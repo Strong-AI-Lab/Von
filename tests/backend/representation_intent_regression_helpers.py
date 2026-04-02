@@ -26,10 +26,16 @@ def representation_profiles() -> list[dict[str, Any]]:
             ],
             "domain_terms": ["paper", "arxiv", "abstract", "metadata"],
             "required_tools_by_source": {
-                "file_copy": ["interpret_file_copy"],
-                "url": ["download_paper"],
-                "mixed": ["download_paper", "interpret_file_copy"],
-                "unknown": ["interpret_file_copy"],
+                "file_copy": ["materialise_scholarly_representation_for_file_copy"],
+                "url": [
+                    "download_paper",
+                    "materialise_scholarly_representation_for_file_copy",
+                ],
+                "mixed": [
+                    "download_paper",
+                    "materialise_scholarly_representation_for_file_copy",
+                ],
+                "unknown": ["materialise_scholarly_representation_for_file_copy"],
             },
             "required_predicates": [
                 "#V#computer_file_for_propositional_information_thing",

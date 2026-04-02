@@ -37,7 +37,9 @@ def test_get_session_workflow_continuation_context_uses_latest_record_and_episod
                     "effect_type": "scholarly_representation",
                     "status": "not_executed",
                     "description": "Represent the corresponding scholarly paper.",
-                    "required_tools": ["interpret_file_copy"],
+                    "required_tools": [
+                        "materialise_scholarly_representation_for_file_copy"
+                    ],
                     "targets": ["#V#uploaded_file_copy_abc123"],
                 }
             ],
@@ -65,7 +67,7 @@ def test_get_session_workflow_continuation_context_uses_latest_record_and_episod
     assert context["safe_to_claim_completion"] is False
     assert context["has_unresolved_required_effects"] is True
     assert context["unresolved_required_effects"][0]["required_tools"] == [
-        "interpret_file_copy"
+        "materialise_scholarly_representation_for_file_copy"
     ]
     assert context["required_effects_contract"]["domain_profile_id"] == "paper"
 
@@ -164,7 +166,9 @@ def test_build_workflow_continuation_routing_prompt_summarises_targets_and_tools
                 {
                     "effect_type": "scholarly_representation",
                     "targets": ["#V#uploaded_file_copy_abc123"],
-                    "required_tools": ["interpret_file_copy"],
+                    "required_tools": [
+                        "materialise_scholarly_representation_for_file_copy"
+                    ],
                     "description": "Represent the corresponding scholarly paper.",
                 }
             ],
@@ -179,7 +183,9 @@ def test_build_workflow_continuation_routing_prompt_summarises_targets_and_tools
 
     assert "ACTIVE WORKFLOW CONTINUATION CONTEXT" in prompt
     assert "Selected workflow: #V#scholarly_paper_representation_workflow" in prompt
-    assert "required_tools: interpret_file_copy" in prompt
+    assert (
+        "required_tools: materialise_scholarly_representation_for_file_copy" in prompt
+    )
     assert "Artefact file_copy_ids: #V#uploaded_file_copy_abc123" in prompt
     assert "Artefact urls: https://arxiv.org/abs/2502.14996" in prompt
     assert prompt.rstrip().endswith("Please proceed.")

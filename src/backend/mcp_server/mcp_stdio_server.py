@@ -1894,13 +1894,17 @@ async def _handle_download_paper(arguments: dict[str, Any]) -> list[TextContent]
         ]
 
     try:
-        proxy = get_arxiv_proxy()
-        result = proxy.download_paper(
-            arxiv_id=arxiv_id, filename=arguments.get("filename")
+        from src.backend.integrations.internal_mcp import (
+            catalogue as internal_catalogue,
+        )
+
+        result = internal_catalogue._download_paper(
+            arxiv_id=arxiv_id,
+            filename=arguments.get("filename"),
+            delete_local_cache=arguments.get("delete_local_cache"),
+            namespace=arguments.get("namespace"),
         )
         return [_json_text(result)]
-    except ArxivProxyError as exc:
-        return [_json_text({"error": str(exc), "success": False})]
     except Exception as exc:
         return [
             _json_text({"error": f"Unexpected error: {str(exc)}", "success": False})
@@ -1929,6 +1933,39 @@ async def _handle_finalise_cached_paper(arguments: dict[str, Any]) -> list[TextC
         result = internal_catalogue._finalise_cached_paper(
             arxiv_id=arxiv_id,
             name=arguments.get("filename") or arguments.get("name"),
+            delete_local_cache=arguments.get("delete_local_cache"),
+            include_markdown=arguments.get("include_markdown"),
+            namespace=arguments.get("namespace"),
+        )
+        return [_json_text(result)]
+    except Exception as exc:
+        return [
+            _json_text({"error": f"Unexpected error: {str(exc)}", "success": False})
+        ]
+
+
+async def _handle_materialise_scholarly_representation_for_file_copy(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    concept_id = arguments.get("concept_id") or arguments.get("file_copy_concept_id")
+    if not concept_id:
+        return [
+            _json_error(
+                "Missing required parameter: concept_id",
+                error_code="missing_parameter",
+                suggestions=[
+                    "Provide the #V#computer_file_copy concept_id to materialise",
+                ],
+            )
+        ]
+
+    try:
+        from src.backend.integrations.internal_mcp import (
+            catalogue as internal_catalogue,
+        )
+
+        result = internal_catalogue._materialise_scholarly_representation_for_file_copy_tool(
+            **arguments
         )
         return [_json_text(result)]
     except Exception as exc:
@@ -3451,6 +3488,7 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "get_paper_metadata": _handle_get_paper_metadata,
     "download_paper": _handle_download_paper,
     "finalise_cached_paper": _handle_finalise_cached_paper,
+    "materialise_scholarly_representation_for_file_copy": _handle_materialise_scholarly_representation_for_file_copy,
     "search_web": _handle_search_web,
     "context_search": _handle_context_search,
     "qna_search": _handle_qna_search,

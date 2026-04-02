@@ -896,13 +896,13 @@ For paper-representation intents, VWL required-effects semantics MUST ensure exe
 
 Canonical paper profile source expectations:
 
-- `file_copy` source: required tool set MUST include `interpret_file_copy`.
-- `url` source (including arXiv URLs/IDs): required tool set MUST include `download_paper`.
-- `mixed` source: required tool set SHOULD include both `download_paper` and `interpret_file_copy`.
+- `file_copy` source: required tool set MUST include `materialise_scholarly_representation_for_file_copy`.
+- `url` source (including arXiv URLs/IDs): required tool set MUST include `download_paper` plus `materialise_scholarly_representation_for_file_copy`.
+- `mixed` source: required tool set SHOULD include both `download_paper` and `materialise_scholarly_representation_for_file_copy`.
 
 Intent boundary for URL inputs:
 
-- A canonical arXiv abstract URL or ID on its own **does** authorise low-risk additive `download_paper` execution and scholarly representation, unless the user explicitly denies mutation.
+- A canonical arXiv abstract URL or ID on its own **does** authorise low-risk additive `download_paper` execution and the follow-up scholarly-materialisation path, unless the user explicitly denies mutation.
 - Explicit phrasing such as "represent that paper" remains an equivalent positive signal, but it is not required.
 - Explicit denial (for example "do not download/store this") MUST block mutation even when a canonical arXiv source is present.
 - Deterministic route-level coverage for this boundary is tracked by `JVNAUTOSCI-1399`; the current URL-first regression to fix is `JVNAUTOSCI-1394`.
@@ -920,8 +920,8 @@ Important runtime contract note:
 
 Operational expectations for arXiv tool handlers:
 
-- `download_paper` and `finalise_cached_paper` SHOULD attempt scholarly representation materialisation for authenticated file-copy registrations.
-- Tool responses SHOULD expose `scholarly_representation` diagnostics (`attempted`, `verified`, `paper_concept_id`, `metadata_source`, `metadata_available`, and explicit error/fallback fields when not verified).
+- `download_paper` and `finalise_cached_paper` SHOULD stop at durable acquisition and authenticated file-copy registration; they MUST NOT hide scholarly-paper materialisation side effects inside acquisition helpers.
+- Explicit scholarly-paper materialisation SHOULD run through `materialise_scholarly_representation_for_file_copy`, which SHOULD expose `attempted`, `verified`, `paper_concept_id`, metadata provenance, and explicit verification/failure fields.
 
 Turn-execution gate expectation:
 
@@ -930,7 +930,7 @@ Turn-execution gate expectation:
 Current implementation caveat (JVNAUTOSCI-1415):
 
 - `#V#scholarly_paper_representation_workflow` currently exists as a loadable Vontology workflow concept, but its present graph is legacy/incomplete: most steps invoke `workflow_creation.emit_marker`, with only author resolution represented as a domain-specific action;
-- the current arXiv and upload pathways therefore still depend primarily on tool-handler materialisation (`download_paper`, `finalise_cached_paper`, `interpret_file_copy`) plus representation-contract and completion-gate semantics, not yet on a fully expressive domain workflow family;
+- the current arXiv and upload pathways therefore still depend on explicit acquisition/materialisation tool sequencing (`download_paper`, `finalise_cached_paper`, `materialise_scholarly_representation_for_file_copy`) plus representation-contract and completion-gate semantics, not yet on a fully expressive domain workflow family;
 - `JVNAUTOSCI-1415` is the task that repairs/replaces this workflow family with a proper general-paper workflow plus an explicit arXiv wrapper workflow.
 
 ### 10.7 Person Representation Contract (JVNAUTOSCI-1369 / JVNAUTOSCI-1373)

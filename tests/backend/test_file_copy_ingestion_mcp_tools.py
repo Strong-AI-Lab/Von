@@ -422,6 +422,107 @@ def test_interpret_file_copy_supports_non_persist_mode(monkeypatch):
     assert result["persisted_relations"] == []
 
 
+def test_interpret_file_copy_reports_explicit_scholarly_materialisation_requirement(
+    monkeypatch,
+):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.catalogue._read_file_copy",
+        lambda **_kwargs: {
+            "success": True,
+            "text": "arXiv:2502.14996 Research draft content",
+            "content_type": "application/pdf",
+            "original_filename": "2502.14996.pdf",
+            "size_bytes": 64,
+            "byte_length": 64,
+            "blob": {"backend": "local", "key": "uploads/user/hash/2502.14996.pdf"},
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.computer_file_copy_service.fetch_file_copy_bytes",
+        lambda **_kwargs: {"success": True, "data": b"%PDF-1.4..."},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.file_copy_interpretation_service.build_document_interpretation",
+        lambda **_kwargs: {
+            "kind": "document",
+            "description": "Document text extracted: arXiv:2502.14996 Research draft content",
+            "subject_tags": ["document"],
+            "content_text": "arXiv:2502.14996 Research draft content",
+            "content_length": 39,
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.file_copy_interpretation_service.extract_pdf_diagram_organisation_candidates",
+        lambda **_kwargs: {
+            "available": False,
+            "reason": "disabled_for_test",
+            "requires_human_confirmation": True,
+            "prose_organisations": [],
+            "diagram_organisations": [],
+            "diagram_only_organisations": [],
+            "diagram_relationship_candidates": [],
+            "page_summaries": [],
+            "errors": [],
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.text_value_service.upsert_singleton_text_relation",
+        lambda **_kwargs: {"relation_id": "rel-paper"},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.relationship_write_service.add_relationship",
+        lambda **_kwargs: {"success": True, "forward_modified": True},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.rag_text_relation_change_hook_service.maybe_sync_concept_text_relations_to_rag",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.person_file_representation_service.materialise_person_representation_for_file_copy",
+        lambda **_kwargs: {
+            "success": True,
+            "attempted": False,
+            "verified": False,
+            "reason": "not_applicable",
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.company_file_representation_service.materialise_company_representation_for_file_copy",
+        lambda **_kwargs: {
+            "success": True,
+            "attempted": False,
+            "verified": False,
+            "reason": "not_applicable",
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.meeting_file_representation_service.materialise_meeting_representation_for_file_copy",
+        lambda **_kwargs: {
+            "success": True,
+            "attempted": False,
+            "verified": False,
+            "reason": "not_applicable",
+        },
+    )
+
+    result = cat._interpret_file_copy(
+        concept_id="#V#file_copy_pdf_test",
+        namespace="#V#user@org",
+    )
+
+    assert result["success"] is True
+    scholarly = result.get("scholarly_representation") or {}
+    assert scholarly.get("attempted") is False
+    assert scholarly.get("verified") is False
+    assert scholarly.get("reason") == "requires_explicit_materialisation_tool"
+    assert scholarly.get("required_tool") == (
+        "materialise_scholarly_representation_for_file_copy"
+    )
+    assert scholarly.get("arxiv_id") == "2502.14996"
+
+
 def test_interpret_file_copy_fails_closed_when_person_representation_unverified(monkeypatch):
     from src.backend.integrations.internal_mcp import catalogue as cat
 

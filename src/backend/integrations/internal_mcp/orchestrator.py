@@ -1168,6 +1168,7 @@ class InternalMCPChatOrchestrator:
         ("search_arxiv", "arxiv"),
         ("download_paper", "arxiv"),
         ("finalise_cached_paper", "arxiv"),
+        ("materialise_scholarly_representation_for_file_copy", "arxiv"),
         ("read_paper", "arxiv"),
         ("list_papers", "arxiv"),
         ("task_", "task"),
@@ -8089,8 +8090,9 @@ class InternalMCPChatOrchestrator:
                 "ARXIV TOOL ROUTING:\n"
                 "- To search arXiv by author/topic/keywords → USE search_arxiv\n"
                 "- To list papers already cached locally / already stored → USE list_papers\n"
-                "- To download a specific arXiv PDF and store it durably → USE download_paper (requires arxiv_id)\n"
+                "- To download a specific arXiv PDF, store it durably, and optionally register a file-copy record → USE download_paper (requires arxiv_id)\n"
                 "- To upload a PDF that is already cached and register a file-copy record → USE finalise_cached_paper (requires arxiv_id)\n"
+                "- To materialise the scholarly-paper concept from an existing file copy → USE materialise_scholarly_representation_for_file_copy (requires concept_id/file_copy_concept_id)\n"
                 "- To read/summarise an already-downloaded paper → USE read_paper (requires arxiv_id)\n"
                 'If user asks "what\'s in my RAG store?" or asks about RAG *collections/sources* → USE rag_list_collections\n'
                 'If user asks about RAG sessions ("how many", "what\'s indexed", "list sessions") → USE rag_list_indexed (often with collection=...)\n'
@@ -8647,11 +8649,11 @@ class InternalMCPChatOrchestrator:
         return concept_ids
 
     @classmethod
-    def _extract_interpret_file_copy_ids_from_invocations(
+    def _extract_scholarly_materialisation_file_copy_ids_from_invocations(
         cls,
         tool_invocations: Sequence[Mapping[str, Any]],
     ) -> list[str]:
-        """Collect file-copy concept IDs already processed via interpret_file_copy calls."""
+        """Collect file-copy IDs already processed by explicit scholarly materialisation."""
 
         concept_ids: list[str] = []
         seen: set[str] = set()
@@ -8662,7 +8664,8 @@ class InternalMCPChatOrchestrator:
             raw_tool = invocation.get("tool")
             if (
                 not isinstance(raw_tool, str)
-                or raw_tool.strip().lower() != "interpret_file_copy"
+                or raw_tool.strip().lower()
+                != "materialise_scholarly_representation_for_file_copy"
             ):
                 continue
 
@@ -8821,11 +8824,11 @@ class InternalMCPChatOrchestrator:
 
         missing_scholarly_representation_file_copy_ids: list[str] = []
         if required_scholarly_representation_for_file_copy_ids:
-            interpreted_file_copy_ids = cls._extract_interpret_file_copy_ids_from_invocations(
+            materialised_file_copy_ids = cls._extract_scholarly_materialisation_file_copy_ids_from_invocations(
                 tool_invocations
             )
             interpreted_lookup = {
-                concept_id.lower() for concept_id in interpreted_file_copy_ids
+                concept_id.lower() for concept_id in materialised_file_copy_ids
             }
             for concept_id in required_scholarly_representation_for_file_copy_ids:
                 if (
@@ -8841,8 +8844,8 @@ class InternalMCPChatOrchestrator:
                 for tool_name in missing_tools
                 if isinstance(tool_name, str) and tool_name.strip()
             }
-            if "interpret_file_copy" not in missing_lookup:
-                missing_tools.append("interpret_file_copy")
+            if "materialise_scholarly_representation_for_file_copy" not in missing_lookup:
+                missing_tools.append("materialise_scholarly_representation_for_file_copy")
 
         return (
             missing_tools,
@@ -17934,7 +17937,8 @@ class InternalMCPChatOrchestrator:
             "Your previous message described an action that requires MCP tools, but you did not emit a tool call. "
             "NOW respond with ONLY a tool-call JSON object or a JSON array of tool-call objects. "
             "Choose a tool that matches the user's request. Low-risk additive Vontology writes may proceed by default unless the user explicitly denied them. "
-            "If the user provided a canonical arXiv ID/URL, treat that as sufficient permission for additive scholarly-paper materialisation and call download_paper with the arxiv_id (do NOT call list_papers). "
+            "If the user provided a canonical arXiv ID/URL, treat that as sufficient permission for additive paper acquisition/file-copy registration and call download_paper with the arxiv_id (do NOT call list_papers). "
+            "Scholarly-paper materialisation from an existing file copy requires the explicit materialise_scholarly_representation_for_file_copy tool. "
             "Destructive writes still require explicit confirmation. "
             "No prose. No Markdown. Do NOT wrap the JSON in ``` fences (including ```json). "
             "The first character MUST be an opening curly brace or an opening square bracket, and the response must contain only valid JSON."
@@ -18173,7 +18177,7 @@ class InternalMCPChatOrchestrator:
                 )
                 continue
 
-            if name == "interpret_file_copy":
+            if name == "materialise_scholarly_representation_for_file_copy":
                 scholarly_file_copy_ids = list(
                     missing_required_scholarly_representation_file_copy_ids
                 )

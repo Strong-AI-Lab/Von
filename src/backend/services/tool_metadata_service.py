@@ -205,6 +205,11 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "category": "arxiv",
         "display_template": "Finalised: {arxiv_id}",
     },
+    "materialise_scholarly_representation_for_file_copy": {
+        "salience": "high",
+        "category": "arxiv",
+        "display_template": "Materialised paper: {paper_concept_id}",
+    },
     # LinkedIn Data Dump tools
     "linkedin_list_exports": {
         "salience": "high",

@@ -100,6 +100,7 @@ _ADDITIVE_LOW_RISK_WRITE_TOOLS: frozenset[str] = frozenset(
         "upsert_singleton_text_relation",
         "download_paper",
         "finalise_cached_paper",
+        "materialise_scholarly_representation_for_file_copy",
         "import_url_file_copy",
         "create_task",
         "assign_task",

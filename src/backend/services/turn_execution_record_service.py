@@ -61,6 +61,7 @@ _WRITE_TOOL_NAMES = {
     "delete_text_relation",
     "download_paper",
     "finalise_cached_paper",
+    "materialise_scholarly_representation_for_file_copy",
     "import_url_file_copy",
     "gmail_modify_labels",
     "issue_write",
@@ -3140,7 +3141,11 @@ def _evaluate_representation_effect_payloads(
     tool_name: str,
     payloads: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any] | None:
-    if tool_name.lower() != "interpret_file_copy":
+    tool_name_lower = tool_name.lower()
+    if tool_name_lower not in {
+        "interpret_file_copy",
+        "materialise_scholarly_representation_for_file_copy",
+    }:
         return None
 
     effect_type = _safe_str(effect.get("effect_type"))
@@ -3155,28 +3160,36 @@ def _evaluate_representation_effect_payloads(
     )
 
     for payload in payloads:
+        candidate_payloads: list[Mapping[str, Any]] = []
         representation_payload = payload.get(payload_key)
-        if not isinstance(representation_payload, Mapping):
-            continue
-        if bool(representation_payload.get("verified")):
-            return {
-                "status": "satisfied",
-                "status_reason": (
-                    _safe_str(representation_payload.get("reason"))
-                    or f"Verified {domain_id} representation from interpret_file_copy."
-                ),
-                "failure_codes": [],
-            }
-        if bool(representation_payload.get("attempted")) or isinstance(
-            representation_payload.get("reason"), str
+        if isinstance(representation_payload, Mapping):
+            candidate_payloads.append(representation_payload)
+        if (
+            tool_name_lower == "materialise_scholarly_representation_for_file_copy"
+            and effect_type == "scholarly_representation"
         ):
-            return {
-                "status": "not_satisfied",
-                "status_reason": _safe_str(representation_payload.get("reason"))
-                or _safe_str(representation_payload.get("metadata_error"))
-                or generic_reason,
-                "failure_codes": [f"{domain_id}_representation_not_verified"],
-            }
+            candidate_payloads.append(payload)
+
+        for candidate_payload in candidate_payloads:
+            if bool(candidate_payload.get("verified")):
+                return {
+                    "status": "satisfied",
+                    "status_reason": (
+                        _safe_str(candidate_payload.get("reason"))
+                        or f"Verified {domain_id} representation from {tool_name_lower}."
+                    ),
+                    "failure_codes": [],
+                }
+            if bool(candidate_payload.get("attempted")) or isinstance(
+                candidate_payload.get("reason"), str
+            ):
+                return {
+                    "status": "not_satisfied",
+                    "status_reason": _safe_str(candidate_payload.get("reason"))
+                    or _safe_str(candidate_payload.get("metadata_error"))
+                    or generic_reason,
+                    "failure_codes": [f"{domain_id}_representation_not_verified"],
+                }
 
     if payloads:
         return {
@@ -3355,6 +3368,7 @@ def _extract_mutation_metadata_from_invocation(
         "status": status,
         "targets": targets,
         "predicates": predicates,
+        "payload": payload if isinstance(payload, Mapping) else None,
     }
 
 
@@ -3390,6 +3404,7 @@ def _build_tool_authored_mutation_effects(
                 "any_success": False,
                 "any_failure": False,
                 "any_blocked": False,
+                "payloads": [],
             }
             tool_order.append(lowered)
 
@@ -3400,6 +3415,9 @@ def _build_tool_authored_mutation_effects(
         for p in metadata["predicates"]:
             if p not in group["predicates"]:
                 group["predicates"].append(p)
+        payload = metadata.get("payload")
+        if isinstance(payload, Mapping):
+            group["payloads"].append(payload)
 
         if metadata["status"] == "ok":
             group["any_success"] = True
@@ -3457,6 +3475,43 @@ def _build_tool_authored_mutation_effects(
         }
         if failure_codes:
             effect["failure_code"] = failure_codes[0]
+
+        if tool_name.lower() == "materialise_scholarly_representation_for_file_copy":
+            effect.update(
+                {
+                    "effect_id": f"effect_paper_representation_tool_{index + 1}",
+                    "effect_type": "scholarly_representation",
+                    "representation_domain_id": "paper",
+                    "description": (
+                        "Materialise scholarly paper representation from file-copy context."
+                    ),
+                    "required_predicates": [
+                        "#V#computer_file_for_propositional_information_thing",
+                        "#V#propositional_information_thing_has_computer_file",
+                    ],
+                    "postcondition_strategy": "execution_observed",
+                }
+            )
+            payload_verdict = _evaluate_representation_effect_payloads(
+                effect=effect,
+                tool_name=tool_name,
+                payloads=group["payloads"],
+            )
+            if isinstance(payload_verdict, Mapping):
+                effect["status"] = (
+                    _safe_str(payload_verdict.get("status")) or "not_satisfied"
+                )
+                effect["status_reason"] = (
+                    _safe_str(payload_verdict.get("status_reason"))
+                    or "Representation payload verification failed."
+                )
+                effect["failure_codes"] = _normalise_failure_codes(
+                    payload_verdict.get("failure_codes")
+                )
+                if effect["failure_codes"]:
+                    effect["failure_code"] = effect["failure_codes"][0]
+                else:
+                    effect.pop("failure_code", None)
 
         effects.append(effect)
 

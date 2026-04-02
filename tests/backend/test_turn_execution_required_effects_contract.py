@@ -18,7 +18,9 @@ def _paper_continuation_contract() -> dict[str, object]:
                 "effect_id": "effect_paper_representation_1",
                 "effect_type": "scholarly_representation",
                 "targets": ["#V#uploaded_file_copy_abc123"],
-                "required_tools": ["interpret_file_copy"],
+                "required_tools": [
+                    "materialise_scholarly_representation_for_file_copy"
+                ],
                 "status": "not_executed",
                 "status_reason": "No required representation tool execution was observed.",
                 "failure_code": "paper_representation_not_executed",
@@ -151,7 +153,7 @@ def test_continuation_context_representation_contract_can_be_satisfied_by_matchi
         ],
         tool_invocations=[
             {
-                "tool": "interpret_file_copy",
+                "tool": "materialise_scholarly_representation_for_file_copy",
                 "payload": {
                     "success": True,
                     "concept_id": "#V#uploaded_file_copy_abc123",

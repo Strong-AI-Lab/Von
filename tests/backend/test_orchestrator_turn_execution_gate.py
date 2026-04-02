@@ -87,10 +87,20 @@ def _patch_representation_profile_loader(monkeypatch) -> None:
                     ],
                     "domain_terms": ["paper", "arxiv", "metadata", "abstract"],
                     "required_tools_by_source": {
-                        "file_copy": ["interpret_file_copy"],
-                        "url": ["download_paper"],
-                        "mixed": ["download_paper", "interpret_file_copy"],
-                        "unknown": ["interpret_file_copy"],
+                        "file_copy": [
+                            "materialise_scholarly_representation_for_file_copy"
+                        ],
+                        "url": [
+                            "download_paper",
+                            "materialise_scholarly_representation_for_file_copy",
+                        ],
+                        "mixed": [
+                            "download_paper",
+                            "materialise_scholarly_representation_for_file_copy",
+                        ],
+                        "unknown": [
+                            "materialise_scholarly_representation_for_file_copy"
+                        ],
                     },
                     "required_predicates": [
                         "#V#computer_file_for_propositional_information_thing",
@@ -547,10 +557,12 @@ def test_turn_execution_critic_marks_scholarly_representation_satisfied(monkeypa
             "final_response": "Paper representation has been produced.",
             "invocations": [
                 {
-                    "tool": "interpret_file_copy",
+                    "tool": "materialise_scholarly_representation_for_file_copy",
                     "payload": {
                         "success": True,
                         "concept_id": "#V#uploaded_file_copy_76c1c13fed0140f496133d008b4cfad7",
+                        "verified": True,
+                        "paper_concept_id": "#V#paper_on_arxiv_76c1c13f",
                         "scholarly_representation": {
                             "attempted": True,
                             "verified": True,
@@ -584,7 +596,12 @@ def test_turn_execution_critic_marks_scholarly_representation_satisfied(monkeypa
     assert isinstance(record, dict)
     required_effects = record.get("required_effects")
     assert isinstance(required_effects, list)
-    assert required_effects == []
+    assert required_effects
+    assert all(effect.get("status") == "satisfied" for effect in required_effects)
+    assert any(
+        effect.get("effect_type") == "scholarly_representation"
+        for effect in required_effects
+    )
 
     completion_gate = record.get("completion_gate")
     assert isinstance(completion_gate, dict)

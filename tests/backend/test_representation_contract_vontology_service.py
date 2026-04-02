@@ -33,7 +33,7 @@ def test_load_representation_profiles_from_concept_ids_parses_profile_json(
                     '"description":"Represent paper metadata.",'
                     '"intent_patterns":["\\\\bpaper\\\\s+representation\\\\b"],'
                     '"domain_terms":["paper","arxiv"],'
-                    '"required_tools_by_source":{"file_copy":["interpret_file_copy"]},'
+                    '"required_tools_by_source":{"file_copy":["materialise_scholarly_representation_for_file_copy"]},'
                     '"required_predicates":["#V#paper"],'
                     '"default_decision_policy":{"completion_block_on_unresolved_effects":true}'
                     "}"
@@ -52,7 +52,7 @@ def test_load_representation_profiles_from_concept_ids_parses_profile_json(
     assert profiles[0]["profile_id"] == "paper"
     assert profiles[0]["target_entity_class"] == "scholarly_paper"
     assert profiles[0]["required_tools_by_source"]["file_copy"] == [
-        "interpret_file_copy"
+        "materialise_scholarly_representation_for_file_copy"
     ]
     assert diagnostics["loaded_concept_ids"] == [
         "#V#representation_contract_profile_paper"
@@ -130,7 +130,9 @@ def test_upsert_representation_profile_validates_and_persists_singleton_text(
             "effect_type": "scholarly_representation",
             "intent_patterns": [r"\bpaper\s+representation\b"],
             "domain_terms": ["paper", "arxiv"],
-            "required_tools_by_source": {"file_copy": ["interpret_file_copy"]},
+            "required_tools_by_source": {
+                "file_copy": ["materialise_scholarly_representation_for_file_copy"]
+            },
             "required_predicates": ["#V#paper"],
         },
     )

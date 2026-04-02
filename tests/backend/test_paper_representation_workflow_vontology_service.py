@@ -199,7 +199,7 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         state_id="download_or_finalise",
     )
     download_action = arxiv_definition.states[download_state_id].actions[0]
-    assert download_action.inputs.get("materialise_scholarly_representation") is False
+    assert "materialise_scholarly_representation" not in download_action.inputs
     decide_acquisition_mode_state_id = authority_service._step_concept_id(
         workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
         state_id="decide_acquisition_mode",

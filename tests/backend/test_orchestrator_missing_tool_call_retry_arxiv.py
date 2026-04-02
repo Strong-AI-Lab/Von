@@ -21,6 +21,10 @@ class _Gateway:
                 "category": "write",
                 "description": "Upload cached arXiv PDF and register file copy",
             },
+            "materialise_scholarly_representation_for_file_copy": {
+                "category": "write",
+                "description": "Materialise scholarly-paper representation from file copy",
+            },
             "list_papers": {
                 "category": "read",
                 "description": "List cached papers",
@@ -145,3 +149,27 @@ def test_missing_tool_call_retry_forces_finalise_cached_paper_when_requested():
     assert forced is not None
     assert any(call["tool"] == "finalise_cached_paper" for call in forced)
     assert not any(call["tool"] == "list_papers" for call in forced)
+
+
+def test_missing_tool_call_retry_forces_explicit_scholarly_materialisation_tool():
+    orchestrator = _build_orchestrator_stub()
+
+    forced = orchestrator._infer_missing_tool_call_retry_tool_calls(
+        [],
+        user_prompt="Represent the corresponding paper from #V#uploaded_file_copy_abc123.",
+        missing_required_tools=[
+            "materialise_scholarly_representation_for_file_copy"
+        ],
+        missing_required_scholarly_representation_file_copy_ids=[
+            "#V#uploaded_file_copy_abc123"
+        ],
+    )
+
+    assert forced is not None
+    assert forced == [
+        {
+            "action": "call_tool",
+            "tool": "materialise_scholarly_representation_for_file_copy",
+            "payload": {"concept_id": "#V#uploaded_file_copy_abc123"},
+        }
+    ]

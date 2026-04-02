@@ -98,12 +98,6 @@
             "next_state": "materialise_base_representation",
             "on_failure_state": "failed",
             "state_id": "normalise_inputs",
-            "static_input_bindings": [
-              [
-                "materialise_scholarly_representation",
-                false
-              ]
-            ],
             "tool_output_mapping_specs": [
               {
                 "concept_id": "#V#workflow_mapping_tool_field_scholarly_paper_representation_workflow_normalise_inputs_arxiv_id_to_arxiv_id",
@@ -571,12 +565,6 @@
             "next_state": "decide_acquisition_mode",
             "on_failure_state": "failed",
             "state_id": "fetch_arxiv_metadata",
-            "static_input_bindings": [
-              [
-                "materialise_scholarly_representation",
-                false
-              ]
-            ],
             "tool_output_mapping_specs": [
               {
                 "concept_id": "#V#workflow_mapping_tool_field_arxiv_paper_representation_workflow_fetch_arxiv_metadata_result_to_paper_metadata",
@@ -673,12 +661,6 @@
             "next_state": "delegate_to_general_paper_workflow",
             "on_failure_state": "failed",
             "state_id": "download_or_finalise",
-            "static_input_bindings": [
-              [
-                "materialise_scholarly_representation",
-                false
-              ]
-            ],
             "tool_output_mapping_specs": [
               {
                 "concept_id": "#V#workflow_mapping_tool_field_arxiv_paper_representation_workflow_download_or_finalise_result_arxiv_id_to_arxiv_id",
@@ -689,41 +671,6 @@
                 "concept_id": "#V#workflow_mapping_tool_field_arxiv_paper_representation_workflow_download_or_finalise_result_computer_file_copy_concept_id_to_file_copy_concept_id",
                 "context_key": "file_copy_concept_id",
                 "tool_output_field": "result.computer_file_copy_concept_id"
-              },
-              {
-                "concept_id": "#V#workflow_mapping_tool_field_arxiv_paper_representation_workflow_download_or_finalise_result_paper_concept_id_to_paper_concept_id",
-                "context_key": "paper_concept_id",
-                "tool_output_field": "result.paper_concept_id"
-              },
-              {
-                "concept_id": "#V#workflow_mapping_tool_field_arxiv_paper_representation_workflow_download_or_finalise_result_scholarly_representation_to_scholarly_representation",
-                "context_key": "scholarly_representation",
-                "tool_output_field": "result.scholarly_representation"
-              },
-              {
-                "concept_id": "#V#workflow_mapping_tool_field_arxiv_paper_representation_workflow_download_or_finalise_result_scholarly_representation_author_names_to_author_names",
-                "context_key": "author_names",
-                "tool_output_field": "result.scholarly_representation.author_names"
-              },
-              {
-                "concept_id": "#V#workflow_mapping_tool_field_arxiv_paper_representation_workflow_download_or_finalise_result_scholarly_representation_publication_date_to_publication_date",
-                "context_key": "publication_date",
-                "tool_output_field": "result.scholarly_representation.publication_date"
-              },
-              {
-                "concept_id": "#V#workflow_mapping_tool_field_arxiv_paper_representation_workflow_download_or_finalise_result_scholarly_representation_summary_to_summary",
-                "context_key": "summary",
-                "tool_output_field": "result.scholarly_representation.summary"
-              },
-              {
-                "concept_id": "#V#workflow_mapping_tool_field_arxiv_paper_representation_workflow_download_or_finalise_result_scholarly_representation_title_to_title",
-                "context_key": "title",
-                "tool_output_field": "result.scholarly_representation.title"
-              },
-              {
-                "concept_id": "#V#workflow_mapping_tool_field_arxiv_paper_representation_workflow_download_or_finalise_result_scholarly_representation_topic_labels_to_topic_labels",
-                "context_key": "topic_labels",
-                "tool_output_field": "result.scholarly_representation.topic_labels"
               }
             ]
           },

@@ -244,6 +244,61 @@ def test_import_url_file_copy_gateway_invoke(monkeypatch):
     assert payload.get("workflow_event_launch", {}).get("triggered") is True
 
 
+def test_materialise_scholarly_representation_for_file_copy_gateway_invoke(
+    monkeypatch,
+):
+    gateway = _build_gateway()
+
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: "#V#user",
+    )
+
+    from src.backend.integrations.internal_mcp import catalogue as internal_catalogue
+
+    calls: list[dict[str, object]] = []
+
+    def _fake_materialise_arxiv_file_copy_representation(**kwargs):
+        calls.append(dict(kwargs))
+        return {
+            "success": True,
+            "attempted": True,
+            "verified": True,
+            "paper_concept_id": "#V#paper_gateway_explicit",
+            "file_copy_concept_id": kwargs["file_copy_concept_id"],
+        }
+
+    monkeypatch.setattr(
+        internal_catalogue,
+        "_materialise_arxiv_file_copy_representation",
+        _fake_materialise_arxiv_file_copy_representation,
+    )
+
+    payload = gateway.invoke(
+        "materialise_scholarly_representation_for_file_copy",
+        {
+            "concept_id": "#V#imported_file_gateway",
+            "arxiv_id": "2502.14996",
+            "namespace": "#V#user@org",
+        },
+    ).payload
+
+    assert payload.get("success") is True
+    assert payload.get("verified") is True
+    assert payload.get("paper_concept_id") == "#V#paper_gateway_explicit"
+    assert payload.get("scholarly_representation", {}).get("verified") is True
+    assert calls == [
+        {
+            "user_concept_id": "#V#user",
+            "arxiv_id": "2502.14996",
+            "file_copy_concept_id": "#V#imported_file_gateway",
+            "fallback_title": None,
+            "namespace": "#V#user@org",
+            "metadata": None,
+        }
+    ]
+
+
 def test_interpret_file_copy_gateway_fails_closed_on_unverified_person_representation(
     monkeypatch,
 ):
