@@ -709,12 +709,17 @@ def _validate_existing_materialisation(
                 "drift_workflow_ids": [],
                 "issue_codes": ["no_target_workflow_ids"],
                 "workflow_status_by_id": {},
+                "bundle_snapshot_drift_detected": False,
+                "bundle_snapshot_drift_workflow_ids": [],
+                "bundle_snapshot_issue_codes": [],
+                "bundle_snapshot_status_by_id": {},
             },
         )
 
     cached_definitions: dict[str, Any | None] = {}
     validation_by_workflow_id: dict[str, dict[str, Any]] = {}
     workflow_status_by_id: dict[str, dict[str, Any]] = {}
+    bundle_snapshot_status_by_id: dict[str, dict[str, Any]] = {}
 
     def _cached_loader(candidate_workflow_id: str) -> Any | None:
         workflow_id = str(candidate_workflow_id or "").strip()
@@ -758,21 +763,6 @@ def _validate_existing_materialisation(
             continue
 
         publication_spec = publication_specs.get(workflow_id)
-        if publication_spec is None:
-            workflow_status["status"] = "publication_spec_missing"
-            workflow_status["issue_code"] = "publication_spec_missing"
-            workflow_status_by_id[workflow_id] = workflow_status
-            continue
-        if not _materialisation_matches_publication_spec(
-            loaded_definition=definition,
-            workflow_id=workflow_id,
-            publication_spec=publication_spec,
-        ):
-            workflow_status["status"] = "definition_mismatch"
-            workflow_status["issue_code"] = "definition_mismatch"
-            workflow_status_by_id[workflow_id] = workflow_status
-            continue
-
         validation = validate_workflow_definition_contract(
             definition=definition,
             supported_action_ids=supported_action_ids,
@@ -793,6 +783,23 @@ def _validate_existing_materialisation(
 
         workflow_status_by_id[workflow_id] = workflow_status
 
+        snapshot_status: dict[str, Any] = {
+            "workflow_id": workflow_id,
+            "status": "current",
+            "issue_code": None,
+        }
+        if publication_spec is None:
+            snapshot_status["status"] = "publication_spec_missing"
+            snapshot_status["issue_code"] = "publication_spec_missing"
+        elif not _materialisation_matches_publication_spec(
+            loaded_definition=definition,
+            workflow_id=workflow_id,
+            publication_spec=publication_spec,
+        ):
+            snapshot_status["status"] = "definition_mismatch"
+            snapshot_status["issue_code"] = "definition_mismatch"
+        bundle_snapshot_status_by_id[workflow_id] = snapshot_status
+
     current_workflow_ids = [
         workflow_id
         for workflow_id, status in workflow_status_by_id.items()
@@ -810,6 +817,18 @@ def _validate_existing_materialisation(
             if str(status.get("issue_code") or "").strip()
         }
     )
+    bundle_snapshot_drift_workflow_ids = [
+        workflow_id
+        for workflow_id, status in bundle_snapshot_status_by_id.items()
+        if status.get("status") != "current"
+    ]
+    bundle_snapshot_issue_codes = sorted(
+        {
+            str(status.get("issue_code") or "").strip()
+            for status in bundle_snapshot_status_by_id.values()
+            if str(status.get("issue_code") or "").strip()
+        }
+    )
     already_current = bool(target_workflow_ids) and not drift_workflow_ids
 
     return (
@@ -822,6 +841,12 @@ def _validate_existing_materialisation(
             "drift_workflow_ids": drift_workflow_ids,
             "issue_codes": issue_codes,
             "workflow_status_by_id": workflow_status_by_id,
+            "bundle_snapshot_drift_detected": bool(
+                bundle_snapshot_drift_workflow_ids
+            ),
+            "bundle_snapshot_drift_workflow_ids": bundle_snapshot_drift_workflow_ids,
+            "bundle_snapshot_issue_codes": bundle_snapshot_issue_codes,
+            "bundle_snapshot_status_by_id": bundle_snapshot_status_by_id,
         },
     )
 
@@ -921,64 +946,85 @@ def bootstrap_repo_seed_workflow_bundle(
         publication_report["issue_codes"] = list(
             materialisation_preflight.get("issue_codes") or []
         )
+        publication_report["bundle_snapshot_drift_detected"] = bool(
+            materialisation_preflight.get("bundle_snapshot_drift_detected")
+        )
+        publication_report["bundle_snapshot_drift_workflow_ids"] = list(
+            materialisation_preflight.get("bundle_snapshot_drift_workflow_ids") or []
+        )
+        publication_report["bundle_snapshot_issue_codes"] = list(
+            materialisation_preflight.get("bundle_snapshot_issue_codes") or []
+        )
 
-        for workflow_id, spec in publication_specs.items():
-            type_ids = tuple(workflow_type_ids.get(workflow_id) or ())
-            if type_ids and ensure_instance_typing(
-                concept_id=workflow_id,
-                type_ids=type_ids,
-                remove_type_parent_ids=type_ids,
-            ):
-                typed_workflow_ids.append(workflow_id)
-
-            relation_specs = tuple(workflow_text_relations.get(workflow_id) or ())
-            if relation_specs:
-                authority_service.upsert_seed_bundle_text_relations(
-                    subject_concept_id=workflow_id,
-                    relation_specs=relation_specs,
-                    workflow_id=workflow_id,
-                    source_tag=source_tag,
-                    managed_by=managed_by,
-                )
-
-            launch_contract = workflow_launch_contracts.get(workflow_id)
-            if isinstance(launch_contract, dict):
-                upsert_singleton_text_relation(
-                    subject_concept_id=workflow_id,
-                    predicate="#V#hasWorkflowLaunchInputContractJson",
-                    text=json.dumps(launch_contract, ensure_ascii=True, sort_keys=True),
-                    lang="en-NZ",
-                    context={
-                        "workflow_id": workflow_id,
-                        **({"source": source_tag} if source_tag else {}),
-                        **({"managed_by": managed_by} if managed_by else {}),
-                    },
-                    garbage_collect=True,
-                )
-
-            for step, step_concept_id in zip(
-                spec.steps,
-                authority_service.publication_spec_step_concept_ids(
-                    workflow_id=workflow_id,
-                    spec=spec,
-                ),
-            ):
-                if ensure_instance_typing(
-                    concept_id=step_concept_id,
-                    type_ids=(_WORKFLOW_STEP_TYPE_ID,),
+        should_apply_seed_bundle_mutations = not (already_current and not force_republish)
+        if should_apply_seed_bundle_mutations:
+            for workflow_id, spec in publication_specs.items():
+                type_ids = tuple(workflow_type_ids.get(workflow_id) or ())
+                if type_ids and ensure_instance_typing(
+                    concept_id=workflow_id,
+                    type_ids=type_ids,
+                    remove_type_parent_ids=type_ids,
                 ):
-                    typed_step_ids.append(step_concept_id)
-                step_relation_specs = tuple(step_text_relations.get(step_concept_id) or ())
-                if step_relation_specs:
+                    typed_workflow_ids.append(workflow_id)
+
+                relation_specs = tuple(workflow_text_relations.get(workflow_id) or ())
+                if relation_specs:
                     authority_service.upsert_seed_bundle_text_relations(
-                        subject_concept_id=step_concept_id,
-                        relation_specs=step_relation_specs,
+                        subject_concept_id=workflow_id,
+                        relation_specs=relation_specs,
                         workflow_id=workflow_id,
                         source_tag=source_tag,
                         managed_by=managed_by,
-                        state_id=str(getattr(step, "state_id", "") or "").strip() or None,
                     )
 
+                launch_contract = workflow_launch_contracts.get(workflow_id)
+                if isinstance(launch_contract, dict):
+                    upsert_singleton_text_relation(
+                        subject_concept_id=workflow_id,
+                        predicate="#V#hasWorkflowLaunchInputContractJson",
+                        text=json.dumps(
+                            launch_contract,
+                            ensure_ascii=True,
+                            sort_keys=True,
+                        ),
+                        lang="en-NZ",
+                        context={
+                            "workflow_id": workflow_id,
+                            **({"source": source_tag} if source_tag else {}),
+                            **({"managed_by": managed_by} if managed_by else {}),
+                        },
+                        garbage_collect=True,
+                    )
+
+                for step, step_concept_id in zip(
+                    spec.steps,
+                    authority_service.publication_spec_step_concept_ids(
+                        workflow_id=workflow_id,
+                        spec=spec,
+                    ),
+                ):
+                    if ensure_instance_typing(
+                        concept_id=step_concept_id,
+                        type_ids=(_WORKFLOW_STEP_TYPE_ID,),
+                    ):
+                        typed_step_ids.append(step_concept_id)
+                    step_relation_specs = tuple(
+                        step_text_relations.get(step_concept_id) or ()
+                    )
+                    if step_relation_specs:
+                        authority_service.upsert_seed_bundle_text_relations(
+                            subject_concept_id=step_concept_id,
+                            relation_specs=step_relation_specs,
+                            workflow_id=workflow_id,
+                            source_tag=source_tag,
+                            managed_by=managed_by,
+                            state_id=(
+                                str(getattr(step, "state_id", "") or "").strip()
+                                or None
+                            ),
+                        )
+
+        for workflow_id, spec in publication_specs.items():
             validation = validation_by_workflow_id.get(workflow_id)
             if already_current and not force_republish:
                 if not isinstance(validation, dict):
