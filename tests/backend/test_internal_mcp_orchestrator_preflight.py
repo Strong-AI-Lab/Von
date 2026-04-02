@@ -1857,3 +1857,60 @@ def test_preflight_stage_authorities_classify_mechanical_stages_correctly(
         assert "stage" in item
         assert "decision_source" in item
         assert "changed_outcome" in item
+
+
+def test_run_derives_identity_components_from_namespace_for_model_selection(
+    monkeypatch,
+) -> None:
+    captured_model_contexts: list[dict[str, Any]] = []
+
+    def _capture_stage_model(
+        self,
+        *,
+        stage,
+        default_model,
+        policy_state,
+        registry_snapshot,
+        user_concept_id,
+        org_concept_id,
+    ):
+        captured_model_contexts.append(
+            {
+                "stage": stage,
+                "user_concept_id": user_concept_id,
+                "org_concept_id": org_concept_id,
+            }
+        )
+        return default_model
+
+    monkeypatch.setattr(
+        InternalMCPChatOrchestrator,
+        "_select_model_for_stage",
+        _capture_stage_model,
+    )
+
+    gateway = cast(Any, _CapturingGateway())
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway, max_tool_invocations=1, max_context_chars=80_000
+    )
+
+    llm = _CapturingLLM(["ok"])
+    result = orchestrator.run(
+        prompt="Hello",
+        context=[],
+        llm_client=llm,
+        model="gpt-5.4-nano",
+        user_namespace="#V#user_alpha@org_beta",
+    )
+
+    assert result.response_text == "ok"
+    assert captured_model_contexts, "expected stage model selection to run"
+    assert any(
+        entry["user_concept_id"] == "#V#user_alpha"
+        and entry["org_concept_id"] == "#V#org_beta"
+        for entry in captured_model_contexts
+    )
+    assert not any(
+        entry["user_concept_id"] == "#V#user_alpha@org_beta"
+        for entry in captured_model_contexts
+    )

@@ -30,6 +30,7 @@ from .feature_flags import (
 from .namespace_service import (
     concept_id_to_namespace_slug,
     coerce_namespace,
+    derive_actor_context_from_namespace,
     derive_namespace_for_actor,
 )
 from ..workflows.durable.models import EventWorkflowBinding
@@ -193,44 +194,12 @@ def _normalise_namespace_override(namespace: str | None) -> str | None:
 def _derive_actor_context_from_namespace(
     namespace: str | None,
 ) -> tuple[str | None, str | None]:
-    """Infer user/org hints from a namespace string when available.
-
-    Supported forms:
-    - ``#V#user``
-    - ``#V#user@org`` (org may optionally include ``#V#``)
-    - ``user/org`` or ``user@org`` (legacy/internal forms)
-    """
+    """Infer user/org hints from a namespace string when available."""
 
     namespace_clean = _normalise_namespace_override(namespace)
     if namespace_clean is None:
         return None, None
-
-    if namespace_clean.startswith("#V#"):
-        body = namespace_clean[3:]
-        if "@" in body:
-            user_raw, org_raw = body.split("@", 1)
-            user_clean = user_raw.strip()
-            org_clean = org_raw.strip()
-            user_value = f"#V#{user_clean}" if user_clean else None
-            if not org_clean:
-                return user_value, None
-            org_value = org_clean if org_clean.startswith("#V#") else f"#V#{org_clean}"
-            return user_value, org_value
-        return namespace_clean, None
-
-    if "@" in namespace_clean:
-        user_raw, org_raw = namespace_clean.split("@", 1)
-        user_value = user_raw.strip() or None
-        org_value = org_raw.strip() or None
-        return user_value, org_value
-
-    if "/" in namespace_clean:
-        user_raw, org_raw = namespace_clean.split("/", 1)
-        user_value = user_raw.strip() or None
-        org_value = org_raw.strip() or None
-        return user_value, org_value
-
-    return namespace_clean, None
+    return derive_actor_context_from_namespace(namespace_clean)
 
 
 def resolve_event_actor_context(

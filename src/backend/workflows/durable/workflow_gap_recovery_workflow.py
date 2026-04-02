@@ -20,6 +20,7 @@ from ...services.concept_service import (
 from ...services.settings_service import (
     INTERNAL_MCP_MAX_TOOL_INVOCATIONS_DEFAULT,
 )
+from ...services.namespace_service import derive_actor_context_from_namespace
 from ...services.text_value_service import upsert_singleton_text_relation
 from ...services.workflow_gap_vontology_service import (
     render_workflow_gap_candidate_prompt,
@@ -452,9 +453,18 @@ def _handle_collect_context(request: WorkflowActionRequest) -> WorkflowActionRes
         _clean_text(request.data.get("workflow_gap_base_response_text"))
         or _clean_text(request.data.get("response_text"))
     )
+    namespace_user_concept_id, namespace_org_concept_id = (
+        derive_actor_context_from_namespace(request.environment.user_namespace)
+    )
     user_concept_id = (
         _clean_text(request.data.get("user_concept_id"))
-        or _clean_text(request.environment.user_namespace)
+        or _clean_text(request.environment.user_concept_id)
+        or _clean_text(namespace_user_concept_id)
+    )
+    org_concept_id = (
+        _clean_text(request.data.get("org_concept_id"))
+        or _clean_text(request.environment.org_concept_id)
+        or _clean_text(namespace_org_concept_id)
     )
     conversation_session_id = _clean_text(
         request.data.get("conversation_session_id") or request.data.get("session_id")
@@ -503,7 +513,7 @@ def _handle_collect_context(request: WorkflowActionRequest) -> WorkflowActionRes
         "workflow_gap_routing_snapshot": routing,
         "workflow_gap_discovery_snapshot": discovery_result,
         "user_concept_id": user_concept_id or None,
-        "org_concept_id": _clean_text(request.data.get("org_concept_id")) or None,
+        "org_concept_id": org_concept_id or None,
         "conversation_session_id": conversation_session_id or None,
         "turn_id": _clean_text(request.data.get("turn_id")) or None,
         "workflow_gap_context_collected": True,
@@ -888,6 +898,20 @@ def _handle_execute_candidate(request: WorkflowActionRequest) -> WorkflowActionR
     if not context_messages:
         context_messages = list(recent_turns)
 
+    namespace_user_concept_id, namespace_org_concept_id = (
+        derive_actor_context_from_namespace(request.environment.user_namespace)
+    )
+    resolved_user_concept_id = (
+        _clean_text(request.data.get("user_concept_id"))
+        or _clean_text(request.environment.user_concept_id)
+        or _clean_text(namespace_user_concept_id)
+    )
+    resolved_org_concept_id = (
+        _clean_text(request.data.get("org_concept_id"))
+        or _clean_text(request.environment.org_concept_id)
+        or _clean_text(namespace_org_concept_id)
+    )
+
     nested_result = orchestrator.run(
         prompt=request_text,
         context=context_messages,
@@ -900,6 +924,8 @@ def _handle_execute_candidate(request: WorkflowActionRequest) -> WorkflowActionR
         workflow_discovery_result=None,
         workflow_continuation_context=None,
         workflow_gap_recovery_enabled=False,
+        user_concept_id=resolved_user_concept_id or None,
+        org_concept_id=resolved_org_concept_id or None,
     )
     response_text = _clean_text(nested_result.response_text)
     return WorkflowActionResult(

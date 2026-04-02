@@ -139,6 +139,33 @@ def resolve_canonical_namespace(
     return None
 
 
+def derive_actor_context_from_namespace(
+    namespace: Any,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Infer canonical concept IDs from a namespace string when possible.
+
+    This helper keeps namespace-as-scope and actor identity aligned without
+    treating the full namespace string as a user concept ID. It accepts the
+    same compatibility forms as ``coerce_namespace`` and returns canonical
+    ``#V#...`` concept IDs for the user and optional organisation components.
+    """
+
+    canonical_namespace = coerce_namespace(namespace)
+    if canonical_namespace is None:
+        return None, None
+
+    try:
+        parsed = parse_namespace(canonical_namespace)
+    except ValueError:
+        return None, None
+
+    user_id = parsed.get("user_id")
+    org_id = parsed.get("org_id")
+    user_concept_id = f"#V#{user_id}" if isinstance(user_id, str) and user_id else None
+    org_concept_id = f"#V#{org_id}" if isinstance(org_id, str) and org_id else None
+    return user_concept_id, org_concept_id
+
+
 def parse_namespace(namespace: str) -> Dict[str, Optional[str]]:
     """
     Parse a composite namespace into components.

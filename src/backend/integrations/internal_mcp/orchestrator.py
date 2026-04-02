@@ -112,6 +112,7 @@ from src.backend.services.buttonify_service import (
     sanitise_buttonify_options,
     enforce_buttonify_prompt_contract,
 )
+from src.backend.services.namespace_service import derive_actor_context_from_namespace
 
 # Tool metadata service for Vontology-driven tool display (JVNAUTOSCI-1073)
 from src.backend.services.tool_metadata_service import (
@@ -142,6 +143,24 @@ class WorkflowRoutingInfo:
     confidence_score: float = 0.0
     reasoning: str = ""
     selection_rationale: str = ""
+
+
+def _resolve_identity_context(
+    *,
+    user_concept_id: str | None,
+    org_concept_id: str | None,
+    user_namespace: str | None,
+) -> tuple[str | None, str | None]:
+    """Resolve actor IDs from explicit inputs first, then canonical namespace components."""
+
+    resolved_user = user_concept_id if isinstance(user_concept_id, str) else None
+    resolved_org = org_concept_id if isinstance(org_concept_id, str) else None
+    namespace_user, namespace_org = derive_actor_context_from_namespace(user_namespace)
+    if not resolved_user:
+        resolved_user = namespace_user
+    if not resolved_org:
+        resolved_org = namespace_org
+    return resolved_user, resolved_org
 
 
 @dataclass(frozen=True)
@@ -3025,6 +3044,13 @@ class InternalMCPChatOrchestrator:
         user_concept_id = data.get("user_concept_id")
         org_concept_id = data.get("org_concept_id")
         registry_snapshot = data.get("registry_snapshot")
+        resolved_user_concept_id, resolved_org_concept_id = _resolve_identity_context(
+            user_concept_id=(
+                user_concept_id if isinstance(user_concept_id, str) else None
+            ),
+            org_concept_id=(org_concept_id if isinstance(org_concept_id, str) else None),
+            user_namespace=request.environment.user_namespace,
+        )
 
         retry_response = None
         duration_ms = 0.0
@@ -3045,14 +3071,8 @@ class InternalMCPChatOrchestrator:
                     if isinstance(registry_snapshot, Mapping)
                     else None
                 ),
-                user_concept_id=(
-                    user_concept_id
-                    if isinstance(user_concept_id, str)
-                    else request.environment.user_namespace
-                ),
-                org_concept_id=(
-                    org_concept_id if isinstance(org_concept_id, str) else None
-                ),
+                user_concept_id=resolved_user_concept_id,
+                org_concept_id=resolved_org_concept_id,
                 llm_calls_log=(
                     llm_calls_log
                     if isinstance(llm_calls_log, list)
@@ -3756,6 +3776,13 @@ class InternalMCPChatOrchestrator:
         user_concept_id = request.data.get("user_concept_id")
         org_concept_id = request.data.get("org_concept_id")
         registry_snapshot = request.data.get("registry_snapshot")
+        resolved_user_concept_id, resolved_org_concept_id = _resolve_identity_context(
+            user_concept_id=(
+                user_concept_id if isinstance(user_concept_id, str) else None
+            ),
+            org_concept_id=(org_concept_id if isinstance(org_concept_id, str) else None),
+            user_namespace=request.environment.user_namespace,
+        )
 
         if (
             isinstance(policy_state, _WorkflowModelPolicyState)
@@ -3777,14 +3804,8 @@ class InternalMCPChatOrchestrator:
                     if isinstance(registry_snapshot, Mapping)
                     else None
                 ),
-                user_concept_id=(
-                    user_concept_id
-                    if isinstance(user_concept_id, str)
-                    else request.environment.user_namespace
-                ),
-                org_concept_id=(
-                    org_concept_id if isinstance(org_concept_id, str) else None
-                ),
+                user_concept_id=resolved_user_concept_id,
+                org_concept_id=resolved_org_concept_id,
                 llm_calls_log=request.data.get("llm_calls_log") or [],
                 aux_log=aux_llm_calls,
                 record_llm_call=record_llm_call,
@@ -12375,15 +12396,8 @@ class InternalMCPChatOrchestrator:
 
     @staticmethod
     def _derive_actor_concept_id_from_namespace(namespace: str | None) -> str | None:
-        if not isinstance(namespace, str):
-            return None
-        cleaned = namespace.strip()
-        if not cleaned or not cleaned.startswith("#V#"):
-            return None
-        if "@" not in cleaned:
-            return cleaned
-        user_part = cleaned.split("@", 1)[0].strip()
-        return user_part or None
+        actor_concept_id, _actor_org_id = derive_actor_context_from_namespace(namespace)
+        return actor_concept_id
 
     def _summarise_write_target_for_confirmation(
         self,
@@ -20358,11 +20372,13 @@ class InternalMCPChatOrchestrator:
             if trace_enabled and trace is not None:
                 trace.metadata["model_registry"] = dict(registry_summary)
 
-        # JVNAUTOSCI-1651: Use authenticated user/org IDs passed from the route
-        # handler. Fall back to user_namespace for backward compatibility with
-        # callers that do not yet provide the explicit IDs.
-        user_concept_id = user_concept_id or user_namespace
-        org_concept_id = org_concept_id  # may be None if caller did not provide it
+        # Prefer explicit authenticated IDs, but derive canonical actor/org
+        # components from the namespace when older callers only provide scope.
+        user_concept_id, org_concept_id = _resolve_identity_context(
+            user_concept_id=user_concept_id,
+            org_concept_id=org_concept_id,
+            user_namespace=user_namespace,
+        )
 
         def _model_for_stage(stage: str) -> Optional[str]:
             return self._select_model_for_stage(

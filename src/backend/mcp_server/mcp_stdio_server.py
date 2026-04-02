@@ -80,6 +80,7 @@ from src.backend.services.concept_embedding_service import (
     get_concepts_needing_indexing,
     get_concept_embedding_stats,
 )
+from src.backend.services.namespace_service import derive_actor_context_from_namespace
 from src.backend.services.text_value_service import (
     upsert_text_for_concept,
     get_texts_for_concept,
@@ -808,6 +809,28 @@ async def _handle_von_chat_run(arguments: dict[str, Any]) -> list[TextContent]:
         if isinstance(arguments.get("user_namespace"), str)
         else None
     )
+    user_concept_id = (
+        arguments.get("user_concept_id")
+        if isinstance(arguments.get("user_concept_id"), str)
+        else None
+    )
+    org_concept_id = (
+        arguments.get("org_concept_id")
+        if isinstance(arguments.get("org_concept_id"), str)
+        else None
+    )
+    if org_concept_id is None and isinstance(
+        arguments.get("organisation_concept_id"), str
+    ):
+        org_concept_id = arguments.get("organisation_concept_id")
+    if user_concept_id is None or org_concept_id is None:
+        namespace_user_id, namespace_org_id = derive_actor_context_from_namespace(
+            user_namespace
+        )
+        if user_concept_id is None:
+            user_concept_id = namespace_user_id
+        if org_concept_id is None:
+            org_concept_id = namespace_org_id
     gmail_profile = (
         arguments.get("gmail_profile")
         if isinstance(arguments.get("gmail_profile"), str)
@@ -912,6 +935,8 @@ async def _handle_von_chat_run(arguments: dict[str, Any]) -> list[TextContent]:
                 gmail_profile=gmail_profile,
                 auxiliary_system_prompt=auxiliary_system_prompt,
                 preferred_language=get_preferred_language(),
+                user_concept_id=user_concept_id,
+                org_concept_id=org_concept_id,
             )
 
         orchestrator_result = await _run_blocking_with_timeout(

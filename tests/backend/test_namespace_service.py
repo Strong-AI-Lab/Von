@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.backend.services.namespace_service import (
     coerce_namespace,
+    derive_actor_context_from_namespace,
     derive_namespace,
     derive_namespace_for_actor,
     parse_namespace,
@@ -215,6 +216,21 @@ class TestCompatibilityNormalisation:
             resolve_canonical_namespace(None, "#V#user_alpha", "#V#org_beta")
             == "#V#user_alpha@org_beta"
         )
+
+    def test_derive_actor_context_from_org_scoped_namespace(self):
+        assert derive_actor_context_from_namespace("#V#user_alpha@org_beta") == (
+            "#V#user_alpha",
+            "#V#org_beta",
+        )
+
+    def test_derive_actor_context_from_legacy_slash_namespace(self):
+        assert derive_actor_context_from_namespace("#V#user_alpha/#V#org_beta") == (
+            "#V#user_alpha",
+            "#V#org_beta",
+        )
+
+    def test_derive_actor_context_from_invalid_namespace_returns_none(self):
+        assert derive_actor_context_from_namespace("not a namespace") == (None, None)
 
 
 class TestEdgeCases:

@@ -165,7 +165,9 @@ def test_execute_candidate_disables_recursive_gap_recovery(monkeypatch) -> None:
             llm_client=object(),
             gateway=SimpleNamespace(enabled=True),
             model="gpt-5.2-chat-latest",
-            user_namespace="#V#user",
+            user_namespace="#V#user@org",
+            user_concept_id="#V#user",
+            org_concept_id="#V#org",
         ),
     )
 
@@ -175,6 +177,8 @@ def test_execute_candidate_disables_recursive_gap_recovery(monkeypatch) -> None:
     run_kwargs = cast(dict[str, Any], captured["run_kwargs"])
     assert run_kwargs["workflow_gap_recovery_enabled"] is False
     assert run_kwargs["prompt"] == "Please recover this workflow gap."
+    assert run_kwargs["user_concept_id"] == "#V#user"
+    assert run_kwargs["org_concept_id"] == "#V#org"
 
 
 def test_execute_candidate_uses_canonical_cap_default_when_env_cap_missing(
