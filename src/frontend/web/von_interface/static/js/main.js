@@ -574,13 +574,15 @@ function setupDynamicLayout() {
 
     // Get actual header height including search box
     const headerHeight = header.getBoundingClientRect().height;
-    const tabHeight = 48; // Standard tab height
+    tabContainer.style.top = `${headerHeight}px`;
+    const measuredTabHeight = Math.max(
+      48,
+      Math.ceil(tabContainer.getBoundingClientRect().height || tabContainer.scrollHeight || 48)
+    );
+    const tabHeight = measuredTabHeight;
     const contentTop = headerHeight + tabHeight + 8; // 8px margin
 
     console.log(`Dynamic layout: Header ${headerHeight}px, positioning tabs at ${headerHeight}px, content at ${contentTop}px`);
-
-    // Position tabs right below header
-    tabContainer.style.top = `${headerHeight}px`;
 
     // Position main tab content area below tabs
     if (tabContentArea) {
@@ -619,6 +621,25 @@ function setupDynamicLayout() {
     } catch (e) {
       console.warn('Dynamic layout: ResizeObserver setup failed', e);
     }
+  }
+
+  if (tabContainer && !tabContainer._dynamicLayoutObserved) {
+    try {
+      const resizeObserver = new ResizeObserver(() => {
+        requestAnimationFrame(updateLayout);
+      });
+      resizeObserver.observe(tabContainer);
+      tabContainer._dynamicLayoutObserved = true;
+    } catch (e) {
+      console.warn('Dynamic layout: Tab container ResizeObserver setup failed', e);
+    }
+  }
+
+  if (!document._dynamicTabStripLayoutListenerBound) {
+    document.addEventListener('von:tab-strip-layout-changed', () => {
+      requestAnimationFrame(updateLayout);
+    });
+    document._dynamicTabStripLayoutListenerBound = true;
   }
 }
 

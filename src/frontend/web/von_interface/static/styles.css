@@ -2361,8 +2361,8 @@ body {
     /* below global header height (increased for safety) */
     left: 0;
     right: 0;
-    height: 48px;
-    /* ADDED: Explicit height for the tab bar */
+    min-height: 48px;
+    height: auto;
     z-index: 1100 !important;
     /* force above everything */
     background-color: #f8f9fa;
@@ -2371,19 +2371,36 @@ body {
     /* Light background for the tab bar */
     border-bottom: 1px solid #dee2e6;
     /* Subtle border */
-    padding: 0 20px;
-    /* MODIFIED: Adjusted padding, top/bottom padding handled by alignment */
+    padding: 6px 20px 0;
     box-sizing: border-box;
     box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
     /* Soft shadow for depth */
-    display: flex;
-    /* ADDED to help align tab buttons */
-    align-items: center;
-    /* ADDED to vertically center tab buttons */
+    gap: 8px;
+    align-items: flex-start;
 
     /* Allow many dynamic tabs without pushing Settings off-screen */
     overflow-x: auto;
     overflow-y: hidden;
+}
+
+.concept-tab-groups {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    flex: 0 0 auto;
+    min-width: 0;
+}
+
+.concept-tab-bucket {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+    flex: 0 0 auto;
+}
+
+.concept-tab-bucket:empty {
+    display: none;
 }
 
 .tab-container::-webkit-scrollbar {
@@ -2426,13 +2443,21 @@ body {
     border: 1px solid var(--von-tab-border);
     border-bottom: none;
     border-radius: 4px 4px 0 0;
-    margin-right: 5px;
-    display: inline-block !important;
+    margin-right: 0;
+    display: inline-flex !important;
+    align-items: center;
+    gap: 6px;
     flex: 0 0 auto;
+    align-self: flex-start;
     position: relative;
     visibility: visible !important;
     z-index: 1101;
     transition: background-color 120ms ease, color 120ms ease, box-shadow 120ms ease;
+}
+
+.concept-tab-bucket .tab-button {
+    width: max-content;
+    max-width: 100%;
 }
 
 .tab-button:hover {

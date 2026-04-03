@@ -235,6 +235,87 @@ describe('dynamic tab accessibility and close behaviour', () => {
     });
 });
 
+describe('dynamic concept tab buckets', () => {
+    beforeEach(() => {
+        document.body.innerHTML = `
+            <div id="tabContainer" class="tab-container">
+                <div class="tab-button" data-tab="chatTab">Chat</div>
+                <div class="tab-button" data-tab="vontologyTab">Vontology</div>
+                <div class="tab-button" data-tab="importExportTab">Import/Export</div>
+            </div>
+            <div class="tab-content-area"></div>
+        `;
+        global.fetch = jest.fn(async () => ({ ok: false, status: 404, text: async () => '' }));
+    });
+
+    afterEach(() => {
+        jest.resetModules();
+        jest.restoreAllMocks();
+        delete global.fetch;
+    });
+
+    function getBucketConceptOrders() {
+        return Array.from(document.querySelectorAll('#conceptTabGroups .concept-tab-bucket')).map((bucket) => ({
+            kind: bucket.dataset.bucketKind,
+            conceptIds: Array.from(bucket.querySelectorAll('.tab-button[data-concept-id]')).map((button) => button.dataset.conceptId)
+        }));
+    }
+
+    test('renders only non-empty kind buckets and keeps most recent tabs first within each bucket', () => {
+        const { createOrActivateConceptTab } = require(dynamicTabsModulePath);
+
+        createOrActivateConceptTab('#V#alpha', 'Alpha', false, { kind: 'type' });
+        createOrActivateConceptTab('#V#beta', 'Beta', false, { kind: 'type' });
+        createOrActivateConceptTab('#V#gamma', 'Gamma', false, { kind: 'individual' });
+
+        expect(getBucketConceptOrders()).toEqual([
+            { kind: 'type', conceptIds: ['#V#beta', '#V#alpha'] },
+            { kind: 'individual', conceptIds: ['#V#gamma'] }
+        ]);
+        expect(document.querySelector('#conceptTabGroups .concept-tab-bucket[data-bucket-kind="predicate"]')).toBeNull();
+    });
+
+    test('promotes the activated tab to the top of its existing kind bucket', () => {
+        const dynamicTabs = require(dynamicTabsModulePath);
+        dynamicTabs.initializeDynamicTabs();
+
+        const alphaTabId = dynamicTabs.createOrActivateConceptTab('#V#alpha', 'Alpha', false, { kind: 'type' });
+        dynamicTabs.createOrActivateConceptTab('#V#beta', 'Beta', false, { kind: 'type' });
+        dynamicTabs.createOrActivateConceptTab('#V#gamma', 'Gamma', false, { kind: 'type' });
+
+        document.dispatchEvent(new CustomEvent('von:tab-activated', {
+            detail: { tabId: alphaTabId }
+        }));
+
+        expect(getBucketConceptOrders()).toEqual([
+            { kind: 'type', conceptIds: ['#V#alpha', '#V#gamma', '#V#beta'] }
+        ]);
+    });
+
+    test('keeps the tab context menu available for a stacked non-MRU tab item', () => {
+        const { createOrActivateConceptTab } = require(dynamicTabsModulePath);
+
+        createOrActivateConceptTab('#V#alpha', 'Alpha', false, { kind: 'type' });
+        createOrActivateConceptTab('#V#beta', 'Beta', false, { kind: 'type' });
+
+        const stackedTab = document.querySelector('.concept-tab-bucket[data-bucket-kind="type"] .tab-button[data-concept-id="#V#alpha"]');
+        expect(stackedTab).not.toBeNull();
+
+        stackedTab.dispatchEvent(new MouseEvent('contextmenu', {
+            bubbles: true,
+            cancelable: true,
+            clientX: 24,
+            clientY: 24
+        }));
+
+        const menu = document.querySelector('.tab-context-menu');
+        expect(menu).not.toBeNull();
+        expect(menu.style.display).toBe('block');
+        expect(menu.querySelector('[data-action="close"]')).not.toBeNull();
+        expect(menu.querySelector('[data-action="close-right"]')).not.toBeNull();
+    });
+});
+
 describe('notes and content editor markup hygiene', () => {
     beforeEach(() => {
         document.body.innerHTML = '<div id="conceptStep1_test"></div>';
@@ -342,10 +423,11 @@ describe('persisted concept tab restore', () => {
         expect(storedSnapshot).toMatchObject({
             activeConceptId: '#V#beta',
             tabs: [
-                { conceptId: '#V#alpha', conceptName: 'Alpha', kind: 'type' },
-                { conceptId: '#V#beta', conceptName: 'Beta', kind: 'type' }
+                { conceptId: '#V#beta', conceptName: 'Beta', kind: 'type' },
+                { conceptId: '#V#alpha', conceptName: 'Alpha', kind: 'type' }
             ]
         });
+        expect(storedSnapshot.tabs[0].lastTouchedAt).toBeGreaterThan(storedSnapshot.tabs[1].lastTouchedAt);
 
         jest.resetModules();
         document.body.innerHTML = `
@@ -364,13 +446,13 @@ describe('persisted concept tab restore', () => {
             (entry) => entry.conceptId === '#V#beta'
         );
 
-        expect(restored.restoredConceptIds).toEqual(['#V#alpha', '#V#beta']);
+        expect(restored.restoredConceptIds).toEqual(['#V#beta', '#V#alpha']);
         expect(restored.activeTabId).toBe(restoredBetaInfo.tabId);
 
         const restoredButtons = Array.from(
             document.querySelectorAll('#tabContainer .tab-button.closable[data-concept-id]')
         ).map((button) => button.dataset.conceptId);
-        expect(restoredButtons).toEqual(['#V#alpha', '#V#beta']);
+        expect(restoredButtons).toEqual(['#V#beta', '#V#alpha']);
     });
 
     test('keeps last active state null when a non-concept tab becomes active', () => {

@@ -36,14 +36,17 @@ let annotationTabCounter = 0;
 const annotationEnabled = isAnnotationEnabled();
 const TAB_CLOSE_ANIMATION_MS = 160;
 const OPEN_CONCEPT_TABS_STORAGE_PREFIX = 'von:openConceptTabs';
-const OPEN_CONCEPT_TABS_STORAGE_VERSION = 1;
+const OPEN_CONCEPT_TABS_STORAGE_VERSION = 2;
 const MAX_RESTORE_NOTICE_ITEMS = 3;
+const CONCEPT_TAB_BUCKET_ORDER = ['type', 'individual', 'predicate'];
+const CONCEPT_TAB_KIND_CLASS_NAMES = ['type-tab', 'individual-tab', 'predicate-tab'];
 // Singleton context menu element for tab operations (created lazily)
 let tabContextMenu = null;
 let currentContextMenuTarget = null; // The tab button element for which menu opened
 let lastContextMenuOpenAt = 0;
 let lastContextMenuTriggerEl = null;
 let suppressConceptTabPersistence = false;
+let dynamicConceptTabRecencyCounter = 0;
 
 function getOpenConceptTabsStorageKey(namespace = null) {
     return buildNamespaceScopedStorageKey(OPEN_CONCEPT_TABS_STORAGE_PREFIX, namespace);
@@ -53,6 +56,9 @@ function normaliseStoredConceptTabEntry(entry) {
     if (!entry || typeof entry !== 'object') return null;
     const conceptId = typeof entry.conceptId === 'string' ? entry.conceptId.trim() : '';
     if (!conceptId) return null;
+    const lastTouchedAt = Number.isFinite(Number(entry.lastTouchedAt))
+        ? Math.max(0, Math.trunc(Number(entry.lastTouchedAt)))
+        : null;
     return {
         conceptId,
         conceptName:
@@ -62,8 +68,179 @@ function normaliseStoredConceptTabEntry(entry) {
         kind:
             typeof entry.kind === 'string' && entry.kind.trim()
                 ? entry.kind.trim()
-                : 'unknown'
+                : 'unknown',
+        lastTouchedAt
     };
+}
+
+function normaliseConceptTabKind(kind) {
+    if (kind === 'type' || kind === 'individual' || kind === 'predicate') {
+        return kind;
+    }
+    return 'unknown';
+}
+
+function getConceptTabBucketKind(kind) {
+    const normalisedKind = normaliseConceptTabKind(kind);
+    if (normalisedKind === 'individual' || normalisedKind === 'predicate') {
+        return normalisedKind;
+    }
+    return 'type';
+}
+
+function getConceptTabBucketOrderIndex(kind) {
+    const idx = CONCEPT_TAB_BUCKET_ORDER.indexOf(getConceptTabBucketKind(kind));
+    return idx === -1 ? CONCEPT_TAB_BUCKET_ORDER.length : idx;
+}
+
+function nextConceptTabRecency(lastTouchedAt = null) {
+    if (lastTouchedAt !== null && lastTouchedAt !== undefined && Number.isFinite(Number(lastTouchedAt))) {
+        const normalised = Math.max(0, Math.trunc(Number(lastTouchedAt)));
+        dynamicConceptTabRecencyCounter = Math.max(dynamicConceptTabRecencyCounter, normalised);
+        return normalised;
+    }
+    dynamicConceptTabRecencyCounter += 1;
+    return dynamicConceptTabRecencyCounter;
+}
+
+function getOrderedDynamicConceptTabEntries(namespace = null) {
+    const effectiveNamespace =
+        typeof namespace === 'string' && namespace.trim()
+            ? namespace.trim()
+            : null;
+    return Array.from(dynamicConceptTabs.values())
+        .filter((info) => {
+            if (!effectiveNamespace) return true;
+            const infoNamespace =
+                typeof info.namespace === 'string' && info.namespace.trim()
+                    ? info.namespace.trim()
+                    : null;
+            return !infoNamespace || infoNamespace === effectiveNamespace;
+        })
+        .sort((a, b) => {
+            const bucketDelta = getConceptTabBucketOrderIndex(a.kind) - getConceptTabBucketOrderIndex(b.kind);
+            if (bucketDelta !== 0) return bucketDelta;
+            const recencyDelta = (Number(b.lastTouchedAt) || 0) - (Number(a.lastTouchedAt) || 0);
+            if (recencyDelta !== 0) return recencyDelta;
+            return String(a.conceptName || a.conceptId).localeCompare(String(b.conceptName || b.conceptId));
+        });
+}
+
+function getConceptTabInsertAnchor(tabContainer) {
+    if (!tabContainer) return null;
+    return (
+        tabContainer.querySelector('.tab-button[data-tab="importExportTab"]') ||
+        tabContainer.querySelector('.tab-button[data-tab="settingsTab"]') ||
+        null
+    );
+}
+
+function ensureConceptTabGroupsRoot() {
+    const tabContainer = document.getElementById('tabContainer');
+    if (!tabContainer) return null;
+    let groupsRoot = document.getElementById('conceptTabGroups');
+    if (!groupsRoot) {
+        groupsRoot = document.createElement('div');
+        groupsRoot.id = 'conceptTabGroups';
+        groupsRoot.className = 'concept-tab-groups';
+        groupsRoot.setAttribute('aria-label', 'Open concept tabs grouped by kind');
+    }
+    const anchor = getConceptTabInsertAnchor(tabContainer);
+    if (anchor) {
+        tabContainer.insertBefore(groupsRoot, anchor);
+    } else if (groupsRoot.parentNode !== tabContainer) {
+        tabContainer.appendChild(groupsRoot);
+    }
+    return groupsRoot;
+}
+
+function notifyConceptTabLayoutChanged() {
+    try {
+        document.dispatchEvent(new CustomEvent('von:tab-strip-layout-changed'));
+    } catch (_) { /* ignore */ }
+}
+
+function applyConceptTabKindPresentation(element, kind) {
+    if (!element) return;
+    const normalisedKind = normaliseConceptTabKind(kind);
+    element.classList.remove(...CONCEPT_TAB_KIND_CLASS_NAMES);
+    if (normalisedKind !== 'unknown') {
+        element.classList.add(`${normalisedKind}-tab`);
+    }
+    element.dataset.tabKind = normalisedKind;
+    element.dataset.tabBucketKind = getConceptTabBucketKind(normalisedKind);
+}
+
+function rebuildConceptTabBuckets() {
+    const tabContainer = document.getElementById('tabContainer');
+    if (!tabContainer) return;
+    const orderedEntries = getOrderedDynamicConceptTabEntries();
+    const existingRoot = document.getElementById('conceptTabGroups');
+    if (!orderedEntries.length) {
+        if (existingRoot && existingRoot.parentNode) {
+            existingRoot.parentNode.removeChild(existingRoot);
+            notifyConceptTabLayoutChanged();
+        }
+        return;
+    }
+
+    const groupsRoot = ensureConceptTabGroupsRoot();
+    if (!groupsRoot) return;
+
+    const groupedEntries = new Map(CONCEPT_TAB_BUCKET_ORDER.map((kind) => [kind, []]));
+    orderedEntries.forEach((info) => {
+        groupedEntries.get(getConceptTabBucketKind(info.kind)).push(info);
+    });
+
+    const bucketElements = [];
+    CONCEPT_TAB_BUCKET_ORDER.forEach((kind) => {
+        const entries = groupedEntries.get(kind) || [];
+        if (!entries.length) return;
+        const bucket = document.createElement('div');
+        bucket.className = 'concept-tab-bucket';
+        bucket.dataset.bucketKind = kind;
+        bucket.setAttribute('role', 'group');
+        bucket.setAttribute('aria-label', `${kind} concept tabs`);
+        entries.forEach((info) => {
+            if (info.button) {
+                bucket.appendChild(info.button);
+            }
+        });
+        bucketElements.push(bucket);
+    });
+
+    groupsRoot.replaceChildren(...bucketElements);
+    const anchor = getConceptTabInsertAnchor(tabContainer);
+    if (anchor) {
+        tabContainer.insertBefore(groupsRoot, anchor);
+    } else {
+        tabContainer.appendChild(groupsRoot);
+    }
+    notifyConceptTabLayoutChanged();
+}
+
+function touchDynamicConceptTabRecency(conceptId, { lastTouchedAt = null, rebuild = true } = {}) {
+    const info = dynamicConceptTabs.get(conceptId);
+    if (!info) return null;
+    info.lastTouchedAt = nextConceptTabRecency(lastTouchedAt);
+    if (rebuild) {
+        rebuildConceptTabBuckets();
+    }
+    return info.lastTouchedAt;
+}
+
+function setDynamicConceptTabKind(conceptId, kind, { rebuild = true } = {}) {
+    const info = dynamicConceptTabs.get(conceptId);
+    if (!info) return null;
+    const previousBucketKind = getConceptTabBucketKind(info.kind);
+    const normalisedKind = normaliseConceptTabKind(kind);
+    info.kind = normalisedKind;
+    applyConceptTabKindPresentation(info.button, normalisedKind);
+    applyConceptTabKindPresentation(info.content, normalisedKind);
+    if (rebuild && previousBucketKind !== getConceptTabBucketKind(normalisedKind)) {
+        rebuildConceptTabBuckets();
+    }
+    return normalisedKind;
 }
 
 function getPersistedConceptTabSnapshot(namespace = null) {
@@ -129,14 +306,7 @@ function buildOpenConceptTabsSnapshot(namespace = null, activeTabId = null) {
             : getSessionScopedNamespace();
     if (!effectiveNamespace) return null;
 
-    const tabs = Array.from(dynamicConceptTabs.values())
-        .filter((info) => {
-            const infoNamespace =
-                typeof info.namespace === 'string' && info.namespace.trim()
-                    ? info.namespace.trim()
-                    : effectiveNamespace;
-            return infoNamespace === effectiveNamespace;
-        })
+    const tabs = getOrderedDynamicConceptTabEntries(effectiveNamespace)
         .map((info) => ({
             conceptId: info.conceptId,
             conceptName:
@@ -146,7 +316,11 @@ function buildOpenConceptTabsSnapshot(namespace = null, activeTabId = null) {
             kind:
                 typeof info.kind === 'string' && info.kind.trim()
                     ? info.kind.trim()
-                    : 'unknown'
+                    : 'unknown',
+            lastTouchedAt:
+                Number.isFinite(Number(info.lastTouchedAt))
+                    ? Math.max(0, Math.trunc(Number(info.lastTouchedAt)))
+                    : 0
         }));
 
     const activeConceptId = resolveActiveConceptId(effectiveNamespace, activeTabId);
@@ -654,9 +828,8 @@ async function pollActiveConceptTabForExternalChanges() {
 
 /** TESTING ONLY helper to inject ontology meta (avoids network in unit tests) */
 export function __setTabOntologyMeta(conceptId, { kind, parentTypes, instanceOf }) {
-    const info = dynamicConceptTabs.get(conceptId);
-    if (info) {
-        if (kind) info.kind = kind;
+    if (kind) {
+        setDynamicConceptTabKind(conceptId, kind);
     }
     if (Array.isArray(parentTypes)) parentTypesCache.set(conceptId, parentTypes.slice());
     if (Array.isArray(instanceOf)) instanceOfCache.set(conceptId, instanceOf.slice());
@@ -813,13 +986,16 @@ function userPrefersReducedMotion() {
     }
 }
 
-function removeTabElements(tabButton, tabContent, { animate = true } = {}) {
+function removeTabElements(tabButton, tabContent, { animate = true, onRemoved = null } = {}) {
     const removeNow = () => {
         if (tabButton && tabButton.parentNode) {
             tabButton.parentNode.removeChild(tabButton);
         }
         if (tabContent && tabContent.parentNode) {
             tabContent.parentNode.removeChild(tabContent);
+        }
+        if (typeof onRemoved === 'function') {
+            onRemoved();
         }
     };
 
@@ -895,7 +1071,10 @@ export function createOrActivateConceptTab(conceptId, conceptName, activate = tr
     const tabId = generateTabId(conceptId);
 
     // Create new dynamic concept tab
-    createDynamicConceptTab(conceptId, conceptName, tabId, options.kind, { newlyCreated: options.newlyCreated });
+    createDynamicConceptTab(conceptId, conceptName, tabId, options.kind, {
+        newlyCreated: options.newlyCreated,
+        lastTouchedAt: options.lastTouchedAt
+    });
 
     // Optionally activate the newly created tab
     if (activate) {
@@ -919,31 +1098,46 @@ export function createOrActivateConceptTab(conceptId, conceptName, activate = tr
 function createDynamicConceptTab(conceptId, conceptName, tabId, kind, opts = {}) {
     console.log(`[dynamicTabs] Creating new tab: ${tabId} for concept ${conceptId}`);
     const currentNamespace = getSessionScopedNamespace();
+    const normalisedKind = normaliseConceptTabKind(kind);
 
     // Get display names for the concept
     const displayNames = getConceptTypeDisplayNames(conceptId);
 
     // Create tab button: singular for individual/predicate tabs, plural for type tabs
-    const buttonText = (kind === 'individual' || kind === 'predicate')
+    const buttonText = (normalisedKind === 'individual' || normalisedKind === 'predicate')
         ? displayNames.singular
         : displayNames.plural;
-    const tabButton = createTabButton(tabId, buttonText, conceptId, kind, opts);
+    const tabButton = createTabButton(tabId, buttonText, conceptId, normalisedKind, opts);
 
     // After initial creation, asynchronously refine label using shortest name in current language
     try { tabButton.dataset.conceptId = conceptId; } catch (_) { }
     try { updateTabLabelWithShortestName(conceptId, tabButton); } catch (_) { /* ignore */ }
 
+    // Create tab content
+    const tabContent = createTabContent(tabId, conceptId, normalisedKind);
+
+    // Store tab information before any asynchronous reclassification work starts.
+    dynamicConceptTabs.set(conceptId, {
+        tabId: tabId,
+        conceptId: conceptId,
+        conceptName: conceptName,
+        displayNames: displayNames,
+        kind: normalisedKind,
+        namespace: currentNamespace,
+        button: tabButton,
+        content: tabContent,
+        lastTouchedAt: nextConceptTabRecency(opts.lastTouchedAt)
+    });
+
     // Asynchronously check if this individual is actually a predicate and update styling
-    if (kind === 'individual') {
+    if (normalisedKind === 'individual') {
         (async () => {
             try {
                 const nodeResp = await fetch(`/vontology/api/vontology/node_content?identifier=${encodeURIComponent(conceptId)}`);
                 if (nodeResp.ok) {
                     const nodeJson = await nodeResp.json();
                     if (nodeJson && nodeJson.kind === 'predicate') {
-                        // Update tab button styling to predicate
-                        tabButton.classList.remove('individual-tab');
-                        tabButton.classList.add('predicate-tab');
+                        setDynamicConceptTabKind(conceptId, 'predicate');
                         console.log(`[dynamicTabs] Tab ${conceptId} reclassified as predicate on creation`);
                     }
                 }
@@ -954,26 +1148,11 @@ function createDynamicConceptTab(conceptId, conceptName, tabId, kind, opts = {})
         })();
     }
 
-    // Create tab content
-    const tabContent = createTabContent(tabId, conceptId, kind);
-
     // Insert tab button in the correct position (after vontology, before import/export)
     insertTabButton(tabButton);
 
     // Insert tab content in the tab content area
     insertTabContent(tabContent);
-
-    // Store tab information
-    dynamicConceptTabs.set(conceptId, {
-        tabId: tabId,
-        conceptId: conceptId,
-        conceptName: conceptName,
-        displayNames: displayNames,
-        kind: kind,
-        namespace: currentNamespace,
-        button: tabButton,
-        content: tabContent
-    });
 
     console.log(`[dynamicTabs] Dynamic concept tab created successfully: ${tabId}`);
 }
@@ -1142,16 +1321,7 @@ function createTabButton(tabId, displayName, conceptId, kind, opts = {}) {
     tabButton.dataset.conceptName = displayName;
     tabButton.title = displayName;
     tabButton.setAttribute('aria-label', `Open concept tab: ${displayName}`);
-    if (kind === 'type') {
-        tabButton.classList.add('type-tab');
-    } else if (kind === 'individual') {
-        tabButton.classList.add('individual-tab');
-    } else if (kind === 'predicate') {
-        tabButton.classList.add('predicate-tab');
-    } // 'unknown' gets no specific class yet
-    if (kind) {
-        tabButton.dataset.tabKind = kind;
-    }
+    applyConceptTabKindPresentation(tabButton, kind);
     // Optional NEW badge for recently created tabs
     if (opts.newlyCreated) {
         const badge = document.createElement('span');
@@ -1244,9 +1414,7 @@ function createTabContent(tabId, conceptId, kind) {
     tabContent.id = tabId;
     tabContent.className = 'tab-content';
     tabContent.dataset.conceptId = conceptId;
-    if (kind) {
-        tabContent.dataset.tabKind = kind;
-    }
+    applyConceptTabKindPresentation(tabContent, kind);
 
     // Add loading state initially
     tabContent.innerHTML = '<div class="loading">Loading concept interface...</div>';
@@ -1259,18 +1427,17 @@ function createTabContent(tabId, conceptId, kind) {
  * @param {HTMLElement} tabButton - The tab button to insert
  */
 function insertTabButton(tabButton) {
-    const tabContainer = document.getElementById('tabContainer');
-    const importExportTab = document.querySelector('.tab-button[data-tab="importExportTab"]');
-    const settingsTab = document.querySelector('.tab-button[data-tab="settingsTab"]');
+    if (!tabButton) return;
+    if (tabButton.dataset?.conceptId) {
+        rebuildConceptTabBuckets();
+        return;
+    }
 
-    if (tabContainer && importExportTab) {
-        // Insert before import/export tab
-        tabContainer.insertBefore(tabButton, importExportTab);
-    } else if (tabContainer && settingsTab) {
-        // Non-expert mode: keep dynamic concept tabs immediately after Conversations (before Settings).
-        tabContainer.insertBefore(tabButton, settingsTab);
+    const tabContainer = document.getElementById('tabContainer');
+    const anchor = getConceptTabInsertAnchor(tabContainer);
+    if (tabContainer && anchor) {
+        tabContainer.insertBefore(tabButton, anchor);
     } else if (tabContainer) {
-        // Fallback: append to end
         tabContainer.appendChild(tabButton);
     } else {
         console.error('[dynamicTabs] Tab container not found');
@@ -1345,7 +1512,9 @@ export function closeDynamicConceptTab(conceptId, options = {}) {
         tabInfo.content.classList.remove('active');
     } catch (_) { /* ignore */ }
 
-    removeTabElements(tabInfo.button, tabInfo.content);
+    removeTabElements(tabInfo.button, tabInfo.content, {
+        onRemoved: () => rebuildConceptTabBuckets()
+    });
     if (shouldPersist) {
         persistOpenConceptTabs({
             activeTabId: isActive ? 'chatTab' : null,
@@ -1459,6 +1628,7 @@ export async function loadDynamicConceptTabContent(tabId, conceptId) {
     }
 
     try {
+        const initialBucketKind = getConceptTabBucketKind(tabInfo.kind);
         // Fetch the concept tab template
         const response = await fetch('/concept_tab');
         if (!response.ok) {
@@ -1493,9 +1663,7 @@ export async function loadDynamicConceptTabContent(tabId, conceptId) {
                     nodeJson = await nodeResp.json();
                     // Prefer backend-provided computed_kind if available
                     if (nodeJson.computed_kind && nodeJson.computed_kind !== kind) {
-                        kind = nodeJson.computed_kind;
-                        const updated = dynamicConceptTabs.get(conceptId);
-                        if (updated) { updated.kind = kind; }
+                        kind = setDynamicConceptTabKind(conceptId, nodeJson.computed_kind, { rebuild: false }) || kind;
                     }
                     const rel = (nodeJson && (nodeJson.raw_doc || {}).relationships) || {}; // prefer raw_doc->relationships if present
                     const instanceRel = rel.is_an_instance_of || nodeJson.is_an_instance_of;
@@ -1506,9 +1674,7 @@ export async function loadDynamicConceptTabContent(tabId, conceptId) {
                     if (nonEmptyInstance && !nonEmptyType) inferred = 'individual';
                     else if (nonEmptyType) inferred = 'type';
                     if (inferred && inferred !== kind) {
-                        kind = inferred;
-                        const updated = dynamicConceptTabs.get(conceptId);
-                        if (updated) { updated.kind = inferred; }
+                        kind = setDynamicConceptTabKind(conceptId, inferred, { rebuild: false }) || kind;
                     }
                 }
             } catch (inferErr) {
@@ -1527,9 +1693,8 @@ export async function loadDynamicConceptTabContent(tabId, conceptId) {
                 if (headerDiv.firstChild) headerDiv.insertBefore(badge, headerDiv.firstChild); else headerDiv.appendChild(badge);
 
                 // Update tab button styling if this is a predicate
-                if (backendKind === 'predicate' && tabInfo.button) {
-                    tabInfo.button.classList.remove('individual-tab');
-                    tabInfo.button.classList.add('predicate-tab');
+                if (backendKind === 'predicate') {
+                    setDynamicConceptTabKind(conceptId, backendKind, { rebuild: false });
                 }
             }
             if (headerDiv) {
@@ -1549,22 +1714,9 @@ export async function loadDynamicConceptTabContent(tabId, conceptId) {
             if (currentInfo) {
                 const storedKind = currentInfo.kind; // may have been inferred above
                 const contentEl = currentInfo.content;
-                const buttonEl = currentInfo.button;
-                const datasetKind = contentEl.dataset.tabKind;
+                const datasetKind = normaliseConceptTabKind(contentEl.dataset.tabKind);
                 if (storedKind && datasetKind !== storedKind) {
-                    // Update dataset
-                    contentEl.dataset.tabKind = storedKind;
-                    if (buttonEl) buttonEl.dataset.tabKind = storedKind;
-                    // Swap CSS classes
-                    buttonEl.classList.remove('type-tab', 'individual-tab');
-                    contentEl.classList.remove('type-tab', 'individual-tab');
-                    if (storedKind === 'type') {
-                        buttonEl.classList.add('type-tab');
-                        contentEl.classList.add('type-tab');
-                    } else if (storedKind === 'individual') {
-                        buttonEl.classList.add('individual-tab');
-                        contentEl.classList.add('individual-tab');
-                    }
+                    setDynamicConceptTabKind(conceptId, storedKind, { rebuild: false });
                     // Ensure badge reflects updated kind; if existing wrong badge, replace it.
                     const headerSpan2 = document.getElementById(`conceptTypeDisplayNamePluralElement_${uniqueIdSuffix}`);
                     const headerDiv2 = headerSpan2 ? headerSpan2.closest('.concept-header') : null;
@@ -1582,12 +1734,14 @@ export async function loadDynamicConceptTabContent(tabId, conceptId) {
                         badge.textContent = badgeText;
 
                         // Update tab button styling if this is a predicate
-                        if (backendKind === 'predicate' && buttonEl) {
-                            buttonEl.classList.remove('individual-tab');
-                            buttonEl.classList.add('predicate-tab');
+                        if (backendKind === 'predicate') {
+                            setDynamicConceptTabKind(conceptId, backendKind, { rebuild: false });
                         }
                     }
                     console.log(`[dynamicTabs] Reclassified tab ${conceptId} to kind=${storedKind}`);
+                }
+                if (getConceptTabBucketKind(storedKind) !== initialBucketKind) {
+                    rebuildConceptTabBuckets();
                 }
             }
         } catch (reclassErr) {
@@ -1746,7 +1900,10 @@ export async function restorePersistedConceptTabs(namespace = null) {
                 entry.conceptId,
                 entry.conceptName || entry.conceptId,
                 false,
-                { kind: entry.kind || 'unknown' }
+                {
+                    kind: entry.kind || 'unknown',
+                    lastTouchedAt: entry.lastTouchedAt
+                }
             );
             restoredConceptIds.push(entry.conceptId);
         }
@@ -2416,6 +2573,10 @@ export function initializeDynamicTabs() {
         const tabId = typeof evt?.detail?.tabId === 'string' ? evt.detail.tabId.trim() : '';
         if (!tabId || dynamicConceptTabs.size === 0) {
             return;
+        }
+        const activeConceptInfo = Array.from(dynamicConceptTabs.values()).find((info) => info.tabId === tabId);
+        if (activeConceptInfo) {
+            touchDynamicConceptTabRecency(activeConceptInfo.conceptId);
         }
         persistOpenConceptTabs({
             activeTabId: tabId,
