@@ -3,6 +3,16 @@
 const { detectMarkdown, simpleMarkdownToHtml } = require('../../src/frontend/web/von_interface/static/js/markdownUtils.js');
 
 describe('markdownUtils', () => {
+    test('detectMarkdown recognises GitHub-style pipe tables', () => {
+        const input = [
+            '| Name | Degree | Role |',
+            '| --- | --- | --- |',
+            '| Alice | PhD | Student |'
+        ].join('\n');
+
+        expect(detectMarkdown(input)).toBe(true);
+    });
+
     test('detectMarkdown recognises indented list markers', () => {
         const input = [
             '5) Section',

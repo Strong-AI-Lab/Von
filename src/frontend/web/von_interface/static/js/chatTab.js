@@ -11323,22 +11323,8 @@ const CHAT_CONCEPT_META_MAX_RETRIES = 3;
 const chatConceptMetaRetryCounts = new Map();
 const chatConceptMetaRetryTimers = new Map();
 
-function isMarkdownProducingModel(model) {
-    if (!model) {
-        return false;
-    }
-    const modelName = String(model).trim().toLowerCase();
-    return modelName.startsWith('gpt-5.2');
-}
-
-function shouldRenderMarkdownForAssistant(message, debugData) {
+function shouldRenderMarkdownForAssistant(message, _debugData) {
     const text = String(message ?? '');
-
-    if (isMarkdownProducingModel(debugData?.model)) {
-        // Treat as markdown-friendly even when detection is ambiguous.
-        return true;
-    }
-
     return detectMarkdown(text);
 }
 

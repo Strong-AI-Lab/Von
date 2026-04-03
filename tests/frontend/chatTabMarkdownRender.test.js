@@ -304,6 +304,15 @@ describe('chat markdown rendering (assistant)', () => {
         const promptInput = document.getElementById('promptInput');
         promptInput.value = 'test prompt';
 
+        const assistantResponse = [
+            '- State A',
+            '  - #V#person',
+            '',
+            '```',
+            '#V#person',
+            '```'
+        ].join('\n');
+
         const assistantHtml = [
             '<ul><li>State A<ul><li>V#person</li></ul></li></ul>',
             '<pre><code>V#person</code></pre>'
@@ -341,7 +350,7 @@ describe('chat markdown rendering (assistant)', () => {
             if (typeof url === 'string' && url.startsWith('/von/generate')) {
                 return Promise.resolve({
                     ok: true,
-                    json: async () => ({ response: 'ok', llm_debug: { model: 'gpt-5.2' } })
+                    json: async () => ({ response: assistantResponse, llm_debug: { model: 'gpt-5.2' } })
                 });
             }
 
@@ -380,6 +389,15 @@ describe('chat markdown rendering (assistant)', () => {
         const promptInput = document.getElementById('promptInput');
         promptInput.value = 'test prompt';
 
+        const assistantResponse = [
+            'Do this:',
+            '',
+            '> **“Apply the hierarchy fix.”**',
+            '> **“Create `work_specification` and re-anchor `task_specification`.”**',
+            '> **“Do the thing.”** now',
+            '> **Apply the hierarchy fix.**'
+        ].join('\n');
+
         const assistantHtml = [
             '<p>Do this:</p>',
             '<blockquote><p><strong>“Apply the hierarchy fix.”</strong></p></blockquote>',
@@ -415,7 +433,7 @@ describe('chat markdown rendering (assistant)', () => {
             if (typeof url === 'string' && url.startsWith('/von/generate')) {
                 return Promise.resolve({
                     ok: true,
-                    json: async () => ({ response: 'ok', llm_debug: { model: 'gpt-5.2' } })
+                    json: async () => ({ response: assistantResponse, llm_debug: { model: 'gpt-5.2' } })
                 });
             }
 
@@ -551,5 +569,148 @@ describe('chat markdown rendering (assistant)', () => {
 
         proceedButton.click();
         expect(promptInput.value).toBe('Alpha\nProceed');
+    });
+
+    test('renders assistant pipe tables for GPT-5.4-family responses and supports raw-text toggle', async () => {
+        const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ',
+            gmail_profile: null
+        });
+
+        const promptInput = document.getElementById('promptInput');
+        promptInput.value = 'show me the table';
+
+        const assistantResponse = [
+            '| Name | Degree | Role |',
+            '| --- | --- | --- |',
+            '| Alice | PhD | Student |',
+            '| Bob | MSc | Tutor |'
+        ].join('\n');
+
+        const assistantHtml = [
+            '<table>',
+            '<thead><tr><th>Name</th><th>Degree</th><th>Role</th></tr></thead>',
+            '<tbody>',
+            '<tr><td>Alice</td><td>PhD</td><td>Student</td></tr>',
+            '<tr><td>Bob</td><td>MSc</td><td>Tutor</td></tr>',
+            '</tbody>',
+            '</table>'
+        ].join('');
+
+        global.fetch = jest.fn((url) => {
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ history_length: 0, authenticated: true })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/api/render_markdown')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ html: assistantHtml })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        response: assistantResponse,
+                        llm_debug: { model: 'gpt-5.4-mini-2026-03-17' }
+                    })
+                });
+            }
+
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        await sendMessage();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        const scrollableField = document.getElementById('scrollableField');
+        const assistantMarkdown = scrollableField.querySelector('.chat-markdown.markdown-rendered');
+        expect(assistantMarkdown).not.toBeNull();
+        expect(assistantMarkdown.querySelector('table')).not.toBeNull();
+        expect(assistantMarkdown.textContent).toContain('Alice');
+
+        const assistantContainer = assistantMarkdown.closest('.message-container');
+        const toggleButton = assistantContainer.querySelector('.chat-render-toggle');
+        const renderBadge = assistantContainer.querySelector('.chat-render-mode-badge');
+        expect(toggleButton).toBeTruthy();
+        expect(toggleButton.textContent).toBe('Text');
+        expect(renderBadge.textContent).toContain('View: Rendered');
+
+        toggleButton.click();
+
+        expect(assistantMarkdown.dataset.renderMode).toBe('text');
+        expect(assistantMarkdown.classList.contains('chat-markdown')).toBe(false);
+        expect(assistantMarkdown.querySelector('table')).toBeNull();
+        expect(assistantMarkdown.textContent).toContain('| Name | Degree | Role |');
+        expect(renderBadge.textContent).toContain('View: Text');
+        expect(toggleButton.textContent).toBe('Rendered');
+
+        toggleButton.click();
+
+        expect(assistantMarkdown.dataset.renderMode).toBe('rendered');
+        expect(assistantMarkdown.classList.contains('chat-markdown')).toBe(true);
+        expect(assistantMarkdown.querySelector('table')).not.toBeNull();
+        expect(renderBadge.textContent).toContain('View: Rendered');
+        expect(toggleButton.textContent).toBe('Text');
+    });
+
+    test('keeps GPT-5.4-family plain-text assistant responses in text mode', async () => {
+        const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ',
+            gmail_profile: null
+        });
+
+        const promptInput = document.getElementById('promptInput');
+        promptInput.value = 'plain response please';
+
+        let renderMarkdownCalls = 0;
+        global.fetch = jest.fn((url) => {
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ history_length: 0, authenticated: true })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/api/render_markdown')) {
+                renderMarkdownCalls += 1;
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ html: '<p>Should not be used</p>' })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        response: 'This is a plain assistant reply with no markdown markers.',
+                        llm_debug: { model: 'gpt-5.4-mini-2026-03-17' }
+                    })
+                });
+            }
+
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        await sendMessage();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        const scrollableField = document.getElementById('scrollableField');
+        expect(scrollableField.querySelector('.chat-render-toggle')).toBeNull();
+        expect(scrollableField.querySelector('.chat-markdown.markdown-rendered')).toBeNull();
+        expect(scrollableField.textContent).toContain('This is a plain assistant reply with no markdown markers.');
+        expect(renderMarkdownCalls).toBe(0);
     });
 });

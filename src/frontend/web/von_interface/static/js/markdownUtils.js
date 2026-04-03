@@ -2,6 +2,22 @@
  * Lightweight markdown detection utility
  * Detects clear markdown indicators to avoid false positives
  */
+const MARKDOWN_TABLE_SEPARATOR_RULE = /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/;
+
+function looksLikeMarkdownTableHeader(line) {
+    return typeof line === 'string' && line.includes('|');
+}
+
+function hasMarkdownTableAt(lines, index) {
+    return (
+        Array.isArray(lines)
+        && index >= 0
+        && index + 1 < lines.length
+        && looksLikeMarkdownTableHeader(lines[index])
+        && MARKDOWN_TABLE_SEPARATOR_RULE.test(lines[index + 1] || '')
+    );
+}
+
 export function detectMarkdown(text) {
     if (!text || typeof text !== 'string') return false;
 
@@ -18,7 +34,18 @@ export function detectMarkdown(text) {
         /^\s*>\s+.+$/m              // Blockquotes (> text) (allow leading indentation)
     ];
 
-    return patterns.some(pattern => pattern.test(text));
+    if (patterns.some(pattern => pattern.test(text))) {
+        return true;
+    }
+
+    const lines = text.replace(/\r\n/g, '\n').split('\n');
+    for (let i = 0; i < lines.length - 1; i += 1) {
+        if (hasMarkdownTableAt(lines, i)) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 export function escapeHtml(text) {
@@ -90,8 +117,6 @@ export function simpleMarkdownToHtml(markdown) {
     const unorderedListRule = /^ {0,3}[-*+]\s+(.+)$/;
     const orderedListRule = /^ {0,3}\d+\.\s+(.+)$/;
     const blockquoteRule = /^>\s?(.*)$/;
-    const tableSeparatorRule = /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/;
-
     const renderInlineMarkdown = (text) => {
         let html = escapeHtml(text ?? '');
 
@@ -121,10 +146,6 @@ export function simpleMarkdownToHtml(markdown) {
         if (row.startsWith('|')) row = row.slice(1);
         if (row.endsWith('|')) row = row.slice(0, -1);
         return row.split('|').map(cell => renderInlineMarkdown(String(cell).trim()));
-    };
-
-    const looksLikeTableHeader = (line) => {
-        return typeof line === 'string' && line.includes('|');
     };
 
     let i = 0;
@@ -160,11 +181,7 @@ export function simpleMarkdownToHtml(markdown) {
         }
 
         // Tables (header + separator + rows)
-        if (
-            i + 1 < lines.length &&
-            looksLikeTableHeader(line) &&
-            tableSeparatorRule.test(lines[i + 1] || '')
-        ) {
+        if (hasMarkdownTableAt(lines, i)) {
             const headerCells = splitTableRow(line);
             i += 2; // skip header and separator
             const bodyRows = [];
@@ -240,11 +257,7 @@ export function simpleMarkdownToHtml(markdown) {
             if (blockquoteRule.test(candidate)) break;
             if (unorderedListRule.test(candidate)) break;
             if (orderedListRule.test(candidate)) break;
-            if (
-                i + 1 < lines.length &&
-                looksLikeTableHeader(candidate) &&
-                tableSeparatorRule.test(lines[i + 1] || '')
-            ) {
+            if (hasMarkdownTableAt(lines, i)) {
                 break;
             }
             paragraphLines.push(renderInlineMarkdown(candidate));
