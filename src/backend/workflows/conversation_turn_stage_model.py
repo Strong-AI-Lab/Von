@@ -69,6 +69,15 @@ _NON_FORMAL_STAGE_SPECS: tuple[_StageSpec, ...] = (
         runtime_aliases=("workflow_discovery",),
     ),
     _StageSpec(
+        stage_id="workflow_dispatch_prepare",
+        stage_label="Workflow dispatch preparation",
+        order=25,
+        stage_kind="non_formal",
+        boundary_type="routing",
+        stage_concept_id="#V#conversation_turn_stage_workflow_dispatch_prepare",
+        runtime_aliases=("workflow_dispatch_prepare", "orchestrator_start"),
+    ),
+    _StageSpec(
         stage_id="workflow_dispatch",
         stage_label="Workflow dispatch",
         order=30,

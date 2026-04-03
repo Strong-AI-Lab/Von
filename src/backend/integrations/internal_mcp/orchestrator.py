@@ -803,6 +803,7 @@ class ProgressTracker:
     # Phase labels mirrored from orchestrator for convenience.
     _PHASE_LABELS: Mapping[str, str] = {
         "context_build": "Building context",
+        "workflow_dispatch_prepare": "Preparing workflow dispatch",
         "workflow_dispatch": "Workflow dispatch",
         "plain_response": "Plain-response routing",
         "tool_plan": "Planning tool calls",
@@ -1009,6 +1010,7 @@ class InternalMCPChatOrchestrator:
     # --- Tool-use progress phases (JVNAUTOSCI-984) ---
     # Used to provide phase-aware status updates during tool execution.
     PHASE_CONTEXT_BUILD = "context_build"
+    PHASE_WORKFLOW_DISPATCH_PREPARE = "workflow_dispatch_prepare"
     PHASE_WORKFLOW_DISPATCH = "workflow_dispatch"
     PHASE_PLAIN_RESPONSE = "plain_response"
     PHASE_TOOL_PLAN = "tool_plan"
@@ -1021,6 +1023,7 @@ class InternalMCPChatOrchestrator:
 
     _PHASE_LABELS: Mapping[str, str] = {
         PHASE_CONTEXT_BUILD: "Building context",
+        PHASE_WORKFLOW_DISPATCH_PREPARE: "Preparing workflow dispatch",
         PHASE_WORKFLOW_DISPATCH: "Workflow dispatch",
         PHASE_PLAIN_RESPONSE: "Plain-response routing",
         PHASE_TOOL_PLAN: "Planning tool calls",
@@ -20100,6 +20103,94 @@ class InternalMCPChatOrchestrator:
         def _orchestrator_duration_ms() -> float:
             return (time.perf_counter() - orchestrator_start) * 1000.0
 
+        def _emit_dispatch_prepare_progress(
+            *,
+            subtask: str | None = None,
+            result_summary: str | None = None,
+            extra: Mapping[str, Any] | None = None,
+        ) -> None:
+            payload: dict[str, Any] = {
+                "status": "thinking",
+                "stage": self.PHASE_WORKFLOW_DISPATCH_PREPARE,
+                "phase": self.PHASE_WORKFLOW_DISPATCH_PREPARE,
+                "phase_label": self._PHASE_LABELS[
+                    self.PHASE_WORKFLOW_DISPATCH_PREPARE
+                ],
+            }
+            if subtask:
+                payload["subtask"] = subtask
+            if result_summary:
+                payload["result_summary"] = result_summary
+            if isinstance(workflow_discovery_result, Mapping):
+                payload["workflow_discovery"] = dict(workflow_discovery_result)
+            if isinstance(extra, Mapping):
+                payload.update(extra)
+            _emit_progress_local(payload)
+
+        def _record_dispatch_prepare_step(
+            *,
+            step_id: str,
+            step_label: str,
+            duration_ms: int,
+            status: str = "completed",
+            extra: Mapping[str, Any] | None = None,
+        ) -> None:
+            payload: dict[str, Any] = {
+                "type": "workflow_dispatch_prepare_step",
+                "stage": self.PHASE_WORKFLOW_DISPATCH_PREPARE,
+                "step_id": step_id,
+                "step_label": step_label,
+                "status": status,
+                "duration_ms": int(max(0, duration_ms)),
+            }
+            if isinstance(extra, Mapping):
+                for key, value in extra.items():
+                    if isinstance(key, str):
+                        payload[key] = value
+            aux_llm_calls.append(payload)
+            if trace_enabled and trace is not None:
+                raw_steps = trace.metadata.get("workflow_dispatch_prepare_steps")
+                step_events: list[dict[str, Any]]
+                if isinstance(raw_steps, list):
+                    step_events = raw_steps
+                else:
+                    step_events = []
+                    trace.metadata["workflow_dispatch_prepare_steps"] = step_events
+                step_events.append(dict(payload))
+
+        def _run_dispatch_prepare_step(
+            step_id: str,
+            step_label: str,
+            operation: Callable[[], Any],
+        ) -> Any:
+            _emit_dispatch_prepare_progress(
+                subtask=step_label,
+                result_summary=step_label,
+            )
+            step_start = time.perf_counter()
+            try:
+                result = operation()
+            except Exception as exc:
+                duration_ms = int((time.perf_counter() - step_start) * 1000)
+                _record_dispatch_prepare_step(
+                    step_id=step_id,
+                    step_label=step_label,
+                    duration_ms=duration_ms,
+                    status="failed",
+                    extra={
+                        "error_class": exc.__class__.__name__,
+                        "error": str(exc),
+                    },
+                )
+                raise
+            duration_ms = int((time.perf_counter() - step_start) * 1000)
+            _record_dispatch_prepare_step(
+                step_id=step_id,
+                step_label=step_label,
+                duration_ms=duration_ms,
+            )
+            return result
+
         def _finalise_selection_experience_record(
             *,
             result: OrchestratorResult,
@@ -20337,30 +20428,41 @@ class InternalMCPChatOrchestrator:
             except Exception:
                 pass
 
-        _emit_progress_local(
-            {
+        _emit_phase_transition_local(
+            self.PHASE_WORKFLOW_DISPATCH_PREPARE,
+            extra={
                 "status": "orchestrator_start",
-                "stage": "orchestrator_start",
-            }
+                "stage": self.PHASE_WORKFLOW_DISPATCH_PREPARE,
+                "subtask": "Prepare routing policy and context",
+                "result_summary": "Preparing workflow dispatch",
+            },
         )
 
-        policy_state, policy_telemetry = self._load_workflow_model_policy(
-            preferred_language
+        policy_state, policy_telemetry = _run_dispatch_prepare_step(
+            "workflow_model_policy",
+            "Load routing model policy",
+            lambda: self._load_workflow_model_policy(preferred_language),
         )
         if policy_telemetry:
             aux_llm_calls.append(policy_telemetry)
             if trace_enabled and trace is not None:
                 trace.metadata["workflow_model_policy"] = dict(policy_telemetry)
 
-        registry_snapshot: Mapping[str, Any] | None = None
-        try:
-            from ...services.model_registry_service import get_model_registry_snapshot
+        def _load_registry_snapshot() -> Mapping[str, Any] | None:
+            try:
+                from ...services.model_registry_service import get_model_registry_snapshot
 
-            registry_snapshot = get_model_registry_snapshot(
-                preferred_language=preferred_language
-            )
-        except Exception:
-            registry_snapshot = None
+                return get_model_registry_snapshot(
+                    preferred_language=preferred_language
+                )
+            except Exception:
+                return None
+
+        registry_snapshot = _run_dispatch_prepare_step(
+            "model_registry_snapshot",
+            "Load model registry snapshot",
+            _load_registry_snapshot,
+        )
 
         if isinstance(registry_snapshot, Mapping):
             models_value = registry_snapshot.get("models")
@@ -20648,145 +20750,191 @@ class InternalMCPChatOrchestrator:
             _persist_trace(status="completed")
             return result
 
-        preflight = self._build_ontology_preflight(
-            prompt,
-            preferred_language,
-            context=context,
-            conversation_session_id=conversation_session_id,
-            user_namespace=user_namespace,
+        preflight = _run_dispatch_prepare_step(
+            "ontology_preflight",
+            "Build ontology preflight",
+            lambda: self._build_ontology_preflight(
+                prompt,
+                preferred_language,
+                context=context,
+                conversation_session_id=conversation_session_id,
+                user_namespace=user_namespace,
+            ),
         )
         if preflight.telemetry:
             aux_llm_calls.append(preflight.telemetry)
             if trace_enabled and trace is not None:
                 trace.metadata["ontology_preflight"] = dict(preflight.telemetry)
 
-        augmented_context = self._build_augmented_context(
-            context,
-            user_namespace=user_namespace,
-            auxiliary_system_prompt=auxiliary_system_prompt,
-            preflight_message=preflight.message,
-            preferred_language=preferred_language,
+        augmented_context = _run_dispatch_prepare_step(
+            "augmented_context",
+            "Build augmented context",
+            lambda: self._build_augmented_context(
+                context,
+                user_namespace=user_namespace,
+                auxiliary_system_prompt=auxiliary_system_prompt,
+                preflight_message=preflight.message,
+                preferred_language=preferred_language,
+            ),
         )
 
-        effective_prompt_for_routing = prompt
-        workflow_continuation_payload = (
-            dict(workflow_continuation_context)
-            if isinstance(workflow_continuation_context, Mapping)
-            else None
-        )
-        try:
-            from ...services.workflow_continuation_service import (
-                assess_prompt_for_workflow_continuation,
-                build_workflow_continuation_routing_prompt,
-                build_workflow_continuation_system_message,
-                get_session_workflow_continuation_context,
+        def _prepare_workflow_continuation_context() -> tuple[
+            str, Mapping[str, Any] | None
+        ]:
+            effective_prompt = prompt
+            workflow_continuation_payload_local = (
+                dict(workflow_continuation_context)
+                if isinstance(workflow_continuation_context, Mapping)
+                else None
             )
-
-            if workflow_continuation_payload is None and conversation_session_id:
-                workflow_continuation_payload = get_session_workflow_continuation_context(
-                    session_id=conversation_session_id,
-                    namespace=user_namespace,
-                    user_id=None,
+            try:
+                from ...services.workflow_continuation_service import (
+                    assess_prompt_for_workflow_continuation,
+                    build_workflow_continuation_routing_prompt,
+                    build_workflow_continuation_system_message,
+                    get_session_workflow_continuation_context,
                 )
 
-            if isinstance(workflow_continuation_payload, Mapping):
-                apply_decision = assess_prompt_for_workflow_continuation(
-                    prompt=prompt,
-                    continuation_context=workflow_continuation_payload,
-                )
-                apply_reason = str(apply_decision.get("reason") or "").strip() or None
-                if isinstance(aux_llm_calls, list):
-                    continuation_decision_source = (
-                        str(apply_decision.get("decision_source") or "").strip()
-                        or "workflow_state_check"
+                if (
+                    workflow_continuation_payload_local is None
+                    and conversation_session_id
+                ):
+                    workflow_continuation_payload_local = (
+                        get_session_workflow_continuation_context(
+                            session_id=conversation_session_id,
+                            namespace=user_namespace,
+                            user_id=None,
+                        )
                     )
-                    try:
-                        aux_llm_calls.append(
-                            annotate_python_decision_event(
+
+                if isinstance(workflow_continuation_payload_local, Mapping):
+                    apply_decision = assess_prompt_for_workflow_continuation(
+                        prompt=prompt,
+                        continuation_context=workflow_continuation_payload_local,
+                    )
+                    apply_reason = (
+                        str(apply_decision.get("reason") or "").strip() or None
+                    )
+                    if isinstance(aux_llm_calls, list):
+                        continuation_decision_source = (
+                            str(apply_decision.get("decision_source") or "").strip()
+                            or "workflow_state_check"
+                        )
+                        try:
+                            aux_llm_calls.append(
+                                annotate_python_decision_event(
+                                    {
+                                        "type": "workflow_continuation_decision",
+                                        "stage": "workflow_dispatch",
+                                        "applies": bool(
+                                            apply_decision.get("applies", False)
+                                        ),
+                                        "reason": apply_reason,
+                                        "session_id": workflow_continuation_payload_local.get(
+                                            "session_id"
+                                        ),
+                                        "selected_workflow_id": workflow_continuation_payload_local.get(
+                                            "selected_workflow_id"
+                                        ),
+                                    },
+                                    stage="workflow_dispatch",
+                                    component="workflow_continuation_service",
+                                    function="assess_prompt_for_workflow_continuation",
+                                    decision_class="continuation_classifier",
+                                    decision_source=continuation_decision_source,
+                                    changed_outcome=bool(
+                                        apply_decision.get("applies", False)
+                                    ),
+                                    reason_code=apply_reason,
+                                )
+                            )
+                        except Exception:
+                            pass
+                    workflow_continuation_payload_local = dict(
+                        workflow_continuation_payload_local
+                    )
+                    workflow_continuation_payload_local["applied"] = bool(
+                        apply_decision.get("applies", False)
+                    )
+                    workflow_continuation_payload_local["apply_reason"] = (
+                        str(apply_decision.get("reason") or "").strip() or None
+                    )
+                    if bool(workflow_continuation_payload_local.get("applied")):
+                        system_message = build_workflow_continuation_system_message(
+                            workflow_continuation_payload_local
+                        )
+                        if isinstance(system_message, str) and system_message.strip():
+                            insert_at = (
+                                1
+                                if augmented_context
+                                and isinstance(augmented_context[0], Mapping)
+                                and augmented_context[0].get("role") == "system"
+                                else 0
+                            )
+                            augmented_context.insert(
+                                insert_at,
                                 {
-                                    "type": "workflow_continuation_decision",
-                                    "stage": "workflow_dispatch",
-                                    "applies": bool(apply_decision.get("applies", False)),
-                                    "reason": apply_reason,
-                                    "session_id": workflow_continuation_payload.get(
-                                        "session_id"
-                                    ),
-                                    "selected_workflow_id": workflow_continuation_payload.get(
-                                        "selected_workflow_id"
-                                    ),
+                                    "role": "system",
+                                    "content": system_message.strip(),
                                 },
-                                stage="workflow_dispatch",
-                                component="workflow_continuation_service",
-                                function="assess_prompt_for_workflow_continuation",
-                                decision_class="continuation_classifier",
-                                decision_source=continuation_decision_source,
-                                changed_outcome=bool(
-                                    apply_decision.get("applies", False)
-                                ),
-                                reason_code=apply_reason,
                             )
-                        )
-                    except Exception:
-                        pass
-                workflow_continuation_payload = dict(workflow_continuation_payload)
-                workflow_continuation_payload["applied"] = bool(
-                    apply_decision.get("applies", False)
-                )
-                workflow_continuation_payload["apply_reason"] = str(
-                    apply_decision.get("reason") or ""
-                ).strip() or None
-                if bool(workflow_continuation_payload.get("applied")):
-                    system_message = build_workflow_continuation_system_message(
-                        workflow_continuation_payload
-                    )
-                    if isinstance(system_message, str) and system_message.strip():
-                        insert_at = (
-                            1
-                            if augmented_context
-                            and isinstance(augmented_context[0], Mapping)
-                            and augmented_context[0].get("role") == "system"
-                            else 0
-                        )
-                        augmented_context.insert(
-                            insert_at,
-                            {
-                                "role": "system",
-                                "content": system_message.strip(),
-                            },
-                        )
-                    effective_prompt_for_routing = (
-                        build_workflow_continuation_routing_prompt(
-                            prompt=prompt,
-                            continuation_context=workflow_continuation_payload,
-                        )
-                        or prompt
-                    )
-                aux_llm_calls.append(
-                    {
-                        "type": "workflow_continuation_context",
-                        "applied": bool(workflow_continuation_payload.get("applied", False)),
-                        "reason": workflow_continuation_payload.get("apply_reason"),
-                        "context": dict(workflow_continuation_payload),
-                    }
-                )
-                if trace_enabled and trace is not None:
-                    trace.metadata["workflow_continuation_context"] = {
-                        "applied": bool(workflow_continuation_payload.get("applied", False)),
-                        "reason": workflow_continuation_payload.get("apply_reason"),
-                        "selected_workflow_id": workflow_continuation_payload.get(
-                            "selected_workflow_id"
-                        ),
-                        "requires_follow_up": bool(
-                            workflow_continuation_payload.get("requires_follow_up", False)
-                        ),
-                        "has_unresolved_required_effects": bool(
-                            workflow_continuation_payload.get(
-                                "has_unresolved_required_effects", False
+                        effective_prompt = (
+                            build_workflow_continuation_routing_prompt(
+                                prompt=prompt,
+                                continuation_context=workflow_continuation_payload_local,
                             )
-                        ),
-                    }
-        except Exception:
-            workflow_continuation_payload = None
+                            or prompt
+                        )
+                    aux_llm_calls.append(
+                        {
+                            "type": "workflow_continuation_context",
+                            "applied": bool(
+                                workflow_continuation_payload_local.get(
+                                    "applied", False
+                                )
+                            ),
+                            "reason": workflow_continuation_payload_local.get(
+                                "apply_reason"
+                            ),
+                            "context": dict(workflow_continuation_payload_local),
+                        }
+                    )
+                    if trace_enabled and trace is not None:
+                        trace.metadata["workflow_continuation_context"] = {
+                            "applied": bool(
+                                workflow_continuation_payload_local.get(
+                                    "applied", False
+                                )
+                            ),
+                            "reason": workflow_continuation_payload_local.get(
+                                "apply_reason"
+                            ),
+                            "selected_workflow_id": workflow_continuation_payload_local.get(
+                                "selected_workflow_id"
+                            ),
+                            "requires_follow_up": bool(
+                                workflow_continuation_payload_local.get(
+                                    "requires_follow_up", False
+                                )
+                            ),
+                            "has_unresolved_required_effects": bool(
+                                workflow_continuation_payload_local.get(
+                                    "has_unresolved_required_effects", False
+                                )
+                            ),
+                        }
+            except Exception:
+                workflow_continuation_payload_local = None
+            return effective_prompt, workflow_continuation_payload_local
+
+        (
+            effective_prompt_for_routing,
+            workflow_continuation_payload,
+        ) = _run_dispatch_prepare_step(
+            "workflow_continuation_context",
+            "Inspect workflow continuation context",
+            _prepare_workflow_continuation_context,
+        )
 
         base_prompt_telemetry = self._consume_base_system_prompt_telemetry()
         if base_prompt_telemetry:
@@ -20800,15 +20948,23 @@ class InternalMCPChatOrchestrator:
                 # Place immediately after the main instruction message.
                 augmented_context.insert(1, {"role": "system", "content": hint.strip()})
 
-        method_catalogue_for_routing: Mapping[str, Any] = {}
-        describe_methods_for_routing = getattr(self._gateway, "describe_methods", None)
-        if callable(describe_methods_for_routing):
-            try:
-                described_methods = describe_methods_for_routing()
-                if isinstance(described_methods, Mapping):
-                    method_catalogue_for_routing = described_methods
-            except Exception:
-                method_catalogue_for_routing = {}
+        def _load_method_catalogue_for_routing() -> Mapping[str, Any]:
+            method_catalogue: Mapping[str, Any] = {}
+            describe_methods_for_routing = getattr(self._gateway, "describe_methods", None)
+            if callable(describe_methods_for_routing):
+                try:
+                    described_methods = describe_methods_for_routing()
+                    if isinstance(described_methods, Mapping):
+                        method_catalogue = described_methods
+                except Exception:
+                    method_catalogue = {}
+            return method_catalogue
+
+        method_catalogue_for_routing = _run_dispatch_prepare_step(
+            "method_catalogue_snapshot",
+            "Load tool method catalogue",
+            _load_method_catalogue_for_routing,
+        )
 
         routing_url_requirement: dict[str, Any] = {
             "required": False,
@@ -20816,12 +20972,16 @@ class InternalMCPChatOrchestrator:
             "tool": None,
             "reason": "workflow_llm_owns_url_reading_decision",
         }
-        routing_prompt_requirements = self._evaluate_prompt_requirements(
-            prompt_text=effective_prompt_for_routing,
-            method_catalogue=method_catalogue_for_routing,
-            context_messages=augmented_context,
-            tool_invocations=(),
-            url_requirement=routing_url_requirement,
+        routing_prompt_requirements = _run_dispatch_prepare_step(
+            "prompt_requirement_inference",
+            "Infer prompt requirements for routing",
+            lambda: self._evaluate_prompt_requirements(
+                prompt_text=effective_prompt_for_routing,
+                method_catalogue=method_catalogue_for_routing,
+                context_messages=augmented_context,
+                tool_invocations=(),
+                url_requirement=routing_url_requirement,
+            ),
         )
         if isinstance(aux_llm_calls, list):
             try:
@@ -20966,6 +21126,7 @@ class InternalMCPChatOrchestrator:
         def _copy_workflow_routing_aux_entries() -> list[dict[str, Any]]:
             relevant_types = {
                 "custom_workflow_override_policy",
+                "workflow_dispatch_prepare_step",
                 "workflow_selector_prompt",
                 "workflow_selector",
                 "workflow_selector_override",
@@ -21013,13 +21174,38 @@ class InternalMCPChatOrchestrator:
                 payload["workflow_routing"] = None
             return payload
 
-        if isinstance(workflow_discovery_result, Mapping):
-            discovered_matches, excluded_discovered_matches = (
-                self._prepare_selector_discovered_matches(workflow_discovery_result)
+        def _prepare_selector_candidates() -> tuple[
+            list[dict[str, Any]],
+            list[dict[str, Any]],
+            list[dict[str, Any]],
+        ]:
+            local_discovered_matches: list[dict[str, Any]] = []
+            local_excluded_matches: list[dict[str, Any]] = []
+            if isinstance(workflow_discovery_result, Mapping):
+                (
+                    local_discovered_matches,
+                    local_excluded_matches,
+                ) = self._prepare_selector_discovered_matches(
+                    workflow_discovery_result
+                )
+            local_selector_candidate_matches = _merge_selector_candidates(
+                _build_selector_default_candidates(),
+                local_discovered_matches,
             )
-        selector_candidate_matches = _merge_selector_candidates(
-            _build_selector_default_candidates(),
+            return (
+                local_discovered_matches,
+                local_excluded_matches,
+                local_selector_candidate_matches,
+            )
+
+        (
             discovered_matches,
+            excluded_discovered_matches,
+            selector_candidate_matches,
+        ) = _run_dispatch_prepare_step(
+            "selector_candidate_preparation",
+            "Prepare selector candidates",
+            _prepare_selector_candidates,
         )
 
         routing_info: WorkflowRoutingInfo | None = None
@@ -21056,17 +21242,16 @@ class InternalMCPChatOrchestrator:
             )
 
         if user_namespace and self._workflow_selector.enabled():
-            _emit_progress_local(
-                {
-                    "status": "phase_transition",
+            _emit_phase_transition_local(
+                self.PHASE_WORKFLOW_DISPATCH,
+                extra={
                     "stage": "workflow_dispatch",
-                    "phase": "workflow_dispatch",
                     "phase_label": "Selecting workflow",
                     "subtask": "Choose the best workflow for this turn",
                     "workflow_match_count": len(discovered_matches),
                     "workflow_candidate_count": len(selector_candidate_matches)
                     + len(excluded_discovered_matches),
-                }
+                },
             )
             selector_start = time.perf_counter()
             selector_prompt = self._workflow_selector.prepare_selection_prompt(

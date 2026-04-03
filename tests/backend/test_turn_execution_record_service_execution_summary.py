@@ -36,7 +36,7 @@ def test_worker_unavailable_failure_code_only_applies_to_tool_routes() -> None:
     )
 
 
-def test_worker_unavailable_orchestrator_start_heartbeat_does_not_emit_tool_failure() -> None:
+def test_worker_unavailable_pre_dispatch_prepare_heartbeat_does_not_emit_tool_failure() -> None:
     summary = _summarise_tool_execution_context(
         workflow_routing={
             "workflow_id": "#V#tool_calling_workflow",
@@ -49,8 +49,8 @@ def test_worker_unavailable_orchestrator_start_heartbeat_does_not_emit_tool_fail
                     {
                         "liveness_reason": "worker_unavailable",
                         "event_kind": "heartbeat",
-                        "stage": "orchestrator_start",
-                        "phase": "orchestrator_start",
+                        "stage": "workflow_dispatch_prepare",
+                        "phase": "workflow_dispatch_prepare",
                     }
                 ],
             }
@@ -613,6 +613,20 @@ def test_build_workflow_routing_diagnostics_preserves_selector_exchange_and_disp
         },
         aux_llm_calls=[
             {
+                "type": "workflow_dispatch_prepare_step",
+                "step_id": "workflow_model_policy",
+                "step_label": "Load routing model policy",
+                "status": "completed",
+                "duration_ms": 7,
+            },
+            {
+                "type": "workflow_dispatch_prepare_step",
+                "step_id": "selector_candidate_preparation",
+                "step_label": "Prepare selector candidates",
+                "status": "completed",
+                "duration_ms": 11,
+            },
+            {
                 "type": "workflow_selector_prompt",
                 "prompt_id": "#V#chat_turn_classifier_prompt",
                 "requested_prompt_ids": ["#V#chat_turn_classifier_prompt"],
@@ -819,6 +833,11 @@ def test_build_workflow_routing_diagnostics_preserves_selector_exchange_and_disp
     )
     assert diagnostics["discovery"]["match_absence_reason"] == (
         "no_routing_match_after_exclusions"
+    )
+    assert diagnostics["dispatch"]["pre_dispatch"]["step_count"] == 2
+    assert diagnostics["dispatch"]["pre_dispatch"]["total_duration_ms"] == 18
+    assert diagnostics["dispatch"]["pre_dispatch"]["slowest_step_id"] == (
+        "selector_candidate_preparation"
     )
     assert diagnostics["dispatch"]["selected_execution_mode"] == "tool_pipeline"
     assert diagnostics["dispatch"]["contract_resolution_status"] == "resolved"

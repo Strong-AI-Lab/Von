@@ -1668,6 +1668,10 @@ def build_workflow_routing_diagnostics(
         aux_llm_calls,
         entry_type="workflow_dispatch_boundary",
     )
+    dispatch_prepare_events = _collect_aux_entries(
+        aux_llm_calls,
+        entry_type="workflow_dispatch_prepare_step",
+    )
 
     if isinstance(execution_summary, Mapping):
         execution_summary_payload = dict(execution_summary)
@@ -1879,6 +1883,34 @@ def build_workflow_routing_diagnostics(
     last_dispatch_boundary = (
         _safe_str(dispatch_events[-1].get("boundary")) if dispatch_events else None
     )
+    dispatch_prepare_steps: list[dict[str, Any]] = []
+    dispatch_prepare_total_duration_ms = 0
+    dispatch_prepare_completed_step_count = 0
+    dispatch_prepare_failed_step_count = 0
+    dispatch_prepare_slowest_step_id: str | None = None
+    dispatch_prepare_slowest_step_label: str | None = None
+    dispatch_prepare_slowest_step_duration_ms = 0
+    for event in dispatch_prepare_events:
+        step_duration_ms = _safe_non_negative_int(event.get("duration_ms"))
+        step_status = _safe_str(event.get("status")) or "completed"
+        step_payload = {
+            "step_id": _safe_str(event.get("step_id")),
+            "step_label": _safe_str(event.get("step_label")),
+            "status": step_status,
+            "duration_ms": step_duration_ms,
+            "error_class": _safe_str(event.get("error_class")),
+            "error": _safe_str(event.get("error")),
+        }
+        dispatch_prepare_steps.append(step_payload)
+        dispatch_prepare_total_duration_ms += step_duration_ms
+        if step_status == "failed":
+            dispatch_prepare_failed_step_count += 1
+        else:
+            dispatch_prepare_completed_step_count += 1
+        if step_duration_ms >= dispatch_prepare_slowest_step_duration_ms:
+            dispatch_prepare_slowest_step_duration_ms = step_duration_ms
+            dispatch_prepare_slowest_step_id = step_payload["step_id"]
+            dispatch_prepare_slowest_step_label = step_payload["step_label"]
 
     return {
         "schema_version": WORKFLOW_ROUTING_DIAGNOSTICS_SCHEMA_VERSION,
@@ -2083,6 +2115,16 @@ def build_workflow_routing_diagnostics(
             "failure_codes": dispatch_failure_codes,
             "zero_execution_primary_failure_code": dispatch_primary_failure_code,
             "zero_execution_primary_failure_reason": dispatch_primary_failure_reason,
+            "pre_dispatch": {
+                "step_count": len(dispatch_prepare_steps),
+                "completed_step_count": dispatch_prepare_completed_step_count,
+                "failed_step_count": dispatch_prepare_failed_step_count,
+                "total_duration_ms": dispatch_prepare_total_duration_ms,
+                "slowest_step_id": dispatch_prepare_slowest_step_id,
+                "slowest_step_label": dispatch_prepare_slowest_step_label,
+                "slowest_step_duration_ms": dispatch_prepare_slowest_step_duration_ms,
+                "steps": dispatch_prepare_steps,
+            },
             "tool_execution": {
                 "planned_count": _safe_non_negative_int(
                     tool_execution_payload.get("planned_count")

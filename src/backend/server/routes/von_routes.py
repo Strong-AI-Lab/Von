@@ -332,6 +332,7 @@ def _default_stage_label(stage: str) -> str:
         "context_build": "Understanding request",
         "workflow_discovery": "Looking for relevant workflows",
         "workflow_discovery_complete": "Evaluating workflow applicability",
+        "workflow_dispatch_prepare": "Preparing workflow dispatch",
         "workflow_dispatch": "Selecting workflow",
         "tool_plan": "Deciding next actions",
         "tool_execute": "Applying actions",
@@ -362,7 +363,7 @@ def _derive_progress_stage(update: dict[str, Any], existing: dict[str, Any]) -> 
 
     status = _progress_str(update.get("status")) or ""
     status_stage_map = {
-        "orchestrator_start": "orchestrator_start",
+        "orchestrator_start": "workflow_dispatch_prepare",
         "orchestrator_end": "orchestrator_end",
         "llm_call_start": "llm_call",
         "llm_call_chunk": "llm_call",
@@ -433,6 +434,8 @@ def _classify_progress_cause(stage: str, status: str) -> str:
         return "model_timeout"
     if "retry" in stage_lower or status_lower.startswith("retry_"):
         return "model_timeout"
+    if "workflow_dispatch_prepare" in stage_lower:
+        return "orchestrator_startup_wait"
     if "orchestrator" in stage_lower:
         return "orchestrator_startup_wait"
     return "network_silence"
@@ -721,7 +724,7 @@ def _canonicalise_live_runtime_stage(stage: Any) -> str | None:
     if clean_stage == "workflow_discovery_complete":
         return "workflow_discovery"
     if clean_stage == "orchestrator_start":
-        return "workflow_dispatch"
+        return "workflow_dispatch_prepare"
     if clean_stage == "orchestrator_end":
         return None
     return clean_stage
@@ -1473,7 +1476,9 @@ def _canonicalise_turn_execution_stage_id(stage: Any) -> str | None:
         return None
     if clean_stage == "workflow_discovery_complete":
         return "workflow_discovery"
-    if clean_stage in {"orchestrator_start", "orchestrator_end"}:
+    if clean_stage == "orchestrator_start":
+        return "workflow_dispatch_prepare"
+    if clean_stage == "orchestrator_end":
         return "workflow_dispatch"
     return clean_stage
 
@@ -1622,7 +1627,11 @@ def _build_turn_execution_stage_diagnostics(
             )
             if tool_history:
                 stage_payload["tool_history"] = [dict(entry) for entry in tool_history]
-        if stage_id in {"workflow_dispatch", "plain_response"}:
+        if stage_id in {
+            "workflow_dispatch_prepare",
+            "workflow_dispatch",
+            "plain_response",
+        }:
             stage_payload["selected_workflow_id"] = _progress_str(
                 latest_progress_payload.get("selected_workflow_id")
             )
@@ -1648,6 +1657,9 @@ def _build_turn_execution_stage_diagnostics(
             if isinstance(workflow_routing_diagnostics, Mapping):
                 dispatch = workflow_routing_diagnostics.get("dispatch")
                 if isinstance(dispatch, Mapping):
+                    pre_dispatch = dispatch.get("pre_dispatch")
+                    if isinstance(pre_dispatch, Mapping):
+                        stage_payload["pre_dispatch"] = dict(pre_dispatch)
                     stage_payload["dispatch_terminal_status"] = _progress_str(
                         dispatch.get("dispatch_terminal_status")
                     )
@@ -8072,8 +8084,11 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         request_id,
                         {
                             "status": "orchestrator_start",
-                            "stage": "orchestrator_start",
-                            "phase_label": "Starting orchestrator",
+                            "stage": "workflow_dispatch_prepare",
+                            "phase": "workflow_dispatch_prepare",
+                            "phase_label": "Preparing workflow dispatch",
+                            "subtask": "Prepare routing policy and context",
+                            "result_summary": "Preparing workflow dispatch",
                             "goal_label": progress_goal_label,
                             "request_id": request_id,
                         },

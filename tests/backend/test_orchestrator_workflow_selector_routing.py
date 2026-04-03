@@ -6181,8 +6181,18 @@ def test_routing_duration_ms_in_aux_llm_calls(monkeypatch):
     assert "routing_duration_ms" in selector_entry
     assert isinstance(selector_entry["routing_duration_ms"], float)
     assert selector_entry["routing_duration_ms"] >= 0
-
-    # Also check WorkflowRoutingInfo has timing.
+    prepare_steps = [
+        e
+        for e in result.aux_llm_calls
+        if isinstance(e, dict) and e.get("type") == "workflow_dispatch_prepare_step"
+    ]
+    assert prepare_steps
+    assert any(
+        step.get("step_id") == "selector_candidate_preparation"
+        for step in prepare_steps
+    )
+    assert all(step.get("stage") == "workflow_dispatch_prepare" for step in prepare_steps)
+    assert all(isinstance(step.get("duration_ms"), int) for step in prepare_steps)
 
 
 # ---------------------------------------------------------------------------

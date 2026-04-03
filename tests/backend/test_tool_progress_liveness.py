@@ -474,6 +474,18 @@ def test_live_progress_serialisation_includes_workflow_stage_path(monkeypatch) -
         "scope-workflow",
         "req-workflow",
         {
+            "status": "orchestrator_start",
+            "stage": "workflow_dispatch_prepare",
+            "phase": "workflow_dispatch_prepare",
+            "request_id": "req-workflow",
+            "result_summary": "Preparing workflow dispatch",
+        },
+    )
+    clock["now"] += 0.1
+    von_routes._set_tool_progress(
+        "scope-workflow",
+        "req-workflow",
+        {
             "status": "phase_transition",
             "phase": "workflow_dispatch",
             "request_id": "req-workflow",
@@ -497,6 +509,7 @@ def test_live_progress_serialisation_includes_workflow_stage_path(monkeypatch) -
     assert isinstance(path, list)
     assert [entry.get("stage_id") for entry in path] == [
         "workflow_discovery",
+        "workflow_dispatch_prepare",
         "workflow_dispatch",
     ]
 
@@ -519,9 +532,9 @@ def test_workflow_discovery_progress_payload_preserves_explicit_no_match_state()
     assert payload["errors"] is None
 
 
-def test_orchestrator_start_uses_startup_wait_liveness_reason() -> None:
+def test_pre_dispatch_prepare_uses_startup_wait_liveness_reason() -> None:
     assert (
-        von_routes._classify_progress_cause("orchestrator_start", "heartbeat")
+        von_routes._classify_progress_cause("workflow_dispatch_prepare", "heartbeat")
         == "orchestrator_startup_wait"
     )
     assert (

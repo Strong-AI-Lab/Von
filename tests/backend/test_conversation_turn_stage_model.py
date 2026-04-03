@@ -26,6 +26,15 @@ def _patch_stage_catalogue(monkeypatch: pytest.MonkeyPatch) -> None:
             runtime_aliases=("workflow_discovery",),
         ),
         stage_model._StageSpec(
+            stage_id="workflow_dispatch_prepare",
+            stage_label="Workflow dispatch preparation",
+            order=25,
+            stage_kind="non_formal",
+            boundary_type="routing",
+            stage_concept_id="#V#conversation_turn_stage_workflow_dispatch_prepare",
+            runtime_aliases=("workflow_dispatch_prepare", "orchestrator_start"),
+        ),
+        stage_model._StageSpec(
             stage_id="workflow_dispatch",
             stage_label="Workflow dispatch",
             order=30,
@@ -117,6 +126,7 @@ def test_stage_path_maps_known_runtime_stages_to_catalogue_entries() -> None:
     result = build_conversation_turn_stage_path(
         runtime_stages=[
             "workflow_discovery",
+            "workflow_dispatch_prepare",
             "tool_plan",
             "tool_execute",
             "completion_gate",
@@ -130,6 +140,7 @@ def test_stage_path_maps_known_runtime_stages_to_catalogue_entries() -> None:
     path = result["path"]
     assert [entry["stage_id"] for entry in path] == [
         "workflow_discovery",
+        "workflow_dispatch_prepare",
         "tool_plan",
         "tool_execute",
         "completion_gate",
@@ -192,3 +203,17 @@ def test_stage_path_prefers_mapped_execution_workflow_over_route_hint() -> None:
     assert path[0]["stage_id"] == "workflow_dispatch"
     assert path[1]["stage_id"] == "tool_execute"
     assert path[1]["workflow_id"] == TOOL_CALLING_WORKFLOW_ID
+
+
+def test_stage_path_maps_orchestrator_start_alias_to_dispatch_prepare() -> None:
+    result = build_conversation_turn_stage_path(
+        runtime_stages=["orchestrator_start", "workflow_dispatch"],
+        workflow_id=TOOL_CALLING_WORKFLOW_ID,
+    )
+
+    assert result["has_unmapped_runtime_stages"] is False
+    path = result["path"]
+    assert [entry["stage_id"] for entry in path] == [
+        "workflow_dispatch_prepare",
+        "workflow_dispatch",
+    ]
