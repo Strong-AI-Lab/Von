@@ -282,6 +282,14 @@ The existing `message.direct_created` binding to `#V#chat_assistant_workflow` sh
 - Intended for engineering debugging and portfolio review of selector accuracy, intent completion, false success, unresolved follow-up, and pre-dispatch latency.
 - Supports drill-down from trend and regression views into replay cases and Jira-linked triage evidence.
 
+### 6.1A Operating protocol
+
+The active engineering protocol for running, reviewing, and gating this measurement stack now lives in:
+
+- `docs/engineering/execution_correctness_benchmark_protocol.md`
+
+That document is the authoritative repo-side operating guide for the Phase 1 evaluation cadence. This schema proposal remains the design note for the record structure and tool surfaces.
+
 6. `turn_execution_backfill_from_chat_history` (implemented)
 - Replays assistant-message `llm_debug_data.turn_execution_record` payloads into `turn_execution_records`.
 - Namespace-scoped and dry-run by default for safe backfill planning.
