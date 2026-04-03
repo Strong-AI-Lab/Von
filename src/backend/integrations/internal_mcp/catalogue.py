@@ -12178,6 +12178,45 @@ def _workflow_list_execution_traces(**kwargs):
     }
 
 
+def _workflow_build_prediction_envelope(**kwargs):
+    """Build an observed workflow prediction envelope from recent traces."""
+    from ...services.workflow_prediction_service import (
+        build_workflow_prediction_envelope,
+    )
+
+    workflow_id = kwargs.get("workflow_id")
+    if not isinstance(workflow_id, str) or not workflow_id.strip():
+        return make_error_response(
+            "missing_parameter",
+            "workflow_id is required",
+            details={"missing": ["workflow_id"]},
+        )
+
+    try:
+        limit = int(kwargs.get("limit", 50))
+    except (TypeError, ValueError):
+        limit = 50
+
+    try:
+        return build_workflow_prediction_envelope(
+            workflow_id=workflow_id,
+            namespace=kwargs.get("namespace"),
+            model=kwargs.get("model"),
+            provider=kwargs.get("provider"),
+            limit=limit,
+        )
+    except ValueError as exc:
+        return make_error_response(
+            "invalid_prediction_request",
+            str(exc),
+        )
+    except Exception as exc:
+        return make_error_response(
+            "workflow_prediction_envelope_failed",
+            f"Failed to build workflow prediction envelope: {exc}",
+        )
+
+
 def _workflow_list_instances(**kwargs):
     """List workflow instances with filters."""
     from ...services.namespace_service import coerce_namespace
@@ -24537,6 +24576,42 @@ def build_default_catalogue() -> MethodCatalogue:
             description=(
                 "List recent durable workflow execution traces with bounded/redacted summaries. "
                 "Filter by namespace or workflow_id."
+            ),
+        ),
+        MethodDefinition(
+            name="workflow_build_prediction_envelope",
+            handler=_workflow_build_prediction_envelope,
+            input_schema=Schema(
+                required={"workflow_id": str},
+                optional={
+                    "namespace": (str, type(None)),
+                    "model": (str, type(None)),
+                    "provider": (str, type(None)),
+                    "limit": int,
+                },
+                allow_unknown=True,
+                description=(
+                    "Build an observed workflow prediction envelope from recent traces."
+                ),
+            ),
+            output_schema=Schema(
+                required={
+                    "success": bool,
+                    "schema_version": str,
+                    "workflow_id": str,
+                    "filters": dict,
+                    "sample_window": dict,
+                    "prediction_envelope": dict,
+                },
+                optional={"error": str, "error_code": str},
+                allow_unknown=True,
+                description="Observed workflow duration/cost/performance envelope.",
+            ),
+            category="read",
+            description=(
+                "Build a prediction-ready envelope from recent workflow execution traces, "
+                "including observed duration ranges, token-cost proxies, and ranked "
+                "observed model trade-offs."
             ),
         ),
         MethodDefinition(

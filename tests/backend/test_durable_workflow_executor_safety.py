@@ -85,6 +85,7 @@ def test_durable_executor_persists_trace_and_checkpoints_trace_link() -> None:
     insert_trace.assert_called_once()
     stored_doc = insert_trace.call_args.args[0]
     assert stored_doc["instance_id"] == "instance-1"
+    assert stored_doc["metadata"]["default_model"] == "test-model"
     assert any(
         isinstance(call.kwargs, dict)
         and call.kwargs.get("execution_trace_id") == "trace-1550"

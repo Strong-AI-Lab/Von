@@ -193,6 +193,7 @@ class DurableWorkflowExecutor:
         from ...languagemodels.llm_interface import (
             get_active_model_name,
             get_llm_client,
+            resolve_provider_from_model_concept,
         )
         from .registry_factory import _get_or_build_durable_mcp_gateway
 
@@ -218,6 +219,24 @@ class DurableWorkflowExecutor:
             user_namespace=instance.namespace,
             org_id=instance.org_id,
         )
+        if isinstance(environment.model, str) and environment.model.strip():
+            default_model = environment.model.strip()
+            trace.metadata["default_model"] = default_model
+            resolved_provider = resolve_provider_from_model_concept(default_model)
+            if resolved_provider is None:
+                lowered_model = default_model.lower()
+                if lowered_model.startswith("openai:") or lowered_model.startswith(
+                    ("gpt-", "o1-", "text-", "davinci", "curie", "babbage", "ada")
+                ):
+                    resolved_provider = "openai"
+                elif lowered_model.startswith("ollama:") or (
+                    ":" in lowered_model and not lowered_model.startswith("ft:")
+                ):
+                    resolved_provider = "ollama"
+                elif lowered_model.startswith("gemini"):
+                    resolved_provider = "gemini"
+            if resolved_provider:
+                trace.metadata["default_provider"] = resolved_provider
         persisted_execution_trace_id: str | None = None
 
         # Compute terminal states

@@ -4402,6 +4402,44 @@
             }
         },
         {
+            "name": "workflow_build_prediction_envelope",
+            "description": "Build a prediction-ready envelope from recent workflow execution traces, including observed duration ranges, token-cost proxies, and ranked observed model trade-offs.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "workflow_id": {
+                        "type": "string"
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "model": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "provider": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "limit": {
+                        "type": "integer"
+                    }
+                },
+                "required": [
+                    "workflow_id"
+                ],
+                "additionalProperties": true,
+                "description": "Build an observed workflow prediction envelope from recent traces."
+            }
+        },
+        {
             "name": "workflow_cancel_instance",
             "description": "Cancel a running or pending workflow instance. The worker will stop execution at the next checkpoint. Cannot cancel already-terminal instances.",
             "inputSchema": {

@@ -13,6 +13,15 @@ _REDACT_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"secret", re.IGNORECASE),
     re.compile(r"token", re.IGNORECASE),
 )
+_SAFE_TOKEN_COUNT_KEYS: frozenset[str] = frozenset(
+    {
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "token_count",
+        "tokens_streamed",
+    }
+)
 
 
 def _utcnow() -> datetime:
@@ -24,7 +33,7 @@ def sanitise_for_trace_storage(
     *,
     max_string_chars: int = 800,
     max_list_items: int = 50,
-    max_depth: int = 6,
+    max_depth: int = 8,
     _depth: int = 0,
 ) -> Any:
     """Best-effort sanitisation/redaction for workflow traces.
@@ -102,7 +111,10 @@ def sanitise_for_trace_storage(
         for k, v in value.items():
             key = str(k)
             # Redact by key name as well as by value content.
-            if any(p.search(key) for p in _REDACT_PATTERNS):
+            if (
+                key.lower() not in _SAFE_TOKEN_COUNT_KEYS
+                and any(p.search(key) for p in _REDACT_PATTERNS)
+            ):
                 sanitised[key] = "[redacted]"
                 continue
             sanitised[key] = sanitise_for_trace_storage(
@@ -117,6 +129,12 @@ def sanitise_for_trace_storage(
     # Ensure datetime is serialisable.
     if isinstance(value, datetime):
         return value.isoformat()
+
+    if isinstance(value, bool):
+        return value
+
+    if isinstance(value, (int, float)):
+        return value
 
     # Fallback: keep it stringy.
     return str(value)

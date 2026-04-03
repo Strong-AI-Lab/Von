@@ -13,6 +13,7 @@ WORKFLOW_TOOL_NAMES = {
     "workflow_execute",
     "workflow_list_instances",
     "workflow_list_execution_traces",
+    "workflow_build_prediction_envelope",
     "workflow_get_instance",
     "workflow_get_execution_trace",
     "workflow_cancel_instance",

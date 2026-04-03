@@ -223,6 +223,9 @@ from src.backend.integrations.internal_mcp.catalogue import (
 from src.backend.integrations.internal_mcp.catalogue import _upsert_renderer_profile
 from src.backend.integrations.internal_mcp.catalogue import _workflow_bind_event
 from src.backend.integrations.internal_mcp.catalogue import _workflow_cancel_instance
+from src.backend.integrations.internal_mcp.catalogue import (
+    _workflow_build_prediction_envelope,
+)
 from src.backend.integrations.internal_mcp.catalogue import _workflow_create_instance
 from src.backend.integrations.internal_mcp.catalogue import _workflow_execute
 from src.backend.integrations.internal_mcp.catalogue import _workflow_create_schedule
@@ -2890,6 +2893,16 @@ async def _handle_workflow_list_execution_traces(
     )
 
 
+async def _handle_workflow_build_prediction_envelope(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _workflow_build_prediction_envelope,
+        arguments,
+        tool_family_label="Workflow",
+    )
+
+
 async def _handle_workflow_get_instance(arguments: dict[str, Any]) -> list[TextContent]:
     return _run_catalogue_proxy_handler(
         _workflow_get_instance,
@@ -3609,6 +3622,7 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "workflow_execute": _handle_workflow_execute,
     "workflow_list_instances": _handle_workflow_list_instances,
     "workflow_list_execution_traces": _handle_workflow_list_execution_traces,
+    "workflow_build_prediction_envelope": _handle_workflow_build_prediction_envelope,
     "workflow_get_instance": _handle_workflow_get_instance,
     "workflow_get_execution_trace": _handle_workflow_get_execution_trace,
     "workflow_cancel_instance": _handle_workflow_cancel_instance,

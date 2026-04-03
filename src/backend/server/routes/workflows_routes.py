@@ -31,6 +31,9 @@ from ...services.namespace_service import (
     coerce_namespace,
     resolve_canonical_namespace,
 )
+from ...services.workflow_prediction_service import (
+    build_workflow_prediction_envelope,
+)
 from ...workflows.trace_store import (
     get_workflow_execution_trace,
     list_recent_workflow_execution_traces,
@@ -79,6 +82,14 @@ _WORKFLOW_DEFINITIONS_CACHE_TTL_SECONDS_DEFAULT = 8.0
 _WORKFLOW_DEFINITIONS_REFRESH_RETRY_AFTER_SECONDS_DEFAULT = 1.0
 _WORKFLOW_DEFINITIONS_EXECUTABILITY_PENDING_REASON = "inspection_summary_pending"
 _WORKFLOW_DEFINITIONS_EXECUTABILITY_PENDING_DETAIL = "lazy_definition_not_loaded"
+
+
+def _safe_request_arg(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if value is None:
+        return ""
+    return str(value).strip()
 
 
 def _resolve_request_llm_scope_ids() -> Tuple[Optional[str], Optional[str]]:
@@ -876,6 +887,69 @@ def api_list_recent_workflow_executions():
         workflow_id=workflow_id or None,
     )
     return jsonify({"items": docs, "count": len(docs)})
+
+
+@workflows_bp.get("/api/workflows/predictions/envelope")
+def api_get_workflow_prediction_envelope():
+    workflow_id = _safe_request_arg(request.args.get("workflow_id"))
+    if not workflow_id:
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "missing_workflow_id",
+                    "detail": "workflow_id is required",
+                }
+            ),
+            400,
+        )
+
+    namespace = _safe_request_arg(request.args.get("namespace")) or None
+    model = _safe_request_arg(request.args.get("model")) or None
+    provider = _safe_request_arg(request.args.get("provider")) or None
+    limit_raw = request.args.get("limit", "50")
+    try:
+        limit = int(limit_raw)
+    except Exception:
+        limit = 50
+
+    try:
+        payload = build_workflow_prediction_envelope(
+            workflow_id=workflow_id,
+            namespace=namespace,
+            model=model,
+            provider=provider,
+            limit=limit,
+        )
+    except ValueError as exc:
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "invalid_prediction_request",
+                    "detail": str(exc),
+                }
+            ),
+            400,
+        )
+    except Exception as exc:
+        logger.exception(
+            "Workflow prediction envelope build failed for %s",
+            workflow_id,
+        )
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "workflow_prediction_envelope_failed",
+                    "workflow_id": workflow_id,
+                    "detail": str(exc),
+                }
+            ),
+            500,
+        )
+
+    return jsonify(payload)
 
 
 @workflows_bp.get("/api/workflows/episodes")
