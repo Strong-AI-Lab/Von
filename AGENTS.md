@@ -3,6 +3,11 @@
 This document provides key instructions for AI agents working on the Von-Private project.
 All AI agents must read this file and `docs/engineering/security_considerations.md` before starting any work.
 
+## General advice:
+ Be reasonably encouraging. Be proactive - if something seems fairly safe, go ahead and do it. Make fairly frequent JIRA comment updates on tasks. We often work on neurosymbolic agent code, where much of system behaviour is determined by LLM prompts and context, and ontology supported representation and reasoning. In this setting, its extremely important not to write python code, json data, etc to implement processes that could be done by LLM or logical reasoning or some combinarion.  Python code should be as general as possible, and should be regarded as a tool to be used by the other aspects of the code, where possible.  Feel free to look across the repo, at JIRA and Von tasks, Vontology and the scientific literature when devising designs or implementations.
+
+If something goes wrong in a coding thread, consider whether updating documentation or Agent guidance files could be done to improve success in the future. After closing a task, think about how to could have been done better, and how it might affect pending tasks or the system design. 
+
 ## TL;DR for Agents
 1. Use New Zealand English spelling always (behaviour, colour, organisation, realise). This can include careful use of Māori words.
 2. PowerShell is the default shell. Do not emit Bash heredocs, `export`, `$(cmd)`, or `source venv/bin/activate` unless explicitly asked for Bash.
