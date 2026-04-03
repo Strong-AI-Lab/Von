@@ -20,6 +20,8 @@ def test_internal_mcp_catalogue_builds_and_includes_relationship_tools():
     assert "turn_execution_backfill_from_chat_history" in methods
     assert "turn_execution_namespace_coverage_report" in methods
     assert "workflow_build_prediction_envelope" in methods
+    assert "skill_catalogue_list" in methods
+    assert "skill_catalogue_sync" in methods
     assert "testing_theory_create_slice" in methods
     assert "testing_theory_import_canonical_context" in methods
     assert "testing_theory_assert_local_claims" in methods

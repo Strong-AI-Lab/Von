@@ -123,6 +123,8 @@ from src.backend.integrations.internal_mcp.catalogue import _list_recent_screens
 from src.backend.integrations.internal_mcp.catalogue import _remove_relationship
 from src.backend.integrations.internal_mcp.catalogue import _preview_remove_relationship
 from src.backend.integrations.internal_mcp.catalogue import _remove_relationships_bulk
+from src.backend.integrations.internal_mcp.catalogue import _skill_catalogue_list
+from src.backend.integrations.internal_mcp.catalogue import _skill_catalogue_sync
 from src.backend.integrations.internal_mcp.catalogue import _undo_relationship_removal
 from src.backend.integrations.internal_mcp.catalogue import (
     _turn_execution_build_benchmark,
@@ -3085,6 +3087,26 @@ async def _handle_build_paper_recommendations(
     )
 
 
+async def _handle_skill_catalogue_list(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _skill_catalogue_list,
+        arguments,
+        tool_family_label="SkillCatalogue",
+    )
+
+
+async def _handle_skill_catalogue_sync(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _skill_catalogue_sync,
+        arguments,
+        tool_family_label="SkillCatalogue",
+    )
+
+
 async def _handle_turn_execution_backfill_from_chat_history(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
@@ -3538,6 +3560,8 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "get_paper_metadata": _handle_get_paper_metadata,
     "download_paper": _handle_download_paper,
     "build_paper_recommendations": _handle_build_paper_recommendations,
+    "skill_catalogue_list": _handle_skill_catalogue_list,
+    "skill_catalogue_sync": _handle_skill_catalogue_sync,
     "finalise_cached_paper": _handle_finalise_cached_paper,
     "materialise_scholarly_representation_for_file_copy": _handle_materialise_scholarly_representation_for_file_copy,
     "search_web": _handle_search_web,

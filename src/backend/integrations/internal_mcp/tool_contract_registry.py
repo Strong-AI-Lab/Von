@@ -100,6 +100,8 @@ VONTOLOGY_STDIO_EXPOSED_TOOL_NAMES: tuple[str, ...] = (
     "search_concepts",
     "search_knowledge_base",
     "search_web",
+    "skill_catalogue_list",
+    "skill_catalogue_sync",
     "testing_theory_create_slice",
     "testing_theory_import_canonical_context",
     "testing_theory_assert_local_claims",

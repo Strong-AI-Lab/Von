@@ -2871,6 +2871,110 @@
             }
         },
         {
+            "name": "skill_catalogue_list",
+            "description": "Discover external SKILL artefacts across configured roots and return a deterministic catalogue with workflow IDs, provenance, and Vontology projection metadata.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "include_default_roots": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    },
+                    "project_roots": {
+                        "type": [
+                            "array",
+                            "null"
+                        ],
+                        "items": {}
+                    },
+                    "personal_roots": {
+                        "type": [
+                            "array",
+                            "null"
+                        ],
+                        "items": {}
+                    },
+                    "extension_roots": {
+                        "type": [
+                            "array",
+                            "null"
+                        ],
+                        "items": {}
+                    },
+                    "shared_roots": {
+                        "type": [
+                            "array",
+                            "null"
+                        ],
+                        "items": {}
+                    },
+                    "include_body": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "skill_catalogue_list input: optional include_default_roots (defaults true), optional per-scope root overrides, and optional include_body to include full skill markdown bodies in the response."
+            }
+        },
+        {
+            "name": "skill_catalogue_sync",
+            "description": "Synchronise discovered external SKILL artefacts into Vontology as first-class skill concepts, preserving skill-body content and the deterministic workflow mapping exposed by skill interoperability.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "include_default_roots": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    },
+                    "project_roots": {
+                        "type": [
+                            "array",
+                            "null"
+                        ],
+                        "items": {}
+                    },
+                    "personal_roots": {
+                        "type": [
+                            "array",
+                            "null"
+                        ],
+                        "items": {}
+                    },
+                    "extension_roots": {
+                        "type": [
+                            "array",
+                            "null"
+                        ],
+                        "items": {}
+                    },
+                    "shared_roots": {
+                        "type": [
+                            "array",
+                            "null"
+                        ],
+                        "items": {}
+                    },
+                    "dry_run": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "skill_catalogue_sync input: optional include_default_roots (defaults true), optional per-scope root overrides, and optional dry_run to preview sync without mutating Vontology."
+            }
+        },
+        {
             "name": "testing_cleanup_arxiv_paper_ingestion_artifacts",
             "description": "Clean up transient artefacts created by the arXiv paper-ingestion testing workflow.",
             "inputSchema": {

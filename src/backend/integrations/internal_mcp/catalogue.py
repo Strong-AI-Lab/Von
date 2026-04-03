@@ -2661,6 +2661,51 @@ def _build_paper_recommendations(**kwargs):
     }
 
 
+def _normalise_string_list_argument(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        cleaned = value.strip()
+        return [cleaned] if cleaned else []
+    if not isinstance(value, list):
+        return []
+    return [
+        str(item).strip()
+        for item in value
+        if isinstance(item, str) and str(item).strip()
+    ]
+
+
+def _skill_catalogue_list(**kwargs):
+    from ...services.skill_catalogue_service import list_skill_catalogue
+
+    return list_skill_catalogue(
+        include_default_roots=bool(kwargs.get("include_default_roots", True)),
+        project_roots=_normalise_string_list_argument(kwargs.get("project_roots")),
+        personal_roots=_normalise_string_list_argument(kwargs.get("personal_roots")),
+        extension_roots=_normalise_string_list_argument(
+            kwargs.get("extension_roots")
+        ),
+        shared_roots=_normalise_string_list_argument(kwargs.get("shared_roots")),
+        include_body=bool(kwargs.get("include_body", False)),
+    )
+
+
+def _skill_catalogue_sync(**kwargs):
+    from ...services.skill_catalogue_service import sync_skill_catalogue_to_vontology
+
+    return sync_skill_catalogue_to_vontology(
+        include_default_roots=bool(kwargs.get("include_default_roots", True)),
+        project_roots=_normalise_string_list_argument(kwargs.get("project_roots")),
+        personal_roots=_normalise_string_list_argument(kwargs.get("personal_roots")),
+        extension_roots=_normalise_string_list_argument(
+            kwargs.get("extension_roots")
+        ),
+        shared_roots=_normalise_string_list_argument(kwargs.get("shared_roots")),
+        dry_run=bool(kwargs.get("dry_run", False)),
+    )
+
+
 def _list_papers(**kwargs):
     import asyncio
     from .arxiv_proxy_mcp import get_arxiv_proxy, ArxivProxyError
@@ -7102,6 +7147,86 @@ def _build_paper_recommendations_output_schema() -> Schema:
             "build_paper_recommendations output: success/error state, target user/profile IDs, "
             "recommendation policy version, ranked/skipped result rows with grounded rationale "
             "and provenance, plus profile-signal and warning diagnostics."
+        ),
+    )
+
+
+def _skill_catalogue_list_input_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "include_default_roots": (bool, type(None)),
+            "project_roots": (list, type(None)),
+            "personal_roots": (list, type(None)),
+            "extension_roots": (list, type(None)),
+            "shared_roots": (list, type(None)),
+            "include_body": (bool, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "skill_catalogue_list input: optional include_default_roots (defaults true), "
+            "optional per-scope root overrides, and optional include_body to include full "
+            "skill markdown bodies in the response."
+        ),
+    )
+
+
+def _skill_catalogue_list_output_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "success": (bool, type(None)),
+            "roots_by_scope": (dict, type(None)),
+            "skills": (list, type(None)),
+            "count": (int, type(None)),
+            "error": (str, type(None)),
+            "message": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "skill_catalogue_list output: resolved roots_by_scope, discovered skill rows "
+            "with deterministic workflow IDs and Vontology projection metadata, and count."
+        ),
+    )
+
+
+def _skill_catalogue_sync_input_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "include_default_roots": (bool, type(None)),
+            "project_roots": (list, type(None)),
+            "personal_roots": (list, type(None)),
+            "extension_roots": (list, type(None)),
+            "shared_roots": (list, type(None)),
+            "dry_run": (bool, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "skill_catalogue_sync input: optional include_default_roots (defaults true), "
+            "optional per-scope root overrides, and optional dry_run to preview sync "
+            "without mutating Vontology."
+        ),
+    )
+
+
+def _skill_catalogue_sync_output_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "success": (bool, type(None)),
+            "dry_run": (bool, type(None)),
+            "roots_by_scope": (dict, type(None)),
+            "ensured_concept_ids": (list, type(None)),
+            "synced_skills": (list, type(None)),
+            "count": (int, type(None)),
+            "error": (str, type(None)),
+            "message": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "skill_catalogue_sync output: ensured primitive concept IDs, synced skill "
+            "rows, resolved roots_by_scope, dry_run flag, and count."
         ),
     )
 
@@ -21864,6 +21989,32 @@ def build_default_catalogue() -> MethodCatalogue:
                 "Rank represented scholarly-paper candidates against a represented user "
                 "paper recommendation profile and return grounded rationale/provenance. "
                 "This is the workflow-first ranking core, independent of later delivery surfaces."
+            ),
+        ),
+        MethodDefinition(
+            name="skill_catalogue_list",
+            handler=_skill_catalogue_list,
+            input_schema=_skill_catalogue_list_input_schema(),
+            output_schema=_skill_catalogue_list_output_schema(),
+            category="read",
+            timeout_sec=20.0,
+            description=(
+                "Discover external SKILL artefacts across configured roots and return "
+                "a deterministic catalogue with workflow IDs, provenance, and Vontology "
+                "projection metadata."
+            ),
+        ),
+        MethodDefinition(
+            name="skill_catalogue_sync",
+            handler=_skill_catalogue_sync,
+            input_schema=_skill_catalogue_sync_input_schema(),
+            output_schema=_skill_catalogue_sync_output_schema(),
+            category="write",
+            timeout_sec=30.0,
+            description=(
+                "Synchronise discovered external SKILL artefacts into Vontology as "
+                "first-class skill concepts, preserving skill-body content and the "
+                "deterministic workflow mapping exposed by skill interoperability."
             ),
         ),
         MethodDefinition(

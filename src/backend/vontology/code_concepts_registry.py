@@ -142,6 +142,8 @@ _SKILL_INTEROP_PREDICATE_IDS = [
     "#V#disables_model_invocation",
     "#V#has_skill_source_scope",
     "#V#has_skill_discovery_location",
+    "#V#has_skill_workflow_id",
+    "#V#has_skill_interop_metadata_json",
 ]
 
 _WORKFLOW_BACKGROUND_POLICY_PREDICATE_IDS = [

@@ -23,6 +23,7 @@ _SERVICE_EXPORT_MODULES = {
     "parent_specificity_vontology_service": ".parent_specificity_vontology_service",
     "relation_elicitation_service": ".relation_elicitation_service",
     "settings_service": ".settings_service",
+    "skill_catalogue_service": ".skill_catalogue_service",
     "testing_workflow_vontology_service": ".testing_workflow_vontology_service",
     "text_value_service": ".text_value_service",
     "vontology_service": ".vontology_service",
@@ -55,6 +56,7 @@ if TYPE_CHECKING:
     )
     from . import relation_elicitation_service as relation_elicitation_service
     from . import settings_service as settings_service
+    from . import skill_catalogue_service as skill_catalogue_service
     from . import testing_workflow_vontology_service as testing_workflow_vontology_service
     from . import text_value_service as text_value_service
     from . import vontology_service as vontology_service
@@ -87,6 +89,7 @@ __all__ = [
     "parent_specificity_vontology_service",
     "relation_elicitation_service",
     "settings_service",
+    "skill_catalogue_service",
     "testing_workflow_vontology_service",
     "text_value_service",
     "vontology_service",
