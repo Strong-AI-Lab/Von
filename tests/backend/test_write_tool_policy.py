@@ -65,9 +65,9 @@ def test_explicit_denial_blocks_additive_write():
     assert decision.user_denial_detected is True
 
 
-def test_mutative_non_destructive_write_defaults_allow():
+def test_mutative_non_destructive_write_requires_clear_request():
     from src.backend.workflows.write_tool_policy import (
-        REASON_DEFAULT_ALLOW_MUTATIVE_NON_DESTRUCTIVE,
+        REASON_MUTATIVE_NON_DESTRUCTIVE_REQUEST_REQUIRED,
         compute_allowed_write_tools,
     )
 
@@ -77,13 +77,34 @@ def test_mutative_non_destructive_write_defaults_allow():
         recent_user_prompts=[],
     )
 
+    assert "update_concept" not in decision.allowed_tools
+    assert decision.reason == REASON_MUTATIVE_NON_DESTRUCTIVE_REQUEST_REQUIRED
+    tool_decision = decision.decision_for_tool("update_concept")
+    assert tool_decision is not None
+    assert tool_decision.confidence_state == "low_confidence"
+    assert tool_decision.intervention_kind == "require_explicit_request"
+    assert "insufficient_request_evidence" in tool_decision.unresolved_risk_factors
+
+
+def test_explicit_prompt_allows_mutative_non_destructive_write():
+    from src.backend.workflows.write_tool_policy import (
+        REASON_EXPLICIT_NON_DESTRUCTIVE_MUTATION_REQUEST,
+        compute_allowed_write_tools,
+    )
+
+    decision = compute_allowed_write_tools(
+        prompt="Update the Vontology concept description now.",
+        requested_tools=["update_concept"],
+        recent_user_prompts=[],
+    )
+
     assert "update_concept" in decision.allowed_tools
-    assert decision.reason == REASON_DEFAULT_ALLOW_MUTATIVE_NON_DESTRUCTIVE
+    assert decision.reason == REASON_EXPLICIT_NON_DESTRUCTIVE_MUTATION_REQUEST
 
 
 def test_recent_prompt_allows_mutative_non_destructive_write():
     from src.backend.workflows.write_tool_policy import (
-        REASON_DEFAULT_ALLOW_MUTATIVE_NON_DESTRUCTIVE,
+        REASON_RECENT_NON_DESTRUCTIVE_MUTATION_REQUEST,
         compute_allowed_write_tools,
     )
 
@@ -94,7 +115,7 @@ def test_recent_prompt_allows_mutative_non_destructive_write():
     )
 
     assert "update_concept" in decision.allowed_tools
-    assert decision.reason == REASON_DEFAULT_ALLOW_MUTATIVE_NON_DESTRUCTIVE
+    assert decision.reason == REASON_RECENT_NON_DESTRUCTIVE_MUTATION_REQUEST
 
 
 def test_destructive_write_requires_confirmation():
@@ -192,6 +213,46 @@ def test_workflow_mutation_authority_can_cap_mutations_to_additive_only():
     tool_decision = decision.decision_for_tool("update_concept")
     assert tool_decision is not None
     assert tool_decision.authority_block_source == "workflow"
+
+
+def test_process_sensitive_additive_write_requires_clear_request():
+    from src.backend.workflows.write_tool_policy import (
+        REASON_MUTATIVE_NON_DESTRUCTIVE_REQUEST_REQUIRED,
+        compute_allowed_write_tools,
+    )
+
+    decision = compute_allowed_write_tools(
+        prompt="List the current workflow bindings only.",
+        requested_tools=["workflow_bind_event"],
+        requested_tool_payloads={
+            "workflow_bind_event": {
+                "event_type": "task.created",
+                "workflow_id": "#V#some_workflow",
+            }
+        },
+        recent_user_prompts=[],
+        runtime_profile={
+            "profile_concept_id": "#V#minimal_imposition_runtime_profile_write_policy_v1",
+            "decision_policy": {
+                "process_sensitive_additive_requires_clear_request": True,
+            },
+            "tool_feature_overrides": {
+                "workflow_bind_event": {
+                    "blast_radius": "high",
+                    "process_sensitive": True,
+                    "requires_clear_request": True,
+                }
+            },
+        },
+    )
+
+    assert "workflow_bind_event" not in decision.allowed_tools
+    assert decision.reason == REASON_MUTATIVE_NON_DESTRUCTIVE_REQUEST_REQUIRED
+    tool_decision = decision.decision_for_tool("workflow_bind_event")
+    assert tool_decision is not None
+    assert tool_decision.scenario_id == "high_fan_out_change"
+    assert tool_decision.risk_features is not None
+    assert tool_decision.risk_features["blast_radius"] == "high"
 
 
 def test_build_mutation_guardrail_events_includes_authority_context():

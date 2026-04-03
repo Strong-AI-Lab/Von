@@ -48,6 +48,9 @@ from src.backend.services.workflow_override_policy_service import (
     WorkflowOverrideDecision,
     choose_custom_workflow_override_candidate,
 )
+from src.backend.services.minimal_imposition_runtime_profile_vontology_service import (
+    load_minimal_imposition_runtime_profile,
+)
 from src.backend.services.python_decision_authority_service import (
     annotate_python_decision_event,
 )
@@ -779,6 +782,13 @@ class _ResolvedWritePolicyDecision:
     effective_mutation_authority: str
     authority_sources: Mapping[str, str]
     guardrail_events: tuple[Mapping[str, Any], ...]
+    scenario_ids: Mapping[str, str]
+    risk_features: Mapping[str, Mapping[str, Any]]
+    unresolved_risk_factors: Mapping[str, Sequence[str]]
+    intervention_kinds: Mapping[str, str]
+    confidence_states: Mapping[str, str]
+    profile_concept_id: str | None
+    profile_diagnostics: Mapping[str, Any]
 
 
 class ProgressTracker:
@@ -2045,6 +2055,7 @@ class InternalMCPChatOrchestrator:
                     else ""
                 ),
                 requested_write_tools=[tool_name],
+                requested_write_payloads={tool_name: dict(payload)},
                 recent_user_prompts=(
                     [
                         str(item).strip()
@@ -2435,6 +2446,9 @@ class InternalMCPChatOrchestrator:
             requested_tools = []
         if not isinstance(recent_user_prompts, list):
             recent_user_prompts = []
+        requested_tool_payloads = request.data.get("requested_tool_payloads")
+        if not isinstance(requested_tool_payloads, Mapping):
+            requested_tool_payloads = {}
         caller_workflow_id = request.data.get("caller_workflow_id")
         caller_workflow_step_id = request.data.get("caller_workflow_step_id")
         caller_workflow_step_metadata = request.data.get(
@@ -2448,10 +2462,28 @@ class InternalMCPChatOrchestrator:
         ).strip() or "write_policy.decide"
         conversation_session_id = request.data.get("conversation_session_id")
         turn_id = request.data.get("turn_id")
+        try:
+            runtime_profile, runtime_profile_diagnostics = (
+                load_minimal_imposition_runtime_profile(
+                    workflow_id=WRITE_TOOL_POLICY_WORKFLOW_ID
+                )
+            )
+        except Exception as exc:
+            runtime_profile = None
+            runtime_profile_diagnostics = {
+                "status": "runtime_profile_unavailable",
+                "error": str(exc),
+                "workflow_id": WRITE_TOOL_POLICY_WORKFLOW_ID,
+            }
 
         decision = compute_allowed_write_tools(
             prompt=prompt,
             requested_tools=[str(tool) for tool in requested_tools if tool],
+            requested_tool_payloads={
+                str(tool_name): dict(payload)
+                for tool_name, payload in requested_tool_payloads.items()
+                if isinstance(tool_name, str) and isinstance(payload, Mapping)
+            },
             recent_user_prompts=[
                 str(item) for item in recent_user_prompts if isinstance(item, str)
             ],
@@ -2464,6 +2496,8 @@ class InternalMCPChatOrchestrator:
                 else None
             ),
             global_mutation_authority=self._resolve_global_mutation_authority_level(),
+            runtime_profile=runtime_profile,
+            runtime_profile_diagnostics=runtime_profile_diagnostics,
         )
         try:
             from ...workflows.workflow_baseline_telemetry import (
@@ -2538,6 +2572,37 @@ class InternalMCPChatOrchestrator:
                     if isinstance(item.authority_block_source, str)
                     and item.authority_block_source
                 },
+                "write_policy_scenario_ids": {
+                    item.tool_name: item.scenario_id
+                    for item in decision.tool_decisions
+                    if isinstance(item.scenario_id, str) and item.scenario_id
+                },
+                "write_policy_risk_features": {
+                    item.tool_name: dict(item.risk_features or {})
+                    for item in decision.tool_decisions
+                    if isinstance(item.risk_features, Mapping)
+                },
+                "write_policy_unresolved_risk_factors": {
+                    item.tool_name: list(item.unresolved_risk_factors)
+                    for item in decision.tool_decisions
+                    if item.unresolved_risk_factors
+                },
+                "write_policy_intervention_kinds": {
+                    item.tool_name: item.intervention_kind
+                    for item in decision.tool_decisions
+                    if isinstance(item.intervention_kind, str)
+                    and item.intervention_kind
+                },
+                "write_policy_confidence_states": {
+                    item.tool_name: item.confidence_state
+                    for item in decision.tool_decisions
+                    if isinstance(item.confidence_state, str)
+                    and item.confidence_state
+                },
+                "write_policy_profile_concept_id": decision.profile_concept_id,
+                "write_policy_profile_diagnostics": dict(
+                    decision.profile_diagnostics or {}
+                ),
                 "write_policy_requires_confirmation": [
                     item.tool_name
                     for item in decision.tool_decisions
@@ -5548,6 +5613,43 @@ class InternalMCPChatOrchestrator:
             if isinstance(data.get("write_policy_authority_block_sources"), Mapping)
             else {}
         )
+        write_policy_scenario_ids = (
+            dict(data.get("write_policy_scenario_ids"))
+            if isinstance(data.get("write_policy_scenario_ids"), Mapping)
+            else {}
+        )
+        write_policy_risk_features = {
+            str(tool_name): dict(feature_map)
+            for tool_name, feature_map in (data.get("write_policy_risk_features") or {}).items()
+            if isinstance(tool_name, str) and isinstance(feature_map, Mapping)
+        }
+        write_policy_unresolved_risk_factors = {
+            str(tool_name): list(factors)
+            for tool_name, factors in (
+                data.get("write_policy_unresolved_risk_factors") or {}
+            ).items()
+            if isinstance(tool_name, str)
+            and isinstance(factors, Sequence)
+            and not isinstance(factors, (str, bytes))
+        }
+        write_policy_intervention_kinds = (
+            dict(data.get("write_policy_intervention_kinds"))
+            if isinstance(data.get("write_policy_intervention_kinds"), Mapping)
+            else {}
+        )
+        write_policy_confidence_states = (
+            dict(data.get("write_policy_confidence_states"))
+            if isinstance(data.get("write_policy_confidence_states"), Mapping)
+            else {}
+        )
+        write_policy_profile_concept_id = str(
+            data.get("write_policy_profile_concept_id") or ""
+        ).strip()
+        write_policy_profile_diagnostics = (
+            dict(data.get("write_policy_profile_diagnostics"))
+            if isinstance(data.get("write_policy_profile_diagnostics"), Mapping)
+            else {}
+        )
         write_policy_requires_confirmation = {
             str(item)
             for item in (data.get("write_policy_requires_confirmation") or [])
@@ -5642,6 +5744,7 @@ class InternalMCPChatOrchestrator:
                 resolved_write_policy = self._resolve_allowed_write_tools(
                     prompt=prompt,
                     requested_write_tools=[tool_name],
+                    requested_write_payloads={tool_name: dict(payload)},
                     recent_user_prompts=recent_user_prompts,
                     llm_client=llm_client,
                     model=env.model,
@@ -5685,6 +5788,31 @@ class InternalMCPChatOrchestrator:
                 write_policy_authority_block_sources = dict(
                     resolved_write_policy.authority_block_sources
                 )
+                write_policy_scenario_ids = dict(resolved_write_policy.scenario_ids)
+                write_policy_risk_features = {
+                    str(tool_name): dict(feature_map)
+                    for tool_name, feature_map in resolved_write_policy.risk_features.items()
+                    if isinstance(tool_name, str) and isinstance(feature_map, Mapping)
+                }
+                write_policy_unresolved_risk_factors = {
+                    str(tool_name): list(factors)
+                    for tool_name, factors in resolved_write_policy.unresolved_risk_factors.items()
+                    if isinstance(tool_name, str)
+                    and isinstance(factors, Sequence)
+                    and not isinstance(factors, (str, bytes))
+                }
+                write_policy_intervention_kinds = dict(
+                    resolved_write_policy.intervention_kinds
+                )
+                write_policy_confidence_states = dict(
+                    resolved_write_policy.confidence_states
+                )
+                write_policy_profile_concept_id = str(
+                    resolved_write_policy.profile_concept_id or ""
+                ).strip()
+                write_policy_profile_diagnostics = dict(
+                    resolved_write_policy.profile_diagnostics
+                )
                 write_policy_requires_confirmation = set(
                     resolved_write_policy.confirmation_required_tools
                 )
@@ -5698,6 +5826,23 @@ class InternalMCPChatOrchestrator:
             ).strip()
             tool_blocked_reason = str(
                 write_policy_blocked_reasons.get(tool_name) or write_policy_reason or ""
+            ).strip()
+            tool_scenario_id = str(
+                write_policy_scenario_ids.get(tool_name) or ""
+            ).strip()
+            tool_risk_features = (
+                dict(write_policy_risk_features.get(tool_name) or {})
+                if isinstance(write_policy_risk_features.get(tool_name), Mapping)
+                else {}
+            )
+            tool_unresolved_risk_factors = list(
+                write_policy_unresolved_risk_factors.get(tool_name) or []
+            )
+            tool_intervention_kind = str(
+                write_policy_intervention_kinds.get(tool_name) or ""
+            ).strip()
+            tool_confidence_state = str(
+                write_policy_confidence_states.get(tool_name) or ""
             ).strip()
             tool_requires_confirmation = tool_name in write_policy_requires_confirmation
             write_override_reason = None
@@ -5751,6 +5896,19 @@ class InternalMCPChatOrchestrator:
                     "write_policy_requires_confirmation": tool_requires_confirmation,
                     "write_policy_blocked_reason": tool_blocked_reason or None,
                     "write_policy_user_denial_detected": write_policy_user_denial_detected,
+                    "write_policy_scenario_id": tool_scenario_id or None,
+                    "write_policy_risk_features": tool_risk_features,
+                    "write_policy_unresolved_risk_factors": tool_unresolved_risk_factors,
+                    "write_policy_intervention_kind": tool_intervention_kind or None,
+                    "write_policy_confidence_state": tool_confidence_state or None,
+                    "write_policy_profile_concept_id": (
+                        write_policy_profile_concept_id or None
+                    ),
+                    "write_policy_profile_diagnostics": (
+                        dict(write_policy_profile_diagnostics)
+                        if write_policy_profile_diagnostics
+                        else {}
+                    ),
                 }
                 if write_policy_reason:
                     blocked_record["write_policy_reason"] = write_policy_reason
@@ -5892,6 +6050,27 @@ class InternalMCPChatOrchestrator:
                         if write_policy_authority_sources
                         else {}
                     )
+                    invocation_record["write_policy_scenario_id"] = (
+                        tool_scenario_id or None
+                    )
+                    invocation_record["write_policy_risk_features"] = tool_risk_features
+                    invocation_record["write_policy_unresolved_risk_factors"] = (
+                        tool_unresolved_risk_factors
+                    )
+                    invocation_record["write_policy_intervention_kind"] = (
+                        tool_intervention_kind or None
+                    )
+                    invocation_record["write_policy_confidence_state"] = (
+                        tool_confidence_state or None
+                    )
+                    invocation_record["write_policy_profile_concept_id"] = (
+                        write_policy_profile_concept_id or None
+                    )
+                    invocation_record["write_policy_profile_diagnostics"] = (
+                        dict(write_policy_profile_diagnostics)
+                        if write_policy_profile_diagnostics
+                        else {}
+                    )
                 if call_id:
                     invocation_record["call_id"] = call_id
                 if logical_error:
@@ -5997,6 +6176,35 @@ class InternalMCPChatOrchestrator:
         # Store remaining overflow tool calls for the backfill handler.
         data["allowed_write_tools"] = allowed_write_tools
         data["write_policy_reason"] = write_policy_reason
+        data["write_policy_decision_basis"] = write_policy_decision_basis
+        data["write_policy_outcome"] = write_policy_outcome
+        data["write_policy_effective_mutation_authority"] = (
+            write_policy_effective_mutation_authority
+        )
+        data["write_policy_authority_sources"] = dict(write_policy_authority_sources)
+        data["write_policy_risk_classes"] = dict(write_policy_risk_classes)
+        data["write_policy_tool_outcomes"] = dict(write_policy_tool_outcomes)
+        data["write_policy_blocked_reasons"] = dict(write_policy_blocked_reasons)
+        data["write_policy_authority_block_sources"] = dict(
+            write_policy_authority_block_sources
+        )
+        data["write_policy_scenario_ids"] = dict(write_policy_scenario_ids)
+        data["write_policy_risk_features"] = {
+            str(tool_name): dict(feature_map)
+            for tool_name, feature_map in write_policy_risk_features.items()
+            if isinstance(tool_name, str) and isinstance(feature_map, Mapping)
+        }
+        data["write_policy_unresolved_risk_factors"] = {
+            str(tool_name): list(factors)
+            for tool_name, factors in write_policy_unresolved_risk_factors.items()
+            if isinstance(tool_name, str)
+            and isinstance(factors, Sequence)
+            and not isinstance(factors, (str, bytes))
+        }
+        data["write_policy_intervention_kinds"] = dict(write_policy_intervention_kinds)
+        data["write_policy_confidence_states"] = dict(write_policy_confidence_states)
+        data["write_policy_profile_concept_id"] = write_policy_profile_concept_id or None
+        data["write_policy_profile_diagnostics"] = dict(write_policy_profile_diagnostics)
         return WorkflowActionResult(
             outputs={
                 "tool_execution_complete": True,
@@ -18279,6 +18487,7 @@ class InternalMCPChatOrchestrator:
         *,
         prompt: str,
         requested_write_tools: list[str],
+        requested_write_payloads: Mapping[str, Mapping[str, Any] | None] | None = None,
         recent_user_prompts: list[str] | None,
         llm_client: Any,
         model: str | None,
@@ -18299,6 +18508,15 @@ class InternalMCPChatOrchestrator:
             data={
                 "prompt": prompt,
                 "requested_write_tools": list(requested_write_tools),
+                "requested_tool_payloads": (
+                    {
+                        str(tool_name): dict(payload)
+                        for tool_name, payload in (requested_write_payloads or {}).items()
+                        if isinstance(tool_name, str) and isinstance(payload, Mapping)
+                    }
+                    if isinstance(requested_write_payloads, Mapping)
+                    else {}
+                ),
                 "recent_user_prompts": list(recent_user_prompts or []),
                 "conversation_session_id": conversation_session_id,
                 "turn_id": turn_id,
@@ -18349,6 +18567,13 @@ class InternalMCPChatOrchestrator:
                 effective_mutation_authority="",
                 authority_sources={},
                 guardrail_events=(),
+                scenario_ids={},
+                risk_features={},
+                unresolved_risk_factors={},
+                intervention_kinds={},
+                confidence_states={},
+                profile_concept_id=None,
+                profile_diagnostics={},
             )
         allowed = workflow_result.data.get("allowed_write_tools")
         reason = workflow_result.data.get("write_policy_reason")
@@ -18367,6 +18592,15 @@ class InternalMCPChatOrchestrator:
         authority_block_sources = workflow_result.data.get(
             "write_policy_authority_block_sources"
         )
+        scenario_ids = workflow_result.data.get("write_policy_scenario_ids")
+        risk_features = workflow_result.data.get("write_policy_risk_features")
+        unresolved_risk_factors = workflow_result.data.get(
+            "write_policy_unresolved_risk_factors"
+        )
+        intervention_kinds = workflow_result.data.get("write_policy_intervention_kinds")
+        confidence_states = workflow_result.data.get("write_policy_confidence_states")
+        profile_concept_id = workflow_result.data.get("write_policy_profile_concept_id")
+        profile_diagnostics = workflow_result.data.get("write_policy_profile_diagnostics")
         confirmation_required = workflow_result.data.get(
             "write_policy_requires_confirmation"
         )
@@ -18428,6 +18662,41 @@ class InternalMCPChatOrchestrator:
                 item
                 for item in (guardrail_events_raw or [])
                 if isinstance(item, Mapping)
+            ),
+            scenario_ids=(
+                dict(scenario_ids) if isinstance(scenario_ids, Mapping) else {}
+            ),
+            risk_features={
+                str(tool_name): dict(feature_map)
+                for tool_name, feature_map in (risk_features or {}).items()
+                if isinstance(tool_name, str) and isinstance(feature_map, Mapping)
+            },
+            unresolved_risk_factors={
+                str(tool_name): list(factors)
+                for tool_name, factors in (unresolved_risk_factors or {}).items()
+                if isinstance(tool_name, str)
+                and isinstance(factors, Sequence)
+                and not isinstance(factors, (str, bytes))
+            },
+            intervention_kinds=(
+                dict(intervention_kinds)
+                if isinstance(intervention_kinds, Mapping)
+                else {}
+            ),
+            confidence_states=(
+                dict(confidence_states)
+                if isinstance(confidence_states, Mapping)
+                else {}
+            ),
+            profile_concept_id=(
+                str(profile_concept_id).strip()
+                if isinstance(profile_concept_id, str) and profile_concept_id.strip()
+                else None
+            ),
+            profile_diagnostics=(
+                dict(profile_diagnostics)
+                if isinstance(profile_diagnostics, Mapping)
+                else {}
             ),
         )
 

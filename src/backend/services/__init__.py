@@ -18,6 +18,7 @@ _SERVICE_EXPORT_MODULES = {
     "meta_relations_service": ".meta_relations_service",
     "minimal_imposition_benchmark_profile_vontology_service": ".minimal_imposition_benchmark_profile_vontology_service",
     "minimal_imposition_benchmark_service": ".minimal_imposition_benchmark_service",
+    "minimal_imposition_runtime_profile_vontology_service": ".minimal_imposition_runtime_profile_vontology_service",
     "paper_recommendation_profile_vontology_service": ".paper_recommendation_profile_vontology_service",
     "paper_recommendation_review_service": ".paper_recommendation_review_service",
     "paper_recommendation_ranking_service": ".paper_recommendation_ranking_service",
@@ -46,6 +47,9 @@ if TYPE_CHECKING:
     )
     from . import (
         minimal_imposition_benchmark_service as minimal_imposition_benchmark_service,
+    )
+    from . import (
+        minimal_imposition_runtime_profile_vontology_service as minimal_imposition_runtime_profile_vontology_service,
     )
     from . import (
         paper_recommendation_profile_vontology_service as paper_recommendation_profile_vontology_service,
@@ -92,6 +96,7 @@ __all__ = [
     "meta_relations_service",
     "minimal_imposition_benchmark_profile_vontology_service",
     "minimal_imposition_benchmark_service",
+    "minimal_imposition_runtime_profile_vontology_service",
     "paper_recommendation_profile_vontology_service",
     "paper_recommendation_review_service",
     "paper_recommendation_ranking_service",

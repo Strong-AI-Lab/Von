@@ -24,6 +24,13 @@ def test_workflow_routing_profile_predicates_are_registered():
     assert "#V#has_workflow_routing_profile_json" in ids
 
 
+def test_minimal_imposition_runtime_profile_predicates_are_registered():
+    ids = set(list_code_predicate_ids())
+
+    assert "#V#has_minimal_imposition_runtime_profile" in ids
+    assert "#V#has_minimal_imposition_runtime_profile_json" in ids
+
+
 def test_workflow_discovery_exemplar_predicates_are_registered():
     ids = set(list_code_predicate_ids())
 
