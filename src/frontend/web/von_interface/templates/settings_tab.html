@@ -62,6 +62,67 @@
             <div id="currentUserStatusMessage" class="status-message" role="alert">
                 <!-- Messages will appear here -->
             </div>
+
+            <section id="paperRecommendationProfileSection" class="speech-settings-section mt-4"
+                aria-label="Paper recommendation profile">
+                <h3 class="speech-settings-title">Paper Recommendation Profile</h3>
+                <p class="settings-note">This profile is stored in Vontology and gives the later paper recommender a
+                    stable, editable summary of your current interests and preferences. The observed research-interest
+                    graph remains separate below.</p>
+
+                <div class="speech-settings-row">
+                    <label class="speech-settings-label" for="recommendationProjectDescriptionInput">Project /
+                        research description</label>
+                    <textarea id="recommendationProjectDescriptionInput" class="speech-settings-input" rows="4"
+                        placeholder="Describe your current research direction, project, or problem area."></textarea>
+                </div>
+
+                <div class="speech-settings-row">
+                    <label class="speech-settings-label" for="recommendationInterestTermsInput">Interest terms</label>
+                    <input id="recommendationInterestTermsInput" class="speech-settings-input" type="text"
+                        inputmode="text" placeholder="e.g., causal reasoning, knowledge graphs, neuro-symbolic AI" />
+                </div>
+
+                <div class="speech-settings-row">
+                    <label class="speech-settings-label" for="recommendationNegativeTermsInput">Avoid topics /
+                        keywords</label>
+                    <input id="recommendationNegativeTermsInput" class="speech-settings-input" type="text"
+                        inputmode="text" placeholder="e.g., federated learning, pure benchmarking papers" />
+                </div>
+
+                <div class="speech-settings-row">
+                    <label class="speech-settings-label" for="recommendationPreferredAuthorsInput">Preferred
+                        authors</label>
+                    <input id="recommendationPreferredAuthorsInput" class="speech-settings-input" type="text"
+                        inputmode="text" placeholder="Comma-separated author names" />
+                </div>
+
+                <div class="speech-settings-row">
+                    <label class="speech-settings-label" for="recommendationPreferredVenuesInput">Preferred
+                        venues</label>
+                    <input id="recommendationPreferredVenuesInput" class="speech-settings-input" type="text"
+                        inputmode="text" placeholder="Comma-separated venues or journals" />
+                </div>
+
+                <div class="speech-settings-row">
+                    <label class="speech-settings-label" for="recommendationProfileNotesInput">Notes</label>
+                    <textarea id="recommendationProfileNotesInput" class="speech-settings-input" rows="3"
+                        placeholder="Anything else the recommender should keep in mind."></textarea>
+                </div>
+
+                <div class="speech-settings-row">
+                    <label class="speech-settings-label">Observed research interests</label>
+                    <div id="recommendationObservedInterests" class="runtime-hint">Select a user to load profile
+                        context.</div>
+                </div>
+
+                <div class="speech-settings-actions">
+                    <button id="saveRecommendationProfileButton" class="btn btn-secondary" type="button">Save paper
+                        recommendation profile</button>
+                </div>
+
+                <div id="recommendationProfileStatusMessage" class="status-message" role="alert"></div>
+            </section>
         </section>
 
         <section id="current-organisation-settings">

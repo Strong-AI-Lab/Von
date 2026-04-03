@@ -56,10 +56,15 @@ from ...services.feature_flags import (
     get_expert_footer_enabled,
     get_expert_tabs_enabled,
 )
+from ...services.paper_recommendation_profile_vontology_service import (
+    load_paper_recommendation_profile,
+    upsert_paper_recommendation_profile,
+)
 from ...services.window_session_context_service import get_effective_context
 from ...services.buttonify_service import BUTTONIFY_PROMPT_IDS
 from ...integrations.google.gmail_service import list_profile_ids_from_env
 from ...services.concept_service import list_concepts, get_concept_by_id
+from ...services.concept_service import ConceptNotFoundError
 from ...languagemodels.llm_interface import OpenAIClient
 from ...db.repositories.concepts_repository import ConceptsRepository
 from bson import ObjectId
@@ -208,6 +213,23 @@ def _is_admin_or_owner_session() -> bool:
         return bool(provided) and provided == required_token
     except Exception:
         return False
+
+
+def _can_access_user_scoped_profile(user_concept_id: str) -> bool:
+    """Allow the current user (or admin/owner) to access a user-scoped profile.
+
+    When no session user is established yet, remain permissive so the existing
+    settings flow can bootstrap the selected user context before the profile is
+    first loaded.
+    """
+
+    requested_id = str(user_concept_id or "").strip()
+    if not requested_id:
+        return False
+    session_user_id = str(session.get("user_concept_id") or "").strip()
+    if not session_user_id:
+        return True
+    return session_user_id == requested_id or _is_admin_or_owner_session()
 
 
 # --- Import & Orphan Metrics (JVNAUTOSCI-584) ---
@@ -1361,6 +1383,69 @@ def set_user_prefs(user_concept_id: str):
             f"Error setting user prefs for {user_concept_id}: {e}", exc_info=True
         )
         return jsonify({"error": "Failed to set user preferences"}), 500
+
+
+@settings_bp.route("/recommendation_profile/<path:user_concept_id>", methods=["GET"])
+def get_recommendation_profile(user_concept_id: str):
+    """Return a user's paper recommendation profile and derived context."""
+
+    try:
+        if not user_concept_id:
+            return jsonify({"error": "Missing user_concept_id"}), 400
+        if not _can_access_user_scoped_profile(user_concept_id):
+            return jsonify({"error": "Forbidden"}), 403
+        payload = load_paper_recommendation_profile(
+            user_concept_id=user_concept_id,
+            create_if_missing=True,
+        )
+        return jsonify(payload), 200
+    except ConceptNotFoundError:
+        return jsonify({"error": "User concept not found"}), 404
+    except Exception as e:
+        current_app.logger.error(
+            "Error getting recommendation profile for %s: %s",
+            user_concept_id,
+            e,
+            exc_info=True,
+        )
+        return jsonify({"error": "Failed to retrieve recommendation profile"}), 500
+
+
+@settings_bp.route("/recommendation_profile/<path:user_concept_id>", methods=["POST"])
+def set_recommendation_profile(user_concept_id: str):
+    """Upsert a user's paper recommendation profile."""
+
+    try:
+        if not user_concept_id:
+            return jsonify({"error": "Missing user_concept_id"}), 400
+        if not _can_access_user_scoped_profile(user_concept_id):
+            return jsonify({"error": "Forbidden"}), 403
+
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return jsonify({"error": "JSON object body required"}), 400
+
+        payload = upsert_paper_recommendation_profile(
+            user_concept_id=user_concept_id,
+            recommendation_profile=data,
+            provenance={
+                "source": "settings_routes.recommendation_profile",
+            },
+            context={
+                "path": "settings_routes.recommendation_profile",
+            },
+        )
+        return jsonify(payload), 200
+    except ConceptNotFoundError:
+        return jsonify({"error": "User concept not found"}), 404
+    except Exception as e:
+        current_app.logger.error(
+            "Error setting recommendation profile for %s: %s",
+            user_concept_id,
+            e,
+            exc_info=True,
+        )
+        return jsonify({"error": "Failed to save recommendation profile"}), 500
 
 
 @settings_bp.route("/openai/verify", methods=["POST"])

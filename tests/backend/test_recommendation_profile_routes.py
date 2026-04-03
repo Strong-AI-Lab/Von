@@ -1,0 +1,113 @@
+from __future__ import annotations
+
+from flask import Flask
+
+from src.backend.server.routes.settings_routes import settings_bp
+
+
+def _make_settings_app() -> Flask:
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+    app.config["TESTING"] = True
+    app.register_blueprint(settings_bp, url_prefix="/api/settings")
+    return app
+
+
+def test_get_recommendation_profile_returns_payload(monkeypatch):
+    app = _make_settings_app()
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.load_paper_recommendation_profile",
+        lambda **_kwargs: {
+            "success": True,
+            "user_concept_id": "#V#lu_yunli",
+            "profile_concept_id": "#V#paper_recommendation_profile_for_lu_yunli",
+            "profile": {"project_description": "Graph reasoning"},
+            "derived_context": {
+                "research_interest_concepts": [
+                    {"concept_id": "#V#knowledge_graph", "name": "Knowledge Graph"}
+                ]
+            },
+            "diagnostics": {"profile_exists": True},
+        },
+    )
+
+    with app.test_client() as client:
+        resp = client.get("/api/settings/recommendation_profile/%23V%23lu_yunli")
+
+    assert resp.status_code == 200
+    payload = resp.get_json() or {}
+    assert payload["profile"]["project_description"] == "Graph reasoning"
+    assert payload["derived_context"]["research_interest_concepts"][0]["name"] == (
+        "Knowledge Graph"
+    )
+
+
+def test_post_recommendation_profile_forbidden_for_different_non_admin_session(
+    monkeypatch,
+):
+    app = _make_settings_app()
+
+    called = {"hit": False}
+
+    def _fake_upsert(**_kwargs):
+        called["hit"] = True
+        return {"success": True}
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.upsert_paper_recommendation_profile",
+        _fake_upsert,
+    )
+
+    with app.test_client() as client:
+        with client.session_transaction() as sess:
+            sess["user_concept_id"] = "#V#someone_else"
+            sess["role_in_org"] = "member"
+
+        resp = client.post(
+            "/api/settings/recommendation_profile/%23V%23lu_yunli",
+            json={"project_description": "Graph reasoning"},
+        )
+
+    assert resp.status_code == 403
+    assert called["hit"] is False
+
+
+def test_post_recommendation_profile_persists_payload(monkeypatch):
+    app = _make_settings_app()
+
+    captured: dict[str, object] = {}
+
+    def _fake_upsert(**kwargs):
+        captured.update(kwargs)
+        return {
+            "success": True,
+            "user_concept_id": kwargs["user_concept_id"],
+            "profile": kwargs["recommendation_profile"],
+        }
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.upsert_paper_recommendation_profile",
+        _fake_upsert,
+    )
+
+    with app.test_client() as client:
+        with client.session_transaction() as sess:
+            sess["user_concept_id"] = "#V#lu_yunli"
+
+        resp = client.post(
+            "/api/settings/recommendation_profile/%23V%23lu_yunli",
+            json={
+                "project_description": "Graph reasoning",
+                "stated_interest_terms": ["knowledge graphs"],
+            },
+        )
+
+    assert resp.status_code == 200
+    payload = resp.get_json() or {}
+    assert payload["success"] is True
+    assert captured["user_concept_id"] == "#V#lu_yunli"
+    assert captured["recommendation_profile"] == {
+        "project_description": "Graph reasoning",
+        "stated_interest_terms": ["knowledge graphs"],
+    }

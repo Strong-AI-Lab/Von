@@ -1660,8 +1660,13 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (window.refreshOrgSelector) {
           try { await window.refreshOrgSelector(); } catch (e) { console.warn('Org selector refresh failed', e); }
         }
+        await loadRecommendationProfileForSelectedUser();
       }
-    } else { setStoredJson(LS_USER_KEY, null); }
+    } else {
+      setStoredJson(LS_USER_KEY, null);
+      clearRecommendationProfileForm();
+      setRecommendationProfileControlsDisabled(true);
+    }
   });
   document.getElementById('currentOrganisationSelect')?.addEventListener('change', async () => {
     const sel = document.getElementById('currentOrganisationSelect');
@@ -1720,6 +1725,12 @@ document.addEventListener('DOMContentLoaded', async () => {
       updateGmailProfileStatus();
     });
   }
+
+  setRecommendationProfileControlsDisabled(true);
+  document.getElementById('saveRecommendationProfileButton')?.addEventListener('click', () => {
+    void saveRecommendationProfileForSelectedUser();
+  });
+  await loadRecommendationProfileForSelectedUser();
 });
 
 // Expose a lightweight hook so inline auth script can refresh org selector post-login
@@ -2534,6 +2545,188 @@ async function persistCurrentUserPreferences() {
     }
   } catch (e) {
     console.warn('Error persisting user preferences', e);
+  }
+}
+
+function parseCommaSeparatedProfileValues(rawValue) {
+  const raw = String(rawValue || '').trim();
+  if (!raw) return [];
+
+  const deduped = [];
+  const seen = new Set();
+  for (const part of raw.split(',')) {
+    const cleaned = part.trim();
+    if (!cleaned) continue;
+    const fingerprint = cleaned.toLocaleLowerCase();
+    if (seen.has(fingerprint)) continue;
+    seen.add(fingerprint);
+    deduped.push(cleaned);
+  }
+  return deduped;
+}
+
+function joinProfileValues(values) {
+  if (!Array.isArray(values) || !values.length) return '';
+  return values
+    .filter((value) => typeof value === 'string' && value.trim())
+    .map((value) => value.trim())
+    .join(', ');
+}
+
+function setRecommendationProfileStatus(message, isError = false) {
+  const el = document.getElementById('recommendationProfileStatusMessage');
+  if (!el) return;
+  el.textContent = message || '';
+  el.className = isError ? 'status-message error' : 'status-message success';
+  el.style.display = message ? 'block' : 'none';
+}
+
+function setRecommendationProfileControlsDisabled(disabled) {
+  const elementIds = [
+    'recommendationProjectDescriptionInput',
+    'recommendationInterestTermsInput',
+    'recommendationNegativeTermsInput',
+    'recommendationPreferredAuthorsInput',
+    'recommendationPreferredVenuesInput',
+    'recommendationProfileNotesInput',
+    'saveRecommendationProfileButton',
+  ];
+  for (const id of elementIds) {
+    const el = document.getElementById(id);
+    if (el) el.disabled = !!disabled;
+  }
+}
+
+function clearRecommendationProfileForm() {
+  const fieldIds = [
+    'recommendationProjectDescriptionInput',
+    'recommendationInterestTermsInput',
+    'recommendationNegativeTermsInput',
+    'recommendationPreferredAuthorsInput',
+    'recommendationPreferredVenuesInput',
+    'recommendationProfileNotesInput',
+  ];
+  for (const id of fieldIds) {
+    const el = document.getElementById(id);
+    if (el) el.value = '';
+  }
+  const observed = document.getElementById('recommendationObservedInterests');
+  if (observed) {
+    observed.textContent = 'Select a user to load profile context.';
+  }
+}
+
+function renderObservedRecommendationInterests(derivedContext) {
+  const observed = document.getElementById('recommendationObservedInterests');
+  if (!observed) return;
+  const interests = Array.isArray(derivedContext?.research_interest_concepts)
+    ? derivedContext.research_interest_concepts
+    : [];
+  if (!interests.length) {
+    observed.textContent = 'No linked research-interest concepts found for this user yet.';
+    return;
+  }
+  observed.textContent = interests
+    .map((item) => String(item?.name || item?.concept_id || '').trim())
+    .filter(Boolean)
+    .join(', ');
+}
+
+function applyRecommendationProfileToForm(profilePayload) {
+  const profile = profilePayload?.profile || {};
+  const projectDescriptionInput = document.getElementById('recommendationProjectDescriptionInput');
+  const interestTermsInput = document.getElementById('recommendationInterestTermsInput');
+  const negativeTermsInput = document.getElementById('recommendationNegativeTermsInput');
+  const preferredAuthorsInput = document.getElementById('recommendationPreferredAuthorsInput');
+  const preferredVenuesInput = document.getElementById('recommendationPreferredVenuesInput');
+  const notesInput = document.getElementById('recommendationProfileNotesInput');
+
+  if (projectDescriptionInput) projectDescriptionInput.value = profile.project_description || '';
+  if (interestTermsInput) interestTermsInput.value = joinProfileValues(profile.stated_interest_terms);
+  if (negativeTermsInput) negativeTermsInput.value = joinProfileValues(profile.negative_interest_terms);
+  if (preferredAuthorsInput) preferredAuthorsInput.value = joinProfileValues(profile.preferred_authors);
+  if (preferredVenuesInput) preferredVenuesInput.value = joinProfileValues(profile.preferred_venues);
+  if (notesInput) notesInput.value = profile.notes || '';
+
+  renderObservedRecommendationInterests(profilePayload?.derived_context);
+}
+
+export function __testOnly_buildRecommendationProfilePayload(overrides = {}) {
+  const values = {
+    project_description: document.getElementById('recommendationProjectDescriptionInput')?.value || '',
+    stated_interest_terms: parseCommaSeparatedProfileValues(
+      document.getElementById('recommendationInterestTermsInput')?.value,
+    ),
+    negative_interest_terms: parseCommaSeparatedProfileValues(
+      document.getElementById('recommendationNegativeTermsInput')?.value,
+    ),
+    preferred_authors: parseCommaSeparatedProfileValues(
+      document.getElementById('recommendationPreferredAuthorsInput')?.value,
+    ),
+    preferred_venues: parseCommaSeparatedProfileValues(
+      document.getElementById('recommendationPreferredVenuesInput')?.value,
+    ),
+    notes: document.getElementById('recommendationProfileNotesInput')?.value || '',
+  };
+  return { ...values, ...overrides };
+}
+
+async function loadRecommendationProfileForSelectedUser() {
+  const storedUser = getStoredJson(LS_USER_KEY);
+  const userConceptId = storedUser?.concept_id || null;
+  if (!userConceptId) {
+    clearRecommendationProfileForm();
+    setRecommendationProfileControlsDisabled(true);
+    setRecommendationProfileStatus('Select a current user to inspect a recommendation profile.');
+    return;
+  }
+
+  setRecommendationProfileControlsDisabled(false);
+  setRecommendationProfileStatus('Loading recommendation profile...');
+  try {
+    const response = await fetch(`/api/settings/recommendation_profile/${encodeURIComponent(userConceptId)}`, {
+      cache: 'no-store',
+      headers: buildSettingsFetchHeaders(),
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const data = await response.json();
+    applyRecommendationProfileToForm(data);
+    setRecommendationProfileStatus('Recommendation profile loaded.');
+  } catch (error) {
+    console.warn('Failed to load recommendation profile', error);
+    clearRecommendationProfileForm();
+    setRecommendationProfileStatus('Failed to load recommendation profile.', true);
+  }
+}
+
+async function saveRecommendationProfileForSelectedUser() {
+  const storedUser = getStoredJson(LS_USER_KEY);
+  const userConceptId = storedUser?.concept_id || null;
+  if (!userConceptId) {
+    setRecommendationProfileStatus('Select a current user before saving a recommendation profile.', true);
+    return;
+  }
+
+  setRecommendationProfileStatus('Saving recommendation profile...');
+  try {
+    const response = await fetch(`/api/settings/recommendation_profile/${encodeURIComponent(userConceptId)}`, {
+      method: 'POST',
+      headers: buildSettingsFetchHeaders({
+        'Content-Type': 'application/json',
+      }),
+      body: JSON.stringify(__testOnly_buildRecommendationProfilePayload()),
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const data = await response.json();
+    applyRecommendationProfileToForm(data);
+    setRecommendationProfileStatus('Recommendation profile saved.');
+  } catch (error) {
+    console.warn('Failed to save recommendation profile', error);
+    setRecommendationProfileStatus('Failed to save recommendation profile.', true);
   }
 }
 
