@@ -123,6 +123,56 @@
 
                 <div id="recommendationProfileStatusMessage" class="status-message" role="alert"></div>
             </section>
+
+            <section id="paperRecommendationReviewSection" class="speech-settings-section mt-4"
+                aria-label="Paper recommendation review">
+                <h3 class="speech-settings-title">Paper Recommendation Review</h3>
+                <p class="settings-note">This settings-tab review is the current authoritative Von-native surface for
+                    inspecting paper recommendations, rationale, and provenance. External channels can mirror it later,
+                    but they are not authoritative.</p>
+
+                <div class="speech-settings-row">
+                    <label class="speech-settings-label" for="recommendationCandidatePaperIdsInput">Candidate paper
+                        concept IDs</label>
+                    <textarea id="recommendationCandidatePaperIdsInput" class="speech-settings-input" rows="3"
+                        placeholder="Optional. Paste #V#paper_concept_ids separated by commas or new lines. Leave blank to review the most recent represented scholarly papers in Vontology."></textarea>
+                </div>
+
+                <div class="speech-settings-row">
+                    <label class="speech-settings-label" for="recommendationCandidateLimitInput">Discovery / display
+                        limit</label>
+                    <input id="recommendationCandidateLimitInput" class="speech-settings-input" type="number" min="1"
+                        max="100" step="1" inputmode="numeric" value="25" />
+                </div>
+
+                <div class="speech-settings-row">
+                    <label class="speech-settings-label">Review options</label>
+                    <div class="recommendation-review-options">
+                        <label class="speech-settings-checkbox"><input id="recommendationIncludeAllCandidatesToggle"
+                                type="checkbox" checked /> Include skipped candidates</label>
+                        <label class="speech-settings-checkbox"><input
+                                id="recommendationAutoReviewAfterProfileSaveToggle" type="checkbox" checked /> Run
+                            review after saving profile</label>
+                    </div>
+                </div>
+
+                <div class="speech-settings-row">
+                    <label class="speech-settings-label">Trigger points</label>
+                    <div id="recommendationReviewTriggerHint" class="runtime-hint">Manual review is always available.
+                        Saving the profile can immediately re-run the review, and the same route accepts explicit
+                        candidate IDs for a future candidate-ingestion trigger.</div>
+                </div>
+
+                <div class="speech-settings-actions">
+                    <button id="runRecommendationReviewButton" class="btn btn-secondary" type="button">Review paper
+                        recommendations</button>
+                </div>
+
+                <div id="recommendationReviewStatusMessage" class="status-message" role="alert"></div>
+                <div id="recommendationReviewSummary" class="runtime-hint">Run a review to inspect recommendation
+                    rationale and provenance.</div>
+                <div id="recommendationReviewResults" class="recommendation-review-results"></div>
+            </section>
         </section>
 
         <section id="current-organisation-settings">

@@ -3772,6 +3772,94 @@ button:hover {
     color: #64748b;
 }
 
+.recommendation-review-options {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+}
+
+.recommendation-review-results {
+    display: grid;
+    gap: 12px;
+    margin-top: 12px;
+}
+
+.recommendation-review-card {
+    border: 1px solid #dbe4ee;
+    border-radius: 10px;
+    background: #f8fafc;
+    padding: 12px 14px;
+}
+
+.recommendation-review-card.is-skipped {
+    background: #fff7ed;
+    border-color: #fed7aa;
+}
+
+.recommendation-review-header {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: baseline;
+    justify-content: space-between;
+}
+
+.recommendation-review-title {
+    margin: 0;
+    font-size: 1rem;
+    color: #0f172a;
+}
+
+.recommendation-review-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    background: #e2e8f0;
+    color: #334155;
+}
+
+.recommendation-review-badge.tier-strong {
+    background: #dcfce7;
+    color: #166534;
+}
+
+.recommendation-review-badge.tier-moderate {
+    background: #dbeafe;
+    color: #1d4ed8;
+}
+
+.recommendation-review-badge.tier-weak,
+.recommendation-review-badge.tier-unmatched {
+    background: #f1f5f9;
+    color: #475569;
+}
+
+.recommendation-review-badge.tier-avoid,
+.recommendation-review-badge.status-skipped {
+    background: #fee2e2;
+    color: #b91c1c;
+}
+
+.recommendation-review-meta,
+.recommendation-review-list {
+    margin: 8px 0 0;
+    padding-left: 18px;
+    color: #334155;
+}
+
+.recommendation-review-meta li,
+.recommendation-review-list li {
+    margin: 2px 0;
+}
+
+.recommendation-review-summary {
+    margin-top: 8px;
+    color: #334155;
+}
+
 /* Secondary variant (for non-primary actions like Reset) */
 /* Delete exchange button styling */
 .btn-delete-exchange {

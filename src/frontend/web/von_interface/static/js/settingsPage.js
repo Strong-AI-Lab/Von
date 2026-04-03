@@ -1666,6 +1666,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       setStoredJson(LS_USER_KEY, null);
       clearRecommendationProfileForm();
       setRecommendationProfileControlsDisabled(true);
+      setRecommendationReviewControlsDisabled(true);
+      setRecommendationReviewStatus('');
     }
   });
   document.getElementById('currentOrganisationSelect')?.addEventListener('change', async () => {
@@ -1727,8 +1729,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   setRecommendationProfileControlsDisabled(true);
+  setRecommendationReviewControlsDisabled(true);
   document.getElementById('saveRecommendationProfileButton')?.addEventListener('click', () => {
     void saveRecommendationProfileForSelectedUser();
+  });
+  document.getElementById('runRecommendationReviewButton')?.addEventListener('click', () => {
+    void generateRecommendationReviewForSelectedUser();
   });
   await loadRecommendationProfileForSelectedUser();
 });
@@ -2597,6 +2603,216 @@ function setRecommendationProfileControlsDisabled(disabled) {
   }
 }
 
+function parseCandidatePaperConceptIds(rawValue) {
+  const raw = String(rawValue || '').trim();
+  if (!raw) return [];
+
+  const deduped = [];
+  const seen = new Set();
+  for (const part of raw.split(/[\s,]+/)) {
+    const cleaned = part.trim();
+    if (!cleaned) continue;
+    if (seen.has(cleaned)) continue;
+    seen.add(cleaned);
+    deduped.push(cleaned);
+  }
+  return deduped;
+}
+
+function normaliseCandidateLimit(rawValue) {
+  const parsed = Number.parseInt(String(rawValue || ''), 10);
+  if (!Number.isFinite(parsed)) return 25;
+  return Math.min(100, Math.max(1, parsed));
+}
+
+function setRecommendationReviewStatus(message, isError = false) {
+  const el = document.getElementById('recommendationReviewStatusMessage');
+  if (!el) return;
+  el.textContent = message || '';
+  el.className = isError ? 'status-message error' : 'status-message success';
+  el.style.display = message ? 'block' : 'none';
+}
+
+function setRecommendationReviewControlsDisabled(disabled) {
+  const elementIds = [
+    'recommendationCandidatePaperIdsInput',
+    'recommendationCandidateLimitInput',
+    'recommendationIncludeAllCandidatesToggle',
+    'recommendationAutoReviewAfterProfileSaveToggle',
+    'runRecommendationReviewButton',
+  ];
+  for (const id of elementIds) {
+    const el = document.getElementById(id);
+    if (el) el.disabled = !!disabled;
+  }
+}
+
+function clearRecommendationReviewResults(
+  message = 'Run a review to inspect recommendation rationale and provenance.',
+) {
+  const summary = document.getElementById('recommendationReviewSummary');
+  if (summary) {
+    summary.textContent = message;
+  }
+  const container = document.getElementById('recommendationReviewResults');
+  if (container) {
+    container.replaceChildren();
+  }
+}
+
+function formatRecommendationScalar(value, fallback = 'None') {
+  const cleaned = String(value || '').trim();
+  return cleaned || fallback;
+}
+
+function appendRecommendationList(container, title, items) {
+  if (!container || !Array.isArray(items) || !items.length) return;
+  const heading = document.createElement('div');
+  heading.className = 'speech-settings-note';
+  heading.textContent = title;
+  container.appendChild(heading);
+
+  const list = document.createElement('ul');
+  list.className = 'recommendation-review-list';
+  for (const item of items) {
+    const li = document.createElement('li');
+    li.textContent = item;
+    list.appendChild(li);
+  }
+  container.appendChild(list);
+}
+
+function renderRecommendationReviewPayload(payload) {
+  const summary = document.getElementById('recommendationReviewSummary');
+  const container = document.getElementById('recommendationReviewResults');
+  if (!summary || !container) return;
+
+  const trigger = payload?.trigger || {};
+  const candidateSelection = payload?.candidate_selection || {};
+  const report = payload?.recommendation_report || {};
+  const authoritativeSurface = payload?.authoritative_review_surface || 'settings_tab';
+  const externalAuthoritative = payload?.external_channels_authoritative === true;
+
+  const summaryBits = [
+    `Trigger: ${formatRecommendationScalar(trigger.label || trigger.trigger_source, 'manual review')}.`,
+    `Candidate source: ${formatRecommendationScalar(candidateSelection.source, 'unknown')}.`,
+    `Candidates: ${Number(candidateSelection.candidate_count || 0)}.`,
+    `Authoritative surface: ${formatRecommendationScalar(authoritativeSurface)}.`,
+    externalAuthoritative
+      ? 'External channels are authoritative.'
+      : 'External channels are not authoritative.',
+  ];
+  summary.textContent = summaryBits.join(' ');
+  container.replaceChildren();
+
+  if (!report?.success) {
+    const panel = document.createElement('div');
+    panel.className = 'recommendation-review-card is-skipped';
+
+    const title = document.createElement('h4');
+    title.className = 'recommendation-review-title';
+    title.textContent = formatRecommendationScalar(
+      report?.message,
+      'Recommendation review could not produce ranked results.',
+    );
+    panel.appendChild(title);
+
+    appendRecommendationList(panel, 'Suggestions', report?.suggestions || []);
+    container.appendChild(panel);
+    return;
+  }
+
+  const results = Array.isArray(report?.results) ? report.results : [];
+  if (!results.length) {
+    const hint = document.createElement('div');
+    hint.className = 'runtime-hint';
+    hint.textContent = 'No recommendation rows were returned for this review.';
+    container.appendChild(hint);
+    return;
+  }
+
+  for (const row of results) {
+    const card = document.createElement('article');
+    const status = String(row?.status || '').trim().toLowerCase();
+    card.className = `recommendation-review-card${status === 'skipped' ? ' is-skipped' : ''}`;
+
+    const header = document.createElement('div');
+    header.className = 'recommendation-review-header';
+
+    const title = document.createElement('h4');
+    title.className = 'recommendation-review-title';
+    title.textContent = formatRecommendationScalar(row?.paper_title, row?.paper_concept_id);
+    header.appendChild(title);
+
+    const badge = document.createElement('span');
+    const tier = String(row?.recommendation_tier || status || 'unmatched').trim().toLowerCase();
+    badge.className = `recommendation-review-badge ${status === 'skipped' ? 'status-skipped' : `tier-${tier}`}`;
+    badge.textContent = status === 'skipped'
+      ? 'Skipped'
+      : `${formatRecommendationScalar(row?.recommendation_tier, 'unmatched')} · ${Number(
+        row?.score || 0,
+      ).toFixed(2)}`;
+    header.appendChild(badge);
+    card.appendChild(header);
+
+    const meta = document.createElement('ul');
+    meta.className = 'recommendation-review-meta';
+    const metaItems = [
+      `Paper concept: ${formatRecommendationScalar(row?.paper_concept_id)}`,
+      `Publication date: ${formatRecommendationScalar(row?.paper_representation?.publication_date)}`,
+    ];
+    if (status === 'skipped') {
+      metaItems.push(`Skip reason: ${formatRecommendationScalar(row?.skip_reason)}`);
+    }
+    for (const item of metaItems) {
+      const li = document.createElement('li');
+      li.textContent = item;
+      meta.appendChild(li);
+    }
+    card.appendChild(meta);
+
+    const summaryText = document.createElement('div');
+    summaryText.className = 'recommendation-review-summary';
+    summaryText.textContent = formatRecommendationScalar(
+      row?.rationale_summary || row?.paper_representation?.summary_excerpt,
+      'No grounded rationale summary was returned.',
+    );
+    card.appendChild(summaryText);
+
+    appendRecommendationList(card, 'Rationale', row?.rationale || []);
+
+    const evidenceItems = Array.isArray(row?.evidence)
+      ? row.evidence.map((item) => {
+          const evidenceType = formatRecommendationScalar(item?.evidence_type);
+          const profileValue = formatRecommendationScalar(item?.profile_value);
+          const matchedText = formatRecommendationScalar(item?.matched_paper_text);
+          const referenceId = formatRecommendationScalar(item?.paper_reference_id);
+          return `${evidenceType}: ${profileValue} -> ${matchedText} (ref: ${referenceId})`;
+        })
+      : [];
+    appendRecommendationList(card, 'Evidence', evidenceItems);
+
+    const provenance = row?.provenance || {};
+    const provenanceItems = [
+      `Paper concept: ${formatRecommendationScalar(provenance?.paper_concept_id)}`,
+      `Author concepts: ${Array.isArray(provenance?.author_concept_ids) && provenance.author_concept_ids.length
+        ? provenance.author_concept_ids.join(', ')
+        : 'None'}`,
+      `Topic concepts: ${Array.isArray(provenance?.topic_concept_ids) && provenance.topic_concept_ids.length
+        ? provenance.topic_concept_ids.join(', ')
+        : 'None'}`,
+      `Summary relation: ${formatRecommendationScalar(provenance?.summary_relation_id)}`,
+    ];
+    appendRecommendationList(card, 'Provenance', provenanceItems);
+
+    if (status === 'skipped' && Array.isArray(row?.representation_failures) && row.representation_failures.length) {
+      appendRecommendationList(card, 'Representation failures', row.representation_failures);
+    }
+
+    container.appendChild(card);
+  }
+}
+
 function clearRecommendationProfileForm() {
   const fieldIds = [
     'recommendationProjectDescriptionInput',
@@ -2614,6 +2830,7 @@ function clearRecommendationProfileForm() {
   if (observed) {
     observed.textContent = 'Select a user to load profile context.';
   }
+  clearRecommendationReviewResults();
 }
 
 function renderObservedRecommendationInterests(derivedContext) {
@@ -2671,17 +2888,38 @@ export function __testOnly_buildRecommendationProfilePayload(overrides = {}) {
   return { ...values, ...overrides };
 }
 
+export function __testOnly_buildRecommendationReviewRequest(overrides = {}) {
+  const values = {
+    candidate_paper_concept_ids: parseCandidatePaperConceptIds(
+      document.getElementById('recommendationCandidatePaperIdsInput')?.value,
+    ),
+    candidate_limit: normaliseCandidateLimit(
+      document.getElementById('recommendationCandidateLimitInput')?.value,
+    ),
+    include_all_candidates: !!document.getElementById('recommendationIncludeAllCandidatesToggle')?.checked,
+    trigger_source: 'manual_review',
+  };
+  return { ...values, ...overrides };
+}
+
+export function __testOnly_renderRecommendationReviewPayload(payload) {
+  renderRecommendationReviewPayload(payload);
+}
+
 async function loadRecommendationProfileForSelectedUser() {
   const storedUser = getStoredJson(LS_USER_KEY);
   const userConceptId = storedUser?.concept_id || null;
   if (!userConceptId) {
     clearRecommendationProfileForm();
     setRecommendationProfileControlsDisabled(true);
+    setRecommendationReviewControlsDisabled(true);
     setRecommendationProfileStatus('Select a current user to inspect a recommendation profile.');
+    setRecommendationReviewStatus('');
     return;
   }
 
   setRecommendationProfileControlsDisabled(false);
+  setRecommendationReviewControlsDisabled(false);
   setRecommendationProfileStatus('Loading recommendation profile...');
   try {
     const response = await fetch(`/api/settings/recommendation_profile/${encodeURIComponent(userConceptId)}`, {
@@ -2694,10 +2932,55 @@ async function loadRecommendationProfileForSelectedUser() {
     const data = await response.json();
     applyRecommendationProfileToForm(data);
     setRecommendationProfileStatus('Recommendation profile loaded.');
+    clearRecommendationReviewResults();
+    setRecommendationReviewStatus('');
   } catch (error) {
     console.warn('Failed to load recommendation profile', error);
     clearRecommendationProfileForm();
     setRecommendationProfileStatus('Failed to load recommendation profile.', true);
+    setRecommendationReviewStatus('Recommendation review is unavailable until the profile loads.', true);
+  }
+}
+
+async function generateRecommendationReviewForSelectedUser({ triggerSource = 'manual_review' } = {}) {
+  const storedUser = getStoredJson(LS_USER_KEY);
+  const userConceptId = storedUser?.concept_id || null;
+  if (!userConceptId) {
+    setRecommendationReviewStatus('Select a current user before running a recommendation review.', true);
+    return;
+  }
+
+  setRecommendationReviewStatus('Building recommendation review...');
+  try {
+    const response = await fetch(`/api/settings/recommendation_review/${encodeURIComponent(userConceptId)}`, {
+      method: 'POST',
+      headers: buildSettingsFetchHeaders({
+        'Content-Type': 'application/json',
+      }),
+      body: JSON.stringify(
+        __testOnly_buildRecommendationReviewRequest({
+          trigger_source: triggerSource,
+        }),
+      ),
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const data = await response.json();
+    renderRecommendationReviewPayload(data);
+    const reportMessage = data?.recommendation_report?.message;
+    if (data?.success) {
+      setRecommendationReviewStatus(reportMessage || 'Recommendation review ready.');
+    } else {
+      setRecommendationReviewStatus(
+        reportMessage || 'Recommendation review completed with diagnostics rather than ranked results.',
+        true,
+      );
+    }
+  } catch (error) {
+    console.warn('Failed to build recommendation review', error);
+    clearRecommendationReviewResults();
+    setRecommendationReviewStatus('Failed to build recommendation review.', true);
   }
 }
 
@@ -2724,6 +3007,9 @@ async function saveRecommendationProfileForSelectedUser() {
     const data = await response.json();
     applyRecommendationProfileToForm(data);
     setRecommendationProfileStatus('Recommendation profile saved.');
+    if (document.getElementById('recommendationAutoReviewAfterProfileSaveToggle')?.checked) {
+      await generateRecommendationReviewForSelectedUser({ triggerSource: 'profile_saved' });
+    }
   } catch (error) {
     console.warn('Failed to save recommendation profile', error);
     setRecommendationProfileStatus('Failed to save recommendation profile.', true);

@@ -60,6 +60,9 @@ from ...services.paper_recommendation_profile_vontology_service import (
     load_paper_recommendation_profile,
     upsert_paper_recommendation_profile,
 )
+from ...services.paper_recommendation_review_service import (
+    build_paper_recommendation_review,
+)
 from ...services.window_session_context_service import get_effective_context
 from ...services.buttonify_service import BUTTONIFY_PROMPT_IDS
 from ...integrations.google.gmail_service import list_profile_ids_from_env
@@ -1446,6 +1449,44 @@ def set_recommendation_profile(user_concept_id: str):
             exc_info=True,
         )
         return jsonify({"error": "Failed to save recommendation profile"}), 500
+
+
+@settings_bp.route("/recommendation_review/<path:user_concept_id>", methods=["POST"])
+def get_recommendation_review(user_concept_id: str):
+    """Return a bounded paper recommendation review payload for one user."""
+
+    try:
+        if not user_concept_id:
+            return jsonify({"error": "Missing user_concept_id"}), 400
+        if not _can_access_user_scoped_profile(user_concept_id):
+            return jsonify({"error": "Forbidden"}), 403
+
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return jsonify({"error": "JSON object body required"}), 400
+
+        raw_candidate_ids = data.get("candidate_paper_concept_ids")
+        if raw_candidate_ids is None:
+            raw_candidate_ids = data.get("paper_concept_ids")
+
+        payload = build_paper_recommendation_review(
+            user_concept_id=user_concept_id,
+            candidate_paper_concept_ids=raw_candidate_ids,
+            candidate_limit=data.get("candidate_limit"),
+            include_all_candidates=bool(data.get("include_all_candidates", True)),
+            trigger_source=str(data.get("trigger_source") or "").strip() or None,
+        )
+        return _jsonify_no_store(payload), 200
+    except ConceptNotFoundError:
+        return jsonify({"error": "User concept not found"}), 404
+    except Exception as e:
+        current_app.logger.error(
+            "Error building recommendation review for %s: %s",
+            user_concept_id,
+            e,
+            exc_info=True,
+        )
+        return jsonify({"error": "Failed to build recommendation review"}), 500
 
 
 @settings_bp.route("/openai/verify", methods=["POST"])

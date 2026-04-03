@@ -111,3 +111,88 @@ def test_post_recommendation_profile_persists_payload(monkeypatch):
         "project_description": "Graph reasoning",
         "stated_interest_terms": ["knowledge graphs"],
     }
+
+
+def test_post_recommendation_review_returns_payload(monkeypatch):
+    app = _make_settings_app()
+
+    captured: dict[str, object] = {}
+
+    def _fake_build_review(**kwargs):
+        captured.update(kwargs)
+        return {
+            "success": True,
+            "review_surface_id": "settings.paper_recommendation_review.v1",
+            "recommendation_report": {
+                "success": True,
+                "results": [
+                    {
+                        "paper_concept_id": "#V#paper_causal_science",
+                        "paper_title": "Causal Models for Scientific Discovery",
+                    }
+                ],
+            },
+        }
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.build_paper_recommendation_review",
+        _fake_build_review,
+    )
+
+    with app.test_client() as client:
+        with client.session_transaction() as sess:
+            sess["user_concept_id"] = "#V#lu_yunli"
+
+        resp = client.post(
+            "/api/settings/recommendation_review/%23V%23lu_yunli",
+            json={
+                "candidate_paper_concept_ids": ["#V#paper_causal_science"],
+                "candidate_limit": 15,
+                "include_all_candidates": True,
+                "trigger_source": "manual_review",
+            },
+        )
+
+    assert resp.status_code == 200
+    payload = resp.get_json() or {}
+    assert payload["success"] is True
+    assert payload["recommendation_report"]["results"][0]["paper_title"] == (
+        "Causal Models for Scientific Discovery"
+    )
+    assert captured == {
+        "user_concept_id": "#V#lu_yunli",
+        "candidate_paper_concept_ids": ["#V#paper_causal_science"],
+        "candidate_limit": 15,
+        "include_all_candidates": True,
+        "trigger_source": "manual_review",
+    }
+
+
+def test_post_recommendation_review_forbidden_for_different_non_admin_session(
+    monkeypatch,
+):
+    app = _make_settings_app()
+
+    called = {"hit": False}
+
+    def _fake_build_review(**_kwargs):
+        called["hit"] = True
+        return {"success": True}
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.build_paper_recommendation_review",
+        _fake_build_review,
+    )
+
+    with app.test_client() as client:
+        with client.session_transaction() as sess:
+            sess["user_concept_id"] = "#V#someone_else"
+            sess["role_in_org"] = "member"
+
+        resp = client.post(
+            "/api/settings/recommendation_review/%23V%23lu_yunli",
+            json={},
+        )
+
+    assert resp.status_code == 403
+    assert called["hit"] is False
