@@ -275,18 +275,24 @@ The existing `message.direct_created` binding to `#V#chat_assistant_workflow` sh
 - Benchmark metrics should count the shared `execution_correctness.metric_labels` directly in addition to detailed failure modes, so selector-layer and turn-level reporting share one label vocabulary.
 - Adds Jira-linkable triage metadata (`triage_index` + per-case issue-key extraction) so replay evidence can be routed directly into issue triage workflows.
 - Supports optional baseline-rate comparison (`baseline_*_rate_pct` + `regression_tolerance_pct`) to flag metric regressions in automated benchmark runs.
+- Includes pre-dispatch latency summaries and day-bucket trend views so `JVNAUTOSCI-1429` attribution feeds the same reporting surface instead of a parallel timing report.
 
-5. `turn_execution_backfill_from_chat_history` (implemented)
+5. `turn_execution_build_dashboard` (implemented)
+- Composes the turn-execution benchmark with the selector-routing benchmark into one dashboard/reporting payload.
+- Intended for engineering debugging and portfolio review of selector accuracy, intent completion, false success, unresolved follow-up, and pre-dispatch latency.
+- Supports drill-down from trend and regression views into replay cases and Jira-linked triage evidence.
+
+6. `turn_execution_backfill_from_chat_history` (implemented)
 - Replays assistant-message `llm_debug_data.turn_execution_record` payloads into `turn_execution_records`.
 - Namespace-scoped and dry-run by default for safe backfill planning.
 - Supports synthesis from legacy `llm_debug_data` + message context when embedded records are absent.
 - Synthesis infers workflow routing metadata (`selected_workflow_id`, verdict/source) from debug/tool traces when possible.
 
-6. `turn_execution_namespace_coverage_report` (implemented)
+7. `turn_execution_namespace_coverage_report` (implemented)
 - Produces namespace-level instrumentation/projection coverage, request-id overlap, and gap signals.
 - Intended to validate benchmark readiness before interpreting failure-rate metrics.
 
-7. Chat-history write-path synthesis guardrail (implemented)
+8. Chat-history write-path synthesis guardrail (implemented)
 - `add_message_to_history(...)` now synthesises `turn_execution_record` for assistant turns when `llm_debug_data.request_id` exists but embedded record is missing.
 - Ensures both persisted `llm_debug_data.turn_execution_record` and projection upsert occur on forward writes.
 

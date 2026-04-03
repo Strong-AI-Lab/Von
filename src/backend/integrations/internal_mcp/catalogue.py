@@ -30,7 +30,7 @@ import logging
 import os
 import re
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List, Mapping, Sequence
 
@@ -8713,6 +8713,668 @@ def _build_turn_execution_benchmark_signals(
     return signals, summary
 
 
+_TURN_EXECUTION_OUTCOME_LABEL_NAMES: tuple[str, ...] = (
+    "successful_completion",
+    "false_success",
+    "unresolved_follow_up_needed",
+    "tool_or_workflow_misrouting",
+    "abstain_escalate_no_safe_route",
+)
+
+
+def _parse_iso_datetime_or_none(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _compute_percentile(values: Sequence[int], percentile: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(int(max(0, value)) for value in values)
+    if len(ordered) == 1:
+        return float(ordered[0])
+
+    bounded_percentile = min(100.0, max(0.0, float(percentile)))
+    position = (bounded_percentile / 100.0) * float(len(ordered) - 1)
+    lower_index = int(position)
+    upper_index = min(len(ordered) - 1, lower_index + 1)
+    if lower_index == upper_index:
+        return float(ordered[lower_index])
+    fraction = position - float(lower_index)
+    interpolated = ordered[lower_index] + (
+        float(ordered[upper_index] - ordered[lower_index]) * fraction
+    )
+    return round(float(interpolated), 2)
+
+
+def _extract_pre_dispatch_payload(item: Mapping[str, Any]) -> Mapping[str, Any]:
+    workflow_routing_diagnostics_raw = item.get("workflow_routing_diagnostics")
+    workflow_routing_diagnostics = (
+        workflow_routing_diagnostics_raw
+        if isinstance(workflow_routing_diagnostics_raw, Mapping)
+        else {}
+    )
+    dispatch_raw = workflow_routing_diagnostics.get("dispatch")
+    dispatch = dispatch_raw if isinstance(dispatch_raw, Mapping) else {}
+    pre_dispatch_raw = dispatch.get("pre_dispatch")
+    return pre_dispatch_raw if isinstance(pre_dispatch_raw, Mapping) else {}
+
+
+def _build_turn_execution_latency_and_trend_views(
+    items: Sequence[Mapping[str, Any]],
+    *,
+    include_completed: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    total_items = len(items)
+    pre_dispatch_durations: list[int] = []
+    bucket_map: dict[str, dict[str, Any]] = {}
+    step_stats: dict[str, dict[str, Any]] = {}
+
+    slowest_request_id: str | None = None
+    slowest_created_at_utc: str | None = None
+    slowest_duration_ms = 0
+    slowest_step_id: str | None = None
+    slowest_step_label: str | None = None
+
+    for item in items:
+        request_id = (
+            str(item.get("request_id")).strip()
+            if isinstance(item.get("request_id"), str)
+            else ""
+        )
+        created_at_utc = (
+            str(item.get("created_at_utc")).strip()
+            if isinstance(item.get("created_at_utc"), str)
+            else ""
+        )
+        created_at_dt = _parse_iso_datetime_or_none(created_at_utc)
+        bucket_key = (
+            created_at_dt.date().isoformat()
+            if created_at_dt is not None
+            else "undated"
+        )
+        bucket_start_utc = (
+            datetime.combine(
+                created_at_dt.date(),
+                datetime.min.time(),
+                tzinfo=timezone.utc,
+            ).isoformat().replace("+00:00", "Z")
+            if created_at_dt is not None
+            else None
+        )
+        bucket = bucket_map.setdefault(
+            bucket_key,
+            {
+                "bucket_id": bucket_key,
+                "bucket_start_utc": bucket_start_utc,
+                "scanned_count": 0,
+                "outcome_label_counts": {
+                    label_name: 0 for label_name in _TURN_EXECUTION_OUTCOME_LABEL_NAMES
+                },
+                "overall_outcome_counts": {},
+                "request_ids": [],
+                "_pre_dispatch_durations": [],
+            },
+        )
+        bucket["scanned_count"] += 1
+        if request_id and request_id not in bucket["request_ids"] and len(
+            bucket["request_ids"]
+        ) < 10:
+            bucket["request_ids"].append(request_id)
+
+        execution_correctness_raw = item.get("execution_correctness")
+        execution_correctness = (
+            execution_correctness_raw
+            if isinstance(execution_correctness_raw, Mapping)
+            else {}
+        )
+        metric_labels_raw = execution_correctness.get("metric_labels")
+        metric_labels = metric_labels_raw if isinstance(metric_labels_raw, Mapping) else {}
+        for label_name in _TURN_EXECUTION_OUTCOME_LABEL_NAMES:
+            if bool(metric_labels.get(label_name, False)):
+                bucket["outcome_label_counts"][label_name] += 1
+
+        overall_outcome = (
+            str(execution_correctness.get("overall_outcome")).strip()
+            if isinstance(execution_correctness.get("overall_outcome"), str)
+            else ""
+        )
+        if overall_outcome:
+            overall_counts = bucket["overall_outcome_counts"]
+            overall_counts[overall_outcome] = overall_counts.get(overall_outcome, 0) + 1
+
+        pre_dispatch = _extract_pre_dispatch_payload(item)
+        total_duration_ms = _coerce_int_or_none(pre_dispatch.get("total_duration_ms"))
+        if total_duration_ms is None:
+            total_duration_ms = None
+        elif total_duration_ms < 0:
+            total_duration_ms = 0
+
+        if total_duration_ms is not None:
+            pre_dispatch_durations.append(total_duration_ms)
+            bucket["_pre_dispatch_durations"].append(total_duration_ms)
+            if total_duration_ms >= slowest_duration_ms:
+                slowest_duration_ms = total_duration_ms
+                slowest_request_id = request_id or None
+                slowest_created_at_utc = created_at_utc or None
+                slowest_step_id = (
+                    str(pre_dispatch.get("slowest_step_id")).strip()
+                    if isinstance(pre_dispatch.get("slowest_step_id"), str)
+                    else None
+                )
+                slowest_step_label = (
+                    str(pre_dispatch.get("slowest_step_label")).strip()
+                    if isinstance(pre_dispatch.get("slowest_step_label"), str)
+                    else None
+                )
+
+        steps_raw = pre_dispatch.get("steps")
+        steps = steps_raw if isinstance(steps_raw, list) else []
+        for raw_step in steps:
+            if not isinstance(raw_step, Mapping):
+                continue
+            step_id = (
+                str(raw_step.get("step_id")).strip()
+                if isinstance(raw_step.get("step_id"), str)
+                else ""
+            ) or "unknown"
+            step_label = (
+                str(raw_step.get("step_label")).strip()
+                if isinstance(raw_step.get("step_label"), str)
+                else ""
+            ) or step_id
+            step_duration_ms = _coerce_int_or_none(raw_step.get("duration_ms"))
+            if step_duration_ms is None or step_duration_ms < 0:
+                step_duration_ms = 0
+            step_status = (
+                str(raw_step.get("status")).strip().lower()
+                if isinstance(raw_step.get("status"), str)
+                else ""
+            ) or "unknown"
+
+            stats = step_stats.setdefault(
+                step_id,
+                {
+                    "step_id": step_id,
+                    "step_label": step_label,
+                    "observed_count": 0,
+                    "failed_count": 0,
+                    "total_duration_ms": 0,
+                    "max_duration_ms": 0,
+                    "slowest_request_id": None,
+                    "slowest_created_at_utc": None,
+                    "_durations": [],
+                },
+            )
+            stats["observed_count"] += 1
+            stats["total_duration_ms"] += step_duration_ms
+            stats["_durations"].append(step_duration_ms)
+            if step_status == "failed":
+                stats["failed_count"] += 1
+            if step_duration_ms >= int(stats["max_duration_ms"]):
+                stats["max_duration_ms"] = step_duration_ms
+                stats["slowest_request_id"] = request_id or None
+                stats["slowest_created_at_utc"] = created_at_utc or None
+
+    observed_pre_dispatch_count = len(pre_dispatch_durations)
+    avg_pre_dispatch_duration_ms = (
+        round(sum(pre_dispatch_durations) / observed_pre_dispatch_count, 2)
+        if observed_pre_dispatch_count > 0
+        else None
+    )
+    latency_summary = {
+        "item_scope": (
+            "all_matching_turns" if include_completed else "likely_failure_subset"
+        ),
+        "observed_pre_dispatch_count": observed_pre_dispatch_count,
+        "observed_pre_dispatch_rate_pct": _format_turn_execution_rate(
+            observed_pre_dispatch_count, total_items
+        ),
+        "avg_pre_dispatch_duration_ms": avg_pre_dispatch_duration_ms,
+        "median_pre_dispatch_duration_ms": _compute_percentile(pre_dispatch_durations, 50),
+        "p95_pre_dispatch_duration_ms": _compute_percentile(pre_dispatch_durations, 95),
+        "max_pre_dispatch_duration_ms": (
+            max(pre_dispatch_durations) if observed_pre_dispatch_count > 0 else None
+        ),
+        "slowest_request_id": slowest_request_id,
+        "slowest_created_at_utc": slowest_created_at_utc,
+        "slowest_step_id": slowest_step_id,
+        "slowest_step_label": slowest_step_label,
+        "slowest_pre_dispatch_duration_ms": (
+            slowest_duration_ms if observed_pre_dispatch_count > 0 else None
+        ),
+    }
+
+    pre_dispatch_step_breakdown: list[dict[str, Any]] = []
+    for step_id, stats in step_stats.items():
+        durations = stats.pop("_durations")
+        observed_count = int(stats.get("observed_count") or 0)
+        total_duration_ms = int(stats.get("total_duration_ms") or 0)
+        entry = {
+            **stats,
+            "step_id": step_id,
+            "avg_duration_ms": (
+                round(total_duration_ms / observed_count, 2)
+                if observed_count > 0
+                else None
+            ),
+            "median_duration_ms": _compute_percentile(durations, 50),
+            "p95_duration_ms": _compute_percentile(durations, 95),
+        }
+        pre_dispatch_step_breakdown.append(entry)
+    pre_dispatch_step_breakdown.sort(
+        key=lambda row: (
+            -(float(row.get("avg_duration_ms") or 0.0)),
+            -(float(row.get("max_duration_ms") or 0.0)),
+            str(row.get("step_id") or ""),
+        )
+    )
+
+    turn_outcome_buckets: list[dict[str, Any]] = []
+    for bucket_key in sorted(bucket_map.keys()):
+        bucket = bucket_map[bucket_key]
+        durations = bucket.pop("_pre_dispatch_durations")
+        scanned_count = int(bucket.get("scanned_count") or 0)
+        outcome_label_counts = bucket.get("outcome_label_counts") or {}
+        turn_outcome_buckets.append(
+            {
+                **bucket,
+                "item_scope": (
+                    "all_matching_turns"
+                    if include_completed
+                    else "likely_failure_subset"
+                ),
+                "outcome_label_rates_pct": {
+                    f"{label_name}_rate_pct": _format_turn_execution_rate(
+                        int(outcome_label_counts.get(label_name) or 0),
+                        scanned_count,
+                    )
+                    for label_name in _TURN_EXECUTION_OUTCOME_LABEL_NAMES
+                },
+                "pre_dispatch_observed_count": len(durations),
+                "avg_pre_dispatch_duration_ms": (
+                    round(sum(durations) / len(durations), 2)
+                    if durations
+                    else None
+                ),
+                "p95_pre_dispatch_duration_ms": _compute_percentile(durations, 95),
+            }
+        )
+
+    latency_views = {
+        "summary": latency_summary,
+        "pre_dispatch_step_breakdown": pre_dispatch_step_breakdown,
+    }
+    trend_views = {
+        "bucket_granularity": "day",
+        "item_scope": "all_matching_turns" if include_completed else "likely_failure_subset",
+        "turn_outcome_buckets": turn_outcome_buckets,
+    }
+    return latency_views, trend_views
+
+
+def _build_selector_regression_assessment(
+    *,
+    selector_metrics: Mapping[str, Any],
+    baseline_selector_accuracy_pct: Any,
+    baseline_selector_misrouting_rate_pct: Any,
+    regression_tolerance_pct: Any,
+) -> dict[str, Any]:
+    tolerance = _safe_float_or_none(regression_tolerance_pct)
+    if tolerance is None or tolerance < 0:
+        tolerance = 0.0
+
+    comparisons: list[dict[str, Any]] = []
+    regression_detected = False
+
+    current_accuracy_pct = _safe_float_or_none(selector_metrics.get("selector_accuracy_pct"))
+    baseline_accuracy_pct = _safe_float_or_none(baseline_selector_accuracy_pct)
+    if current_accuracy_pct is not None and baseline_accuracy_pct is not None:
+        min_expected_accuracy_pct = round(max(0.0, baseline_accuracy_pct - tolerance), 2)
+        accuracy_regressed = current_accuracy_pct < min_expected_accuracy_pct
+        regression_detected = regression_detected or accuracy_regressed
+        comparisons.append(
+            {
+                "metric": "selector_accuracy_pct",
+                "baseline_pct": round(baseline_accuracy_pct, 2),
+                "current_pct": round(current_accuracy_pct, 2),
+                "delta_pct": round(current_accuracy_pct - baseline_accuracy_pct, 2),
+                "min_expected_pct": min_expected_accuracy_pct,
+                "regressed": accuracy_regressed,
+            }
+        )
+
+    outcome_label_rates_raw = selector_metrics.get("outcome_label_rates_pct")
+    outcome_label_rates = (
+        outcome_label_rates_raw if isinstance(outcome_label_rates_raw, Mapping) else {}
+    )
+    current_misrouting_rate_pct = _safe_float_or_none(
+        outcome_label_rates.get("tool_or_workflow_misrouting_rate_pct")
+    )
+    baseline_misrouting_rate_pct = _safe_float_or_none(
+        baseline_selector_misrouting_rate_pct
+    )
+    if current_misrouting_rate_pct is not None and baseline_misrouting_rate_pct is not None:
+        max_expected_misrouting_rate_pct = round(
+            baseline_misrouting_rate_pct + tolerance,
+            2,
+        )
+        misrouting_regressed = current_misrouting_rate_pct > max_expected_misrouting_rate_pct
+        regression_detected = regression_detected or misrouting_regressed
+        comparisons.append(
+            {
+                "metric": "selector_misrouting_rate_pct",
+                "baseline_pct": round(baseline_misrouting_rate_pct, 2),
+                "current_pct": round(current_misrouting_rate_pct, 2),
+                "delta_pct": round(
+                    current_misrouting_rate_pct - baseline_misrouting_rate_pct,
+                    2,
+                ),
+                "max_expected_pct": max_expected_misrouting_rate_pct,
+                "regressed": misrouting_regressed,
+            }
+        )
+
+    return {
+        "baseline_provided": len(comparisons) > 0,
+        "regression_tolerance_pct": round(tolerance, 2),
+        "regression_detected": regression_detected,
+        "comparisons": comparisons,
+    }
+
+
+def _build_latency_regression_assessment(
+    *,
+    latency_summary: Mapping[str, Any],
+    baseline_pre_dispatch_avg_duration_ms: Any,
+    baseline_pre_dispatch_p95_duration_ms: Any,
+    latency_regression_tolerance_pct: Any,
+) -> dict[str, Any]:
+    tolerance_pct = _safe_float_or_none(latency_regression_tolerance_pct)
+    if tolerance_pct is None or tolerance_pct < 0:
+        tolerance_pct = 0.0
+
+    comparisons: list[dict[str, Any]] = []
+    regression_detected = False
+
+    def _add_latency_comparison(
+        *,
+        metric_name: str,
+        current_value_raw: Any,
+        baseline_value_raw: Any,
+    ) -> None:
+        nonlocal regression_detected
+        current_value = _safe_float_or_none(current_value_raw)
+        baseline_value = _safe_float_or_none(baseline_value_raw)
+        if current_value is None or baseline_value is None:
+            return
+        max_expected_value = round(
+            baseline_value * (1.0 + (tolerance_pct / 100.0)),
+            2,
+        )
+        delta_ms = round(current_value - baseline_value, 2)
+        delta_pct = (
+            round((delta_ms / baseline_value) * 100.0, 2)
+            if baseline_value > 0
+            else None
+        )
+        regressed = current_value > max_expected_value
+        regression_detected = regression_detected or regressed
+        comparisons.append(
+            {
+                "metric": metric_name,
+                "baseline_ms": round(baseline_value, 2),
+                "current_ms": round(current_value, 2),
+                "delta_ms": delta_ms,
+                "delta_pct": delta_pct,
+                "max_expected_ms": max_expected_value,
+                "regressed": regressed,
+            }
+        )
+
+    _add_latency_comparison(
+        metric_name="avg_pre_dispatch_duration_ms",
+        current_value_raw=latency_summary.get("avg_pre_dispatch_duration_ms"),
+        baseline_value_raw=baseline_pre_dispatch_avg_duration_ms,
+    )
+    _add_latency_comparison(
+        metric_name="p95_pre_dispatch_duration_ms",
+        current_value_raw=latency_summary.get("p95_pre_dispatch_duration_ms"),
+        baseline_value_raw=baseline_pre_dispatch_p95_duration_ms,
+    )
+
+    return {
+        "baseline_provided": len(comparisons) > 0,
+        "latency_regression_tolerance_pct": round(tolerance_pct, 2),
+        "regression_detected": regression_detected,
+        "comparisons": comparisons,
+    }
+
+
+def _build_measurement_dashboard_signal_summary(
+    signals: Sequence[Mapping[str, Any]],
+) -> dict[str, int]:
+    return {
+        "pass_count": sum(1 for signal in signals if signal.get("status") == "pass"),
+        "fail_count": sum(1 for signal in signals if signal.get("status") == "fail"),
+        "not_evaluated_count": sum(
+            1 for signal in signals if signal.get("status") == "not_evaluated"
+        ),
+        "total_count": len(signals),
+    }
+
+
+def _build_execution_dashboard_summary_cards(
+    *,
+    turn_metrics: Mapping[str, Any],
+    selector_metrics: Mapping[str, Any],
+    latency_summary: Mapping[str, Any],
+    turn_regression_assessment: Mapping[str, Any],
+    selector_regression_assessment: Mapping[str, Any],
+    latency_regression_assessment: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    turn_outcome_rates_raw = turn_metrics.get("outcome_label_rates_pct")
+    turn_outcome_rates = (
+        turn_outcome_rates_raw if isinstance(turn_outcome_rates_raw, Mapping) else {}
+    )
+    selector_outcome_rates_raw = selector_metrics.get("outcome_label_rates_pct")
+    selector_outcome_rates = (
+        selector_outcome_rates_raw
+        if isinstance(selector_outcome_rates_raw, Mapping)
+        else {}
+    )
+
+    def _comparison_for(
+        assessment: Mapping[str, Any],
+        metric_name: str,
+    ) -> Mapping[str, Any]:
+        comparisons_raw = assessment.get("comparisons")
+        comparisons = comparisons_raw if isinstance(comparisons_raw, list) else []
+        for raw in comparisons:
+            if not isinstance(raw, Mapping):
+                continue
+            if str(raw.get("metric")).strip() == metric_name:
+                return raw
+        return {}
+
+    def _card(
+        *,
+        card_id: str,
+        title: str,
+        value: Any,
+        unit: str,
+        comparison: Mapping[str, Any] | None = None,
+        status: str = "info",
+    ) -> dict[str, Any]:
+        payload = {
+            "card_id": card_id,
+            "title": title,
+            "value": value,
+            "unit": unit,
+            "status": status,
+        }
+        if isinstance(comparison, Mapping) and comparison:
+            payload["comparison"] = dict(comparison)
+            if bool(comparison.get("regressed")):
+                payload["status"] = "fail"
+            elif comparison.get("baseline_pct") is not None or comparison.get(
+                "baseline_ms"
+            ) is not None:
+                payload["status"] = "pass"
+        return payload
+
+    cards = [
+        _card(
+            card_id="successful_completion_rate",
+            title="Successful completion rate",
+            value=turn_outcome_rates.get("successful_completion_rate_pct"),
+            unit="pct",
+        ),
+        _card(
+            card_id="false_success_rate",
+            title="False success rate",
+            value=turn_metrics.get("false_success_rate_pct"),
+            unit="pct",
+            comparison=_comparison_for(
+                turn_regression_assessment,
+                "false_success_rate_pct",
+            ),
+            status=(
+                "pass"
+                if float(turn_metrics.get("false_success_rate_pct") or 0.0) <= 0.0
+                else "warn"
+            ),
+        ),
+        _card(
+            card_id="unresolved_follow_up_rate",
+            title="Unresolved follow-up rate",
+            value=turn_metrics.get("unresolved_follow_up_rate_pct"),
+            unit="pct",
+            comparison=_comparison_for(
+                turn_regression_assessment,
+                "unresolved_follow_up_rate_pct",
+            ),
+        ),
+        _card(
+            card_id="selector_accuracy",
+            title="Selector accuracy",
+            value=selector_metrics.get("selector_accuracy_pct"),
+            unit="pct",
+            comparison=_comparison_for(
+                selector_regression_assessment,
+                "selector_accuracy_pct",
+            ),
+        ),
+        _card(
+            card_id="selector_misrouting_rate",
+            title="Selector misrouting rate",
+            value=selector_outcome_rates.get("tool_or_workflow_misrouting_rate_pct"),
+            unit="pct",
+            comparison=_comparison_for(
+                selector_regression_assessment,
+                "selector_misrouting_rate_pct",
+            ),
+            status=(
+                "pass"
+                if float(
+                    selector_outcome_rates.get("tool_or_workflow_misrouting_rate_pct")
+                    or 0.0
+                )
+                <= 0.0
+                else "warn"
+            ),
+        ),
+        _card(
+            card_id="avg_pre_dispatch_duration",
+            title="Average pre-dispatch duration",
+            value=latency_summary.get("avg_pre_dispatch_duration_ms"),
+            unit="ms",
+            comparison=_comparison_for(
+                latency_regression_assessment,
+                "avg_pre_dispatch_duration_ms",
+            ),
+        ),
+    ]
+    return cards
+
+
+def _normalise_recommendation_rows(value: Any) -> list[dict[str, Any]]:
+    rows = value if isinstance(value, list) else []
+    normalised: list[dict[str, Any]] = []
+    for raw in rows:
+        if not isinstance(raw, Mapping):
+            continue
+        entry = dict(raw)
+        priority = entry.get("priority")
+        if not isinstance(priority, str) or not priority.strip():
+            entry["priority"] = "medium"
+        normalised.append(entry)
+    return normalised
+
+
+def _combine_dashboard_recommendations(
+    *,
+    turn_report: Mapping[str, Any],
+    selector_report: Mapping[str, Any],
+    latency_regression_assessment: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    recommendations: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+
+    for source_name, report in (
+        ("turn_execution", turn_report),
+        ("selector_routing", selector_report),
+    ):
+        for recommendation in _normalise_recommendation_rows(
+            report.get("recommendations")
+        ):
+            summary = str(recommendation.get("summary") or "").strip()
+            recommendation_id = str(recommendation.get("recommendation_id") or "").strip()
+            dedupe_key = recommendation_id or summary
+            if not dedupe_key or dedupe_key in seen_keys:
+                continue
+            seen_keys.add(dedupe_key)
+            recommendations.append(
+                {
+                    **recommendation,
+                    "source_surface": source_name,
+                }
+            )
+
+    if bool(latency_regression_assessment.get("regression_detected")):
+        comparisons_raw = latency_regression_assessment.get("comparisons")
+        comparisons = comparisons_raw if isinstance(comparisons_raw, list) else []
+        recommendations.append(
+            {
+                "recommendation_id": "inspect_pre_dispatch_latency_regressions",
+                "priority": "high",
+                "summary": (
+                    "Inspect the slowest pre-dispatch steps and convert repeated latency spikes into regression gates or workflow/runtime fixes."
+                ),
+                "details": {
+                    "comparisons": [
+                        dict(comparison)
+                        for comparison in comparisons
+                        if isinstance(comparison, Mapping) and comparison.get("regressed")
+                    ]
+                },
+                "source_surface": "pre_dispatch_latency",
+            }
+        )
+
+    return recommendations
+
+
 def _turn_execution_build_benchmark(**kwargs):
     from ...services.turn_execution_record_service import (
         TURN_EXECUTION_CORRECTNESS_SCHEMA_VERSION,
@@ -8845,11 +9507,7 @@ def _turn_execution_build_benchmark(**kwargs):
                 failure_mode_counts[key_text] = 0
 
     outcome_label_counts = {
-        "successful_completion": 0,
-        "false_success": 0,
-        "unresolved_follow_up_needed": 0,
-        "tool_or_workflow_misrouting": 0,
-        "abstain_escalate_no_safe_route": 0,
+        label_name: 0 for label_name in _TURN_EXECUTION_OUTCOME_LABEL_NAMES
     }
     overall_outcome_counts: dict[str, int] = {}
     for item in sorted_items:
@@ -8873,6 +9531,10 @@ def _turn_execution_build_benchmark(**kwargs):
             overall_outcome_counts[overall_outcome] = (
                 overall_outcome_counts.get(overall_outcome, 0) + 1
             )
+    latency_views, trend_views = _build_turn_execution_latency_and_trend_views(
+        sorted_items,
+        include_completed=include_completed,
+    )
     filters_payload = {
         "namespace": kwargs.get("namespace"),
         "limit": kwargs.get("limit"),
@@ -8948,7 +9610,7 @@ def _turn_execution_build_benchmark(**kwargs):
         "overall_outcome_counts": overall_outcome_counts,
         "metric_schema": {
             "summary_schema_version": TURN_EXECUTION_CORRECTNESS_SCHEMA_VERSION,
-            "outcome_labels": list(outcome_label_counts.keys()),
+            "outcome_labels": list(_TURN_EXECUTION_OUTCOME_LABEL_NAMES),
         },
         "decision_counts": (
             result.get("decision_counts")
@@ -8957,6 +9619,11 @@ def _turn_execution_build_benchmark(**kwargs):
         ),
         "workflow_counts": workflow_counts,
         "workflow_failure_counts": workflow_failure_counts,
+        "latency_metrics": (
+            latency_views.get("summary")
+            if isinstance(latency_views.get("summary"), Mapping)
+            else {}
+        ),
     }
     regression_assessment = _build_turn_execution_regression_assessment(
         metrics=metrics_payload,
@@ -9004,6 +9671,8 @@ def _turn_execution_build_benchmark(**kwargs):
             if isinstance(result.get("recommendations"), list)
             else _derive_turn_execution_failure_recommendations(failure_mode_counts)
         ),
+        "latency_views": latency_views,
+        "trend_views": trend_views,
         "effective_namespace": result.get("effective_namespace"),
         "effective_namespace_source": result.get("effective_namespace_source"),
         "namespace": result.get("namespace"),
@@ -9062,6 +9731,260 @@ def _turn_execution_build_selector_benchmark(**kwargs):
         payload=result,
         item_kind="selector_routing_benchmark_report",
         source_system=source_system,
+    )
+
+
+def _turn_execution_build_dashboard(**kwargs):
+    include_completed = kwargs.get("include_completed")
+    if include_completed is None:
+        include_completed = True
+
+    turn_execution_kwargs = {
+        "namespace": kwargs.get("namespace"),
+        "limit": kwargs.get("limit"),
+        "offset": kwargs.get("offset"),
+        "decision": kwargs.get("decision"),
+        "decisions": kwargs.get("decisions"),
+        "workflow_id": kwargs.get("workflow_id"),
+        "requires_follow_up": kwargs.get("requires_follow_up"),
+        "prompt_contains": kwargs.get("prompt_contains"),
+        "from_utc": kwargs.get("from_utc"),
+        "to_utc": kwargs.get("to_utc"),
+        "include_completed": bool(include_completed),
+        "max_cases": kwargs.get("max_cases"),
+        "jira_base_url": kwargs.get("jira_base_url"),
+        "baseline_likely_failure_rate_pct": kwargs.get(
+            "baseline_likely_failure_rate_pct"
+        ),
+        "baseline_false_success_rate_pct": kwargs.get(
+            "baseline_false_success_rate_pct"
+        ),
+        "baseline_unresolved_follow_up_rate_pct": kwargs.get(
+            "baseline_unresolved_follow_up_rate_pct"
+        ),
+        "regression_tolerance_pct": kwargs.get("regression_tolerance_pct"),
+    }
+    turn_execution_report = _turn_execution_build_benchmark(**turn_execution_kwargs)
+    if not isinstance(turn_execution_report, dict):
+        return turn_execution_report
+    if not turn_execution_report.get("success", False):
+        return turn_execution_report
+
+    selector_kwargs = {
+        "case_set": kwargs.get("selector_case_set"),
+        "max_cases": kwargs.get("selector_max_cases"),
+        "bundle_path": kwargs.get("selector_bundle_path"),
+    }
+    selector_report = _turn_execution_build_selector_benchmark(**selector_kwargs)
+    if not isinstance(selector_report, dict):
+        return selector_report
+    if not selector_report.get("success", False):
+        return selector_report
+
+    turn_metrics_raw = turn_execution_report.get("metrics")
+    turn_metrics = turn_metrics_raw if isinstance(turn_metrics_raw, Mapping) else {}
+    selector_metrics_raw = selector_report.get("metrics")
+    selector_metrics = (
+        selector_metrics_raw if isinstance(selector_metrics_raw, Mapping) else {}
+    )
+    latency_views_raw = turn_execution_report.get("latency_views")
+    latency_views = latency_views_raw if isinstance(latency_views_raw, Mapping) else {}
+    latency_summary_raw = latency_views.get("summary")
+    latency_summary = (
+        latency_summary_raw if isinstance(latency_summary_raw, Mapping) else {}
+    )
+
+    selector_regression_assessment = _build_selector_regression_assessment(
+        selector_metrics=selector_metrics,
+        baseline_selector_accuracy_pct=kwargs.get("baseline_selector_accuracy_pct"),
+        baseline_selector_misrouting_rate_pct=kwargs.get(
+            "baseline_selector_misrouting_rate_pct"
+        ),
+        regression_tolerance_pct=kwargs.get("regression_tolerance_pct"),
+    )
+    latency_regression_assessment = _build_latency_regression_assessment(
+        latency_summary=latency_summary,
+        baseline_pre_dispatch_avg_duration_ms=kwargs.get(
+            "baseline_pre_dispatch_avg_duration_ms"
+        ),
+        baseline_pre_dispatch_p95_duration_ms=kwargs.get(
+            "baseline_pre_dispatch_p95_duration_ms"
+        ),
+        latency_regression_tolerance_pct=kwargs.get(
+            "latency_regression_tolerance_pct"
+        ),
+    )
+
+    turn_regression_assessment_raw = turn_execution_report.get("regression_assessment")
+    turn_regression_assessment = (
+        turn_regression_assessment_raw
+        if isinstance(turn_regression_assessment_raw, Mapping)
+        else {}
+    )
+
+    combined_signals: list[dict[str, Any]] = []
+    for source_surface, report in (
+        ("turn_execution", turn_execution_report),
+        ("selector_routing", selector_report),
+    ):
+        signals_raw = report.get("benchmark_signals")
+        signals = signals_raw if isinstance(signals_raw, list) else []
+        for raw_signal in signals:
+            if not isinstance(raw_signal, Mapping):
+                continue
+            combined_signals.append({**raw_signal, "source_surface": source_surface})
+
+    if bool(latency_regression_assessment.get("baseline_provided")):
+        combined_signals.append(
+            {
+                "signal_id": "pre_dispatch_latency_vs_baseline",
+                "dimension": "pre_dispatch_latency",
+                "title": "Pre-dispatch latency remains within configured baseline tolerance",
+                "status": (
+                    "fail"
+                    if bool(latency_regression_assessment.get("regression_detected"))
+                    else "pass"
+                ),
+                "passed": not bool(
+                    latency_regression_assessment.get("regression_detected")
+                ),
+                "details": {
+                    "comparisons": latency_regression_assessment.get("comparisons") or []
+                },
+                "source_surface": "pre_dispatch_latency",
+            }
+        )
+
+    active_regressions: list[dict[str, Any]] = []
+    for source_surface, assessment in (
+        ("turn_execution", turn_regression_assessment),
+        ("selector_routing", selector_regression_assessment),
+        ("pre_dispatch_latency", latency_regression_assessment),
+    ):
+        comparisons_raw = assessment.get("comparisons")
+        comparisons = comparisons_raw if isinstance(comparisons_raw, list) else []
+        for raw_comparison in comparisons:
+            if not isinstance(raw_comparison, Mapping):
+                continue
+            if not bool(raw_comparison.get("regressed")):
+                continue
+            active_regressions.append(
+                {
+                    **raw_comparison,
+                    "source_surface": source_surface,
+                }
+            )
+
+    summary_cards = _build_execution_dashboard_summary_cards(
+        turn_metrics=turn_metrics,
+        selector_metrics=selector_metrics,
+        latency_summary=latency_summary,
+        turn_regression_assessment=turn_regression_assessment,
+        selector_regression_assessment=selector_regression_assessment,
+        latency_regression_assessment=latency_regression_assessment,
+    )
+    recommendations = _combine_dashboard_recommendations(
+        turn_report=turn_execution_report,
+        selector_report=selector_report,
+        latency_regression_assessment=latency_regression_assessment,
+    )
+
+    payload = {
+        "collection": "turn_execution_dashboard",
+        "dashboard_generated_at_utc": _utc_now_iso(),
+        "filters": {
+            "turn_execution": turn_execution_report.get("filters"),
+            "selector_routing": selector_report.get("filters"),
+            "selector_case_set": kwargs.get("selector_case_set"),
+            "selector_bundle_path": kwargs.get("selector_bundle_path"),
+            "selector_max_cases": kwargs.get("selector_max_cases"),
+            "baseline_selector_accuracy_pct": kwargs.get(
+                "baseline_selector_accuracy_pct"
+            ),
+            "baseline_selector_misrouting_rate_pct": kwargs.get(
+                "baseline_selector_misrouting_rate_pct"
+            ),
+            "baseline_pre_dispatch_avg_duration_ms": kwargs.get(
+                "baseline_pre_dispatch_avg_duration_ms"
+            ),
+            "baseline_pre_dispatch_p95_duration_ms": kwargs.get(
+                "baseline_pre_dispatch_p95_duration_ms"
+            ),
+            "latency_regression_tolerance_pct": kwargs.get(
+                "latency_regression_tolerance_pct"
+            ),
+        },
+        "overview": {
+            "turn_execution": {
+                "benchmark_fingerprint": turn_execution_report.get(
+                    "benchmark_fingerprint"
+                ),
+                "scanned_count": turn_metrics.get("scanned_count"),
+                "likely_failure_rate_pct": turn_metrics.get("likely_failure_rate_pct"),
+                "false_success_rate_pct": turn_metrics.get("false_success_rate_pct"),
+                "unresolved_follow_up_rate_pct": turn_metrics.get(
+                    "unresolved_follow_up_rate_pct"
+                ),
+            },
+            "selector_routing": {
+                "benchmark_fingerprint": selector_report.get("benchmark_fingerprint"),
+                "scanned_count": selector_metrics.get("scanned_count"),
+                "selector_accuracy_pct": selector_metrics.get("selector_accuracy_pct"),
+                "selector_misrouting_rate_pct": (
+                    selector_metrics.get("outcome_label_rates_pct", {}).get(
+                        "tool_or_workflow_misrouting_rate_pct"
+                    )
+                    if isinstance(selector_metrics.get("outcome_label_rates_pct"), Mapping)
+                    else None
+                ),
+            },
+            "pre_dispatch_latency": latency_summary,
+        },
+        "summary_cards": summary_cards,
+        "regression_views": {
+            "turn_execution": turn_regression_assessment,
+            "selector_routing": selector_regression_assessment,
+            "pre_dispatch_latency": latency_regression_assessment,
+            "active_regressions": active_regressions,
+        },
+        "trend_views": turn_execution_report.get("trend_views") or {},
+        "latency_views": latency_views,
+        "drilldowns": {
+            "turn_execution_replay_cases": turn_execution_report.get("replay_cases") or [],
+            "selector_replay_cases": selector_report.get("replay_cases") or [],
+            "turn_execution_triage_index": turn_execution_report.get("triage_index")
+            or {},
+        },
+        "benchmark_signals": combined_signals,
+        "benchmark_signal_summary": _build_measurement_dashboard_signal_summary(
+            combined_signals
+        ),
+        "recommendations": recommendations,
+        "data_sources": {
+            "turn_execution_report": {
+                "item_kind": turn_execution_report.get("provenance", {}).get(
+                    "item_kind"
+                )
+                if isinstance(turn_execution_report.get("provenance"), Mapping)
+                else None,
+                "benchmark_fingerprint": turn_execution_report.get(
+                    "benchmark_fingerprint"
+                ),
+            },
+            "selector_report": {
+                "item_kind": selector_report.get("provenance", {}).get("item_kind")
+                if isinstance(selector_report.get("provenance"), Mapping)
+                else None,
+                "benchmark_fingerprint": selector_report.get("benchmark_fingerprint"),
+                "corpus": selector_report.get("corpus") or {},
+            },
+        },
+        "success": True,
+    }
+    return _with_rag_provenance(
+        payload=payload,
+        item_kind="turn_execution_dashboard_report",
+        source_system="composite.turn_execution_dashboard",
     )
 
 
@@ -22269,6 +23192,49 @@ def build_default_catalogue() -> MethodCatalogue:
             category="read",
             description=(
                 "Evaluate workflow selector routing against a reviewable benchmark corpus while emitting the shared execution-correctness outcome labels."
+            ),
+        ),
+        MethodDefinition(
+            name="turn_execution_build_dashboard",
+            handler=_turn_execution_build_dashboard,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "namespace": (str, type(None)),
+                    "limit": (int,),
+                    "offset": (int,),
+                    "decision": (str, type(None)),
+                    "decisions": (list,),
+                    "workflow_id": (str, type(None)),
+                    "requires_follow_up": (bool,),
+                    "prompt_contains": (str, type(None)),
+                    "from_utc": (str, type(None)),
+                    "to_utc": (str, type(None)),
+                    "include_completed": (bool,),
+                    "max_cases": (int,),
+                    "jira_base_url": (str, type(None)),
+                    "baseline_likely_failure_rate_pct": (int, float),
+                    "baseline_false_success_rate_pct": (int, float),
+                    "baseline_unresolved_follow_up_rate_pct": (int, float),
+                    "regression_tolerance_pct": (int, float),
+                    "selector_case_set": (str, type(None)),
+                    "selector_max_cases": (int,),
+                    "selector_bundle_path": (str, type(None)),
+                    "baseline_selector_accuracy_pct": (int, float),
+                    "baseline_selector_misrouting_rate_pct": (int, float),
+                    "baseline_pre_dispatch_avg_duration_ms": (int, float),
+                    "baseline_pre_dispatch_p95_duration_ms": (int, float),
+                    "latency_regression_tolerance_pct": (int, float),
+                },
+                allow_unknown=True,
+                description=(
+                    "Build a coherent dashboard and regression report across turn execution outcomes, selector routing, and pre-dispatch latency attribution."
+                ),
+            ),
+            output_schema=None,
+            category="read",
+            description=(
+                "Generate dashboards and regression views for selector accuracy, intent completion, false success, and pre-dispatch latency."
             ),
         ),
         MethodDefinition(

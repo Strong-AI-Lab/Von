@@ -322,6 +322,176 @@ def _build_hesitancy_trace_docs() -> list[dict[str, Any]]:
     ]
 
 
+def _build_dashboard_trace_docs() -> list[dict[str, Any]]:
+    return [
+        {
+            "request_id": "req-dash-1",
+            "session_id": "chat-dash-1",
+            "namespace": "#V#user@org",
+            "created_at_utc": "2026-02-20T00:00:00Z",
+            "completion_gate": {
+                "decision": "escalation_required",
+                "decision_reason": "Required mutation was not executed.",
+                "safe_to_claim_completion": False,
+                "requires_follow_up": True,
+                "blocking_effect_ids": ["effect_1"],
+            },
+            "required_effects": [{"effect_id": "effect_1", "status": "not_executed"}],
+            "workflow_selection": {
+                "selected_workflow_id": "#V#tool_calling_workflow",
+                "selector_verdict": "tool_seeking",
+            },
+            "workflow_routing_diagnostics": {
+                "schema_version": "workflow_routing_diagnostics.v1",
+                "dispatch": {
+                    "selected_execution_mode": "tool_pipeline",
+                    "pre_dispatch": {
+                        "step_count": 2,
+                        "completed_step_count": 2,
+                        "failed_step_count": 0,
+                        "total_duration_ms": 18,
+                        "slowest_step_id": "selector_candidate_preparation",
+                        "slowest_step_label": "Prepare selector candidates",
+                        "slowest_step_duration_ms": 11,
+                        "steps": [
+                            {
+                                "step_id": "workflow_model_policy",
+                                "step_label": "Load routing model policy",
+                                "status": "completed",
+                                "duration_ms": 7,
+                            },
+                            {
+                                "step_id": "selector_candidate_preparation",
+                                "step_label": "Prepare selector candidates",
+                                "status": "completed",
+                                "duration_ms": 11,
+                            },
+                        ],
+                    },
+                },
+            },
+            "prompt": {"preview": "JVNAUTOSCI-1429 pre-dispatch gap example"},
+            "critic": {"summary": {"not_verified_count": 1}},
+            "final_response": {
+                "completion_claim_detected": True,
+                "completion_claim_validated": False,
+            },
+        },
+        {
+            "request_id": "req-dash-2",
+            "session_id": "chat-dash-2",
+            "namespace": "#V#user@org",
+            "created_at_utc": "2026-02-21T00:10:00Z",
+            "completion_gate": {
+                "decision": "completed",
+                "decision_reason": "No blocking effect detected.",
+                "safe_to_claim_completion": True,
+                "requires_follow_up": False,
+                "blocking_effect_ids": [],
+            },
+            "required_effects": [],
+            "workflow_selection": {
+                "selected_workflow_id": "#V#sail_phd_student_onboarding_workflow",
+                "selector_verdict": "rag_selected",
+            },
+            "workflow_routing_diagnostics": {
+                "schema_version": "workflow_routing_diagnostics.v1",
+                "dispatch": {
+                    "selected_execution_mode": "custom_workflow",
+                    "dispatch_terminal_status": "failed",
+                    "dispatch_terminal_failure_reason": "metadata_validation_failed",
+                    "zero_tool_reason_code": (
+                        "custom_workflow_failed_before_tool_invocation"
+                    ),
+                    "pre_dispatch": {
+                        "step_count": 2,
+                        "completed_step_count": 2,
+                        "failed_step_count": 0,
+                        "total_duration_ms": 33,
+                        "slowest_step_id": "selector_candidate_preparation",
+                        "slowest_step_label": "Prepare selector candidates",
+                        "slowest_step_duration_ms": 20,
+                        "steps": [
+                            {
+                                "step_id": "workflow_model_policy",
+                                "step_label": "Load routing model policy",
+                                "status": "completed",
+                                "duration_ms": 13,
+                            },
+                            {
+                                "step_id": "selector_candidate_preparation",
+                                "step_label": "Prepare selector candidates",
+                                "status": "completed",
+                                "duration_ms": 20,
+                            },
+                        ],
+                    },
+                },
+            },
+            "prompt": {"preview": "Materialise the onboarding workflow"},
+            "critic": {"summary": {"not_verified_count": 0}},
+            "final_response": {
+                "completion_claim_detected": False,
+                "completion_claim_validated": True,
+            },
+        },
+        {
+            "request_id": "req-dash-3",
+            "session_id": "chat-dash-3",
+            "namespace": "#V#user@org",
+            "created_at_utc": "2026-02-21T00:20:00Z",
+            "completion_gate": {
+                "decision": "completed",
+                "decision_reason": "No blocking effect detected.",
+                "safe_to_claim_completion": True,
+                "requires_follow_up": False,
+                "blocking_effect_ids": [],
+            },
+            "required_effects": [],
+            "workflow_selection": {
+                "selected_workflow_id": "#V#tool_calling_workflow",
+                "selector_verdict": "tool_seeking",
+            },
+            "workflow_routing_diagnostics": {
+                "schema_version": "workflow_routing_diagnostics.v1",
+                "dispatch": {
+                    "selected_execution_mode": "tool_pipeline",
+                    "dispatch_terminal_status": "completed",
+                    "pre_dispatch": {
+                        "step_count": 2,
+                        "completed_step_count": 2,
+                        "failed_step_count": 0,
+                        "total_duration_ms": 12,
+                        "slowest_step_id": "selector_candidate_preparation",
+                        "slowest_step_label": "Prepare selector candidates",
+                        "slowest_step_duration_ms": 7,
+                        "steps": [
+                            {
+                                "step_id": "workflow_model_policy",
+                                "step_label": "Load routing model policy",
+                                "status": "completed",
+                                "duration_ms": 5,
+                            },
+                            {
+                                "step_id": "selector_candidate_preparation",
+                                "step_label": "Prepare selector candidates",
+                                "status": "completed",
+                                "duration_ms": 7,
+                            },
+                        ],
+                    },
+                },
+            },
+            "prompt": {"preview": "Update the workflow metadata"},
+            "critic": {"summary": {"not_verified_count": 0}},
+            "final_response": {
+                "completion_claim_detected": False,
+                "completion_claim_validated": True,
+            },
+        },
+    ]
+
+
 def test_rag_list_indexed_supports_turn_execution_records(monkeypatch):
     from src.backend.integrations.internal_mcp import catalogue as cat
 
@@ -1271,6 +1441,59 @@ def test_turn_execution_build_benchmark_reports_gap_when_no_records(monkeypatch)
     assert any(gap.get("gap_id") == "no_turn_execution_records" for gap in capability_gaps)
 
 
+def test_turn_execution_build_benchmark_includes_latency_and_trend_views(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    coll = _TurnExecutionCollection(_build_dashboard_trace_docs())
+    monkeypatch.setattr(
+        "src.backend.db.connection_manager.get_db",
+        lambda: _DB({"turn_execution_records": coll}),
+    )
+
+    result = cat._turn_execution_build_benchmark(
+        namespace="#V#user@org",
+        limit=20,
+        offset=0,
+        include_completed=True,
+        max_cases=3,
+    )
+
+    assert result["success"] is True
+
+    metrics = result.get("metrics")
+    assert isinstance(metrics, dict)
+    latency_metrics = metrics.get("latency_metrics")
+    assert isinstance(latency_metrics, dict)
+    assert latency_metrics.get("observed_pre_dispatch_count") == 3
+    assert latency_metrics.get("avg_pre_dispatch_duration_ms") == 21.0
+    assert latency_metrics.get("max_pre_dispatch_duration_ms") == 33
+    assert latency_metrics.get("slowest_request_id") == "req-dash-2"
+
+    latency_views = result.get("latency_views")
+    assert isinstance(latency_views, dict)
+    step_breakdown = latency_views.get("pre_dispatch_step_breakdown")
+    assert isinstance(step_breakdown, list)
+    selector_step = next(
+        step for step in step_breakdown if step.get("step_id") == "selector_candidate_preparation"
+    )
+    assert selector_step.get("observed_count") == 3
+    assert selector_step.get("slowest_request_id") == "req-dash-2"
+
+    trend_views = result.get("trend_views")
+    assert isinstance(trend_views, dict)
+    assert trend_views.get("bucket_granularity") == "day"
+    buckets = trend_views.get("turn_outcome_buckets")
+    assert isinstance(buckets, list)
+    assert len(buckets) == 2
+    assert buckets[0].get("bucket_id") == "2026-02-20"
+    assert buckets[0].get("scanned_count") == 1
+    assert buckets[1].get("bucket_id") == "2026-02-21"
+    assert buckets[1].get("scanned_count") == 2
+    assert buckets[1].get("outcome_label_counts", {}).get("false_success") == 1
+    assert buckets[1].get("outcome_label_counts", {}).get("successful_completion") == 1
+    assert buckets[1].get("avg_pre_dispatch_duration_ms") == 22.5
+
+
 def test_turn_execution_build_benchmark_hesitancy_trace_gateway_e2e(monkeypatch):
     docs = _build_hesitancy_trace_docs()
     coll = _TurnExecutionCollection(docs)
@@ -1428,6 +1651,84 @@ def test_turn_execution_build_selector_benchmark_gateway_e2e():
     assert signal_by_id["selector_benchmark_corpus_present"]["status"] == "pass"
     assert signal_by_id["selector_accuracy_not_worse_than_baseline"]["status"] == "pass"
     assert signal_by_id["abstain_cases_routed_safely"]["status"] == "pass"
+
+
+def test_turn_execution_build_dashboard_gateway_e2e(monkeypatch):
+    docs = _build_dashboard_trace_docs()
+    coll = _TurnExecutionCollection(docs)
+    monkeypatch.setattr(
+        "src.backend.db.connection_manager.get_db",
+        lambda: _DB({"turn_execution_records": coll}),
+    )
+
+    gateway = _build_gateway()
+    payload = gateway.invoke(
+        "turn_execution_build_dashboard",
+        {
+            "namespace": "#V#user@org",
+            "limit": 20,
+            "offset": 0,
+            "include_completed": True,
+            "max_cases": 3,
+            "selector_case_set": "phase1_seed",
+            "baseline_false_success_rate_pct": 0.0,
+            "baseline_selector_accuracy_pct": 90.0,
+            "baseline_pre_dispatch_avg_duration_ms": 15.0,
+            "regression_tolerance_pct": 1.0,
+            "latency_regression_tolerance_pct": 10.0,
+        },
+    ).payload
+
+    assert payload["success"] is True
+    assert payload["collection"] == "turn_execution_dashboard"
+    assert payload["provenance"]["item_kind"] == "turn_execution_dashboard_report"
+
+    overview = payload.get("overview")
+    assert isinstance(overview, dict)
+    assert overview.get("turn_execution", {}).get("false_success_rate_pct") == 33.33
+    assert overview.get("selector_routing", {}).get("selector_accuracy_pct") == 80.0
+    assert overview.get("pre_dispatch_latency", {}).get(
+        "avg_pre_dispatch_duration_ms"
+    ) == 21.0
+
+    summary_cards = payload.get("summary_cards")
+    assert isinstance(summary_cards, list)
+    card_by_id = {
+        card.get("card_id"): card for card in summary_cards if isinstance(card, dict)
+    }
+    assert card_by_id["false_success_rate"]["status"] == "fail"
+    assert card_by_id["selector_accuracy"]["status"] == "fail"
+    assert card_by_id["avg_pre_dispatch_duration"]["status"] == "fail"
+
+    regression_views = payload.get("regression_views")
+    assert isinstance(regression_views, dict)
+    active_regressions = regression_views.get("active_regressions")
+    assert isinstance(active_regressions, list)
+    regression_keys = {
+        (row.get("source_surface"), row.get("metric"))
+        for row in active_regressions
+        if isinstance(row, dict)
+    }
+    assert ("turn_execution", "false_success_rate_pct") in regression_keys
+    assert ("selector_routing", "selector_accuracy_pct") in regression_keys
+    assert ("pre_dispatch_latency", "avg_pre_dispatch_duration_ms") in regression_keys
+
+    trend_views = payload.get("trend_views")
+    assert isinstance(trend_views, dict)
+    assert len(trend_views.get("turn_outcome_buckets") or []) == 2
+
+    drilldowns = payload.get("drilldowns")
+    assert isinstance(drilldowns, dict)
+    assert len(drilldowns.get("turn_execution_replay_cases") or []) == 2
+    assert len(drilldowns.get("selector_replay_cases") or []) == 5
+
+    signals = payload.get("benchmark_signals")
+    assert isinstance(signals, list)
+    assert any(
+        signal.get("source_surface") == "pre_dispatch_latency"
+        for signal in signals
+        if isinstance(signal, dict)
+    )
 
 
 def test_turn_execution_backfill_wrapper_returns_provenance(monkeypatch):

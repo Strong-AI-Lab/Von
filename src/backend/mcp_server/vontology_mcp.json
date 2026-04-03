@@ -3477,6 +3477,148 @@
             }
         },
         {
+            "name": "turn_execution_build_dashboard",
+            "description": "Generate dashboards and regression views for selector accuracy, intent completion, false success, and pre-dispatch latency.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "limit": {
+                        "type": "integer"
+                    },
+                    "offset": {
+                        "type": "integer"
+                    },
+                    "decision": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "decisions": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "workflow_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "requires_follow_up": {
+                        "type": "boolean"
+                    },
+                    "prompt_contains": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "from_utc": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "to_utc": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "include_completed": {
+                        "type": "boolean"
+                    },
+                    "max_cases": {
+                        "type": "integer"
+                    },
+                    "jira_base_url": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "baseline_likely_failure_rate_pct": {
+                        "type": [
+                            "integer",
+                            "number"
+                        ]
+                    },
+                    "baseline_false_success_rate_pct": {
+                        "type": [
+                            "integer",
+                            "number"
+                        ]
+                    },
+                    "baseline_unresolved_follow_up_rate_pct": {
+                        "type": [
+                            "integer",
+                            "number"
+                        ]
+                    },
+                    "regression_tolerance_pct": {
+                        "type": [
+                            "integer",
+                            "number"
+                        ]
+                    },
+                    "selector_case_set": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "selector_max_cases": {
+                        "type": "integer"
+                    },
+                    "selector_bundle_path": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "baseline_selector_accuracy_pct": {
+                        "type": [
+                            "integer",
+                            "number"
+                        ]
+                    },
+                    "baseline_selector_misrouting_rate_pct": {
+                        "type": [
+                            "integer",
+                            "number"
+                        ]
+                    },
+                    "baseline_pre_dispatch_avg_duration_ms": {
+                        "type": [
+                            "integer",
+                            "number"
+                        ]
+                    },
+                    "baseline_pre_dispatch_p95_duration_ms": {
+                        "type": [
+                            "integer",
+                            "number"
+                        ]
+                    },
+                    "latency_regression_tolerance_pct": {
+                        "type": [
+                            "integer",
+                            "number"
+                        ]
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "Build a coherent dashboard and regression report across turn execution outcomes, selector routing, and pre-dispatch latency attribution."
+            }
+        },
+        {
             "name": "turn_execution_build_selector_benchmark",
             "description": "Evaluate workflow selector routing against a reviewable benchmark corpus while emitting the shared execution-correctness outcome labels.",
             "inputSchema": {
