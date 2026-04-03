@@ -14,6 +14,7 @@ Related repo guidance:
 - [AGENTS.md](../../AGENTS.md)
 - [docs/engineering/security_considerations.md](./security_considerations.md)
 - [docs/engineering/von_workflow_language_manual.md](./von_workflow_language_manual.md)
+- [docs/engineering/minimal_imposition_benchmark_model.md](./minimal_imposition_benchmark_model.md)
 
 ## 2. Principle Statement
 
@@ -157,6 +158,12 @@ If Von takes minimal imposition seriously, it should be evaluated on more than a
 - user trust and adoption under realistic task conditions.
 
 These metrics fit Von's broader aim of narrowing the verifiability gap: the point is not only to produce good outputs, but to do so in a way that is inspectable, non-disruptive, and compatible with real scholarly and organisational practice.
+
+The first explicit engineering model for this in the repo is now documented in
+[docs/engineering/minimal_imposition_benchmark_model.md](./minimal_imposition_benchmark_model.md).
+That model is intentionally honest about current evidence quality by separating
+`direct`, `proxy`, and `missing` dimensions instead of pretending the current
+runtime already exposes a complete imposition taxonomy.
 
 ## 9. Summary
 

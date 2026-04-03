@@ -9471,6 +9471,7 @@ def _build_execution_dashboard_summary_cards(
     turn_metrics: Mapping[str, Any],
     selector_metrics: Mapping[str, Any],
     latency_summary: Mapping[str, Any],
+    imposition_assessment: Mapping[str, Any],
     turn_regression_assessment: Mapping[str, Any],
     selector_regression_assessment: Mapping[str, Any],
     latency_regression_assessment: Mapping[str, Any],
@@ -9596,6 +9597,21 @@ def _build_execution_dashboard_summary_cards(
                 "avg_pre_dispatch_duration_ms",
             ),
         ),
+        _card(
+            card_id="minimal_imposition_score",
+            title="Minimal-imposition score",
+            value=imposition_assessment.get("weighted_score_pct"),
+            unit="pct",
+            status=(
+                "pass"
+                if str(imposition_assessment.get("status") or "") == "good"
+                else "warn"
+                if str(imposition_assessment.get("status") or "") == "caution"
+                else "fail"
+                if str(imposition_assessment.get("status") or "") == "high"
+                else "info"
+            ),
+        ),
     ]
     return cards
 
@@ -9619,6 +9635,7 @@ def _combine_dashboard_recommendations(
     turn_report: Mapping[str, Any],
     selector_report: Mapping[str, Any],
     latency_regression_assessment: Mapping[str, Any],
+    imposition_assessment: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
     recommendations: list[dict[str, Any]] = []
     seen_keys: set[str] = set()
@@ -9642,6 +9659,22 @@ def _combine_dashboard_recommendations(
                     "source_surface": source_name,
                 }
             )
+
+    for recommendation in _normalise_recommendation_rows(
+        imposition_assessment.get("recommendations")
+    ):
+        summary = str(recommendation.get("summary") or "").strip()
+        recommendation_id = str(recommendation.get("recommendation_id") or "").strip()
+        dedupe_key = recommendation_id or summary
+        if not dedupe_key or dedupe_key in seen_keys:
+            continue
+        seen_keys.add(dedupe_key)
+        recommendations.append(
+            {
+                **recommendation,
+                "source_surface": "minimal_imposition",
+            }
+        )
 
     if bool(latency_regression_assessment.get("regression_detected")):
         comparisons_raw = latency_regression_assessment.get("comparisons")
@@ -9670,6 +9703,9 @@ def _combine_dashboard_recommendations(
 def _turn_execution_build_benchmark(**kwargs):
     from ...services.turn_execution_record_service import (
         TURN_EXECUTION_CORRECTNESS_SCHEMA_VERSION,
+    )
+    from ...services.minimal_imposition_benchmark_service import (
+        build_minimal_imposition_assessment,
     )
 
     include_completed = bool(kwargs.get("include_completed", True))
@@ -9936,6 +9972,54 @@ def _turn_execution_build_benchmark(**kwargs):
             regression_assessment=regression_assessment,
         )
     )
+    imposition_assessment = build_minimal_imposition_assessment(
+        turn_execution_metrics=metrics_payload,
+        profile_concept_id=kwargs.get("profile_concept_id"),
+        workflow_id="#V#tool_calling_workflow",
+    )
+    capability_gaps = _derive_turn_execution_capability_gaps(
+        sorted_items,
+        failure_mode_counts=failure_mode_counts,
+    )
+    if not bool(imposition_assessment.get("success")):
+        capability_gaps.append(
+            {
+                "gap_id": "minimal_imposition_profile_missing",
+                "title": "Minimal-imposition benchmark profile is not yet materialised",
+                "severity": "high",
+                "description": imposition_assessment.get("message")
+                or "Minimal-imposition assessment could not be computed because the profile was unavailable.",
+            }
+        )
+    missing_imposition_dimensions = imposition_assessment.get(
+        "missing_telemetry_dimensions"
+    )
+    if isinstance(missing_imposition_dimensions, list) and missing_imposition_dimensions:
+        capability_gaps.append(
+            {
+                "gap_id": "minimal_imposition_telemetry_missing",
+                "title": "Minimal-imposition benchmark still relies on missing telemetry",
+                "severity": "medium",
+                "description": (
+                    "Some imposition dimensions are still unmeasured and are being "
+                    "reported explicitly rather than hidden in the composite score."
+                ),
+                "missing_dimension_ids": [
+                    str(item.get("dimension_id"))
+                    for item in missing_imposition_dimensions
+                    if isinstance(item, Mapping) and item.get("dimension_id")
+                ],
+            }
+        )
+    recommendations_raw = result.get("recommendations")
+    recommendations: list[Any] = (
+        list(recommendations_raw)
+        if isinstance(recommendations_raw, list)
+        else list(_derive_turn_execution_failure_recommendations(failure_mode_counts))
+    )
+    imposition_recommendations = imposition_assessment.get("recommendations")
+    if isinstance(imposition_recommendations, list):
+        recommendations.extend(imposition_recommendations)
     payload = {
         "collection": "turn_execution_records",
         "benchmark_generated_at_utc": _utc_now_iso(),
@@ -9954,15 +10038,9 @@ def _turn_execution_build_benchmark(**kwargs):
         "regression_assessment": regression_assessment,
         "benchmark_signals": benchmark_signals,
         "benchmark_signal_summary": benchmark_signal_summary,
-        "capability_gaps": _derive_turn_execution_capability_gaps(
-            sorted_items,
-            failure_mode_counts=failure_mode_counts,
-        ),
-        "recommendations": (
-            result.get("recommendations")
-            if isinstance(result.get("recommendations"), list)
-            else _derive_turn_execution_failure_recommendations(failure_mode_counts)
-        ),
+        "imposition_assessment": imposition_assessment,
+        "capability_gaps": capability_gaps,
+        "recommendations": recommendations,
         "latency_views": latency_views,
         "trend_views": trend_views,
         "effective_namespace": result.get("effective_namespace"),
@@ -10027,6 +10105,10 @@ def _turn_execution_build_selector_benchmark(**kwargs):
 
 
 def _turn_execution_build_dashboard(**kwargs):
+    from ...services.minimal_imposition_benchmark_service import (
+        build_minimal_imposition_assessment,
+    )
+
     include_completed = kwargs.get("include_completed")
     if include_completed is None:
         include_completed = True
@@ -10055,6 +10137,7 @@ def _turn_execution_build_dashboard(**kwargs):
             "baseline_unresolved_follow_up_rate_pct"
         ),
         "regression_tolerance_pct": kwargs.get("regression_tolerance_pct"),
+        "profile_concept_id": kwargs.get("profile_concept_id"),
     }
     turn_execution_report = _turn_execution_build_benchmark(**turn_execution_kwargs)
     if not isinstance(turn_execution_report, dict):
@@ -10112,6 +10195,12 @@ def _turn_execution_build_dashboard(**kwargs):
         turn_regression_assessment_raw
         if isinstance(turn_regression_assessment_raw, Mapping)
         else {}
+    )
+    imposition_assessment = build_minimal_imposition_assessment(
+        turn_execution_metrics=turn_metrics,
+        selector_metrics=selector_metrics,
+        profile_concept_id=kwargs.get("profile_concept_id"),
+        workflow_id="#V#tool_calling_workflow",
     )
 
     combined_signals: list[dict[str, Any]] = []
@@ -10171,6 +10260,7 @@ def _turn_execution_build_dashboard(**kwargs):
         turn_metrics=turn_metrics,
         selector_metrics=selector_metrics,
         latency_summary=latency_summary,
+        imposition_assessment=imposition_assessment,
         turn_regression_assessment=turn_regression_assessment,
         selector_regression_assessment=selector_regression_assessment,
         latency_regression_assessment=latency_regression_assessment,
@@ -10179,6 +10269,7 @@ def _turn_execution_build_dashboard(**kwargs):
         turn_report=turn_execution_report,
         selector_report=selector_report,
         latency_regression_assessment=latency_regression_assessment,
+        imposition_assessment=imposition_assessment,
     )
 
     payload = {
@@ -10231,6 +10322,12 @@ def _turn_execution_build_dashboard(**kwargs):
                 ),
             },
             "pre_dispatch_latency": latency_summary,
+            "minimal_imposition": {
+                "weighted_cost_pct": imposition_assessment.get("weighted_cost_pct"),
+                "weighted_score_pct": imposition_assessment.get("weighted_score_pct"),
+                "status": imposition_assessment.get("status"),
+                "dimension_counts": imposition_assessment.get("dimension_counts") or {},
+            },
         },
         "summary_cards": summary_cards,
         "regression_views": {
@@ -10251,6 +10348,7 @@ def _turn_execution_build_dashboard(**kwargs):
         "benchmark_signal_summary": _build_measurement_dashboard_signal_summary(
             combined_signals
         ),
+        "imposition_assessment": imposition_assessment,
         "recommendations": recommendations,
         "data_sources": {
             "turn_execution_report": {
@@ -23530,6 +23628,7 @@ def build_default_catalogue() -> MethodCatalogue:
                     "baseline_false_success_rate_pct": (int, float),
                     "baseline_unresolved_follow_up_rate_pct": (int, float),
                     "regression_tolerance_pct": (int, float),
+                    "profile_concept_id": (str, type(None)),
                 },
                 allow_unknown=True,
                 description=(
@@ -23595,6 +23694,7 @@ def build_default_catalogue() -> MethodCatalogue:
                     "baseline_pre_dispatch_avg_duration_ms": (int, float),
                     "baseline_pre_dispatch_p95_duration_ms": (int, float),
                     "latency_regression_tolerance_pct": (int, float),
+                    "profile_concept_id": (str, type(None)),
                 },
                 allow_unknown=True,
                 description=(

@@ -224,6 +224,69 @@ def _build_gateway():
     )
 
 
+def _install_minimal_imposition_profile_loader(monkeypatch) -> None:
+    profile = {
+        "profile_concept_id": "#V#minimal_imposition_benchmark_profile_autopilot_v1",
+        "profile_id": "autopilot_minimal_imposition_v1",
+        "description": "Test minimal-imposition profile",
+        "benchmark_surface_ids": [
+            "turn_execution_build_benchmark",
+            "turn_execution_build_dashboard",
+        ],
+        "composite_policy": {"policy_version": "minimal_imposition_cost.v1"},
+        "dimensions": [
+            {
+                "dimension_id": "user_interruption_burden",
+                "title": "User interruption burden",
+                "formula_id": "turn_follow_up_rate_pct",
+                "weight": 0.35,
+                "evidence_kind": "direct",
+                "ideal_max_pct": 5.0,
+                "warning_max_pct": 15.0,
+                "fail_max_pct": 30.0,
+            },
+            {
+                "dimension_id": "unsafe_under_escalation",
+                "title": "Unsafe under-escalation",
+                "formula_id": "turn_false_success_rate_pct",
+                "weight": 0.35,
+                "evidence_kind": "direct",
+                "ideal_max_pct": 0.0,
+                "warning_max_pct": 1.0,
+                "fail_max_pct": 5.0,
+            },
+            {
+                "dimension_id": "workflow_process_disruption",
+                "title": "Workflow/process disruption",
+                "formula_id": "combined_workflow_disruption_rate_pct",
+                "weight": 0.2,
+                "evidence_kind": "direct",
+                "ideal_max_pct": 5.0,
+                "warning_max_pct": 12.0,
+                "fail_max_pct": 25.0,
+            },
+            {
+                "dimension_id": "epistemic_intrusion",
+                "title": "Epistemic intrusion",
+                "formula_id": "missing_epistemic_intrusion_telemetry",
+                "weight": 0.1,
+                "evidence_kind": "missing",
+                "ideal_max_pct": 0.0,
+                "warning_max_pct": 0.0,
+                "fail_max_pct": 0.0,
+            },
+        ],
+        "scenario_families": [
+            {"scenario_id": "low_risk_additive_internal_write"},
+            {"scenario_id": "destructive_action"},
+        ],
+    }
+    monkeypatch.setattr(
+        "src.backend.services.minimal_imposition_benchmark_service.load_minimal_imposition_benchmark_profile",
+        lambda **_: (profile, {"loaded_profile_concept_id": profile["profile_concept_id"]}),
+    )
+
+
 def _build_hesitancy_trace_docs() -> list[dict[str, Any]]:
     return [
         {
@@ -1195,6 +1258,7 @@ def test_turn_execution_search_failures_flags_completed_record_with_failed_dispa
 def test_turn_execution_build_benchmark_returns_metrics_and_replay_cases(monkeypatch):
     from src.backend.integrations.internal_mcp import catalogue as cat
 
+    _install_minimal_imposition_profile_loader(monkeypatch)
     docs = [
         {
             "request_id": "req-fail-1",
@@ -1329,12 +1393,21 @@ def test_turn_execution_build_benchmark_returns_metrics_and_replay_cases(monkeyp
     assert triage_index["issue_link_count"] == 1
     assert triage_index["issue_links"][0]["issue_key"] == "JVNAUTOSCI-1202"
 
+    imposition = result.get("imposition_assessment")
+    assert isinstance(imposition, dict)
+    assert imposition.get("success") is True
+    assert imposition.get("profile", {}).get("profile_id") == (
+        "autopilot_minimal_imposition_v1"
+    )
+    assert imposition.get("dimension_counts", {}).get("missing_count") == 1
+
 
 def test_turn_execution_build_benchmark_flags_regression_when_baseline_is_better(
     monkeypatch,
 ):
     from src.backend.integrations.internal_mcp import catalogue as cat
 
+    _install_minimal_imposition_profile_loader(monkeypatch)
     docs = [
         {
             "request_id": "req-fail-1",
@@ -1418,6 +1491,7 @@ def test_turn_execution_build_benchmark_flags_regression_when_baseline_is_better
 def test_turn_execution_build_benchmark_reports_gap_when_no_records(monkeypatch):
     from src.backend.integrations.internal_mcp import catalogue as cat
 
+    _install_minimal_imposition_profile_loader(monkeypatch)
     coll = _TurnExecutionCollection([])
     monkeypatch.setattr(
         "src.backend.db.connection_manager.get_db",
@@ -1439,11 +1513,16 @@ def test_turn_execution_build_benchmark_reports_gap_when_no_records(monkeypatch)
     capability_gaps = result.get("capability_gaps")
     assert isinstance(capability_gaps, list)
     assert any(gap.get("gap_id") == "no_turn_execution_records" for gap in capability_gaps)
+    assert any(
+        gap.get("gap_id") == "minimal_imposition_telemetry_missing"
+        for gap in capability_gaps
+    )
 
 
 def test_turn_execution_build_benchmark_includes_latency_and_trend_views(monkeypatch):
     from src.backend.integrations.internal_mcp import catalogue as cat
 
+    _install_minimal_imposition_profile_loader(monkeypatch)
     coll = _TurnExecutionCollection(_build_dashboard_trace_docs())
     monkeypatch.setattr(
         "src.backend.db.connection_manager.get_db",
@@ -1495,6 +1574,7 @@ def test_turn_execution_build_benchmark_includes_latency_and_trend_views(monkeyp
 
 
 def test_turn_execution_build_benchmark_hesitancy_trace_gateway_e2e(monkeypatch):
+    _install_minimal_imposition_profile_loader(monkeypatch)
     docs = _build_hesitancy_trace_docs()
     coll = _TurnExecutionCollection(docs)
     monkeypatch.setattr(
@@ -1571,10 +1651,16 @@ def test_turn_execution_build_benchmark_hesitancy_trace_gateway_e2e(monkeypatch)
     assert isinstance(triage, dict)
     assert "JVNAUTOSCI-1326" in triage.get("jira_issue_keys", [])
 
+    imposition = payload.get("imposition_assessment")
+    assert isinstance(imposition, dict)
+    assert imposition.get("success") is True
+    assert imposition.get("weighted_score_pct") is not None
+
 
 def test_turn_execution_build_benchmark_hesitancy_signals_detect_plain_response_regression(
     monkeypatch,
 ):
+    _install_minimal_imposition_profile_loader(monkeypatch)
     docs = _build_hesitancy_trace_docs()
     docs[0]["workflow_selection"] = {
         "selected_workflow_id": "#V#chat_assistant_workflow",
@@ -1654,6 +1740,7 @@ def test_turn_execution_build_selector_benchmark_gateway_e2e():
 
 
 def test_turn_execution_build_dashboard_gateway_e2e(monkeypatch):
+    _install_minimal_imposition_profile_loader(monkeypatch)
     docs = _build_dashboard_trace_docs()
     coll = _TurnExecutionCollection(docs)
     monkeypatch.setattr(
@@ -1690,6 +1777,7 @@ def test_turn_execution_build_dashboard_gateway_e2e(monkeypatch):
     assert overview.get("pre_dispatch_latency", {}).get(
         "avg_pre_dispatch_duration_ms"
     ) == 21.0
+    assert overview.get("minimal_imposition", {}).get("weighted_score_pct") is not None
 
     summary_cards = payload.get("summary_cards")
     assert isinstance(summary_cards, list)
@@ -1699,6 +1787,7 @@ def test_turn_execution_build_dashboard_gateway_e2e(monkeypatch):
     assert card_by_id["false_success_rate"]["status"] == "fail"
     assert card_by_id["selector_accuracy"]["status"] == "fail"
     assert card_by_id["avg_pre_dispatch_duration"]["status"] == "fail"
+    assert "minimal_imposition_score" in card_by_id
 
     regression_views = payload.get("regression_views")
     assert isinstance(regression_views, dict)
@@ -1729,6 +1818,9 @@ def test_turn_execution_build_dashboard_gateway_e2e(monkeypatch):
         for signal in signals
         if isinstance(signal, dict)
     )
+    imposition = payload.get("imposition_assessment")
+    assert isinstance(imposition, dict)
+    assert imposition.get("success") is True
 
 
 def test_turn_execution_backfill_wrapper_returns_provenance(monkeypatch):

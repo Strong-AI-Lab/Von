@@ -3623,6 +3623,12 @@
                             "integer",
                             "number"
                         ]
+                    },
+                    "profile_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
                     }
                 },
                 "required": [],
@@ -3764,6 +3770,12 @@
                         "type": [
                             "integer",
                             "number"
+                        ]
+                    },
+                    "profile_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
                         ]
                     }
                 },

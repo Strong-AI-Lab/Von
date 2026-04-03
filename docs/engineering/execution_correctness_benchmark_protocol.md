@@ -17,6 +17,12 @@ In practice, this protocol ties together:
 - the pre-dispatch latency attribution surfaces from `JVNAUTOSCI-1429`
 - the reporting and regression views from `JVNAUTOSCI-966`
 
+Later benchmark overlays should continue to attach to this same stack rather
+than creating parallel benchmark families. The current example is the
+minimal-imposition assessment model documented in
+[minimal_imposition_benchmark_model.md](./minimal_imposition_benchmark_model.md),
+which reuses the same turn-execution and dashboard surfaces.
+
 ## 2. What This Protocol Governs
 
 This protocol governs:

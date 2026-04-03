@@ -16,6 +16,8 @@ _SERVICE_EXPORT_MODULES = {
     "concept_service": ".concept_service",
     "knowledge_acquisition_profile_vontology_service": ".knowledge_acquisition_profile_vontology_service",
     "meta_relations_service": ".meta_relations_service",
+    "minimal_imposition_benchmark_profile_vontology_service": ".minimal_imposition_benchmark_profile_vontology_service",
+    "minimal_imposition_benchmark_service": ".minimal_imposition_benchmark_service",
     "paper_recommendation_profile_vontology_service": ".paper_recommendation_profile_vontology_service",
     "paper_recommendation_review_service": ".paper_recommendation_review_service",
     "paper_recommendation_ranking_service": ".paper_recommendation_ranking_service",
@@ -39,6 +41,12 @@ if TYPE_CHECKING:
         knowledge_acquisition_profile_vontology_service as knowledge_acquisition_profile_vontology_service,
     )
     from . import meta_relations_service as meta_relations_service
+    from . import (
+        minimal_imposition_benchmark_profile_vontology_service as minimal_imposition_benchmark_profile_vontology_service,
+    )
+    from . import (
+        minimal_imposition_benchmark_service as minimal_imposition_benchmark_service,
+    )
     from . import (
         paper_recommendation_profile_vontology_service as paper_recommendation_profile_vontology_service,
     )
@@ -82,6 +90,8 @@ __all__ = [
     "concept_service",
     "knowledge_acquisition_profile_vontology_service",
     "meta_relations_service",
+    "minimal_imposition_benchmark_profile_vontology_service",
+    "minimal_imposition_benchmark_service",
     "paper_recommendation_profile_vontology_service",
     "paper_recommendation_review_service",
     "paper_recommendation_ranking_service",
