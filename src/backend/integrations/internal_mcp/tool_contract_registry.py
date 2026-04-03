@@ -51,6 +51,7 @@ VONTOLOGY_STDIO_EXPOSED_TOOL_NAMES: tuple[str, ...] = (
     "delete_concept",
     "delete_text_relation",
     "download_paper",
+    "build_paper_recommendations",
     "extract_annotations",
     "extract_url",
     "fetch_concept",

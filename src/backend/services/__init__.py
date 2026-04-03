@@ -17,6 +17,7 @@ _SERVICE_EXPORT_MODULES = {
     "knowledge_acquisition_profile_vontology_service": ".knowledge_acquisition_profile_vontology_service",
     "meta_relations_service": ".meta_relations_service",
     "paper_recommendation_profile_vontology_service": ".paper_recommendation_profile_vontology_service",
+    "paper_recommendation_ranking_service": ".paper_recommendation_ranking_service",
     "parent_specificity_schedule_bootstrap_service": ".parent_specificity_schedule_bootstrap_service",
     "parent_specificity_vontology_service": ".parent_specificity_vontology_service",
     "relation_elicitation_service": ".relation_elicitation_service",
@@ -38,6 +39,9 @@ if TYPE_CHECKING:
     from . import meta_relations_service as meta_relations_service
     from . import (
         paper_recommendation_profile_vontology_service as paper_recommendation_profile_vontology_service,
+    )
+    from . import (
+        paper_recommendation_ranking_service as paper_recommendation_ranking_service,
     )
     from . import (
         parent_specificity_schedule_bootstrap_service as parent_specificity_schedule_bootstrap_service,
@@ -73,6 +77,7 @@ __all__ = [
     "knowledge_acquisition_profile_vontology_service",
     "meta_relations_service",
     "paper_recommendation_profile_vontology_service",
+    "paper_recommendation_ranking_service",
     "parent_specificity_schedule_bootstrap_service",
     "parent_specificity_vontology_service",
     "relation_elicitation_service",

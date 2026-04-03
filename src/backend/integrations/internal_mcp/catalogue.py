@@ -2547,6 +2547,120 @@ def _materialise_scholarly_representation_for_file_copy_tool(**kwargs):
     return response_payload
 
 
+def _build_paper_recommendations(**kwargs):
+    from src.backend.security.access_control import get_effective_user_concept_id
+
+    from ...services.paper_recommendation_ranking_service import (
+        build_paper_recommendations,
+    )
+
+    raw_candidate_ids = kwargs.get("candidate_paper_concept_ids")
+    if raw_candidate_ids is None:
+        raw_candidate_ids = kwargs.get("paper_concept_ids")
+    if isinstance(raw_candidate_ids, str):
+        raw_candidate_ids = [raw_candidate_ids]
+    candidate_paper_concept_ids = [
+        str(item).strip()
+        for item in (raw_candidate_ids or [])
+        if isinstance(item, str) and str(item).strip()
+    ]
+    if not candidate_paper_concept_ids:
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: candidate_paper_concept_ids",
+            details={"missing": ["candidate_paper_concept_ids"]},
+            suggestions=[
+                "Provide represented scholarly-paper concept IDs to rank",
+                "Use paper_concept_ids as an alias if that is more convenient",
+            ],
+        )
+
+    namespace = _normalise_namespace_override(kwargs.get("namespace"))
+    ns_report = _resolve_rag_namespace_from_kwargs(dict(kwargs))
+    if bool(ns_report.get("namespace_mismatch")):
+        return {
+            "success": False,
+            "error": "namespace_mismatch",
+            "message": (
+                "Explicit namespace conflicts with derived user/org namespace; "
+                "paper recommendation ranking was not executed."
+            ),
+            **ns_report,
+        }
+
+    effective_namespace = namespace
+    if effective_namespace is None:
+        derived_namespace = ns_report.get("namespace")
+        if isinstance(derived_namespace, str) and derived_namespace.strip():
+            effective_namespace = derived_namespace.strip()
+
+    derived_user_concept_id, _organisation_concept_id = _resolve_rag_actor_scope_ids(
+        ns_report
+    )
+    explicit_user_concept_id = kwargs.get("user_concept_id")
+    if isinstance(explicit_user_concept_id, str):
+        explicit_user_concept_id = explicit_user_concept_id.strip() or None
+    else:
+        explicit_user_concept_id = None
+
+    if (
+        isinstance(derived_user_concept_id, str)
+        and derived_user_concept_id.strip()
+        and explicit_user_concept_id is not None
+        and explicit_user_concept_id != derived_user_concept_id.strip()
+    ):
+        return {
+            "success": False,
+            "error": "target_user_mismatch",
+            "message": (
+                "Explicit user_concept_id conflicts with the authenticated or namespace-derived user."
+            ),
+            "user_concept_id": explicit_user_concept_id,
+            "derived_user_concept_id": derived_user_concept_id.strip(),
+            "namespace": effective_namespace,
+        }
+
+    user_concept_id = explicit_user_concept_id or (
+        derived_user_concept_id.strip()
+        if isinstance(derived_user_concept_id, str) and derived_user_concept_id.strip()
+        else None
+    )
+    if user_concept_id is None:
+        with _with_namespace_actor_override(effective_namespace):
+            effective_user = get_effective_user_concept_id()
+        if isinstance(effective_user, str) and effective_user.strip():
+            user_concept_id = effective_user.strip()
+    if user_concept_id is None:
+        return {
+            "success": False,
+            "error": "missing_user_concept_id",
+            "message": (
+                "A user_concept_id or authenticated user context is required to load a recommendation profile."
+            ),
+            "namespace": effective_namespace,
+        }
+
+    with _with_namespace_actor_override(effective_namespace):
+        report = build_paper_recommendations(
+            user_concept_id=user_concept_id,
+            candidate_paper_concept_ids=candidate_paper_concept_ids,
+            max_results=kwargs.get("max_results", 10),
+            include_all_candidates=bool(kwargs.get("include_all_candidates", False)),
+        )
+
+    if isinstance(report, Mapping):
+        response_payload = dict(report)
+        response_payload["namespace"] = effective_namespace
+        return response_payload
+    return {
+        "success": False,
+        "error": "unexpected_recommendation_response",
+        "message": "Paper recommendation ranking returned an unexpected response type.",
+        "response_type": type(report).__name__,
+        "namespace": effective_namespace,
+    }
+
+
 def _list_papers(**kwargs):
     import asyncio
     from .arxiv_proxy_mcp import get_arxiv_proxy, ArxivProxyError
@@ -6935,6 +7049,59 @@ def _materialise_scholarly_representation_for_file_copy_output_schema() -> Schem
             "materialise_scholarly_representation_for_file_copy output: success/attempted/verified flags, "
             "file_copy_concept_id, paper_concept_id, optional arxiv_id/metadata fields, verification failures, "
             "and scholarly_representation diagnostics."
+        ),
+    )
+
+
+def _build_paper_recommendations_input_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "user_concept_id": (str, type(None)),
+            "candidate_paper_concept_ids": (list, type(None)),
+            "paper_concept_ids": (list, type(None)),
+            "max_results": (int, type(None)),
+            "include_all_candidates": (bool, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "build_paper_recommendations input: candidate_paper_concept_ids/paper_concept_ids "
+            "(list of represented scholarly-paper concept IDs, at least one required), optional "
+            "user_concept_id (defaults to authenticated/namespace user when available), optional "
+            "max_results, optional include_all_candidates, and optional namespace override."
+        ),
+    )
+
+
+def _build_paper_recommendations_output_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "success": (bool, type(None)),
+            "error": (str, type(None)),
+            "message": (str, type(None)),
+            "user_concept_id": (str, type(None)),
+            "profile_concept_id": (str, type(None)),
+            "namespace": (str, type(None)),
+            "recommendation_policy_version": (str, type(None)),
+            "generated_at": (str, type(None)),
+            "results": (list, type(None)),
+            "ranked_count": (int, type(None)),
+            "skipped_count": (int, type(None)),
+            "candidate_count_requested": (int, type(None)),
+            "warning_count": (int, type(None)),
+            "warnings": (list, type(None)),
+            "profile_signal_summary": (dict, type(None)),
+            "profile_diagnostics": (dict, type(None)),
+            "details": (dict, type(None)),
+            "suggestions": (list, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "build_paper_recommendations output: success/error state, target user/profile IDs, "
+            "recommendation policy version, ranked/skipped result rows with grounded rationale "
+            "and provenance, plus profile-signal and warning diagnostics."
         ),
     )
 
@@ -21646,6 +21813,19 @@ def build_default_catalogue() -> MethodCatalogue:
             category="write",
             timeout_sec=45.0,
             description="Materialise the scholarly-paper representation explicitly from an already-registered #V#computer_file_copy. Use after download_paper, finalise_cached_paper, or other file-copy registration when the user wants the paper concept and source linkage created.",
+        ),
+        MethodDefinition(
+            name="build_paper_recommendations",
+            handler=_build_paper_recommendations,
+            input_schema=_build_paper_recommendations_input_schema(),
+            output_schema=_build_paper_recommendations_output_schema(),
+            category="read",
+            timeout_sec=30.0,
+            description=(
+                "Rank represented scholarly-paper candidates against a represented user "
+                "paper recommendation profile and return grounded rationale/provenance. "
+                "This is the workflow-first ranking core, independent of later delivery surfaces."
+            ),
         ),
         MethodDefinition(
             name="list_papers",

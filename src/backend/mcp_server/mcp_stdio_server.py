@@ -106,6 +106,7 @@ from src.backend.services.settings_service import (
     INTERNAL_MCP_TOOL_BATCH_CAP_DEFAULT,
 )
 from src.backend.integrations.internal_mcp.catalogue import _add_relationship
+from src.backend.integrations.internal_mcp.catalogue import _build_paper_recommendations
 from src.backend.integrations.internal_mcp.catalogue import _jira_add_comment
 from src.backend.integrations.internal_mcp.catalogue import _jira_add_attachment
 from src.backend.integrations.internal_mcp.catalogue import _jira_create_issue
@@ -3061,6 +3062,16 @@ async def _handle_turn_execution_build_dashboard(
     )
 
 
+async def _handle_build_paper_recommendations(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _build_paper_recommendations,
+        arguments,
+        tool_family_label="PaperRecommendation",
+    )
+
+
 async def _handle_turn_execution_backfill_from_chat_history(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
@@ -3513,6 +3524,7 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "search_arxiv": _handle_search_arxiv,
     "get_paper_metadata": _handle_get_paper_metadata,
     "download_paper": _handle_download_paper,
+    "build_paper_recommendations": _handle_build_paper_recommendations,
     "finalise_cached_paper": _handle_finalise_cached_paper,
     "materialise_scholarly_representation_for_file_copy": _handle_materialise_scholarly_representation_for_file_copy,
     "search_web": _handle_search_web,

@@ -96,6 +96,56 @@
             }
         },
         {
+            "name": "build_paper_recommendations",
+            "description": "Rank represented scholarly-paper candidates against a represented user paper recommendation profile and return grounded rationale/provenance. This is the workflow-first ranking core, independent of later delivery surfaces.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "user_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "candidate_paper_concept_ids": {
+                        "type": [
+                            "array",
+                            "null"
+                        ],
+                        "items": {}
+                    },
+                    "paper_concept_ids": {
+                        "type": [
+                            "array",
+                            "null"
+                        ],
+                        "items": {}
+                    },
+                    "max_results": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    },
+                    "include_all_candidates": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "build_paper_recommendations input: candidate_paper_concept_ids/paper_concept_ids (list of represented scholarly-paper concept IDs, at least one required), optional user_concept_id (defaults to authenticated/namespace user when available), optional max_results, optional include_all_candidates, and optional namespace override."
+            }
+        },
+        {
             "name": "concept_exists",
             "description": "Minimal existence/accessibility check for a concept_id. Use before expensive fetch operations or when you need to validate user input.",
             "inputSchema": {
