@@ -44,8 +44,11 @@ import {
     __testOnly_setThinkingState,
     __testOnly_normaliseThinkingActivityHistory,
     __testOnly_renderThinkingCardBodyHTML,
+    __testOnly_refreshThinkingCardProgressUi,
     __testOnly_bindConceptSelectionClicks,
+    __testOnly_bindThinkingCardControls,
     __testOnly_updateThinkingCardMeta,
+    __testOnly_persistThinkingCardBodyHeightFromDom,
     __testOnly_syncThinkingCanonicalHistoriesFromProgress,
     __testOnly_resetChatConceptMetaCaches,
     formatChatTimestamp,
@@ -3081,6 +3084,121 @@ describe('thinking card toggle accessibility', () => {
         retained.sizeDecreaseButton.click();
         expect(retained.detail.style.height).toBe('120px');
         expect(retained.sizeDecreaseButton.disabled).toBe(true);
+    });
+});
+
+describe('active thinking card manual resize persistence', () => {
+    let originalResizeObserver;
+
+    beforeEach(() => {
+        originalResizeObserver = global.ResizeObserver;
+        global.ResizeObserver = undefined;
+        __testOnly_setThinkingCardRequests(null, null);
+        document.body.innerHTML = `
+            <div id="scrollableField"></div>
+            <div class="thinking-card-wrapper" id="thinkingCardWrapper" aria-hidden="false">
+                <div class="thinking-card" role="status" aria-live="polite">
+                    <div class="thinking-card-header" id="loadingIndicator" data-thinking-role="header">
+                        <span class="thinking-card-phase loading-indicator-text" data-thinking-role="phase">Thinking...</span>
+                        <span id="thinkingCardStatusBadge" class="thinking-card-status active" data-thinking-role="status" aria-hidden="true">Active</span>
+                        <span class="thinking-card-meta" id="thinkingCardMeta" data-thinking-role="meta"></span>
+                        <button id="thinkingCardToggleButton" type="button" data-thinking-role="toggle" aria-hidden="false" aria-expanded="true" aria-controls="loadingIndicatorDetail" aria-label="Collapse thinking details" title="Collapse thinking details">
+                            <span class="thinking-card-toggle-icon" aria-hidden="true">⌄</span>
+                            <span class="visually-hidden">Toggle thinking details</span>
+                        </button>
+                        <button type="button" class="thinking-card-size-button" data-thinking-role="size-decrease" aria-hidden="false">−</button>
+                        <button type="button" class="thinking-card-size-button" data-thinking-role="size-increase" aria-hidden="false">+</button>
+                        <button id="retryThinkingButton" type="button" data-thinking-role="retry" aria-hidden="true">Retry</button>
+                        <button id="copyThinkingDiagnosticsButton" type="button" data-thinking-role="copy" aria-hidden="false">Copy diagnostics</button>
+                        <button id="abortButton" type="button" data-thinking-role="abort" aria-hidden="false"></button>
+                    </div>
+                    <div class="thinking-card-body" id="loadingIndicatorDetail" data-thinking-role="detail" aria-live="polite"></div>
+                </div>
+            </div>
+            <button id="sendButton"></button>
+            <textarea id="promptInput"></textarea>
+            <input type="checkbox" id="annotationToggle" />
+        `;
+    });
+
+    afterEach(() => {
+        global.ResizeObserver = originalResizeObserver;
+        __testOnly_setThinkingCardRequests(null, null);
+        jest.restoreAllMocks();
+    });
+
+    function createActiveThinkingRequest() {
+        return {
+            latestProgress: {
+                status: 'pending',
+                phase: 'tool_execute',
+                phase_label: 'Executing tools'
+            },
+            activityHistory: [{
+                sequenceNo: 1,
+                label: 'Tool call: search_knowledge_base',
+                detail: 'Searching indexed knowledge',
+                state: 'pending',
+                status: 'tool_call_start',
+                stage: 'tool_execute',
+                eventKind: 'tool_call_start',
+                groupCount: 1
+            }]
+        };
+    }
+
+    test('keeps a manually dragged active thinking-card height across live refreshes', () => {
+        const request = createActiveThinkingRequest();
+        __testOnly_setThinkingCardRequests(request, null);
+
+        __testOnly_refreshThinkingCardProgressUi(request);
+        __testOnly_bindThinkingCardControls();
+
+        const wrapper = document.getElementById('thinkingCardWrapper');
+        const detail = document.getElementById('loadingIndicatorDetail');
+        expect(wrapper.classList.contains('has-tools')).toBe(true);
+
+        detail.style.height = '360px';
+        detail.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+        expect(request.thinkingCardBodyHeightPx).toBe(360);
+
+        request.activityHistory = [
+            ...request.activityHistory,
+            {
+                sequenceNo: 2,
+                label: 'Tool call completed: search_knowledge_base',
+                detail: 'Found 4 relevant results',
+                state: 'success',
+                status: 'tool_invoked',
+                stage: 'tool_execute',
+                eventKind: 'tool_invoked',
+                groupCount: 1
+            }
+        ];
+
+        __testOnly_refreshThinkingCardProgressUi(request);
+
+        expect(request.thinkingCardBodyHeightPx).toBe(360);
+        expect(detail.style.height).toBe('360px');
+    });
+
+    test('clamps manually dragged active thinking-card heights to explicit bounds', () => {
+        const request = createActiveThinkingRequest();
+        __testOnly_setThinkingCardRequests(request, null);
+
+        __testOnly_refreshThinkingCardProgressUi(request);
+
+        const detail = document.getElementById('loadingIndicatorDetail');
+
+        detail.style.height = '80px';
+        expect(__testOnly_persistThinkingCardBodyHeightFromDom(request)).toBe(120);
+        expect(request.thinkingCardBodyHeightPx).toBe(120);
+        expect(detail.style.height).toBe('120px');
+
+        detail.style.height = '800px';
+        expect(__testOnly_persistThinkingCardBodyHeightFromDom(request)).toBe(520);
+        expect(request.thinkingCardBodyHeightPx).toBe(520);
+        expect(detail.style.height).toBe('520px');
     });
 });
 

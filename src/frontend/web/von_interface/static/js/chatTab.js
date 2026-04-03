@@ -808,6 +808,39 @@ function ensureThinkingCardBodyHeightPx(request, detailEl = null) {
     return request.thinkingCardBodyHeightPx;
 }
 
+function resolveThinkingCardBodyHeightPxFromDom(detailEl) {
+    if (!(detailEl instanceof HTMLElement)) {
+        return null;
+    }
+
+    const inlineHeight = Number.parseFloat(detailEl.style.height);
+    if (Number.isFinite(inlineHeight) && inlineHeight > 0) {
+        return clampThinkingCardBodyHeightPx(inlineHeight);
+    }
+
+    const rectHeight = detailEl.getBoundingClientRect().height;
+    if (Number.isFinite(rectHeight) && rectHeight > 0) {
+        return clampThinkingCardBodyHeightPx(rectHeight);
+    }
+
+    return null;
+}
+
+function applyThinkingCardBodyHeightPx(nextHeightPx, request = getThinkingCardDisplayRequest(), cardRoot = null) {
+    const detailEl = getLoadingIndicatorDetailEl(cardRoot);
+    if (!(detailEl instanceof HTMLElement)) {
+        return null;
+    }
+
+    const clampedHeightPx = clampThinkingCardBodyHeightPx(nextHeightPx);
+    if (request && typeof request === 'object') {
+        request.thinkingCardBodyHeightPx = clampedHeightPx;
+    }
+    detailEl.style.height = `${clampedHeightPx}px`;
+    updateThinkingCardResizeControls(request, cardRoot);
+    return clampedHeightPx;
+}
+
 function setLoadingIndicatorText(text, cardRoot = null) {
     const el = getLoadingIndicatorTextEl(cardRoot);
     if (!el) {
@@ -1110,6 +1143,31 @@ function shouldDisableThinkingCardToggle(request) {
     return request === activeChatRequest && !isTerminalThinkingProgress(request.latestProgress);
 }
 
+function persistThinkingCardBodyHeightFromDom(request = getThinkingCardDisplayRequest(), cardRoot = null) {
+    const wrapper = getThinkingCardWrapperEl(cardRoot);
+    const detailEl = getLoadingIndicatorDetailEl(cardRoot);
+    if (!wrapper || !(detailEl instanceof HTMLElement) || !request || typeof request !== 'object') {
+        return null;
+    }
+
+    const state = ensureThinkingCardDisplayState(request) || createThinkingCardDisplayState();
+    const shouldPersistHeight = wrapper.classList.contains('has-tools')
+        && state.expanded !== false
+        && wrapper.getAttribute('aria-hidden') !== 'true';
+    if (!shouldPersistHeight) {
+        return Number.isFinite(request.thinkingCardBodyHeightPx)
+            ? clampThinkingCardBodyHeightPx(request.thinkingCardBodyHeightPx)
+            : null;
+    }
+
+    const measuredHeightPx = resolveThinkingCardBodyHeightPxFromDom(detailEl);
+    if (!Number.isFinite(measuredHeightPx)) {
+        return null;
+    }
+
+    return applyThinkingCardBodyHeightPx(measuredHeightPx, request, cardRoot);
+}
+
 function syncThinkingCardBodyHeightToDom(request = getThinkingCardDisplayRequest(), cardRoot = null) {
     const wrapper = getThinkingCardWrapperEl(cardRoot);
     const detailEl = getLoadingIndicatorDetailEl(cardRoot);
@@ -1127,7 +1185,7 @@ function syncThinkingCardBodyHeightToDom(request = getThinkingCardDisplayRequest
     }
 
     const nextHeightPx = ensureThinkingCardBodyHeightPx(request, detailEl);
-    detailEl.style.height = `${nextHeightPx}px`;
+    applyThinkingCardBodyHeightPx(nextHeightPx, request, cardRoot);
 }
 
 function updateThinkingCardResizeControls(request = getThinkingCardDisplayRequest(), cardRoot = null) {
@@ -1183,12 +1241,40 @@ function adjustThinkingCardBodyHeight(request = getThinkingCardDisplayRequest(),
             || detailEl.getBoundingClientRect().height
             || ensureThinkingCardBodyHeightPx(request, detailEl)
         );
-    const nextHeightPx = clampThinkingCardBodyHeightPx(baseHeight + deltaPx);
-    if (request && typeof request === 'object') {
-        request.thinkingCardBodyHeightPx = nextHeightPx;
+    applyThinkingCardBodyHeightPx(baseHeight + deltaPx, request, cardRoot);
+}
+
+function bindThinkingCardBodyResizePersistence(cardRoot = null, options = {}) {
+    const explicitRoot = cardRoot instanceof HTMLElement;
+    const wrapper = getThinkingCardWrapperEl(cardRoot);
+    if (!wrapper && explicitRoot) {
+        return;
     }
-    detailEl.style.height = `${nextHeightPx}px`;
-    updateThinkingCardResizeControls(request, cardRoot);
+    const rootRef = explicitRoot ? wrapper : null;
+    const detailEl = getLoadingIndicatorDetailEl(rootRef);
+    if (!(detailEl instanceof HTMLElement) || detailEl.dataset.resizePersistenceBound === '1') {
+        return;
+    }
+
+    const requestResolver = (typeof options.requestResolver === 'function')
+        ? options.requestResolver
+        : (() => getThinkingCardDisplayRequest());
+    const persistCurrentHeight = () => {
+        persistThinkingCardBodyHeightFromDom(requestResolver(), rootRef);
+    };
+
+    detailEl.dataset.resizePersistenceBound = '1';
+    ['mouseup', 'pointerup', 'touchend'].forEach((eventName) => {
+        detailEl.addEventListener(eventName, persistCurrentHeight);
+    });
+
+    if (typeof ResizeObserver === 'function' && !detailEl._thinkingCardResizeObserver) {
+        // Track native CSS-resize handle changes so rerenders reuse the user's chosen height.
+        detailEl._thinkingCardResizeObserver = new ResizeObserver(() => {
+            persistCurrentHeight();
+        });
+        detailEl._thinkingCardResizeObserver.observe(detailEl);
+    }
 }
 
 function syncThinkingCardExpandedStateToDom(request = getThinkingCardDisplayRequest(), cardRoot = null) {
@@ -1485,6 +1571,7 @@ function refreshThinkingCardProgressUi(request, cardRoot = null) {
         return;
     }
 
+    persistThinkingCardBodyHeightFromDom(request, cardRoot);
     setLoadingIndicatorText(formatToolUseProgressText(request.latestProgress, request), cardRoot);
     setLoadingIndicatorDetailHtml(renderThinkingCardBodyHTML(request), request, cardRoot);
     updateThinkingCardMeta(request, request.latestProgress || null, cardRoot);
@@ -2114,8 +2201,16 @@ export function __testOnly_renderThinkingCardBodyHTML(request = null) {
     return renderThinkingCardBodyHTML(request);
 }
 
+export function __testOnly_refreshThinkingCardProgressUi(request, cardRoot = null) {
+    return refreshThinkingCardProgressUi(request, cardRoot);
+}
+
 export function __testOnly_bindConceptSelectionClicks(container, options = {}) {
     bindConceptSelectionClicks(container, options);
+}
+
+export function __testOnly_bindThinkingCardControls(cardRoot = null, options = {}) {
+    bindThinkingCardControls(cardRoot, options);
 }
 
 export function __testOnly_updateThinkingCardMeta(request, progress) {
@@ -2137,6 +2232,10 @@ export async function __testOnly_copyActiveThinkingDiagnostics(button = null, re
 export function __testOnly_setThinkingCardRequests(activeRequest = null, finishedRequest = null) {
     activeChatRequest = activeRequest;
     lastFinishedThinkingCard = finishedRequest;
+}
+
+export function __testOnly_persistThinkingCardBodyHeightFromDom(request = getThinkingCardDisplayRequest(), cardRoot = null) {
+    return persistThinkingCardBodyHeightFromDom(request, cardRoot);
 }
 
 export function __testOnly_shouldAcceptThinkingProgressUpdate(currentProgress = null, nextProgress = null) {
@@ -20608,6 +20707,8 @@ function bindThinkingCardControls(cardRoot = null, options = {}) {
     const copyDiagnosticsButton = getThinkingCardCopyButtonEl(rootRef);
     const sizeDecreaseButton = getThinkingCardSizeDecreaseButtonEl(rootRef);
     const sizeIncreaseButton = getThinkingCardSizeIncreaseButtonEl(rootRef);
+
+    bindThinkingCardBodyResizePersistence(rootRef, { requestResolver });
 
     if (toggleButton && toggleButton.dataset.bound !== '1') {
         toggleButton.dataset.bound = '1';
