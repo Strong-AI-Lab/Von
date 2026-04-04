@@ -60,7 +60,7 @@ similar operational lessons that do not belong in this constitutional guide.
 3. Never clobber `.env`. Only touch it when explicitly required, and never print secrets.
 4. Vontology is the authoritative source of truth for persistent knowledge, prompts, workflow artefacts, and other enduring represented state unless an exception is explicitly justified.
 5. Do not use direct DB access for Vontology-governed data. Use the Vontology API, MCP tools, or canonical service pathways.
-6. Branch first for substantial Jira work. Keep Jira status, comments, and links in sync with the real implementation state.
+6. Branch first for substantial Jira work. Keep Jira status, comments, assignee, and links in sync with the real implementation state.
 7. Prefer MCP and existing repo control surfaces over ad-hoc scripts or handwritten workarounds.
 8. Workflow-first / KB-authoritative is the default doctrine: if behaviour can live in workflow, prompt, KB, or Vontology artefacts, do not hide it in Python.
 9. Decision-policy authority extends beyond routing. Ranking, recommendation, matching, classification, explanation, retrieval strategy, and planning count as authored behaviour.
@@ -148,6 +148,7 @@ Verify all of the following:
 
 - create or switch to the task branch
 - transition the Jira issue to `In Progress`
+- when creating Jira issues on the user's behalf, assign them to the authenticated Jira user by default unless the user explicitly asks for a different assignee or Jira refuses the assignment
 - review task age, linked issues, and likely staleness
 - identify the authoritative KB/workflow/prompt artefacts
 - decide which situation-specific docs are mandatory for this task
@@ -163,6 +164,7 @@ Verify all of the following:
 
 - A task is not fully complete until code, Jira, and any required authoritative
   Vontology/workflow state all match the claimed outcome.
+- Do not stop at local implementation, local validation success, or a "ready to commit" state unless the user explicitly asks to pause there. For Jira implementation work, the default expectation is commit, merge to `main`, verify `origin/main`, and close the Jira issue before reporting completion.
 - rerun targeted regression checks
 - gather direct acceptance evidence
 - verify any required Vontology/workflow/KB state changes were actually
