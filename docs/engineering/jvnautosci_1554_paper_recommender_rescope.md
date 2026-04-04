@@ -1,7 +1,7 @@
 # JVNAUTOSCI-1554 Paper Recommender Re-scope
 
-Status: implementation note for task closure
-Last updated: 2026-04-03 (Pacific/Auckland)
+Status: closure note and backlog redirect
+Last updated: 2026-04-04 (Pacific/Auckland)
 Task: `JVNAUTOSCI-1554`
 
 ## 1. Purpose
@@ -15,7 +15,14 @@ This note records:
 - what currently exists in code and Vontology,
 - which legacy `JVNAUTOSCI-1` subtasks are obsolete, historical, or still
   conceptually relevant,
-- and what the active implementation path under `JVNAUTOSCI-1553` should be.
+- and how the active implementation path under `JVNAUTOSCI-1553` was
+  re-scoped.
+
+It now serves primarily as closure evidence for `JVNAUTOSCI-1554`. The live
+follow-on planning for the next open `JVNAUTOSCI-1553` step should be read from:
+
+- `docs/engineering/jvnautosci_1654_open_epic_review.md`
+- `docs/engineering/jvnautosci_1676_recommendation_tool_vs_workflow.md`
 
 ## 2. Audited current state
 
@@ -204,13 +211,14 @@ The system should capture graded user feedback on:
 - whether the explanation was useful,
 - and any free-text correction that helps future ranking/evaluation.
 
-## 5. Recommended active backlog under `JVNAUTOSCI-1553`
+## 5. Post-rescope backlog snapshot under `JVNAUTOSCI-1553`
 
-### 5.1 Keep and reinterpret existing tasks
+### 5.1 What landed from the re-scope
 
 #### `JVNAUTOSCI-117`
 
-Keep, but reinterpret as the modern researcher recommendation profile task:
+This is now `Done` and established the modern researcher recommendation profile
+surface:
 
 - editable project/research-interest representation,
 - stronger specificity than the old free-text description,
@@ -218,20 +226,48 @@ Keep, but reinterpret as the modern researcher recommendation profile task:
 
 #### `JVNAUTOSCI-120`
 
-Keep, but reinterpret from “restore old code” to:
+This is now `Done` and should be read as the first workflow-first ranking and
+explanation step on the modern substrate rather than as a request to restore the
+old Slack prototype.
 
-- implement the workflow-first paper recommendation ranking and explanation path
-  on the current infrastructure,
-- using represented papers plus represented researcher/project context,
-- not by reviving the Slack prototype.
+The more explicit semantic-evaluation replacement task is now
+`JVNAUTOSCI-1679`, which replaced the lexical ranker with workflow-materialised
+semantic evaluation.
+
+If Jira still shows open child work beneath `JVNAUTOSCI-1679`, treat that as
+the remaining detailed semantic-evaluation tranche rather than reopening
+`JVNAUTOSCI-120` as the live brief.
+
+#### `JVNAUTOSCI-1675`
+
+This is now `Done` and established the first authoritative Von-native review
+surface:
+
+- a settings-tab recommendation review path,
+- inspectable rationale and provenance,
+- and bounded trigger points for recommendation inspection.
+
+### 5.2 Current open and later follow-on work
+
+#### `JVNAUTOSCI-1676`
+
+This is the next open architecture/planning step under `JVNAUTOSCI-1553`. It
+should clarify:
+
+- when recommendation remains a bounded reusable primitive,
+- when it should be expressed as a workflow family,
+- and which research-group recommendation use cases should call the primitive
+  versus becoming explicit workflows.
 
 #### `JVNAUTOSCI-116`
 
-Keep, but reinterpret from a UI micro-change to:
+This remains open (`Backlog`) and should now be read as post-review feedback
+capture work:
 
 - implement graded recommendation feedback,
 - capture explanation feedback separately from relevance feedback,
-- and preserve enough signal for later evaluation or learning.
+- and preserve enough signal for later evaluation, learning, or workflow
+  invalidation.
 
 #### `JVNAUTOSCI-270`
 
@@ -242,25 +278,28 @@ Hugging Face Papers.
 
 Keep as an optional source-enrichment evaluation task for SciSciNet.
 
-### 5.2 New task created
+### 5.3 What should no longer be treated as the live backlog brief
 
-`JVNAUTOSCI-1675` was created from this rescope to cover recommendation
-delivery and review surfaces. It covers:
+Do not continue to read this note as if `JVNAUTOSCI-120` were still the single
+active implementation brief for the recommendation core. The April 2026 follow-on
+split is now:
 
-- how recommendations are surfaced in Von,
-- how users inspect rationale/provenance,
-- and how trigger points such as “profile updated” or “new candidate paper
-  ingested” create recommendation review opportunities.
+- `JVNAUTOSCI-1679` for the semantic evaluation/materialisation replacement,
+- `JVNAUTOSCI-1675` for delivery and review surfaces,
+- `JVNAUTOSCI-1676` for the next tool-versus-workflow clarification.
 
-## 6. Recommended implementation order
+## 6. Recommended next interpretation order
 
 1. Keep paper/arXiv representation as the authoritative substrate and repair any
    residual workflow-family issues there if they block downstream work.
-2. Implement researcher recommendation profiles (`JVNAUTOSCI-117`).
-3. Implement ranking and explanation (`JVNAUTOSCI-120`).
-4. Implement delivery/review surfaces (`JVNAUTOSCI-1675`).
-5. Implement feedback capture and evaluation (`JVNAUTOSCI-116`).
-6. Use `JVNAUTOSCI-270` and `JVNAUTOSCI-776` as optional source-enrichment
+2. Treat the landed profile, semantic evaluation, and review surfaces
+   (`JVNAUTOSCI-117`, `JVNAUTOSCI-1679`, `JVNAUTOSCI-1675`) as the current base
+   capability.
+3. Clarify the bounded recommendation primitive versus workflow-family split in
+   `JVNAUTOSCI-1676` before adding broader research-group recommendation flows.
+4. Implement feedback capture and evaluation (`JVNAUTOSCI-116`) against that
+   clarified workflow family.
+5. Use `JVNAUTOSCI-270` and `JVNAUTOSCI-776` as optional source-enrichment
    decisions rather than hard blockers.
 
 ## 7. Closure interpretation for `JVNAUTOSCI-1554`
@@ -272,3 +311,7 @@ delivery and review surfaces. It covers:
 - the old subtasks are mapped to obsolete, historical, or superseded status,
 - and the active `JVNAUTOSCI-1553` backlog is rewritten to express the modern
   workflow-first implementation path.
+
+That closure condition is now satisfied. This note should therefore remain as a
+historical re-scope record, while live `JVNAUTOSCI-1553` follow-on planning
+shifts to the later April 2026 task split and linked notes.
