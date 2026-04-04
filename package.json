@@ -12,7 +12,8 @@
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
     "test:backend": "jest tests/backend",
-    "test:frontend": "jest tests/frontend --passWithNoTests"
+    "test:frontend": "jest tests/frontend --passWithNoTests",
+    "lint:frontend:static": "node scripts/lint_frontend_static.cjs"
   },
   "jest": {
     "testEnvironment": "jsdom"

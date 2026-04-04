@@ -20,6 +20,13 @@
 			"problemMatcher": []
 		},
 		{
+			"label": "lint:frontend:static",
+			"type": "shell",
+			"command": "npm run lint:frontend:static -- ${relativeFile}",
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
 			"label": "test:coverage",
 			"type": "npm",
 			"script": "test:coverage",

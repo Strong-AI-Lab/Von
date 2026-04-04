@@ -1,7 +1,7 @@
-import js from "@eslint/js";
-import globals from "globals";
+const js = require("@eslint/js");
+const globals = require("globals");
 
-export default [
+module.exports = [
     js.configs.recommended,
     {
         languageOptions: {
@@ -28,7 +28,7 @@ export default [
     },
     {
         // Node.js files (config, tests)
-        files: ["*.config.js", "jest.*.js", "babel.config.js"],
+        files: ["*.config.js", "jest.*.js", "babel.config.js", "scripts/**/*.cjs"],
         languageOptions: {
             globals: {
                 ...globals.node,

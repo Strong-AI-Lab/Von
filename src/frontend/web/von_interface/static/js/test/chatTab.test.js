@@ -60,7 +60,7 @@ import {
     setLlmDebugDataForTurn,
     formatChatTimestamp,
     sendMessage
-} from '../chatTab';
+} from '../chatTab.js';
 
 // Mock dependencies to avoid import errors
 jest.mock('../apiService.js', () => {
@@ -5210,30 +5210,35 @@ describe('conversation LLM telemetry clipboard export', () => {
 
     test('keeps the full telemetry export payload unchanged for file save', () => {
         const timestampMs = 1743760800000;
+        jest.useFakeTimers().setSystemTime(new Date('2026-04-04T19:03:45.963Z'));
 
-        setLlmDebugDataForTurn('assistant-1743760800000', {
-            timestamp: timestampMs,
-            request_id: 'req-1684-full',
-            history_location: {
-                session_id: 'session-1684',
-                history_index: 7
-            },
-            model: 'gpt-5',
-            response: {
-                content: 'full telemetry'
-            }
-        });
+        try {
+            setLlmDebugDataForTurn('assistant-1743760800000', {
+                timestamp: timestampMs,
+                request_id: 'req-1684-full',
+                history_location: {
+                    session_id: 'session-1684',
+                    history_index: 7
+                },
+                model: 'gpt-5',
+                response: {
+                    content: 'full telemetry'
+                }
+            });
 
-        const fullPayload = __testOnly_buildConversationLlmTelemetryPayload();
-        const exportPayload = __testOnly_buildConversationTelemetryExportPayload();
-        const locatorPayload = __testOnly_buildConversationLlmTelemetryLocatorPayload();
+            const fullPayload = __testOnly_buildConversationLlmTelemetryPayload();
+            const exportPayload = __testOnly_buildConversationTelemetryExportPayload();
+            const locatorPayload = __testOnly_buildConversationLlmTelemetryLocatorPayload();
 
-        expect(exportPayload).toEqual(fullPayload);
-        expect(fullPayload.schema_version).toBe('conversation_llm_telemetry.v1');
-        expect(fullPayload.turns[0].debug_data).toBeTruthy();
-        expect(fullPayload.turns[0].debug_data.model).toBe('gpt-5');
-        expect(locatorPayload.turns[0].debug_data).toBeUndefined();
-        expect(locatorPayload.turns[0].request_id).toBe('req-1684-full');
+            expect(exportPayload).toEqual(fullPayload);
+            expect(fullPayload.schema_version).toBe('conversation_llm_telemetry.v1');
+            expect(fullPayload.turns[0].debug_data).toBeTruthy();
+            expect(fullPayload.turns[0].debug_data.model).toBe('gpt-5');
+            expect(locatorPayload.turns[0].debug_data).toBeUndefined();
+            expect(locatorPayload.turns[0].request_id).toBe('req-1684-full');
+        } finally {
+            jest.useRealTimers();
+        }
     });
 
     test('hydrates history placeholders before copying locator JSON', async () => {

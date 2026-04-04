@@ -201,6 +201,35 @@ early-return behaviour are tested on the actual surface that callers use.
   verify those authoritative changes were actually materialised, not merely that
   repo-side support code was merged.
 
+### 7.4 Frontend static JS gate
+
+For the browser-side modules under:
+
+- `src/frontend/web/von_interface/static/js/**/*.js`
+- `tests/frontend/**/*.js`
+
+do not use `pyright` as a pre-commit or changed-files gate. `pyright` is a
+Python type checker and produces parser/configuration noise rather than
+actionable diagnostics on these files.
+
+Use this repo's JS gate instead:
+
+- changed-file check:
+  `npm run lint:frontend:static -- <changed static-js files>`
+
+The wrapper filters mixed changed-file lists down to the supported browser-side
+JS paths and avoids falling back to a noisy repository-wide sweep. Do not treat
+bare `npm run lint:frontend:static` as a clean whole-tree gate while the wider
+static JS surface still carries unrelated lint debt.
+
+For user-visible behaviour changes, pair that lint pass with a focused Jest
+run, for example:
+
+- `npx jest src/frontend/web/von_interface/static/js/test/chatTab.test.js --runInBand`
+
+This keeps frontend validation file-local and avoids repository-wide parser
+failures unrelated to the changed JS module.
+
 ## 8. Practical Refactoring and Consistency Habits
 
 - Search first before adding helpers or parallel pathways.
