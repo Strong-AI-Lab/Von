@@ -81,3 +81,77 @@ def test_build_selector_routing_benchmark_report_supports_prompt_failure_cases()
     assert replay_case["selection_source"] == "selector_fail_closed"
     assert replay_case["selected_workflow_id"] == CHAT_ASSISTANT_WORKFLOW_ID
     assert replay_case["overall_outcome"] == "abstain_escalate_no_safe_route"
+
+
+def test_load_selector_routing_benchmark_cases_supports_entity_representation_case_set() -> None:
+    result = load_selector_routing_benchmark_cases(
+        case_set="entity_representation_generalisation"
+    )
+
+    assert result["source"] == "seed_bundle"
+    assert result["case_set"] == "entity_representation_generalisation"
+
+    cases = result["cases"]
+    assert len(cases) == 7
+    assert any(
+        case.case_id == "entity_people_follow_up_reasoning_override"
+        for case in cases
+    )
+    assert any(
+        case.case_id == "unsupported_domain_safe_authoring_recovery"
+        for case in cases
+    )
+
+
+def test_build_selector_routing_benchmark_report_for_entity_representation_case_set() -> None:
+    result = build_selector_routing_benchmark_report(
+        case_set="entity_representation_generalisation"
+    )
+
+    assert result["success"] is True
+    metrics = result["metrics"]
+    assert metrics["scanned_count"] == 7
+    assert metrics["matched_case_count"] == 7
+    assert metrics["selector_accuracy_pct"] == 100.0
+    assert metrics["baseline_accuracy_pct"] == 0.0
+    assert metrics["accuracy_improvement_pct"] == 100.0
+    assert metrics["abstain_case_count"] == 1
+    assert metrics["abstain_matched_count"] == 1
+    assert metrics["misrouting_count"] == 0
+    assert metrics["outcome_label_counts"]["successful_completion"] == 6
+    assert metrics["outcome_label_counts"]["abstain_escalate_no_safe_route"] == 1
+    assert metrics["outcome_label_counts"]["tool_or_workflow_misrouting"] == 0
+
+    replay_cases = result["replay_cases"]
+    assert len(replay_cases) == 7
+    follow_up_case = next(
+        case
+        for case in replay_cases
+        if case["case_id"] == "entity_people_follow_up_reasoning_override"
+    )
+    assert follow_up_case["selected_workflow_id"] == "#V#entity_representation_workflow"
+    assert follow_up_case["overall_outcome"] == "successful_completion"
+
+    recovery_case = next(
+        case
+        for case in replay_cases
+        if case["case_id"] == "unsupported_domain_safe_authoring_recovery"
+    )
+    assert (
+        recovery_case["selected_workflow_id"]
+        == "#V#workflow_discovery_gap_recovery_workflow"
+    )
+    assert recovery_case["overall_outcome"] == "abstain_escalate_no_safe_route"
+
+    signal_by_id = {
+        signal["signal_id"]: signal for signal in result["benchmark_signals"]
+    }
+    assert signal_by_id["selector_benchmark_corpus_present"]["status"] == "pass"
+    assert (
+        signal_by_id["selector_accuracy_not_worse_than_baseline"]["status"] == "pass"
+    )
+    assert signal_by_id["abstain_cases_routed_safely"]["status"] == "pass"
+    assert (
+        signal_by_id["selector_misrouting_examples_detected"]["status"]
+        == "not_evaluated"
+    )

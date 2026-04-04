@@ -40,8 +40,17 @@ def _build_transition(
 def _build_transitions_from_row(row: Mapping[str, Any]) -> tuple[WorkflowTransitionSpec, ...]:
     transitions: list[WorkflowTransitionSpec] = []
 
-    def _append_if_present(target_key: str, reason: str, condition_spec: Mapping[str, Any]) -> None:
-        target = _clean_text(row.get(target_key))
+    def _append_if_present(
+        target_keys: str | tuple[str, ...],
+        reason: str,
+        condition_spec: Mapping[str, Any],
+    ) -> None:
+        keys = (target_keys,) if isinstance(target_keys, str) else target_keys
+        target = ""
+        for key in keys:
+            target = _clean_text(row.get(key))
+            if target:
+                break
         if not target:
             return
         transitions.append(
@@ -74,17 +83,45 @@ def _build_transitions_from_row(row: Mapping[str, Any]) -> tuple[WorkflowTransit
                     to_state=target,
                     reason=reason,
                     condition_spec=condition_spec,
-                )
             )
+        )
 
-    _append_if_present("on_failure_state_key", "on_failure", {"kind": "context_flag", "key": "last_action_failed", "expected": True})
-    _append_if_present("on_unknown_state_key", "on_unknown", {"kind": "context_flag", "key": "last_action_unknown", "expected": True})
-    _append_if_present("on_approval_required_state_key", "on_approval_required", {"kind": "context_flag", "key": "approval_required", "expected": True})
-    _append_if_present("on_break_state_key", "on_break", {"kind": "control_signal", "signal": "break"})
-    _append_if_present("on_continue_state_key", "on_continue", {"kind": "control_signal", "signal": "continue"})
-    _append_if_present("on_true_state_key", "on_true", {"kind": "transition_result_truth", "expected": True})
-    _append_if_present("on_false_state_key", "on_false", {"kind": "transition_result_truth", "expected": False})
-    _append_if_present("next_state_key", "next_step", {"kind": "always"})
+    _append_if_present(
+        ("on_failure_state_key", "on_failure_state"),
+        "on_failure",
+        {"kind": "context_flag", "key": "last_action_failed", "expected": True},
+    )
+    _append_if_present(
+        ("on_unknown_state_key", "on_unknown_state"),
+        "on_unknown",
+        {"kind": "context_flag", "key": "last_action_unknown", "expected": True},
+    )
+    _append_if_present(
+        ("on_approval_required_state_key", "on_approval_required_state"),
+        "on_approval_required",
+        {"kind": "context_flag", "key": "approval_required", "expected": True},
+    )
+    _append_if_present(
+        ("on_break_state_key", "on_break_state"),
+        "on_break",
+        {"kind": "control_signal", "signal": "break"},
+    )
+    _append_if_present(
+        ("on_continue_state_key", "on_continue_state"),
+        "on_continue",
+        {"kind": "control_signal", "signal": "continue"},
+    )
+    _append_if_present(
+        ("on_true_state_key", "on_true_state"),
+        "on_true",
+        {"kind": "transition_result_truth", "expected": True},
+    )
+    _append_if_present(
+        ("on_false_state_key", "on_false_state"),
+        "on_false",
+        {"kind": "transition_result_truth", "expected": False},
+    )
+    _append_if_present(("next_state_key", "next_state"), "next_step", {"kind": "always"})
 
     return tuple(transitions)
 

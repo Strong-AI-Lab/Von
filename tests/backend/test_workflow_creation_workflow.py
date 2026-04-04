@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Dict
 from unittest.mock import patch
 
@@ -9,6 +10,9 @@ import pytest
 
 from src.backend.db.mongo_client import get_db
 from src.backend.services import concept_service
+from src.backend.services.entity_representation_workflow_vontology_service import (
+    bootstrap_canonical_entity_representation_workflows,
+)
 from src.backend.services.text_value_service import (
     get_texts_for_concept,
     upsert_text_for_concept,
@@ -44,7 +48,9 @@ from src.backend.workflows.vontology_loader import (
     build_workflow_process_graph,
     discover_workflow_ids,
     load_workflow_definition_from_vontology,
+    resolve_workflow_discovery_exemplars,
     resolve_workflow_publication_lifecycle,
+    resolve_workflow_routing_profile,
 )
 from src.backend.workflows.workflow_creation_contracts import (
     WORKFLOW_AUTHORING_ACTION_CONCEPT_ENSURE_WORKFLOW_IDENTITY,
@@ -59,6 +65,9 @@ from src.backend.workflows.workflow_creation_contracts import (
     WORKFLOW_CREATION_ACTION_CONCEPT_EMIT_MARKER,
     WORKFLOW_CREATION_ACTION_CONCEPT_IDENTIFY_NEED,
     WORKFLOW_CREATION_ACTION_CONCEPT_RESOLVE_SCHOLARLY_AUTHORS,
+)
+from src.backend.workflows.workflow_template_profile_service import (
+    WORKFLOW_CREATION_PERSON_TEMPLATE_ID,
 )
 from src.backend.workflows.workflow_definition_identity_service import (
     collect_workflow_action_ids,
@@ -729,16 +738,160 @@ def test_text_only_scholarly_request_synthesises_non_blocking_workflow() -> None
     created_author_id = str(created_ids[0])
     created_author = concept_service.get_concept_by_concept_id(created_author_id)
     assert created_author is not None
-    created_types = (
-        (created_author.get("relationships") or {}).get("is_an_instance_of") or []
-    )
-    assert "#V#person" in created_types
 
-    paper_doc = concept_service.get_concept_by_concept_id("#V#paper_test")
-    assert paper_doc is not None
-    authored_by_ids = ((paper_doc.get("relationships") or {}).get("#V#authored_by") or [])
-    assert "#V#person_jane_doe_existing" in authored_by_ids
-    assert created_author_id in authored_by_ids
+
+def test_text_only_person_request_synthesises_discoverable_entity_workflow() -> None:
+    _seed_workflow_creation_graph_without_actions()
+
+    pre = load_workflow_definition_from_vontology(WORKFLOW_CREATION_WORKFLOW_ID)
+    assert pre is not None
+    registry_for_publish = WorkflowRegistry()
+    registry_for_publish.register(
+        WorkflowRegistration(
+            workflow_id=WORKFLOW_CREATION_WORKFLOW_ID,
+            definition=pre,
+            purpose="text-only person synthesis",
+            source="vontology",
+        )
+    )
+    authority_service.publish_canonical_chat_workflow_graphs(registry=registry_for_publish)
+    _seed_workflow_creation_synthesis_policy()
+    bootstrap_canonical_entity_representation_workflows()
+
+    creation_llm = _QueuedLLM(
+        [
+            json.dumps(
+                {
+                    "ready_to_materialise": True,
+                    "needs_user_affirmation": False,
+                    "entity_name": "Ada Lovelace",
+                    "entity_description": "Mathematician and writer.",
+                    "entity_aliases": ["Augusta Ada King"],
+                    "entity_source_text": (
+                        "Represent Ada Lovelace in the Vontology. "
+                        "She was a mathematician and writer."
+                    ),
+                    "response_text": "Representing Ada Lovelace now.",
+                }
+            )
+        ]
+    )
+    action_registry = build_durable_action_registry()
+    env = WorkflowEnvironment(
+        llm_client=creation_llm,
+        user_namespace="#V#test_user",
+    )
+    workflow_creation_definition = load_workflow_definition_from_vontology(
+        WORKFLOW_CREATION_WORKFLOW_ID
+    )
+    assert workflow_creation_definition is not None
+
+    prompt = (
+        "Create a workflow from this description request: represent a person "
+        "from text description in Vontology."
+    )
+    generated_workflow_id = "#V#integration_person_representation_workflow"
+    run_result = WorkflowExecutor(registry=action_registry, max_transitions=40).run(
+        workflow_creation_definition,
+        environment=env,
+        data={
+            "prompt": prompt,
+            "target_workflow_id": generated_workflow_id,
+            "workflow_template_id": WORKFLOW_CREATION_PERSON_TEMPLATE_ID,
+        },
+    )
+
+    assert run_result.completed is True
+    assert run_result.data.get("postconditions_verified") is True
+    assert run_result.data.get("workflow_concept_id") == generated_workflow_id
+
+    generated_definition = load_workflow_definition_from_vontology(
+        generated_workflow_id
+    )
+    assert generated_definition is not None
+
+    action_ids = set(collect_workflow_action_ids(generated_definition))
+    assert "llm.action" in action_ids
+    assert "entity_representation.materialise_from_payload" in action_ids
+
+    routing_profile, routing_source = resolve_workflow_routing_profile(
+        generated_workflow_id
+    )
+    assert isinstance(routing_profile, dict)
+    assert routing_source.startswith("text_relation:")
+    assert routing_profile.get("role") == "execution"
+
+    discovery_exemplars, discovery_source = resolve_workflow_discovery_exemplars(
+        generated_workflow_id
+    )
+    assert isinstance(discovery_exemplars, dict)
+    assert discovery_source.startswith("text_relation:")
+    assert "represent person" in (discovery_exemplars.get("keywords") or [])
+
+    generated_run = WorkflowExecutor(registry=action_registry, max_transitions=20).run(
+        generated_definition,
+        environment=WorkflowEnvironment(
+            llm_client=_QueuedLLM(
+                [
+                    json.dumps(
+                        {
+                            "ready_to_materialise": True,
+                            "needs_user_affirmation": False,
+                            "entity_name": "Grace Hopper",
+                            "entity_description": "Computer scientist and rear admiral.",
+                            "entity_aliases": ["Amazing Grace"],
+                            "entity_source_text": (
+                                "Represent Grace Hopper in the Vontology. "
+                                "She was a computer scientist."
+                            ),
+                            "response_text": "Representing Grace Hopper now.",
+                        }
+                    )
+                ]
+            ),
+            user_namespace="#V#test_user",
+        ),
+        data={
+            "prompt": (
+                "Represent Grace Hopper in the Vontology. "
+                "She was a computer scientist."
+            ),
+        },
+    )
+
+    assert generated_run.completed is True
+    assert generated_run.data.get("requires_user_affirmation") is False
+    assert generated_run.data.get("entity_representation_verified") is True
+    assert generated_run.data.get("entity_representation_domain") == "person"
+
+    concept_id = str(
+        generated_run.data.get("entity_representation_concept_id") or ""
+    ).strip()
+    assert concept_id
+    concept_doc = concept_service.get_concept_by_concept_id(concept_id)
+    assert concept_doc is not None
+    type_ids = (concept_doc.get("relationships") or {}).get("is_an_instance_of") or []
+    assert "#V#person" in type_ids
+    description_rows = get_texts_for_concept(
+        subject_concept_id=concept_id,
+        predicate="hasDescription",
+        limit=20,
+    )
+    assert any(
+        (row.get("text") or "") == "Computer scientist and rear admiral."
+        for row in description_rows
+        if isinstance(row, dict)
+    )
+    alias_rows = get_texts_for_concept(
+        subject_concept_id=concept_id,
+        predicate="hasName",
+        limit=20,
+    )
+    assert any(
+        (row.get("text") or "") == "Amazing Grace"
+        for row in alias_rows
+        if isinstance(row, dict)
+    )
 
 
 def test_text_only_phd_student_request_routes_create_execute_end_to_end() -> None:

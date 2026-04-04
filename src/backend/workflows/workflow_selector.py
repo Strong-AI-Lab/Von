@@ -15,6 +15,7 @@ workflow ID out.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional, Sequence
 
@@ -95,6 +96,21 @@ class WorkflowSelector:
     _JSON_CONFIDENCE_KEYS = ("confidence", "confidence_score", "score")
     _JSON_REASONING_KEYS = ("reasoning", "reason", "explanation", "rationale")
     _CANDIDATE_BOUNDARY_STRIP = " \t\r\n`'\".,;:!?()[]{}<>"
+    _REASONING_SELECTION_CUES = (
+        "best fit is",
+        "best match is",
+        "best workflow is",
+        "choose",
+        "choose the",
+        "select",
+        "selected",
+        "prefer",
+        "prefer the",
+        "route to",
+        "route through",
+        "fallback to",
+        "fall back to",
+    )
 
     @staticmethod
     def _humanise_candidate_signal(value: Any) -> str:
@@ -264,6 +280,86 @@ class WorkflowSelector:
             "Generic fallback selected because "
             + "; ".join(disqualified_candidates[:2])
         )
+
+    @staticmethod
+    def _normalise_reasoning_surface(value: Any) -> str:
+        text = str(value or "").strip().lower()
+        if not text:
+            return ""
+        text = text.replace("#v#", "")
+        text = re.sub(r"[_\-]+", " ", text)
+        text = re.sub(r"[^a-z0-9\s]+", " ", text)
+        return " ".join(text.split())
+
+    @classmethod
+    def _candidate_reasoning_aliases(
+        cls,
+        *,
+        workflow_id: str,
+        entry: Mapping[str, Any] | None,
+    ) -> tuple[str, ...]:
+        aliases: set[str] = set()
+
+        def _add(value: Any) -> None:
+            normalised = cls._normalise_reasoning_surface(value)
+            if len(normalised) < 4:
+                return
+            aliases.add(normalised)
+            if normalised.endswith(" workflow"):
+                trimmed = normalised[: -len(" workflow")].strip()
+                if len(trimmed) >= 4:
+                    aliases.add(trimmed)
+
+        _add(workflow_id)
+        if isinstance(entry, Mapping):
+            _add(entry.get("name"))
+
+        return tuple(sorted(aliases, key=len, reverse=True))
+
+    @classmethod
+    def _reasoning_recommends_alias(cls, *, reasoning: str, alias: str) -> bool:
+        if not reasoning or not alias:
+            return False
+        for cue in cls._REASONING_SELECTION_CUES:
+            pattern = (
+                rf"\b{re.escape(cue)}\b(?:\s+\w+){{0,6}}\s+"
+                rf"{re.escape(alias)}\b"
+            )
+            if re.search(pattern, reasoning):
+                return True
+        return False
+
+    @classmethod
+    def _resolve_reasoning_recommended_candidate(
+        cls,
+        *,
+        reasoning: str,
+        candidate_workflow_ids: Sequence[str],
+        candidate_entries: Sequence[Mapping[str, Any]] | None,
+    ) -> str | None:
+        reasoning_surface = cls._normalise_reasoning_surface(reasoning)
+        if not reasoning_surface:
+            return None
+
+        entry_lookup = cls._candidate_entry_lookup(candidate_entries)
+        matched_candidates: list[str] = []
+        for workflow_id in candidate_workflow_ids:
+            aliases = cls._candidate_reasoning_aliases(
+                workflow_id=workflow_id,
+                entry=entry_lookup.get(workflow_id),
+            )
+            if any(
+                cls._reasoning_recommends_alias(
+                    reasoning=reasoning_surface,
+                    alias=alias,
+                )
+                for alias in aliases
+            ):
+                matched_candidates.append(workflow_id)
+
+        if len(matched_candidates) != 1:
+            return None
+        return matched_candidates[0]
 
     @property
     def rag_first(self) -> bool:
@@ -671,6 +767,17 @@ class WorkflowSelector:
                 # Lower confidence for fallback selections.
                 if confidence_score > 0.0:
                     confidence_score = min(confidence_score, 0.3)
+        reasoning_candidate = self._resolve_reasoning_recommended_candidate(
+            reasoning=reasoning,
+            candidate_workflow_ids=candidate_ids,
+            candidate_entries=candidate_entries,
+        )
+        if reasoning_candidate and reasoning_candidate != workflow_id:
+            selection_metadata["selection_resolution"] = "reasoning_candidate_override"
+            selection_metadata["reasoning_override_from_workflow_id"] = workflow_id
+            selection_metadata["reasoning_override_workflow_id"] = reasoning_candidate
+            workflow_id = reasoning_candidate
+            verdict = "rag_selected"
         selection_metadata["selected_workflow_id"] = workflow_id
 
         if not reasoning:

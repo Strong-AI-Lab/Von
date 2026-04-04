@@ -5987,6 +5987,128 @@ def test_generic_tool_fallback_records_disqualifying_reason_for_specialised_cand
     assert "launch input contract unsatisfied" in reasoning
 
 
+def test_contradictory_structured_selector_reasoning_overrides_selected_workflow_id(
+    monkeypatch,
+):
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    selected_workflow_id = "#V#arxiv_paper_representation_workflow"
+    _register_terminal_custom_workflow(
+        orchestrator,
+        workflow_id=selected_workflow_id,
+        purpose=(
+            "Canonical arXiv wrapper workflow that normalises an arXiv source, "
+            "fetches authoritative metadata, and delegates to scholarly-paper "
+            "representation."
+        ),
+    )
+    captured_workflow_ids: list[str] = []
+
+    def _execute_workflow(workflow_id: str, **_kwargs: Any):
+        captured_workflow_ids.append(workflow_id)
+        if workflow_id == selected_workflow_id:
+            return SimpleNamespace(
+                data={"response_text": "Executed via arXiv representation workflow."},
+                final_state="complete",
+                completed=True,
+            )
+        if workflow_id == TOOL_CALLING_WORKFLOW_ID:
+            return SimpleNamespace(
+                data={
+                    "final_response": "Fallback via generic tool pipeline.",
+                    "tool_messages": [],
+                    "invocations": [],
+                    "iteration_count": 0,
+                },
+                final_state="complete",
+                completed=True,
+            )
+        raise AssertionError(f"Unexpected workflow execution: {workflow_id}")
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
+
+    result = orchestrator.run(
+        prompt=(
+            "For each of those students, if they are not already represented in "
+            "the Vontology, please represent them."
+        ),
+        context=[],
+        llm_client=_CapturingLLM(
+            [
+                json.dumps(
+                    {
+                        "workflow_id": selected_workflow_id,
+                        "confidence": 0.97,
+                        "reasoning": (
+                            "The arXiv-specific workflow is irrelevant here, while "
+                            "the best fit is the generic tool-calling workflow for "
+                            "KB writes and representation operations."
+                        ),
+                    }
+                ),
+                "Fallback via generic tool pipeline.",
+            ]
+        ),
+        model=None,
+        user_namespace="#V#user",
+        workflow_discovery_result={
+            "matches": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Arxiv Paper Representation Workflow",
+                    "description": "Canonical arXiv representation workflow.",
+                    "candidate_source": "workflow_discovery",
+                    "match_source": "capability_index",
+                    "relevance_score": 1.0,
+                    "confidence_score": 1.0,
+                    "routing_eligible": True,
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                }
+            ],
+            "candidates": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Arxiv Paper Representation Workflow",
+                    "description": "Canonical arXiv representation workflow.",
+                    "candidate_source": "workflow_discovery",
+                    "match_source": "capability_index",
+                    "relevance_score": 1.0,
+                    "confidence_score": 1.0,
+                    "routing_eligible": True,
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                }
+            ],
+            "match_count": 1,
+        },
+    )
+
+    assert result.workflow_routing is not None
+    assert result.workflow_routing.workflow_id == TOOL_CALLING_WORKFLOW_ID
+    assert result.workflow_routing.verdict == "rag_selected"
+    assert result.workflow_routing.source == "selector"
+    assert result.response_text == "Fallback via generic tool pipeline."
+    assert captured_workflow_ids == [TOOL_CALLING_WORKFLOW_ID]
+
+    selector_entry = next(
+        entry
+        for entry in result.aux_llm_calls
+        if isinstance(entry, dict) and entry.get("type") == "workflow_selector"
+    )
+    assert selector_entry["workflow_id"] == TOOL_CALLING_WORKFLOW_ID
+    assert selector_entry["selection_metadata"]["selection_resolution"] == (
+        "reasoning_candidate_override"
+    )
+    assert (
+        selector_entry["selection_metadata"]["reasoning_override_from_workflow_id"]
+        == selected_workflow_id
+    )
+    assert (
+        selector_entry["selection_metadata"]["reasoning_override_workflow_id"]
+        == TOOL_CALLING_WORKFLOW_ID
+    )
+
+
 def test_same_session_follow_up_does_not_rehydrate_python_write_intent_memory(
     monkeypatch,
 ):
@@ -6630,6 +6752,265 @@ def test_discovery_miss_invokes_gap_recovery_after_plain_fallback(monkeypatch):
     assert recovery_entry is not None
     assert recovery_entry.get("status") == "applied"
     assert recovery_entry.get("candidate_workflow_id") == "#V#candidate_recovery_workflow"
+
+
+def test_discovered_custom_workflow_failure_invokes_gap_recovery(monkeypatch):
+    import src.backend.services.workflow_selection_policy_service as policy_module
+
+    monkeypatch.setattr(policy_module, "get_live_selection_policy", lambda: None)
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    selected_workflow_id = "#V#misaligned_specialised_workflow"
+    monkeypatch.setenv("VON_WORKFLOW_SELECTOR_ALLOW_POLICY_UNSAFE", "1")
+    _register_terminal_custom_workflow(
+        orchestrator,
+        workflow_id=selected_workflow_id,
+        purpose="Misaligned specialised workflow for gap-recovery routing tests.",
+    )
+
+    recovery_calls: list[tuple[str, Mapping[str, Any]]] = []
+
+    def _fake_execute_workflow(workflow_id: str, **kwargs: Any):
+        if workflow_id == selected_workflow_id:
+            return SimpleNamespace(
+                data={"response_text": "Selected specialised workflow failed."},
+                final_state="#V#workflow_step_misaligned_specialised_workflow_failed",
+                completed=True,
+                error=None,
+            )
+        if workflow_id == WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID:
+            recovery_calls.append((workflow_id, dict(kwargs)))
+            return SimpleNamespace(
+                data={
+                    "workflow_gap_final_response_text": (
+                        "Recovered after detected specialised-workflow failure."
+                    ),
+                    "workflow_gap_final_extra_messages": [
+                        {"role": "tool", "content": "gap recovery tool output"}
+                    ],
+                    "workflow_gap_final_tool_invocations": [
+                        {"tool": "workflow_gap.execute_candidate"}
+                    ],
+                    "workflow_gap_recovery_outcome": "candidate_retried_successfully",
+                    "workflow_gap_candidate_workflow_id": (
+                        "#V#candidate_recovery_workflow"
+                    ),
+                },
+                final_state="complete",
+                completed=True,
+            )
+        raise AssertionError(f"Unexpected workflow execution: {workflow_id}")
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _fake_execute_workflow)
+
+    result = orchestrator.run(
+        prompt="Represent these people in the Vontology if they are not already represented.",
+        context=[],
+        llm_client=_CapturingLLM([selected_workflow_id]),
+        model=None,
+        user_namespace="#V#user",
+        workflow_discovery_result={
+            "matches": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Misaligned specialised workflow",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                }
+            ],
+            "candidates": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Misaligned specialised workflow",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                }
+            ],
+        },
+    )
+
+    assert recovery_calls
+    workflow_id, payload = recovery_calls[0]
+    assert workflow_id == WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID
+    assert payload["data"]["workflow_gap_trigger_reason"] == (
+        "discovered_custom_workflow_failed"
+    )
+    assert payload["data"]["workflow_gap_selected_workflow_completed"] is True
+    assert payload["data"]["workflow_gap_selected_workflow_final_state"] == (
+        "#V#workflow_step_misaligned_specialised_workflow_failed"
+    )
+    assert result.response_text == (
+        "Recovered after detected specialised-workflow failure."
+    )
+    assert result.extra_messages == (
+        {"role": "tool", "content": "gap recovery tool output"},
+    )
+    assert result.tool_invocations == (
+        {"tool": "workflow_gap.execute_candidate"},
+    )
+    dispatch_boundaries = [
+        entry
+        for entry in result.aux_llm_calls
+        if isinstance(entry, dict) and entry.get("type") == "workflow_dispatch_boundary"
+    ]
+    terminal_boundary = next(
+        (
+            entry
+            for entry in dispatch_boundaries
+            if entry.get("boundary") == "workflow_terminal"
+            and entry.get("selected_execution_mode") == "custom_workflow"
+        ),
+        None,
+    )
+    assert terminal_boundary is not None
+    assert terminal_boundary.get("status") == "failed"
+    assert terminal_boundary.get("completed") is False
+    assert terminal_boundary.get("final_state") == (
+        "#V#workflow_step_misaligned_specialised_workflow_failed"
+    )
+    assert terminal_boundary.get("reason") == "failed_terminal_state"
+    assert terminal_boundary.get("detail") == (
+        "Selected specialised workflow failed."
+    )
+    recovery_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "workflow_gap_recovery"
+        ),
+        None,
+    )
+    assert recovery_entry is not None
+    assert recovery_entry.get("status") == "applied"
+    assert recovery_entry.get("candidate_workflow_id") == "#V#candidate_recovery_workflow"
+
+
+def test_entity_representation_failure_family_replays_with_truthful_gap_recovery(
+    monkeypatch,
+):
+    import src.backend.services.workflow_selection_policy_service as policy_module
+
+    monkeypatch.setattr(policy_module, "get_live_selection_policy", lambda: None)
+    monkeypatch.setenv("VON_WORKFLOW_SELECTOR_ALLOW_POLICY_UNSAFE", "1")
+
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    selected_workflow_id = "#V#arxiv_paper_representation_workflow"
+    _register_terminal_custom_workflow(
+        orchestrator,
+        workflow_id=selected_workflow_id,
+        purpose=(
+            "Canonical arXiv wrapper workflow that represents scholarly papers, "
+            "not conversational person lists."
+        ),
+    )
+
+    recovery_calls: list[tuple[str, Mapping[str, Any]]] = []
+
+    def _fake_execute_workflow(workflow_id: str, **kwargs: Any):
+        if workflow_id == selected_workflow_id:
+            return SimpleNamespace(
+                data={
+                    "response_text": (
+                        "ArXiv paper representation could not represent those people."
+                    )
+                },
+                final_state="#V#workflow_step_arxiv_paper_representation_workflow_failed",
+                completed=True,
+                error=None,
+            )
+        if workflow_id == WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID:
+            recovery_calls.append((workflow_id, dict(kwargs)))
+            return SimpleNamespace(
+                data={
+                    "workflow_gap_final_response_text": (
+                        "Recovered by escalating into entity-representation workflow authoring."
+                    ),
+                    "workflow_gap_final_extra_messages": [
+                        {
+                            "role": "tool",
+                            "content": "workflow-gap recovery prepared entity workflow follow-up",
+                        }
+                    ],
+                    "workflow_gap_final_tool_invocations": [
+                        {"tool": "workflow_gap.execute_candidate"}
+                    ],
+                    "workflow_gap_recovery_outcome": "candidate_retried_successfully",
+                    "workflow_gap_candidate_workflow_id": (
+                        "#V#entity_representation_workflow"
+                    ),
+                },
+                final_state="complete",
+                completed=True,
+            )
+        raise AssertionError(f"Unexpected workflow execution: {workflow_id}")
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _fake_execute_workflow)
+
+    result = orchestrator.run(
+        prompt=(
+            "OK, now for each of those students, if they aren't already represented "
+            "in the Vontology, please represent them."
+        ),
+        context=[],
+        llm_client=_CapturingLLM([selected_workflow_id]),
+        model=None,
+        user_namespace="#V#user",
+        workflow_discovery_result={
+            "matches": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Arxiv Paper Representation Workflow",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                }
+            ],
+            "candidates": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Arxiv Paper Representation Workflow",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                }
+            ],
+        },
+    )
+
+    assert recovery_calls
+    workflow_id, payload = recovery_calls[0]
+    assert workflow_id == WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID
+    assert payload["data"]["workflow_gap_trigger_reason"] == (
+        "discovered_custom_workflow_failed"
+    )
+    assert payload["data"]["workflow_gap_selected_workflow_final_state"] == (
+        "#V#workflow_step_arxiv_paper_representation_workflow_failed"
+    )
+    assert result.response_text == (
+        "Recovered by escalating into entity-representation workflow authoring."
+    )
+    assert result.extra_messages == (
+        {
+            "role": "tool",
+            "content": "workflow-gap recovery prepared entity workflow follow-up",
+        },
+    )
+    terminal_boundary = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "workflow_dispatch_boundary"
+            and entry.get("boundary") == "workflow_terminal"
+            and entry.get("selected_execution_mode") == "custom_workflow"
+        ),
+        None,
+    )
+    assert terminal_boundary is not None
+    assert terminal_boundary.get("status") == "failed"
+    assert terminal_boundary.get("completed") is False
+    assert terminal_boundary.get("reason") == "failed_terminal_state"
+    assert terminal_boundary.get("detail") == (
+        "ArXiv paper representation could not represent those people."
+    )
 
 
 def test_custom_workflow_result_preserves_messages_and_invocations(monkeypatch):

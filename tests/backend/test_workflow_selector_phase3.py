@@ -184,6 +184,50 @@ class TestSelectionConfidenceReasoning:
         assert result.confidence_score == pytest.approx(0.92)
         assert result.reasoning == "Request needs external data."
 
+    def test_structured_json_reasoning_overrides_conflicting_workflow_id(self):
+        selector = _build_selector()
+        selected_workflow_id = "#V#arxiv_paper_representation_workflow"
+        result = selector.resolve_selection(
+            raw_response=json.dumps(
+                {
+                    "workflow_id": selected_workflow_id,
+                    "confidence": 0.97,
+                    "reasoning": (
+                        "The arXiv-specific workflow is irrelevant here, while "
+                        "the best fit is the generic tool-calling workflow for "
+                        "KB writes and representation operations."
+                    ),
+                }
+            ),
+            prompt_id=None,
+            prompt_used="test",
+            discovered_workflow_ids=[selected_workflow_id, _TOOL_WORKFLOW],
+            candidate_entries=[
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Arxiv Paper Representation Workflow",
+                    "candidate_source": "workflow_discovery",
+                },
+                {
+                    "concept_id": _TOOL_WORKFLOW,
+                    "name": "Tool Calling Workflow",
+                    "candidate_source": "selector_default",
+                },
+            ],
+        )
+        assert result.workflow_id == _TOOL_WORKFLOW
+        assert result.verdict == "rag_selected"
+        assert result.confidence_score == pytest.approx(0.97)
+        assert result.selection_metadata.get("selection_resolution") == (
+            "reasoning_candidate_override"
+        )
+        assert result.selection_metadata.get("reasoning_override_from_workflow_id") == (
+            selected_workflow_id
+        )
+        assert result.selection_metadata.get("reasoning_override_workflow_id") == (
+            _TOOL_WORKFLOW
+        )
+
     def test_plain_text_response_has_zero_confidence(self):
         selector = _build_selector()
         result = selector.resolve_selection(

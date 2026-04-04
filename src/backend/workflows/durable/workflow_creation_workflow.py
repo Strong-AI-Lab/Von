@@ -66,6 +66,10 @@ from ..workflow_authoring_service import (
 from ..workflow_template_profile_service import (
     resolve_workflow_spec_template,
 )
+from .entity_representation_workflow import (
+    ENTITY_REPRESENTATION_MATERIALISE_ACTION_ID,
+    register_entity_representation_actions,
+)
 from .workflow_gap_recovery_workflow import register_workflow_gap_recovery_actions
 
 WORKFLOW_CONTEXT_KEY_VALIDATED_TYPE_NAME = "#V#workflow_context_key_validated_type_name"
@@ -571,6 +575,29 @@ def _normalise_input_mapping(inputs: Mapping[str, Any]) -> Dict[str, Any]:
     return encoded
 
 
+def _normalise_text_relation_specs(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+
+    relation_specs: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        predicate = _clean_text(item.get("predicate"))
+        text = _clean_text(item.get("text"))
+        lang = _clean_text(item.get("lang")) or "en-NZ"
+        if not predicate or not text:
+            continue
+        relation_specs.append(
+            {
+                "predicate": predicate,
+                "text": text,
+                "lang": lang,
+            }
+        )
+    return relation_specs
+
+
 def _build_step_rows(
     *,
     workflow_id: str,
@@ -919,6 +946,7 @@ def _normalise_workflow_spec(context: Mapping[str, Any]) -> dict[str, Any]:
             for key, value in verification_inputs_raw.items()
             if isinstance(key, str)
         }
+    text_relations = _normalise_text_relation_specs(raw_spec.get("text_relations"))
 
     return {
         "workflow_id": workflow_id,
@@ -931,6 +959,7 @@ def _normalise_workflow_spec(context: Mapping[str, Any]) -> dict[str, Any]:
         "required_effects": required_effects,
         "postcondition_probe": postcondition_probe,
         "verification_inputs": verification_inputs,
+        "text_relations": text_relations,
         "synthesis_policy_text": _clean_text(raw_spec.get("synthesis_policy_text")),
         "template_resolution": template_resolution,
     }
@@ -1342,6 +1371,35 @@ def _handle_materialise_workflow_definition(
             or f"workflow_definition_materialisation_validation_failed:{workflow_id}",
             outputs=outputs,
         )
+
+    relation_specs = tuple(spec.get("text_relations") or ())
+    if relation_specs:
+        try:
+            workflow_authority_service.upsert_seed_bundle_text_relations(
+                subject_concept_id=workflow_id,
+                relation_specs=relation_specs,
+                workflow_id=workflow_id,
+                source_tag="JVNAUTOSCI-1704",
+                managed_by="workflow_creation_workflow",
+            )
+        except Exception as exc:
+            outputs = _add_contract_output(
+                outputs={
+                    "workflow_creation_spec": spec,
+                    "workflow_concept_id": workflow_id,
+                    "workflow_structure_written": False,
+                    "workflow_graph_publication_report": publication_report,
+                },
+                validated_type_name=parent_type_id,
+            )
+            return WorkflowActionResult(
+                status="failed",
+                error=(
+                    "workflow_definition_text_relation_materialisation_failed:"
+                    f"{workflow_id}:{exc}"
+                ),
+                outputs=outputs,
+            )
 
     step_ids = [
         str(row.get("step_concept_id") or "").strip()
@@ -2123,6 +2181,7 @@ def _build_verification_registry(environment: WorkflowEnvironment) -> ActionRegi
     # the same action registry they will later execute under, or verification
     # can incorrectly reject otherwise runnable workflows.
     register_workflow_gap_recovery_actions(registry)
+    register_entity_representation_actions(registry)
     registry.register_if_absent(
         ActionSpec(
             action_id=WORKFLOW_CREATION_ACTION_EMIT_MARKER,
@@ -2197,6 +2256,7 @@ def _supported_action_ids_for_verification(
     supported: set[str] = set()
     local_actions = {
         "workflow_gap.execute_candidate",
+        ENTITY_REPRESENTATION_MATERIALISE_ACTION_ID,
         WORKFLOW_CREATION_ACTION_EMIT_MARKER,
         WORKFLOW_CREATION_ACTION_RESOLVE_SCHOLARLY_AUTHORS,
         WORKFLOW_CREATION_ACTION_RESOLVE_PHD_STUDENT_CANDIDATE,

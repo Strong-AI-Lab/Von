@@ -356,6 +356,1117 @@
       }
     },
     {
+      "template_id": "workflow_creation.person_representation",
+      "name": "Workflow Creation Person Representation Template",
+      "description": "Authored workflow template for conversational person-representation workflows.",
+      "default_workflow_description": "Executable person representation workflow created from text intent.",
+      "template_profile": {
+        "schema_version": "workflow_template_profile.v1",
+        "selection_mode": "automatic",
+        "priority": 38,
+        "keywords": [
+          "person representation",
+          "represent person",
+          "researcher representation",
+          "contact representation",
+          "people in vontology"
+        ],
+        "exemplars": [
+          "Create a workflow from this description request: represent a person from text description in Vontology.",
+          "Build a workflow that represents researchers, people, and contacts from conversational text."
+        ],
+        "required_terms_any": [
+          "person",
+          "people",
+          "researcher",
+          "contact",
+          "profile"
+        ],
+        "forbidden_terms_any": [
+          "phd student",
+          "doctoral student",
+          "company",
+          "organisation",
+          "organization",
+          "event",
+          "meeting",
+          "place",
+          "location"
+        ],
+        "requires_synthesis_policy": true
+      },
+      "workflow_spec_template": {
+        "workflow_id": "{workflow_id}",
+        "name": "{workflow_name}",
+        "description": "{workflow_description}",
+        "parent_type_id": "#V#ai_workflow",
+        "required_effects": [
+          "context:user_affirmation_policy=only_when_vital_info_missing",
+          "context:entity_representation_verified=True",
+          "context:entity_representation_domain=person"
+        ],
+        "postcondition_probe": {
+          "user_affirmation_policy": "only_when_vital_info_missing",
+          "entity_representation_verified": true,
+          "entity_representation_domain": "person"
+        },
+        "verification_inputs": {
+          "request_text": "Represent Ada Lovelace in the Vontology. She was a mathematician and writer."
+        },
+        "text_relations": [
+          {
+            "predicate": "#V#hasWorkflowRoutingProfileJson",
+            "text": "{{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"execution\",\"authoring_intent_required\":false,\"prefer_existing_capability\":false}}",
+            "lang": "en-NZ"
+          },
+          {
+            "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
+            "text": "{{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"person representation\",\"represent person\",\"represent researcher\",\"represent contact\",\"represent people in vontology\"],\"examples\":[\"Represent this person in the Vontology.\",\"Please represent these researchers if they are not already represented.\",\"Create or update a person representation from this conversational description.\"]}}",
+            "lang": "en-NZ"
+          }
+        ],
+        "steps": [
+          {
+            "state_id": "set_autonomy_policy",
+            "action_id": "workflow_authoring.emit_marker",
+            "inputs": {
+              "marker_key": "user_affirmation_policy",
+              "marker_value": "only_when_vital_info_missing"
+            },
+            "next_state": "set_affirmation_default",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "set_affirmation_default",
+            "action_id": "workflow_authoring.emit_marker",
+            "inputs": {
+              "marker_key": "requires_user_affirmation",
+              "marker_value": "false"
+            },
+            "next_state": "extract_entity_payload",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "extract_entity_payload",
+            "action_id": "llm.action",
+            "execution_mode": "llm",
+            "prompt_contract": {
+              "validation_policy": "fail",
+              "requested_prompt_concept_ids": [
+                "#V#entity_representation_payload_prompt"
+              ],
+              "resolved_prompt_concept_id": "#V#entity_representation_payload_prompt",
+              "metadata": {
+                "prompt_name": "Entity representation payload prompt",
+                "prompt_source": "workflow_template_seed_bundle"
+              }
+            },
+            "llm_policy": {
+              "policy_stage": "entity_representation_payload",
+              "tool_mode": "none",
+              "response_contract_text": "Return JSON with keys ready_to_materialise, needs_user_affirmation, entity_name, entity_description, entity_aliases, entity_source_text, and response_text.",
+              "context_fields": [
+                {
+                  "context_key": "request_text",
+                  "label": "Entity representation request"
+                },
+                {
+                  "context_key": "prompt",
+                  "label": "Original user prompt"
+                },
+                {
+                  "context_key": "entity_name",
+                  "label": "Existing entity name"
+                },
+                {
+                  "context_key": "entity_description",
+                  "label": "Existing entity description"
+                }
+              ]
+            },
+            "validation_policy": {
+              "output_format": "json_value"
+            },
+            "inputs": {
+              "expected_entity_domain": "person"
+            },
+            "tool_output_context_mappings": [
+              {
+                "tool_output_field": "validated_json.ready_to_materialise",
+                "context_key": "ready_to_materialise"
+              },
+              {
+                "tool_output_field": "validated_json.needs_user_affirmation",
+                "context_key": "needs_user_affirmation"
+              },
+              {
+                "tool_output_field": "validated_json.entity_name",
+                "context_key": "entity_name"
+              },
+              {
+                "tool_output_field": "validated_json.entity_description",
+                "context_key": "entity_description"
+              },
+              {
+                "tool_output_field": "validated_json.entity_aliases",
+                "context_key": "entity_aliases"
+              },
+              {
+                "tool_output_field": "validated_json.entity_source_text",
+                "context_key": "entity_source_text"
+              },
+              {
+                "tool_output_field": "validated_json.response_text",
+                "context_key": "response_text"
+              }
+            ],
+            "writes_context_keys": [
+              "ready_to_materialise",
+              "needs_user_affirmation",
+              "entity_name",
+              "entity_description",
+              "entity_aliases",
+              "entity_source_text",
+              "response_text"
+            ],
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "context_value_equals",
+                  "key": "needs_user_affirmation",
+                  "value": true
+                },
+                "reason": "needs_user_affirmation",
+                "to_state": "request_clarification"
+              },
+              {
+                "condition_spec": {
+                  "kind": "context_value_equals",
+                  "key": "ready_to_materialise",
+                  "value": true
+                },
+                "reason": "materialise_person",
+                "to_state": "materialise_entity"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "payload_invalid",
+                "to_state": "failed"
+              }
+            ],
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "request_clarification",
+            "action_id": "workflow_authoring.emit_marker",
+            "inputs": {
+              "marker_key": "requires_user_affirmation",
+              "marker_value": "true"
+            },
+            "writes_context_keys": [
+              "requires_user_affirmation"
+            ],
+            "next_state": "completed",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "materialise_entity",
+            "action_id": "entity_representation.materialise_from_payload",
+            "inputs": {
+              "entity_domain": "person",
+              "entity_type_id": "#V#person",
+              "entity_name": {
+                "$context_key": "entity_name"
+              },
+              "entity_description": {
+                "$context_key": "entity_description"
+              },
+              "entity_aliases": {
+                "$context_key": "entity_aliases"
+              },
+              "entity_source_text": {
+                "$context_key": "entity_source_text"
+              }
+            },
+            "tool_output_context_mappings": [
+              {
+                "tool_output_field": "entity_representation_concept_id",
+                "context_key": "entity_representation_concept_id"
+              },
+              {
+                "tool_output_field": "entity_representation_verified",
+                "context_key": "entity_representation_verified"
+              },
+              {
+                "tool_output_field": "entity_representation_domain",
+                "context_key": "entity_representation_domain"
+              },
+              {
+                "tool_output_field": "requires_user_affirmation",
+                "context_key": "requires_user_affirmation"
+              },
+              {
+                "tool_output_field": "response_text",
+                "context_key": "response_text"
+              }
+            ],
+            "writes_context_keys": [
+              "entity_representation_concept_id",
+              "entity_representation_verified",
+              "entity_representation_domain",
+              "requires_user_affirmation",
+              "response_text"
+            ],
+            "next_state": "completed",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "completed",
+            "terminal": true
+          },
+          {
+            "state_id": "failed",
+            "terminal": true
+          }
+        ]
+      }
+    },
+    {
+      "template_id": "workflow_creation.company_representation",
+      "name": "Workflow Creation Company Representation Template",
+      "description": "Authored workflow template for conversational company-representation workflows.",
+      "default_workflow_description": "Executable company representation workflow created from text intent.",
+      "template_profile": {
+        "schema_version": "workflow_template_profile.v1",
+        "selection_mode": "automatic",
+        "priority": 38,
+        "keywords": [
+          "company representation",
+          "organisation representation",
+          "organization representation",
+          "represent company",
+          "represent organisation"
+        ],
+        "exemplars": [
+          "Create a workflow from this description request: represent a company from text description in Vontology.",
+          "Build a workflow that represents organisations and companies from conversational text."
+        ],
+        "required_terms_any": [
+          "company",
+          "organisation",
+          "organization",
+          "business",
+          "startup"
+        ],
+        "forbidden_terms_any": [
+          "person",
+          "people",
+          "researcher",
+          "student",
+          "event",
+          "meeting",
+          "place",
+          "location"
+        ],
+        "requires_synthesis_policy": true
+      },
+      "workflow_spec_template": {
+        "workflow_id": "{workflow_id}",
+        "name": "{workflow_name}",
+        "description": "{workflow_description}",
+        "parent_type_id": "#V#ai_workflow",
+        "required_effects": [
+          "context:user_affirmation_policy=only_when_vital_info_missing",
+          "context:entity_representation_verified=True",
+          "context:entity_representation_domain=company"
+        ],
+        "postcondition_probe": {
+          "user_affirmation_policy": "only_when_vital_info_missing",
+          "entity_representation_verified": true,
+          "entity_representation_domain": "company"
+        },
+        "verification_inputs": {
+          "request_text": "Represent OpenAI in the Vontology. It is an AI research and deployment company."
+        },
+        "text_relations": [
+          {
+            "predicate": "#V#hasWorkflowRoutingProfileJson",
+            "text": "{{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"execution\",\"authoring_intent_required\":false,\"prefer_existing_capability\":false}}",
+            "lang": "en-NZ"
+          },
+          {
+            "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
+            "text": "{{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"company representation\",\"organisation representation\",\"organization representation\",\"represent company\",\"represent organisation\"],\"examples\":[\"Represent this company in the Vontology.\",\"Please represent these organisations if they are not already represented.\",\"Create or update a company representation from this conversational description.\"]}}",
+            "lang": "en-NZ"
+          }
+        ],
+        "steps": [
+          {
+            "state_id": "set_autonomy_policy",
+            "action_id": "workflow_authoring.emit_marker",
+            "inputs": {
+              "marker_key": "user_affirmation_policy",
+              "marker_value": "only_when_vital_info_missing"
+            },
+            "next_state": "set_affirmation_default",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "set_affirmation_default",
+            "action_id": "workflow_authoring.emit_marker",
+            "inputs": {
+              "marker_key": "requires_user_affirmation",
+              "marker_value": "false"
+            },
+            "next_state": "extract_entity_payload",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "extract_entity_payload",
+            "action_id": "llm.action",
+            "execution_mode": "llm",
+            "prompt_contract": {
+              "validation_policy": "fail",
+              "requested_prompt_concept_ids": [
+                "#V#entity_representation_payload_prompt"
+              ],
+              "resolved_prompt_concept_id": "#V#entity_representation_payload_prompt",
+              "metadata": {
+                "prompt_name": "Entity representation payload prompt",
+                "prompt_source": "workflow_template_seed_bundle"
+              }
+            },
+            "llm_policy": {
+              "policy_stage": "entity_representation_payload",
+              "tool_mode": "none",
+              "response_contract_text": "Return JSON with keys ready_to_materialise, needs_user_affirmation, entity_name, entity_description, entity_aliases, entity_source_text, and response_text.",
+              "context_fields": [
+                {
+                  "context_key": "request_text",
+                  "label": "Entity representation request"
+                },
+                {
+                  "context_key": "prompt",
+                  "label": "Original user prompt"
+                },
+                {
+                  "context_key": "entity_name",
+                  "label": "Existing entity name"
+                },
+                {
+                  "context_key": "entity_description",
+                  "label": "Existing entity description"
+                }
+              ]
+            },
+            "validation_policy": {
+              "output_format": "json_value"
+            },
+            "inputs": {
+              "expected_entity_domain": "company"
+            },
+            "tool_output_context_mappings": [
+              {
+                "tool_output_field": "validated_json.ready_to_materialise",
+                "context_key": "ready_to_materialise"
+              },
+              {
+                "tool_output_field": "validated_json.needs_user_affirmation",
+                "context_key": "needs_user_affirmation"
+              },
+              {
+                "tool_output_field": "validated_json.entity_name",
+                "context_key": "entity_name"
+              },
+              {
+                "tool_output_field": "validated_json.entity_description",
+                "context_key": "entity_description"
+              },
+              {
+                "tool_output_field": "validated_json.entity_aliases",
+                "context_key": "entity_aliases"
+              },
+              {
+                "tool_output_field": "validated_json.entity_source_text",
+                "context_key": "entity_source_text"
+              },
+              {
+                "tool_output_field": "validated_json.response_text",
+                "context_key": "response_text"
+              }
+            ],
+            "writes_context_keys": [
+              "ready_to_materialise",
+              "needs_user_affirmation",
+              "entity_name",
+              "entity_description",
+              "entity_aliases",
+              "entity_source_text",
+              "response_text"
+            ],
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "context_value_equals",
+                  "key": "needs_user_affirmation",
+                  "value": true
+                },
+                "reason": "needs_user_affirmation",
+                "to_state": "request_clarification"
+              },
+              {
+                "condition_spec": {
+                  "kind": "context_value_equals",
+                  "key": "ready_to_materialise",
+                  "value": true
+                },
+                "reason": "materialise_company",
+                "to_state": "materialise_entity"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "payload_invalid",
+                "to_state": "failed"
+              }
+            ],
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "request_clarification",
+            "action_id": "workflow_authoring.emit_marker",
+            "inputs": {
+              "marker_key": "requires_user_affirmation",
+              "marker_value": "true"
+            },
+            "writes_context_keys": [
+              "requires_user_affirmation"
+            ],
+            "next_state": "completed",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "materialise_entity",
+            "action_id": "entity_representation.materialise_from_payload",
+            "inputs": {
+              "entity_domain": "company",
+              "entity_type_id": "#V#organisation",
+              "entity_name": {
+                "$context_key": "entity_name"
+              },
+              "entity_description": {
+                "$context_key": "entity_description"
+              },
+              "entity_aliases": {
+                "$context_key": "entity_aliases"
+              },
+              "entity_source_text": {
+                "$context_key": "entity_source_text"
+              }
+            },
+            "tool_output_context_mappings": [
+              {
+                "tool_output_field": "entity_representation_concept_id",
+                "context_key": "entity_representation_concept_id"
+              },
+              {
+                "tool_output_field": "entity_representation_verified",
+                "context_key": "entity_representation_verified"
+              },
+              {
+                "tool_output_field": "entity_representation_domain",
+                "context_key": "entity_representation_domain"
+              },
+              {
+                "tool_output_field": "requires_user_affirmation",
+                "context_key": "requires_user_affirmation"
+              },
+              {
+                "tool_output_field": "response_text",
+                "context_key": "response_text"
+              }
+            ],
+            "writes_context_keys": [
+              "entity_representation_concept_id",
+              "entity_representation_verified",
+              "entity_representation_domain",
+              "requires_user_affirmation",
+              "response_text"
+            ],
+            "next_state": "completed",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "completed",
+            "terminal": true
+          },
+          {
+            "state_id": "failed",
+            "terminal": true
+          }
+        ]
+      }
+    },
+    {
+      "template_id": "workflow_creation.event_representation",
+      "name": "Workflow Creation Event Representation Template",
+      "description": "Authored workflow template for conversational event-representation workflows.",
+      "default_workflow_description": "Executable event representation workflow created from text intent.",
+      "template_profile": {
+        "schema_version": "workflow_template_profile.v1",
+        "selection_mode": "automatic",
+        "priority": 38,
+        "keywords": [
+          "event representation",
+          "meeting representation",
+          "represent event",
+          "represent meeting",
+          "calendar event representation"
+        ],
+        "exemplars": [
+          "Create a workflow from this description request: represent an event from text description in Vontology.",
+          "Build a workflow that represents meetings and events from conversational text."
+        ],
+        "required_terms_any": [
+          "event",
+          "meeting",
+          "seminar",
+          "talk",
+          "calendar"
+        ],
+        "forbidden_terms_any": [
+          "person",
+          "people",
+          "researcher",
+          "student",
+          "company",
+          "organisation",
+          "organization",
+          "place",
+          "location"
+        ],
+        "requires_synthesis_policy": true
+      },
+      "workflow_spec_template": {
+        "workflow_id": "{workflow_id}",
+        "name": "{workflow_name}",
+        "description": "{workflow_description}",
+        "parent_type_id": "#V#ai_workflow",
+        "required_effects": [
+          "context:user_affirmation_policy=only_when_vital_info_missing",
+          "context:entity_representation_verified=True",
+          "context:entity_representation_domain=event"
+        ],
+        "postcondition_probe": {
+          "user_affirmation_policy": "only_when_vital_info_missing",
+          "entity_representation_verified": true,
+          "entity_representation_domain": "event"
+        },
+        "verification_inputs": {
+          "request_text": "Represent the Von research seminar on 10 April 2026 in the Vontology."
+        },
+        "text_relations": [
+          {
+            "predicate": "#V#hasWorkflowRoutingProfileJson",
+            "text": "{{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"execution\",\"authoring_intent_required\":false,\"prefer_existing_capability\":false}}",
+            "lang": "en-NZ"
+          },
+          {
+            "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
+            "text": "{{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"event representation\",\"meeting representation\",\"represent event\",\"represent meeting\",\"calendar event representation\"],\"examples\":[\"Represent this event in the Vontology.\",\"Please represent these meetings if they are not already represented.\",\"Create or update an event representation from this conversational description.\"]}}",
+            "lang": "en-NZ"
+          }
+        ],
+        "steps": [
+          {
+            "state_id": "set_autonomy_policy",
+            "action_id": "workflow_authoring.emit_marker",
+            "inputs": {
+              "marker_key": "user_affirmation_policy",
+              "marker_value": "only_when_vital_info_missing"
+            },
+            "next_state": "set_affirmation_default",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "set_affirmation_default",
+            "action_id": "workflow_authoring.emit_marker",
+            "inputs": {
+              "marker_key": "requires_user_affirmation",
+              "marker_value": "false"
+            },
+            "next_state": "extract_entity_payload",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "extract_entity_payload",
+            "action_id": "llm.action",
+            "execution_mode": "llm",
+            "prompt_contract": {
+              "validation_policy": "fail",
+              "requested_prompt_concept_ids": [
+                "#V#entity_representation_payload_prompt"
+              ],
+              "resolved_prompt_concept_id": "#V#entity_representation_payload_prompt",
+              "metadata": {
+                "prompt_name": "Entity representation payload prompt",
+                "prompt_source": "workflow_template_seed_bundle"
+              }
+            },
+            "llm_policy": {
+              "policy_stage": "entity_representation_payload",
+              "tool_mode": "none",
+              "response_contract_text": "Return JSON with keys ready_to_materialise, needs_user_affirmation, entity_name, entity_description, entity_aliases, entity_source_text, and response_text.",
+              "context_fields": [
+                {
+                  "context_key": "request_text",
+                  "label": "Entity representation request"
+                },
+                {
+                  "context_key": "prompt",
+                  "label": "Original user prompt"
+                },
+                {
+                  "context_key": "entity_name",
+                  "label": "Existing entity name"
+                },
+                {
+                  "context_key": "entity_description",
+                  "label": "Existing entity description"
+                }
+              ]
+            },
+            "validation_policy": {
+              "output_format": "json_value"
+            },
+            "inputs": {
+              "expected_entity_domain": "event"
+            },
+            "tool_output_context_mappings": [
+              {
+                "tool_output_field": "validated_json.ready_to_materialise",
+                "context_key": "ready_to_materialise"
+              },
+              {
+                "tool_output_field": "validated_json.needs_user_affirmation",
+                "context_key": "needs_user_affirmation"
+              },
+              {
+                "tool_output_field": "validated_json.entity_name",
+                "context_key": "entity_name"
+              },
+              {
+                "tool_output_field": "validated_json.entity_description",
+                "context_key": "entity_description"
+              },
+              {
+                "tool_output_field": "validated_json.entity_aliases",
+                "context_key": "entity_aliases"
+              },
+              {
+                "tool_output_field": "validated_json.entity_source_text",
+                "context_key": "entity_source_text"
+              },
+              {
+                "tool_output_field": "validated_json.response_text",
+                "context_key": "response_text"
+              }
+            ],
+            "writes_context_keys": [
+              "ready_to_materialise",
+              "needs_user_affirmation",
+              "entity_name",
+              "entity_description",
+              "entity_aliases",
+              "entity_source_text",
+              "response_text"
+            ],
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "context_value_equals",
+                  "key": "needs_user_affirmation",
+                  "value": true
+                },
+                "reason": "needs_user_affirmation",
+                "to_state": "request_clarification"
+              },
+              {
+                "condition_spec": {
+                  "kind": "context_value_equals",
+                  "key": "ready_to_materialise",
+                  "value": true
+                },
+                "reason": "materialise_event",
+                "to_state": "materialise_entity"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "payload_invalid",
+                "to_state": "failed"
+              }
+            ],
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "request_clarification",
+            "action_id": "workflow_authoring.emit_marker",
+            "inputs": {
+              "marker_key": "requires_user_affirmation",
+              "marker_value": "true"
+            },
+            "writes_context_keys": [
+              "requires_user_affirmation"
+            ],
+            "next_state": "completed",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "materialise_entity",
+            "action_id": "entity_representation.materialise_from_payload",
+            "inputs": {
+              "entity_domain": "event",
+              "entity_type_id": "#V#event",
+              "entity_name": {
+                "$context_key": "entity_name"
+              },
+              "entity_description": {
+                "$context_key": "entity_description"
+              },
+              "entity_aliases": {
+                "$context_key": "entity_aliases"
+              },
+              "entity_source_text": {
+                "$context_key": "entity_source_text"
+              }
+            },
+            "tool_output_context_mappings": [
+              {
+                "tool_output_field": "entity_representation_concept_id",
+                "context_key": "entity_representation_concept_id"
+              },
+              {
+                "tool_output_field": "entity_representation_verified",
+                "context_key": "entity_representation_verified"
+              },
+              {
+                "tool_output_field": "entity_representation_domain",
+                "context_key": "entity_representation_domain"
+              },
+              {
+                "tool_output_field": "requires_user_affirmation",
+                "context_key": "requires_user_affirmation"
+              },
+              {
+                "tool_output_field": "response_text",
+                "context_key": "response_text"
+              }
+            ],
+            "writes_context_keys": [
+              "entity_representation_concept_id",
+              "entity_representation_verified",
+              "entity_representation_domain",
+              "requires_user_affirmation",
+              "response_text"
+            ],
+            "next_state": "completed",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "completed",
+            "terminal": true
+          },
+          {
+            "state_id": "failed",
+            "terminal": true
+          }
+        ]
+      }
+    },
+    {
+      "template_id": "workflow_creation.place_representation",
+      "name": "Workflow Creation Place Representation Template",
+      "description": "Authored workflow template for conversational place-representation workflows.",
+      "default_workflow_description": "Executable place representation workflow created from text intent.",
+      "template_profile": {
+        "schema_version": "workflow_template_profile.v1",
+        "selection_mode": "automatic",
+        "priority": 38,
+        "keywords": [
+          "place representation",
+          "location representation",
+          "represent place",
+          "represent location",
+          "venue representation"
+        ],
+        "exemplars": [
+          "Create a workflow from this description request: represent a place from text description in Vontology.",
+          "Build a workflow that represents locations, venues, and places from conversational text."
+        ],
+        "required_terms_any": [
+          "place",
+          "location",
+          "venue",
+          "site",
+          "campus"
+        ],
+        "forbidden_terms_any": [
+          "person",
+          "people",
+          "researcher",
+          "student",
+          "company",
+          "organisation",
+          "organization",
+          "event",
+          "meeting"
+        ],
+        "requires_synthesis_policy": true
+      },
+      "workflow_spec_template": {
+        "workflow_id": "{workflow_id}",
+        "name": "{workflow_name}",
+        "description": "{workflow_description}",
+        "parent_type_id": "#V#ai_workflow",
+        "required_effects": [
+          "context:user_affirmation_policy=only_when_vital_info_missing",
+          "context:entity_representation_verified=True",
+          "context:entity_representation_domain=place"
+        ],
+        "postcondition_probe": {
+          "user_affirmation_policy": "only_when_vital_info_missing",
+          "entity_representation_verified": true,
+          "entity_representation_domain": "place"
+        },
+        "verification_inputs": {
+          "request_text": "Represent the AUT City Campus in the Vontology."
+        },
+        "text_relations": [
+          {
+            "predicate": "#V#hasWorkflowRoutingProfileJson",
+            "text": "{{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"execution\",\"authoring_intent_required\":false,\"prefer_existing_capability\":false}}",
+            "lang": "en-NZ"
+          },
+          {
+            "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
+            "text": "{{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"place representation\",\"location representation\",\"represent place\",\"represent location\",\"venue representation\"],\"examples\":[\"Represent this place in the Vontology.\",\"Please represent these locations if they are not already represented.\",\"Create or update a place representation from this conversational description.\"]}}",
+            "lang": "en-NZ"
+          }
+        ],
+        "steps": [
+          {
+            "state_id": "set_autonomy_policy",
+            "action_id": "workflow_authoring.emit_marker",
+            "inputs": {
+              "marker_key": "user_affirmation_policy",
+              "marker_value": "only_when_vital_info_missing"
+            },
+            "next_state": "set_affirmation_default",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "set_affirmation_default",
+            "action_id": "workflow_authoring.emit_marker",
+            "inputs": {
+              "marker_key": "requires_user_affirmation",
+              "marker_value": "false"
+            },
+            "next_state": "extract_entity_payload",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "extract_entity_payload",
+            "action_id": "llm.action",
+            "execution_mode": "llm",
+            "prompt_contract": {
+              "validation_policy": "fail",
+              "requested_prompt_concept_ids": [
+                "#V#entity_representation_payload_prompt"
+              ],
+              "resolved_prompt_concept_id": "#V#entity_representation_payload_prompt",
+              "metadata": {
+                "prompt_name": "Entity representation payload prompt",
+                "prompt_source": "workflow_template_seed_bundle"
+              }
+            },
+            "llm_policy": {
+              "policy_stage": "entity_representation_payload",
+              "tool_mode": "none",
+              "response_contract_text": "Return JSON with keys ready_to_materialise, needs_user_affirmation, entity_name, entity_description, entity_aliases, entity_source_text, and response_text.",
+              "context_fields": [
+                {
+                  "context_key": "request_text",
+                  "label": "Entity representation request"
+                },
+                {
+                  "context_key": "prompt",
+                  "label": "Original user prompt"
+                },
+                {
+                  "context_key": "entity_name",
+                  "label": "Existing entity name"
+                },
+                {
+                  "context_key": "entity_description",
+                  "label": "Existing entity description"
+                }
+              ]
+            },
+            "validation_policy": {
+              "output_format": "json_value"
+            },
+            "inputs": {
+              "expected_entity_domain": "place"
+            },
+            "tool_output_context_mappings": [
+              {
+                "tool_output_field": "validated_json.ready_to_materialise",
+                "context_key": "ready_to_materialise"
+              },
+              {
+                "tool_output_field": "validated_json.needs_user_affirmation",
+                "context_key": "needs_user_affirmation"
+              },
+              {
+                "tool_output_field": "validated_json.entity_name",
+                "context_key": "entity_name"
+              },
+              {
+                "tool_output_field": "validated_json.entity_description",
+                "context_key": "entity_description"
+              },
+              {
+                "tool_output_field": "validated_json.entity_aliases",
+                "context_key": "entity_aliases"
+              },
+              {
+                "tool_output_field": "validated_json.entity_source_text",
+                "context_key": "entity_source_text"
+              },
+              {
+                "tool_output_field": "validated_json.response_text",
+                "context_key": "response_text"
+              }
+            ],
+            "writes_context_keys": [
+              "ready_to_materialise",
+              "needs_user_affirmation",
+              "entity_name",
+              "entity_description",
+              "entity_aliases",
+              "entity_source_text",
+              "response_text"
+            ],
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "context_value_equals",
+                  "key": "needs_user_affirmation",
+                  "value": true
+                },
+                "reason": "needs_user_affirmation",
+                "to_state": "request_clarification"
+              },
+              {
+                "condition_spec": {
+                  "kind": "context_value_equals",
+                  "key": "ready_to_materialise",
+                  "value": true
+                },
+                "reason": "materialise_place",
+                "to_state": "materialise_entity"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "payload_invalid",
+                "to_state": "failed"
+              }
+            ],
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "request_clarification",
+            "action_id": "workflow_authoring.emit_marker",
+            "inputs": {
+              "marker_key": "requires_user_affirmation",
+              "marker_value": "true"
+            },
+            "writes_context_keys": [
+              "requires_user_affirmation"
+            ],
+            "next_state": "completed",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "materialise_entity",
+            "action_id": "entity_representation.materialise_from_payload",
+            "inputs": {
+              "entity_domain": "place",
+              "entity_type_id": "#V#place",
+              "entity_name": {
+                "$context_key": "entity_name"
+              },
+              "entity_description": {
+                "$context_key": "entity_description"
+              },
+              "entity_aliases": {
+                "$context_key": "entity_aliases"
+              },
+              "entity_source_text": {
+                "$context_key": "entity_source_text"
+              }
+            },
+            "tool_output_context_mappings": [
+              {
+                "tool_output_field": "entity_representation_concept_id",
+                "context_key": "entity_representation_concept_id"
+              },
+              {
+                "tool_output_field": "entity_representation_verified",
+                "context_key": "entity_representation_verified"
+              },
+              {
+                "tool_output_field": "entity_representation_domain",
+                "context_key": "entity_representation_domain"
+              },
+              {
+                "tool_output_field": "requires_user_affirmation",
+                "context_key": "requires_user_affirmation"
+              },
+              {
+                "tool_output_field": "response_text",
+                "context_key": "response_text"
+              }
+            ],
+            "writes_context_keys": [
+              "entity_representation_concept_id",
+              "entity_representation_verified",
+              "entity_representation_domain",
+              "requires_user_affirmation",
+              "response_text"
+            ],
+            "next_state": "completed",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "completed",
+            "terminal": true
+          },
+          {
+            "state_id": "failed",
+            "terminal": true
+          }
+        ]
+      }
+    },
+    {
       "template_id": "workflow_gap_recovery.candidate_execution",
       "name": "Workflow Gap Recovery Candidate Execution Template",
       "description": "Authored workflow template for workflow-gap candidate execution workflows.",

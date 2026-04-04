@@ -37,6 +37,10 @@ WORKFLOW_CREATION_SCHOLARLY_TEMPLATE_ID = "workflow_creation.scholarly_represent
 WORKFLOW_CREATION_PHD_STUDENT_TEMPLATE_ID = (
     "workflow_creation.phd_student_representation"
 )
+WORKFLOW_CREATION_PERSON_TEMPLATE_ID = "workflow_creation.person_representation"
+WORKFLOW_CREATION_COMPANY_TEMPLATE_ID = "workflow_creation.company_representation"
+WORKFLOW_CREATION_EVENT_TEMPLATE_ID = "workflow_creation.event_representation"
+WORKFLOW_CREATION_PLACE_TEMPLATE_ID = "workflow_creation.place_representation"
 WORKFLOW_GAP_CANDIDATE_EXECUTION_TEMPLATE_ID = (
     "workflow_gap_recovery.candidate_execution"
 )
@@ -79,6 +83,18 @@ _CANONICAL_TEMPLATE_CONCEPT_IDS = {
     ),
     WORKFLOW_CREATION_PHD_STUDENT_TEMPLATE_ID: (
         "#V#workflow_template_workflow_creation_phd_student_representation"
+    ),
+    WORKFLOW_CREATION_PERSON_TEMPLATE_ID: (
+        "#V#workflow_template_workflow_creation_person_representation"
+    ),
+    WORKFLOW_CREATION_COMPANY_TEMPLATE_ID: (
+        "#V#workflow_template_workflow_creation_company_representation"
+    ),
+    WORKFLOW_CREATION_EVENT_TEMPLATE_ID: (
+        "#V#workflow_template_workflow_creation_event_representation"
+    ),
+    WORKFLOW_CREATION_PLACE_TEMPLATE_ID: (
+        "#V#workflow_template_workflow_creation_place_representation"
     ),
     WORKFLOW_GAP_CANDIDATE_EXECUTION_TEMPLATE_ID: (
         "#V#workflow_template_workflow_gap_recovery_candidate_execution"
@@ -867,9 +883,13 @@ def resolve_workflow_spec_template(
 
 __all__ = [
     "DEFAULT_REPO_SEED_TEMPLATE_ASSET_PATH",
+    "WORKFLOW_CREATION_COMPANY_TEMPLATE_ID",
     "REPO_SEED_WORKFLOW_TEMPLATE_BUNDLE_SCHEMA_VERSION",
     "WORKFLOW_CREATION_DEFAULT_TEMPLATE_ID",
+    "WORKFLOW_CREATION_EVENT_TEMPLATE_ID",
     "WORKFLOW_CREATION_PHD_STUDENT_TEMPLATE_ID",
+    "WORKFLOW_CREATION_PERSON_TEMPLATE_ID",
+    "WORKFLOW_CREATION_PLACE_TEMPLATE_ID",
     "WORKFLOW_CREATION_SCHOLARLY_TEMPLATE_ID",
     "WORKFLOW_GAP_CANDIDATE_EXECUTION_TEMPLATE_ID",
     "WORKFLOW_TEMPLATE_DEFAULT_DESCRIPTION_PREDICATE",

@@ -333,6 +333,18 @@ _WORKFLOW_MUTATION_ID_FIELD_PATTERN = re.compile(
     r"^(created|updated|upserted|materialised|materialized|deleted|removed|linked|bound|scheduled|promoted|merged)_(.+?)_ids?$",
     flags=re.IGNORECASE,
 )
+_WORKFLOW_FAILURE_LIKE_FINAL_STATE_TOKENS = (
+    "_failed",
+    "failed",
+    "_error",
+    "error",
+    "_invalid",
+    "invalid",
+    "_rejected",
+    "rejected",
+    "_cancelled",
+    "cancelled",
+)
 
 
 def _workflow_execution_summary_text(value: Any) -> str | None:
@@ -340,6 +352,27 @@ def _workflow_execution_summary_text(value: Any) -> str | None:
         return None
     cleaned = value.strip()
     return cleaned or None
+
+
+def _workflow_final_state_is_failure_like(final_state: str | None) -> bool:
+    lowered_final_state = (final_state or "").lower()
+    if not lowered_final_state:
+        return False
+    return any(
+        token in lowered_final_state
+        for token in _WORKFLOW_FAILURE_LIKE_FINAL_STATE_TOKENS
+    )
+
+
+def _workflow_result_effective_completed(workflow_result: Any) -> bool:
+    if not bool(getattr(workflow_result, "completed", False)):
+        return False
+    if _workflow_execution_summary_text(getattr(workflow_result, "error", None)):
+        return False
+    final_state = _workflow_execution_summary_text(
+        getattr(workflow_result, "final_state", None)
+    )
+    return not _workflow_final_state_is_failure_like(final_state)
 
 
 def _workflow_execution_summary_mapping_list(value: Any) -> list[Mapping[str, Any]]:
@@ -627,8 +660,10 @@ def _build_workflow_execution_summary(
         int(entry.get("artefact_count") or 0) for entry in durable_side_effects
     )
 
-    final_state = _workflow_execution_summary_text(getattr(workflow_result, "final_state", None))
-    completed = bool(getattr(workflow_result, "completed", False))
+    final_state = _workflow_execution_summary_text(
+        getattr(workflow_result, "final_state", None)
+    )
+    completed = _workflow_result_effective_completed(workflow_result)
 
     return {
         "schema_version": _WORKFLOW_EXECUTION_SUMMARY_SCHEMA_VERSION,
@@ -674,7 +709,7 @@ def _build_workflow_execution_aux_entry(
         "final_state": _workflow_execution_summary_text(
             getattr(workflow_result, "final_state", None)
         ),
-        "completed": bool(getattr(workflow_result, "completed", False)),
+        "completed": _workflow_result_effective_completed(workflow_result),
         "execution_summary": dict(execution_summary),
     }
     result_snapshot = _build_workflow_execution_aux_result_snapshot(workflow_result)
@@ -3745,7 +3780,7 @@ class InternalMCPChatOrchestrator:
         final_state = cls._coerce_non_empty_text(
             getattr(workflow_result, "final_state", None)
         )
-        completed = bool(getattr(workflow_result, "completed", False))
+        completed = _workflow_result_effective_completed(workflow_result)
         if final_state:
             status = "completed" if completed else "failed"
             return f"Workflow {workflow_id} {status} (state: {final_state})."
@@ -19987,17 +20022,25 @@ class InternalMCPChatOrchestrator:
                         workflow_result=result,
                     )
                 )
-            completed = bool(getattr(result, "completed", False))
+            completed = _workflow_result_effective_completed(result)
             final_state = (
                 str(result.final_state)
                 if isinstance(getattr(result, "final_state", None), str)
                 else None
             )
             error_value = result.error if isinstance(result.error, str) else None
-            termination_code = "completed" if completed else _normalise_error_code(
-                error_value
-            )
-            termination_detail = None if completed else error_value
+            if completed:
+                termination_code = "completed"
+                termination_detail = None
+            elif error_value:
+                termination_code = _normalise_error_code(error_value)
+                termination_detail = error_value
+            elif _workflow_final_state_is_failure_like(final_state):
+                termination_code = "failed_terminal_state"
+                termination_detail = final_state
+            else:
+                termination_code = "terminated"
+                termination_detail = None
             terminal_stage = final_state or ("completed" if completed else "terminated")
             if callable(finalise_episode_fn):
                 try:
@@ -26407,16 +26450,21 @@ class InternalMCPChatOrchestrator:
             return cleaned_values
 
         def _build_workflow_terminal_failure_extra(result: Any) -> dict[str, Any]:
-            if bool(getattr(result, "completed", False)):
+            if _workflow_result_effective_completed(result):
                 return {}
 
             extra_payload: dict[str, Any] = {}
             result_error = _clean_boundary_scalar_text(getattr(result, "error", None))
+            result_final_state = _clean_boundary_scalar_text(
+                getattr(result, "final_state", None)
+            )
             if result_error:
                 extra_payload["error"] = result_error
                 reason_code = result_error.split(":", 1)[0].strip()
                 if reason_code:
                     extra_payload["reason"] = reason_code
+            elif _workflow_final_state_is_failure_like(result_final_state):
+                extra_payload["reason"] = "failed_terminal_state"
 
             result_data = getattr(result, "data", None)
             if isinstance(result_data, Mapping):
@@ -26427,7 +26475,6 @@ class InternalMCPChatOrchestrator:
                 )
                 if failure_detail:
                     extra_payload["detail"] = failure_detail
-
                 launch_resolution = result_data.get("workflow_launch_input_resolution")
                 if isinstance(launch_resolution, Mapping):
                     resolution_status = _clean_boundary_scalar_text(
@@ -26461,6 +26508,8 @@ class InternalMCPChatOrchestrator:
                     )
                     if failing_action_id:
                         extra_payload["failing_action_id"] = failing_action_id
+            if "detail" not in extra_payload and result_final_state:
+                extra_payload["detail"] = result_final_state
 
             return extra_payload
 
@@ -27186,8 +27235,25 @@ class InternalMCPChatOrchestrator:
                 orchestrator_duration_ms=_orchestrator_duration_ms(),
             )
 
+        def _workflow_gap_recovery_trigger_reason(
+            *,
+            execution_mode: str,
+            workflow_result: Any | None = None,
+        ) -> str | None:
+            if not discovered_matches:
+                return "no_discovered_matches"
+            if execution_mode != "custom_workflow" or workflow_result is None:
+                return None
+
+            if not _workflow_result_effective_completed(workflow_result):
+                return "discovered_custom_workflow_failed"
+            return None
+
         def _maybe_apply_workflow_gap_recovery(
             base_result: OrchestratorResult,
+            *,
+            execution_mode: str,
+            workflow_result: Any | None = None,
         ) -> OrchestratorResult:
             if not workflow_gap_recovery_enabled:
                 return base_result
@@ -27195,8 +27261,19 @@ class InternalMCPChatOrchestrator:
                 return base_result
             if not isinstance(workflow_discovery_result, Mapping):
                 return base_result
-            if discovered_matches:
+            trigger_reason = _workflow_gap_recovery_trigger_reason(
+                execution_mode=execution_mode,
+                workflow_result=workflow_result,
+            )
+            if not trigger_reason:
                 return base_result
+
+            workflow_result_error = _clean_boundary_scalar_text(
+                getattr(workflow_result, "error", None)
+            )
+            workflow_result_final_state = _clean_boundary_scalar_text(
+                getattr(workflow_result, "final_state", None)
+            )
 
             recovery_request = {
                 "prompt": prompt,
@@ -27220,6 +27297,7 @@ class InternalMCPChatOrchestrator:
                 "workflow_gap_base_response_text": base_result.response_text,
                 "workflow_gap_base_extra_messages": list(base_result.extra_messages),
                 "workflow_gap_base_tool_invocations": list(base_result.tool_invocations),
+                "workflow_gap_trigger_reason": trigger_reason,
                 "workflow_gap_discovery_candidate_count": len(discovered_matches)
                 + len(excluded_discovered_matches),
                 "workflow_gap_discovery_excluded_count": len(
@@ -27236,6 +27314,18 @@ class InternalMCPChatOrchestrator:
                 "turn_id": turn_id,
                 "workflow_episode_source": "chat_turn_workflow",
                 "workflow_episode_stage": "workflow_gap_recovery",
+                "workflow_gap_selected_execution_mode": execution_mode,
+                "workflow_gap_selected_workflow_completed": (
+                    bool(getattr(workflow_result, "completed", False))
+                    if workflow_result is not None
+                    else None
+                ),
+                "workflow_gap_selected_workflow_final_state": (
+                    workflow_result_final_state or None
+                ),
+                "workflow_gap_selected_workflow_error": (
+                    workflow_result_error or None
+                ),
             }
             try:
                 recovery_result = self.execute_workflow(
@@ -27409,7 +27499,10 @@ class InternalMCPChatOrchestrator:
                 workflow_routing=routing_info,
                 render_plan=_result_render_plan(),
             )
-            result = _maybe_apply_workflow_gap_recovery(result)
+            result = _maybe_apply_workflow_gap_recovery(
+                result,
+                execution_mode="direct_response",
+            )
             _finalise_selection_experience_record(
                 result=result,
                 outcome="completed",
@@ -27464,13 +27557,15 @@ class InternalMCPChatOrchestrator:
                     episode_source="chat_turn_workflow",
                 )
                 if wf_result is not None:
+                    wf_completed = _workflow_result_effective_completed(wf_result)
                     wf_response = self._render_custom_workflow_response_text(
                         workflow_id=selected_workflow_id_text,
                         workflow_result=wf_result,
                     )
                     if not isinstance(wf_response, str) or not wf_response.strip():
+                        workflow_status = "completed" if wf_completed else "failed"
                         wf_response = (
-                            f"Workflow {selected_workflow_id_text} completed "
+                            f"Workflow {selected_workflow_id_text} {workflow_status} "
                             f"(state: {wf_result.final_state})."
                         )
                     wf_response = self._sanitise_user_visible_action_output(
@@ -27502,21 +27597,25 @@ class InternalMCPChatOrchestrator:
                         workflow_routing=routing_info,
                         render_plan=_result_render_plan(),
                     )
-                    result = _maybe_apply_workflow_gap_recovery(result)
+                    result = _maybe_apply_workflow_gap_recovery(
+                        result,
+                        execution_mode="custom_workflow",
+                        workflow_result=wf_result,
+                    )
                     _finalise_selection_experience_record(
                         result=result,
-                        outcome="completed" if wf_result.completed else "failed",
+                        outcome="completed" if wf_completed else "failed",
                         final_state=wf_result.final_state,
-                        completed=wf_result.completed,
+                        completed=wf_completed,
                     )
                     _emit_dispatch_boundary(
                         boundary="workflow_terminal",
-                        status="completed" if wf_result.completed else "failed",
+                        status="completed" if wf_completed else "failed",
                         selected_execution_mode="custom_workflow",
                         selected_workflow_id=selected_workflow_id_text,
                         dispatch_workflow_id=selected_workflow_id_text,
                         final_state=wf_result.final_state,
-                        completed=wf_result.completed,
+                        completed=wf_completed,
                         extra=_build_workflow_terminal_failure_extra(wf_result) or None,
                     )
                     result = _refresh_result_runtime_snapshots(result)
@@ -27849,12 +27948,13 @@ class InternalMCPChatOrchestrator:
             # Handler produced a pre-built OrchestratorResult (error case).
             prebuilt_result = tc_result.data["orchestrator_result"]
             result_with_dispatch_telemetry = prebuilt_result
+            tc_completed = _workflow_result_effective_completed(tc_result)
             if isinstance(prebuilt_result, OrchestratorResult):
                 _finalise_selection_experience_record(
                     result=prebuilt_result,
                     outcome="failed",
                     final_state=tc_result.final_state,
-                    completed=tc_result.completed,
+                    completed=tc_completed,
                     retry_attempts=int(
                         tc_result.data.get("missing_tool_call_retry_attempts", 0)
                     ),
@@ -27864,12 +27964,12 @@ class InternalMCPChatOrchestrator:
                 )
             _emit_dispatch_boundary(
                 boundary="workflow_terminal",
-                status="completed" if tc_result.completed else "failed",
+                status="completed" if tc_completed else "failed",
                 selected_execution_mode="tool_pipeline",
                 selected_workflow_id=selected_workflow_id_text,
                 dispatch_workflow_id=tool_dispatch_workflow_id,
                 final_state=tc_result.final_state,
-                completed=tc_result.completed,
+                completed=tc_completed,
                 extra={
                     **_build_workflow_terminal_failure_extra(tc_result),
                     "prebuilt_result": True,
@@ -27927,10 +28027,13 @@ class InternalMCPChatOrchestrator:
                 not gate_requires_follow_up,
             )
         )
+        tc_completed = _workflow_result_effective_completed(tc_result)
         terminal_trace_status = (
             "completed"
-            if gate_safe_to_claim_completion and not gate_requires_follow_up
+            if tc_completed and gate_safe_to_claim_completion and not gate_requires_follow_up
             else "follow_up_required"
+            if tc_completed
+            else "failed"
         )
 
         # JVNAUTOSCI-984: Emit completed phase transition.
@@ -27953,18 +28056,22 @@ class InternalMCPChatOrchestrator:
             workflow_routing=routing_info,
             render_plan=_result_render_plan(),
         )
-        result = _maybe_apply_workflow_gap_recovery(result)
+        result = _maybe_apply_workflow_gap_recovery(
+            result,
+            execution_mode="tool_pipeline",
+            workflow_result=tc_result,
+        )
         _finalise_selection_experience_record(
             result=result,
             outcome=(
                 "completed"
-                if gate_safe_to_claim_completion and not gate_requires_follow_up
+                if tc_completed and gate_safe_to_claim_completion and not gate_requires_follow_up
                 else "follow_up_required"
-                if tc_result.completed
+                if tc_completed
                 else "failed"
             ),
             final_state=tc_result.final_state,
-            completed=tc_result.completed,
+            completed=tc_completed,
             retry_attempts=int(
                 tc_result.data.get("missing_tool_call_retry_attempts", 0)
             ),
@@ -27974,12 +28081,12 @@ class InternalMCPChatOrchestrator:
         )
         _emit_dispatch_boundary(
             boundary="workflow_terminal",
-            status=terminal_trace_status if tc_result.completed else "failed",
+            status=terminal_trace_status if tc_completed else "failed",
             selected_execution_mode="tool_pipeline",
             selected_workflow_id=selected_workflow_id_text,
             dispatch_workflow_id=tool_dispatch_workflow_id,
             final_state=tc_result.final_state,
-            completed=tc_result.completed,
+            completed=tc_completed,
             extra={
                 **_build_workflow_terminal_failure_extra(tc_result),
                 "requires_follow_up": gate_requires_follow_up,

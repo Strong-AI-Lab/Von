@@ -355,6 +355,66 @@ def test_execute_workflow_persists_completed_durable_instance_with_turn_summary(
     assert completion_state.get("loop_stall_max_elapsed_ms") == 1_000
 
 
+def test_execute_workflow_marks_failure_like_terminal_state_as_failed(
+    monkeypatch,
+) -> None:
+    orchestrator = _build_orchestrator()
+    _register_test_workflow(
+        orchestrator,
+        workflow_id="#V#misaligned_specialised_workflow",
+    )
+    fake_manager = _FakeWorkflowInstanceManager()
+    _patch_submit_verified_instance(monkeypatch)
+
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: fake_manager,
+    )
+
+    workflow_result = SimpleNamespace(
+        completed=True,
+        final_state="#V#workflow_step_misaligned_specialised_workflow_failed",
+        error=None,
+        data={},
+    )
+    monkeypatch.setattr(
+        orchestrator._workflow_executor,
+        "run",
+        lambda *args, **kwargs: workflow_result,
+    )
+
+    result = orchestrator.execute_workflow(
+        "#V#misaligned_specialised_workflow",
+        data={
+            "prompt": "Represent those students.",
+            "user_concept_id": "#V#user",
+            "org_concept_id": "#V#org",
+            "conversation_session_id": "chat-1708",
+            "turn_id": "turn-1708",
+        },
+        llm_client=object(),
+        model="test-model",
+        user_namespace="#V#user@org",
+        conversation_session_id="chat-1708",
+        turn_id="turn-1708",
+        episode_source="chat_turn_workflow",
+    )
+
+    assert result is workflow_result
+    resolved_result = cast(Any, result)
+    assert isinstance(resolved_result.data, dict)
+    result_data = cast(dict[str, Any], resolved_result.data)
+    summary = cast(dict[str, Any], result_data["workflow_execution_summary"])
+    assert summary["completed"] is False
+    assert len(fake_manager.mark_completed_calls) == 0
+    assert len(fake_manager.mark_failed_calls) == 1
+    failed_call = fake_manager.mark_failed_calls[0]
+    assert failed_call["instance_id"] == "wf-inst-1"
+    assert failed_call["error"] == (
+        "failed_terminal_state:#V#workflow_step_misaligned_specialised_workflow_failed"
+    )
+
+
 def test_execute_workflow_marks_durable_instance_failed_on_exception(
     monkeypatch,
 ) -> None:
