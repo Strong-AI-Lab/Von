@@ -47,6 +47,7 @@ let lastContextMenuOpenAt = 0;
 let lastContextMenuTriggerEl = null;
 let suppressConceptTabPersistence = false;
 let dynamicConceptTabRecencyCounter = 0;
+const expandedConceptTabBuckets = new Set();
 
 function getOpenConceptTabsStorageKey(namespace = null) {
     return buildNamespaceScopedStorageKey(OPEN_CONCEPT_TABS_STORAGE_PREFIX, namespace);
@@ -91,6 +92,52 @@ function getConceptTabBucketKind(kind) {
 function getConceptTabBucketOrderIndex(kind) {
     const idx = CONCEPT_TAB_BUCKET_ORDER.indexOf(getConceptTabBucketKind(kind));
     return idx === -1 ? CONCEPT_TAB_BUCKET_ORDER.length : idx;
+}
+
+function isConceptTabBucketExpanded(kind) {
+    return expandedConceptTabBuckets.has(getConceptTabBucketKind(kind));
+}
+
+function setConceptTabBucketExpanded(kind, expanded) {
+    const bucketKind = getConceptTabBucketKind(kind);
+    const previouslyExpanded = Array.from(expandedConceptTabBuckets);
+    if (expanded) {
+        expandedConceptTabBuckets.clear();
+        expandedConceptTabBuckets.add(bucketKind);
+        return previouslyExpanded.length !== 1 || previouslyExpanded[0] !== bucketKind;
+    }
+    expandedConceptTabBuckets.delete(bucketKind);
+    return previouslyExpanded.includes(bucketKind);
+}
+
+function collapseConceptTabBucket(kind, { rebuild = true } = {}) {
+    const changed = setConceptTabBucketExpanded(kind, false);
+    if (changed && rebuild) {
+        rebuildConceptTabBuckets();
+    }
+    return changed;
+}
+
+function collapseAllConceptTabBuckets({ rebuild = true } = {}) {
+    if (!expandedConceptTabBuckets.size) {
+        return false;
+    }
+    expandedConceptTabBuckets.clear();
+    if (rebuild) {
+        rebuildConceptTabBuckets();
+    }
+    return true;
+}
+
+function toggleConceptTabBucket(kind) {
+    const nextExpanded = !isConceptTabBucketExpanded(kind);
+    setConceptTabBucketExpanded(kind, nextExpanded);
+    rebuildConceptTabBuckets();
+    return nextExpanded;
+}
+
+function getConceptTabBucketPanelId(kind) {
+    return `conceptTabBucketPanel_${getConceptTabBucketKind(kind)}`;
 }
 
 function nextConceptTabRecency(lastTouchedAt = null) {
@@ -171,6 +218,59 @@ function applyConceptTabKindPresentation(element, kind) {
     element.dataset.tabBucketKind = getConceptTabBucketKind(normalisedKind);
 }
 
+function createConceptTabBucketToggle(kind, hiddenCount) {
+    const bucketKind = getConceptTabBucketKind(kind);
+    const panelId = getConceptTabBucketPanelId(bucketKind);
+    const isExpanded = isConceptTabBucketExpanded(bucketKind);
+    const noun = hiddenCount === 1 ? 'tab' : 'tabs';
+    const stateLabel = isExpanded ? 'Hide' : 'Show';
+    const accessibilityLabel = `${stateLabel} ${hiddenCount} more ${bucketKind} concept ${noun}`;
+
+    const toggleButton = document.createElement('button');
+    toggleButton.type = 'button';
+    toggleButton.className = 'concept-tab-bucket-toggle';
+    toggleButton.dataset.bucketKind = bucketKind;
+    toggleButton.dataset.hiddenCount = String(hiddenCount);
+    toggleButton.title = accessibilityLabel;
+    toggleButton.setAttribute('aria-label', accessibilityLabel);
+    toggleButton.setAttribute('aria-expanded', isExpanded ? 'true' : 'false');
+    toggleButton.setAttribute('aria-controls', panelId);
+
+    const countLabel = document.createElement('span');
+    countLabel.className = 'concept-tab-bucket-toggle-count';
+    countLabel.textContent = `+${hiddenCount}`;
+    toggleButton.appendChild(countLabel);
+
+    const srLabel = document.createElement('span');
+    srLabel.className = 'visually-hidden';
+    srLabel.textContent = accessibilityLabel;
+    toggleButton.appendChild(srLabel);
+
+    toggleButton.addEventListener('click', (event) => {
+        event.preventDefault();
+        toggleConceptTabBucket(bucketKind);
+    });
+
+    toggleButton.addEventListener('keydown', (event) => {
+        const currentlyExpanded = isConceptTabBucketExpanded(bucketKind);
+        if (event.key === 'Escape' && currentlyExpanded) {
+            event.preventDefault();
+            collapseConceptTabBucket(bucketKind);
+            return;
+        }
+        if (event.key === 'ArrowDown') {
+            event.preventDefault();
+            if (!currentlyExpanded) {
+                toggleConceptTabBucket(bucketKind);
+            }
+            const firstExtraButton = document.getElementById(panelId)?.querySelector('.tab-button[data-concept-id]');
+            firstExtraButton?.focus?.();
+        }
+    });
+
+    return toggleButton;
+}
+
 function rebuildConceptTabBuckets() {
     const tabContainer = document.getElementById('tabContainer');
     if (!tabContainer) return;
@@ -201,11 +301,44 @@ function rebuildConceptTabBuckets() {
         bucket.dataset.bucketKind = kind;
         bucket.setAttribute('role', 'group');
         bucket.setAttribute('aria-label', `${kind} concept tabs`);
-        entries.forEach((info) => {
+
+        const primaryRow = document.createElement('div');
+        primaryRow.className = 'concept-tab-bucket-primary';
+
+        const [mruEntry, ...olderEntries] = entries;
+        if (mruEntry?.button) {
+            primaryRow.appendChild(mruEntry.button);
+        }
+
+        if (!olderEntries.length) {
+            expandedConceptTabBuckets.delete(kind);
+            bucket.appendChild(primaryRow);
+            bucketElements.push(bucket);
+            return;
+        }
+
+        bucket.classList.add('has-extra-items');
+        const isExpanded = isConceptTabBucketExpanded(kind);
+        if (isExpanded) {
+            bucket.classList.add('is-expanded');
+        }
+
+        primaryRow.appendChild(createConceptTabBucketToggle(kind, olderEntries.length));
+        bucket.appendChild(primaryRow);
+
+        const overflowPanel = document.createElement('div');
+        overflowPanel.className = 'concept-tab-bucket-panel';
+        overflowPanel.id = getConceptTabBucketPanelId(kind);
+        overflowPanel.hidden = !isExpanded;
+        overflowPanel.setAttribute('role', 'group');
+        overflowPanel.setAttribute('aria-label', `More ${kind} concept tabs`);
+        olderEntries.forEach((info) => {
             if (info.button) {
-                bucket.appendChild(info.button);
+                overflowPanel.appendChild(info.button);
             }
         });
+        bucket.appendChild(overflowPanel);
+
         bucketElements.push(bucket);
     });
 
@@ -1366,6 +1499,7 @@ function createTabButton(tabId, displayName, conceptId, kind, opts = {}) {
 
     // Tab button click handler
     tabButton.addEventListener('click', () => {
+        collapseAllConceptTabBuckets({ rebuild: false });
         // Remove NEW badge on first activation
         if (tabButton.dataset.newlyCreated === 'true') {
             const badge = tabButton.querySelector('.new-tab-badge');
@@ -1392,6 +1526,11 @@ function createTabButton(tabId, displayName, conceptId, kind, opts = {}) {
     // Keyboard accessibility: open menu with Shift+F10 or Menu key when focused
     tabButton.setAttribute('tabindex', '0');
     tabButton.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            tabButton.click();
+            return;
+        }
         if ((e.shiftKey && e.key === 'F10') || e.key === 'ContextMenu') {
             e.preventDefault();
             const rect = tabButton.getBoundingClientRect();
@@ -2476,6 +2615,7 @@ export function initializeDynamicTabs() {
 
     // Clear any existing dynamic tabs on initialization
     closeAllDynamicConceptTabs({ persist: false });
+    expandedConceptTabBuckets.clear();
 
     // Listen for global requests to open concept tabs (avoids circular imports)
     // detail: { conceptId: string, conceptName: string, kind?: 'type'|'individual', activate?: boolean }

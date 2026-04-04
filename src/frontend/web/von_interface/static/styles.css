@@ -2394,13 +2394,123 @@ body {
 .concept-tab-bucket {
     display: flex;
     flex-direction: column;
-    align-items: stretch;
+    align-items: flex-start;
     gap: 4px;
     flex: 0 0 auto;
+    min-width: 0;
 }
 
 .concept-tab-bucket:empty {
     display: none;
+}
+
+.concept-tab-bucket-primary {
+    display: inline-flex;
+    align-items: stretch;
+    gap: 4px;
+    max-width: 100%;
+}
+
+.concept-tab-bucket-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 36px;
+    padding: 0 10px;
+    cursor: pointer;
+    border: 1px solid var(--von-tab-border);
+    border-bottom: none;
+    border-radius: 4px 4px 0 0;
+    background: #f3f4f6;
+    color: var(--von-tab-text-muted);
+    font: inherit;
+    line-height: 1;
+    flex: 0 0 auto;
+    transition: background-color 120ms ease, color 120ms ease, box-shadow 120ms ease;
+}
+
+.concept-tab-bucket-toggle:hover {
+    background: #e5e7eb;
+    color: var(--von-tab-text-colour);
+}
+
+.concept-tab-bucket-toggle:focus-visible {
+    outline: 2px solid var(--von-tab-focus-colour);
+    outline-offset: 2px;
+    box-shadow: 0 0 0 2px var(--von-tab-focus-shadow);
+}
+
+.concept-tab-bucket-toggle-count {
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+}
+
+.concept-tab-bucket[data-bucket-kind="type"] .concept-tab-bucket-toggle {
+    background: var(--von-tab-type-bg);
+    border-color: var(--von-tab-type-border);
+    color: var(--von-tab-type-text);
+}
+
+.concept-tab-bucket[data-bucket-kind="type"] .concept-tab-bucket-toggle:hover {
+    background: var(--von-tab-type-bg-hover);
+}
+
+.concept-tab-bucket[data-bucket-kind="individual"] .concept-tab-bucket-toggle {
+    background: var(--von-tab-individual-bg);
+    border-color: var(--von-tab-individual-border);
+    color: var(--von-tab-individual-text);
+}
+
+.concept-tab-bucket[data-bucket-kind="individual"] .concept-tab-bucket-toggle:hover {
+    background: var(--von-tab-individual-bg-hover);
+}
+
+.concept-tab-bucket[data-bucket-kind="predicate"] .concept-tab-bucket-toggle {
+    background: var(--von-tab-predicate-bg);
+    border-color: var(--von-tab-predicate-border);
+    color: var(--von-tab-predicate-text);
+}
+
+.concept-tab-bucket[data-bucket-kind="predicate"] .concept-tab-bucket-toggle:hover {
+    background: var(--von-tab-predicate-bg-hover);
+}
+
+.concept-tab-bucket.is-expanded .concept-tab-bucket-toggle {
+    box-shadow: inset 0 -2px 0 rgba(15, 23, 42, 0.08);
+}
+
+.concept-tab-bucket-panel {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+    padding: 6px;
+    margin-top: -1px;
+    border: 1px solid var(--von-tab-border);
+    border-radius: 0 8px 8px 8px;
+    background: #ffffff;
+    box-shadow: 0 8px 18px rgba(15, 23, 42, 0.12);
+    min-width: 0;
+}
+
+.concept-tab-bucket-panel[hidden] {
+    display: none;
+}
+
+.concept-tab-bucket[data-bucket-kind="type"] .concept-tab-bucket-panel {
+    border-color: var(--von-tab-type-border);
+    background: #f8fbff;
+}
+
+.concept-tab-bucket[data-bucket-kind="individual"] .concept-tab-bucket-panel {
+    border-color: var(--von-tab-individual-border);
+    background: #f8fbf5;
+}
+
+.concept-tab-bucket[data-bucket-kind="predicate"] .concept-tab-bucket-panel {
+    border-color: var(--von-tab-predicate-border);
+    background: #faf8ff;
 }
 
 .tab-container::-webkit-scrollbar {
@@ -2458,6 +2568,12 @@ body {
 .concept-tab-bucket .tab-button {
     width: max-content;
     max-width: 100%;
+}
+
+.concept-tab-bucket-panel .tab-button {
+    width: 100%;
+    border-bottom: 1px solid var(--von-tab-border);
+    border-radius: 6px;
 }
 
 .tab-button:hover {

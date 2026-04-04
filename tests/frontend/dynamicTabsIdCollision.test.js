@@ -261,6 +261,12 @@ describe('dynamic concept tab buckets', () => {
         }));
     }
 
+    function getPrimaryBucketConceptIds(kind) {
+        return Array.from(
+            document.querySelectorAll(`.concept-tab-bucket[data-bucket-kind="${kind}"] .concept-tab-bucket-primary .tab-button[data-concept-id]`)
+        ).map((button) => button.dataset.conceptId);
+    }
+
     test('renders only non-empty kind buckets and keeps most recent tabs first within each bucket', () => {
         const { createOrActivateConceptTab } = require(dynamicTabsModulePath);
 
@@ -273,6 +279,28 @@ describe('dynamic concept tab buckets', () => {
             { kind: 'individual', conceptIds: ['#V#gamma'] }
         ]);
         expect(document.querySelector('#conceptTabGroups .concept-tab-bucket[data-bucket-kind="predicate"]')).toBeNull();
+    });
+
+    test('shows only the MRU item in the primary row and hides older items behind a disclosure by default', () => {
+        const { createOrActivateConceptTab } = require(dynamicTabsModulePath);
+
+        createOrActivateConceptTab('#V#alpha', 'Alpha', false, { kind: 'type' });
+        createOrActivateConceptTab('#V#beta', 'Beta', false, { kind: 'type' });
+        createOrActivateConceptTab('#V#gamma', 'Gamma', false, { kind: 'type' });
+
+        expect(getPrimaryBucketConceptIds('type')).toEqual(['#V#gamma']);
+
+        const toggleButton = document.querySelector('.concept-tab-bucket[data-bucket-kind="type"] .concept-tab-bucket-toggle');
+        expect(toggleButton).not.toBeNull();
+        expect(toggleButton.textContent).toContain('+2');
+        expect(toggleButton.getAttribute('aria-expanded')).toBe('false');
+
+        const overflowPanel = document.getElementById('conceptTabBucketPanel_type');
+        expect(overflowPanel).not.toBeNull();
+        expect(overflowPanel.hidden).toBe(true);
+        expect(
+            Array.from(overflowPanel.querySelectorAll('.tab-button[data-concept-id]')).map((button) => button.dataset.conceptId)
+        ).toEqual(['#V#beta', '#V#alpha']);
     });
 
     test('promotes the activated tab to the top of its existing kind bucket', () => {
@@ -292,13 +320,52 @@ describe('dynamic concept tab buckets', () => {
         ]);
     });
 
-    test('keeps the tab context menu available for a stacked non-MRU tab item', () => {
+    test('promotes a disclosed item to MRU and collapses the bucket after selection', () => {
+        const dynamicTabs = require(dynamicTabsModulePath);
+        dynamicTabs.initializeDynamicTabs();
+
+        const alphaTabId = dynamicTabs.createOrActivateConceptTab('#V#alpha', 'Alpha', false, { kind: 'type' });
+        dynamicTabs.createOrActivateConceptTab('#V#beta', 'Beta', false, { kind: 'type' });
+        dynamicTabs.createOrActivateConceptTab('#V#gamma', 'Gamma', false, { kind: 'type' });
+
+        const toggleButton = document.querySelector('.concept-tab-bucket[data-bucket-kind="type"] .concept-tab-bucket-toggle');
+        toggleButton.click();
+
+        const overflowPanel = document.getElementById('conceptTabBucketPanel_type');
+        expect(overflowPanel.hidden).toBe(false);
+
+        const alphaButton = overflowPanel.querySelector('.tab-button[data-concept-id="#V#alpha"]');
+        alphaButton.click();
+        document.dispatchEvent(new CustomEvent('von:tab-activated', {
+            detail: { tabId: alphaTabId }
+        }));
+
+        expect(getBucketConceptOrders()).toEqual([
+            { kind: 'type', conceptIds: ['#V#alpha', '#V#gamma', '#V#beta'] }
+        ]);
+        expect(getPrimaryBucketConceptIds('type')).toEqual(['#V#alpha']);
+        expect(document.getElementById('conceptTabBucketPanel_type').hidden).toBe(true);
+    });
+
+    test('does not render a disclosure button for a bucket with a single item', () => {
+        const { createOrActivateConceptTab } = require(dynamicTabsModulePath);
+
+        createOrActivateConceptTab('#V#alpha', 'Alpha', false, { kind: 'individual' });
+
+        expect(document.querySelector('.concept-tab-bucket[data-bucket-kind="individual"] .concept-tab-bucket-toggle')).toBeNull();
+        expect(getPrimaryBucketConceptIds('individual')).toEqual(['#V#alpha']);
+    });
+
+    test('keeps the tab context menu available for a disclosed non-MRU tab item', () => {
         const { createOrActivateConceptTab } = require(dynamicTabsModulePath);
 
         createOrActivateConceptTab('#V#alpha', 'Alpha', false, { kind: 'type' });
         createOrActivateConceptTab('#V#beta', 'Beta', false, { kind: 'type' });
 
-        const stackedTab = document.querySelector('.concept-tab-bucket[data-bucket-kind="type"] .tab-button[data-concept-id="#V#alpha"]');
+        const toggleButton = document.querySelector('.concept-tab-bucket[data-bucket-kind="type"] .concept-tab-bucket-toggle');
+        toggleButton.click();
+
+        const stackedTab = document.querySelector('#conceptTabBucketPanel_type .tab-button[data-concept-id="#V#alpha"]');
         expect(stackedTab).not.toBeNull();
 
         stackedTab.dispatchEvent(new MouseEvent('contextmenu', {
@@ -313,6 +380,25 @@ describe('dynamic concept tab buckets', () => {
         expect(menu.style.display).toBe('block');
         expect(menu.querySelector('[data-action="close"]')).not.toBeNull();
         expect(menu.querySelector('[data-action="close-right"]')).not.toBeNull();
+    });
+
+    test('supports keyboard activation for a disclosed concept item', () => {
+        const { activateTab } = require('../../src/frontend/web/von_interface/static/js/tabNavigation.js');
+        const { createOrActivateConceptTab } = require(dynamicTabsModulePath);
+
+        const alphaTabId = createOrActivateConceptTab('#V#alpha', 'Alpha', false, { kind: 'type' });
+        createOrActivateConceptTab('#V#beta', 'Beta', false, { kind: 'type' });
+
+        const toggleButton = document.querySelector('.concept-tab-bucket[data-bucket-kind="type"] .concept-tab-bucket-toggle');
+        toggleButton.click();
+
+        const disclosedButton = document.querySelector('#conceptTabBucketPanel_type .tab-button[data-concept-id="#V#alpha"]');
+        disclosedButton.dispatchEvent(new KeyboardEvent('keydown', {
+            key: 'Enter',
+            bubbles: true
+        }));
+
+        expect(activateTab).toHaveBeenCalledWith(alphaTabId);
     });
 });
 
