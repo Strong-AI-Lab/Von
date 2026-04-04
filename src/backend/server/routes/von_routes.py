@@ -32,12 +32,11 @@ from ...languagemodels.llm_interface import (
     get_active_model_name,
     get_llm_client,
 )
-from .settings_routes import get_all_settings_data
 from ...integrations.internal_mcp import ProgressTracker, ToolCallParsingError
 from ...integrations.internal_mcp.orchestrator import InternalMCPChatOrchestrator
 from ...services import chat_history_service
+from ...services.background_task_service import background_task_registry
 from ...services.window_session_context_service import (
-    get_or_create_window_context,
     set_window_organisation,
     clear_window_organisation,
     get_effective_context,
@@ -2228,7 +2227,7 @@ def upload_file_to_blob_store_and_vontology():
         from ...db.repositories.concepts_repository import ConceptsRepository
         from ...services.text_value_service import upsert_text_for_concept
 
-        instance = concept_service.create_concept(
+        concept_service.create_concept(
             name=original_filename,
             concept_id=instance_concept_id,
             parent_concept_ids=[type_concept_id],
@@ -3141,8 +3140,6 @@ def get_generation_progress(request_id: str):
 
 # ----------------- Background Tasks (JVNAUTOSCI-1038) -----------------
 
-from ...services.background_task_service import background_task_registry
-
 
 @von_bp.route("/api/task/status/<task_id>", methods=["GET"])
 def get_task_status(task_id: str):
@@ -3632,7 +3629,7 @@ def _calculate_tool_stats(tool_messages: list[dict]) -> dict:
             )
             if isinstance(parsed, dict):
                 tool_name = parsed.get("tool", "unknown")
-        except:
+        except Exception:
             pass
 
         stats["tools"].append(
@@ -7252,6 +7249,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             "tools_invoked": [],
             "tool_results_included_in_prompt": False,
         }
+        auxiliary_llm_calls: list[dict[str, Any]] = []
         workflow_continuation_context: dict[str, Any] | None = None
         workflow_discovery_query = prompt_text
         try:
@@ -7272,7 +7270,16 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     continuation_context=workflow_continuation_context,
                 )
                 apply_reason = str(apply_decision.get("reason") or "").strip() or None
+                apply_signals = [
+                    str(item).strip()
+                    for item in (apply_decision.get("matched_signals") or [])
+                    if str(item).strip()
+                ]
                 try:
+                    continuation_decision_source = (
+                        str(apply_decision.get("decision_source") or "").strip()
+                        or "workflow_state_check"
+                    )
                     auxiliary_llm_calls.append(
                         annotate_python_decision_event(
                             {
@@ -7280,6 +7287,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                                 "stage": "workflow_dispatch",
                                 "applies": bool(apply_decision.get("applies", False)),
                                 "reason": apply_reason,
+                                "signals": list(apply_signals),
                                 "session_id": workflow_continuation_context.get(
                                     "session_id"
                                 ),
@@ -7291,7 +7299,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                             component="workflow_continuation_service",
                             function="assess_prompt_for_workflow_continuation",
                             decision_class="continuation_classifier",
-                            decision_source="workflow_state_check",
+                            decision_source=continuation_decision_source,
                             changed_outcome=bool(
                                 apply_decision.get("applies", False)
                             ),
@@ -7307,6 +7315,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 workflow_continuation_context["apply_reason"] = str(
                     apply_decision.get("reason") or ""
                 ).strip() or None
+                workflow_continuation_context["apply_signals"] = list(apply_signals)
                 if bool(workflow_continuation_context.get("applied")):
                     workflow_discovery_query = build_workflow_continuation_routing_prompt(
                         prompt=prompt_text,
@@ -7896,7 +7905,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         }
                     )
 
-        auxiliary_llm_calls: list[dict] = []
         llm_interaction: dict = {
             "requested_model": model_name,
             "orchestrator_used": orchestrator is not None,
@@ -10047,7 +10055,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 context_stats = {
                     "sent_to_llm": _calculate_context_stats(enhanced_context)
                 }
-            except:
+            except Exception:
                 pass
 
         if "show_tool_use_progress" in locals() and show_tool_use_progress:
@@ -10426,7 +10434,7 @@ def history_debug():
         # Fallback: if namespace mismatch (e.g. org session accessed without org context),
         # retry without namespace restriction since we've already verified access above.
         if not debug_data:
-            print(f"[history/debug] Retrying without namespace restriction")
+            print("[history/debug] Retrying without namespace restriction")
             debug_data = chat_history_service.get_chat_history_debug_entry(
                 user_id=owner_user_id,
                 session_id=session_id,

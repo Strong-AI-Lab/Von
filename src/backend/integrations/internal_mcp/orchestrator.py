@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
@@ -41,11 +40,11 @@ from .schemas import (
 from ...languagemodels.structured_tool_calling import (
     LLMResponse,
     ToolDefinition,
-    ToolCall,
 )
 from src.backend.services.prompt_template_service import PromptTemplateService
 from src.backend.services.workflow_override_policy_service import (
     WorkflowOverrideDecision,
+    assess_workflow_routing_candidate_policy,
     choose_custom_workflow_override_candidate,
 )
 from src.backend.services.minimal_imposition_runtime_profile_vontology_service import (
@@ -61,7 +60,6 @@ from ...workflows.action_registry import (
     WorkflowEnvironment,
 )
 from ...workflows.execution_contracts import (
-    WORKFLOW_RESULT_ENVELOPE_KEY,
     WORKFLOW_RUNTIME_EVENTS_KEY,
     WORKFLOW_STEP_RESULT_ENVELOPES_KEY,
 )
@@ -106,7 +104,6 @@ from src.backend.workflows.write_tool_policy import (
     compute_allowed_write_tools,
     prompt_explicitly_denies_write,
     required_mutation_authority_level_for_risk,
-    tool_requires_confirmation,
 )
 from ...services.turn_execution_record_service import build_turn_execution_record
 from src.backend.services.buttonify_service import (
@@ -2207,58 +2204,6 @@ class InternalMCPChatOrchestrator:
             data.get("missing_tool_call_retry_budget"),
             default=self._max_missing_tool_call_retries_per_turn,
             max_value=20,
-        )
-        missing_prompt_tools_raw = data.get("missing_prompt_tools")
-        missing_prompt_tools = (
-            [
-                str(item).strip()
-                for item in missing_prompt_tools_raw
-                if isinstance(item, str) and str(item).strip()
-            ]
-            if isinstance(missing_prompt_tools_raw, list)
-            else []
-        )
-        missing_prompt_fetch_concept_ids_raw = data.get(
-            "missing_prompt_fetch_concept_ids"
-        )
-        missing_prompt_fetch_concept_ids = (
-            [
-                str(item).strip()
-                for item in missing_prompt_fetch_concept_ids_raw
-                if isinstance(item, str) and str(item).strip()
-            ]
-            if isinstance(missing_prompt_fetch_concept_ids_raw, list)
-            else []
-        )
-        missing_prompt_read_file_copy_ids_raw = data.get(
-            "missing_prompt_read_file_copy_ids"
-        )
-        missing_prompt_read_file_copy_ids = (
-            [
-                str(item).strip()
-                for item in missing_prompt_read_file_copy_ids_raw
-                if isinstance(item, str) and str(item).strip()
-            ]
-            if isinstance(missing_prompt_read_file_copy_ids_raw, list)
-            else []
-        )
-        missing_prompt_scholarly_file_copy_ids_raw = data.get(
-            "missing_prompt_scholarly_representation_for_file_copy_ids"
-        )
-        missing_prompt_scholarly_file_copy_ids = (
-            [
-                str(item).strip()
-                for item in missing_prompt_scholarly_file_copy_ids_raw
-                if isinstance(item, str) and str(item).strip()
-            ]
-            if isinstance(missing_prompt_scholarly_file_copy_ids_raw, list)
-            else []
-        )
-        required_prompt_create_type_name_raw = data.get("required_prompt_create_type_name")
-        required_prompt_create_type_name = (
-            str(required_prompt_create_type_name_raw).strip()
-            if isinstance(required_prompt_create_type_name_raw, str)
-            else ""
         )
         # Keep heuristic/classifier retry available for ordinary "I'll do it
         # now" tool promises as well as explicit prompt-requirement failures.
@@ -5015,20 +4960,8 @@ class InternalMCPChatOrchestrator:
                 else None
             ),
         )
-        required_prompt_tools = list(prompt_requirements.required_tools)
-        required_prompt_fetch_concept_ids = list(
-            prompt_requirements.required_fetch_concept_ids
-        )
-        required_prompt_read_file_copy_ids = list(
-            prompt_requirements.required_read_file_copy_ids
-        )
-        required_prompt_scholarly_representation_file_copy_ids = list(
-            prompt_requirements.required_scholarly_representation_file_copy_ids
-        )
-        required_prompt_create_type_name = (
-            prompt_requirements.required_create_type_name
-        )
         self._store_prompt_requirement_evaluation(data, prompt_requirements)
+        required_prompt_tools = list(prompt_requirements.required_tools)
 
         # Emit planning phase.
         if callable(emit_phase_transition):
@@ -5146,17 +5079,6 @@ class InternalMCPChatOrchestrator:
 
         # Missing-tool-call recovery.
         if not has_valid_tool_call:
-            missing_prompt_tools = list(prompt_requirements.missing_tools)
-            missing_prompt_fetch_concept_ids = list(
-                prompt_requirements.missing_fetch_concept_ids
-            )
-            missing_prompt_read_file_copy_ids = list(
-                prompt_requirements.missing_read_file_copy_ids
-            )
-            missing_prompt_scholarly_representation_file_copy_ids = list(
-                prompt_requirements.missing_scholarly_representation_file_copy_ids
-            )
-
             recovery_data = self._run_missing_tool_call_recovery_workflow(
                 request=request,
                 environment=env,
@@ -5313,8 +5235,6 @@ class InternalMCPChatOrchestrator:
                 }
             )
 
-        prompt = data.get("prompt", "")
-        augmented_context = data.get("augmented_context", [])
         policy_state = data["policy_state"]
         registry_snapshot = data.get("registry_snapshot")
         user_concept_id = data.get("user_concept_id")
@@ -16116,12 +16036,6 @@ class InternalMCPChatOrchestrator:
             if not type_concept_id:
                 continue
             type_doc = _get_type_doc(type_concept_id)
-            relationships = (
-                type_doc.get("relationships")
-                if isinstance(type_doc, Mapping)
-                and isinstance(type_doc.get("relationships"), Mapping)
-                else {}
-            )
 
             inherited_predicates = self._normalise_preflight_relationship_targets(
                 type_doc.get("inherited_salient_binary_predicates")
@@ -20192,14 +20106,19 @@ class InternalMCPChatOrchestrator:
     def _prepare_selector_discovered_matches(
         self,
         workflow_discovery_result: Mapping[str, Any],
+        *,
+        turn_text: str,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """Filter discovered workflows to executable + policy-safe defaults.
+        """Filter discovered workflows to executable + routing-policy-safe defaults.
 
         JVNAUTOSCI-1088:
         - Non-executable discovered concepts are excluded from selector context
           unless explicitly overridden.
         - Policy-safe defaults to "registered workflow concept ID" so the
           selector only routes into workflow IDs known to this process.
+        - Discovery-side routing exclusions and workflow routing profiles must
+          survive into selector preparation so prompt-level routing policy can
+          be honoured consistently on the normal discovery path.
         """
 
         allow_non_executable = self._env_flag_enabled(
@@ -20217,13 +20136,13 @@ class InternalMCPChatOrchestrator:
             if not concept_id:
                 continue
 
-            is_policy_safe = concept_id in registry_ids
+            registry_safe = concept_id in registry_ids
             raw_reason = candidate.get("executability_reason")
             raw_is_executable = candidate.get("is_executable")
             if raw_reason is None and raw_is_executable is None:
                 # Legacy discovery payloads did not expose executability metadata.
                 # Use registry membership as a conservative executable default.
-                is_executable = is_policy_safe
+                is_executable = registry_safe
                 reason = "executable_now" if is_executable else "graph_incomplete"
             else:
                 reason = str(raw_reason or "non_executable_design_artifact").strip()
@@ -20235,12 +20154,68 @@ class InternalMCPChatOrchestrator:
             item["concept_id"] = concept_id
             item["is_executable"] = is_executable
             item["executability_reason"] = reason
+            discovery_policy_safe = candidate.get("is_policy_safe")
+            if isinstance(discovery_policy_safe, bool):
+                is_policy_safe = bool(discovery_policy_safe and registry_safe)
+            else:
+                is_policy_safe = registry_safe
             item["is_policy_safe"] = is_policy_safe
             item["candidate_source"] = "workflow_discovery"
-            item["candidate_reason"] = "discovered_workflow_candidate"
-            item["routing_eligible"] = True
-            item["routing_exclusion_reason"] = None
+            item["candidate_reason"] = str(
+                candidate.get("candidate_reason") or "discovered_workflow_candidate"
+            ).strip() or "discovered_workflow_candidate"
 
+            preserved_routing_eligible = candidate.get("routing_eligible")
+            if isinstance(preserved_routing_eligible, bool):
+                item["routing_eligible"] = preserved_routing_eligible
+            else:
+                item["routing_eligible"] = True
+            preserved_routing_exclusion_reason = str(
+                candidate.get("routing_exclusion_reason") or ""
+            ).strip()
+            item["routing_exclusion_reason"] = (
+                preserved_routing_exclusion_reason or None
+            )
+
+            routing_profile = candidate.get("routing_profile")
+            if not isinstance(routing_profile, Mapping):
+                registration = self._workflow_registry.get_registration(concept_id)
+                definition = getattr(registration, "definition", None)
+                definition_metadata = (
+                    getattr(definition, "metadata", None)
+                    if definition is not None
+                    else None
+                )
+                if isinstance(definition_metadata, Mapping):
+                    routing_profile = definition_metadata.get("routing_profile")
+            if isinstance(routing_profile, Mapping):
+                item["routing_profile"] = dict(routing_profile)
+
+            policy_assessment = assess_workflow_routing_candidate_policy(
+                turn_text=turn_text,
+                candidate=item,
+            )
+            item["routing_profile_role"] = str(
+                policy_assessment.get("role") or "unknown"
+            )
+            item["routing_profile_role_source"] = str(
+                policy_assessment.get("role_source") or "none"
+            )
+            item["routing_policy_flags"] = dict(
+                policy_assessment.get("policy_flags") or {}
+            )
+            item["routing_policy_lexical_signals"] = dict(
+                policy_assessment.get("lexical_signals") or {}
+            )
+
+            if not bool(item.get("routing_eligible", True)):
+                item["candidate_reason"] = "discovered_workflow_excluded"
+                item["routing_exclusion_reason"] = (
+                    item.get("routing_exclusion_reason")
+                    or "discovery_marked_ineligible"
+                )
+                excluded.append(item)
+                continue
             if not is_executable and not allow_non_executable:
                 item["routing_eligible"] = False
                 item["candidate_reason"] = "discovered_workflow_excluded"
@@ -20251,6 +20226,19 @@ class InternalMCPChatOrchestrator:
                 item["routing_eligible"] = False
                 item["candidate_reason"] = "discovered_workflow_excluded"
                 item["routing_exclusion_reason"] = "policy_unsafe_not_registered"
+                excluded.append(item)
+                continue
+            if (
+                item.get("routing_profile_role") == "authoring"
+                and not bool(policy_assessment.get("suitable", True))
+                and str(policy_assessment.get("suitability_reason") or "").strip()
+                == "authoring_intent_required_by_workflow_profile"
+            ):
+                item["routing_eligible"] = False
+                item["candidate_reason"] = "discovered_workflow_excluded"
+                item["routing_exclusion_reason"] = (
+                    "authoring_intent_required_by_workflow_profile"
+                )
                 excluded.append(item)
                 continue
 
@@ -21084,6 +21072,11 @@ class InternalMCPChatOrchestrator:
                     apply_reason = (
                         str(apply_decision.get("reason") or "").strip() or None
                     )
+                    apply_signals = [
+                        str(item).strip()
+                        for item in (apply_decision.get("matched_signals") or [])
+                        if str(item).strip()
+                    ]
                     if isinstance(aux_llm_calls, list):
                         continuation_decision_source = (
                             str(apply_decision.get("decision_source") or "").strip()
@@ -21099,6 +21092,7 @@ class InternalMCPChatOrchestrator:
                                             apply_decision.get("applies", False)
                                         ),
                                         "reason": apply_reason,
+                                        "signals": list(apply_signals),
                                         "session_id": workflow_continuation_payload_local.get(
                                             "session_id"
                                         ),
@@ -21127,6 +21121,9 @@ class InternalMCPChatOrchestrator:
                     )
                     workflow_continuation_payload_local["apply_reason"] = (
                         str(apply_decision.get("reason") or "").strip() or None
+                    )
+                    workflow_continuation_payload_local["apply_signals"] = list(
+                        apply_signals
                     )
                     if bool(workflow_continuation_payload_local.get("applied")):
                         system_message = build_workflow_continuation_system_message(
@@ -21455,7 +21452,8 @@ class InternalMCPChatOrchestrator:
                     local_discovered_matches,
                     local_excluded_matches,
                 ) = self._prepare_selector_discovered_matches(
-                    workflow_discovery_result
+                    workflow_discovery_result,
+                    turn_text=prompt,
                 )
             local_selector_candidate_matches = _merge_selector_candidates(
                 _build_selector_default_candidates(),

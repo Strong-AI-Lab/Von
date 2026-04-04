@@ -176,6 +176,7 @@ class WorkflowMatch:
     is_policy_safe: bool = False
     routing_eligible: bool = False
     routing_exclusion_reason: Optional[str] = None
+    routing_profile: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialisation."""
@@ -192,6 +193,11 @@ class WorkflowMatch:
             "is_policy_safe": self.is_policy_safe,
             "routing_eligible": self.routing_eligible,
             "routing_exclusion_reason": self.routing_exclusion_reason,
+            "routing_profile": (
+                dict(self.routing_profile)
+                if isinstance(self.routing_profile, dict)
+                else None
+            ),
         }
 
 
@@ -787,6 +793,27 @@ def _has_authoritative_routing_text(concept_id: str) -> bool:
     )
 
 
+@lru_cache(maxsize=1024)
+def _resolve_workflow_routing_profile_data(
+    concept_id: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Return authoritative routing-profile metadata for a workflow concept."""
+
+    if not isinstance(concept_id, str) or not concept_id.strip():
+        return None, None
+
+    try:
+        from ..workflows.vontology_loader import resolve_workflow_routing_profile
+
+        profile, source = resolve_workflow_routing_profile(concept_id)
+    except Exception:
+        return None, None
+
+    if not isinstance(profile, Mapping):
+        return None, None
+    return dict(profile), str(source or "").strip() or None
+
+
 def _annotate_and_rank_candidates(
     matches: List[WorkflowMatch],
     *,
@@ -802,6 +829,9 @@ def _annotate_and_rank_candidates(
             match.concept_id
         )
         has_authoritative_text = _has_authoritative_routing_text(match.concept_id)
+        routing_profile, _routing_profile_source = _resolve_workflow_routing_profile_data(
+            match.concept_id
+        )
         match.is_executable = bool(is_executable)
         match.executability_reason = reason
         match.executability_detail = detail
@@ -817,6 +847,8 @@ def _annotate_and_rank_candidates(
             )
         else:
             match.routing_exclusion_reason = None
+        if isinstance(routing_profile, dict):
+            match.routing_profile = routing_profile
         match.confidence_score = _compute_candidate_confidence(match)
         annotated.append(match)
 
@@ -893,6 +925,7 @@ def invalidate_workflow_discovery_executability_caches() -> None:
 
     _classify_workflow_concept_executability.cache_clear()
     _is_executable_workflow_concept.cache_clear()
+    _resolve_workflow_routing_profile_data.cache_clear()
 
 
 def _count_executable_matches(matches: List[WorkflowMatch]) -> int:
