@@ -288,6 +288,53 @@ class WorkflowInstanceManager:
                 values.append(value)
         return values
 
+    @staticmethod
+    def _monitor_snapshot_should_reserve_active_workflows(
+        status_values: list[str],
+    ) -> bool:
+        """Reserve running or paused visibility when pending backlog is present."""
+        if not status_values:
+            return False
+        return (
+            WorkflowInstanceStatus.PENDING.value in status_values
+            and (
+                WorkflowInstanceStatus.RUNNING.value in status_values
+                or WorkflowInstanceStatus.PAUSED.value in status_values
+            )
+        )
+
+    @staticmethod
+    def _monitor_snapshot_status_order(status_values: list[str]) -> list[str]:
+        """Order statuses for bounded monitor snapshots."""
+        ordered: list[str] = []
+        for status_value in (
+            WorkflowInstanceStatus.RUNNING.value,
+            WorkflowInstanceStatus.PAUSED.value,
+            WorkflowInstanceStatus.PENDING.value,
+            WorkflowInstanceStatus.COMPLETED.value,
+            WorkflowInstanceStatus.FAILED.value,
+            WorkflowInstanceStatus.CANCELLED.value,
+        ):
+            if status_value in status_values and status_value not in ordered:
+                ordered.append(status_value)
+        for status_value in status_values:
+            if status_value not in ordered:
+                ordered.append(status_value)
+        return ordered
+
+    @staticmethod
+    def _build_exact_status_query(
+        base_query: dict[str, Any], *, status_value: str
+    ) -> dict[str, Any]:
+        query = dict(base_query)
+        query["status"] = status_value
+        return query
+
+    @staticmethod
+    def _monitor_snapshot_workflow_key(doc: dict[str, Any]) -> str:
+        workflow_id = str(doc.get("workflow_id") or "").strip()
+        return workflow_id or "__unknown_workflow__"
+
     def _build_instance_list_query(
         self,
         *,
@@ -735,6 +782,7 @@ class WorkflowInstanceManager:
         if coll is None:
             return []
 
+        status_values = self._normalise_status_filter(status)
         query = self._build_instance_list_query(
             user_id=user_id,
             org_id=org_id,
@@ -748,6 +796,59 @@ class WorkflowInstanceManager:
             from_utc=from_utc,
             to_utc=to_utc,
         )
+        if self._monitor_snapshot_should_reserve_active_workflows(status_values):
+            selected_docs: list[dict[str, Any]] = []
+            selected_ids: set[str] = set()
+            represented_workflows: set[str] = set()
+
+            # Reserve one running or paused row per workflow first so active
+            # execution cannot disappear behind a newer pending backlog.
+            for status_value in (
+                WorkflowInstanceStatus.RUNNING.value,
+                WorkflowInstanceStatus.PAUSED.value,
+            ):
+                if status_value not in status_values:
+                    continue
+                cursor = coll.find(
+                    self._build_exact_status_query(query, status_value=status_value)
+                ).sort("created_at", -1)
+                for doc in cursor:
+                    if len(selected_docs) >= limit:
+                        break
+                    instance_id = str(doc.get("instance_id") or "").strip()
+                    if not instance_id or instance_id in selected_ids:
+                        continue
+                    workflow_key = self._monitor_snapshot_workflow_key(doc)
+                    if workflow_key in represented_workflows:
+                        continue
+                    selected_docs.append(doc)
+                    selected_ids.add(instance_id)
+                    represented_workflows.add(workflow_key)
+                if len(selected_docs) >= limit:
+                    break
+
+            if len(selected_docs) < limit:
+                for status_value in self._monitor_snapshot_status_order(status_values):
+                    cursor = coll.find(
+                        self._build_exact_status_query(
+                            query, status_value=status_value
+                        )
+                    ).sort("created_at", -1)
+                    for doc in cursor:
+                        if len(selected_docs) >= limit:
+                            break
+                        instance_id = str(doc.get("instance_id") or "").strip()
+                        if not instance_id or instance_id in selected_ids:
+                            continue
+                        selected_docs.append(doc)
+                        selected_ids.add(instance_id)
+                    if len(selected_docs) >= limit:
+                        break
+
+            return [
+                WorkflowInstance.status_dict_from_doc(doc) for doc in selected_docs
+            ]
+
         pipeline = [
             {"$match": query},
             {"$sort": {"created_at": -1}},

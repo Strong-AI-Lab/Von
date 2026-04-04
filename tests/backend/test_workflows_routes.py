@@ -4,6 +4,7 @@ import importlib
 import sys
 import time
 import types
+from datetime import datetime, timedelta, timezone
 from typing import cast
 
 import pytest
@@ -874,6 +875,105 @@ def test_list_workflow_instances_accepts_comma_separated_status_filters(
         "running",
         "paused",
     ]
+
+
+def test_list_workflow_instances_keeps_running_rows_visible_during_pending_backlog(
+    app_client,
+):
+    from src.backend.workflows.durable.instance_manager import WorkflowInstanceManager
+    from src.backend.workflows.durable.models import WorkflowInstanceStatus
+
+    manager = WorkflowInstanceManager()
+    user_id = "user-monitor"
+    namespace = "user-monitor/org-1"
+
+    running_alpha = manager.create_instance(
+        "#V#alpha_workflow",
+        user_id=user_id,
+        org_id="org-1",
+        namespace=namespace,
+    )
+    pending_alpha_old = manager.create_instance(
+        "#V#alpha_workflow",
+        user_id=user_id,
+        org_id="org-1",
+        namespace=namespace,
+    )
+    pending_alpha_new = manager.create_instance(
+        "#V#alpha_workflow",
+        user_id=user_id,
+        org_id="org-1",
+        namespace=namespace,
+    )
+    running_beta = manager.create_instance(
+        "#V#beta_workflow",
+        user_id=user_id,
+        org_id="org-1",
+        namespace=namespace,
+    )
+
+    collection = manager._get_instances_collection()
+    assert collection is not None
+    now = datetime.now(timezone.utc)
+    collection.update_one(
+        {"instance_id": running_alpha},
+        {
+            "$set": {
+                "status": WorkflowInstanceStatus.RUNNING.value,
+                "created_at": now - timedelta(minutes=4),
+                "started_at": now - timedelta(minutes=4),
+                "progress_message": "running alpha",
+            }
+        },
+    )
+    collection.update_one(
+        {"instance_id": pending_alpha_old},
+        {
+            "$set": {
+                "created_at": now - timedelta(minutes=2),
+                "progress_message": "queued alpha old",
+            }
+        },
+    )
+    collection.update_one(
+        {"instance_id": pending_alpha_new},
+        {
+            "$set": {
+                "created_at": now - timedelta(minutes=1),
+                "progress_message": "queued alpha new",
+            }
+        },
+    )
+    collection.update_one(
+        {"instance_id": running_beta},
+        {
+            "$set": {
+                "status": WorkflowInstanceStatus.RUNNING.value,
+                "created_at": now - timedelta(minutes=3),
+                "started_at": now - timedelta(minutes=3),
+                "progress_message": "running beta",
+            }
+        },
+    )
+
+    response = app_client.get(
+        "/api/workflows/instances",
+        query_string={
+            "user_id": user_id,
+            "status": "pending,running,paused",
+            "limit": 3,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["count"] == 3
+    alpha_statuses = {
+        item["status"]
+        for item in payload["items"]
+        if item["workflow_id"] == "#V#alpha_workflow"
+    }
+    assert WorkflowInstanceStatus.RUNNING.value in alpha_statuses
 
 
 def test_list_workflow_instances_rejects_invalid_comma_separated_status_filters(

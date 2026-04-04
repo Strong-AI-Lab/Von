@@ -793,6 +793,102 @@ class TestWorkflowInstanceManager:
         assert summaries[0]["has_outputs"] is True
         assert "workflow_data" not in summaries[0]
 
+    def test_list_instance_status_dicts_keeps_running_rows_visible_during_pending_backlog(
+        self,
+    ) -> None:
+        """Monitor snapshots should not hide running work behind newer pending rows."""
+        manager = WorkflowInstanceManager()
+
+        running_alpha = manager.create_instance(
+            "#V#alpha_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+        pending_alpha_old = manager.create_instance(
+            "#V#alpha_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+        pending_alpha_new = manager.create_instance(
+            "#V#alpha_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+        running_beta = manager.create_instance(
+            "#V#beta_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+
+        collection = manager._get_instances_collection()
+        assert collection is not None
+        now = datetime.now(timezone.utc)
+
+        collection.update_one(
+            {"instance_id": running_alpha},
+            {
+                "$set": {
+                    "status": WorkflowInstanceStatus.RUNNING.value,
+                    "created_at": now - timedelta(minutes=4),
+                    "started_at": now - timedelta(minutes=4),
+                    "progress_message": "running alpha",
+                }
+            },
+        )
+        collection.update_one(
+            {"instance_id": pending_alpha_old},
+            {
+                "$set": {
+                    "created_at": now - timedelta(minutes=2),
+                    "progress_message": "queued alpha old",
+                }
+            },
+        )
+        collection.update_one(
+            {"instance_id": pending_alpha_new},
+            {
+                "$set": {
+                    "created_at": now - timedelta(minutes=1),
+                    "progress_message": "queued alpha new",
+                }
+            },
+        )
+        collection.update_one(
+            {"instance_id": running_beta},
+            {
+                "$set": {
+                    "status": WorkflowInstanceStatus.RUNNING.value,
+                    "created_at": now - timedelta(minutes=3),
+                    "started_at": now - timedelta(minutes=3),
+                    "progress_message": "running beta",
+                }
+            },
+        )
+
+        summaries = manager.list_instance_status_dicts(
+            user_id="user-1",
+            status=[
+                WorkflowInstanceStatus.PENDING,
+                WorkflowInstanceStatus.RUNNING,
+                WorkflowInstanceStatus.PAUSED,
+            ],
+            limit=3,
+        )
+
+        assert len(summaries) == 3
+        alpha_statuses = {
+            summary["status"]
+            for summary in summaries
+            if summary["workflow_id"] == "#V#alpha_workflow"
+        }
+        assert WorkflowInstanceStatus.RUNNING.value in alpha_statuses
+        assert summaries[0]["status"] == WorkflowInstanceStatus.RUNNING.value
+        assert summaries[1]["status"] == WorkflowInstanceStatus.RUNNING.value
+
     def test_workflow_instance_indexes_include_namespace_status_created(self) -> None:
         """Workflow instance indexes should cover the monitor namespace/status query."""
         manager = WorkflowInstanceManager()
