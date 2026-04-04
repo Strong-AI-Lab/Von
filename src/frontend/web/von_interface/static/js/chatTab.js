@@ -16442,7 +16442,15 @@ function rehydrateHistory(scrollableField, historyMessages, options = {}) {
             if (msg.role === 'assistant') {
                 const merged = {
                     ...(msg.llm_debug_data && typeof msg.llm_debug_data === 'object' ? msg.llm_debug_data : {}),
-                    history_location: msg.history_location || null
+                    history_location: msg.history_location || null,
+                    timestamp: (
+                        msg.llm_debug_data
+                        && typeof msg.llm_debug_data === 'object'
+                        && msg.llm_debug_data.timestamp !== undefined
+                        && msg.llm_debug_data.timestamp !== null
+                    )
+                        ? msg.llm_debug_data.timestamp
+                        : (msg.timestamp || null)
                 };
                 setLlmDebugDataEntry(turnId, merged);
             }
@@ -22148,7 +22156,13 @@ async function loadLlmDebugDataForTurn(turnId, options = {}) {
             }
             const merged = {
                 ...data.llm_debug_data,
-                history_location: historyLocation
+                history_location: historyLocation,
+                timestamp: (
+                    data.llm_debug_data.timestamp !== undefined
+                    && data.llm_debug_data.timestamp !== null
+                )
+                    ? data.llm_debug_data.timestamp
+                    : (existing?.timestamp || null)
             };
             setLlmDebugDataEntry(turnId, merged);
             return merged;
@@ -22414,19 +22428,22 @@ function parseTurnTimestampFromTurnId(turnId) {
     return parseTurnTimestampMs(parts[parts.length - 1]);
 }
 
-function resolveTurnTimestampMs(turnId, debugData) {
+function resolveTurnTimestampMs(turnId, debugData, options = {}) {
     const fromDebugData = parseTurnTimestampMs(debugData?.timestamp);
     if (fromDebugData) {
         return fromDebugData;
     }
+    if (options.allowTurnIdTimestampFallback === false) {
+        return null;
+    }
     return parseTurnTimestampFromTurnId(turnId);
 }
 
-function buildSortedConversationLlmDebugEntries() {
+function buildSortedConversationLlmDebugEntries(options = {}) {
     const entries = Array.from(llmDebugData.entries()).map(([turnId, debugData], index) => ({
         turnId,
         debugData,
-        timestampMs: resolveTurnTimestampMs(turnId, debugData),
+        timestampMs: resolveTurnTimestampMs(turnId, debugData, options),
         insertionIndex: index
     }));
 
@@ -22492,17 +22509,63 @@ function buildConversationTelemetryNamespaceContext() {
     };
 }
 
+function countAssistantTranscriptTurns() {
+    if (!Array.isArray(transcriptTurns) || transcriptTurns.length === 0) {
+        return 0;
+    }
+
+    return transcriptTurns.filter((turn) => {
+        if (!turn || typeof turn !== 'object') {
+            return false;
+        }
+
+        const rawRole = typeof turn.role === 'string'
+            ? turn.role
+            : (typeof turn.sender === 'string' ? turn.sender : '');
+        const normalisedRole = rawRole.trim().toLowerCase();
+        return normalisedRole === 'assistant' || normalisedRole === 'von';
+    }).length;
+}
+
+async function hydrateConversationTelemetryLocatorEntries() {
+    const hydrationPromises = [];
+
+    for (const [turnId, debugData] of llmDebugData.entries()) {
+        if (!debugData || typeof debugData !== 'object') {
+            continue;
+        }
+        if (hasLlmDebugPayload(debugData)) {
+            continue;
+        }
+
+        const historyLocation = cloneConversationHistoryLocation(debugData.history_location);
+        if (!historyLocation?.session_id || historyLocation.history_index === undefined || historyLocation.history_index === null) {
+            continue;
+        }
+
+        hydrationPromises.push(loadLlmDebugDataForTurn(turnId));
+    }
+
+    if (hydrationPromises.length === 0) {
+        return;
+    }
+
+    await Promise.allSettled(hydrationPromises);
+}
+
 function buildConversationLlmTelemetryLocatorPayload() {
     if (llmDebugData.size === 0) {
         return null;
     }
 
-    const sortedEntries = buildSortedConversationLlmDebugEntries();
+    const sortedEntries = buildSortedConversationLlmDebugEntries({ allowTurnIdTimestampFallback: false });
     const transcriptTurnCount = Array.isArray(transcriptTurns) ? transcriptTurns.length : 0;
-    const missingTurnTelemetryCount = Math.max(0, transcriptTurnCount - sortedEntries.length);
+    const assistantTranscriptTurnCount = countAssistantTranscriptTurns();
+    const missingAssistantTurnTelemetryCount = Math.max(0, assistantTranscriptTurnCount - sortedEntries.length);
 
     let turnsWithHistoryLocationCount = 0;
     let turnsWithRequestIdCount = 0;
+    let turnsWithUnavailableLocatorFieldsCount = 0;
     const turns = sortedEntries.map((entry, index) => {
         const historyLocation = cloneConversationHistoryLocation(entry.debugData?.history_location);
         if (historyLocation) {
@@ -22514,7 +22577,18 @@ function buildConversationLlmTelemetryLocatorPayload() {
             turnsWithRequestIdCount += 1;
         }
 
-        return {
+        const unavailableLocatorFields = [];
+        if (!Number.isFinite(entry.timestampMs)) {
+            unavailableLocatorFields.push('timestamp_utc');
+        }
+        if (!requestId) {
+            unavailableLocatorFields.push('request_id');
+        }
+        if (unavailableLocatorFields.length > 0) {
+            turnsWithUnavailableLocatorFieldsCount += 1;
+        }
+
+        const turnPayload = {
             sequence: index + 1,
             turn_id: entry.turnId,
             timestamp_utc: Number.isFinite(entry.timestampMs)
@@ -22523,6 +22597,10 @@ function buildConversationLlmTelemetryLocatorPayload() {
             history_location: historyLocation,
             request_id: requestId
         };
+        if (unavailableLocatorFields.length > 0) {
+            turnPayload.unavailable_locator_fields = unavailableLocatorFields;
+        }
+        return turnPayload;
     });
 
     return {
@@ -22535,10 +22613,12 @@ function buildConversationLlmTelemetryLocatorPayload() {
             total_turns: turns.length,
             llm_debug_turn_count: llmDebugData.size,
             transcript_turn_count: transcriptTurnCount,
-            has_partial_telemetry: missingTurnTelemetryCount > 0,
-            missing_turn_telemetry_count: missingTurnTelemetryCount,
+            assistant_transcript_turn_count: assistantTranscriptTurnCount,
+            has_partial_telemetry: missingAssistantTurnTelemetryCount > 0 || turnsWithUnavailableLocatorFieldsCount > 0,
+            missing_turn_telemetry_count: missingAssistantTurnTelemetryCount,
             turns_with_history_location_count: turnsWithHistoryLocationCount,
             turns_with_request_id_count: turnsWithRequestIdCount,
+            turns_with_unavailable_locator_fields_count: turnsWithUnavailableLocatorFieldsCount,
             ordering: 'timestamp_then_turn_id'
         },
         turns
@@ -22633,6 +22713,7 @@ function refreshConversationLlmCopyButtonState() {
 }
 
 async function copyConversationLlmTelemetryToClipboard(button = null) {
+    await hydrateConversationTelemetryLocatorEntries();
     const payload = buildConversationLlmTelemetryLocatorPayload();
     if (!payload) {
         showToast('No conversation-level LLM telemetry is available yet.', 'info');

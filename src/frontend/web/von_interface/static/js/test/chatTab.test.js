@@ -5067,6 +5067,7 @@ describe('conversation LLM telemetry clipboard export', () => {
         __testOnly_clearLlmDebugData();
         __testOnly_setTranscriptTurns([]);
         __testOnly_setActiveChatSession(null, null);
+        delete global.fetch;
         document.body.innerHTML = '';
     });
 
@@ -5114,10 +5115,12 @@ describe('conversation LLM telemetry clipboard export', () => {
             total_turns: 2,
             llm_debug_turn_count: 2,
             transcript_turn_count: 3,
-            has_partial_telemetry: true,
-            missing_turn_telemetry_count: 1,
+            assistant_transcript_turn_count: 2,
+            has_partial_telemetry: false,
+            missing_turn_telemetry_count: 0,
             turns_with_history_location_count: 1,
             turns_with_request_id_count: 2,
+            turns_with_unavailable_locator_fields_count: 0,
             ordering: 'timestamp_then_turn_id'
         });
         expect(payload.turns).toHaveLength(2);
@@ -5140,6 +5143,69 @@ describe('conversation LLM telemetry clipboard export', () => {
         });
         expect(payload.turns[0]).not.toHaveProperty('debug_data');
         expect(payload.turns[1]).not.toHaveProperty('debug_data');
+    });
+
+    test('counts partial locator coverage against assistant turns rather than the full transcript', () => {
+        const timestampMs = 1743760800000;
+
+        __testOnly_setTranscriptTurns([
+            { sender: 'user', message: 'One' },
+            { sender: 'assistant', message: 'Two' },
+            { sender: 'assistant', message: 'Three' }
+        ]);
+
+        setLlmDebugDataForTurn('assistant-1743760800000', {
+            timestamp: timestampMs,
+            request_id: 'req-1684-partial',
+            history_location: {
+                session_id: 'session-1684',
+                history_index: 6
+            }
+        });
+
+        const payload = __testOnly_buildConversationLlmTelemetryLocatorPayload();
+
+        expect(payload.metadata).toMatchObject({
+            transcript_turn_count: 3,
+            assistant_transcript_turn_count: 2,
+            has_partial_telemetry: true,
+            missing_turn_telemetry_count: 1,
+            turns_with_unavailable_locator_fields_count: 0
+        });
+    });
+
+    test('does not fabricate locator timestamps from client turn ids and marks unresolved handles explicitly', () => {
+        __testOnly_setTranscriptTurns([
+            { sender: 'assistant', message: 'Placeholder only' }
+        ]);
+
+        setLlmDebugDataForTurn('history-assistant-1', {
+            history_location: {
+                session_id: 'session-1684',
+                history_index: 11
+            }
+        });
+
+        const payload = __testOnly_buildConversationLlmTelemetryLocatorPayload();
+
+        expect(payload.metadata).toMatchObject({
+            transcript_turn_count: 1,
+            assistant_transcript_turn_count: 1,
+            has_partial_telemetry: true,
+            missing_turn_telemetry_count: 0,
+            turns_with_unavailable_locator_fields_count: 1
+        });
+        expect(payload.turns[0]).toEqual({
+            sequence: 1,
+            turn_id: 'history-assistant-1',
+            timestamp_utc: null,
+            history_location: {
+                session_id: 'session-1684',
+                history_index: 11
+            },
+            request_id: null,
+            unavailable_locator_fields: ['timestamp_utc', 'request_id']
+        });
     });
 
     test('keeps the full telemetry export payload unchanged for file save', () => {
@@ -5168,6 +5234,63 @@ describe('conversation LLM telemetry clipboard export', () => {
         expect(fullPayload.turns[0].debug_data.model).toBe('gpt-5');
         expect(locatorPayload.turns[0].debug_data).toBeUndefined();
         expect(locatorPayload.turns[0].request_id).toBe('req-1684-full');
+    });
+
+    test('hydrates history placeholders before copying locator JSON', async () => {
+        const timestampMs = 1743760923456;
+        const writeText = jest.fn().mockResolvedValue(undefined);
+        Object.assign(navigator, {
+            clipboard: { writeText }
+        });
+        global.fetch = jest.fn((url) => {
+            const parsed = new URL(url, 'http://localhost');
+            expect(parsed.pathname).toBe('/von/history/debug');
+            expect(parsed.searchParams.get('session_id')).toBe('session-1684');
+            expect(parsed.searchParams.get('history_index')).toBe('12');
+            return Promise.resolve({
+                ok: true,
+                status: 200,
+                json: async () => ({
+                    success: true,
+                    llm_debug_data: {
+                        timestamp: timestampMs,
+                        request_id: 'req-1684-hydrated'
+                    }
+                })
+            });
+        });
+
+        __testOnly_setTranscriptTurns([
+            { sender: 'assistant', message: 'Hydrate me' }
+        ]);
+        setLlmDebugDataForTurn('history-assistant-12', {
+            history_location: {
+                session_id: 'session-1684',
+                history_index: 12
+            }
+        });
+
+        const copied = await __testOnly_copyConversationLlmTelemetryToClipboard();
+        const copiedPayload = JSON.parse(writeText.mock.calls[0][0]);
+
+        expect(copied).toBe(true);
+        expect(global.fetch).toHaveBeenCalledTimes(1);
+        expect(copiedPayload.metadata).toMatchObject({
+            assistant_transcript_turn_count: 1,
+            has_partial_telemetry: false,
+            missing_turn_telemetry_count: 0,
+            turns_with_unavailable_locator_fields_count: 0
+        });
+        expect(copiedPayload.turns[0]).toEqual({
+            sequence: 1,
+            turn_id: 'history-assistant-12',
+            timestamp_utc: new Date(timestampMs).toISOString(),
+            history_location: {
+                session_id: 'session-1684',
+                history_index: 12
+            },
+            request_id: 'req-1684-hydrated'
+        });
     });
 
     test('copies compact locator JSON to the clipboard instead of the full telemetry blob', async () => {
