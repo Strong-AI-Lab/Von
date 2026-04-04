@@ -71,10 +71,11 @@ function buildChatFetchHeaders(extraHeaders = {}) {
 const llmDebugData = new Map();
 const llmDebugFetchInFlight = new Map();
 const CONVERSATION_LLM_COPY_BUTTON_ID = 'copyConversationLlmDebugJsonBtn';
-const CONVERSATION_LLM_COPY_BUTTON_LABEL = 'LLM(i)';
-const CONVERSATION_LLM_COPY_BUTTON_TITLE_READY = 'Copy conversation-level LLM telemetry JSON';
-const CONVERSATION_LLM_COPY_BUTTON_TITLE_DISABLED = 'Conversation-level LLM telemetry is not available yet';
+const CONVERSATION_LLM_COPY_BUTTON_LABEL = 'LLM ℹ';
+const CONVERSATION_LLM_COPY_BUTTON_TITLE_READY = 'Copy compact conversation telemetry locator JSON';
+const CONVERSATION_LLM_COPY_BUTTON_TITLE_DISABLED = 'Conversation telemetry handles are not available yet';
 const CONVERSATION_LLM_TELEMETRY_SCHEMA_VERSION = 'conversation_llm_telemetry.v1';
+const CONVERSATION_LLM_TELEMETRY_LOCATOR_SCHEMA_VERSION = 'conversation_llm_telemetry_locator.v1';
 // Track conversation turns for Markdown export and state resets
 const transcriptTurns = [];
 // JVNAUTOSCI-1043: Track user edits to assistant messages
@@ -22447,6 +22448,103 @@ function buildSortedConversationLlmDebugEntries() {
     return entries;
 }
 
+function cloneConversationHistoryLocation(historyLocation) {
+    if (!historyLocation || typeof historyLocation !== 'object') {
+        return null;
+    }
+    return { ...historyLocation };
+}
+
+function resolveConversationTelemetryRequestId(debugData) {
+    if (!debugData || typeof debugData !== 'object') {
+        return null;
+    }
+
+    const directRequestId = typeof debugData.request_id === 'string'
+        ? debugData.request_id.trim()
+        : '';
+    if (directRequestId) {
+        return directRequestId;
+    }
+
+    const turnDiagnosticsRequestId = typeof debugData.turn_diagnostics?.request_id === 'string'
+        ? debugData.turn_diagnostics.request_id.trim()
+        : '';
+    if (turnDiagnosticsRequestId) {
+        return turnDiagnosticsRequestId;
+    }
+
+    const turnExecutionRequestId = typeof debugData.turn_execution_diagnostics?.request_id === 'string'
+        ? debugData.turn_execution_diagnostics.request_id.trim()
+        : '';
+    return turnExecutionRequestId || null;
+}
+
+function buildConversationTelemetryNamespaceContext() {
+    const namespace = getSessionScopedNamespace();
+    const orgContext = getSessionScopedOrgContext();
+    const userId = getCurrentUserConceptId();
+
+    return {
+        namespace: namespace || null,
+        user_id: userId || null,
+        org_id: orgContext?.concept_id || orgContext?.id || null
+    };
+}
+
+function buildConversationLlmTelemetryLocatorPayload() {
+    if (llmDebugData.size === 0) {
+        return null;
+    }
+
+    const sortedEntries = buildSortedConversationLlmDebugEntries();
+    const transcriptTurnCount = Array.isArray(transcriptTurns) ? transcriptTurns.length : 0;
+    const missingTurnTelemetryCount = Math.max(0, transcriptTurnCount - sortedEntries.length);
+
+    let turnsWithHistoryLocationCount = 0;
+    let turnsWithRequestIdCount = 0;
+    const turns = sortedEntries.map((entry, index) => {
+        const historyLocation = cloneConversationHistoryLocation(entry.debugData?.history_location);
+        if (historyLocation) {
+            turnsWithHistoryLocationCount += 1;
+        }
+
+        const requestId = resolveConversationTelemetryRequestId(entry.debugData);
+        if (requestId) {
+            turnsWithRequestIdCount += 1;
+        }
+
+        return {
+            sequence: index + 1,
+            turn_id: entry.turnId,
+            timestamp_utc: Number.isFinite(entry.timestampMs)
+                ? new Date(entry.timestampMs).toISOString()
+                : null,
+            history_location: historyLocation,
+            request_id: requestId
+        };
+    });
+
+    return {
+        schema_version: CONVERSATION_LLM_TELEMETRY_LOCATOR_SCHEMA_VERSION,
+        generated_at_utc: new Date().toISOString(),
+        session_id: activeChatSessionId || null,
+        session_name: activeChatSessionName || null,
+        namespace_context: buildConversationTelemetryNamespaceContext(),
+        metadata: {
+            total_turns: turns.length,
+            llm_debug_turn_count: llmDebugData.size,
+            transcript_turn_count: transcriptTurnCount,
+            has_partial_telemetry: missingTurnTelemetryCount > 0,
+            missing_turn_telemetry_count: missingTurnTelemetryCount,
+            turns_with_history_location_count: turnsWithHistoryLocationCount,
+            turns_with_request_id_count: turnsWithRequestIdCount,
+            ordering: 'timestamp_then_turn_id'
+        },
+        turns
+    };
+}
+
 function buildConversationLlmTelemetryPayload() {
     if (llmDebugData.size === 0) {
         return null;
@@ -22535,7 +22633,7 @@ function refreshConversationLlmCopyButtonState() {
 }
 
 async function copyConversationLlmTelemetryToClipboard(button = null) {
-    const payload = buildConversationLlmTelemetryPayload();
+    const payload = buildConversationLlmTelemetryLocatorPayload();
     if (!payload) {
         showToast('No conversation-level LLM telemetry is available yet.', 'info');
         refreshConversationLlmCopyButtonState();
@@ -22547,7 +22645,7 @@ async function copyConversationLlmTelemetryToClipboard(button = null) {
         jsonText = JSON.stringify(payload, null, 2);
     } catch (err) {
         console.error('[chatTab] Failed to serialize conversation LLM telemetry:', err);
-        showToast('Failed to prepare conversation telemetry JSON.', 'error');
+        showToast('Failed to prepare conversation telemetry locator JSON.', 'error');
         return false;
     }
 
@@ -22558,14 +22656,14 @@ async function copyConversationLlmTelemetryToClipboard(button = null) {
         : await copyTextToClipboard(jsonText);
 
     if (!copied) {
-        showToast('Failed to copy conversation-level LLM telemetry JSON.', 'error');
+        showToast('Failed to copy conversation telemetry locator JSON.', 'error');
         return false;
     }
 
     if (payload.metadata?.has_partial_telemetry) {
-        showToast('Copied conversation LLM telemetry JSON (partial coverage).', 'info');
+        showToast('Copied conversation telemetry locator JSON (partial coverage).', 'info');
     } else {
-        showToast('Copied conversation LLM telemetry JSON.', 'success');
+        showToast('Copied conversation telemetry locator JSON.', 'success');
     }
     return true;
 }
@@ -22845,6 +22943,12 @@ export function __testOnly_buildSanitisedLlmDebugExportPayload(debugData) {
 export function __testOnly_buildConversationLlmTelemetryPayload() {
     return buildConversationLlmTelemetryPayload();
 }
+export function __testOnly_buildConversationLlmTelemetryLocatorPayload() {
+    return buildConversationLlmTelemetryLocatorPayload();
+}
+export function __testOnly_buildConversationTelemetryExportPayload() {
+    return buildConversationTelemetryExportPayload();
+}
 export function __testOnly_refreshConversationLlmCopyButtonState() {
     refreshConversationLlmCopyButtonState();
 }
@@ -22853,6 +22957,12 @@ export async function __testOnly_copyConversationLlmTelemetryToClipboard(button 
 }
 export function __testOnly_clearLlmDebugData() {
     clearLlmDebugDataEntries();
+}
+export function __testOnly_setTranscriptTurns(turns = []) {
+    transcriptTurns.length = 0;
+    if (Array.isArray(turns) && turns.length > 0) {
+        transcriptTurns.push(...turns);
+    }
 }
 export function __testOnly_extractImageFilesFromClipboardEvent(event) {
     return extractImageFilesFromClipboardEvent(event);
