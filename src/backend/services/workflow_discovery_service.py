@@ -34,7 +34,10 @@ from ..vontology.utils_vontology import get_concept_description
 from .file_copy_reference_service import extract_file_copy_concept_ids_from_text
 from .file_copy_typing_service import build_file_copy_typing_context
 from .arxiv_paper_link_service import extract_arxiv_id_candidates
-from .workflow_capability_service import search_workflow_capabilities
+from .workflow_capability_service import (
+    get_workflow_capability_index_runtime_state,
+    search_workflow_capabilities,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +57,7 @@ DEFAULT_MAX_RESULTS = 3
 
 # Search timeout in seconds
 SEARCH_TIMEOUT_SECONDS = 0.5
+DISCOVERY_CAPABILITY_INDEX_MAX_WAIT_SECONDS = 0.0
 
 # Executability reason codes (JVNAUTOSCI-1088).
 EXECUTABILITY_EXECUTABLE_NOW = "executable_now"
@@ -949,6 +953,8 @@ def _search_workflow_capabilities(
             query,
             max_results=limit,
             min_score=0.01,
+            non_blocking=True,
+            max_wait_seconds=DISCOVERY_CAPABILITY_INDEX_MAX_WAIT_SECONDS,
         )
         results: list[WorkflowMatch] = []
         for cap in cap_matches:
@@ -1029,12 +1035,21 @@ def discover_workflows(
         capability_matches = _search_workflow_capabilities(
             search_query, limit=max_results * 3
         )
+        capability_index_state = get_workflow_capability_index_runtime_state()
         all_matches.extend(capability_matches)
         capability_matches_sufficient = _has_enough_capability_matches(
             capability_matches,
             threshold=relevance_threshold,
             max_results=max_results,
         )
+        if not capability_matches:
+            if bool(capability_index_state.get("build_in_progress", False)):
+                errors.append("capability_index_build_in_progress")
+            elif not bool(capability_index_state.get("ready", False)):
+                errors.append("capability_index_not_ready")
+            last_error = capability_index_state.get("last_error")
+            if isinstance(last_error, str) and last_error.strip():
+                errors.append(f"capability_index_build_error:{last_error.strip()}")
     except Exception as e:
         capability_matches_sufficient = False
         errors.append(f"capability_index_error: {e}")

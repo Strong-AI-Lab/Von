@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+import threading
 import time
 from collections import Counter
 from dataclasses import dataclass, field
@@ -58,11 +59,17 @@ _STOP_WORDS = frozenset({
 _CAPABILITY_INDEX_REBUILD_MIN_INTERVAL_SECONDS = 30.0
 
 _INDEX_REBUILD_LOCK = Lock()
-_INDEX_REBUILD_STATE: Dict[str, float | int] = {
+_INDEX_STATE_LOCK = Lock()
+_INDEX_REBUILD_STATE: Dict[str, Any] = {
     "last_attempt_monotonic": 0.0,
     "last_success_monotonic": 0.0,
     "last_built_size": 0,
+    "build_in_progress": False,
+    "last_error": None,
+    "last_mode": None,
 }
+_INDEX_REBUILD_COMPLETED = threading.Event()
+_INDEX_REBUILD_COMPLETED.set()
 
 
 def _normalise_token_variants(token: str) -> List[str]:
@@ -187,9 +194,9 @@ class WorkflowCapabilityIndex:
 
         Returns the number of workflows indexed.
         """
-        count = 0
         skipped_non_authoritative = 0
         skipped_missing_purpose = 0
+        pending_entries: Dict[str, _CapabilityEntry] = {}
 
         def _index_candidate(
             *,
@@ -197,7 +204,6 @@ class WorkflowCapabilityIndex:
             purpose: Any,
             source: Any,
         ) -> None:
-            nonlocal count
             nonlocal skipped_non_authoritative
             nonlocal skipped_missing_purpose
 
@@ -213,9 +219,12 @@ class WorkflowCapabilityIndex:
                     skipped_missing_purpose += 1
                 return
 
-            self.index_workflow(
-                workflow_id,
-                text,
+            tokens = _tokenise(text)
+            pending_entries[workflow_id] = _CapabilityEntry(
+                workflow_id=workflow_id,
+                text=text,
+                tokens=tokens,
+                token_freqs=dict(Counter(tokens)),
                 metadata={
                     "name": _workflow_id_to_name(workflow_id),
                     "source": str(source or "unknown"),
@@ -223,7 +232,6 @@ class WorkflowCapabilityIndex:
                     "purpose": _normalise_capability_text(purpose),
                 },
             )
-            count += 1
 
         # Eager registrations.
         for wid in list(registry.eager_workflow_ids()):
@@ -243,6 +251,11 @@ class WorkflowCapabilityIndex:
                 source=(lazy.source if lazy else None),
             )
 
+        with self._lock:
+            self._entries = dict(pending_entries)
+            self._rebuild_idf_unlocked()
+
+        count = len(pending_entries)
         logger.info(
             "[workflow_capability_index] Indexed %d workflows "
             "(%d eager, %d lazy), skipped_non_authoritative=%d "
@@ -515,9 +528,182 @@ def get_workflow_capability_index() -> WorkflowCapabilityIndex:
         return _global_index
 
 
+def _workflow_capability_rebuild_recently_attempted(
+    now_monotonic: float,
+    *,
+    force_refresh: bool,
+) -> bool:
+    if force_refresh:
+        return False
+    with _INDEX_STATE_LOCK:
+        last_attempt = float(_INDEX_REBUILD_STATE.get("last_attempt_monotonic", 0.0))
+    return (
+        last_attempt > 0.0
+        and (now_monotonic - last_attempt) < _CAPABILITY_INDEX_REBUILD_MIN_INTERVAL_SECONDS
+    )
+
+
+def _set_workflow_capability_rebuild_state(
+    *,
+    build_in_progress: bool,
+    mode: str | None = None,
+    count: int | None = None,
+    error: str | None = None,
+    attempt_monotonic: float | None = None,
+    success_monotonic: float | None = None,
+) -> None:
+    with _INDEX_STATE_LOCK:
+        _INDEX_REBUILD_STATE["build_in_progress"] = bool(build_in_progress)
+        if mode is not None:
+            _INDEX_REBUILD_STATE["last_mode"] = mode
+        if count is not None:
+            _INDEX_REBUILD_STATE["last_built_size"] = int(count)
+        _INDEX_REBUILD_STATE["last_error"] = error
+        if attempt_monotonic is not None:
+            _INDEX_REBUILD_STATE["last_attempt_monotonic"] = float(attempt_monotonic)
+        if success_monotonic is not None:
+            _INDEX_REBUILD_STATE["last_success_monotonic"] = float(success_monotonic)
+
+
+def get_workflow_capability_index_runtime_state() -> Dict[str, Any]:
+    """Return lightweight runtime state for capability-index diagnostics."""
+
+    index = get_workflow_capability_index()
+    with _INDEX_STATE_LOCK:
+        return {
+            "size": int(index.size),
+            "ready": bool(index.size > 0),
+            "build_in_progress": bool(_INDEX_REBUILD_STATE.get("build_in_progress", False)),
+            "last_error": _INDEX_REBUILD_STATE.get("last_error"),
+            "last_mode": _INDEX_REBUILD_STATE.get("last_mode"),
+            "last_attempt_monotonic": float(
+                _INDEX_REBUILD_STATE.get("last_attempt_monotonic", 0.0)
+            ),
+            "last_success_monotonic": float(
+                _INDEX_REBUILD_STATE.get("last_success_monotonic", 0.0)
+            ),
+            "last_built_size": int(_INDEX_REBUILD_STATE.get("last_built_size", 0)),
+        }
+
+
+def _perform_workflow_capability_index_build(
+    *,
+    force_refresh: bool = False,
+    mode: str,
+) -> WorkflowCapabilityIndex:
+    attempt_monotonic = time.monotonic()
+    _INDEX_REBUILD_COMPLETED.clear()
+    _set_workflow_capability_rebuild_state(
+        build_in_progress=True,
+        mode=mode,
+        error=None,
+        attempt_monotonic=attempt_monotonic,
+    )
+    try:
+        from ..workflows.durable.registry_factory import (
+            build_durable_workflow_registry_read_only,
+        )
+        from ..workflows.vontology_loader import batch_fetch_workflow_purposes
+        from ..workflows.workflow_registry import LazyWorkflowRegistration
+
+        registry = build_durable_workflow_registry_read_only(defer_parity_work=True)
+        lazy_ids = list(registry.lazy_workflow_ids())
+        if lazy_ids:
+            purposes = batch_fetch_workflow_purposes(lazy_ids)
+            for workflow_id, purpose in purposes.items():
+                registration = registry.peek_registration(workflow_id)
+                if (
+                    isinstance(registration, LazyWorkflowRegistration)
+                    and not registration.purpose
+                    and isinstance(purpose, str)
+                    and purpose.strip()
+                ):
+                    registration.purpose = purpose.strip()
+
+        index = get_workflow_capability_index()
+        count = index.index_from_registry(registry)
+        success_monotonic = time.monotonic()
+        _set_workflow_capability_rebuild_state(
+            build_in_progress=False,
+            mode=mode,
+            count=count,
+            error=None,
+            success_monotonic=success_monotonic,
+        )
+        logger.info(
+            "[workflow_capability_index] %s build completed with %d entries.",
+            mode,
+            count,
+        )
+        return index
+    except Exception as exc:
+        _set_workflow_capability_rebuild_state(
+            build_in_progress=False,
+            mode=mode,
+            error=str(exc),
+        )
+        raise
+    finally:
+        _INDEX_REBUILD_COMPLETED.set()
+
+
+def _start_background_workflow_capability_index_build(
+    *,
+    force_refresh: bool = False,
+) -> bool:
+    """Trigger a background build if one is not already running."""
+
+    now = time.monotonic()
+    with _INDEX_STATE_LOCK:
+        if bool(_INDEX_REBUILD_STATE.get("build_in_progress", False)):
+            return False
+        last_attempt = float(_INDEX_REBUILD_STATE.get("last_attempt_monotonic", 0.0))
+        if (
+            not force_refresh
+            and last_attempt > 0.0
+            and (now - last_attempt) < _CAPABILITY_INDEX_REBUILD_MIN_INTERVAL_SECONDS
+        ):
+            return False
+        _INDEX_REBUILD_STATE["build_in_progress"] = True
+        _INDEX_REBUILD_STATE["last_mode"] = "background"
+        _INDEX_REBUILD_STATE["last_error"] = None
+        _INDEX_REBUILD_STATE["last_attempt_monotonic"] = now
+        _INDEX_REBUILD_COMPLETED.clear()
+
+    def _worker() -> None:
+        try:
+            with _INDEX_REBUILD_LOCK:
+                _perform_workflow_capability_index_build(
+                    force_refresh=force_refresh,
+                    mode="background",
+                )
+        except Exception as exc:
+            logger.warning("workflow_capability_index_background_build_failed: %s", exc)
+
+    try:
+        thread = threading.Thread(
+            target=_worker,
+            name="workflow_capability_index_build",
+            daemon=True,
+        )
+        thread.start()
+        return True
+    except Exception as exc:
+        _set_workflow_capability_rebuild_state(
+            build_in_progress=False,
+            mode="background",
+            error=f"thread_start_failed:{exc}",
+        )
+        _INDEX_REBUILD_COMPLETED.set()
+        logger.warning("workflow_capability_index_background_thread_start_failed: %s", exc)
+        return False
+
+
 def ensure_workflow_capability_index_populated(
     *,
     force_refresh: bool = False,
+    block: bool = True,
+    max_wait_seconds: float | None = None,
 ) -> WorkflowCapabilityIndex:
     """Build the shared capability index on demand from authoritative workflows.
 
@@ -530,58 +716,39 @@ def ensure_workflow_capability_index_populated(
     if index.size > 0 and not force_refresh:
         return index
 
-    now = time.monotonic()
-    with _INDEX_REBUILD_LOCK:
+    if not block:
+        _start_background_workflow_capability_index_build(force_refresh=force_refresh)
+        wait_seconds = max(0.0, float(max_wait_seconds or 0.0))
+        if wait_seconds > 0.0:
+            _INDEX_REBUILD_COMPLETED.wait(wait_seconds)
+        return get_workflow_capability_index()
+
+    if bool(get_workflow_capability_index_runtime_state().get("build_in_progress", False)):
+        wait_seconds = None if max_wait_seconds is None else max(0.0, float(max_wait_seconds))
+        _INDEX_REBUILD_COMPLETED.wait(wait_seconds)
         index = get_workflow_capability_index()
         if index.size > 0 and not force_refresh:
             return index
 
-        last_attempt = float(_INDEX_REBUILD_STATE.get("last_attempt_monotonic", 0.0))
-        if (
-            not force_refresh
-            and last_attempt > 0.0
-            and (now - last_attempt) < _CAPABILITY_INDEX_REBUILD_MIN_INTERVAL_SECONDS
-        ):
+    now = time.monotonic()
+    if _workflow_capability_rebuild_recently_attempted(
+        now,
+        force_refresh=force_refresh,
+    ):
+        return get_workflow_capability_index()
+
+    with _INDEX_REBUILD_LOCK:
+        index = get_workflow_capability_index()
+        if index.size > 0 and not force_refresh:
             return index
-
-        _INDEX_REBUILD_STATE["last_attempt_monotonic"] = now
-
         try:
-            from ..workflows.durable.registry_factory import (
-                build_durable_workflow_registry_read_only,
-            )
-            from ..workflows.vontology_loader import batch_fetch_workflow_purposes
-            from ..workflows.workflow_registry import LazyWorkflowRegistration
-
-            registry = build_durable_workflow_registry_read_only(defer_parity_work=True)
-            lazy_ids = list(registry.lazy_workflow_ids())
-            if lazy_ids:
-                purposes = batch_fetch_workflow_purposes(lazy_ids)
-                for workflow_id, purpose in purposes.items():
-                    registration = registry.peek_registration(workflow_id)
-                    if (
-                        isinstance(registration, LazyWorkflowRegistration)
-                        and not registration.purpose
-                        and isinstance(purpose, str)
-                        and purpose.strip()
-                    ):
-                        registration.purpose = purpose.strip()
-
-            if force_refresh:
-                reset_workflow_capability_index()
-                index = get_workflow_capability_index()
-
-            count = index.index_from_registry(registry)
-            _INDEX_REBUILD_STATE["last_success_monotonic"] = time.monotonic()
-            _INDEX_REBUILD_STATE["last_built_size"] = count
-            logger.info(
-                "[workflow_capability_index] On-demand build completed with %d entries.",
-                count,
+            return _perform_workflow_capability_index_build(
+                force_refresh=force_refresh,
+                mode="blocking",
             )
         except Exception as exc:
             logger.warning("workflow_capability_index_on_demand_build_failed: %s", exc)
-
-        return get_workflow_capability_index()
+            return get_workflow_capability_index()
 
 
 def search_workflow_capabilities(
@@ -589,13 +756,20 @@ def search_workflow_capabilities(
     *,
     max_results: int = 10,
     min_score: float = 0.0,
+    non_blocking: bool = False,
+    max_wait_seconds: float | None = None,
 ) -> List[WorkflowCapabilityMatch]:
     """Search workflow capabilities, rebuilding the index on bounded misses."""
 
-    index = ensure_workflow_capability_index_populated()
+    index = ensure_workflow_capability_index_populated(
+        block=not non_blocking,
+        max_wait_seconds=max_wait_seconds,
+    )
     results = index.search(query, max_results=max_results, min_score=min_score)
     if results:
         return results
+    if non_blocking:
+        return []
 
     refreshed = ensure_workflow_capability_index_populated(force_refresh=True)
     if refreshed is index and refreshed.size == 0:
@@ -608,7 +782,11 @@ def reset_workflow_capability_index() -> None:
     global _global_index
     with _global_index_lock:
         _global_index = None
-    with _INDEX_REBUILD_LOCK:
+    with _INDEX_STATE_LOCK:
         _INDEX_REBUILD_STATE["last_attempt_monotonic"] = 0.0
         _INDEX_REBUILD_STATE["last_success_monotonic"] = 0.0
         _INDEX_REBUILD_STATE["last_built_size"] = 0
+        _INDEX_REBUILD_STATE["build_in_progress"] = False
+        _INDEX_REBUILD_STATE["last_error"] = None
+        _INDEX_REBUILD_STATE["last_mode"] = None
+    _INDEX_REBUILD_COMPLETED.set()

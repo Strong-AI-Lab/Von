@@ -54,6 +54,14 @@ def _stub_capability_search(monkeypatch: pytest.MonkeyPatch) -> None:
         "src.backend.services.workflow_discovery_service._search_workflow_capabilities",
         lambda *args, **kwargs: [],
     )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_discovery_service.get_workflow_capability_index_runtime_state",
+        lambda: {
+            "ready": True,
+            "build_in_progress": False,
+            "last_error": None,
+        },
+    )
 
 
 class TestWorkflowMatch:
@@ -669,13 +677,22 @@ class TestDiscoverWorkflowsForTurn:
     @patch("src.backend.services.workflow_discovery_service._search_workflows_name_fallback")
     @patch("src.backend.services.workflow_discovery_service._search_workflows_vontology")
     @patch("src.backend.services.workflow_discovery_service._search_workflows_semantic")
+    @patch(
+        "src.backend.services.workflow_discovery_service.get_workflow_capability_index_runtime_state"
+    )
     def test_name_fallback_runs_even_when_semantic_search_returns_candidates(
         self,
+        mock_capability_state: MagicMock,
         mock_semantic: MagicMock,
         mock_vontology: MagicMock,
         mock_name_fallback: MagicMock,
         mock_enrich: MagicMock,
     ) -> None:
+        mock_capability_state.return_value = {
+            "ready": False,
+            "build_in_progress": True,
+            "last_error": None,
+        }
         mock_semantic.return_value = [
             WorkflowMatch("#V#semantic_candidate", "Semantic candidate", relevance_score=0.81)
         ]
@@ -686,6 +703,38 @@ class TestDiscoverWorkflowsForTurn:
         discover_workflows("Represent the uploaded paper now", max_results=1)
 
         assert mock_name_fallback.called is True
+
+    @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
+    @patch("src.backend.services.workflow_discovery_service._search_workflows_name_fallback")
+    @patch("src.backend.services.workflow_discovery_service._search_workflows_vontology")
+    @patch("src.backend.services.workflow_discovery_service._search_workflows_semantic")
+    @patch(
+        "src.backend.services.workflow_discovery_service.get_workflow_capability_index_runtime_state"
+    )
+    def test_records_capability_index_build_in_progress_and_uses_fallback_search(
+        self,
+        mock_capability_state: MagicMock,
+        mock_semantic: MagicMock,
+        mock_vontology: MagicMock,
+        mock_name_fallback: MagicMock,
+        mock_enrich: MagicMock,
+    ) -> None:
+        mock_capability_state.return_value = {
+            "ready": False,
+            "build_in_progress": True,
+            "last_error": None,
+        }
+        mock_semantic.return_value = [
+            WorkflowMatch("#V#semantic_candidate", "Semantic candidate", relevance_score=0.81)
+        ]
+        mock_vontology.return_value = []
+        mock_name_fallback.return_value = []
+        mock_enrich.side_effect = lambda matches: matches
+
+        result = discover_workflows("Represent the uploaded paper now", max_results=1)
+
+        assert "capability_index_build_in_progress" in result.errors
+        assert mock_semantic.called is True
 
     @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
     @patch("src.backend.services.workflow_discovery_service._search_workflows_name_fallback")

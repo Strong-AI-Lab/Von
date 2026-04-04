@@ -428,3 +428,25 @@ def test_search_workflow_capabilities_populates_empty_index_from_registry(
     assert any(
         result.workflow_id == "#V#tool_calling_workflow" for result in results
     )
+
+
+def test_search_workflow_capabilities_non_blocking_triggers_background_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reset_workflow_capability_index()
+    started: list[bool] = []
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_capability_service._start_background_workflow_capability_index_build",
+        lambda *, force_refresh=False: started.append(bool(force_refresh)) or True,
+    )
+
+    results = search_workflow_capabilities(
+        "general tool-calling workflows for external APIs",
+        max_results=5,
+        min_score=0.01,
+        non_blocking=True,
+    )
+
+    assert results == []
+    assert started == [False]
