@@ -92,3 +92,42 @@ def test_build_workflow_definition_from_authoring_spec_rejects_duplicate_state_i
                 ],
             }
         )
+
+
+def test_build_workflow_definition_from_authoring_spec_accepts_plain_transition_aliases():
+    definition = build_workflow_definition_from_authoring_spec(
+        {
+            "workflow_id": "#V#alias_demo_workflow",
+            "initial_state_key": "start",
+            "steps": [
+                {
+                    "state_id": "start",
+                    "action_id": "demo.action",
+                    "next_state": "middle",
+                    "on_failure_state": "failed",
+                },
+                {
+                    "state_id": "middle",
+                    "action_id": "demo.second_action",
+                    "on_true_state": "done",
+                    "on_false_state": "failed",
+                },
+                {"state_id": "done", "terminal": True},
+                {"state_id": "failed", "terminal": True},
+            ],
+        }
+    )
+
+    start_state = definition.states["start"]
+    middle_state = definition.states["middle"]
+
+    assert start_state.terminal is False
+    assert {transition.to_state for transition in start_state.transitions} == {
+        "middle",
+        "failed",
+    }
+    assert middle_state.terminal is False
+    assert {transition.to_state for transition in middle_state.transitions} == {
+        "done",
+        "failed",
+    }

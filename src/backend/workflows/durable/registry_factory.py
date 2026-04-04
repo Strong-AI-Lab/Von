@@ -1116,6 +1116,9 @@ def _register_durable_action_modules(registry: ActionRegistry) -> None:
     from .entity_identity_resolution_workflow import (
         register_entity_identity_resolution_actions,
     )
+    from .entity_representation_workflow import (
+        register_entity_representation_actions,
+    )
     from .file_copy_interpretation_workflow import (
         register_file_copy_interpretation_actions,
     )
@@ -1164,6 +1167,7 @@ def _register_durable_action_modules(registry: ActionRegistry) -> None:
     register_file_copy_upload_handler_actions(registry)
     register_file_copy_interpretation_actions(registry)
     register_entity_identity_resolution_actions(registry)
+    register_entity_representation_actions(registry)
     register_jira_task_incremental_import_actions(registry)
     register_jira_task_full_reconciliation_actions(registry)
     register_parent_specificity_concept_dossier_actions(registry)

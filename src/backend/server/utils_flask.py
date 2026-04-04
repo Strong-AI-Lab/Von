@@ -177,6 +177,7 @@ def _build_durable_workflow_bootstrap_summary(
         return summary
 
     for key in (
+        "entity_workflow_bootstrap",
         "paper_workflow_bootstrap",
         "episode_evaluation_workflow_bootstrap",
         "talk_workflow_bootstrap",
@@ -366,6 +367,9 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         from ..services.paper_representation_workflow_vontology_service import (
             bootstrap_canonical_paper_representation_workflows,
         )
+        from ..services.entity_representation_workflow_vontology_service import (
+            bootstrap_canonical_entity_representation_workflows,
+        )
         from ..services.episode_evaluation_workflow_vontology_service import (
             bootstrap_canonical_episode_evaluation_workflow,
         )
@@ -400,6 +404,10 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
                 )
                 return report
 
+        entity_workflow_bootstrap_report = _run_workflow_family_bootstrap(
+            label="entity workflow",
+            bootstrap_fn=bootstrap_canonical_entity_representation_workflows,
+        )
         paper_workflow_bootstrap_report = _run_workflow_family_bootstrap(
             label="paper workflow",
             bootstrap_fn=bootstrap_canonical_paper_representation_workflows,
@@ -451,6 +459,7 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
                 os.getenv("VON_DURABLE_SCHEDULER_CHECK_INTERVAL", "60.0")
             ),
         )
+        result["entity_workflow_bootstrap"] = entity_workflow_bootstrap_report
         result["paper_workflow_bootstrap"] = paper_workflow_bootstrap_report
         result["episode_evaluation_workflow_bootstrap"] = (
             episode_evaluation_workflow_bootstrap_report
@@ -461,6 +470,11 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         result["talk_workflow_bootstrap"] = talk_workflow_bootstrap_report
         result["testing_workflow_bootstrap"] = testing_workflow_bootstrap_report
         result["workflow_authority_bootstrap"] = workflow_authority_bootstrap_report
+        if not bool(entity_workflow_bootstrap_report.get("success", False)):
+            app_logger.warning(
+                "[durable_workflows] entity workflow bootstrap failed: %s",
+                entity_workflow_bootstrap_report,
+            )
         if not bool(paper_workflow_bootstrap_report.get("success", False)):
             app_logger.warning(
                 "[durable_workflows] paper workflow bootstrap failed: %s",

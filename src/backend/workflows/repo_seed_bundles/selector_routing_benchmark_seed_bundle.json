@@ -123,6 +123,186 @@
         "source_request_id": "req-selector-misroute-example",
         "notes": "Intentional failure example so the corpus contains a known misrouting case."
       }
+    ],
+    "entity_representation_generalisation": [
+      {
+        "case_id": "entity_people_follow_up_reasoning_override",
+        "turn_text": "OK, now for each of those students, if they aren't already represented in the Vontology, please represent them.",
+        "candidate_workflows": [
+          {
+            "concept_id": "#V#arxiv_paper_representation_workflow",
+            "name": "Arxiv Paper Representation Workflow",
+            "description": "Canonical arXiv wrapper workflow for representing scholarly papers."
+          },
+          {
+            "concept_id": "#V#entity_representation_workflow",
+            "name": "Entity Representation Workflow",
+            "description": "Conversational wrapper workflow for representing people, companies, events, and places in Vontology."
+          },
+          {
+            "concept_id": "#V#tool_calling_workflow",
+            "name": "Tool Calling Workflow",
+            "description": "General-purpose tool-calling workflow."
+          }
+        ],
+        "expected_workflow_id": "#V#entity_representation_workflow",
+        "baseline_workflow_id": "#V#arxiv_paper_representation_workflow",
+        "selector_response": {
+          "workflow_id": "#V#arxiv_paper_representation_workflow",
+          "confidence": 0.97,
+          "reasoning": "The request is to represent people in the Vontology. The arXiv workflow is irrelevant here; route through the Entity Representation Workflow."
+        },
+        "jira_issue_keys": [
+          "JVNAUTOSCI-1704",
+          "JVNAUTOSCI-1709"
+        ],
+        "notes": "Exact replay of the entity-follow-up failure family, pinned as a contradictory structured selector output that should now resolve to the entity wrapper."
+      },
+      {
+        "case_id": "entity_person_representation_success",
+        "turn_text": "Represent Ada Lovelace in the Vontology if she is not already represented.",
+        "candidate_workflows": [
+          {
+            "concept_id": "#V#chat_assistant_workflow",
+            "name": "Chat assistant workflow",
+            "description": "Generic explanatory response path."
+          },
+          {
+            "concept_id": "#V#entity_representation_workflow",
+            "name": "Entity Representation Workflow",
+            "description": "Conversational wrapper workflow for representing people, companies, events, and places in Vontology."
+          }
+        ],
+        "expected_workflow_id": "#V#entity_representation_workflow",
+        "baseline_workflow_id": "#V#chat_assistant_workflow",
+        "selector_response": {
+          "workflow_id": "#V#entity_representation_workflow",
+          "confidence": 0.94,
+          "reasoning": "This is a request to represent a person in Vontology, so route through the Entity Representation Workflow."
+        },
+        "notes": "Supported person-representation route."
+      },
+      {
+        "case_id": "entity_company_representation_success",
+        "turn_text": "Represent OpenAI in the Vontology as a company if it is not already represented.",
+        "candidate_workflows": [
+          {
+            "concept_id": "#V#chat_assistant_workflow",
+            "name": "Chat assistant workflow",
+            "description": "Generic explanatory response path."
+          },
+          {
+            "concept_id": "#V#entity_representation_workflow",
+            "name": "Entity Representation Workflow",
+            "description": "Conversational wrapper workflow for representing people, companies, events, and places in Vontology."
+          }
+        ],
+        "expected_workflow_id": "#V#entity_representation_workflow",
+        "baseline_workflow_id": "#V#chat_assistant_workflow",
+        "selector_response": {
+          "workflow_id": "#V#entity_representation_workflow",
+          "confidence": 0.93,
+          "reasoning": "This is a company representation request, so use the Entity Representation Workflow."
+        },
+        "notes": "Supported company-representation route."
+      },
+      {
+        "case_id": "entity_event_representation_success",
+        "turn_text": "Represent the 2026 Neuro-Symbolic Systems Workshop in the Vontology as an event.",
+        "candidate_workflows": [
+          {
+            "concept_id": "#V#chat_assistant_workflow",
+            "name": "Chat assistant workflow",
+            "description": "Generic explanatory response path."
+          },
+          {
+            "concept_id": "#V#entity_representation_workflow",
+            "name": "Entity Representation Workflow",
+            "description": "Conversational wrapper workflow for representing people, companies, events, and places in Vontology."
+          }
+        ],
+        "expected_workflow_id": "#V#entity_representation_workflow",
+        "baseline_workflow_id": "#V#chat_assistant_workflow",
+        "selector_response": {
+          "workflow_id": "#V#entity_representation_workflow",
+          "confidence": 0.92,
+          "reasoning": "This is an event representation request, so use the Entity Representation Workflow."
+        },
+        "notes": "Supported event-representation route."
+      },
+      {
+        "case_id": "entity_place_representation_success",
+        "turn_text": "Represent the Auckland Domain in the Vontology as a place.",
+        "candidate_workflows": [
+          {
+            "concept_id": "#V#chat_assistant_workflow",
+            "name": "Chat assistant workflow",
+            "description": "Generic explanatory response path."
+          },
+          {
+            "concept_id": "#V#entity_representation_workflow",
+            "name": "Entity Representation Workflow",
+            "description": "Conversational wrapper workflow for representing people, companies, events, and places in Vontology."
+          }
+        ],
+        "expected_workflow_id": "#V#entity_representation_workflow",
+        "baseline_workflow_id": "#V#chat_assistant_workflow",
+        "selector_response": {
+          "workflow_id": "#V#entity_representation_workflow",
+          "confidence": 0.92,
+          "reasoning": "This is a place representation request, so use the Entity Representation Workflow."
+        },
+        "notes": "Supported place-representation route."
+      },
+      {
+        "case_id": "entity_ambiguity_low_imposition_route",
+        "turn_text": "Please represent Jordan in the Vontology.",
+        "candidate_workflows": [
+          {
+            "concept_id": "#V#chat_assistant_workflow",
+            "name": "Chat assistant workflow",
+            "description": "Generic explanatory response path."
+          },
+          {
+            "concept_id": "#V#entity_representation_workflow",
+            "name": "Entity Representation Workflow",
+            "description": "Conversational wrapper workflow for representing people, companies, events, and places in Vontology."
+          }
+        ],
+        "expected_workflow_id": "#V#entity_representation_workflow",
+        "baseline_workflow_id": "#V#chat_assistant_workflow",
+        "selector_response": {
+          "workflow_id": "#V#entity_representation_workflow",
+          "confidence": 0.88,
+          "reasoning": "The request is ambiguous, but the Entity Representation Workflow is the right place to ask one minimal clarification question."
+        },
+        "notes": "Low-imposition ambiguity case: routing should still go to the entity wrapper, not to a plain assistant reply."
+      },
+      {
+        "case_id": "unsupported_domain_safe_authoring_recovery",
+        "turn_text": "Represent this biological pathway in the Vontology.",
+        "candidate_workflows": [
+          {
+            "concept_id": "#V#chat_assistant_workflow",
+            "name": "Chat assistant workflow",
+            "description": "Generic explanatory response path."
+          },
+          {
+            "concept_id": "#V#workflow_discovery_gap_recovery_workflow",
+            "name": "Workflow discovery gap recovery workflow",
+            "description": "Escalates or prepares recovery when no safe executable route exists."
+          }
+        ],
+        "expected_workflow_id": "#V#workflow_discovery_gap_recovery_workflow",
+        "expected_routing_outcome": "abstain_escalate_no_safe_route",
+        "baseline_workflow_id": "#V#chat_assistant_workflow",
+        "selector_response": {
+          "workflow_id": "#V#workflow_discovery_gap_recovery_workflow",
+          "confidence": 0.84,
+          "reasoning": "The supported entity workflow family only covers people, companies, events, and places, so route to workflow-gap recovery."
+        },
+        "notes": "General workflow-authoring recovery case for out-of-family entity requests."
+      }
     ]
   }
 }

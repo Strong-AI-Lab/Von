@@ -1,0 +1,935 @@
+{
+  "family_id": "entity_representation_workflow_seed_bundle",
+  "managed_by": "entity_representation_workflow_vontology_service",
+  "schema_version": "repo_seed_workflow_bundle.v1",
+  "source_tag": "JVNAUTOSCI-1704",
+  "supported_action_ids": [
+    "workflow_authoring.emit_marker",
+    "workflow_authoring.discover_existing_workflows",
+    "llm.action",
+    "workflow_invoke_subworkflow"
+  ],
+  "workflows": [
+    {
+      "workflow_id": "#V#entity_representation_workflow",
+      "display_name": "Entity Representation Workflow",
+      "description": "Route conversational entity-representation requests across reusable person, company, event, and place workflows, creating missing specialised workflows when necessary.",
+      "content": "Conversational wrapper workflow for entity representation. It discovers reusable specialised workflows, decides whether to reuse or create one for people, companies, events, or places, and only asks the user for clarification when vital information is missing.",
+      "type_ids": [
+        "#V#ai_workflow",
+        "#V#durable_workflow"
+      ],
+      "launch_input_contract": {
+        "schema_version": "workflow_launch_input_contract.v1",
+        "required_inputs": [
+          "prompt"
+        ],
+        "input_mappings": [
+          {
+            "target_context_key": "prompt",
+            "source_expression": "inputs.prompt",
+            "extractor": "identity",
+            "required": true,
+            "description": "Pass through the user's conversational entity-representation request."
+          }
+        ]
+      },
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"execution\",\"authoring_intent_required\":false,\"prefer_existing_capability\":false}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
+          "text": "{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"represent person in vontology\",\"represent company in vontology\",\"represent event in vontology\",\"represent place in vontology\",\"entity representation workflow\"],\"examples\":[\"Represent these people in the Vontology if they are not already represented.\",\"Please represent this company in the Vontology.\",\"Represent this event in the Vontology.\",\"Represent this place in the Vontology.\"]}",
+          "lang": "en-NZ"
+        }
+      ],
+      "publication_spec": {
+        "initial_state": "set_autonomy_policy",
+        "steps": [
+          {
+            "action_concept_id": null,
+            "action_id": "workflow_authoring.emit_marker",
+            "concept_id": null,
+            "conditional_transitions": [],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": "set_affirmation_default",
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "failed",
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "set_autonomy_policy",
+            "static_input_bindings": [
+              [
+                "marker_key",
+                "user_affirmation_policy"
+              ],
+              [
+                "marker_value",
+                "only_when_vital_info_missing"
+              ]
+            ],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [],
+            "validation_policy": null,
+            "writes_context_keys": [
+              "user_affirmation_policy"
+            ]
+          },
+          {
+            "action_concept_id": null,
+            "action_id": "workflow_authoring.emit_marker",
+            "concept_id": null,
+            "conditional_transitions": [],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": "discover_existing_workflows",
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "failed",
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "set_affirmation_default",
+            "static_input_bindings": [
+              [
+                "marker_key",
+                "requires_user_affirmation"
+              ],
+              [
+                "marker_value",
+                "false"
+              ]
+            ],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [],
+            "validation_policy": null,
+            "writes_context_keys": [
+              "requires_user_affirmation"
+            ]
+          },
+          {
+            "action_concept_id": "#V#workflow_authoring_action_discover_existing_workflows",
+            "action_id": "workflow_authoring.discover_existing_workflows",
+            "concept_id": null,
+            "conditional_transitions": [],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": "decide_entity_path",
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "failed",
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "discover_existing_workflows",
+            "static_input_bindings": [
+              [
+                "max_results",
+                "8"
+              ],
+              [
+                "exclude_workflow_ids",
+                "[\"#V#entity_representation_workflow\", \"#V#workflow_repair_or_create_workflow\", \"#V#workflow_authoring_repair_workflow\", \"#V#von_workflow_creation_workflow\"]"
+              ]
+            ],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [],
+            "validation_policy": null,
+            "writes_context_keys": []
+          },
+          {
+            "action_concept_id": null,
+            "action_id": "llm.action",
+            "concept_id": null,
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "key": "workflow_authoring_preflight_decision",
+                  "kind": "context_value_equals",
+                  "value": "clarify"
+                },
+                "reason": "clarify_user",
+                "to_state": "request_clarification"
+              },
+              {
+                "condition_spec": {
+                  "key": "workflow_authoring_preflight_decision",
+                  "kind": "context_value_equals",
+                  "value": "reuse"
+                },
+                "reason": "reuse_existing_workflow",
+                "to_state": "route_selected_workflow"
+              },
+              {
+                "condition_spec": {
+                  "key": "workflow_authoring_preflight_decision",
+                  "kind": "context_value_equals",
+                  "value": "create"
+                },
+                "reason": "create_specialised_workflow",
+                "to_state": "create_specialised_workflow"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "decision_failed_closed",
+                "to_state": "failed"
+              }
+            ],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": "llm",
+            "invoked_workflow_id": null,
+            "llm_policy": {
+              "policy_stage": "entity_representation_preflight",
+              "tool_mode": "none",
+              "response_contract_text": "Return JSON with keys decision, entity_domain, workflow_template_id, selected_workflow_id, workflow_creation_prompt, and response_text.",
+              "context_fields": [
+                {
+                  "context_key": "workflow_authoring_request_text",
+                  "label": "Entity representation request"
+                },
+                {
+                  "context_key": "workflow_authoring_candidate_workflows",
+                  "label": "Candidate workflows"
+                }
+              ]
+            },
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "failed",
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [
+              "#V#entity_representation_preflight_prompt"
+            ],
+            "state_id": "decide_entity_path",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_decision_to_decision",
+                "context_key": "workflow_authoring_preflight_decision",
+                "tool_output_field": "validated_json.decision"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_decision_to_entity_domain",
+                "context_key": "entity_domain",
+                "tool_output_field": "validated_json.entity_domain"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_decision_to_template_id",
+                "context_key": "workflow_template_id",
+                "tool_output_field": "validated_json.workflow_template_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_decision_to_selected_workflow_id",
+                "context_key": "selected_workflow_id",
+                "tool_output_field": "validated_json.selected_workflow_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_decision_to_creation_prompt",
+                "context_key": "workflow_creation_prompt",
+                "tool_output_field": "validated_json.workflow_creation_prompt"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_decision_to_response_text",
+                "context_key": "response_text",
+                "tool_output_field": "validated_json.response_text"
+              }
+            ],
+            "validation_policy": {
+              "output_format": "json_value"
+            },
+            "writes_context_keys": [
+              "workflow_authoring_preflight_decision",
+              "entity_domain",
+              "workflow_template_id",
+              "selected_workflow_id",
+              "workflow_creation_prompt",
+              "response_text"
+            ]
+          },
+          {
+            "action_concept_id": null,
+            "action_id": "workflow_authoring.emit_marker",
+            "concept_id": null,
+            "conditional_transitions": [],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": "completed",
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "failed",
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "request_clarification",
+            "static_input_bindings": [
+              [
+                "marker_key",
+                "requires_user_affirmation"
+              ],
+              [
+                "marker_value",
+                "true"
+              ]
+            ],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [],
+            "validation_policy": null,
+            "writes_context_keys": [
+              "requires_user_affirmation"
+            ]
+          },
+          {
+            "action_concept_id": null,
+            "action_id": "workflow_invoke_subworkflow",
+            "concept_id": null,
+            "conditional_transitions": [],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_create_prompt_to_prompt_parameter",
+                "context_key": "workflow_creation_prompt",
+                "required": true,
+                "tool_param": "prompt"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_create_template_to_workflow_template_id_parameter",
+                "context_key": "workflow_template_id",
+                "required": true,
+                "tool_param": "workflow_template_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_create_target_to_target_workflow_id_parameter",
+                "context_key": "selected_workflow_id",
+                "required": true,
+                "tool_param": "target_workflow_id"
+              }
+            ],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": "#V#von_workflow_creation_workflow",
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": "route_selected_workflow",
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "failed",
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "create_specialised_workflow",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_create_result_to_selected_workflow_id",
+                "context_key": "selected_workflow_id",
+                "tool_output_field": "result.workflow_concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_create_result_to_response_text",
+                "context_key": "response_text",
+                "tool_output_field": "result.response_text"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_create_result_to_workflow_discoverable",
+                "context_key": "workflow_discoverable",
+                "tool_output_field": "result.workflow_discoverable"
+              }
+            ],
+            "validation_policy": null,
+            "writes_context_keys": [
+              "selected_workflow_id",
+              "response_text",
+              "workflow_discoverable"
+            ]
+          },
+          {
+            "action_concept_id": null,
+            "action_id": "workflow_authoring.emit_marker",
+            "concept_id": null,
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "key": "entity_domain",
+                  "kind": "context_value_equals",
+                  "value": "person"
+                },
+                "reason": "route_person_workflow",
+                "to_state": "execute_person_workflow"
+              },
+              {
+                "condition_spec": {
+                  "key": "entity_domain",
+                  "kind": "context_value_equals",
+                  "value": "company"
+                },
+                "reason": "route_company_workflow",
+                "to_state": "execute_company_workflow"
+              },
+              {
+                "condition_spec": {
+                  "key": "entity_domain",
+                  "kind": "context_value_equals",
+                  "value": "event"
+                },
+                "reason": "route_event_workflow",
+                "to_state": "execute_event_workflow"
+              },
+              {
+                "condition_spec": {
+                  "key": "entity_domain",
+                  "kind": "context_value_equals",
+                  "value": "place"
+                },
+                "reason": "route_place_workflow",
+                "to_state": "execute_place_workflow"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "route_failed_closed",
+                "to_state": "failed"
+              }
+            ],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "failed",
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "route_selected_workflow",
+            "static_input_bindings": [
+              [
+                "marker_key",
+                "workflow_selection_checked"
+              ],
+              [
+                "marker_value",
+                "true"
+              ]
+            ],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [],
+            "validation_policy": null,
+            "writes_context_keys": [
+              "workflow_selection_checked"
+            ]
+          },
+          {
+            "action_concept_id": null,
+            "action_id": "workflow_invoke_subworkflow",
+            "concept_id": null,
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "key": "child_workflow_failed",
+                  "kind": "context_flag"
+                },
+                "reason": "child_failed",
+                "to_state": "failed"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "child_completed_or_clarified",
+                "to_state": "completed"
+              }
+            ],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_prompt_to_prompt_parameter",
+                "context_key": "prompt",
+                "required": true,
+                "tool_param": "prompt"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_request_text_to_request_text_parameter",
+                "context_key": "workflow_authoring_request_text",
+                "required": false,
+                "tool_param": "request_text"
+              }
+            ],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": "#V#person_representation_workflow",
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "failed",
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "execute_person_workflow",
+            "static_input_bindings": [
+              [
+                "failure_mode",
+                "capture_child_failure"
+              ]
+            ],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_response_text",
+                "context_key": "response_text",
+                "tool_output_field": "result.response_text"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_entity_representation_concept_id",
+                "context_key": "entity_representation_concept_id",
+                "tool_output_field": "result.entity_representation_concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_entity_representation_verified",
+                "context_key": "entity_representation_verified",
+                "tool_output_field": "result.entity_representation_verified"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_requires_user_affirmation",
+                "context_key": "requires_user_affirmation",
+                "tool_output_field": "result.requires_user_affirmation"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_child_workflow_failed",
+                "context_key": "child_workflow_failed",
+                "tool_output_field": "child_workflow_failed"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_subworkflow_error",
+                "context_key": "subworkflow_error",
+                "tool_output_field": "subworkflow_error"
+              }
+            ],
+            "validation_policy": null,
+            "writes_context_keys": [
+              "response_text",
+              "entity_representation_concept_id",
+              "entity_representation_verified",
+              "requires_user_affirmation",
+              "child_workflow_failed",
+              "subworkflow_error"
+            ]
+          },
+          {
+            "action_concept_id": null,
+            "action_id": "workflow_invoke_subworkflow",
+            "concept_id": null,
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "key": "child_workflow_failed",
+                  "kind": "context_flag"
+                },
+                "reason": "child_failed",
+                "to_state": "failed"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "child_completed_or_clarified",
+                "to_state": "completed"
+              }
+            ],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_prompt_to_prompt_parameter",
+                "context_key": "prompt",
+                "required": true,
+                "tool_param": "prompt"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_request_text_to_request_text_parameter",
+                "context_key": "workflow_authoring_request_text",
+                "required": false,
+                "tool_param": "request_text"
+              }
+            ],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": "#V#company_representation_workflow",
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "failed",
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "execute_company_workflow",
+            "static_input_bindings": [
+              [
+                "failure_mode",
+                "capture_child_failure"
+              ]
+            ],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_response_text",
+                "context_key": "response_text",
+                "tool_output_field": "result.response_text"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_entity_representation_concept_id",
+                "context_key": "entity_representation_concept_id",
+                "tool_output_field": "result.entity_representation_concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_entity_representation_verified",
+                "context_key": "entity_representation_verified",
+                "tool_output_field": "result.entity_representation_verified"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_requires_user_affirmation",
+                "context_key": "requires_user_affirmation",
+                "tool_output_field": "result.requires_user_affirmation"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_child_workflow_failed",
+                "context_key": "child_workflow_failed",
+                "tool_output_field": "child_workflow_failed"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_subworkflow_error",
+                "context_key": "subworkflow_error",
+                "tool_output_field": "subworkflow_error"
+              }
+            ],
+            "validation_policy": null,
+            "writes_context_keys": [
+              "response_text",
+              "entity_representation_concept_id",
+              "entity_representation_verified",
+              "requires_user_affirmation",
+              "child_workflow_failed",
+              "subworkflow_error"
+            ]
+          },
+          {
+            "action_concept_id": null,
+            "action_id": "workflow_invoke_subworkflow",
+            "concept_id": null,
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "key": "child_workflow_failed",
+                  "kind": "context_flag"
+                },
+                "reason": "child_failed",
+                "to_state": "failed"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "child_completed_or_clarified",
+                "to_state": "completed"
+              }
+            ],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_prompt_to_prompt_parameter",
+                "context_key": "prompt",
+                "required": true,
+                "tool_param": "prompt"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_request_text_to_request_text_parameter",
+                "context_key": "workflow_authoring_request_text",
+                "required": false,
+                "tool_param": "request_text"
+              }
+            ],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": "#V#event_representation_workflow",
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "failed",
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "execute_event_workflow",
+            "static_input_bindings": [
+              [
+                "failure_mode",
+                "capture_child_failure"
+              ]
+            ],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_response_text",
+                "context_key": "response_text",
+                "tool_output_field": "result.response_text"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_entity_representation_concept_id",
+                "context_key": "entity_representation_concept_id",
+                "tool_output_field": "result.entity_representation_concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_entity_representation_verified",
+                "context_key": "entity_representation_verified",
+                "tool_output_field": "result.entity_representation_verified"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_requires_user_affirmation",
+                "context_key": "requires_user_affirmation",
+                "tool_output_field": "result.requires_user_affirmation"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_child_workflow_failed",
+                "context_key": "child_workflow_failed",
+                "tool_output_field": "child_workflow_failed"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_subworkflow_error",
+                "context_key": "subworkflow_error",
+                "tool_output_field": "subworkflow_error"
+              }
+            ],
+            "validation_policy": null,
+            "writes_context_keys": [
+              "response_text",
+              "entity_representation_concept_id",
+              "entity_representation_verified",
+              "requires_user_affirmation",
+              "child_workflow_failed",
+              "subworkflow_error"
+            ]
+          },
+          {
+            "action_concept_id": null,
+            "action_id": "workflow_invoke_subworkflow",
+            "concept_id": null,
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "key": "child_workflow_failed",
+                  "kind": "context_flag"
+                },
+                "reason": "child_failed",
+                "to_state": "failed"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "child_completed_or_clarified",
+                "to_state": "completed"
+              }
+            ],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_prompt_to_prompt_parameter",
+                "context_key": "prompt",
+                "required": true,
+                "tool_param": "prompt"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_request_text_to_request_text_parameter",
+                "context_key": "workflow_authoring_request_text",
+                "required": false,
+                "tool_param": "request_text"
+              }
+            ],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": "#V#place_representation_workflow",
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "failed",
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "execute_place_workflow",
+            "static_input_bindings": [
+              [
+                "failure_mode",
+                "capture_child_failure"
+              ]
+            ],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_response_text",
+                "context_key": "response_text",
+                "tool_output_field": "result.response_text"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_entity_representation_concept_id",
+                "context_key": "entity_representation_concept_id",
+                "tool_output_field": "result.entity_representation_concept_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_entity_representation_verified",
+                "context_key": "entity_representation_verified",
+                "tool_output_field": "result.entity_representation_verified"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_requires_user_affirmation",
+                "context_key": "requires_user_affirmation",
+                "tool_output_field": "result.requires_user_affirmation"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_child_workflow_failed",
+                "context_key": "child_workflow_failed",
+                "tool_output_field": "child_workflow_failed"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_entity_representation_workflow_execute_result_to_subworkflow_error",
+                "context_key": "subworkflow_error",
+                "tool_output_field": "subworkflow_error"
+              }
+            ],
+            "validation_policy": null,
+            "writes_context_keys": [
+              "response_text",
+              "entity_representation_concept_id",
+              "entity_representation_verified",
+              "requires_user_affirmation",
+              "child_workflow_failed",
+              "subworkflow_error"
+            ]
+          },
+          {
+            "action_concept_id": null,
+            "action_id": null,
+            "concept_id": null,
+            "conditional_transitions": [],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": null,
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "completed",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [],
+            "validation_policy": null,
+            "writes_context_keys": []
+          },
+          {
+            "action_concept_id": null,
+            "action_id": null,
+            "concept_id": null,
+            "conditional_transitions": [],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": null,
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "failed",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [],
+            "validation_policy": null,
+            "writes_context_keys": []
+          }
+        ]
+      }
+    }
+  ]
+}

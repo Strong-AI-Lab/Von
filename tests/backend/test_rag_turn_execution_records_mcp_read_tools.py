@@ -1739,6 +1739,56 @@ def test_turn_execution_build_selector_benchmark_gateway_e2e():
     assert signal_by_id["abstain_cases_routed_safely"]["status"] == "pass"
 
 
+def test_turn_execution_build_selector_benchmark_supports_entity_representation_case_set():
+    gateway = _build_gateway()
+    payload = gateway.invoke(
+        "turn_execution_build_selector_benchmark",
+        {"case_set": "entity_representation_generalisation"},
+    ).payload
+
+    assert payload["success"] is True
+    metrics = payload.get("metrics")
+    assert isinstance(metrics, dict)
+    assert metrics.get("scanned_count") == 7
+    assert metrics.get("matched_case_count") == 7
+    assert metrics.get("selector_accuracy_pct") == 100.0
+    assert metrics.get("baseline_accuracy_pct") == 0.0
+    assert metrics.get("outcome_label_counts", {}).get("successful_completion") == 6
+    assert (
+        metrics.get("outcome_label_counts", {}).get("abstain_escalate_no_safe_route")
+        == 1
+    )
+    assert metrics.get("outcome_label_counts", {}).get("tool_or_workflow_misrouting") == 0
+
+    corpus = payload.get("corpus")
+    assert isinstance(corpus, dict)
+    assert corpus.get("source") == "seed_bundle"
+    assert corpus.get("case_set") == "entity_representation_generalisation"
+
+    replay_cases = payload.get("replay_cases")
+    assert isinstance(replay_cases, list)
+    follow_up_case = next(
+        case
+        for case in replay_cases
+        if isinstance(case, dict)
+        and case.get("case_id") == "entity_people_follow_up_reasoning_override"
+    )
+    assert follow_up_case["selected_workflow_id"] == "#V#entity_representation_workflow"
+
+    signal_by_id = {
+        signal.get("signal_id"): signal
+        for signal in payload.get("benchmark_signals") or []
+        if isinstance(signal, dict)
+    }
+    assert signal_by_id["selector_benchmark_corpus_present"]["status"] == "pass"
+    assert signal_by_id["selector_accuracy_not_worse_than_baseline"]["status"] == "pass"
+    assert signal_by_id["abstain_cases_routed_safely"]["status"] == "pass"
+    assert (
+        signal_by_id["selector_misrouting_examples_detected"]["status"]
+        == "not_evaluated"
+    )
+
+
 def test_turn_execution_build_dashboard_gateway_e2e(monkeypatch):
     _install_minimal_imposition_profile_loader(monkeypatch)
     docs = _build_dashboard_trace_docs()
