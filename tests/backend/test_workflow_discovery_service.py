@@ -22,7 +22,6 @@ from src.backend.services.workflow_discovery_service import (
     EXECUTABILITY_GRAPH_INCOMPLETE,
     EXECUTABILITY_WORKFLOW_STEP_COMPLETELY_VACUOUS,
     EXECUTABILITY_WORKFLOW_STEP_PARTIALLY_VACUOUS,
-    EXECUTABILITY_WORKFLOW_STEP_INTEGRITY,
     EXECUTABILITY_NON_EXECUTABLE_DESIGN_ARTIFACT,
     ROUTING_EXCLUSION_MISSING_AUTHORITATIVE_PURPOSE,
     WORKFLOW_TYPE_IDS,
@@ -732,8 +731,12 @@ class TestDiscoverWorkflowsForTurn:
     @patch(
         "src.backend.services.workflow_discovery_service._has_authoritative_routing_text"
     )
+    @patch(
+        "src.backend.services.workflow_discovery_service._resolve_workflow_routing_profile_data"
+    )
     def test_annotation_stops_after_enough_routing_candidates(
         self,
+        mock_routing_profile: MagicMock,
         mock_has_authoritative_text: MagicMock,
         mock_classify: MagicMock,
     ) -> None:
@@ -745,12 +748,50 @@ class TestDiscoverWorkflowsForTurn:
         ]
         mock_classify.return_value = (True, EXECUTABILITY_EXECUTABLE_NOW, None)
         mock_has_authoritative_text.return_value = True
+        mock_routing_profile.return_value = (None, None)
 
         annotated = _annotate_and_rank_candidates(matches, max_results=2)
 
         assert len(annotated) == 2
         assert mock_classify.call_count == 2
         assert mock_has_authoritative_text.call_count == 2
+
+    @patch(
+        "src.backend.services.workflow_discovery_service._classify_workflow_concept_executability"
+    )
+    @patch(
+        "src.backend.services.workflow_discovery_service._has_authoritative_routing_text"
+    )
+    @patch(
+        "src.backend.services.workflow_discovery_service._resolve_workflow_routing_profile_data"
+    )
+    def test_annotation_carries_routing_profile_into_discovery_payload(
+        self,
+        mock_routing_profile: MagicMock,
+        mock_has_authoritative_text: MagicMock,
+        mock_classify: MagicMock,
+    ) -> None:
+        match = WorkflowMatch("#V#authoring_workflow", "Authoring Workflow", relevance_score=0.95)
+        mock_classify.return_value = (True, EXECUTABILITY_EXECUTABLE_NOW, None)
+        mock_has_authoritative_text.return_value = True
+        mock_routing_profile.return_value = (
+            {
+                "role": "authoring",
+                "authoring_intent_required": True,
+                "prefer_existing_capability": True,
+            },
+            "text_relation:#V#hasWorkflowRoutingProfileJson",
+        )
+
+        annotated = _annotate_and_rank_candidates([match], max_results=1)
+
+        assert len(annotated) == 1
+        assert annotated[0].routing_profile == {
+            "role": "authoring",
+            "authoring_intent_required": True,
+            "prefer_existing_capability": True,
+        }
+        assert annotated[0].to_dict()["routing_profile"]["role"] == "authoring"
 
     @patch("src.backend.services.workflow_discovery_service.discover_workflows")
     def test_catches_exceptions(self, mock_discover: MagicMock) -> None:

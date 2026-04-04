@@ -110,6 +110,29 @@ def test_workflow_state_authoritative_overrides_prompt_shape() -> None:
     assert decision["decision_source"] == "workflow_state"
 
 
+def test_explicit_workflow_rejection_suppresses_authoritative_continuation() -> None:
+    decision = service.assess_prompt_for_workflow_continuation(
+        prompt=(
+            "The enrichment workflow isn't the right one. Manually retrieve "
+            "#V#timothy_pistotti and inspect the concept. Do not run an "
+            "existing workflow."
+        ),
+        continuation_context={
+            "requires_follow_up": True,
+            "has_unresolved_required_effects": True,
+            "selected_workflow_id": "#V#enrichment_workflow",
+            "unresolved_required_effects": [
+                {"effect_type": "representation_verification"}
+            ],
+        },
+    )
+
+    assert decision["applies"] is False
+    assert decision["reason"] == "prompt_explicitly_diverges_from_selected_workflow"
+    assert decision["decision_source"] == "prompt_override"
+    assert "prompt_forbids_workflow_execution" in decision["matched_signals"]
+
+
 def test_narrowed_heuristic_no_longer_matches_bare_yet() -> None:
     """Prompt wording alone should not trigger continuation without workflow state."""
     decision = service.assess_prompt_for_workflow_continuation(

@@ -21,13 +21,12 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 from typing import Any, Mapping, Optional, Sequence, cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
 from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
-    OrchestratorResult,
     ProgressTracker,
     WorkflowRoutingInfo,
     _ModelCandidate,
@@ -47,7 +46,7 @@ from src.backend.workflows.definitions import (
 from src.backend.workflows.workflow_gap_workflow_contracts import (
     WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
 )
-from src.backend.workflows.workflow_selector import WorkflowSelection, WorkflowSelector
+from src.backend.workflows.workflow_selector import WorkflowSelector
 from orchestrator_test_harness import build_db_independent_orchestrator
 
 
@@ -5355,6 +5354,193 @@ def test_authoring_workflow_query_is_left_to_selector_without_python_semantic_ov
     )
 
 
+def test_prepare_selector_discovered_matches_preserves_discovery_exclusion_reason(
+    monkeypatch,
+):
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    workflow_id = "#V#search_concept_and_instances_workflow"
+
+    orchestrator._workflow_registry.register_or_replace(
+        WorkflowRegistration(
+            workflow_id=workflow_id,
+            definition=WorkflowDefinition(
+                workflow_id=workflow_id,
+                initial_state="complete",
+                states={
+                    "complete": WorkflowStateSpec(
+                        state_id="complete",
+                        actions=(),
+                        terminal=True,
+                    )
+                },
+            ),
+            purpose="Inspect concepts and their instances.",
+            source="test",
+        )
+    )
+
+    included, excluded = orchestrator._prepare_selector_discovered_matches(
+        {
+            "candidates": [
+                {
+                    "concept_id": workflow_id,
+                    "name": "Search Concept And Instances Workflow",
+                    "description": "Inspect concepts and their instances.",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "relevance_score": 0.91,
+                    "confidence_score": 0.91,
+                    "is_policy_safe": False,
+                    "routing_eligible": False,
+                    "routing_exclusion_reason": "missing_authoritative_purpose",
+                }
+            ]
+        },
+        turn_text="Look up #V#timothy_pistotti and inspect the concept relations.",
+    )
+
+    assert included == []
+    assert len(excluded) == 1
+    assert excluded[0]["routing_eligible"] is False
+    assert excluded[0]["routing_exclusion_reason"] == "missing_authoritative_purpose"
+    assert excluded[0]["candidate_reason"] == "discovered_workflow_excluded"
+
+
+def test_prepare_selector_discovered_matches_excludes_authoring_profile_without_explicit_authoring_request(
+    monkeypatch,
+):
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    workflow_id = "#V#launchable_authoring_workflow"
+
+    orchestrator._workflow_registry.register_or_replace(
+        WorkflowRegistration(
+            workflow_id=workflow_id,
+            definition=WorkflowDefinition(
+                workflow_id=workflow_id,
+                initial_state="complete",
+                states={
+                    "complete": WorkflowStateSpec(
+                        state_id="complete",
+                        actions=(
+                            WorkflowActionInvocation(
+                                action_id="workflow_authoring.identify_need"
+                            ),
+                        ),
+                        terminal=True,
+                    )
+                },
+                metadata={
+                    "routing_profile": {
+                        "role": "authoring",
+                        "authoring_intent_required": True,
+                        "prefer_existing_capability": True,
+                    }
+                },
+            ),
+            purpose="Create and verify executable workflows from a workflow description request.",
+            source="test",
+        )
+    )
+
+    included, excluded = orchestrator._prepare_selector_discovered_matches(
+        {
+            "candidates": [
+                {
+                    "concept_id": workflow_id,
+                    "name": "Workflow creation workflow",
+                    "description": "Create and verify executable workflows from a workflow description request.",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "relevance_score": 0.93,
+                    "confidence_score": 0.93,
+                }
+            ]
+        },
+        turn_text=(
+            "The enrichment workflow isn't the right one. We need a new "
+            "search workflow eventually, but manually retrieve "
+            "#V#timothy_pistotti first and do not run an existing workflow."
+        ),
+    )
+
+    assert included == []
+    assert len(excluded) == 1
+    assert excluded[0]["routing_profile"]["role"] == "authoring"
+    assert (
+        excluded[0]["routing_exclusion_reason"]
+        == "authoring_intent_required_by_workflow_profile"
+    )
+    assert excluded[0]["routing_profile_role"] == "authoring"
+    assert (
+        excluded[0]["routing_policy_lexical_signals"]["explicit_authoring_request"]
+        is False
+    )
+
+
+def test_prepare_selector_discovered_matches_allows_authoring_profile_for_explicit_authoring_request(
+    monkeypatch,
+):
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    workflow_id = "#V#launchable_authoring_workflow"
+
+    orchestrator._workflow_registry.register_or_replace(
+        WorkflowRegistration(
+            workflow_id=workflow_id,
+            definition=WorkflowDefinition(
+                workflow_id=workflow_id,
+                initial_state="complete",
+                states={
+                    "complete": WorkflowStateSpec(
+                        state_id="complete",
+                        actions=(
+                            WorkflowActionInvocation(
+                                action_id="workflow_authoring.identify_need"
+                            ),
+                        ),
+                        terminal=True,
+                    )
+                },
+                metadata={
+                    "routing_profile": {
+                        "role": "authoring",
+                        "authoring_intent_required": True,
+                        "prefer_existing_capability": True,
+                    }
+                },
+            ),
+            purpose="Create and verify executable workflows from a workflow description request.",
+            source="test",
+        )
+    )
+
+    included, excluded = orchestrator._prepare_selector_discovered_matches(
+        {
+            "candidates": [
+                {
+                    "concept_id": workflow_id,
+                    "name": "Workflow creation workflow",
+                    "description": "Create and verify executable workflows from a workflow description request.",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "relevance_score": 0.93,
+                    "confidence_score": 0.93,
+                }
+            ]
+        },
+        turn_text="Create a new workflow to inspect PhD supervision relations.",
+    )
+
+    assert excluded == []
+    assert len(included) == 1
+    assert included[0]["routing_profile"]["role"] == "authoring"
+    assert included[0]["routing_eligible"] is True
+    assert included[0]["routing_profile_role"] == "authoring"
+    assert (
+        included[0]["routing_policy_lexical_signals"]["explicit_authoring_request"]
+        is True
+    )
+
+
 def test_explicit_tool_requirement_is_telemetry_visible_even_without_python_routing_override(
     monkeypatch,
 ):
@@ -6076,6 +6262,83 @@ def test_tool_planner_receives_authoritative_workflow_continuation_context(
     assert continuation_entry is not None
     assert continuation_entry.get("applied") is True
     assert continuation_entry.get("reason") == "workflow_state_authoritative"
+
+
+def test_tool_planner_skips_continuation_after_explicit_workflow_divergence(
+    monkeypatch,
+):
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_continuation_service.get_session_workflow_continuation_context",
+        lambda **_kwargs: {
+            "session_id": "session-1687",
+            "selected_workflow_id": "#V#enrichment_workflow",
+            "completion_gate_decision": "escalation_required",
+            "requires_follow_up": True,
+            "safe_to_claim_completion": False,
+            "has_unresolved_required_effects": True,
+            "unresolved_required_effects": [
+                {
+                    "effect_id": "effect_concept_verification_1",
+                    "effect_type": "concept_verification",
+                    "description": "Verify the concept relations.",
+                    "required_tools": ["fetch_concept"],
+                    "targets": ["#V#timothy_pistotti"],
+                }
+            ],
+        },
+    )
+
+    llm = _CapturingLLM(
+        [
+            TOOL_CALLING_WORKFLOW_ID,
+            "I will inspect the concept directly instead.",
+            "Follow-through response.",
+            "Final response after tool workflow.",
+        ]
+    )
+
+    result = orchestrator.run(
+        prompt=(
+            "The enrichment workflow isn't the right one. Manually retrieve "
+            "#V#timothy_pistotti and inspect the concept. Do not run an "
+            "existing workflow."
+        ),
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+        conversation_session_id="session-1687",
+    )
+
+    assert result.workflow_routing is not None
+    planner_context = llm.calls[1]["context"] or []
+    planner_prompt_context = "\n".join(
+        str(message.get("content") or "")
+        for message in planner_context
+        if isinstance(message, dict)
+    )
+    assert "ACTIVE WORKFLOW CONTINUATION CONTEXT" not in planner_prompt_context
+
+    continuation_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "workflow_continuation_context"
+        ),
+        None,
+    )
+    assert continuation_entry is not None
+    assert continuation_entry.get("applied") is False
+    assert (
+        continuation_entry.get("reason")
+        == "prompt_explicitly_diverges_from_selected_workflow"
+    )
+    assert "prompt_forbids_workflow_execution" in (
+        continuation_entry.get("context", {}).get("apply_signals") or []
+    )
 
 
 # ---------------------------------------------------------------------------

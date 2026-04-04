@@ -57,6 +57,18 @@ _EXPLICIT_EXECUTION_TOKENS = frozenset(
     }
 )
 
+_EXPLICIT_AUTHORING_PATTERNS = (
+    re.compile(
+        r"\b(?:create|build|write|author|design|draft|implement|make|construct)\b"
+        r"[^.?!]{0,120}\b(?:workflow|subworkflow)\b",
+        flags=re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:workflow|subworkflow)\s+(?:creation|authoring)\b",
+        flags=re.IGNORECASE,
+    ),
+)
+
 _ROLE_SYNONYMS = {
     "execution": _ROLE_EXECUTION,
     "executor": _ROLE_EXECUTION,
@@ -111,17 +123,25 @@ def _tokenise_text(value: Any) -> tuple[str, ...]:
     return tuple(token for token in re.findall(r"[a-z0-9_#]+", text) if token)
 
 
-def _classify_turn_text(turn_text: Any) -> tuple[bool, bool]:
+def _classify_turn_text(turn_text: Any) -> tuple[bool, bool, bool]:
     tokens = set(_tokenise_text(turn_text))
+    text = _safe_text(turn_text)
+    explicit_authoring_request = any(
+        pattern.search(text) for pattern in _EXPLICIT_AUTHORING_PATTERNS
+    )
     if not tokens:
-        return False, False
+        return explicit_authoring_request, False, False
     workflow_query_intent = any(
         token in _WORKFLOW_CONTEXT_TOKENS for token in tokens
     )
     explicit_execution_request = workflow_query_intent and any(
         token in _EXPLICIT_EXECUTION_TOKENS for token in tokens
     )
-    return explicit_execution_request, workflow_query_intent
+    return (
+        explicit_authoring_request,
+        explicit_execution_request,
+        workflow_query_intent,
+    )
 
 
 def _normalise_role(value: Any) -> str | None:
@@ -227,6 +247,49 @@ class WorkflowOverrideDecision:
         return payload
 
 
+def assess_workflow_routing_candidate_policy(
+    *,
+    turn_text: str,
+    candidate: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return routing-policy suitability for one workflow candidate.
+
+    This exposes the same routing-profile policy semantics to both the custom
+    override path and the normal selector-discovery path.
+    """
+
+    explicit_authoring_request, explicit_execution_request, workflow_query_intent = (
+        _classify_turn_text(turn_text)
+    )
+    role, role_source, policy_flags = _resolve_candidate_role(candidate)
+
+    suitable = True
+    suitability_reason = "suitable"
+    if (
+        role == _ROLE_AUTHORING
+        and bool(policy_flags.get("authoring_intent_required"))
+        and not explicit_authoring_request
+    ):
+        suitable = False
+        suitability_reason = "authoring_intent_required_by_workflow_profile"
+    elif role == _ROLE_MAINTENANCE and not workflow_query_intent:
+        suitable = False
+        suitability_reason = "explicit_workflow_context_required_by_workflow_profile"
+
+    return {
+        "role": role,
+        "role_source": role_source,
+        "suitable": suitable,
+        "suitability_reason": suitability_reason,
+        "policy_flags": dict(policy_flags),
+        "lexical_signals": {
+            "explicit_authoring_request": explicit_authoring_request,
+            "explicit_execution_request": explicit_execution_request,
+            "workflow_query_intent": workflow_query_intent,
+        },
+    }
+
+
 def choose_custom_workflow_override_candidate(
     *,
     turn_text: str,
@@ -236,9 +299,11 @@ def choose_custom_workflow_override_candidate(
 ) -> WorkflowOverrideDecision:
     """Return a launchable replacement candidate with narrow profile gating."""
 
-    explicit_execution_request, workflow_query_intent = _classify_turn_text(
-        turn_text
-    )
+    (
+        explicit_authoring_request,
+        explicit_execution_request,
+        workflow_query_intent,
+    ) = _classify_turn_text(turn_text)
     candidate_assessments: list[WorkflowOverrideCandidateAssessment] = []
 
     for candidate in candidates:
@@ -262,7 +327,18 @@ def choose_custom_workflow_override_candidate(
         )
 
         name = _safe_text(candidate.get("name")) or workflow_id
-        role, role_source, policy_flags = _resolve_candidate_role(candidate)
+        policy_assessment = assess_workflow_routing_candidate_policy(
+            turn_text=turn_text,
+            candidate=candidate,
+        )
+        role = str(policy_assessment.get("role") or _ROLE_UNKNOWN)
+        role_source = str(policy_assessment.get("role_source") or "none")
+        policy_flags = policy_assessment.get("policy_flags")
+        if not isinstance(policy_flags, Mapping):
+            policy_flags = {
+                "authoring_intent_required": False,
+                "prefer_existing_capability": False,
+            }
         discovery_score = max(
             _coerce_float(candidate.get("confidence_score"), default=0.0),
             _coerce_float(candidate.get("relevance_score"), default=0.0),
@@ -276,16 +352,10 @@ def choose_custom_workflow_override_candidate(
         if not launchable:
             suitable = False
             suitability_reason = "not_launchable"
-        elif (
-            role == _ROLE_AUTHORING
-            and bool(policy_flags.get("authoring_intent_required"))
-        ):
+        elif not bool(policy_assessment.get("suitable", True)):
             suitable = False
-            suitability_reason = "authoring_intent_required_by_workflow_profile"
-        elif role == _ROLE_MAINTENANCE and not workflow_query_intent:
-            suitable = False
-            suitability_reason = (
-                "explicit_workflow_context_required_by_workflow_profile"
+            suitability_reason = str(
+                policy_assessment.get("suitability_reason") or "routing_profile_declined"
             )
 
         candidate_assessments.append(
@@ -305,10 +375,9 @@ def choose_custom_workflow_override_candidate(
                 launch_input_resolution_status=launch_status or None,
                 pre_action_reason_code=pre_action_reason or None,
                 policy_flags=dict(policy_flags),
-                lexical_signals={
-                    "explicit_execution_request": explicit_execution_request,
-                    "workflow_query_intent": workflow_query_intent,
-                },
+                lexical_signals=dict(
+                    policy_assessment.get("lexical_signals") or {}
+                ),
             )
         )
 
@@ -328,7 +397,7 @@ def choose_custom_workflow_override_candidate(
             chosen_workflow_id=chosen.workflow_id,
             outcome="promote",
             reason_code="launchable_custom_workflow_found",
-            explicit_authoring_request=False,
+            explicit_authoring_request=explicit_authoring_request,
             explicit_execution_request=explicit_execution_request,
             workflow_query_intent=workflow_query_intent,
             candidate_assessments=tuple(candidate_assessments),
@@ -355,7 +424,7 @@ def choose_custom_workflow_override_candidate(
         chosen_workflow_id=None,
         outcome="decline",
         reason_code=reason_code,
-        explicit_authoring_request=False,
+        explicit_authoring_request=explicit_authoring_request,
         explicit_execution_request=explicit_execution_request,
         workflow_query_intent=workflow_query_intent,
         candidate_assessments=tuple(candidate_assessments),
@@ -363,6 +432,7 @@ def choose_custom_workflow_override_candidate(
 
 
 __all__ = [
+    "assess_workflow_routing_candidate_policy",
     "WorkflowOverrideCandidateAssessment",
     "WorkflowOverrideDecision",
     "choose_custom_workflow_override_candidate",

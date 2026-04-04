@@ -80,7 +80,26 @@ A reasonable default pattern is:
 
 Do not hard-code this into many helpers. Centralise it.
 
-## 8. Fine-tuning guidance
+## 8. Workflow routing guardrails
+
+When workflow discovery, continuation, and selector preparation interact, keep
+the following policy constraints intact:
+
+1. Preserve discovery-side routing eligibility and exclusion reasons into
+   selector preparation. Do not overwrite them with later executability or
+   registry defaults.
+2. Apply routing-profile policy to normal discovered candidates as well as to
+   custom override candidates. An authoring workflow is still an authoring
+   workflow when found through ordinary discovery.
+3. Treat explicit user divergence from an active workflow continuation as
+   authoritative. If the user says the current workflow is wrong, asks for
+   manual inspection, or explicitly forbids continuing it, do not keep forcing
+   the stale workflow context into the next routing turn.
+4. Require explicit authoring intent before routing into workflow-creation or
+   workflow-authoring flows. Casual mention of “workflow”, or discussion of what
+   workflow might eventually be needed, is not sufficient.
+
+## 9. Fine-tuning guidance
 
 Fine-tuning is attractive when:
 
@@ -96,7 +115,7 @@ Fine-tuning is not a substitute for:
 - validators
 - explicit workflow policy
 
-## 9. Acceptance checklist
+## 10. Acceptance checklist
 
 Before closing prompt- or routing-related work, verify:
 
