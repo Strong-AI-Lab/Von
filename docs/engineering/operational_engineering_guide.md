@@ -134,6 +134,9 @@ For minimum local and hosted environment sets, see
 - Use the Atlassian recovery runbook rather than handwritten REST workarounds.
 - If the Jira pathway is broken, improve the canonical path or document the gap
   instead of normalising ad-hoc bypasses.
+- When creating Jira issues on the user's behalf, assign them to the
+  authenticated Jira user by default unless the user explicitly asks for a
+  different assignee or Jira refuses the assignment.
 
 Jira MCP failure checkpoint:
 
