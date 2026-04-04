@@ -104,3 +104,31 @@ def test_finalise_cached_paper_errors_when_cache_missing(monkeypatch, tmp_path):
 
     assert result["success"] is False
     assert result["error"] == "cached_pdf_not_found"
+    assert result["cache_diagnostics"]["cache_state"] == "cache_miss"
+    assert result["cache_recovery_action"] == "download_from_source"
+
+
+def test_finalise_cached_paper_reports_markdown_only_partial_cache(
+    monkeypatch, tmp_path
+):
+    from src.backend.integrations.internal_mcp import catalogue
+
+    cache_dir = tmp_path / "arxiv_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    markdown_path = cache_dir / "2603.14482.md"
+    markdown_path.write_text("# Partial cache only\n", encoding="utf-8")
+
+    monkeypatch.setenv("ARXIV_CACHE_PATH", str(cache_dir))
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: "#V#user_test",
+    )
+
+    result = catalogue._finalise_cached_paper(arxiv_id="2603.14482")
+
+    assert result["success"] is False
+    assert result["error"] == "cached_pdf_not_found"
+    assert "reacquisition" in result["message"]
+    assert result["cache_recovery_action"] == "reacquire_pdf_from_source"
+    assert result["cache_diagnostics"]["cache_state"] == "markdown_only_partial_cache"
+    assert result["cache_diagnostics"]["cached_markdown_path"] == str(markdown_path)

@@ -159,3 +159,54 @@ def test_step_result_envelope_snapshots_are_detached_from_live_context() -> None
 
     envelopes[0]["output_payload"]["result"]["answer"] = 7
     assert last_envelope["output_payload"]["result"]["answer"] == 42
+
+
+def test_step_result_envelope_preserves_failed_action_outputs() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#failure_snapshot_workflow",
+        initial_state="compute",
+        states={
+            "compute": WorkflowStateSpec(
+                state_id="compute",
+                actions=(WorkflowActionInvocation(action_id="emit.failure"),),
+                transitions=(
+                    WorkflowTransitionSpec(
+                        to_state="done",
+                        reason="on_failure",
+                        condition=lambda ctx: bool(ctx.get("last_action_failed")),
+                    ),
+                ),
+            ),
+            "done": WorkflowStateSpec(state_id="done", terminal=True),
+        },
+    )
+
+    registry = ActionRegistry()
+    registry.register(
+        ActionSpec(
+            action_id="emit.failure",
+            handler=lambda _request: WorkflowActionResult(
+                status="failed",
+                error="boom",
+                outputs={
+                    "cache_state": "markdown_only_partial_cache",
+                    "partial_cache_without_pdf": True,
+                },
+            ),
+        )
+    )
+
+    result = WorkflowExecutor(registry=registry, max_transitions=5).run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={},
+    )
+
+    assert result.completed is True
+    envelopes = result.data.get("workflow_step_result_envelopes")
+    assert isinstance(envelopes, list)
+    assert len(envelopes) == 1
+    assert envelopes[0]["action_outcome"] == "failure"
+    assert envelopes[0]["output_payload"]["cache_state"] == "markdown_only_partial_cache"
+    assert envelopes[0]["output_payload"]["partial_cache_without_pdf"] is True
+    assert "cache_state" not in result.data

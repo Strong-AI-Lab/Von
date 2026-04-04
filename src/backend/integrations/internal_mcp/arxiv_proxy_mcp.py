@@ -706,6 +706,56 @@ def _await_downloaded_pdf_in_cache(
         time.sleep(max(0.05, poll_interval_sec))
 
 
+def resolve_arxiv_cache_root() -> Path:
+    """Return the configured local cache directory used by arxiv-mcp-server."""
+
+    workspace_root = Path(__file__).parent.parent.parent.parent.parent
+    storage_path = workspace_root / "data" / "arxiv_cache"
+    env_storage = os.environ.get("ARXIV_CACHE_PATH") or os.environ.get(
+        "ARXIV_STORAGE_PATH"
+    )
+    if env_storage:
+        storage_path = Path(env_storage)
+    return storage_path
+
+
+def inspect_cached_arxiv_artifacts(
+    *, arxiv_id: str, storage_path: Path | None = None
+) -> Dict[str, Any]:
+    """Return a stable snapshot of local cache state for an arXiv identifier."""
+
+    cache_root = (
+        Path(storage_path) if storage_path is not None else resolve_arxiv_cache_root()
+    )
+    stable_id = _normalise_arxiv_id(arxiv_id)
+    cached_pdf = _find_cached_pdf_for_arxiv_id(cache_root, stable_id)
+    cached_markdown = _find_cached_markdown_for_arxiv_id(cache_root, stable_id)
+    has_cached_pdf = cached_pdf is not None
+    has_cached_markdown = cached_markdown is not None
+    partial_cache_without_pdf = has_cached_markdown and not has_cached_pdf
+    if has_cached_pdf:
+        cache_state = "cached_pdf_available"
+    elif partial_cache_without_pdf:
+        cache_state = "markdown_only_partial_cache"
+    else:
+        cache_state = "cache_miss"
+
+    return {
+        "schema_version": "arxiv_cache_state.v1",
+        "arxiv_id": stable_id,
+        "cache_root": str(cache_root),
+        "cache_root_exists": cache_root.exists(),
+        "cache_state": cache_state,
+        "has_cached_pdf": has_cached_pdf,
+        "cached_pdf_path": str(cached_pdf) if cached_pdf is not None else None,
+        "has_cached_markdown": has_cached_markdown,
+        "cached_markdown_path": (
+            str(cached_markdown) if cached_markdown is not None else None
+        ),
+        "partial_cache_without_pdf": partial_cache_without_pdf,
+    }
+
+
 # Singleton instance
 _proxy_instance: Optional[ArxivMCPProxy] = None
 _proxy_lock = asyncio.Lock()
@@ -717,20 +767,7 @@ async def get_arxiv_proxy() -> ArxivMCPProxy:
 
     async with _proxy_lock:
         if _proxy_instance is None:
-            # Determine storage path
-            import os
-
-            workspace_root = Path(__file__).parent.parent.parent.parent.parent
-            # Cache directory for external arxiv-mcp-server. Durable storage is the blob store.
-            storage_path = workspace_root / "data" / "arxiv_cache"
-
-            # Allow override via environment variable
-            env_storage = os.environ.get("ARXIV_CACHE_PATH") or os.environ.get(
-                "ARXIV_STORAGE_PATH"
-            )
-            if env_storage:
-                storage_path = Path(env_storage)
-
+            storage_path = resolve_arxiv_cache_root()
             config = ArxivProxyConfig(storage_path=storage_path)
             _proxy_instance = ArxivMCPProxy(config)
             logger.info(

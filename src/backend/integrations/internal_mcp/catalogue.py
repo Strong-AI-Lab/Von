@@ -452,17 +452,46 @@ def _materialise_arxiv_file_copy_representation(
 
 
 def _get_arxiv_cache_root() -> "Path":
-    import os
-    from pathlib import Path
+    from .arxiv_proxy_mcp import resolve_arxiv_cache_root
 
-    workspace_root = Path(__file__).parent.parent.parent.parent.parent
-    storage_path = workspace_root / "data" / "arxiv_cache"
-    env_storage = os.environ.get("ARXIV_CACHE_PATH") or os.environ.get(
-        "ARXIV_STORAGE_PATH"
-    )
-    if env_storage:
-        storage_path = Path(env_storage)
-    return storage_path
+    return resolve_arxiv_cache_root()
+
+
+def _inspect_arxiv_cache(arxiv_id: str) -> dict[str, Any]:
+    from .arxiv_proxy_mcp import inspect_cached_arxiv_artifacts
+
+    cache_root = _get_arxiv_cache_root()
+    try:
+        diagnostics = inspect_cached_arxiv_artifacts(
+            arxiv_id=str(arxiv_id),
+            storage_path=cache_root,
+        )
+    except Exception as exc:  # pragma: no cover - defensive diagnostics only
+        return {
+            "schema_version": "arxiv_cache_state.v1",
+            "arxiv_id": str(arxiv_id),
+            "cache_root": str(cache_root),
+            "cache_root_exists": cache_root.exists(),
+            "cache_state": "inspection_failed",
+            "has_cached_pdf": False,
+            "cached_pdf_path": None,
+            "has_cached_markdown": False,
+            "cached_markdown_path": None,
+            "partial_cache_without_pdf": False,
+            "inspection_error": str(exc),
+        }
+    return dict(diagnostics)
+
+
+def _recommended_arxiv_cache_recovery_action(
+    cache_diagnostics: Mapping[str, Any] | None,
+) -> str:
+    cache_state = str((cache_diagnostics or {}).get("cache_state") or "").strip()
+    if cache_state == "cached_pdf_available":
+        return "finalise_cached_pdf"
+    if cache_state == "markdown_only_partial_cache":
+        return "reacquire_pdf_from_source"
+    return "download_from_source"
 
 
 def _best_effort_delete_cached_file(
@@ -2047,6 +2076,8 @@ def _download_paper(**kwargs):
         )
 
     namespace_override = _normalise_namespace_override(kwargs.get("namespace"))
+    cache_diagnostics = _inspect_arxiv_cache(str(arxiv_id))
+    cache_recovery_action = _recommended_arxiv_cache_recovery_action(cache_diagnostics)
 
     # If the PDF is already present in the local arXiv cache, prefer finalise_cached_paper so
     # we can upload to durable storage and register the Computer File Copy without calling
@@ -2054,22 +2085,21 @@ def _download_paper(**kwargs):
     try:
         from src.backend.security.access_control import get_effective_user_concept_id
 
-        from .arxiv_proxy_mcp import _find_cached_pdf_for_arxiv_id
-
         with _with_namespace_actor_override(namespace_override):
             user_concept_id = get_effective_user_concept_id()
-        if user_concept_id:
-            storage_path = _get_arxiv_cache_root()
-            cached = _find_cached_pdf_for_arxiv_id(storage_path, str(arxiv_id))
-            if cached is not None:
-                finalised = _finalise_cached_paper(
-                    arxiv_id=arxiv_id,
-                    name=kwargs.get("filename"),
-                    delete_local_cache=kwargs.get("delete_local_cache"),
-                    namespace=namespace_override,
-                )
-                if isinstance(finalised, dict) and finalised.get("success") is True:
-                    return finalised
+        if user_concept_id and bool(cache_diagnostics.get("has_cached_pdf")):
+            finalised = _finalise_cached_paper(
+                arxiv_id=arxiv_id,
+                name=kwargs.get("filename"),
+                delete_local_cache=kwargs.get("delete_local_cache"),
+                namespace=namespace_override,
+            )
+            if isinstance(finalised, dict):
+                finalised.setdefault("cache_diagnostics", cache_diagnostics)
+                finalised.setdefault("cache_recovery_action", cache_recovery_action)
+                finalised.setdefault("acquisition_path", "finalise_cached_pdf")
+            if isinstance(finalised, dict) and finalised.get("success") is True:
+                return finalised
     except Exception:
         # Best-effort: if anything goes wrong with cache detection/finalisation,
         # fall back to the normal download behaviour.
@@ -2086,6 +2116,13 @@ def _download_paper(**kwargs):
                 stored = dict(stored)
                 if _download_result_is_materially_successful(stored):
                     stored.setdefault("success", True)
+                stored.setdefault("cache_diagnostics", cache_diagnostics)
+                stored.setdefault("cache_recovery_action", cache_recovery_action)
+                if cache_diagnostics.get("cache_state") == "markdown_only_partial_cache":
+                    stored.setdefault("cache_recovery_performed", True)
+                    stored.setdefault("acquisition_path", "reacquire_partial_cache")
+                else:
+                    stored.setdefault("acquisition_path", "download_from_source")
 
             # If authenticated, always register the Computer File Copy (even on a fresh
             # download). The proxy already stores the PDF in durable blob storage.
@@ -2213,13 +2250,25 @@ def _download_paper(**kwargs):
             return make_error_response(
                 "arxiv_proxy_error",
                 str(e),
-                details={"arxiv_id": arxiv_id, "exception_type": "ArxivProxyError"},
+                details={
+                    "arxiv_id": arxiv_id,
+                    "exception_type": "ArxivProxyError",
+                    "cache_state": cache_diagnostics.get("cache_state"),
+                    "cache_diagnostics": cache_diagnostics,
+                    "recommended_recovery_action": cache_recovery_action,
+                },
             )
         except Exception as e:
             return make_error_response(
                 "exception",
                 f"Unexpected error: {e}",
-                details={"arxiv_id": arxiv_id, "exception_type": type(e).__name__},
+                details={
+                    "arxiv_id": arxiv_id,
+                    "exception_type": type(e).__name__,
+                    "cache_state": cache_diagnostics.get("cache_state"),
+                    "cache_diagnostics": cache_diagnostics,
+                    "recommended_recovery_action": cache_recovery_action,
+                },
             )
 
     return _run_async_compat(_async_download)
@@ -2255,6 +2304,10 @@ def _finalise_cached_paper(**kwargs):
         )
 
         namespace_override = _normalise_namespace_override(kwargs.get("namespace"))
+        cache_diagnostics = _inspect_arxiv_cache(str(arxiv_id))
+        cache_recovery_action = _recommended_arxiv_cache_recovery_action(
+            cache_diagnostics
+        )
         with _with_namespace_actor_override(namespace_override):
             user_concept_id = get_effective_user_concept_id()
         if not user_concept_id:
@@ -2262,16 +2315,27 @@ def _finalise_cached_paper(**kwargs):
                 "success": False,
                 "error": "not_authenticated",
                 "message": "Authentication required to register file copies.",
+                "cache_diagnostics": cache_diagnostics,
+                "cache_recovery_action": cache_recovery_action,
             }
 
         storage_path = _get_arxiv_cache_root()
 
         cached = _find_cached_pdf_for_arxiv_id(storage_path, str(arxiv_id))
         if cached is None:
+            message = f"No cached arXiv PDF found for {arxiv_id} under {storage_path}"
+            if cache_diagnostics.get("cache_state") == "markdown_only_partial_cache":
+                message = (
+                    f"No cached arXiv PDF found for {arxiv_id} under {storage_path}; "
+                    "Markdown exists without the reusable PDF, so the cache needs "
+                    "reacquisition before finalisation can succeed."
+                )
             return {
                 "success": False,
                 "error": "cached_pdf_not_found",
-                "message": f"No cached arXiv PDF found for {arxiv_id} under {storage_path}",
+                "message": message,
+                "cache_diagnostics": cache_diagnostics,
+                "cache_recovery_action": cache_recovery_action,
             }
 
         data = cached.read_bytes()
@@ -2425,18 +2489,28 @@ def _finalise_cached_paper(**kwargs):
             "local_cache_deleted": local_deleted,
             "local_cache_delete_error": local_error,
             "markdown": markdown_payload,
+            "cache_diagnostics": cache_diagnostics,
+            "cache_recovery_action": cache_recovery_action,
         }
     except BlobUploadError as exc:
         return make_error_response(
             "blob_upload_failed",
             f"Blob store upload failed: {exc}",
-            details={"exception_type": "BlobUploadError", "arxiv_id": arxiv_id},
+            details={
+                "exception_type": "BlobUploadError",
+                "arxiv_id": arxiv_id,
+                "cache_diagnostics": _inspect_arxiv_cache(str(arxiv_id)),
+            },
         )
     except Exception as exc:
         return make_error_response(
             "exception",
             f"Unexpected error: {exc}",
-            details={"exception_type": type(exc).__name__, "arxiv_id": arxiv_id},
+            details={
+                "exception_type": type(exc).__name__,
+                "arxiv_id": arxiv_id,
+                "cache_diagnostics": _inspect_arxiv_cache(str(arxiv_id)),
+            },
         )
 
 

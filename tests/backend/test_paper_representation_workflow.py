@@ -3,6 +3,10 @@ from __future__ import annotations
 from src.backend.workflows.action_registry import ActionRegistry, WorkflowEnvironment
 from src.backend.workflows.durable.paper_representation_workflow import (
     ARXIV_DECIDE_ACQUISITION_MODE_ACTION_ID,
+    ARXIV_ACQUISITION_MODE_DOWNLOAD_FROM_SOURCE,
+    ARXIV_ACQUISITION_MODE_EXISTING_FILE_COPY,
+    ARXIV_ACQUISITION_MODE_FINALISE_CACHED_PDF,
+    ARXIV_ACQUISITION_MODE_REACQUIRE_PARTIAL_CACHE,
     ARXIV_NORMALISE_SOURCE_ACTION_ID,
     SCHOLARLY_PAPER_ENRICH_ACTION_ID,
     SCHOLARLY_PAPER_MATERIALISE_ACTION_ID,
@@ -70,10 +74,28 @@ def test_normalise_inputs_extracts_publication_date_from_metadata() -> None:
     assert result.outputs["publication_date"] == "2026-03-23"
 
 
-def test_arxiv_decide_acquisition_mode_prefers_existing_file_copy() -> None:
+def test_arxiv_decide_acquisition_mode_prefers_existing_file_copy(monkeypatch) -> None:
+    from src.backend.workflows.durable import paper_representation_workflow as mod
+
     registry = ActionRegistry()
     register_paper_representation_actions(registry)
 
+    monkeypatch.setattr(mod, "_resolve_user_concept_id", lambda _request: "#V#user_test")
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.arxiv_proxy_mcp.inspect_cached_arxiv_artifacts",
+        lambda *, arxiv_id, storage_path=None: {
+            "schema_version": "arxiv_cache_state.v1",
+            "arxiv_id": arxiv_id,
+            "cache_root": "C:/tmp/arxiv_cache",
+            "cache_root_exists": True,
+            "cache_state": "cache_miss",
+            "has_cached_pdf": False,
+            "cached_pdf_path": None,
+            "has_cached_markdown": False,
+            "cached_markdown_path": None,
+            "partial_cache_without_pdf": False,
+        },
+    )
     result = registry.execute(
         ARXIV_DECIDE_ACQUISITION_MODE_ACTION_ID,
         inputs={
@@ -87,7 +109,129 @@ def test_arxiv_decide_acquisition_mode_prefers_existing_file_copy() -> None:
     assert result.status == "success"
     assert result.outputs["result"] is False
     assert result.outputs["acquisition_required"] is False
-    assert result.outputs["acquisition_mode"] == "existing_file_copy"
+    assert result.outputs["acquisition_mode"] == ARXIV_ACQUISITION_MODE_EXISTING_FILE_COPY
+
+
+def test_arxiv_decide_acquisition_mode_prefers_finalise_for_cached_pdf(
+    monkeypatch,
+) -> None:
+    from src.backend.workflows.durable import paper_representation_workflow as mod
+
+    registry = ActionRegistry()
+    register_paper_representation_actions(registry)
+
+    monkeypatch.setattr(mod, "_resolve_user_concept_id", lambda _request: "#V#user_test")
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.arxiv_proxy_mcp.inspect_cached_arxiv_artifacts",
+        lambda *, arxiv_id, storage_path=None: {
+            "schema_version": "arxiv_cache_state.v1",
+            "arxiv_id": arxiv_id,
+            "cache_root": "C:/tmp/arxiv_cache",
+            "cache_root_exists": True,
+            "cache_state": "cached_pdf_available",
+            "has_cached_pdf": True,
+            "cached_pdf_path": "C:/tmp/arxiv_cache/2603.14482.pdf",
+            "has_cached_markdown": True,
+            "cached_markdown_path": "C:/tmp/arxiv_cache/2603.14482.md",
+            "partial_cache_without_pdf": False,
+        },
+    )
+
+    result = registry.execute(
+        ARXIV_DECIDE_ACQUISITION_MODE_ACTION_ID,
+        inputs={"arxiv_id": "2603.14482"},
+        context={},
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert result.status == "success"
+    assert result.outputs["result"] is True
+    assert result.outputs["acquisition_required"] is True
+    assert result.outputs["acquisition_mode"] == ARXIV_ACQUISITION_MODE_FINALISE_CACHED_PDF
+    assert result.outputs["cache_state"] == "cached_pdf_available"
+    assert result.outputs["cached_pdf_path"] == "C:/tmp/arxiv_cache/2603.14482.pdf"
+    assert result.outputs["partial_cache_without_pdf"] is False
+
+
+def test_arxiv_decide_acquisition_mode_marks_partial_cache_for_reacquisition(
+    monkeypatch,
+) -> None:
+    from src.backend.workflows.durable import paper_representation_workflow as mod
+
+    registry = ActionRegistry()
+    register_paper_representation_actions(registry)
+
+    monkeypatch.setattr(mod, "_resolve_user_concept_id", lambda _request: "#V#user_test")
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.arxiv_proxy_mcp.inspect_cached_arxiv_artifacts",
+        lambda *, arxiv_id, storage_path=None: {
+            "schema_version": "arxiv_cache_state.v1",
+            "arxiv_id": arxiv_id,
+            "cache_root": "C:/tmp/arxiv_cache",
+            "cache_root_exists": True,
+            "cache_state": "markdown_only_partial_cache",
+            "has_cached_pdf": False,
+            "cached_pdf_path": None,
+            "has_cached_markdown": True,
+            "cached_markdown_path": "C:/tmp/arxiv_cache/2603.14482.md",
+            "partial_cache_without_pdf": True,
+        },
+    )
+
+    result = registry.execute(
+        ARXIV_DECIDE_ACQUISITION_MODE_ACTION_ID,
+        inputs={"arxiv_id": "2603.14482"},
+        context={},
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert result.status == "success"
+    assert result.outputs["result"] is True
+    assert result.outputs["acquisition_required"] is True
+    assert (
+        result.outputs["acquisition_mode"]
+        == ARXIV_ACQUISITION_MODE_REACQUIRE_PARTIAL_CACHE
+    )
+    assert result.outputs["cache_state"] == "markdown_only_partial_cache"
+    assert result.outputs["cached_markdown_path"] == "C:/tmp/arxiv_cache/2603.14482.md"
+    assert result.outputs["partial_cache_without_pdf"] is True
+
+
+def test_arxiv_decide_acquisition_mode_falls_back_to_download_without_cache(
+    monkeypatch,
+) -> None:
+    from src.backend.workflows.durable import paper_representation_workflow as mod
+
+    registry = ActionRegistry()
+    register_paper_representation_actions(registry)
+
+    monkeypatch.setattr(mod, "_resolve_user_concept_id", lambda _request: "#V#user_test")
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.arxiv_proxy_mcp.inspect_cached_arxiv_artifacts",
+        lambda *, arxiv_id, storage_path=None: {
+            "schema_version": "arxiv_cache_state.v1",
+            "arxiv_id": arxiv_id,
+            "cache_root": "C:/tmp/arxiv_cache",
+            "cache_root_exists": True,
+            "cache_state": "cache_miss",
+            "has_cached_pdf": False,
+            "cached_pdf_path": None,
+            "has_cached_markdown": False,
+            "cached_markdown_path": None,
+            "partial_cache_without_pdf": False,
+        },
+    )
+
+    result = registry.execute(
+        ARXIV_DECIDE_ACQUISITION_MODE_ACTION_ID,
+        inputs={"arxiv_id": "2603.14482"},
+        context={},
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert result.status == "success"
+    assert result.outputs["acquisition_mode"] == ARXIV_ACQUISITION_MODE_DOWNLOAD_FROM_SOURCE
+    assert result.outputs["partial_cache_without_pdf"] is False
 
 
 def test_verify_representation_requires_publication_date_for_arxiv_profile(

@@ -37,6 +37,10 @@ SCHOLARLY_PAPER_RESOLVE_AUTHORS_ACTION_ID = "scholarly_paper.resolve_authors"
 SCHOLARLY_PAPER_VERIFY_ACTION_ID = "scholarly_paper.verify_representation"
 ARXIV_NORMALISE_SOURCE_ACTION_ID = "arxiv.normalise_source"
 ARXIV_DECIDE_ACQUISITION_MODE_ACTION_ID = "arxiv.decide_acquisition_mode"
+ARXIV_ACQUISITION_MODE_EXISTING_FILE_COPY = "existing_file_copy"
+ARXIV_ACQUISITION_MODE_FINALISE_CACHED_PDF = "finalise_cached_pdf"
+ARXIV_ACQUISITION_MODE_REACQUIRE_PARTIAL_CACHE = "reacquire_partial_cache"
+ARXIV_ACQUISITION_MODE_DOWNLOAD_FROM_SOURCE = "download_from_source"
 
 
 def _clean_text(value: Any) -> str:
@@ -780,6 +784,10 @@ def _build_arxiv_normalise_source_handler():
 
 def _build_arxiv_decide_acquisition_mode_handler():
     def _handle(request: WorkflowActionRequest) -> WorkflowActionResult:
+        from ...integrations.internal_mcp.arxiv_proxy_mcp import (
+            inspect_cached_arxiv_artifacts,
+        )
+
         file_copy_concept_id = _first_non_empty_text(
             request.inputs.get("file_copy_concept_id"),
             request.data.get("file_copy_concept_id"),
@@ -791,7 +799,23 @@ def _build_arxiv_decide_acquisition_mode_handler():
                 error="arxiv_identifier_missing",
             )
 
-        acquisition_required = not bool(file_copy_concept_id)
+        cache_diagnostics = inspect_cached_arxiv_artifacts(arxiv_id=arxiv_id)
+        cache_state = _clean_text(cache_diagnostics.get("cache_state")) or "cache_miss"
+        can_register_file_copy = bool(_resolve_user_concept_id(request))
+
+        if file_copy_concept_id:
+            acquisition_mode = ARXIV_ACQUISITION_MODE_EXISTING_FILE_COPY
+            acquisition_required = False
+        elif can_register_file_copy and bool(cache_diagnostics.get("has_cached_pdf")):
+            acquisition_mode = ARXIV_ACQUISITION_MODE_FINALISE_CACHED_PDF
+            acquisition_required = True
+        elif cache_state == "markdown_only_partial_cache":
+            acquisition_mode = ARXIV_ACQUISITION_MODE_REACQUIRE_PARTIAL_CACHE
+            acquisition_required = True
+        else:
+            acquisition_mode = ARXIV_ACQUISITION_MODE_DOWNLOAD_FROM_SOURCE
+            acquisition_required = True
+
         return WorkflowActionResult(
             status="success",
             outputs={
@@ -799,9 +823,15 @@ def _build_arxiv_decide_acquisition_mode_handler():
                 "acquisition_required": acquisition_required,
                 "arxiv_id": arxiv_id,
                 "file_copy_concept_id": file_copy_concept_id,
-                "acquisition_mode": (
-                    "download_or_finalise" if acquisition_required else "existing_file_copy"
+                "acquisition_mode": acquisition_mode,
+                "cache_state": cache_state,
+                "cache_diagnostics": cache_diagnostics,
+                "cached_pdf_path": cache_diagnostics.get("cached_pdf_path"),
+                "cached_markdown_path": cache_diagnostics.get("cached_markdown_path"),
+                "partial_cache_without_pdf": bool(
+                    cache_diagnostics.get("partial_cache_without_pdf")
                 ),
+                "can_register_file_copy": can_register_file_copy,
             },
         )
 

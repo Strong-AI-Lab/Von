@@ -605,6 +605,51 @@
           },
           {
             "action_id": "arxiv.decide_acquisition_mode",
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "key": "acquisition_mode",
+                  "kind": "context_value_equals",
+                  "value": "existing_file_copy"
+                },
+                "reason": "existing_file_copy_available",
+                "to_state": "delegate_to_general_paper_workflow"
+              },
+              {
+                "condition_spec": {
+                  "key": "acquisition_mode",
+                  "kind": "context_value_equals",
+                  "value": "finalise_cached_pdf"
+                },
+                "reason": "finalise_cached_pdf",
+                "to_state": "finalise_cached_pdf"
+              },
+              {
+                "condition_spec": {
+                  "key": "acquisition_mode",
+                  "kind": "context_value_equals",
+                  "value": "reacquire_partial_cache"
+                },
+                "reason": "recover_partial_cache",
+                "to_state": "recover_partial_cache_state"
+              },
+              {
+                "condition_spec": {
+                  "key": "acquisition_mode",
+                  "kind": "context_value_equals",
+                  "value": "download_from_source"
+                },
+                "reason": "download_from_source",
+                "to_state": "download_or_finalise"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "unexpected_acquisition_mode",
+                "to_state": "failed"
+              }
+            ],
             "context_input_mapping_specs": [
               {
                 "concept_id": "#V#workflow_mapping_arxiv_paper_representation_workflow_decide_acquisition_mode_arxiv_id_to_arxiv_id_parameter",
@@ -621,8 +666,6 @@
             ],
             "execution_mode": "deterministic",
             "on_failure_state": "failed",
-            "on_false_state": "delegate_to_general_paper_workflow",
-            "on_true_state": "download_or_finalise",
             "state_id": "decide_acquisition_mode",
             "tool_output_mapping_specs": [
               {
@@ -645,6 +688,63 @@
                 "context_key": "file_copy_concept_id",
                 "tool_output_field": "file_copy_concept_id"
               }
+            ]
+          },
+          {
+            "action_id": "finalise_cached_paper",
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_arxiv_paper_representation_workflow_finalise_cached_pdf_arxiv_id_to_arxiv_id_parameter",
+                "context_key": "arxiv_id",
+                "required": true,
+                "tool_param": "arxiv_id"
+              }
+            ],
+            "execution_mode": "deterministic",
+            "next_state": "delegate_to_general_paper_workflow",
+            "on_failure_state": "failed",
+            "state_id": "finalise_cached_pdf",
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_arxiv_paper_representation_workflow_finalise_cached_pdf_result_arxiv_id_to_arxiv_id",
+                "context_key": "arxiv_id",
+                "tool_output_field": "result.arxiv_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_arxiv_paper_representation_workflow_finalise_cached_pdf_result_computer_file_copy_concept_id_to_file_copy_concept_id",
+                "context_key": "file_copy_concept_id",
+                "tool_output_field": "result.computer_file_copy_concept_id"
+              }
+            ]
+          },
+          {
+            "action_id": "workflow_control.context_set",
+            "execution_mode": "deterministic",
+            "next_state": "download_or_finalise",
+            "on_failure_state": "failed",
+            "state_id": "recover_partial_cache_state",
+            "static_input_bindings": [
+              [
+                "assignments",
+                [
+                  {
+                    "key": "cache_recovery_required",
+                    "value": true
+                  },
+                  {
+                    "key": "cache_recovery_action",
+                    "value": "reacquire_partial_cache"
+                  },
+                  {
+                    "key": "cache_recovery_reason",
+                    "value_from_context": "cache_state"
+                  },
+                  {
+                    "key": "cache_recovery_markdown_path",
+                    "value_from_context": "cached_markdown_path"
+                  }
+                ]
+              ]
             ]
           },
           {

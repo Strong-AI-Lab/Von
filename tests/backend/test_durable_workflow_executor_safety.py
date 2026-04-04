@@ -335,6 +335,75 @@ def test_durable_executor_still_fails_without_on_failure_route() -> None:
     )
 
 
+def test_durable_executor_preserves_failed_action_outputs_in_step_envelopes() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#durable_failure_snapshot",
+        initial_state="risky",
+        states={
+            "risky": WorkflowStateSpec(
+                state_id="risky",
+                actions=(WorkflowActionInvocation(action_id="risky.action"),),
+                transitions=(
+                    WorkflowTransitionSpec(
+                        to_state="recover",
+                        reason="on_failure",
+                        condition=lambda ctx: bool(ctx.get("last_action_failed")),
+                    ),
+                ),
+            ),
+            "recover": WorkflowStateSpec(state_id="recover", terminal=True),
+        },
+    )
+
+    registry = ActionRegistry()
+    registry.register(
+        ActionSpec(
+            action_id="risky.action",
+            handler=lambda _request: WorkflowActionResult(
+                status="failed",
+                error="boom",
+                outputs={
+                    "cache_state": "markdown_only_partial_cache",
+                    "partial_cache_without_pdf": True,
+                },
+            ),
+        )
+    )
+
+    manager = MagicMock()
+    manager.get_instance.return_value = _build_instance(definition.workflow_id)
+    manager.is_cancelled.return_value = False
+    manager.extend_lock.return_value = True
+    manager.checkpoint.return_value = True
+
+    executor = DurableWorkflowExecutor(registry=registry, instance_manager=manager)
+
+    with (
+        patch(
+            "src.backend.languagemodels.llm_interface.get_llm_client",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "src.backend.languagemodels.llm_interface.get_active_model_name",
+            return_value="test-model",
+        ),
+    ):
+        result = executor.run_durable(
+            "instance-1",
+            definition,
+            resume_from_checkpoint=False,
+        )
+
+    assert result.completed is True
+    envelopes = result.data.get("workflow_step_result_envelopes")
+    assert isinstance(envelopes, list)
+    assert len(envelopes) == 1
+    assert envelopes[0]["action_outcome"] == "failure"
+    assert envelopes[0]["output_payload"]["cache_state"] == "markdown_only_partial_cache"
+    assert envelopes[0]["output_payload"]["partial_cache_without_pdf"] is True
+    assert "cache_state" not in result.data
+
+
 def test_durable_executor_routes_to_on_unknown_recovery() -> None:
     """Unknown outcomes should route via explicit `on_unknown` transitions."""
     definition = WorkflowDefinition(

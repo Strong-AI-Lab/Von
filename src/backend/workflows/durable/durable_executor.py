@@ -484,13 +484,11 @@ class DurableWorkflowExecutor:
 
                 action_outcome = normalise_action_outcome(result.status)
                 action_output_snapshot: dict[str, Any] = {}
-                if (
-                    action_outcome != WORKFLOW_ACTION_OUTCOME_FAILURE
-                    and isinstance(result.outputs, Mapping)
-                ):
+                if isinstance(result.outputs, Mapping):
                     action_output_snapshot = snapshot_workflow_mapping(
                         result.outputs
                     )
+                if action_outcome != WORKFLOW_ACTION_OUTCOME_FAILURE:
                     context.update(action_output_snapshot)
                     apply_tool_output_context_mappings(
                         context=context,

@@ -204,6 +204,18 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
         state_id="decide_acquisition_mode",
     )
+    finalise_cached_pdf_state_id = authority_service._step_concept_id(
+        workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+        state_id="finalise_cached_pdf",
+    )
+    recover_partial_cache_state_id = authority_service._step_concept_id(
+        workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+        state_id="recover_partial_cache_state",
+    )
+    delegate_state_id = authority_service._step_concept_id(
+        workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+        state_id="delegate_to_general_paper_workflow",
+    )
     decide_acquisition_mode_action = arxiv_definition.states[
         decide_acquisition_mode_state_id
     ].actions[0]
@@ -212,6 +224,43 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         "$mapping_concept_id": "#V#workflow_mapping_arxiv_paper_representation_workflow_decide_acquisition_mode_file_copy_concept_id_to_file_copy_concept_id_parameter",
         "$required": False,
     }
+    decide_transitions = {
+        transition.reason: transition
+        for transition in arxiv_definition.states[
+            decide_acquisition_mode_state_id
+        ].transitions
+    }
+    assert decide_transitions["existing_file_copy_available"].to_state == delegate_state_id
+    assert decide_transitions["existing_file_copy_available"].condition_spec == {
+        "key": "acquisition_mode",
+        "kind": "context_value_equals",
+        "value": "existing_file_copy",
+    }
+    assert decide_transitions["finalise_cached_pdf"].to_state == finalise_cached_pdf_state_id
+    assert decide_transitions["recover_partial_cache"].to_state == (
+        recover_partial_cache_state_id
+    )
+    assert decide_transitions["download_from_source"].to_state == download_state_id
+
+    finalise_action = arxiv_definition.states[finalise_cached_pdf_state_id].actions[0]
+    assert finalise_action.action_id == "finalise_cached_paper"
+    assert finalise_action.inputs.get("arxiv_id") == {
+        "$context_key": "arxiv_id",
+        "$mapping_concept_id": "#V#workflow_mapping_arxiv_paper_representation_workflow_finalise_cached_pdf_arxiv_id_to_arxiv_id_parameter",
+        "$required": True,
+    }
+
+    recover_action = arxiv_definition.states[recover_partial_cache_state_id].actions[0]
+    assert recover_action.action_id == "workflow_control.context_set"
+    assert recover_action.inputs.get("assignments") == [
+        {"key": "cache_recovery_required", "value": True},
+        {"key": "cache_recovery_action", "value": "reacquire_partial_cache"},
+        {"key": "cache_recovery_reason", "value_from_context": "cache_state"},
+        {
+            "key": "cache_recovery_markdown_path",
+            "value_from_context": "cached_markdown_path",
+        },
+    ]
 
     scholarly_verify_state_id = authority_service._step_concept_id(
         workflow_id=SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID,

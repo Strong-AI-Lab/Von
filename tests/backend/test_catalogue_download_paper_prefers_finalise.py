@@ -1,7 +1,6 @@
 from typing import Any, cast
 
 
-
 def test_download_paper_prefers_finalise_when_cached_and_authenticated(
     monkeypatch, tmp_path
 ):
@@ -60,6 +59,9 @@ def test_download_paper_prefers_finalise_when_cached_and_authenticated(
     assert result["success"] is True
     assert called["count"] == 1
     assert called["args"]["arxiv_id"] == "2506.16596v2"
+    assert result["cache_diagnostics"]["cache_state"] == "cached_pdf_available"
+    assert result["cache_recovery_action"] == "finalise_cached_pdf"
+    assert result["acquisition_path"] == "finalise_cached_pdf"
 
 
 def test_download_paper_falls_back_when_not_authenticated(monkeypatch, tmp_path):
@@ -173,6 +175,47 @@ def test_download_paper_registers_file_copy_when_authenticated(monkeypatch, tmp_
     # And local cache is deleted by default when authenticated.
     assert result.get("local_cache_deleted") is True
     assert pdf_path.exists() is False
+
+
+def test_download_paper_reports_partial_cache_diagnostics_on_proxy_failure(
+    monkeypatch, tmp_path
+):
+    cache_dir = tmp_path / "arxiv_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    markdown_path = cache_dir / "2603.14482.md"
+    markdown_path.write_text("# Partial cache only\n", encoding="utf-8")
+    monkeypatch.setenv("ARXIV_CACHE_PATH", str(cache_dir))
+
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: "#V#user_test",
+    )
+
+    from src.backend.integrations.internal_mcp import catalogue
+    from src.backend.integrations.internal_mcp.arxiv_proxy_mcp import ArxivProxyError
+
+    class _Proxy:
+        async def download_paper(self, *, arxiv_id: str, filename=None):
+            raise ArxivProxyError(f"download failed for {arxiv_id}")
+
+    async def _fake_get_proxy():
+        return _Proxy()
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.arxiv_proxy_mcp.get_arxiv_proxy",
+        _fake_get_proxy,
+    )
+
+    result = catalogue._download_paper(arxiv_id="2603.14482")
+
+    assert result["success"] is False
+    assert result["error_code"] == "arxiv_proxy_error"
+    details = cast(dict[str, Any], result["error_details"])
+    assert details["cache_state"] == "markdown_only_partial_cache"
+    assert details["recommended_recovery_action"] == "reacquire_pdf_from_source"
+    cache_diagnostics = cast(dict[str, Any], details["cache_diagnostics"])
+    assert cache_diagnostics["cached_markdown_path"] == str(markdown_path)
+    assert cache_diagnostics["partial_cache_without_pdf"] is True
 
 
 def test_materialise_scholarly_representation_for_file_copy_prefers_explicit_arxiv_path(
