@@ -19,7 +19,7 @@ import logging
 import threading
 import time
 from collections import defaultdict
-from typing import Any, Dict, Iterable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 from ..db.repositories.concepts_repository import ConceptsRepository
 from ..db.repositories.text_value_repository import TextRelationsRepository

@@ -13,11 +13,10 @@ from __future__ import annotations
 import logging
 import queue
 import threading
-import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, Generator, List, Optional, Set
+from typing import Dict, Generator, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 

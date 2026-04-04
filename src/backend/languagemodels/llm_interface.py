@@ -1,8 +1,32 @@
+from abc import ABC, abstractmethod
+from collections import defaultdict
 import logging
 import os
-import sys
+import time
 import warnings
+from typing import (
+    Optional,
+    List,
+    Dict,
+    Any,
+    TypedDict,
+    Literal,
+    Sequence,
+    cast,
+)
+
+import openai
 import requests
+
+from ..services.llm_api_key_resolution import get_gemini_api_key
+from ..services.settings_service import get_openai_env_var, resolve_llm_setting
+from .structured_tool_calling import (
+    LLMClientConfig,
+    LLMResponse,
+    ToolDefinition,
+    get_llm_client as get_structured_client,
+)
+from .structured_tool_calling.client import resolve_safe_temperature_for_model
 
 try:  # Optional dependency (local model runtime) — imported lazily to avoid
     # the module-level Client() creation in ollama/__init__.py which calls
@@ -26,28 +50,6 @@ def _import_ollama():
 
         ollama = _ollama
     return ollama
-import openai
-from abc import ABC, abstractmethod
-
-# Structured tool calling support (JVNAUTOSCI-799)
-from .structured_tool_calling import (
-    LLMResponse,
-    ToolDefinition,
-    get_llm_client as get_structured_client,
-    LLMClientConfig,
-)
-from .structured_tool_calling.client import resolve_safe_temperature_for_model
-from typing import (
-    Optional,
-    List,
-    Dict,
-    Any,
-    TypedDict,
-    Literal,
-    Sequence,
-    TYPE_CHECKING,
-    cast,
-)
 
 try:
     from google import genai  # type: ignore
@@ -57,10 +59,6 @@ except ImportError:  # pragma: no cover - optional dependency
 if genai is not None:
     # Cast to Any so Pyright doesn't complain about dynamic attrs
     genai = cast(Any, genai)
-from ..services.settings_service import resolve_llm_setting, get_openai_env_var
-from ..services.llm_api_key_resolution import get_gemini_api_key
-import time
-from collections import defaultdict
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -1520,7 +1518,7 @@ def get_llm_client(
             )
             provider = resolved_provider
 
-    logger.info(f"--- LLM Client Selection ---")
+    logger.info("--- LLM Client Selection ---")
     logger.info(f"Provider: {provider}, Model: {model}, Host: {host}")
 
     if (

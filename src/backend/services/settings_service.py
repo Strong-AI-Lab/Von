@@ -4,11 +4,9 @@ import os
 from typing import Any, Optional, Dict, List, Mapping, Sequence
 from pymongo.results import UpdateResult
 from pymongo.errors import OperationFailure
-from datetime import datetime, timezone
 from ..utils.time_utils import utc_now
 from ..db.mongo_client import (
     APPLICATION_SETTINGS_COLLECTION_NAME,
-    get_concepts_collection,
     get_text_values_collection,
     get_text_relations_collection,
 )

@@ -5,7 +5,6 @@ Unit tests for task creation, retrieval, status updates, and assignment.
 
 from __future__ import annotations
 
-import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock, patch
@@ -20,10 +19,7 @@ from src.backend.services.task_management_service import (
     TASK_STATUS_CANCELLED,
     VALID_TASK_STATUSES,
     VALID_PRIORITIES,
-    PRIORITY_LOW,
     PRIORITY_MEDIUM,
-    PRIORITY_HIGH,
-    TaskManagementError,
     TaskNotFoundError,
     InvalidTaskDataError,
     create_task,

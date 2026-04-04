@@ -1,19 +1,26 @@
 # --- Standard Library Imports ---
-import os
-import threading
-from pathlib import Path
-import hashlib
-import json
-import re
-import traceback
-import hashlib
-from datetime import datetime, timezone
-from ..utils.time_utils import utc_now, utc_iso_now
-import logging
-import inspect
-from typing import Optional, List, Dict, Any, Union
-from typing import Any, Dict, List, Optional, Set, Iterable, Union, Tuple
 from collections import defaultdict
+from datetime import datetime, timezone
+import hashlib
+import importlib
+import inspect
+import logging
+import os
+from pathlib import Path
+import re
+import threading
+import traceback
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+
+from bson import errors as bson_errors  # ObjectId import corrected
+from bson.objectid import ObjectId
+from pymongo.errors import PyMongoError  # Added OperationFailure
+
+from ..db.repositories.concepts_repository import (
+    ConceptsRepository,
+)  # Added repository import
+from ..db.repositories.text_value_repository import TextRelationsRepository
+from ..utils.time_utils import utc_iso_now
 
 # Critical Note: Concept Files XX_Type.md are in the XX directory that contains directories containing their children
 # e.g. Thing contains Thing_Type.md and UnderspecifiedLocation/  and UnderspecifiedLocation contains UnderspecifiedLocation_Type.md
@@ -141,19 +148,7 @@ def extract_salient_scope_lists(
         "unclassified": [],
     }
 
-
-# --- Third-Party Imports ---
-import requests
-import bson.json_util as json_util
-from pymongo.collection import Collection
-from pymongo.errors import PyMongoError, OperationFailure  # Added OperationFailure
-from bson.objectid import ObjectId
-from bson import errors as bson_errors  # ObjectId import corrected
-from bson.errors import InvalidId  # Ensure InvalidId is imported
-
 # --- Optional markdown import (avoid hard dependency / lint error) ---
-import importlib
-
 _markdown_mod = None
 try:  # Attempt dynamic discovery first to suppress static unresolved-import warnings
     if importlib.util.find_spec("markdown") is not None:  # type: ignore[attr-defined]
@@ -178,18 +173,12 @@ else:
 try:
     from ..db.mongo_client import (
         get_db,
-        get_concepts_collection,
         CONCEPTS_COLLECTION_NAME,
     )
-except ImportError:
+except ImportError:  # pragma: no cover - defensive fallback for direct script usage
     # Fallback for direct script usage or testing
     from ..db.mongo_client import get_db
-
-from ..db.repositories.concepts_repository import (
-    ConceptsRepository,
-)  # Added repository import
-
-from ..db.repositories.text_value_repository import TextRelationsRepository
+    CONCEPTS_COLLECTION_NAME = "concepts"
 
 # --- Cached preferred language to avoid repeated DB calls ---
 _cached_preferred_language = None
@@ -2236,9 +2225,6 @@ def get_concept_hierarchical_paths(
             current_doc = fetched_concepts.get(current_id)
             if not current_doc:
                 return
-
-            # Get display name
-            display_name = get_concept_display_name_with_names_fallback(current_doc)
 
             # Add current to path
             new_path_ids = current_path_ids + [current_id]

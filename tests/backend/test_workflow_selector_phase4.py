@@ -8,7 +8,6 @@ import pytest
 import src.backend.db.mongo_client as mongo_client_module
 import src.backend.services.workflow_selection_experience as experience_module
 import src.backend.services.workflow_selection_policy_service as policy_module
-from src.backend.workflows import WorkflowRegistry
 from src.backend.workflows.definitions import (
     CHAT_ASSISTANT_WORKFLOW_ID,
     TODO_REFRESH_WORKFLOW_ID,

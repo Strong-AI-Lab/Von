@@ -7,8 +7,7 @@ Tests the semantic search path in concept_search_service, including:
 """
 
 import pytest
-from unittest.mock import patch, MagicMock, AsyncMock
-from typing import Any, Dict, List
+from unittest.mock import patch
 
 from src.backend.services.concept_search_service import search_concepts
 from src.backend.services.concept_embedding_service import (
@@ -81,7 +80,7 @@ class TestSearchConceptsSemanticMatchType:
             )
         ]
 
-        result = search_concepts(query="test query", match_type="semantic", limit=10)
+        search_concepts(query="test query", match_type="semantic", limit=10)
 
         mock_semantic.assert_called_once()
         # Check query was passed

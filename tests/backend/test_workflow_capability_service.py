@@ -14,7 +14,6 @@ import pytest
 from src.backend.services.workflow_capability_service import (
     BUILTIN_WORKFLOW_CAPABILITIES,
     WorkflowCapabilityIndex,
-    WorkflowCapabilityMatch,
     _tokenise,
     _workflow_id_to_name,
     build_workflow_capability_text,

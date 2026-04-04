@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Add hasContent text relation to the missing tool call detection prompt."""
 
+import importlib
 import sys
 from pathlib import Path
 
@@ -8,13 +9,15 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from src.backend.services.text_value_service import upsert_text_for_concept
+upsert_text_for_concept = importlib.import_module(
+    "src.backend.services.text_value_service"
+).upsert_text_for_concept
 
 # Read the prompt
 prompt_file = project_root / "utilities" / "detector_prompt.txt"
 prompt_text = prompt_file.read_text(encoding="utf-8")
 
-print(f"Adding hasContent relation to #V#missing_tool_call_detection_prompt")
+print("Adding hasContent relation to #V#missing_tool_call_detection_prompt")
 print(f"Prompt length: {len(prompt_text)} characters")
 
 # Add the content

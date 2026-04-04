@@ -1257,25 +1257,20 @@ def search_concepts(
                 # Check ALL names (including abbreviations and alternate forms) for best match
                 all_names_for_concept = text_relations_all_names.get(concept_id, [])
                 best_match_score = 0.0
-                best_match_name = primary_name
-                best_match_type = "NL"  # Default to natural language
 
                 # Check primary name first
                 if name_lower == query_lower:
                     best_match_score = 100.0
-                    best_match_name = primary_name
                 elif name_lower.startswith(query_lower):
                     match_ratio = (
                         len(query_lower) / len(name_lower) if len(name_lower) > 0 else 0
                     )
                     best_match_score = 90.0 + (match_ratio * 5.0)
-                    best_match_name = primary_name
                 elif query_lower in name_lower:
                     match_ratio = (
                         len(query_lower) / len(name_lower) if len(name_lower) > 0 else 0
                     )
                     best_match_score = 70.0 + (match_ratio * 15.0)
-                    best_match_name = primary_name
 
                 # Check all alternate names (abbreviations, codes, other languages)
                 for alt_name, name_type in all_names_for_concept:
@@ -1316,8 +1311,6 @@ def search_concepts(
                     # Update best match if this is better
                     if candidate_score > best_match_score:
                         best_match_score = candidate_score
-                        best_match_name = alt_name
-                        best_match_type = name_type
 
                 score = best_match_score
 

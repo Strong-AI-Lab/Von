@@ -394,7 +394,7 @@ class TestRuminationDispatch:
             patch(
                 "src.backend.workflows.durable.enrichment_workflow."
                 "_upsert_text_value_internal"
-            ) as mock_upsert,
+            ),
         ):
             mock_repo.find_one.return_value = {"concept_id": "#V#c1"}
 

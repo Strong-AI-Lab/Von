@@ -1,3 +1,5 @@
+import sys
+
 try:  # Optional dependency; script provides guidance if missing
     import ollama  # type: ignore
 except Exception as _import_err:  # pragma: no cover - environment dependent
@@ -6,7 +8,6 @@ except Exception as _import_err:  # pragma: no cover - environment dependent
         file=sys.stderr,
     )
     ollama = None  # type: ignore
-import sys
 
 # --- Configuration ---
 # Set this to the IP address of the server machine.
@@ -96,11 +97,11 @@ if __name__ == "__main__":
             print(f"Error: {e}", file=sys.stderr)
             print("\nPlease check the following:", file=sys.stderr)
             print(
-                f"1. The server script 'start_ollama_remote.py' is running on the server machine.",
+                "1. The server script 'start_ollama_remote.py' is running on the server machine.",
                 file=sys.stderr,
             )
             print(
-                f"2. The server machine's firewall allows incoming TCP connections on port 11434.",
+                "2. The server machine's firewall allows incoming TCP connections on port 11434.",
                 file=sys.stderr,
             )
             print(

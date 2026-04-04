@@ -1,6 +1,7 @@
 import os
 import base64
 import json
+import re
 import time
 from typing import Any, Dict, List, Sequence
 
@@ -277,9 +278,6 @@ def jira_add_attachment(
 # ---------------------------------------------------------
 # Markdown to Atlassian Document Format (ADF) converter
 # ---------------------------------------------------------
-import re
-from typing import Tuple
-
 
 def _markdown_to_adf(text: str) -> Dict[str, Any]:
     """Convert Markdown/plain text to Atlassian Document Format (ADF).

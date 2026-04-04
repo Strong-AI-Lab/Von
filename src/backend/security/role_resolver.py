@@ -16,7 +16,7 @@ Phase 3 Will Replace:
 - Add permission-based access control
 """
 
-from typing import Dict, Optional, Set
+from typing import Dict, Set
 
 
 # Hardcoded role mappings for Phase 1

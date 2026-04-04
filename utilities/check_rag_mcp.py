@@ -6,15 +6,16 @@ This is a developer utility script (not a pytest test).
 
 from __future__ import annotations
 
+import importlib
 import sys
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
-from src.backend.integrations.internal_mcp.catalogue import (
-    _rag_list_indexed,
-)  # noqa: E402
+_rag_list_indexed = importlib.import_module(
+    "src.backend.integrations.internal_mcp.catalogue"
+)._rag_list_indexed
 
 
 def main() -> int:

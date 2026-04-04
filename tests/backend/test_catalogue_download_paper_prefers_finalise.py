@@ -1,6 +1,5 @@
 from typing import Any, cast
 
-import pytest
 
 
 def test_download_paper_prefers_finalise_when_cached_and_authenticated(

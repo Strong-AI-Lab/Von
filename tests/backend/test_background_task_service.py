@@ -7,10 +7,8 @@ and result retrieval.
 from __future__ import annotations
 
 import time
-from concurrent.futures import Future
 from datetime import datetime, timezone
 from typing import Any, Mapping
-from unittest.mock import MagicMock
 
 import pytest
 

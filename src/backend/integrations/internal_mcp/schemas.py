@@ -9,11 +9,10 @@ fields) which is sufficient for the initial gateway scaffolding.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from typing import (
     Any,
     Dict,
-    Iterable,
     List,
     Mapping,
     MutableMapping,

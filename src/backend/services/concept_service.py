@@ -21,14 +21,13 @@
 # and other related functionalities.
 
 from pymongo.collection import Collection
-from pymongo.results import InsertOneResult, UpdateResult, DeleteResult
+from pymongo.results import InsertOneResult, DeleteResult
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 from bson import ObjectId
 import logging
 import os
 import uuid  # Added for GUID generation
-import traceback  # Added for error logging
 from datetime import datetime, timezone  # Ensure timezone is imported
 import requests  # Added for requests.exceptions.ConnectionError
 from typing import Dict, Any, Optional, List, Tuple, Iterable  # Added Tuple
@@ -43,7 +42,6 @@ except Exception:  # pragma: no cover
 
 
 from ..vontology.utils_vontology import (
-    VONTOLOGY_NODES_COLLECTION_NAME,
     get_vontology_node_and_descendant_ids,
     get_concept_details_from_db,
     update_vontology_node_in_db,
@@ -67,8 +65,6 @@ from ..db.mongo_client import get_db  # , get_database_name
 # If it is in src.backend.models, the original path should be fine if PYTHONPATH is set up correctly or it\'s a package.
 # For now, assuming the original path was intended to be resolvable.
 from ..models.concept_models import (
-    ConceptInteraction,
-    ConceptModel,
     InteractionEntry,
     interaction_session_collection_name,
 )  # Ensure this line is uncommented and correct
@@ -1200,7 +1196,7 @@ def enrich_concept_with_text_relations(
             if not existing_descriptions:
                 if logger:
                     logger.info(
-                        f"[migrate-on-read] Migrating legacy description to text relations"
+                        "[migrate-on-read] Migrating legacy description to text relations"
                     )
                 upsert_text_for_concept(
                     subject_concept_id=concept_id,
@@ -1216,7 +1212,7 @@ def enrich_concept_with_text_relations(
                     {"concept_id": concept_id}, {"$unset": {"description": ""}}
                 )
                 if logger:
-                    logger.info(f"[migrate-on-read] Removed legacy 'description' field")
+                    logger.info("[migrate-on-read] Removed legacy 'description' field")
             except Exception as e:
                 if logger:
                     logger.error(
@@ -1283,7 +1279,7 @@ def update_concept(concept_id: str, update_data: Dict[str, Any]) -> Dict[str, An
         # TODO: Implement proper validation based on concept type vs individual distinction
         del update_data["concept_id"]
         logger.info(
-            f"Removed concept_id from update payload to prevent duplicate key error"
+            "Removed concept_id from update payload to prevent duplicate key error"
         )
 
     # Prevent reintroducing legacy storage for descriptions.
@@ -2412,7 +2408,6 @@ def start_interaction_session(
 
     # Derive composite namespace for the session (user@org isolation for RAG/search)
     # Phase 1: Support basic user@org namespace with stubbed roles
-    import os
     from ..services.namespace_service import derive_namespace
     from ..security.role_resolver import get_user_role
 
@@ -3313,7 +3308,6 @@ def update_concept_description(concept_id: str, new_description: str) -> bool:
     from .annotation_extraction_service import (
         PROMPT_CONCEPT_ID,
     )  # local import to avoid cycles
-    import os
 
     if (
         os.environ.get("READ_ONLY_PROMPT_CONCEPT") in ("1", "true", "True")

@@ -6,7 +6,6 @@ from pathlib import Path
 
 from src.backend.integrations.internal_mcp.catalogue import (
     _github_create_branch,
-    _github_create_pull_request,
     _github_get_file_contents,
     _github_issue_read,
     _github_search_code,

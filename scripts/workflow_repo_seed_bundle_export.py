@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 from pathlib import Path
 import sys
@@ -10,9 +11,14 @@ repo_root_str = str(REPO_ROOT)
 if repo_root_str not in sys.path:
     sys.path.insert(0, repo_root_str)
 
-from src.backend.workflows.workflow_repo_seed_export_service import (
-    diff_repo_seed_workflow_bundle_from_authority,
-    write_repo_seed_workflow_bundle_from_authority,
+_workflow_repo_seed_export_service = importlib.import_module(
+    "src.backend.workflows.workflow_repo_seed_export_service"
+)
+diff_repo_seed_workflow_bundle_from_authority = (
+    _workflow_repo_seed_export_service.diff_repo_seed_workflow_bundle_from_authority
+)
+write_repo_seed_workflow_bundle_from_authority = (
+    _workflow_repo_seed_export_service.write_repo_seed_workflow_bundle_from_authority
 )
 
 

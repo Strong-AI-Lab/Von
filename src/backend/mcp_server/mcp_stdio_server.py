@@ -8,10 +8,171 @@ while reusing the existing Flask endpoint logic.
 import sys
 import os
 import asyncio
+import importlib
 import json
 import logging
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
+
+if TYPE_CHECKING:
+    from datetime import datetime, timezone
+    from src.backend.vontology.utils_vontology import (
+        get_vontology_node_content,
+        get_vontology_tree,
+        simulate_or_delete_concept,
+    )
+    from src.backend.db.repositories.concepts_repository import ConceptsRepository
+    from src.backend.services.concept_service import (
+        enrich_concept_with_text_relations,
+        get_concept_by_concept_id,
+        get_concept_display_name_with_names_fallback,
+        update_concept,
+    )
+    from src.backend.services.concept_relation_service import (
+        build_concept_relations_payload,
+        find_relations_with_argument,
+    )
+    from src.backend.services.concept_search_service import search_concepts
+    from src.backend.services.concept_embedding_service import (
+        get_concept_embedding_stats,
+    )
+    from src.backend.services.namespace_service import derive_actor_context_from_namespace
+    from src.backend.services.text_value_service import (
+        delete_text_relation,
+        delete_text_relation_by_predicate_and_text,
+        get_text_relations_summary,
+        get_texts_for_concept,
+        update_text_relation_text,
+        upsert_singleton_text_relation,
+        upsert_text_for_concept,
+    )
+    from src.backend.services.rag_text_relation_change_hook_service import (
+        maybe_delete_text_relation_doc_from_rag,
+        maybe_sync_concept_text_relations_to_rag,
+    )
+    from src.backend.services.annotation_extraction_service import extract_annotations
+    from src.backend.services.concept_merge_service import merge_concepts
+    from src.backend.services.settings_service import (
+        INTERNAL_MCP_MAX_TOOL_INVOCATIONS_DEFAULT,
+        INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MAX,
+        INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MIN,
+        INTERNAL_MCP_TOOL_BATCH_CAP_DEFAULT,
+        get_preferred_language,
+        get_setting,
+        resolve_llm_setting,
+    )
+    from src.backend.integrations.internal_mcp.catalogue import (
+        _add_relationship,
+        _build_paper_recommendations,
+        _episode_critique_build_benchmark,
+        _episode_critique_memory_get,
+        _episode_critique_memory_list,
+        _experiment_compute_verdict,
+        _experiment_create_spec,
+        _experiment_emit_learning_signal,
+        _experiment_execute_regression_suite,
+        _experiment_execute_target_workflow,
+        _experiment_record_observation,
+        _experiment_run_get,
+        _experiment_run_list,
+        _experiment_start_run,
+        _jira_add_attachment,
+        _jira_add_comment,
+        _jira_create_issue,
+        _jira_delete_issue_link,
+        _jira_get_auth_config,
+        _jira_get_issue,
+        _jira_get_myself,
+        _jira_get_transitions,
+        _jira_link_issue,
+        _jira_search,
+        _jira_transition_issue,
+        _jira_update_issue,
+        _list_recent_screenshots,
+        _preview_remove_relationship,
+        _remove_relationship,
+        _remove_relationships_bulk,
+        _renderer_resolve_applicability,
+        _repo_dossier_file_snapshot,
+        _repo_dossier_git_metadata,
+        _repo_dossier_prompt_definition_get,
+        _repo_dossier_search,
+        _repo_dossier_workflow_definition_get,
+        _skill_catalogue_list,
+        _skill_catalogue_sync,
+        _testing_cleanup_arxiv_paper_ingestion_artifacts,
+        _testing_prepare_arxiv_paper_ingestion_fixture,
+        _testing_prepare_experiment_spec,
+        _testing_prepare_meeting_invitation_spec,
+        _testing_theory_assert_local_claims,
+        _testing_theory_compute_diff,
+        _testing_theory_create_slice,
+        _testing_theory_gc_expired,
+        _testing_theory_import_canonical_context,
+        _testing_theory_promote_validated_claims,
+        _testing_theory_rollback_local_writes,
+        _testing_verify_arxiv_paper_ingestion_result,
+        _turn_execution_backfill_from_chat_history,
+        _turn_execution_build_benchmark,
+        _turn_execution_build_dashboard,
+        _turn_execution_build_selector_benchmark,
+        _turn_execution_get,
+        _turn_execution_get_critic_bundle,
+        _turn_execution_get_diagnostics,
+        _turn_execution_list,
+        _turn_execution_namespace_coverage_report,
+        _turn_execution_search_failures,
+        _undo_relationship_removal,
+        _upsert_renderer_profile,
+        _workflow_bind_event,
+        _workflow_build_prediction_envelope,
+        _workflow_cancel_instance,
+        _workflow_create_instance,
+        _workflow_create_schedule,
+        _workflow_delete_event_binding,
+        _workflow_delete_schedule,
+        _workflow_execute,
+        _workflow_get_execution_trace,
+        _workflow_get_instance,
+        _workflow_get_schedule,
+        _workflow_list_definitions,
+        _workflow_list_event_bindings,
+        _workflow_list_execution_traces,
+        _workflow_list_instances,
+        _workflow_list_schedules,
+        _workflow_mcp_health_check,
+        _workflow_retry_instance,
+        _workflow_set_event_binding_enabled,
+        _workflow_set_schedule_enabled,
+        _workflow_trigger_schedule,
+    )
+    from src.backend.integrations.internal_mcp.schemas import make_error_response
+    from src.backend.integrations.internal_mcp.workflow_surface_capabilities import (
+        classify_stdio_missing_tool,
+    )
+    from src.backend.integrations.internal_mcp import (
+        InternalMCPGateway,
+        InternalMCPTransport,
+        build_default_catalogue,
+        catalogue as internal_mcp_catalogue_module,
+    )
+    from src.backend.integrations.internal_mcp.tool_contract_registry import (
+        SURFACE_VONTOLOGY_STDIO,
+        get_surface_tool_payloads,
+    )
+    from src.backend.integrations.internal_mcp import (
+        tool_contract_registry as tool_contract_registry_module,
+    )
+    from src.backend.integrations.internal_mcp.arxiv_proxy import (
+        ArxivProxyError,
+        get_arxiv_proxy,
+    )
+    from src.backend.integrations.internal_mcp.search_proxy_mcp import (
+        SearchProxyError,
+        get_search_proxy,
+    )
+    from src.backend.integrations.google import gmail_service
+    from src.backend.services.rag_service import RAGBackendUnavailable, get_rag_service
 
 # Avoid UnicodeEncodeError on Windows consoles (default cp1252) when any
 # dependency logs Unicode (e.g. checkmarks). MCP runs over stdio; we must not
@@ -31,7 +192,9 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from src.backend.mcp_server.process_guard import terminate_duplicate_sibling_servers
+terminate_duplicate_sibling_servers = importlib.import_module(
+    "src.backend.mcp_server.process_guard"
+).terminate_duplicate_sibling_servers
 
 # Optional recovery hygiene: enable only when explicitly debugging stale
 # sibling MCP processes from previous IDE restarts.
@@ -56,231 +219,206 @@ except ImportError:
     print("Error: MCP package not installed. Run: pdm add mcp", file=sys.stderr)
     sys.exit(1)
 
-# Absolute imports (works when run as a script)
-from datetime import datetime, timezone
-from src.backend.vontology.utils_vontology import (
-    get_all_vontology_nodes_with_details,
-    get_vontology_node_content,
-    get_vontology_tree,
-    simulate_or_delete_concept,
+def _bind_imports(module_name: str, names: list[str]) -> None:
+    module = importlib.import_module(module_name)
+    globals().update({name: getattr(module, name) for name in names})
+
+
+_bind_imports("datetime", ["datetime", "timezone"])
+_bind_imports(
+    "src.backend.vontology.utils_vontology",
+    [
+        "get_vontology_node_content",
+        "get_vontology_tree",
+        "simulate_or_delete_concept",
+    ],
 )
-from src.backend.db.repositories.concepts_repository import ConceptsRepository
-from src.backend.services.concept_service import (
-    get_concept_display_name_with_names_fallback,
-    get_concept_by_concept_id,
-    enrich_concept_with_text_relations,
-    update_concept,
+_bind_imports(
+    "src.backend.db.repositories.concepts_repository",
+    ["ConceptsRepository"],
 )
-from src.backend.services.concept_relation_service import (
-    build_concept_relations_payload,
-    find_relations_with_argument,
+_bind_imports(
+    "src.backend.services.concept_service",
+    [
+        "get_concept_display_name_with_names_fallback",
+        "get_concept_by_concept_id",
+        "enrich_concept_with_text_relations",
+        "update_concept",
+    ],
 )
-from src.backend.services.concept_search_service import search_concepts
-from src.backend.services.concept_embedding_service import (
-    get_concepts_needing_indexing,
-    get_concept_embedding_stats,
+_bind_imports(
+    "src.backend.services.concept_relation_service",
+    [
+        "build_concept_relations_payload",
+        "find_relations_with_argument",
+    ],
 )
-from src.backend.services.namespace_service import derive_actor_context_from_namespace
-from src.backend.services.text_value_service import (
-    upsert_text_for_concept,
-    get_texts_for_concept,
-    get_text_relations_summary,
-    upsert_singleton_text_relation,
-    update_text_relation_text,
-    delete_text_relation,
-    delete_text_relation_by_predicate_and_text,
+_bind_imports("src.backend.services.concept_search_service", ["search_concepts"])
+_bind_imports(
+    "src.backend.services.concept_embedding_service",
+    ["get_concept_embedding_stats"],
 )
-from src.backend.services.rag_text_relation_change_hook_service import (
-    maybe_delete_text_relation_doc_from_rag,
-    maybe_sync_concept_text_relations_to_rag,
+_bind_imports(
+    "src.backend.services.namespace_service",
+    ["derive_actor_context_from_namespace"],
 )
-from src.backend.services.annotation_extraction_service import extract_annotations
-from src.backend.services.concept_merge_service import merge_concepts
-from src.backend.services.settings_service import (
-    resolve_llm_setting,
-    get_preferred_language,
-    get_setting,
-    INTERNAL_MCP_MAX_TOOL_INVOCATIONS_DEFAULT,
-    INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MAX,
-    INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MIN,
-    INTERNAL_MCP_TOOL_BATCH_CAP_DEFAULT,
+_bind_imports(
+    "src.backend.services.text_value_service",
+    [
+        "upsert_text_for_concept",
+        "get_texts_for_concept",
+        "get_text_relations_summary",
+        "upsert_singleton_text_relation",
+        "update_text_relation_text",
+        "delete_text_relation",
+        "delete_text_relation_by_predicate_and_text",
+    ],
 )
-from src.backend.integrations.internal_mcp.catalogue import _add_relationship
-from src.backend.integrations.internal_mcp.catalogue import _build_paper_recommendations
-from src.backend.integrations.internal_mcp.catalogue import _jira_add_comment
-from src.backend.integrations.internal_mcp.catalogue import _jira_add_attachment
-from src.backend.integrations.internal_mcp.catalogue import _jira_create_issue
-from src.backend.integrations.internal_mcp.catalogue import _jira_delete_issue_link
-from src.backend.integrations.internal_mcp.catalogue import _jira_get_auth_config
-from src.backend.integrations.internal_mcp.catalogue import _jira_get_issue
-from src.backend.integrations.internal_mcp.catalogue import _jira_get_transitions
-from src.backend.integrations.internal_mcp.catalogue import _jira_get_myself
-from src.backend.integrations.internal_mcp.catalogue import _jira_link_issue
-from src.backend.integrations.internal_mcp.catalogue import _jira_search
-from src.backend.integrations.internal_mcp.catalogue import _jira_transition_issue
-from src.backend.integrations.internal_mcp.catalogue import _jira_update_issue
-from src.backend.integrations.internal_mcp.catalogue import _list_recent_screenshots
-from src.backend.integrations.internal_mcp.catalogue import _remove_relationship
-from src.backend.integrations.internal_mcp.catalogue import _preview_remove_relationship
-from src.backend.integrations.internal_mcp.catalogue import _remove_relationships_bulk
-from src.backend.integrations.internal_mcp.catalogue import _skill_catalogue_list
-from src.backend.integrations.internal_mcp.catalogue import _skill_catalogue_sync
-from src.backend.integrations.internal_mcp.catalogue import _undo_relationship_removal
-from src.backend.integrations.internal_mcp.catalogue import (
-    _turn_execution_build_benchmark,
+_bind_imports(
+    "src.backend.services.rag_text_relation_change_hook_service",
+    [
+        "maybe_delete_text_relation_doc_from_rag",
+        "maybe_sync_concept_text_relations_to_rag",
+    ],
 )
-from src.backend.integrations.internal_mcp.catalogue import (
-    _turn_execution_build_selector_benchmark,
+_bind_imports(
+    "src.backend.services.annotation_extraction_service",
+    ["extract_annotations"],
 )
-from src.backend.integrations.internal_mcp.catalogue import (
-    _turn_execution_build_dashboard,
+_bind_imports("src.backend.services.concept_merge_service", ["merge_concepts"])
+_bind_imports(
+    "src.backend.services.settings_service",
+    [
+        "resolve_llm_setting",
+        "get_preferred_language",
+        "get_setting",
+        "INTERNAL_MCP_MAX_TOOL_INVOCATIONS_DEFAULT",
+        "INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MAX",
+        "INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MIN",
+        "INTERNAL_MCP_TOOL_BATCH_CAP_DEFAULT",
+    ],
 )
-from src.backend.integrations.internal_mcp.catalogue import (
-    _turn_execution_backfill_from_chat_history,
+_bind_imports(
+    "src.backend.integrations.internal_mcp.catalogue",
+    [
+        "_add_relationship",
+        "_build_paper_recommendations",
+        "_jira_add_comment",
+        "_jira_add_attachment",
+        "_jira_create_issue",
+        "_jira_delete_issue_link",
+        "_jira_get_auth_config",
+        "_jira_get_issue",
+        "_jira_get_transitions",
+        "_jira_get_myself",
+        "_jira_link_issue",
+        "_jira_search",
+        "_jira_transition_issue",
+        "_jira_update_issue",
+        "_list_recent_screenshots",
+        "_remove_relationship",
+        "_preview_remove_relationship",
+        "_remove_relationships_bulk",
+        "_skill_catalogue_list",
+        "_skill_catalogue_sync",
+        "_undo_relationship_removal",
+        "_turn_execution_build_benchmark",
+        "_turn_execution_build_selector_benchmark",
+        "_turn_execution_build_dashboard",
+        "_turn_execution_backfill_from_chat_history",
+        "_experiment_compute_verdict",
+        "_experiment_create_spec",
+        "_experiment_emit_learning_signal",
+        "_experiment_execute_regression_suite",
+        "_experiment_execute_target_workflow",
+        "_episode_critique_build_benchmark",
+        "_episode_critique_memory_get",
+        "_episode_critique_memory_list",
+        "_repo_dossier_file_snapshot",
+        "_repo_dossier_git_metadata",
+        "_repo_dossier_prompt_definition_get",
+        "_repo_dossier_search",
+        "_repo_dossier_workflow_definition_get",
+        "_experiment_record_observation",
+        "_experiment_run_get",
+        "_experiment_run_list",
+        "_experiment_start_run",
+        "_testing_cleanup_arxiv_paper_ingestion_artifacts",
+        "_testing_prepare_arxiv_paper_ingestion_fixture",
+        "_testing_prepare_experiment_spec",
+        "_testing_prepare_meeting_invitation_spec",
+        "_testing_verify_arxiv_paper_ingestion_result",
+        "_testing_theory_assert_local_claims",
+        "_testing_theory_compute_diff",
+        "_testing_theory_create_slice",
+        "_testing_theory_gc_expired",
+        "_testing_theory_import_canonical_context",
+        "_testing_theory_promote_validated_claims",
+        "_testing_theory_rollback_local_writes",
+        "_turn_execution_get",
+        "_turn_execution_get_diagnostics",
+        "_turn_execution_get_critic_bundle",
+        "_turn_execution_list",
+        "_turn_execution_search_failures",
+        "_turn_execution_namespace_coverage_report",
+        "_renderer_resolve_applicability",
+        "_upsert_renderer_profile",
+        "_workflow_bind_event",
+        "_workflow_cancel_instance",
+        "_workflow_build_prediction_envelope",
+        "_workflow_create_instance",
+        "_workflow_execute",
+        "_workflow_create_schedule",
+        "_workflow_delete_event_binding",
+        "_workflow_delete_schedule",
+        "_workflow_get_execution_trace",
+        "_workflow_get_instance",
+        "_workflow_get_schedule",
+        "_workflow_list_definitions",
+        "_workflow_list_event_bindings",
+        "_workflow_list_execution_traces",
+        "_workflow_list_instances",
+        "_workflow_list_schedules",
+        "_workflow_mcp_health_check",
+        "_workflow_retry_instance",
+        "_workflow_set_event_binding_enabled",
+        "_workflow_set_schedule_enabled",
+        "_workflow_trigger_schedule",
+    ],
 )
-from src.backend.integrations.internal_mcp.catalogue import _experiment_compute_verdict
-from src.backend.integrations.internal_mcp.catalogue import _experiment_create_spec
-from src.backend.integrations.internal_mcp.catalogue import (
-    _experiment_emit_learning_signal,
+_bind_imports(
+    "src.backend.integrations.internal_mcp.schemas",
+    ["make_error_response"],
 )
-from src.backend.integrations.internal_mcp.catalogue import (
-    _experiment_execute_regression_suite,
+_bind_imports(
+    "src.backend.integrations.internal_mcp.workflow_surface_capabilities",
+    ["classify_stdio_missing_tool"],
 )
-from src.backend.integrations.internal_mcp.catalogue import (
-    _experiment_execute_target_workflow,
+tool_contract_registry_module = importlib.import_module(
+    "src.backend.integrations.internal_mcp.tool_contract_registry"
 )
-from src.backend.integrations.internal_mcp.catalogue import (
-    _episode_critique_build_benchmark,
+SURFACE_VONTOLOGY_STDIO = tool_contract_registry_module.SURFACE_VONTOLOGY_STDIO
+get_surface_tool_payloads = tool_contract_registry_module.get_surface_tool_payloads
+_bind_imports(
+    "src.backend.integrations.internal_mcp.arxiv_proxy",
+    ["get_arxiv_proxy", "ArxivProxyError"],
 )
-from src.backend.integrations.internal_mcp.catalogue import (
-    _episode_critique_memory_get,
+_bind_imports(
+    "src.backend.integrations.internal_mcp.search_proxy_mcp",
+    ["get_search_proxy", "SearchProxyError"],
 )
-from src.backend.integrations.internal_mcp.catalogue import (
-    _episode_critique_memory_list,
+internal_mcp_catalogue_module = importlib.import_module(
+    "src.backend.integrations.internal_mcp.catalogue"
 )
-from src.backend.integrations.internal_mcp.catalogue import _repo_dossier_file_snapshot
-from src.backend.integrations.internal_mcp.catalogue import _repo_dossier_git_metadata
-from src.backend.integrations.internal_mcp.catalogue import (
-    _repo_dossier_prompt_definition_get,
+internal_mcp_module = importlib.import_module("src.backend.integrations.internal_mcp")
+InternalMCPGateway = internal_mcp_module.InternalMCPGateway
+InternalMCPTransport = internal_mcp_module.InternalMCPTransport
+build_default_catalogue = internal_mcp_module.build_default_catalogue
+gmail_service = importlib.import_module("src.backend.integrations.google.gmail_service")
+_bind_imports(
+    "src.backend.services.rag_service",
+    ["get_rag_service", "RAGBackendUnavailable"],
 )
-from src.backend.integrations.internal_mcp.catalogue import _repo_dossier_search
-from src.backend.integrations.internal_mcp.catalogue import (
-    _repo_dossier_workflow_definition_get,
-)
-from src.backend.integrations.internal_mcp.catalogue import _experiment_record_observation
-from src.backend.integrations.internal_mcp.catalogue import _experiment_run_get
-from src.backend.integrations.internal_mcp.catalogue import _experiment_run_list
-from src.backend.integrations.internal_mcp.catalogue import _experiment_start_run
-from src.backend.integrations.internal_mcp.catalogue import (
-    _testing_cleanup_arxiv_paper_ingestion_artifacts,
-)
-from src.backend.integrations.internal_mcp.catalogue import (
-    _testing_prepare_arxiv_paper_ingestion_fixture,
-)
-from src.backend.integrations.internal_mcp.catalogue import (
-    _testing_prepare_experiment_spec,
-)
-from src.backend.integrations.internal_mcp.catalogue import (
-    _testing_prepare_meeting_invitation_spec,
-)
-from src.backend.integrations.internal_mcp.catalogue import (
-    _testing_verify_arxiv_paper_ingestion_result,
-)
-from src.backend.integrations.internal_mcp.catalogue import (
-    _testing_theory_assert_local_claims,
-)
-from src.backend.integrations.internal_mcp.catalogue import (
-    _testing_theory_compute_diff,
-)
-from src.backend.integrations.internal_mcp.catalogue import (
-    _testing_theory_create_slice,
-)
-from src.backend.integrations.internal_mcp.catalogue import _testing_theory_gc_expired
-from src.backend.integrations.internal_mcp.catalogue import (
-    _testing_theory_import_canonical_context,
-)
-from src.backend.integrations.internal_mcp.catalogue import (
-    _testing_theory_promote_validated_claims,
-)
-from src.backend.integrations.internal_mcp.catalogue import (
-    _testing_theory_rollback_local_writes,
-)
-from src.backend.integrations.internal_mcp.catalogue import _turn_execution_get
-from src.backend.integrations.internal_mcp.catalogue import (
-    _turn_execution_get_diagnostics,
-)
-from src.backend.integrations.internal_mcp.catalogue import (
-    _turn_execution_get_critic_bundle,
-)
-from src.backend.integrations.internal_mcp.catalogue import _turn_execution_list
-from src.backend.integrations.internal_mcp.catalogue import (
-    _turn_execution_search_failures,
-)
-from src.backend.integrations.internal_mcp.catalogue import (
-    _turn_execution_namespace_coverage_report,
-)
-from src.backend.integrations.internal_mcp.catalogue import (
-    _renderer_resolve_applicability,
-)
-from src.backend.integrations.internal_mcp.catalogue import _upsert_renderer_profile
-from src.backend.integrations.internal_mcp.catalogue import _workflow_bind_event
-from src.backend.integrations.internal_mcp.catalogue import _workflow_cancel_instance
-from src.backend.integrations.internal_mcp.catalogue import (
-    _workflow_build_prediction_envelope,
-)
-from src.backend.integrations.internal_mcp.catalogue import _workflow_create_instance
-from src.backend.integrations.internal_mcp.catalogue import _workflow_execute
-from src.backend.integrations.internal_mcp.catalogue import _workflow_create_schedule
-from src.backend.integrations.internal_mcp.catalogue import _workflow_delete_event_binding
-from src.backend.integrations.internal_mcp.catalogue import _workflow_delete_schedule
-from src.backend.integrations.internal_mcp.catalogue import (
-    _workflow_get_execution_trace,
-)
-from src.backend.integrations.internal_mcp.catalogue import _workflow_get_instance
-from src.backend.integrations.internal_mcp.catalogue import _workflow_get_schedule
-from src.backend.integrations.internal_mcp.catalogue import _workflow_list_definitions
-from src.backend.integrations.internal_mcp.catalogue import _workflow_list_event_bindings
-from src.backend.integrations.internal_mcp.catalogue import (
-    _workflow_list_execution_traces,
-)
-from src.backend.integrations.internal_mcp.catalogue import _workflow_list_instances
-from src.backend.integrations.internal_mcp.catalogue import _workflow_list_schedules
-from src.backend.integrations.internal_mcp.catalogue import _workflow_mcp_health_check
-from src.backend.integrations.internal_mcp.catalogue import _workflow_retry_instance
-from src.backend.integrations.internal_mcp.catalogue import (
-    _workflow_set_event_binding_enabled,
-)
-from src.backend.integrations.internal_mcp.catalogue import (
-    _workflow_set_schedule_enabled,
-)
-from src.backend.integrations.internal_mcp.catalogue import _workflow_trigger_schedule
-from src.backend.integrations.internal_mcp.schemas import make_error_response
-from src.backend.integrations.internal_mcp.workflow_surface_capabilities import (
-    classify_stdio_missing_tool,
-)
-from src.backend.integrations.internal_mcp import (
-    tool_contract_registry as tool_contract_registry_module,
-)
-from src.backend.integrations.internal_mcp.tool_contract_registry import (
-    SURFACE_VONTOLOGY_STDIO,
-    get_surface_tool_payloads,
-)
-from src.backend.integrations.internal_mcp.arxiv_proxy import (
-    get_arxiv_proxy,
-    ArxivProxyError,
-)
-from src.backend.integrations.internal_mcp.search_proxy_mcp import (
-    get_search_proxy,
-    SearchProxyError,
-)
-from src.backend.integrations.internal_mcp import (
-    catalogue as internal_mcp_catalogue_module,
-    InternalMCPGateway,
-    InternalMCPTransport,
-    build_default_catalogue,
-)
-from src.backend.integrations.google import gmail_service
-from src.backend.services.rag_service import get_rag_service, RAGBackendUnavailable
 
 # Create MCP server instance
 app = Server("vontology-mcp")
@@ -295,12 +433,13 @@ _TOOL_LIST_CACHE_PATH = (
 _TOOL_MANIFEST_PATH = (
     Path(project_root) / "src" / "backend" / "mcp_server" / "vontology_mcp.json"
 )
-_TOOL_CACHE_DEPENDENCY_PATHS: tuple[Path, ...] = (
-    Path(__file__).resolve(),
-    Path(tool_contract_registry_module.__file__).resolve(),
-    Path(internal_mcp_catalogue_module.__file__).resolve(),
-    _TOOL_MANIFEST_PATH.resolve(),
-)
+_tool_cache_dependency_paths: list[Path] = [Path(__file__).resolve()]
+for _dependency_module in (tool_contract_registry_module, internal_mcp_catalogue_module):
+    _dependency_file = getattr(_dependency_module, "__file__", None)
+    if isinstance(_dependency_file, str) and _dependency_file:
+        _tool_cache_dependency_paths.append(Path(_dependency_file).resolve())
+_tool_cache_dependency_paths.append(_TOOL_MANIFEST_PATH.resolve())
+_TOOL_CACHE_DEPENDENCY_PATHS: tuple[Path, ...] = tuple(_tool_cache_dependency_paths)
 
 
 def _tool_cache_dependency_signature() -> dict[str, int]:
@@ -562,8 +701,8 @@ class _RestrictedGateway:
     When writes are not allowed, blocks non-read-category tools.
     """
 
-    def __init__(self, *, gateway: InternalMCPGateway, allow_writes: bool) -> None:
-        self._gateway = gateway
+    def __init__(self, *, gateway: Any, allow_writes: bool) -> None:
+        self._gateway: Any = gateway
         self._allow_writes = bool(allow_writes)
 
     @property

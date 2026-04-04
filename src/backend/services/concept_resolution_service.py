@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 from bson import ObjectId
 
@@ -101,8 +101,14 @@ def resolve_concept_by_name(
         }
 
     audit: list[dict[str, Any]] = []
-    preferred = [str(l) for l in (preferred_languages or []) if str(l).strip()]
-    allowed = [str(l) for l in (allowed_languages or []) if str(l).strip()]
+    preferred = [
+        str(language)
+        for language in (preferred_languages or [])
+        if str(language).strip()
+    ]
+    allowed = [
+        str(language) for language in (allowed_languages or []) if str(language).strip()
+    ]
     allowed_set = set(allowed) if allowed else None
 
     # Stage 0: direct concept-id/code identifier resolution.

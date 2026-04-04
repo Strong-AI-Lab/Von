@@ -427,7 +427,7 @@ def build_concept_searchable_text(concept_doc: Dict[str, Any]) -> str:
             for e in extent:
                 usage_lines.append(f"  {e['subject']} → {e['object']}")
             if usage_lines:
-                parts.append(f"Used in relations:\n" + "\n".join(usage_lines))
+                parts.append("Used in relations:\n" + "\n".join(usage_lines))
 
     elif kind == "type":
         # Type: include instances and subtypes
@@ -454,7 +454,7 @@ def build_concept_searchable_text(concept_doc: Dict[str, Any]) -> str:
             for r in relations:
                 rel_lines.append(f"  {r['predicate']}: {r['object_text']}")
             if rel_lines:
-                parts.append(f"Relations:\n" + "\n".join(rel_lines))
+                parts.append("Relations:\n" + "\n".join(rel_lines))
 
     return "\n".join(filter(None, parts))
 

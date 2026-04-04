@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import sys
 from pathlib import Path
@@ -9,9 +10,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.backend.services.code_predicate_sync_service import (
-    sync_code_predicate_concepts,
-)
+sync_code_predicate_concepts = importlib.import_module(
+    "src.backend.services.code_predicate_sync_service"
+).sync_code_predicate_concepts
 
 
 def main() -> int:

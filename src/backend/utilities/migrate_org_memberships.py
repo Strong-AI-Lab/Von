@@ -17,8 +17,8 @@ Note:
 """
 
 import argparse
+import logging
 import sys
-import os
 from pathlib import Path
 from typing import Dict, List, Tuple, Any
 
@@ -29,8 +29,6 @@ for potential_root in [current_file.parent] + list(current_file.parents):
     if (potential_root / "pyproject.toml").exists():
         sys.path.insert(0, str(potential_root))
         break
-
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -182,7 +180,7 @@ def run_migration(dry_run: bool = False, verbose: bool = False) -> Dict[str, Any
     if dry_run:
         logger.warning("[DRY RUN MODE] No changes will be made to the database")
 
-    logger.info(f"Reading stub mappings from role_resolver.py...")
+    logger.info("Reading stub mappings from role_resolver.py...")
     logger.info(f"Found {len(stub_mappings)} users with organisation mappings")
 
     total_successful = 0

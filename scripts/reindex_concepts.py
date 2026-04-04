@@ -25,9 +25,9 @@ Usage:
 """
 
 import argparse
+import importlib
 import logging
 import sys
-from datetime import datetime, timezone
 from typing import List, Optional
 
 # Add project root to path
@@ -37,20 +37,29 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from src.backend.services.concept_embedding_service import (
-    get_concept_embedding_stats,
-    get_concept_embedding_status,
-    get_concepts_needing_indexing,
-    update_concept_embedding_status,
-    build_concept_searchable_text,
-    build_concept_embedding_metadata,
-    CONCEPT_EMBEDDING_NAMESPACE,
-    EMBEDDING_STATUS_PENDING,
-    EMBEDDING_STATUS_INDEXED,
-    EMBEDDING_STATUS_STALE,
-    EMBEDDING_STATUS_FAILED,
+_concept_embedding_service = importlib.import_module(
+    "src.backend.services.concept_embedding_service"
 )
-from src.backend.db.repositories.concepts_repository import ConceptsRepository
+get_concept_embedding_stats = _concept_embedding_service.get_concept_embedding_stats
+get_concept_embedding_status = _concept_embedding_service.get_concept_embedding_status
+get_concepts_needing_indexing = _concept_embedding_service.get_concepts_needing_indexing
+update_concept_embedding_status = (
+    _concept_embedding_service.update_concept_embedding_status
+)
+build_concept_searchable_text = (
+    _concept_embedding_service.build_concept_searchable_text
+)
+build_concept_embedding_metadata = (
+    _concept_embedding_service.build_concept_embedding_metadata
+)
+CONCEPT_EMBEDDING_NAMESPACE = _concept_embedding_service.CONCEPT_EMBEDDING_NAMESPACE
+EMBEDDING_STATUS_PENDING = _concept_embedding_service.EMBEDDING_STATUS_PENDING
+EMBEDDING_STATUS_INDEXED = _concept_embedding_service.EMBEDDING_STATUS_INDEXED
+EMBEDDING_STATUS_STALE = _concept_embedding_service.EMBEDDING_STATUS_STALE
+EMBEDDING_STATUS_FAILED = _concept_embedding_service.EMBEDDING_STATUS_FAILED
+ConceptsRepository = importlib.import_module(
+    "src.backend.db.repositories.concepts_repository"
+).ConceptsRepository
 
 logging.basicConfig(
     level=logging.INFO,
@@ -191,7 +200,7 @@ def reindex_concepts(
                 )
 
                 if failure_count > 0:
-                    raise RuntimeError(f"Failed to upsert document")
+                    raise RuntimeError("Failed to upsert document")
 
                 # Update status
                 update_concept_embedding_status(concept_id, EMBEDDING_STATUS_INDEXED)

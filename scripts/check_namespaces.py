@@ -14,7 +14,7 @@ coll = db["interaction_sessions"]
 total = coll.count_documents({})
 indexed = coll.count_documents({"indexing_status": "indexed"})
 
-print(f"=== RAG Session Namespace Analysis ===\n")
+print("=== RAG Session Namespace Analysis ===\n")
 print(f"Total sessions: {total}")
 print(f"Indexed sessions: {indexed}\n")
 

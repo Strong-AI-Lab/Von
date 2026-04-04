@@ -9,9 +9,8 @@ This test suite validates:
 5. Tool definition conversion from MCP catalog to ToolDefinition format
 """
 
-import os
-from typing import Any, Dict, List, Mapping, Optional, Sequence, cast
-from unittest.mock import MagicMock, patch
+from typing import Any, List, Mapping, Optional, Sequence, cast
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -421,7 +420,7 @@ def test_legacy_fallback_when_structured_disabled(orchestrator):
     """Test that legacy path is used when feature flag disabled."""
     llm_client = MockLLMClientWithTools(should_use_structured=False)
 
-    result = orchestrator.run(
+    orchestrator.run(
         prompt="Find test concept",
         context=[],
         llm_client=llm_client,
@@ -511,7 +510,7 @@ def test_namespace_injection_preserved(orchestrator):
     """Test that namespace injection still works in structured path."""
     llm_client = MockLLMClientWithTools(should_use_structured=True)
 
-    result = orchestrator.run(
+    orchestrator.run(
         prompt="Find test concept",
         context=[],
         llm_client=llm_client,
@@ -782,7 +781,6 @@ def test_structured_calling_passes_capped_tool_list_to_llm():
             ) -> str:
                 return "Direct response"
 
-    from types import SimpleNamespace
     from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
 
     gateway = MagicMock(spec=InternalMCPGateway)

@@ -242,7 +242,6 @@ def _get_client_capabilities(**kwargs):
 
 
 def _get_paper_metadata(**kwargs):
-    import asyncio
     from .arxiv_proxy_mcp import get_arxiv_proxy, ArxivProxyError
     from ...services.arxiv_metadata_service import (
         ArxivMetadataError,
@@ -2006,7 +2005,6 @@ def _undo_relationship_removal(**kwargs):
 
 # arXiv MCP proxy handlers
 def _search_arxiv(**kwargs):
-    import asyncio
     from .arxiv_proxy_mcp import get_arxiv_proxy, ArxivProxyError
 
     async def _async_search():
@@ -2035,7 +2033,6 @@ def _search_arxiv(**kwargs):
 
 
 def _download_paper(**kwargs):
-    import asyncio
     from .arxiv_proxy_mcp import get_arxiv_proxy, ArxivProxyError
 
     arxiv_id = kwargs.get("arxiv_id")
@@ -2848,7 +2845,6 @@ def _skill_catalogue_sync(**kwargs):
 
 
 def _list_papers(**kwargs):
-    import asyncio
     from .arxiv_proxy_mcp import get_arxiv_proxy, ArxivProxyError
 
     async def _async_list():
@@ -2872,7 +2868,6 @@ def _list_papers(**kwargs):
 
 
 def _read_paper(**kwargs):
-    import asyncio
     from .arxiv_proxy_mcp import get_arxiv_proxy, ArxivProxyError
 
     arxiv_id = kwargs.get("arxiv_id")
@@ -5447,7 +5442,6 @@ def _get_predicate_extent(**kwargs):
 
 # Search MCP handlers
 def _search_web(**kwargs):
-    import asyncio
     from .search_proxy_mcp import get_search_proxy, SearchProxyError
 
     query = kwargs.get("query")
@@ -5492,7 +5486,6 @@ def _search_web(**kwargs):
 
 
 def _context_search(**kwargs):
-    import asyncio
     from .search_proxy_mcp import get_search_proxy, SearchProxyError
 
     query = kwargs.get("query")
@@ -5543,7 +5536,6 @@ def _context_search(**kwargs):
 
 
 def _qna_search(**kwargs):
-    import asyncio
     from .search_proxy_mcp import get_search_proxy, SearchProxyError
 
     query = kwargs.get("query")
@@ -5583,7 +5575,6 @@ def _qna_search(**kwargs):
 
 
 def _extract_url(**kwargs):
-    import asyncio
     from .search_proxy_mcp import get_search_proxy, SearchProxyError
 
     url = kwargs.get("url")
@@ -11666,7 +11657,6 @@ def _generate_concept_description(**kwargs):
 
     from ...services.description_generation_service import (
         generate_concept_description,
-        is_placeholder_description,
     )
 
     result = generate_concept_description(
@@ -12867,7 +12857,7 @@ def _workflow_retry_instance(**kwargs):
 
 def _workflow_create_schedule(**kwargs):
     """Create a new workflow schedule."""
-    from datetime import datetime, timezone
+    from datetime import datetime
     from ...services.namespace_service import resolve_canonical_namespace
     from ...workflows.durable import (
         WorkflowInstanceManager,
@@ -17727,7 +17717,6 @@ def _github_create_pull_request_with_copilot(**kwargs):
 
 
 def _jira_search(**kwargs):
-    import asyncio
     from .jira_proxy_mcp import get_jira_proxy, JiraProxyError
 
     jql = kwargs.get("jql")
@@ -17761,7 +17750,6 @@ def _jira_search(**kwargs):
 
 
 def _jira_get_issue(**kwargs):
-    import asyncio
     from .jira_proxy_mcp import get_jira_proxy, JiraProxyError
 
     issue_key = kwargs.get("issue_key")
@@ -17793,7 +17781,6 @@ def _jira_get_issue(**kwargs):
 
 
 def _jira_get_transitions(**kwargs):
-    import asyncio
     from .jira_proxy_mcp import get_jira_proxy, JiraProxyError
 
     issue_key = kwargs.get("issue_key")
@@ -17821,7 +17808,6 @@ def _jira_get_transitions(**kwargs):
 
 
 def _jira_add_comment(**kwargs):
-    import asyncio
     from .jira_proxy_mcp import get_jira_proxy, JiraProxyError
 
     issue_key = kwargs.get("issue_key")
@@ -17844,7 +17830,6 @@ def _jira_add_comment(**kwargs):
 
 
 def _jira_add_attachment(**kwargs):
-    import asyncio
     import base64
     from .jira_proxy_mcp import get_jira_proxy, JiraProxyError
 
@@ -18050,7 +18035,6 @@ def _jira_add_attachment(**kwargs):
 
 
 def _jira_transition_issue(**kwargs):
-    import asyncio
     from .jira_proxy_mcp import get_jira_proxy, JiraProxyError
 
     issue_key = kwargs.get("issue_key")
@@ -18075,7 +18059,6 @@ def _jira_transition_issue(**kwargs):
 
 
 def _jira_create_issue(**kwargs):
-    import asyncio
     import logging
     from .jira_proxy_mcp import get_jira_proxy, JiraProxyError
 
@@ -18138,7 +18121,9 @@ def _jira_create_issue(**kwargs):
 
     labels = kwargs.get("labels")
     if isinstance(labels, list):
-        payload["fields"]["labels"] = [str(l) for l in labels if str(l).strip()]
+        payload["fields"]["labels"] = [
+            str(label) for label in labels if str(label).strip()
+        ]
 
     components = kwargs.get("components")
     if isinstance(components, list):
@@ -18622,7 +18607,6 @@ def _jira_delete_issue_link(**kwargs):
 
 
 def _jira_get_myself(**kwargs):
-    import asyncio
     from .jira_proxy_mcp import get_jira_proxy, JiraProxyError
 
     async def _async_get_myself():

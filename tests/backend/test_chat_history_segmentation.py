@@ -1,16 +1,8 @@
-import sys
-import os
-
-# Add project root to path
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
-
 import pytest
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 from src.backend.services.chat_history_service import (
     get_chat_history_segments,
-    ChatHistoryServiceError,
 )
 
 
@@ -28,10 +20,14 @@ def mock_get_collection(mock_collection):
         yield mock
 
 
+def _get_segments(user_id: str, session_id: str) -> list[list[dict[str, Any]]]:
+    return cast(list[list[dict[str, Any]]], get_chat_history_segments(user_id, session_id))
+
+
 def test_get_chat_history_segments_empty(mock_collection, mock_get_collection):
     mock_collection.find_one.return_value = None
 
-    segments = get_chat_history_segments("user1", "session1")
+    segments = _get_segments("user1", "session1")
     assert segments == []
 
 
@@ -42,7 +38,7 @@ def test_get_chat_history_segments_no_history(mock_collection, mock_get_collecti
         "history": [],
     }
 
-    segments = get_chat_history_segments("user1", "session1")
+    segments = _get_segments("user1", "session1")
     assert segments == []
 
 
@@ -57,7 +53,7 @@ def test_get_chat_history_segments_single_segment(mock_collection, mock_get_coll
         "history": history,
     }
 
-    segments = get_chat_history_segments("user1", "session1")
+    segments = _get_segments("user1", "session1")
     assert len(segments) == 1
     assert segments[0] == history
 
@@ -74,7 +70,7 @@ def test_get_chat_history_segments_with_reset(mock_collection, mock_get_collecti
         "history": history,
     }
 
-    segments = get_chat_history_segments("user1", "session1")
+    segments = _get_segments("user1", "session1")
 
     assert len(segments) == 2
     assert len(segments[0]) == 1
@@ -99,7 +95,7 @@ def test_get_chat_history_segments_multiple_resets(
         "history": history,
     }
 
-    segments = get_chat_history_segments("user1", "session1")
+    segments = _get_segments("user1", "session1")
 
     assert len(segments) == 3
     assert segments[0][0]["content"] == "msg1"
@@ -122,7 +118,7 @@ def test_get_chat_history_segments_consecutive_resets(
         "history": history,
     }
 
-    segments = get_chat_history_segments("user1", "session1")
+    segments = _get_segments("user1", "session1")
 
     # Empty segments between consecutive resets are skipped.
     assert len(segments) == 2
@@ -143,7 +139,7 @@ def test_get_chat_history_segments_ends_with_reset(
         "history": history,
     }
 
-    segments = get_chat_history_segments("user1", "session1")
+    segments = _get_segments("user1", "session1")
 
     # A trailing reset does not create an empty trailing segment.
     assert len(segments) == 1

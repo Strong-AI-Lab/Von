@@ -18,7 +18,7 @@ import json
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 from ...services.prompt_template_service import PromptTemplateService
 from ..action_registry import (

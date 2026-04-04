@@ -20,8 +20,6 @@ from .workflow_event_integration_service import (
 )
 from ..security.access_control import (
     apply_concept_query_filter,
-    get_effective_user_concept_id,
-    bypass_access_control,
 )
 from ..security.visibility_predicates import (
     set_specific_to_org_values,

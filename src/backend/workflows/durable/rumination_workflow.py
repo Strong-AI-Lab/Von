@@ -29,7 +29,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import hashlib
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from ..engine import (
     WorkflowActionInvocation,

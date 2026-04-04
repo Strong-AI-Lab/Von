@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import threading
 
-import pytest
 
 from src.backend.workflows.engine import WorkflowDefinition, WorkflowStateSpec
 from src.backend.workflows.workflow_registry import (

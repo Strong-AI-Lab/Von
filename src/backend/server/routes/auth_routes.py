@@ -3,7 +3,6 @@ from flask import Blueprint, request, redirect, session, url_for, jsonify
 from ...auth_service import GoogleAuthService
 from ...services.settings_service import (
     set_current_user_by_email,
-    get_current_user,
 )
 from ...services.exceptions import MultipleUsersForEmailError
 import time
@@ -112,21 +111,21 @@ def callback():
     # Check session first, then fallback to in-memory storage for popup windows
     valid_state = False
     if session_state and session_state == received_state:
-        print(f"[auth_callback] State validated via session")
+        print("[auth_callback] State validated via session")
         valid_state = True
     elif received_state in _oauth_states:
         state_info = _oauth_states[received_state]
         # Check if state is not used and not too old (5 minutes)
         if not state_info["used"] and (time.time() - state_info["timestamp"]) < 300:
-            print(f"[auth_callback] State validated via memory backup")
+            print("[auth_callback] State validated via memory backup")
             valid_state = True
             # Mark as used
             _oauth_states[received_state]["used"] = True
         else:
-            print(f"[auth_callback] Memory state expired or already used")
+            print("[auth_callback] Memory state expired or already used")
 
     if not valid_state:
-        print(f"[auth_callback] Invalid state - no valid session or memory match")
+        print("[auth_callback] Invalid state - no valid session or memory match")
         return (
             f"Invalid state. Session: {session_state}, Received: {received_state}",
             400,
@@ -144,7 +143,7 @@ def callback():
         print(f"[auth_callback] user_email={email}")
 
         if not email:
-            print(f"[auth_callback] No email found in Google profile")
+            print("[auth_callback] No email found in Google profile")
             return "Email not found in Google profile.", 400
 
         try:

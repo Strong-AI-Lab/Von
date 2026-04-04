@@ -1,7 +1,8 @@
-import sys
-import os
 import logging
 import argparse
+import importlib
+import os
+import sys
 
 # --- Path Setup ---
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -9,10 +10,16 @@ src_root = os.path.join(project_root, "src")
 sys.path.insert(0, project_root)
 sys.path.insert(0, src_root)
 
-from src.backend.db.connection_manager import get_db
-from src.backend.workflows.workflow_registry import WorkflowRegistry
-from src.backend.workflows.definitions import register_default_workflows
-from src.backend.workflows.durable.instance_manager import WorkflowInstanceManager
+get_db = importlib.import_module("src.backend.db.connection_manager").get_db
+WorkflowRegistry = importlib.import_module(
+    "src.backend.workflows.workflow_registry"
+).WorkflowRegistry
+register_default_workflows = importlib.import_module(
+    "src.backend.workflows.definitions"
+).register_default_workflows
+WorkflowInstanceManager = importlib.import_module(
+    "src.backend.workflows.durable.instance_manager"
+).WorkflowInstanceManager
 
 # --- Logging ---
 logging.basicConfig(level=logging.INFO)
@@ -60,7 +67,7 @@ def run(workflow_id: str):
         inputs={"manual_trigger": True},
     )
 
-    logger.info(f"Instance created successfully!")
+    logger.info("Instance created successfully!")
     logger.info(f"Instance ID: {instance_id}")
     logger.info("----------------------------------------------------------------")
     logger.info(

@@ -1,6 +1,5 @@
 import sys
 import os
-import time
 from datetime import datetime, timezone
 from bson import ObjectId
 
@@ -47,7 +46,7 @@ def test_rag_worker():
 
     print("Running worker process...")
     try:
-        process_pending_interactions()
+        process_pending_interactions(loop_iteration=1)
     except Exception as e:
         print(f"Worker failed: {e}")
 

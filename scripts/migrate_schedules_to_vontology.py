@@ -6,18 +6,20 @@ Writes to Vontology using VontologyScheduleRepository.
 """
 
 import sys
+import importlib
 from pathlib import Path
-from datetime import datetime, timezone
 
 # Add src to path so we can import backend definition
 repo_root = Path(__file__).parent.parent
 sys.path.append(str(repo_root))
 
-from src.backend.db.mongo_client import get_db
-from src.backend.workflows.durable.vontology_schedule_repository import (
-    VontologyScheduleRepository,
-)
-from src.backend.workflows.durable.models import WorkflowSchedule
+get_db = importlib.import_module("src.backend.db.mongo_client").get_db
+VontologyScheduleRepository = importlib.import_module(
+    "src.backend.workflows.durable.vontology_schedule_repository"
+).VontologyScheduleRepository
+WorkflowSchedule = importlib.import_module(
+    "src.backend.workflows.durable.models"
+).WorkflowSchedule
 
 
 def migrate_schedules():
@@ -50,12 +52,12 @@ def migrate_schedules():
 
             repo.create_schedule(schedule)
             migrated += 1
-            print(f"  -> Success.")
+            print("  -> Success.")
         except Exception as e:
             print(f"  -> FAILED: {e}")
             errors += 1
 
-    print(f"\nMigration complete.")
+    print("\nMigration complete.")
     print(f"Migrated: {migrated}")
     print(f"Errors:   {errors}")
 

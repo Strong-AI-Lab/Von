@@ -2,19 +2,13 @@
 
 from __future__ import annotations
 
-import queue
-import threading
-import time
 import types
-from datetime import datetime, timezone
-from unittest.mock import patch
+from datetime import datetime
 
 import pytest
 
 from src.backend.services.shared_conversation_stream_service import (
     SharedConversationStreamService,
-    Subscriber,
-    TurnEvent,
     broadcast_shared_turn,
     get_stream_service,
 )

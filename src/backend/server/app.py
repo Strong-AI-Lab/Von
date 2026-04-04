@@ -14,7 +14,6 @@ from __future__ import annotations
 from typing import List, Dict, Optional
 
 from .utils_flask import create_flask_app
-from flask import current_app
 from .routes.vontology_routes import list_salient_predicates_for_instance  # type: ignore
 
 # Lightweight dummy dependency functions

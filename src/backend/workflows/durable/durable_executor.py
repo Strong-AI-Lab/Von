@@ -67,7 +67,6 @@ from ..plan_state_runtime import (
 )
 from ..trace_store import insert_workflow_execution_trace
 from .instance_manager import WorkflowInstanceManager
-from .models import WorkflowInstance, WorkflowInstanceStatus
 
 logger = logging.getLogger(__name__)
 

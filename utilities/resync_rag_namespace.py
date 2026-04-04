@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import os
 import sys
 from dataclasses import dataclass
@@ -12,9 +13,13 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from src.backend.db.connection_manager import get_db
-from src.backend.services.namespace_service import derive_namespace
-from src.backend.services.rag_sync_service import sync_one_session
+get_db = importlib.import_module("src.backend.db.connection_manager").get_db
+derive_namespace = importlib.import_module(
+    "src.backend.services.namespace_service"
+).derive_namespace
+sync_one_session = importlib.import_module(
+    "src.backend.services.rag_sync_service"
+).sync_one_session
 
 
 @dataclass(frozen=True)

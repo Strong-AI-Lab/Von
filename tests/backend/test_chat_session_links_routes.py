@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sys
 import types
-from typing import Any, Dict, List
+from typing import Any, Dict
 from unittest.mock import MagicMock, patch
 
 import pytest

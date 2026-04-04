@@ -24,13 +24,9 @@ from ...services.rag_text_relation_change_hook_service import (
     maybe_sync_concept_text_relations_to_rag,
 )
 from ...vontology.utils_vontology import (
-    get_vontology_node_and_descendant_ids,
     get_concept_notes,
 )  # Added getter import
 from ...db.mongo_client import get_db
-from bson import (
-    ObjectId,
-)  # Required for converting string IDs if necessary, though service should handle
 
 concept_bp = Blueprint("concepts", __name__)  # Define blueprint
 
@@ -142,7 +138,6 @@ def create_concept_route():
     system_tags = data.get("system_tags")
     user_tags = data.get("user_tags")
     linked_concepts = data.get("linked_concepts")
-    relationships = data.get("relationships")
 
     if not name:
         return jsonify(error="concept name is required"), 400

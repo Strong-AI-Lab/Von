@@ -4,9 +4,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from flask import Blueprint, request, jsonify, current_app, send_file, session
-from werkzeug.utils import secure_filename
 import tempfile
-import logging
 from ...vontology.utils_vontology import (
     get_concept_notes,
     EXAMPLE_USER_CONCEPT_ID,
@@ -14,13 +12,9 @@ from ...vontology.utils_vontology import (
 from typing import Optional, Tuple, Dict, Any
 from werkzeug.datastructures import FileStorage
 from ...services.settings_service import (
-    get_active_llm_setting,
-    set_active_llm_setting,
     get_openai_env_var,
     set_openai_env_var,
-    get_fetch_counts_on_load,
     set_fetch_counts_on_load,
-    get_preload_vontology_tree,
     set_preload_vontology_tree,
     get_ollama_hosts_list,
     set_ollama_hosts_list,
@@ -32,13 +26,9 @@ from ...services.settings_service import (
     set_org_llm_setting,
     set_user_enabled_llm_settings,
     set_org_enabled_llm_settings,
-    get_disable_remote_ollama_scan,
-    get_show_tool_use_during_thinking,
     set_disable_remote_ollama_scan,
     set_show_tool_use_during_thinking,
-    get_internal_mcp_max_tool_invocations,
     set_internal_mcp_max_tool_invocations,
-    get_internal_mcp_tool_batch_cap,
     set_internal_mcp_tool_batch_cap,
     get_disable_write_tool_conservatism,
     set_disable_write_tool_conservatism,
@@ -47,7 +37,6 @@ from ...services.settings_service import (
     get_user_mutation_authority_level,
     set_require_human_review_for_high_impact_kb_writes,
     set_user_mutation_authority_level,
-    get_buttonify_model_enabled,
     set_buttonify_model_enabled,
     set_auto_proceed_minimal_imposition_enabled,
     get_all_settings_batch,
@@ -74,7 +63,7 @@ from ...services.concept_service import ConceptNotFoundError
 from ...languagemodels.llm_interface import OpenAIClient
 from ...db.repositories.concepts_repository import ConceptsRepository
 from bson import ObjectId
-from pymongo.errors import BulkWriteError, PyMongoError
+from pymongo.errors import BulkWriteError
 from ...db.mongo_client import (
     MONGO_URI,
     DATABASE_NAME,
@@ -483,7 +472,8 @@ def get_db_location_info():
         if using_fallback:
             # Try to discover outward-facing IP (best-effort, short timeout). Avoid blocking failures.
             try:
-                import urllib.request, socket
+                import urllib.request
+                import socket
 
                 socket.setdefaulttimeout(1.5)
                 with urllib.request.urlopen(
@@ -2143,17 +2133,11 @@ def import_ontology():
 
         # Mode selection
         req_mode = request.args.get("mode")  # None | 'incremental' | 'replace'
-        replace_all_flag = request.args.get("replace_all") in ("1", "true", "True")
         # Dry run flag: query param dry_run=1 or header X-Import-Dry-Run=1
         dry_run_flag = request.args.get("dry_run") in ("1", "true", "True") or (
             request.headers.get("X-Import-Dry-Run") in ("1", "true", "True")
         )
         incremental = req_mode == "incremental"
-        destructive = (
-            (req_mode == "replace")
-            or (not incremental and not replace_all_flag)
-            and not dry_run_flag
-        )  # legacy default remains destructive apply unless incremental explicitly requested
         # Normalise mode string for responses
         if incremental:
             mode = "incremental-dry-run" if dry_run_flag else "incremental"
@@ -2217,7 +2201,7 @@ def import_ontology():
             if "_id" in concept and isinstance(concept["_id"], str):
                 try:
                     concept["_id"] = ObjectId(concept["_id"])
-                except:
+                except Exception:
                     # If conversion fails, remove _id to let MongoDB generate new one
                     del concept["_id"]
 
@@ -2231,7 +2215,7 @@ def import_ontology():
                 f"Validation failed. Found {len(validation_errors)} error(s)."
             )
             if len(validation_errors) > 10:
-                error_summary += f" Showing first 10 errors."
+                error_summary += " Showing first 10 errors."
 
             return (
                 jsonify(

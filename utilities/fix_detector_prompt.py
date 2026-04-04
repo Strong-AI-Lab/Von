@@ -39,7 +39,7 @@ for text_rel in has_content_relations:
 print("Adding new prompt text...")
 result = upsert_text_for_concept(prompt_id, "hasContent", new_prompt_text, lang="en")
 
-print(f"✅ Updated detector prompt")
+print("✅ Updated detector prompt")
 print(f'  Text value ID: {result["text_value_id"]}')
 print(f'  Relation ID: {result["relation_id"]}')
 
@@ -48,9 +48,9 @@ texts = get_texts_for_concept(prompt_id)
 for t in texts:
     if t.get("predicate") == "hasContent":
         text = t.get("text", "")
-        print(f"\n✅ Verification:")
+        print("\n✅ Verification:")
         print(f"  Length: {len(text)} chars")
         if "{response}" in text:
-            print(f"  ✅ Contains {{response}} placeholder")
+            print("  ✅ Contains {response} placeholder")
         else:
-            print(f"  ❌ Missing {{response}} placeholder!")
+            print("  ❌ Missing {response} placeholder!")

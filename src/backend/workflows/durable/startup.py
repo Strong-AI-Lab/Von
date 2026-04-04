@@ -11,8 +11,8 @@ from typing import Any, Callable
 
 from .instance_manager import WorkflowInstanceManager
 from .durable_executor import DurableWorkflowExecutor
-from .worker import DurableWorkflowWorker, AsyncDurableWorkflowWorker
-from .scheduler import WorkflowScheduler, AsyncWorkflowScheduler
+from .worker import DurableWorkflowWorker
+from .scheduler import WorkflowScheduler
 
 logger = logging.getLogger(__name__)
 

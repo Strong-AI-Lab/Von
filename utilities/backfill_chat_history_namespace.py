@@ -24,6 +24,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import importlib
 import os
 import re
 import sys
@@ -48,8 +49,10 @@ try:
 except ImportError:
     pass
 
-from src.backend.db.connection_manager import get_db
-from src.backend.services.namespace_service import derive_namespace
+get_db = importlib.import_module("src.backend.db.connection_manager").get_db
+derive_namespace = importlib.import_module(
+    "src.backend.services.namespace_service"
+).derive_namespace
 
 
 @dataclass

@@ -11,7 +11,7 @@ import logging
 import re
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from ..prompt.annotation_prompt import AnnotationPromptBuilder
 from .description_metadata_service import extract_inline_description_metadata
@@ -161,7 +161,6 @@ class DescriptionGenerationService:
         Returns:
             Dict with concept_name, concept_id, type_hierarchy, relationships
         """
-        from ..services import concept_service
 
         concept_id = concept.get("concept_id", "")
 

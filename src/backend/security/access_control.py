@@ -4,12 +4,10 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar
+import logging
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from flask import has_request_context, session, request
-import logging
-
-_log = logging.getLogger(__name__)
 
 from ..db.mongo_client import get_concepts_collection
 from .visibility_predicates import (
@@ -17,6 +15,8 @@ from .visibility_predicates import (
     SPECIFIC_TO_USER_PREDICATES,
     get_specific_to_user_values,
 )
+
+_log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Context state
@@ -330,7 +330,7 @@ def build_visibility_filter() -> Optional[Dict[str, Any]]:
     else:
         # Instrumentation: no effective user; user-specific concepts will be hidden.
         _log.info(
-            f"[access_filter] No authenticated user - user-specific concepts will be hidden"
+            "[access_filter] No authenticated user - user-specific concepts will be hidden"
         )
         try:
             _log.info(

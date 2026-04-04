@@ -10,11 +10,7 @@ from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional, Iterable
 from pymongo import ASCENDING, DESCENDING
 from pymongo.errors import (
-    AutoReconnect,
-    ConnectionFailure,
-    NetworkTimeout,
     PyMongoError,
-    ServerSelectionTimeoutError,
 )
 from pymongo.read_preferences import ReadPreference
 from ..db.mongo_client import get_db
@@ -1386,7 +1382,7 @@ def add_message_to_history(
             set_on_insert["role_in_org"] = role_value.strip()
 
         # Update or insert the session document
-        result = chat_history_coll.update_one(
+        chat_history_coll.update_one(
             {"user_id": user_id, "session_id": session_id},
             {
                 "$push": {"history": message_with_timestamp},

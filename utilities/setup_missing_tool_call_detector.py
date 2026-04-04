@@ -1,10 +1,8 @@
 """Setup the missing tool call detector configuration in the Vontology."""
 
 from src.backend.vontology.utils_vontology import create_vontology_concept
+from src.backend.services.relationship_write_service import add_relationship
 from src.backend.services.text_value_service import upsert_text_for_concept
-from src.backend.db.repositories.meta_relations_repository import (
-    MetaRelationsRepository,
-)
 
 # Create the detector action concept
 action_result = create_vontology_concept("#V#thing", "detect_missing_tool_call_action")
@@ -32,11 +30,9 @@ upsert_text_for_concept(prompt_id, "hasContent", prompt_text)
 print("Added prompt text")
 
 # Create uses_prompt relationship
-MetaRelationsRepository.create_meta_relation(
-    source_concept_id=action_id, predicate="uses_prompt", target_concept_id=prompt_id
-)
+add_relationship(action_id, "uses_prompt", prompt_id)
 print(f"Linked action to prompt: {action_id} -> {prompt_id}")
 
-print(f"\nDetector configured successfully!")
+print("\nDetector configured successfully!")
 print(f"Action ID: {action_id}")
 print(f"Prompt ID: {prompt_id}")

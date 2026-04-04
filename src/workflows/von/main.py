@@ -1,31 +1,33 @@
 #!/usr/bin/env python3
 
-import sys
-import os
-import importlib
+import argparse
+import faulthandler
 from importlib import util as importlib_util
+import importlib
+import logging
+import os
+from pathlib import Path
+import sys
+import threading
+import time
+import traceback
+
+from flask import abort, render_template
 
 project_root_str = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
 src_root = os.path.join(project_root_str, "src")
 if src_root not in sys.path:
     sys.path.insert(0, src_root)
 
-
-from flask import Flask, render_template, abort  # Added render_template
-from pathlib import Path  # ADDED
-import logging  # Import logging
-import argparse
-import faulthandler
-import traceback
-import time
-import threading
-from src.backend.server.utils_flask import create_flask_app
-from src.backend.server.routes.von_routes import von_bp  # type: ignore
-from src.backend.server.routes.vontology_routes import vontology_bp  # type: ignore
-from src.backend.server.routes.settings_routes import settings_bp  # type: ignore
-from src.backend.languagemodels.llm_interface import OllamaClient  # type: ignore
-from src.backend.services.feature_flags import get_expert_tabs_enabled
-from src.backend.utils.runtime_env import apply_repo_dotenv_overrides
+create_flask_app = importlib.import_module(
+    "src.backend.server.utils_flask"
+).create_flask_app
+get_expert_tabs_enabled = importlib.import_module(
+    "src.backend.services.feature_flags"
+).get_expert_tabs_enabled
+apply_repo_dotenv_overrides = importlib.import_module(
+    "src.backend.utils.runtime_env"
+).apply_repo_dotenv_overrides
 
 
 # Add src directory to Python path FIRST, before any backend imports
@@ -341,7 +343,6 @@ def main():
     # --- Delay browser launch until app is live ---
 
     def open_browser_once_delayed():
-        import threading
         import time
         import requests
 
@@ -357,7 +358,7 @@ def main():
                 except Exception:
                     time.sleep(1)
             print(
-                f"[WARN] Flask did not become ready in time, skipping browser launch."
+                "[WARN] Flask did not become ready in time, skipping browser launch."
             )
 
         threading.Thread(target=check_server_and_open).start()

@@ -1,6 +1,54 @@
-import sys
-import os
 import datetime as _dt
+import importlib
+import logging
+import os
+import sys
+import time
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+
+from flask import Flask, g, jsonify, redirect, request, url_for
+
+if TYPE_CHECKING:
+    from .routes.von_routes import von_bp
+    from .routes.vontology_routes import get_instance_counts, vontology_bp
+    from .routes.concept_routes import concept_bp
+    from .routes.settings_routes import settings_bp
+    from .routes.elicitation_routes import elicitation_bp
+    from .routes.annotations_routes import annotations_bp
+    from .routes.admin_routes import admin_bp
+    from .routes.auth_routes import auth_bp
+    from .routes.agent_gmail_oauth_routes import agent_gmail_oauth_bp
+    from .routes.predicate_routes import predicate_bp
+    from .routes.workflows_routes import workflows_bp
+    from .routes.room_device_routes import room_device_bp
+    from .routes.client_capabilities_routes import client_capabilities_bp
+    from .routes.speech_routes import speech_bp
+    from .routes.task_routes import task_bp
+    from .routes.message_routes import message_bp
+    from ..db.connection_manager import ensure_monitor_started, get_db
+    from ..services.annotation_extraction_service import (
+        PROMPT_CONCEPT_ID,
+        prompt_concept_health_status,
+    )
+    from ..services.runtime_code_version_service import (
+        DEFAULT_APP_VERSION,
+        get_runtime_code_version,
+        get_runtime_code_version_info,
+    )
+    from ..services.google_oauth_config import (
+        google_oauth_strict_startup_enabled,
+        validate_google_oauth_startup_or_raise,
+    )
+    from ..services.mongo_startup_config import (
+        mongo_startup_probe_enabled,
+        mongo_strict_startup_enabled,
+        run_mongo_startup_probe,
+        validate_mongo_startup_or_raise,
+    )
+    from ..services.settings_service import (
+        get_internal_mcp_max_tool_invocations,
+        get_internal_mcp_tool_batch_cap,
+    )
 
 # Adjust path to ensure project root and src are included for imports BEFORE any backend.* imports
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
@@ -23,63 +71,89 @@ try:  # pragma: no cover - exercised implicitly in dev runs
 except Exception:
     pass
 
-from flask import (
-    Flask,
-    jsonify,
-    redirect,
-    url_for,
-    request,
-    g,
-)  # Added request for shutdown endpoint
-import time
+def _bind_imports(module_name: str, names: list[str]) -> None:
+    module = importlib.import_module(module_name)
+    globals().update({name: getattr(module, name) for name in names})
 
-# --- Updated Typing Imports ---
-from typing import Optional, List, Dict, Any, Callable  # Use List and Dict
-import logging  # Import logging
 
-# Import Blueprints
-from .routes.von_routes import von_bp  # relative import
-from .routes.vontology_routes import vontology_bp, get_instance_counts
-from .routes.concept_routes import concept_bp
-from .routes.settings_routes import settings_bp
-from .routes.elicitation_routes import elicitation_bp
-from .routes.annotations_routes import annotations_bp
-from .routes.admin_routes import admin_bp
-from .routes.auth_routes import auth_bp
-from .routes.agent_gmail_oauth_routes import agent_gmail_oauth_bp
-from .routes.predicate_routes import predicate_bp
-from .routes.workflows_routes import workflows_bp
-from .routes.room_device_routes import room_device_bp
-from .routes.client_capabilities_routes import client_capabilities_bp
-from .routes.speech_routes import speech_bp
-from .routes.task_routes import task_bp  # Task management (JVNAUTOSCI-1040)
-from .routes.message_routes import message_bp  # Inter-user messaging (JVNAUTOSCI-1071)
-from ..db.connection_manager import (
-    ensure_monitor_started,
-    get_db,
-)  # start background DB monitor
-from ..services.annotation_extraction_service import (
-    prompt_concept_health_status,
-    PROMPT_CONCEPT_ID,
+_bind_imports("src.backend.server.routes.von_routes", ["von_bp"])
+_bind_imports(
+    "src.backend.server.routes.vontology_routes",
+    ["vontology_bp", "get_instance_counts"],
 )
-from ..services.runtime_code_version_service import (
-    DEFAULT_APP_VERSION,
-    get_runtime_code_version,
-    get_runtime_code_version_info,
+_bind_imports("src.backend.server.routes.concept_routes", ["concept_bp"])
+_bind_imports("src.backend.server.routes.settings_routes", ["settings_bp"])
+_bind_imports(
+    "src.backend.server.routes.elicitation_routes",
+    ["elicitation_bp"],
 )
-from ..services.google_oauth_config import (
-    google_oauth_strict_startup_enabled,
-    validate_google_oauth_startup_or_raise,
+_bind_imports(
+    "src.backend.server.routes.annotations_routes",
+    ["annotations_bp"],
 )
-from ..services.mongo_startup_config import (
-    mongo_startup_probe_enabled,
-    mongo_strict_startup_enabled,
-    run_mongo_startup_probe,
-    validate_mongo_startup_or_raise,
+_bind_imports("src.backend.server.routes.admin_routes", ["admin_bp"])
+_bind_imports("src.backend.server.routes.auth_routes", ["auth_bp"])
+_bind_imports(
+    "src.backend.server.routes.agent_gmail_oauth_routes",
+    ["agent_gmail_oauth_bp"],
 )
-from ..services.settings_service import (
-    get_internal_mcp_max_tool_invocations,
-    get_internal_mcp_tool_batch_cap,
+_bind_imports(
+    "src.backend.server.routes.predicate_routes",
+    ["predicate_bp"],
+)
+_bind_imports(
+    "src.backend.server.routes.workflows_routes",
+    ["workflows_bp"],
+)
+_bind_imports(
+    "src.backend.server.routes.room_device_routes",
+    ["room_device_bp"],
+)
+_bind_imports(
+    "src.backend.server.routes.client_capabilities_routes",
+    ["client_capabilities_bp"],
+)
+_bind_imports("src.backend.server.routes.speech_routes", ["speech_bp"])
+_bind_imports("src.backend.server.routes.task_routes", ["task_bp"])
+_bind_imports("src.backend.server.routes.message_routes", ["message_bp"])
+_bind_imports(
+    "src.backend.db.connection_manager",
+    ["ensure_monitor_started", "get_db"],
+)
+_bind_imports(
+    "src.backend.services.annotation_extraction_service",
+    ["prompt_concept_health_status", "PROMPT_CONCEPT_ID"],
+)
+_bind_imports(
+    "src.backend.services.runtime_code_version_service",
+    [
+        "DEFAULT_APP_VERSION",
+        "get_runtime_code_version",
+        "get_runtime_code_version_info",
+    ],
+)
+_bind_imports(
+    "src.backend.services.google_oauth_config",
+    [
+        "google_oauth_strict_startup_enabled",
+        "validate_google_oauth_startup_or_raise",
+    ],
+)
+_bind_imports(
+    "src.backend.services.mongo_startup_config",
+    [
+        "mongo_startup_probe_enabled",
+        "mongo_strict_startup_enabled",
+        "run_mongo_startup_probe",
+        "validate_mongo_startup_or_raise",
+    ],
+)
+_bind_imports(
+    "src.backend.services.settings_service",
+    [
+        "get_internal_mcp_max_tool_invocations",
+        "get_internal_mcp_tool_batch_cap",
+    ],
 )
 
 # Legacy fallback version string retained for backwards compatibility.
@@ -705,12 +779,11 @@ def create_flask_app(
         start_time = getattr(g, "_request_start_time", None)
         if start_time is not None:
             elapsed_ms = (time.perf_counter() - start_time) * 1000
-            endpoint = request.endpoint or request.path
             if elapsed_ms >= SLOW_REQUEST_THRESHOLD_MS:
                 app.logger.warning(
                     "[slow_request] %s %s took %.1fms (threshold=%.0fms) status=%s",
                     request.method,
-                    request.path,
+                    request.endpoint or request.path,
                     elapsed_ms,
                     SLOW_REQUEST_THRESHOLD_MS,
                     response.status_code,
@@ -1049,7 +1122,6 @@ def create_flask_app(
         "ready": False,
         "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
     }
-    durable_workflow_components = None
     if not _is_running_under_pytest():
         blocking_durable_startup = (
             os.getenv("VON_DURABLE_WORKFLOWS_BLOCKING_STARTUP", "0").strip().lower()
@@ -2381,7 +2453,8 @@ def create_flask_app(
     def diagnostics():
         """Lightweight diagnostics endpoint exposing runtime/process/cache info."""
         # Lazy imports to avoid overhead if unused
-        import json, threading, time
+        import threading
+        import time
 
         rss_mb = None
         thread_count = None
@@ -2879,7 +2952,9 @@ def create_flask_app(
         if func is None:
             # Fallback for production servers like Waitress: schedule hard exit
             try:
-                import threading, time, os as _os
+                import threading
+                import time
+                import os as _os
 
                 def delayed_exit():
                     time.sleep(0.2)
@@ -2937,7 +3012,8 @@ def create_flask_app(
             ) or app.config.get("PREWARM_DISABLE"):
                 app.logger.info("Prewarm disabled by VON_PREWARM_DISABLE/ config flag.")
                 return
-            import threading, time as _time
+            import threading
+            import time as _time
 
             def _prewarm_worker():
                 t0 = _time.time()

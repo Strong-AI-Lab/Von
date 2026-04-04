@@ -8,7 +8,6 @@ These tests verify that:
 
 from __future__ import annotations
 
-import pytest
 
 from src.backend.vontology.utils_vontology import (
     build_pure_instance_query,

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..db.repositories.concepts_repository import ConceptsRepository
 from ..db.repositories.text_value_repository import TextRelationsRepository
@@ -25,7 +25,7 @@ from ..utils.concept_id_utils import (
     canonicalise_vontology_concept_id,
     validate_concept_id_for_rename,
 )
-from ..security.access_control import bypass_access_control, can_access_concept
+from ..security.access_control import bypass_access_control
 from .text_value_service import audit_concept_text_relations, upsert_text_for_concept
 
 logger = logging.getLogger(__name__)

@@ -70,7 +70,7 @@ def run_backfill(limit: Optional[int] = None) -> Dict[str, Any]:
                 {"$set": {"namespace": ns, "last_updated_time": now}},
             )
             updated += 1
-        except Exception as e:
+        except Exception:
             # Continue; report at end
             pass
 

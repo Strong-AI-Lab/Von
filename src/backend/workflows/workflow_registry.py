@@ -17,7 +17,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from threading import Lock
-from typing import Any, Callable, Dict, Iterable, Optional
+from typing import Callable, Dict, Iterable, Optional
 
 from .engine import WorkflowDefinition
 

@@ -11,16 +11,12 @@ invokes a different MCP tool via the fallback handler.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, MutableMapping
-from unittest.mock import MagicMock, patch, call
+from typing import Any, MutableMapping
+from unittest.mock import MagicMock, patch
 
-import pytest
 
 from src.backend.workflows.action_registry import (
     ActionRegistry,
-    ActionSpec,
-    WorkflowActionRequest,
-    WorkflowActionResult,
     WorkflowEnvironment,
 )
 from src.backend.workflows.engine import (
@@ -28,7 +24,6 @@ from src.backend.workflows.engine import (
     WorkflowExecutor,
 )
 from src.backend.workflows.vontology_loader import (
-    build_workflow_process_graph,
     load_workflow_definition_from_vontology,
 )
 

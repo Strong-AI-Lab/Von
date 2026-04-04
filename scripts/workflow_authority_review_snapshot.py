@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 from pathlib import Path
 import sys
@@ -10,10 +11,17 @@ repo_root_str = str(REPO_ROOT)
 if repo_root_str not in sys.path:
     sys.path.insert(0, repo_root_str)
 
-from src.backend.workflows.workflow_authority_review_snapshot_service import (
-    WORKFLOW_AUTHORITY_REVIEW_OUTPUT_DIR,
-    diff_workflow_authority_review_snapshot,
-    write_workflow_authority_review_snapshot,
+_workflow_authority_review_snapshot_service = importlib.import_module(
+    "src.backend.workflows.workflow_authority_review_snapshot_service"
+)
+WORKFLOW_AUTHORITY_REVIEW_OUTPUT_DIR = (
+    _workflow_authority_review_snapshot_service.WORKFLOW_AUTHORITY_REVIEW_OUTPUT_DIR
+)
+diff_workflow_authority_review_snapshot = (
+    _workflow_authority_review_snapshot_service.diff_workflow_authority_review_snapshot
+)
+write_workflow_authority_review_snapshot = (
+    _workflow_authority_review_snapshot_service.write_workflow_authority_review_snapshot
 )
 
 

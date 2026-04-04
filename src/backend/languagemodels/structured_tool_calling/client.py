@@ -5,7 +5,7 @@ All LLM provider implementations (OpenAI, Gemini, Ollama) inherit from LLMClient
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional, Sequence
 import logging
 
 from ...services.model_registry_service import (

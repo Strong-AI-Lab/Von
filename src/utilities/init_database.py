@@ -10,23 +10,22 @@ Usage:
     python src/utilities/init_database.py --full-setup        # Init + load starter
 """
 
-import os
 import sys
 import json
 import argparse
+import importlib
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Dict, List, Any, Optional
+from typing import Dict, Any
 
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from src.backend.db.mongo_client import (
-    get_db,
-    get_configured_database_name,
-    is_mock_db_enabled,
-    MONGO_URI,
-)
+_mongo_client = importlib.import_module("src.backend.db.mongo_client")
+get_db = _mongo_client.get_db
+get_configured_database_name = _mongo_client.get_configured_database_name
+is_mock_db_enabled = _mongo_client.is_mock_db_enabled
+MONGO_URI = _mongo_client.MONGO_URI
 
 
 def print_banner():
@@ -253,7 +252,7 @@ def load_starter_ontology() -> bool:
             for concept_data in concepts:
                 concept_id = concept_data.get("concept_id")
                 if not concept_id:
-                    print(f"   ⚠️  Skipping concept without concept_id")
+                    print("   ⚠️  Skipping concept without concept_id")
                     continue
 
                 # Check if concept already exists
@@ -283,7 +282,7 @@ def load_starter_ontology() -> bool:
                         concept_doc["concept_data"] = {}
                     concept_doc["concept_data"]["preserved_fields"] = preserved
 
-                result = concepts_collection.insert_one(concept_doc)
+                concepts_collection.insert_one(concept_doc)
                 concept_id_map[concept_id] = concept_id
 
                 # Get primary name for display
@@ -298,10 +297,10 @@ def load_starter_ontology() -> bool:
 
         print("✅ Starter ontology loaded successfully!")
         print()
-        print(f"Summary:")
+        print("Summary:")
         print(f"  • {len(concepts)} concepts loaded")
         print(f"  • {len(meta_relations)} meta relation types defined")
-        print(f"  • Relationships established between concepts")
+        print("  • Relationships established between concepts")
         print()
         print("You can now:")
         print("  • Start Von and explore the concepts")

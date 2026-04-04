@@ -1,17 +1,6 @@
 import unittest
-import sys
-import os
 
-# Add project root to path
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../"))
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
-
-src_path = os.path.join(project_root, "src")
-if src_path not in sys.path:
-    sys.path.insert(0, src_path)
-
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 from src.backend.services.concept_merge_service import merge_concepts
 
 

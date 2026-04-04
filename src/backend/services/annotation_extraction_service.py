@@ -562,7 +562,6 @@ def llm_generate_spans(text: str, max_spans: int = 40) -> List[Dict[str, Any]]:
                 seen_lower.add(low)
                 dedup.append(entry)
             # Convert each to a simple span by naive search (first occurrence) to integrate with existing pipeline expectations.
-            text_lc = text.lower()
             # Normalisation helpers (Unicode NFC + casefold) to improve match rate for diacritics
             import unicodedata
 
@@ -812,7 +811,6 @@ def llm_generate_spans(text: str, max_spans: int = 40) -> List[Dict[str, Any]]:
     if spans and text:
         seq = []
         cursor = 0
-        used_ranges: List[tuple] = []
         for sp in sorted(spans, key=lambda x: (x["start"], x["end"])):
             t = sp["text"]
             if not t:

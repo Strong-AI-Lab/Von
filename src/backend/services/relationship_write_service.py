@@ -27,7 +27,7 @@ from ..db.repositories.concepts_repository import (
     RELATIONSHIP_KINDS,
 )
 from .feature_flags import get_event_workflow_integration_enabled
-from ..vontology.utils_vontology import is_predicate, is_type, is_pure_instance
+from ..vontology.utils_vontology import is_predicate, is_type
 from ..vontology.code_concepts_registry import (
     build_virtual_concept_doc,
     is_code_concept_id,

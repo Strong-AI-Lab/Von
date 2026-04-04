@@ -687,11 +687,10 @@ def validate_workflow_definition_contract(
         else {}
     )
     try:
-        plan_state_policy = normalise_workflow_plan_state_policy_spec(
+        normalise_workflow_plan_state_policy_spec(
             definition_metadata.get("plan_state_policy")
         )
     except ValueError as exc:
-        plan_state_policy = None
         plan_state_issues.append(
             {
                 "scope": "workflow",
@@ -699,11 +698,10 @@ def validate_workflow_definition_contract(
             }
         )
     try:
-        completion_gate = normalise_workflow_completion_gate_spec(
+        normalise_workflow_completion_gate_spec(
             definition_metadata.get("completion_gate")
         )
     except ValueError as exc:
-        completion_gate = None
         completion_gate_issues.append(
             {
                 "scope": "workflow",

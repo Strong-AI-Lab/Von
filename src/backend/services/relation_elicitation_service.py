@@ -54,7 +54,6 @@ class RelationElicitationService:
         if not instance_of:
             return []
 
-        from ..db.repositories.concepts_repository import ConceptsRepository
 
         repo = ConceptsRepository
 

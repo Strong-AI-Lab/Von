@@ -452,9 +452,7 @@ async def run_jira_task_migration(
     already_imported_selected_issue_count = sum(
         1
         for issue_doc in candidate_issue_docs
-        if (
-            issue_key := normalise_jira_issue_key(issue_doc.get("key"))
-        ) in imported_issue_keys
+        if normalise_jira_issue_key(issue_doc.get("key")) in imported_issue_keys
     )
 
     selected_issue_docs = list(candidate_issue_docs)
@@ -462,9 +460,7 @@ async def run_jira_task_migration(
         selected_issue_docs = [
             issue_doc
             for issue_doc in candidate_issue_docs
-            if (
-                issue_key := normalise_jira_issue_key(issue_doc.get("key"))
-            ) not in imported_issue_keys
+            if normalise_jira_issue_key(issue_doc.get("key")) not in imported_issue_keys
         ]
 
     selection_mode = "explicit_jql"

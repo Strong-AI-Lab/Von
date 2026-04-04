@@ -2,11 +2,9 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Iterable, Literal, Mapping, Set
 from pymongo.collection import Collection
 from pymongo.database import Database
-from pymongo.errors import PyMongoError
-from bson import ObjectId
 import logging
 
-from ..mongo_client import get_db, get_concepts_collection, CONCEPTS_COLLECTION_NAME
+from ..mongo_client import get_db, get_concepts_collection
 from ...security.access_control import (
     apply_concept_query_filter,
     apply_pipeline_filter,

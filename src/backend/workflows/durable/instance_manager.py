@@ -27,7 +27,6 @@ from .models import (
     WorkflowInstance,
     WorkflowInstanceStatus,
     WorkflowSchedule,
-    ScheduleType,
 )
 from .vontology_schedule_repository import VontologyScheduleRepository
 
@@ -901,17 +900,6 @@ class WorkflowInstanceManager:
         }
         if workflow_ids:
             query["workflow_id"] = {"$in": workflow_ids}
-
-        update = {
-            "$set": {
-                "status": WorkflowInstanceStatus.RUNNING.value,
-                "locked_by": worker_id,
-                "lock_expires_at": lock_expires,
-                "progress_message": "running",
-                "progress_updated_at": now,
-            },
-            "$setOnInsert": {"started_at": now},
-        }
 
         # Use $setOnInsert for started_at only if not already set
         doc = coll.find_one_and_update(

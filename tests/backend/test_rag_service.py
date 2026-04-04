@@ -1,6 +1,6 @@
 import pytest
 from unittest.mock import MagicMock, patch
-from src.backend.services.rag_service import get_rag_service, RAGService
+from src.backend.services.rag_service import get_rag_service
 
 
 # Mock LlamaIndex components to avoid real API calls and dependencies during unit tests
@@ -12,10 +12,10 @@ def mock_llamaindex():
         ) as mock_index_cls,
         patch(
             "src.backend.services.rag_backends.llamaindex_backend.ServiceContext"
-        ) as mock_service_context,
+        ),
         patch(
             "src.backend.services.rag_backends.llamaindex_backend.StorageContext"
-        ) as mock_storage_context,
+        ),
         patch(
             "src.backend.services.rag_backends.llamaindex_backend.load_index_from_storage"
         ) as mock_load,

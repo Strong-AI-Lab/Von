@@ -7,7 +7,7 @@ user concepts and organisation concepts, including role associations.
 from __future__ import annotations
 
 import logging
-from typing import Dict, Any, Optional, List, Set
+from typing import Dict, Any, Optional, Set
 
 from ..db.repositories.concepts_repository import ConceptsRepository
 from ..security.access_control import can_access_concept

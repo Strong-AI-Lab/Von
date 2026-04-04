@@ -6,7 +6,7 @@ It is imported lazily to avoid hard dependencies.
 """
 
 from typing import Iterable, Dict, Any, Optional, List, Tuple
-from ..rag_service import RAGService, RAGBackendUnavailable
+from ..rag_service import RAGService
 
 try:
     # Import Haystack components here

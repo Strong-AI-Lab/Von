@@ -7,7 +7,6 @@ and the durable submission path in the sync service.
 from __future__ import annotations
 
 import os
-from typing import Any, Dict
 from unittest.mock import MagicMock, patch
 
 import pytest

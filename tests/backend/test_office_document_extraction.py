@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import io
-import pytest
+from typing import Any, cast
 
 
 def test_docx_extraction(monkeypatch):
@@ -415,8 +415,9 @@ def test_odt_extraction(monkeypatch):
     doc = OpenDocumentText()
     p1 = odf_text.P(text="Hello from LibreOffice!")
     p2 = odf_text.P(text="Second paragraph in ODT.")
-    doc.text.addElement(p1)
-    doc.text.addElement(p2)
+    doc_root = cast(Any, doc).text
+    doc_root.addElement(p1)
+    doc_root.addElement(p2)
 
     odt_buffer = io.BytesIO()
     doc.save(odt_buffer)
@@ -705,7 +706,7 @@ def test_detection_by_extension_odt(monkeypatch):
 
     doc = OpenDocumentText()
     p = odf_text.P(text="Detected by extension")
-    doc.text.addElement(p)
+    cast(Any, doc).text.addElement(p)
 
     odt_buffer = io.BytesIO()
     doc.save(odt_buffer)

@@ -6,10 +6,8 @@ import types
 import pytest
 
 from src.backend.languagemodels.structured_tool_calling import (
-    LLMClient,
     LLMClientConfig,
     ToolDefinition,
-    LLMResponse,
     get_llm_client,
 )
 

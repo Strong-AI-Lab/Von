@@ -6,7 +6,7 @@ JVNAUTOSCI-1071
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 from flask import Blueprint, jsonify, request, session
 from flask.typing import ResponseReturnValue

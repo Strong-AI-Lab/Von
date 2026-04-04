@@ -10,10 +10,9 @@ JVNAUTOSCI-922 Phase 3.1: Verifies that:
 
 from __future__ import annotations
 
-from typing import Any, Dict, MutableMapping
+from typing import Any, Dict
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from src.backend.workflows.action_registry import (
     ActionRegistry,
@@ -371,6 +370,13 @@ class TestMCPToolInvoke:
                         "decision": "approval_required",
                     },
                 ),
+                scenario_ids={},
+                risk_features={},
+                unresolved_risk_factors={},
+                intervention_kinds={},
+                confidence_states={},
+                profile_concept_id=None,
+                profile_diagnostics={},
             )
         )
 

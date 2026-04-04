@@ -4,10 +4,8 @@ Tests the core functions for building searchable text,
 metadata, and tracking embedding status for concepts.
 """
 
-import pytest
 from datetime import datetime, timezone
 from unittest.mock import patch, MagicMock
-from typing import Any, Dict
 
 from src.backend.services.concept_embedding_service import (
     build_concept_searchable_text,

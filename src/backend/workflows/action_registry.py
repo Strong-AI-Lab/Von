@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, Mapping, Sequence
 
 from .execution_contracts import (
     WORKFLOW_CONTROL_SIGNAL_ERROR,

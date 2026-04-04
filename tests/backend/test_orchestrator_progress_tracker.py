@@ -5,7 +5,6 @@ Validates that concurrent requests using ProgressTracker maintain isolation.
 
 from typing import Any, Mapping, cast
 
-import pytest
 
 from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
 from src.backend.integrations.internal_mcp.orchestrator import (

@@ -3,16 +3,13 @@
 Tests the background worker that indexes concepts for semantic search.
 """
 
-import pytest
 from unittest.mock import patch, MagicMock
-from typing import Any, Dict, List
 
 from src.backend.services.concept_embedding_service import (
     EMBEDDING_STATUS_INDEXED,
     EMBEDDING_STATUS_FAILED,
     EMBEDDING_STATUS_PENDING,
     EMBEDDING_STATUS_STALE,
-    CONCEPT_EMBEDDING_NAMESPACE,
 )
 
 
@@ -225,7 +222,7 @@ class TestConceptsNeedingIndexing:
             get_concepts_needing_indexing,
         )
 
-        results = get_concepts_needing_indexing(batch_size=10)
+        get_concepts_needing_indexing(batch_size=10)
 
         # Verify find was called with correct filter
         call_args = mock_repo.find.call_args

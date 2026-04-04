@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib
 import os
 import sys
 from dataclasses import dataclass
@@ -25,14 +26,21 @@ _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from src.backend.db.repositories.concepts_repository import ConceptsRepository
-from src.backend.integrations.internal_mcp.search_proxy_mcp import get_search_proxy
-from src.backend.languagemodels.llm_interface import get_llm_client
-from src.backend.services.text_value_service import upsert_text_for_concept
-from src.backend.vontology.utils_vontology import (
-    create_vontology_concept,
-    simulate_or_delete_concept,
-)
+ConceptsRepository = importlib.import_module(
+    "src.backend.db.repositories.concepts_repository"
+).ConceptsRepository
+get_search_proxy = importlib.import_module(
+    "src.backend.integrations.internal_mcp.search_proxy_mcp"
+).get_search_proxy
+get_llm_client = importlib.import_module(
+    "src.backend.languagemodels.llm_interface"
+).get_llm_client
+upsert_text_for_concept = importlib.import_module(
+    "src.backend.services.text_value_service"
+).upsert_text_for_concept
+_utils_vontology = importlib.import_module("src.backend.vontology.utils_vontology")
+create_vontology_concept = _utils_vontology.create_vontology_concept
+simulate_or_delete_concept = _utils_vontology.simulate_or_delete_concept
 
 
 @dataclass(frozen=True)

@@ -6,7 +6,6 @@ and the /von/api/session/move_chat_session_org endpoint.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import MagicMock, patch
 

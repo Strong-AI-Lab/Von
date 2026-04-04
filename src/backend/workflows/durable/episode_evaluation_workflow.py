@@ -26,9 +26,6 @@ from ..action_registry import (
     WorkflowActionRequest,
     WorkflowActionResult,
 )
-from .workflow_introspection_maintenance_workflow import (
-    WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID,
-)
 
 
 def _clean_text(value: Any) -> str | None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 from pathlib import Path
 import sys
@@ -10,14 +11,14 @@ repo_root_str = str(REPO_ROOT)
 if repo_root_str not in sys.path:
     sys.path.insert(0, repo_root_str)
 
-from src.backend.workflows.durable.registry_factory import (
-    build_workflow_purity_registry_snapshot,
+build_workflow_purity_registry_snapshot = importlib.import_module(
+    "src.backend.workflows.durable.registry_factory"
+).build_workflow_purity_registry_snapshot
+_workflow_purity_report = importlib.import_module(
+    "src.backend.workflows.workflow_purity_report"
 )
-from src.backend.workflows.workflow_purity_report import (
-    WORKFLOW_PURITY_BASELINE_PATH,
-    build_workflow_purity_report,
-    write_workflow_purity_baseline,
-)
+build_workflow_purity_report = _workflow_purity_report.build_workflow_purity_report
+write_workflow_purity_baseline = _workflow_purity_report.write_workflow_purity_baseline
 
 
 def main(argv: list[str] | None = None) -> int:

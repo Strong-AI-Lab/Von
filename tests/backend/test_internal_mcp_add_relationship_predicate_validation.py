@@ -1,4 +1,3 @@
-import pytest
 
 
 def test_add_relationship_rejects_non_vontology_predicate_keys(monkeypatch):

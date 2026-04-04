@@ -41,7 +41,7 @@ def open_folder(path):
             os.startfile(path)
         elif os.name == "posix":  # For macOS and Linux
             subprocess.call(["open", path])
-    except Exception as e:
+    except Exception:
         pass
 
 
@@ -95,7 +95,7 @@ def save_file_to_local_drive(path, file_name, file_content):
         os.makedirs(path, exist_ok=True)
         with open(os.path.join(path, file_name), "a", encoding="utf-8") as f:
             f.write(file_content)
-    except Exception as e:
+    except Exception:
         pass
 
 
@@ -116,7 +116,7 @@ def upload_file(service, file_path, file_name, file_content, mime_type="text/pla
             .execute()
         )
         return file.get("id")
-    except Exception as e:
+    except Exception:
         pass
 
 
@@ -189,7 +189,7 @@ def iterate_files_in_folder(token_path, folder_id=None):
         )
         files = results.get("files", [])
         return files
-    except Exception as e:
+    except Exception:
         return []
 
 

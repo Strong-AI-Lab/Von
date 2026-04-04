@@ -17,20 +17,16 @@ import logging
 import sys
 import os
 import signal
-from datetime import datetime, timezone
-from typing import Any, Dict, Optional
 
 # Add src to path so we can import backend modules
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from src.backend.db.connection_manager import get_db, health_summary
+from src.backend.db.connection_manager import health_summary
 from src.backend.services.concept_embedding_service import (
     CONCEPT_EMBEDDING_NAMESPACE,
     EMBEDDING_STATUS_INDEXED,
     EMBEDDING_STATUS_FAILED,
-    EMBEDDING_STATUS_PENDING,
-    EMBEDDING_STATUS_STALE,
     build_concept_searchable_text,
     build_concept_embedding_metadata,
     build_concept_document_id,

@@ -5,7 +5,7 @@ annotation payload expected by the realtime annotation API. We avoid
 external dependencies to keep tests lightweight.
 """
 
-from typing import List, Dict, Any, Optional
+from typing import Dict, Any, Optional
 from datetime import datetime
 
 

@@ -31,7 +31,7 @@ class TestCreateConceptInstanceOfType:
         mock_repo.collection.return_value = mock_db_collection
         mock_repo.find_one.return_value = None  # No duplicate
 
-        result = create_concept(
+        create_concept(
             name="published_in",
             concept_id="#V#published_in",
             parent_concept_ids=["#V#predicate"],
@@ -58,7 +58,7 @@ class TestCreateConceptInstanceOfType:
         mock_repo.collection.return_value = mock_db_collection
         mock_repo.find_one.return_value = None
 
-        result = create_concept(
+        create_concept(
             name="test_predicate",
             concept_id="#V#test_predicate",
             parent_concept_ids=["#V#predicate"],
@@ -83,7 +83,7 @@ class TestCreateConceptInstanceOfType:
         mock_repo.find_one.return_value = None
 
         # Create as type (not instance) - should set is_a_type_of only
-        result = create_concept(
+        create_concept(
             name="my_type",
             concept_id="#V#my_type",
             parent_concept_ids=["#V#thing"],
@@ -106,7 +106,7 @@ class TestCreateConceptInstanceOfType:
         mock_repo.find_one.return_value = None
 
         # Create as instance - should set is_an_instance_of only
-        result = create_concept(
+        create_concept(
             name="john_smith",
             concept_id="#V#john_smith",
             parent_concept_ids=["#V#person"],
@@ -129,7 +129,7 @@ class TestCreateConceptInstanceOfType:
         mock_repo.find_one.return_value = None
 
         # Even with create_as_instance=True, instance_of_type takes precedence
-        result = create_concept(
+        create_concept(
             name="special_predicate",
             concept_id="#V#special_predicate",
             parent_concept_ids=["#V#predicate"],

@@ -1,6 +1,5 @@
 """Gemini client with structured tool calling support."""
 
-import json
 import logging
 from typing import Any, Dict, List, Optional, Sequence
 import asyncio

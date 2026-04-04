@@ -13,16 +13,14 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Mapping
+from typing import Any, Dict
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from src.backend.workflows.action_registry import (
     ActionRegistry,
     ActionSpec,
     WorkflowActionRequest,
-    WorkflowActionResult,
     WorkflowEnvironment,
 )
 from src.backend.workflows.definitions import TODO_REFRESH_WORKFLOW_ID

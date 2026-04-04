@@ -1,8 +1,7 @@
 import sys
 import os
 import logging
-import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 
 # Add src to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))

@@ -1,20 +1,27 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 from pathlib import Path
 import sys
-from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.backend.services.jira_task_migration_runner_service import (
-    DEFAULT_JIRA_TASK_MIGRATION_PROJECT_KEY,
-    DEFAULT_JIRA_TASK_MIGRATION_REPORT_PATH,
-    JiraTaskMigrationOptions,
-    run_jira_task_migration_sync,
+_jira_task_migration_runner_service = importlib.import_module(
+    "src.backend.services.jira_task_migration_runner_service"
+)
+DEFAULT_JIRA_TASK_MIGRATION_PROJECT_KEY = (
+    _jira_task_migration_runner_service.DEFAULT_JIRA_TASK_MIGRATION_PROJECT_KEY
+)
+DEFAULT_JIRA_TASK_MIGRATION_REPORT_PATH = (
+    _jira_task_migration_runner_service.DEFAULT_JIRA_TASK_MIGRATION_REPORT_PATH
+)
+JiraTaskMigrationOptions = _jira_task_migration_runner_service.JiraTaskMigrationOptions
+run_jira_task_migration_sync = (
+    _jira_task_migration_runner_service.run_jira_task_migration_sync
 )
 
 

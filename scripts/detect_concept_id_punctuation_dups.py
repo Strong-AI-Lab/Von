@@ -23,6 +23,7 @@ Optional args:
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import os
 import sys
@@ -40,8 +41,10 @@ if PROJECT_ROOT not in sys.path:
 if SRC_ROOT not in sys.path:
     sys.path.insert(0, SRC_ROOT)
 
-from src.backend.db.mongo_client import get_db
-from src.backend.utils.concept_id_utils import canonicalise_vontology_concept_id
+get_db = importlib.import_module("src.backend.db.mongo_client").get_db
+canonicalise_vontology_concept_id = importlib.import_module(
+    "src.backend.utils.concept_id_utils"
+).canonicalise_vontology_concept_id
 
 
 @dataclass(frozen=True)

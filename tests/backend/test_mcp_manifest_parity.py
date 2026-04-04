@@ -6,16 +6,14 @@ from pathlib import Path
 import asyncio
 from typing import Any, cast
 
-# Add project root to path
-project_root = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(project_root))
-
 from src.backend.integrations.internal_mcp.tool_contract_registry import (
     SURFACE_MANIFEST,
     SURFACE_VONTOLOGY_STDIO,
     get_surface_tool_payloads,
 )
 from src.backend.mcp_server.mcp_stdio_server import list_tools
+
+PROJECT_ROOT = Path(__file__).parent.parent.parent
 
 
 def _normalise_surface_payload(payload: dict) -> dict:
@@ -58,7 +56,7 @@ def test_vontology_stdio_surface_matches_canonical_registry() -> None:
 def test_manifest_surface_matches_canonical_registry() -> None:
     """Manifest must exactly match canonical contracts for the manifest surface."""
     manifest_path = (
-        project_root / "src" / "backend" / "mcp_server" / "vontology_mcp.json"
+        PROJECT_ROOT / "src" / "backend" / "mcp_server" / "vontology_mcp.json"
     )
     with open(manifest_path, "r", encoding="utf-8") as f:
         manifest_data = json.load(f)
@@ -84,13 +82,15 @@ def test_manifest_surface_matches_canonical_registry() -> None:
 def test_manifest_regeneration_script_runs_from_repo_root_without_pythonpath() -> None:
     env = os.environ.copy()
     env.pop("PYTHONPATH", None)
-    manifest_path = project_root / "src" / "backend" / "mcp_server" / "vontology_mcp.json"
+    manifest_path = (
+        PROJECT_ROOT / "src" / "backend" / "mcp_server" / "vontology_mcp.json"
+    )
     original_manifest = manifest_path.read_text(encoding="utf-8")
 
     try:
         result = subprocess.run(
             [sys.executable, "scripts/regenerate_vontology_mcp_manifest.py"],
-            cwd=project_root,
+            cwd=PROJECT_ROOT,
             env=env,
             capture_output=True,
             text=True,

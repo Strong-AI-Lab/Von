@@ -19,8 +19,6 @@ except Exception:  # Fallback for environments where direct import path differs
 # Import the utility functions
 from ...vontology.utils_vontology import (
     get_concept_details_from_db,
-    get_vontology_node_and_descendant_ids,
-    update_vontology_node_description,
     get_vontology_tree,
     get_vontology_node_content,
     get_vontology_node_parents,
@@ -30,7 +28,6 @@ from ...vontology.utils_vontology import (
     is_opencyc_format,
     convert_opencyc_to_von_format,
     import_ontology_nodes,
-    get_concept_notes,  # Added import
     to_pascal_case,
     generate_concept_id_from_name,
     get_concept_description,
@@ -44,18 +41,13 @@ from ...vontology.utils_vontology import (
     extract_salient_scope_lists,
     SALIENT_SCOPE_FIELD,
     build_pure_instance_query,
-    is_type,
-    is_predicate,
 )
 from ...db.repositories.concepts_repository import ConceptsRepository
 from ...db.repositories.concepts_repository import RELATIONSHIP_KINDS
-from ...services.settings_service import get_setting
 from ...services.concept_service import (
     get_concept_by_id,
-    get_concept_by_concept_id,
     ConceptNotFoundError,
     update_concept_description,
-    enrich_concept_with_text_relations,
 )
 from ...services.text_value_service import get_texts_for_concept
 from ...services.concept_relation_service import build_concept_relations_payload
@@ -2035,7 +2027,6 @@ def export_nodes_route():
         #     current_app.logger.error(f"Error exporting ontology nodes: {result['error']}")
         #     return jsonify(result), 500
         # current_app.logger.info(f"Successfully exported {len(result)} ontology nodes")
-        return jsonify(result), 200
 
     except Exception as e:
         current_app.logger.error(
@@ -3716,7 +3707,6 @@ def add_relationship_route():
     # Normalise structural predicates using the authoritative service (JVNAUTOSCI-986)
     from ...services.relationship_write_service import (
         normalise_structural_predicate,
-        is_structural_predicate,
         RELATIONSHIP_KINDS,
     )
 
@@ -4053,6 +4043,7 @@ def list_salient_predicates_for_instance():
     # Instrumentation counters stored in _SALIENT_STATS.
     global _SALIENT_CACHE  # type: ignore
     global _SALIENT_STATS  # type: ignore
+    global _SALIENT_METRICS  # type: ignore
     # Initialize caches/stats if missing (avoid unused-expression lint warnings)
     if "_SALIENT_CACHE" not in globals() or not isinstance(_SALIENT_CACHE, dict):  # type: ignore[name-defined]
         _SALIENT_CACHE = {}

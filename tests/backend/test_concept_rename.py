@@ -7,8 +7,7 @@ Tests cover:
 4. Protected concept checks
 """
 
-import pytest
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 from src.backend.utils.concept_id_utils import (
     validate_concept_id_for_rename,

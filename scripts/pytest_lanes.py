@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import os
 from pathlib import Path
 import subprocess
@@ -11,16 +12,19 @@ repo_root_str = str(REPO_ROOT)
 if repo_root_str not in sys.path:
     sys.path.insert(0, repo_root_str)
 
-from src.backend.utils.pytest_lane_catalogue import (
-    SUITES,
-    aggregate_lane_ids,
-    build_pytest_command_for_suite,
-    build_pytest_command_for_targets,
-    count_suite_members,
-    get_git_changed_paths,
-    recommend_for_changed_paths,
-    render_command,
+_pytest_lane_catalogue = importlib.import_module(
+    "src.backend.utils.pytest_lane_catalogue"
 )
+SUITES = _pytest_lane_catalogue.SUITES
+aggregate_lane_ids = _pytest_lane_catalogue.aggregate_lane_ids
+build_pytest_command_for_suite = _pytest_lane_catalogue.build_pytest_command_for_suite
+build_pytest_command_for_targets = (
+    _pytest_lane_catalogue.build_pytest_command_for_targets
+)
+count_suite_members = _pytest_lane_catalogue.count_suite_members
+get_git_changed_paths = _pytest_lane_catalogue.get_git_changed_paths
+recommend_for_changed_paths = _pytest_lane_catalogue.recommend_for_changed_paths
+render_command = _pytest_lane_catalogue.render_command
 
 
 def main(argv: list[str] | None = None) -> int:

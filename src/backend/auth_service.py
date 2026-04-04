@@ -5,6 +5,7 @@ from typing import Any, Protocol, cast, runtime_checkable
 from urllib.parse import urlparse
 
 from google_auth_oauthlib.flow import Flow
+from google.auth.transport.requests import Request
 from google.oauth2 import id_token
 from .services.google_oauth_config import (
     configure_oauthlib_insecure_transport,
@@ -21,8 +22,6 @@ try:  # pragma: no cover - defensive import
     from google.oauth2.credentials import Credentials as OAuthCredentials  # type: ignore
 except Exception:  # pragma: no cover
     OAuthCredentials = Any  # type: ignore
-from google.auth.transport.requests import Request
-import requests
 
 
 class GoogleAuthService:

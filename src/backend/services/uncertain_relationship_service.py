@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import hashlib
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 import uuid
 
 from ..db.repositories.concepts_repository import ConceptsRepository

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import ast
 import copy
-import fnmatch
 import json
 import re
 from datetime import datetime, timezone

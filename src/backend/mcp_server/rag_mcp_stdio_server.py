@@ -9,6 +9,7 @@ fails closed on missing `namespace` to reduce accidental cross-namespace access.
 """
 
 import asyncio
+import importlib
 import json
 import os
 import sys
@@ -31,7 +32,9 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from src.backend.mcp_server.process_guard import terminate_duplicate_sibling_servers
+terminate_duplicate_sibling_servers = importlib.import_module(
+    "src.backend.mcp_server.process_guard"
+).terminate_duplicate_sibling_servers
 
 # Optional recovery hygiene: enable only when explicitly debugging stale
 # sibling MCP processes from previous IDE restarts.
@@ -56,11 +59,14 @@ except ImportError:
     raise
 
 # Absolute imports (required when executed as a script)
-from src.backend.integrations.internal_mcp import catalogue as internal_catalogue
-from src.backend.integrations.internal_mcp.tool_contract_registry import (
-    SURFACE_VONRAG_STDIO,
-    get_surface_tool_payloads,
+internal_catalogue = importlib.import_module(
+    "src.backend.integrations.internal_mcp.catalogue"
 )
+tool_contract_registry_module = importlib.import_module(
+    "src.backend.integrations.internal_mcp.tool_contract_registry"
+)
+SURFACE_VONRAG_STDIO = tool_contract_registry_module.SURFACE_VONRAG_STDIO
+get_surface_tool_payloads = tool_contract_registry_module.get_surface_tool_payloads
 
 
 app = Server("vonrag-mcp")

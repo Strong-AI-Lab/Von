@@ -9,6 +9,7 @@ This is intended to be run manually when iterating on assistant behaviour.
 
 from __future__ import annotations
 
+import importlib
 import os
 import sys
 
@@ -17,13 +18,16 @@ _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from src.backend.security.access_control import bypass_access_control
-from src.backend.services.text_value_service import (
-    delete_text_relation,
-    delete_text_relation_by_predicate_and_text,
-    get_texts_for_concept,
-    upsert_text_for_concept,
+bypass_access_control = importlib.import_module(
+    "src.backend.security.access_control"
+).bypass_access_control
+_text_value_service = importlib.import_module("src.backend.services.text_value_service")
+delete_text_relation = _text_value_service.delete_text_relation
+delete_text_relation_by_predicate_and_text = (
+    _text_value_service.delete_text_relation_by_predicate_and_text
 )
+get_texts_for_concept = _text_value_service.get_texts_for_concept
+upsert_text_for_concept = _text_value_service.upsert_text_for_concept
 
 PROMPT_CONCEPT_ID = "#V#general_von_chat_prompt_for_witbrock"
 PROMPT_LANG = "en-NZ"

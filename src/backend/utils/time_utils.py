@@ -1,6 +1,5 @@
 from __future__ import annotations
 from datetime import datetime, timezone
-from typing import Union
 
 __all__ = ["utc_now", "utc_iso_now"]
 

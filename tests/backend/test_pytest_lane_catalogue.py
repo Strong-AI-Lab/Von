@@ -9,7 +9,6 @@ from src.backend.utils import pytest_lane_catalogue
 from src.backend.utils.pytest_lane_catalogue import (
     LANE_BACKEND_MCP,
     LANE_BACKEND_ROUTES,
-    LANE_BACKEND_WORKFLOWS,
     MARKER_COST_HEAVY,
     MARKER_MANUAL_ONLY,
     MARKER_TRAIT_EXTERNAL_LIKE,

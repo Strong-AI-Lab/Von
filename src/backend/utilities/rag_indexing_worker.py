@@ -1,8 +1,9 @@
 import time
 import logging
-import sys
+import importlib
 import os
 import signal
+import sys
 from datetime import datetime, timezone
 
 """RAG Indexing Worker
@@ -23,8 +24,12 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.
 # Add src directory (for backend imports)
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from src.backend.db.connection_manager import get_db, health_summary
-from src.backend.models.concept_models import IndexingStatus
+_connection_manager = importlib.import_module("src.backend.db.connection_manager")
+get_db = _connection_manager.get_db
+health_summary = _connection_manager.health_summary
+IndexingStatus = importlib.import_module(
+    "src.backend.models.concept_models"
+).IndexingStatus
 
 # Configure logging
 logging.basicConfig(

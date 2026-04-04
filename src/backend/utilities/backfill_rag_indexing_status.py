@@ -1,5 +1,6 @@
-import sys
 import os
+import importlib
+import sys
 from datetime import datetime, timezone
 from typing import Any, Dict
 
@@ -8,8 +9,10 @@ _repo_root = os.path.abspath(".")
 if _repo_root not in sys.path:
     sys.path.append(_repo_root)
 
-from src.backend.db.connection_manager import get_db
-from src.backend.models.concept_models import IndexingStatus
+get_db = importlib.import_module("src.backend.db.connection_manager").get_db
+IndexingStatus = importlib.import_module(
+    "src.backend.models.concept_models"
+).IndexingStatus
 
 """Backfill RAG Indexing Status
 

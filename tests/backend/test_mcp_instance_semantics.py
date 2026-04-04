@@ -16,7 +16,6 @@ import uuid
 from typing import List, Optional
 
 from src.backend.db.repositories.concepts_repository import ConceptsRepository
-from src.backend.services.concept_service import create_concept, get_concept
 from src.backend.services.concept_search_service import search_concepts
 from src.backend.vontology.utils_vontology import create_vontology_concept
 

@@ -1,4 +1,3 @@
-import pytest
 
 
 def test_add_relationship_treats_prefixed_hascontent_as_text_relation(monkeypatch):

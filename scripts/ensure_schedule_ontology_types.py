@@ -3,13 +3,14 @@ Ensure Workflow Schedule types exist in Vontology.
 """
 
 import sys
+import importlib
 from pathlib import Path
 
 # Add src to path
 repo_root = Path(__file__).parent.parent
 sys.path.append(str(repo_root))
 
-from src.backend.services import concept_service
+concept_service = importlib.import_module("src.backend.services.concept_service")
 
 TYPE_WORKFLOW_SCHEDULE = "#V#workflow_schedule"
 TYPE_CRON_SCHEDULE = "#V#cron_schedule"

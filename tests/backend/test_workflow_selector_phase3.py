@@ -24,7 +24,6 @@ from src.backend.services.workflow_selection_experience import (
 )
 from src.backend.workflows import WorkflowRegistry
 from src.backend.workflows.workflow_selector import (
-    WorkflowSelection,
     WorkflowSelector,
 )
 from workflow_test_support import (

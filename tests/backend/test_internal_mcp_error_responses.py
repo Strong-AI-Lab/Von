@@ -6,7 +6,6 @@ These tests verify that:
 3. Write handlers return properly structured error responses
 """
 
-import pytest
 
 
 class TestMCPErrorResponseDataclass:

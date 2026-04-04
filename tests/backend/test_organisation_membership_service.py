@@ -7,8 +7,7 @@ relationships and roles using the memberOf predicate and hasRole text relations.
 import pytest
 import sys
 from pathlib import Path
-from unittest.mock import Mock, patch, MagicMock
-from bson import ObjectId
+from unittest.mock import patch
 
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -313,7 +312,6 @@ class TestGetOrganisationMembers:
     ):
         """Test successful retrieval of organisation members."""
         org_id = "#V#sail"
-        users = ["#V#michael_witbrock", "#V#john_smith"]
 
         # Setup
         mock_concepts_repo.find_one.return_value = {

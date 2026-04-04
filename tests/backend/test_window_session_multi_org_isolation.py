@@ -362,8 +362,6 @@ class TestCreateChatSessionUsesWindowContext:
 
         import src.backend.services.chat_history_service as chat_history_service
 
-        original_create = chat_history_service.create_chat_session
-
         def capture_create(*args, **kwargs):
             created_sessions.append(kwargs.copy())
             # Return a mock result
@@ -516,7 +514,7 @@ class TestHistoryBackfillUsesWindowContext:
         )
 
         # Request backfill (it will fail later in the method, but we're testing namespace check)
-        resp = client.post(
+        client.post(
             "/von/history/backfill_spoken",
             json={"session_id": "test_session", "history_index": 1},
             headers={"X-Von-Window-Session": window_a},
@@ -536,7 +534,6 @@ class TestWindowSessionStoreIsolation:
         """WindowSessionStore should maintain separate contexts per window ID."""
         from src.backend.services.window_session_context_service import (
             WindowSessionStore,
-            WindowSessionContext,
         )
 
         store = WindowSessionStore()

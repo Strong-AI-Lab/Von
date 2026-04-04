@@ -1,7 +1,6 @@
 """Factory for instantiating LLM clients with structured tool calling."""
 
 import logging
-from typing import Optional
 
 from .client import LLMClient, LLMClientConfig
 from .providers.openai_client import OpenAIClient

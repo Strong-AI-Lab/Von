@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import sys
 from pathlib import Path
@@ -11,9 +12,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.backend.integrations.internal_mcp.tool_contract_registry import (
-    get_manifest_payload,
-)
+get_manifest_payload = importlib.import_module(
+    "src.backend.integrations.internal_mcp.tool_contract_registry"
+).get_manifest_payload
 
 
 def main() -> None:

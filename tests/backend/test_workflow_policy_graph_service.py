@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 
 def test_resolve_policy_from_graph_returns_none_when_policy_not_found():

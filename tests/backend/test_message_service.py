@@ -5,8 +5,6 @@ Unit tests for message creation, retrieval, and management.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Any, Dict
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -20,10 +18,8 @@ from src.backend.services.message_service import (
     create_message,
     get_message,
     get_messages_for_user,
-    get_conversation_between_users,
     get_unread_count,
     mark_message_read,
-    mark_messages_read_bulk,
     delete_message,
 )
 

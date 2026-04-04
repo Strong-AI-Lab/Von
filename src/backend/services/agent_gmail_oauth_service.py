@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, Optional
 from google_auth_oauthlib.flow import Flow
 
 if TYPE_CHECKING:  # pragma: no cover
-    from google.oauth2.credentials import Credentials
+    pass
 
 from googleapiclient.discovery import build
 

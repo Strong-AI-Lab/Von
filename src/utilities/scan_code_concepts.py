@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import importlib
 import json
 import sys
 import tokenize
@@ -13,7 +14,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.backend.vontology.code_concepts_registry import list_code_predicate_ids
+list_code_predicate_ids = importlib.import_module(
+    "src.backend.vontology.code_concepts_registry"
+).list_code_predicate_ids
 
 
 CONCEPT_ID_RE = r"#V#[-A-Za-z0-9_]+"

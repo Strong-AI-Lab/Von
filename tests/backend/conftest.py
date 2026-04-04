@@ -5,7 +5,6 @@ longer overridden globally because selector compatibility env toggles were
 removed from production code.
 """
 
-import os
 import re
 import shutil
 import sys
