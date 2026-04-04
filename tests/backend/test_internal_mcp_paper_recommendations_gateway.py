@@ -130,3 +130,62 @@ def test_materialise_paper_recommendations_gateway_invoke(monkeypatch):
         "max_results": 10,
         "trigger_source": "test",
     }
+
+
+def test_record_paper_recommendation_feedback_gateway_invoke(monkeypatch):
+    gateway = _build_gateway()
+
+    captured: dict[str, object] = {}
+
+    def _fake_record_feedback(**kwargs):
+        captured.update(kwargs)
+        return {
+            "success": True,
+            "feedback_concept_id": "#V#paper_recommendation_feedback_deadbeef",
+            "actor_user_concept_id": kwargs["actor_user_concept_id"],
+            "subject_concept_id": kwargs["subject_concept_id"],
+            "assertion_concept_id": kwargs["assertion_concept_id"],
+            "paper_concept_id": "#V#paper_causal_science",
+            "feedback_payload": {
+                "recommendation_usefulness_label": "useful",
+                "explanation_usefulness_label": "partly_useful",
+            },
+        }
+
+    monkeypatch.setattr(
+        "src.backend.services.paper_recommendation_vontology_service.record_paper_recommendation_feedback",
+        _fake_record_feedback,
+    )
+
+    payload = gateway.invoke(
+        "record_paper_recommendation_feedback",
+        {
+            "user_concept_id": "#V#lu_yunli",
+            "assertion_concept_id": "#V#paper_recommendation_assertion_for_lu_yunli_causal",
+            "recommendation_usefulness": "useful",
+            "explanation_usefulness": "partly_useful",
+            "feedback_text": "Useful recommendation, but the explanation should be more specific.",
+            "session_id": "sess-1",
+            "request_id": "req-1",
+        },
+    ).payload
+
+    assert payload["success"] is True
+    assert payload["feedback_concept_id"] == (
+        "#V#paper_recommendation_feedback_deadbeef"
+    )
+    assert payload["namespace"] == "#V#lu_yunli"
+    assert captured == {
+        "actor_user_concept_id": "#V#lu_yunli",
+        "subject_concept_id": "#V#lu_yunli",
+        "assertion_concept_id": "#V#paper_recommendation_assertion_for_lu_yunli_causal",
+        "paper_concept_id": None,
+        "recommendation_usefulness": "useful",
+        "explanation_usefulness": "partly_useful",
+        "feedback_text": "Useful recommendation, but the explanation should be more specific.",
+        "capture_surface": "conversation",
+        "conversation_session_id": "sess-1",
+        "request_id": "req-1",
+        "organisation_concept_id": None,
+        "profile_concept_id": None,
+    }

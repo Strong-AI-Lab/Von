@@ -2302,6 +2302,102 @@
             }
         },
         {
+            "name": "record_paper_recommendation_feedback",
+            "description": "Record graded feedback about a paper recommendation and its explanation, including optional free-text correction and conversational session provenance. Use when a user says a recommendation was useful, partly useful, or unhelpful, and/or comments on the explanation quality.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "subject_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "user_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "assertion_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "paper_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "profile_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "recommendation_usefulness": {
+                        "type": [
+                            "string",
+                            "integer",
+                            "number",
+                            "boolean",
+                            "null"
+                        ]
+                    },
+                    "explanation_usefulness": {
+                        "type": [
+                            "string",
+                            "integer",
+                            "number",
+                            "boolean",
+                            "null"
+                        ]
+                    },
+                    "feedback_text": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "capture_surface": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "source_surface": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "session_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "request_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "record_paper_recommendation_feedback input: optional subject_concept_id/user_concept_id (defaults to the authenticated user when no assertion is supplied), optional assertion_concept_id and paper_concept_id, optional profile_concept_id override, graded recommendation/explanation usefulness values ('useful', 'partly_useful', 'not_useful' or simple aliases), optional feedback_text, optional capture surface metadata, optional session/request provenance, and optional namespace override."
+            }
+        },
+        {
             "name": "remove_relationship",
             "description": "Remove a relationship between two concepts (concept-to-concept only). Use to clean incorrect type/instance links or other structural predicates. Text relation removal is not supported in this tool.",
             "inputSchema": {
