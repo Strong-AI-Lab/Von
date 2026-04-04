@@ -51,6 +51,13 @@ import {
     __testOnly_persistThinkingCardBodyHeightFromDom,
     __testOnly_syncThinkingCanonicalHistoriesFromProgress,
     __testOnly_resetChatConceptMetaCaches,
+    __testOnly_buildConversationLlmTelemetryLocatorPayload,
+    __testOnly_buildConversationLlmTelemetryPayload,
+    __testOnly_buildConversationTelemetryExportPayload,
+    __testOnly_copyConversationLlmTelemetryToClipboard,
+    __testOnly_clearLlmDebugData,
+    __testOnly_setTranscriptTurns,
+    setLlmDebugDataForTurn,
     formatChatTimestamp,
     sendMessage
 } from '../chatTab';
@@ -5029,5 +5036,188 @@ describe('scroll to latest message affordance', () => {
         expect(__testOnly_scrollConversationToEnd(scrollableField, { smooth: false })).toBe(true);
 
         jest.useRealTimers();
+    });
+});
+
+describe('conversation LLM telemetry clipboard export', () => {
+    beforeEach(() => {
+        const { getCurrentUserConceptId } = require('../domUtils.js');
+        const {
+            getSessionScopedNamespace,
+            getSessionScopedOrgContext
+        } = require('../utils/sessionScopedStorage.js');
+
+        document.body.innerHTML = '';
+        __testOnly_clearLlmDebugData();
+        __testOnly_setTranscriptTurns([]);
+        __testOnly_setActiveChatSession('session-1684', 'Compact telemetry test session');
+
+        getCurrentUserConceptId.mockReset();
+        getSessionScopedNamespace.mockReset();
+        getSessionScopedOrgContext.mockReset();
+
+        getCurrentUserConceptId.mockReturnValue('#V#michael_witbrock');
+        getSessionScopedNamespace.mockReturnValue('#V#michael_witbrock');
+        getSessionScopedOrgContext.mockReturnValue({
+            concept_id: '#V#university_of_auckland_strong_ai_lab'
+        });
+    });
+
+    afterEach(() => {
+        __testOnly_clearLlmDebugData();
+        __testOnly_setTranscriptTurns([]);
+        __testOnly_setActiveChatSession(null, null);
+        document.body.innerHTML = '';
+    });
+
+    test('builds a compact locator payload with retrieval handles instead of debug blobs', () => {
+        const firstTimestampMs = 1743760800000;
+        const secondTimestampMs = firstTimestampMs + 60000;
+
+        __testOnly_setTranscriptTurns([
+            { sender: 'user', message: 'One' },
+            { sender: 'assistant', message: 'Two' },
+            { sender: 'assistant', message: 'Three' }
+        ]);
+
+        setLlmDebugDataForTurn('assistant-1743760800000', {
+            timestamp: firstTimestampMs,
+            request_id: 'req-1684-a',
+            history_location: {
+                session_id: 'session-1684',
+                history_index: 4
+            },
+            model: 'gpt-5'
+        });
+        setLlmDebugDataForTurn('assistant-1743760860000', {
+            timestamp: secondTimestampMs,
+            turn_execution_diagnostics: {
+                request_id: 'req-1684-b'
+            },
+            response: {
+                content: 'hello'
+            }
+        });
+
+        const payload = __testOnly_buildConversationLlmTelemetryLocatorPayload();
+
+        expect(payload).toBeTruthy();
+        expect(payload.schema_version).toBe('conversation_llm_telemetry_locator.v1');
+        expect(payload.session_id).toBe('session-1684');
+        expect(payload.session_name).toBe('Compact telemetry test session');
+        expect(payload.namespace_context).toEqual({
+            namespace: '#V#michael_witbrock',
+            user_id: '#V#michael_witbrock',
+            org_id: '#V#university_of_auckland_strong_ai_lab'
+        });
+        expect(payload.metadata).toMatchObject({
+            total_turns: 2,
+            llm_debug_turn_count: 2,
+            transcript_turn_count: 3,
+            has_partial_telemetry: true,
+            missing_turn_telemetry_count: 1,
+            turns_with_history_location_count: 1,
+            turns_with_request_id_count: 2,
+            ordering: 'timestamp_then_turn_id'
+        });
+        expect(payload.turns).toHaveLength(2);
+        expect(payload.turns[0]).toEqual({
+            sequence: 1,
+            turn_id: 'assistant-1743760800000',
+            timestamp_utc: new Date(firstTimestampMs).toISOString(),
+            history_location: {
+                session_id: 'session-1684',
+                history_index: 4
+            },
+            request_id: 'req-1684-a'
+        });
+        expect(payload.turns[1]).toMatchObject({
+            sequence: 2,
+            turn_id: 'assistant-1743760860000',
+            timestamp_utc: new Date(secondTimestampMs).toISOString(),
+            history_location: null,
+            request_id: 'req-1684-b'
+        });
+        expect(payload.turns[0]).not.toHaveProperty('debug_data');
+        expect(payload.turns[1]).not.toHaveProperty('debug_data');
+    });
+
+    test('keeps the full telemetry export payload unchanged for file save', () => {
+        const timestampMs = 1743760800000;
+
+        setLlmDebugDataForTurn('assistant-1743760800000', {
+            timestamp: timestampMs,
+            request_id: 'req-1684-full',
+            history_location: {
+                session_id: 'session-1684',
+                history_index: 7
+            },
+            model: 'gpt-5',
+            response: {
+                content: 'full telemetry'
+            }
+        });
+
+        const fullPayload = __testOnly_buildConversationLlmTelemetryPayload();
+        const exportPayload = __testOnly_buildConversationTelemetryExportPayload();
+        const locatorPayload = __testOnly_buildConversationLlmTelemetryLocatorPayload();
+
+        expect(exportPayload).toEqual(fullPayload);
+        expect(fullPayload.schema_version).toBe('conversation_llm_telemetry.v1');
+        expect(fullPayload.turns[0].debug_data).toBeTruthy();
+        expect(fullPayload.turns[0].debug_data.model).toBe('gpt-5');
+        expect(locatorPayload.turns[0].debug_data).toBeUndefined();
+        expect(locatorPayload.turns[0].request_id).toBe('req-1684-full');
+    });
+
+    test('copies compact locator JSON to the clipboard instead of the full telemetry blob', async () => {
+        const timestampMs = 1743760800000;
+        const writeText = jest.fn().mockResolvedValue(undefined);
+        Object.assign(navigator, {
+            clipboard: { writeText }
+        });
+
+        setLlmDebugDataForTurn('assistant-1743760800000', {
+            timestamp: timestampMs,
+            request_id: 'req-1684-copy',
+            history_location: {
+                session_id: 'session-1684',
+                history_index: 9
+            },
+            model: 'gpt-5',
+            tool_invocations: [
+                { tool_name: 'turn_execution_get_diagnostics' }
+            ]
+        });
+
+        const copied = await __testOnly_copyConversationLlmTelemetryToClipboard();
+        const copiedPayload = JSON.parse(writeText.mock.calls[0][0]);
+        const fullPayload = __testOnly_buildConversationTelemetryExportPayload();
+
+        expect(copied).toBe(true);
+        expect(writeText).toHaveBeenCalledTimes(1);
+        expect(copiedPayload.schema_version).toBe('conversation_llm_telemetry_locator.v1');
+        expect(copiedPayload.turns[0].request_id).toBe('req-1684-copy');
+        expect(copiedPayload.turns[0].history_location).toEqual({
+            session_id: 'session-1684',
+            history_index: 9
+        });
+        expect(copiedPayload.turns[0].debug_data).toBeUndefined();
+        expect(fullPayload.turns[0].debug_data).toBeTruthy();
+        expect(fullPayload.turns[0].debug_data.tool_invocations).toBeTruthy();
+    });
+
+    test('fails gracefully when no conversation telemetry is available', async () => {
+        const writeText = jest.fn().mockResolvedValue(undefined);
+        Object.assign(navigator, {
+            clipboard: { writeText }
+        });
+
+        const payload = __testOnly_buildConversationLlmTelemetryLocatorPayload();
+        const copied = await __testOnly_copyConversationLlmTelemetryToClipboard();
+
+        expect(payload).toBeNull();
+        expect(copied).toBe(false);
+        expect(writeText).not.toHaveBeenCalled();
     });
 });
