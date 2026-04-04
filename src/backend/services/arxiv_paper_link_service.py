@@ -784,7 +784,7 @@ def materialise_scholarly_representation_for_file_copy(
     if not file_link_verified:
         verification_failures.append("file_link_missing")
 
-    return {
+    result = {
         "success": len(verification_failures) == 0,
         "verified": len(verification_failures) == 0,
         "representation_mode": "generic_file_copy",
@@ -799,6 +799,29 @@ def materialise_scholarly_representation_for_file_copy(
         "file_link_verified": file_link_verified,
         "verification_failures": verification_failures,
     }
+    if result["success"]:
+        try:
+            from .paper_recommendation_workflow_vontology_service import (
+                request_paper_recommendation_refresh,
+            )
+
+            result["recommendation_refresh"] = request_paper_recommendation_refresh(
+                candidate_paper_concept_ids=[paper_concept_id],
+                trigger_source="materialise_scholarly_representation_for_file_copy",
+                user_id=user_concept_id,
+                event_payload={
+                    "paper_concept_id": paper_concept_id,
+                    "file_copy_concept_id": file_copy_concept_id,
+                    "source": "materialise_scholarly_representation_for_file_copy",
+                },
+            )
+        except Exception as exc:
+            result["recommendation_refresh"] = {
+                "success": False,
+                "triggered": False,
+                "reason": f"refresh_request_failed:{exc}",
+            }
+    return result
 
 
 def materialise_scholarly_representation_for_arxiv_file_copy(
@@ -1031,7 +1054,7 @@ def materialise_scholarly_representation_for_arxiv_file_copy(
     if not file_link_verified:
         verification_failures.append("file_link_missing")
 
-    return {
+    result = {
         "success": len(verification_failures) == 0,
         "verified": len(verification_failures) == 0,
         "arxiv_id": normalised_arxiv_id,
@@ -1051,6 +1074,30 @@ def materialise_scholarly_representation_for_arxiv_file_copy(
         "file_link_verified": file_link_verified,
         "verification_failures": verification_failures,
     }
+    if result["success"]:
+        try:
+            from .paper_recommendation_workflow_vontology_service import (
+                request_paper_recommendation_refresh,
+            )
+
+            result["recommendation_refresh"] = request_paper_recommendation_refresh(
+                candidate_paper_concept_ids=[paper_concept_id],
+                trigger_source="materialise_scholarly_representation_for_arxiv_file_copy",
+                user_id=user_concept_id,
+                event_payload={
+                    "paper_concept_id": paper_concept_id,
+                    "arxiv_id": normalised_arxiv_id,
+                    "file_copy_concept_id": file_copy_concept_id,
+                    "source": "materialise_scholarly_representation_for_arxiv_file_copy",
+                },
+            )
+        except Exception as exc:
+            result["recommendation_refresh"] = {
+                "success": False,
+                "triggered": False,
+                "reason": f"refresh_request_failed:{exc}",
+            }
+    return result
 
 
 __all__ = [

@@ -94,6 +94,7 @@ def test_upsert_paper_recommendation_profile_normalises_fields_before_write(
     )
 
     captured: dict[str, object] = {}
+    mirrored: dict[str, object] = {}
 
     def _fake_upsert_singleton_text_relation(**kwargs):
         captured.update(kwargs)
@@ -101,6 +102,12 @@ def test_upsert_paper_recommendation_profile_normalises_fields_before_write(
 
     monkeypatch.setattr(
         service, "upsert_singleton_text_relation", _fake_upsert_singleton_text_relation
+    )
+    monkeypatch.setattr(
+        service,
+        "persist_subject_paper_matching_profile",
+        lambda **kwargs: mirrored.update(kwargs)
+        or {"success": True, "subject_concept_id": kwargs["subject_concept_id"]},
     )
 
     result = service.upsert_paper_recommendation_profile(
@@ -140,3 +147,5 @@ def test_upsert_paper_recommendation_profile_normalises_fields_before_write(
     ]
     assert stored_profile["notes"] == "favour papers with strong methodological detail"
     assert stored_profile["updated_at"]
+    assert mirrored["subject_concept_id"] == "#V#lu_yunli"
+    assert result["generic_subject_profile"]["success"] is True

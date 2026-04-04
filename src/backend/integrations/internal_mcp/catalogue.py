@@ -2661,6 +2661,40 @@ def _build_paper_recommendations(**kwargs):
     }
 
 
+def _materialise_paper_recommendations(**kwargs):
+    from ...services.paper_recommendation_materialisation_service import (
+        materialise_paper_recommendations_from_event,
+    )
+
+    raw_candidate_ids = kwargs.get("candidate_paper_concept_ids")
+    if raw_candidate_ids is None:
+        raw_candidate_ids = kwargs.get("paper_concept_ids")
+    if isinstance(raw_candidate_ids, str):
+        raw_candidate_ids = [raw_candidate_ids]
+    raw_subject_ids = kwargs.get("target_subject_concept_ids")
+    if raw_subject_ids is None:
+        raw_subject_ids = kwargs.get("subject_concept_ids")
+    if raw_subject_ids is None:
+        single_subject = kwargs.get("target_subject_concept_id") or kwargs.get(
+            "subject_concept_id"
+        )
+        if isinstance(single_subject, str) and single_subject.strip():
+            raw_subject_ids = [single_subject.strip()]
+    if isinstance(raw_subject_ids, str):
+        raw_subject_ids = [raw_subject_ids]
+
+    payload = dict(kwargs.get("event") or {})
+    payload.setdefault("event_type", kwargs.get("event_type"))
+    return materialise_paper_recommendations_from_event(
+        event_payload=payload,
+        target_subject_concept_ids=raw_subject_ids,
+        candidate_paper_concept_ids=raw_candidate_ids,
+        candidate_limit=kwargs.get("candidate_limit", 24),
+        max_results=kwargs.get("max_results", 10),
+        trigger_source=kwargs.get("trigger_source"),
+    )
+
+
 def _normalise_string_list_argument(value: Any) -> list[str]:
     if value is None:
         return []
@@ -7147,6 +7181,53 @@ def _build_paper_recommendations_output_schema() -> Schema:
             "build_paper_recommendations output: success/error state, target user/profile IDs, "
             "recommendation policy version, ranked/skipped result rows with grounded rationale "
             "and provenance, plus profile-signal and warning diagnostics."
+        ),
+    )
+
+
+def _materialise_paper_recommendations_input_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "target_subject_concept_id": (str, type(None)),
+            "target_subject_concept_ids": (list, type(None)),
+            "subject_concept_id": (str, type(None)),
+            "subject_concept_ids": (list, type(None)),
+            "candidate_paper_concept_ids": (list, type(None)),
+            "paper_concept_ids": (list, type(None)),
+            "candidate_limit": (int, type(None)),
+            "max_results": (int, type(None)),
+            "event_type": (str, type(None)),
+            "event": (dict, type(None)),
+            "trigger_source": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "materialise_paper_recommendations input: optional subject concept IDs, "
+            "optional candidate paper concept IDs, optional candidate_limit/max_results, "
+            "and optional event/event_type payload used to infer impacted subjects or papers."
+        ),
+    )
+
+
+def _materialise_paper_recommendations_output_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "success": (bool, type(None)),
+            "triggered": (bool, type(None)),
+            "event_type": (str, type(None)),
+            "reason": (str, type(None)),
+            "refreshed_subject_count": (int, type(None)),
+            "refreshed_paper_count": (int, type(None)),
+            "subject_concept_ids": (list, type(None)),
+            "candidate_paper_concept_ids": (list, type(None)),
+            "reports": (list, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "materialise_paper_recommendations output: whether a refresh was triggered, "
+            "the impacted subject/paper IDs, and per-subject recommendation materialisation reports."
         ),
     )
 
@@ -22087,6 +22168,18 @@ def build_default_catalogue() -> MethodCatalogue:
                 "Rank represented scholarly-paper candidates against a represented user "
                 "paper recommendation profile and return grounded rationale/provenance. "
                 "This is the workflow-first ranking core, independent of later delivery surfaces."
+            ),
+        ),
+        MethodDefinition(
+            name="materialise_paper_recommendations",
+            handler=_materialise_paper_recommendations,
+            input_schema=_materialise_paper_recommendations_input_schema(),
+            output_schema=_materialise_paper_recommendations_output_schema(),
+            category="write",
+            timeout_sec=60.0,
+            description=(
+                "Materialise semantic paper recommendations for one or more subject concepts, "
+                "optionally resolving impacted subjects and candidate papers from an event payload."
             ),
         ),
         MethodDefinition(

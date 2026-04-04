@@ -15,6 +15,9 @@ from typing import Any, Mapping, Sequence
 from . import concept_service
 from .concept_service import ConceptNotFoundError, get_concept_by_concept_id
 from .relationship_write_service import add_relationship
+from .paper_recommendation_vontology_service import (
+    persist_subject_paper_matching_profile,
+)
 from .text_value_service import get_texts_for_concept, upsert_singleton_text_relation
 from .workflow_vontology_materialisation_helpers import (
     ensure_instance_typing,
@@ -443,6 +446,12 @@ def upsert_paper_recommendation_profile(
         context=dict(context) if isinstance(context, Mapping) else None,
         garbage_collect=garbage_collect,
     )
+    generic_profile_result = persist_subject_paper_matching_profile(
+        subject_concept_id=user_concept_id,
+        profile=normalised_profile,
+        provenance=dict(provenance) if isinstance(provenance, Mapping) else None,
+        context=dict(context) if isinstance(context, Mapping) else None,
+    )
 
     return {
         "success": True,
@@ -450,6 +459,7 @@ def upsert_paper_recommendation_profile(
         "profile_concept_id": profile_concept_id,
         "profile": normalised_profile,
         "text_relation": result,
+        "generic_subject_profile": generic_profile_result,
     }
 
 

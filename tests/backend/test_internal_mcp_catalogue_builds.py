@@ -46,6 +46,7 @@ def test_internal_mcp_catalogue_builds_and_includes_relationship_tools():
     assert "repo_dossier_workflow_definition_get" in methods
     assert "repo_dossier_prompt_definition_get" in methods
     assert "repo_dossier_git_metadata" in methods
+    assert "materialise_paper_recommendations" in methods
     assert "testing_prepare_experiment_spec" in methods
     assert "testing_prepare_meeting_invitation_spec" in methods
     assert "testing_prepare_arxiv_paper_ingestion_fixture" in methods

@@ -1,0 +1,112 @@
+{
+  "family_id": "paper_recommendation_workflow_seed_bundle",
+  "managed_by": "paper_recommendation_workflow_vontology_service",
+  "schema_version": "repo_seed_workflow_bundle.v1",
+  "source_tag": "JVNAUTOSCI-1679",
+  "supported_action_ids": [
+    "materialise_paper_recommendations"
+  ],
+  "workflows": [
+    {
+      "workflow_id": "#V#paper_recommendation_evaluation_workflow",
+      "display_name": "Paper Recommendation Evaluation Workflow",
+      "description": "Canonical durable workflow for semantic paper recommendation materialisation from explicit refresh requests and recommendation-relevant ontology mutations.",
+      "content": "Resolve impacted recommendation subjects and candidate papers from explicit requests or ontology mutation events, run bounded semantic recall plus reranking, and materialise recommendation assertions in Vontology.",
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"execution\",\"authoring_intent_required\":false,\"prefer_existing_capability\":true}",
+          "lang": "en-NZ"
+        }
+      ],
+      "type_ids": [
+        "#V#ai_workflow",
+        "#V#durable_workflow"
+      ],
+      "publication_spec": {
+        "initial_state": "materialise_recommendations",
+        "steps": [
+          {
+            "action_id": "materialise_paper_recommendations",
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_paper_recommendation_evaluation_workflow_materialise_recommendations_event_to_event_parameter",
+                "context_key": "event",
+                "required": false,
+                "tool_param": "event"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_paper_recommendation_evaluation_workflow_materialise_recommendations_event_type_to_event_type_parameter",
+                "context_key": "event_type",
+                "required": false,
+                "tool_param": "event_type"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_paper_recommendation_evaluation_workflow_materialise_recommendations_target_subject_concept_ids_to_target_subject_concept_ids_parameter",
+                "context_key": "target_subject_concept_ids",
+                "required": false,
+                "tool_param": "target_subject_concept_ids"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_paper_recommendation_evaluation_workflow_materialise_recommendations_candidate_paper_concept_ids_to_candidate_paper_concept_ids_parameter",
+                "context_key": "candidate_paper_concept_ids",
+                "required": false,
+                "tool_param": "candidate_paper_concept_ids"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_paper_recommendation_evaluation_workflow_materialise_recommendations_candidate_limit_to_candidate_limit_parameter",
+                "context_key": "candidate_limit",
+                "required": false,
+                "tool_param": "candidate_limit"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_paper_recommendation_evaluation_workflow_materialise_recommendations_max_results_to_max_results_parameter",
+                "context_key": "max_results",
+                "required": false,
+                "tool_param": "max_results"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_paper_recommendation_evaluation_workflow_materialise_recommendations_trigger_source_to_trigger_source_parameter",
+                "context_key": "trigger_source",
+                "required": false,
+                "tool_param": "trigger_source"
+              }
+            ],
+            "execution_mode": "deterministic",
+            "next_state": "completed",
+            "on_failure_state": "failed",
+            "state_id": "materialise_recommendations",
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_paper_recommendation_evaluation_workflow_materialise_recommendations_reports_to_refresh_reports",
+                "context_key": "refresh_reports",
+                "tool_output_field": "reports"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_paper_recommendation_evaluation_workflow_materialise_recommendations_subject_concept_ids_to_subject_concept_ids",
+                "context_key": "subject_concept_ids",
+                "tool_output_field": "subject_concept_ids"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_paper_recommendation_evaluation_workflow_materialise_recommendations_candidate_paper_concept_ids_to_candidate_paper_concept_ids",
+                "context_key": "candidate_paper_concept_ids",
+                "tool_output_field": "candidate_paper_concept_ids"
+              }
+            ],
+            "writes_context_keys": [
+              "refresh_reports",
+              "subject_concept_ids",
+              "candidate_paper_concept_ids"
+            ]
+          },
+          {
+            "state_id": "completed"
+          },
+          {
+            "state_id": "failed"
+          }
+        ]
+      }
+    }
+  ]
+}

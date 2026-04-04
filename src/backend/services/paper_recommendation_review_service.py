@@ -1,8 +1,8 @@
 """Bounded review payloads for Von-native paper recommendation inspection.
 
-This keeps the review surface separate from the ranking core:
+This keeps the review surface separate from recommendation materialisation:
 
-- ranking stays in ``paper_recommendation_ranking_service``
+- semantic evaluation/materialisation stays in ``paper_recommendation_ranking_service``
 - this service chooses a bounded candidate pool and adds trigger metadata
 
 The settings tab is the first authoritative review surface. External channels

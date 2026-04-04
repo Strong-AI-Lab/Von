@@ -77,6 +77,7 @@ def test_post_recommendation_profile_persists_payload(monkeypatch):
     app = _make_settings_app()
 
     captured: dict[str, object] = {}
+    refresh_captured: dict[str, object] = {}
 
     def _fake_upsert(**kwargs):
         captured.update(kwargs)
@@ -89,6 +90,11 @@ def test_post_recommendation_profile_persists_payload(monkeypatch):
     monkeypatch.setattr(
         "src.backend.server.routes.settings_routes.upsert_paper_recommendation_profile",
         _fake_upsert,
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.request_paper_recommendation_refresh",
+        lambda **kwargs: refresh_captured.update(kwargs)
+        or {"success": True, "triggered": True},
     )
 
     with app.test_client() as client:
@@ -111,6 +117,11 @@ def test_post_recommendation_profile_persists_payload(monkeypatch):
         "project_description": "Graph reasoning",
         "stated_interest_terms": ["knowledge graphs"],
     }
+    assert payload["recommendation_refresh"] == {"success": True, "triggered": True}
+    assert refresh_captured["target_subject_concept_ids"] == ["#V#lu_yunli"]
+    assert refresh_captured["trigger_source"] == (
+        "settings_routes.recommendation_profile"
+    )
 
 
 def test_post_recommendation_review_returns_payload(monkeypatch):

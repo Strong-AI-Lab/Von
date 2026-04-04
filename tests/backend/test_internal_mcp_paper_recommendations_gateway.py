@@ -85,3 +85,48 @@ def test_build_paper_recommendations_gateway_invoke(monkeypatch):
         "max_results": 10,
         "include_all_candidates": False,
     }
+
+
+def test_materialise_paper_recommendations_gateway_invoke(monkeypatch):
+    gateway = _build_gateway()
+
+    captured: dict[str, object] = {}
+
+    def _fake_materialise(**kwargs):
+        captured.update(kwargs)
+        return {
+            "success": True,
+            "triggered": True,
+            "refreshed_subject_count": 1,
+            "refreshed_paper_count": 1,
+            "subject_concept_ids": ["#V#project_alpha"],
+            "candidate_paper_concept_ids": ["#V#paper_causal_science"],
+            "reports": [{"success": True, "subject_concept_id": "#V#project_alpha"}],
+        }
+
+    monkeypatch.setattr(
+        "src.backend.services.paper_recommendation_materialisation_service.materialise_paper_recommendations_from_event",
+        _fake_materialise,
+    )
+
+    payload = gateway.invoke(
+        "materialise_paper_recommendations",
+        {
+            "target_subject_concept_id": "#V#project_alpha",
+            "paper_concept_ids": ["#V#paper_causal_science"],
+            "event_type": "paper_recommendation.requested",
+            "trigger_source": "test",
+        },
+    ).payload
+
+    assert payload["success"] is True
+    assert payload["triggered"] is True
+    assert payload["subject_concept_ids"] == ["#V#project_alpha"]
+    assert captured == {
+        "event_payload": {"event_type": "paper_recommendation.requested"},
+        "target_subject_concept_ids": ["#V#project_alpha"],
+        "candidate_paper_concept_ids": ["#V#paper_causal_science"],
+        "candidate_limit": 24,
+        "max_results": 10,
+        "trigger_source": "test",
+    }

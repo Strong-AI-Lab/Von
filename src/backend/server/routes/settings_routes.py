@@ -63,6 +63,9 @@ from ...services.paper_recommendation_profile_vontology_service import (
 from ...services.paper_recommendation_review_service import (
     build_paper_recommendation_review,
 )
+from ...services.paper_recommendation_workflow_vontology_service import (
+    request_paper_recommendation_refresh,
+)
 from ...services.window_session_context_service import get_effective_context
 from ...services.buttonify_service import BUTTONIFY_PROMPT_IDS
 from ...integrations.google.gmail_service import list_profile_ids_from_env
@@ -1436,6 +1439,15 @@ def set_recommendation_profile(user_concept_id: str):
             },
             context={
                 "path": "settings_routes.recommendation_profile",
+            },
+        )
+        payload["recommendation_refresh"] = request_paper_recommendation_refresh(
+            target_subject_concept_ids=[user_concept_id],
+            trigger_source="settings_routes.recommendation_profile",
+            user_id=user_concept_id,
+            event_payload={
+                "subject_concept_id": user_concept_id,
+                "source": "settings_routes.recommendation_profile",
             },
         )
         return jsonify(payload), 200
