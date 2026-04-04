@@ -2661,6 +2661,113 @@ def _build_paper_recommendations(**kwargs):
     }
 
 
+def _record_paper_recommendation_feedback(**kwargs):
+    from src.backend.security.access_control import get_effective_user_concept_id
+
+    from ...services.paper_recommendation_vontology_service import (
+        record_paper_recommendation_feedback,
+    )
+
+    namespace = _normalise_namespace_override(kwargs.get("namespace"))
+    ns_report = _resolve_rag_namespace_from_kwargs(dict(kwargs))
+    if bool(ns_report.get("namespace_mismatch")):
+        return {
+            "success": False,
+            "error": "namespace_mismatch",
+            "message": (
+                "Explicit namespace conflicts with derived user/org namespace; "
+                "paper recommendation feedback was not recorded."
+            ),
+            **ns_report,
+        }
+
+    effective_namespace = namespace
+    if effective_namespace is None:
+        derived_namespace = ns_report.get("namespace")
+        if isinstance(derived_namespace, str) and derived_namespace.strip():
+            effective_namespace = derived_namespace.strip()
+
+    derived_user_concept_id, derived_organisation_concept_id = (
+        _resolve_rag_actor_scope_ids(ns_report)
+    )
+    actor_user_concept_id = (
+        derived_user_concept_id.strip()
+        if isinstance(derived_user_concept_id, str) and derived_user_concept_id.strip()
+        else None
+    )
+    if actor_user_concept_id is None:
+        with _with_namespace_actor_override(effective_namespace):
+            effective_user = get_effective_user_concept_id()
+        if isinstance(effective_user, str) and effective_user.strip():
+            actor_user_concept_id = effective_user.strip()
+    if actor_user_concept_id is None:
+        return {
+            "success": False,
+            "error": "not_authenticated",
+            "message": (
+                "Authenticated user context is required to record paper recommendation feedback."
+            ),
+            "namespace": effective_namespace,
+        }
+
+    raw_subject_concept_id = kwargs.get("subject_concept_id")
+    if raw_subject_concept_id is None:
+        raw_subject_concept_id = kwargs.get("user_concept_id")
+    subject_concept_id = (
+        str(raw_subject_concept_id).strip()
+        if isinstance(raw_subject_concept_id, str) and raw_subject_concept_id.strip()
+        else None
+    )
+
+    assertion_concept_id = (
+        str(kwargs.get("assertion_concept_id")).strip()
+        if isinstance(kwargs.get("assertion_concept_id"), str)
+        and str(kwargs.get("assertion_concept_id")).strip()
+        else None
+    )
+    if subject_concept_id is None and assertion_concept_id is None:
+        subject_concept_id = actor_user_concept_id
+
+    try:
+        with _with_namespace_actor_override(effective_namespace):
+            report = record_paper_recommendation_feedback(
+                actor_user_concept_id=actor_user_concept_id,
+                subject_concept_id=subject_concept_id,
+                assertion_concept_id=assertion_concept_id,
+                paper_concept_id=kwargs.get("paper_concept_id"),
+                recommendation_usefulness=kwargs.get("recommendation_usefulness"),
+                explanation_usefulness=kwargs.get("explanation_usefulness"),
+                feedback_text=kwargs.get("feedback_text"),
+                capture_surface=kwargs.get("capture_surface")
+                or kwargs.get("source_surface")
+                or "conversation",
+                conversation_session_id=kwargs.get("conversation_session_id")
+                or kwargs.get("session_id"),
+                request_id=kwargs.get("request_id") or kwargs.get("turn_id"),
+                organisation_concept_id=derived_organisation_concept_id,
+                profile_concept_id=kwargs.get("profile_concept_id"),
+            )
+    except ValueError as exc:
+        return make_error_response("invalid_feedback_request", str(exc))
+    except Exception as exc:
+        return make_error_response(
+            "paper_recommendation_feedback_failed",
+            f"Failed to record paper recommendation feedback: {exc}",
+        )
+
+    if isinstance(report, Mapping):
+        response_payload = dict(report)
+        response_payload["namespace"] = effective_namespace
+        return response_payload
+    return {
+        "success": False,
+        "error": "unexpected_feedback_response",
+        "message": "Paper recommendation feedback returned an unexpected response type.",
+        "response_type": type(report).__name__,
+        "namespace": effective_namespace,
+    }
+
+
 def _materialise_paper_recommendations(**kwargs):
     from ...services.paper_recommendation_materialisation_service import (
         materialise_paper_recommendations_from_event,
@@ -7181,6 +7288,63 @@ def _build_paper_recommendations_output_schema() -> Schema:
             "build_paper_recommendations output: success/error state, target user/profile IDs, "
             "recommendation policy version, ranked/skipped result rows with grounded rationale "
             "and provenance, plus profile-signal and warning diagnostics."
+        ),
+    )
+
+
+def _record_paper_recommendation_feedback_input_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "subject_concept_id": (str, type(None)),
+            "user_concept_id": (str, type(None)),
+            "assertion_concept_id": (str, type(None)),
+            "paper_concept_id": (str, type(None)),
+            "profile_concept_id": (str, type(None)),
+            "recommendation_usefulness": (str, int, float, bool, type(None)),
+            "explanation_usefulness": (str, int, float, bool, type(None)),
+            "feedback_text": (str, type(None)),
+            "capture_surface": (str, type(None)),
+            "source_surface": (str, type(None)),
+            "session_id": (str, type(None)),
+            "request_id": (str, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "record_paper_recommendation_feedback input: optional subject_concept_id/user_concept_id "
+            "(defaults to the authenticated user when no assertion is supplied), optional assertion_concept_id "
+            "and paper_concept_id, optional profile_concept_id override, graded recommendation/explanation "
+            "usefulness values ('useful', 'partly_useful', 'not_useful' or simple aliases), optional "
+            "feedback_text, optional capture surface metadata, optional session/request provenance, and "
+            "optional namespace override."
+        ),
+    )
+
+
+def _record_paper_recommendation_feedback_output_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "success": (bool, type(None)),
+            "error": (str, type(None)),
+            "message": (str, type(None)),
+            "feedback_concept_id": (str, type(None)),
+            "actor_user_concept_id": (str, type(None)),
+            "subject_concept_id": (str, type(None)),
+            "paper_concept_id": (str, type(None)),
+            "assertion_concept_id": (str, type(None)),
+            "profile_concept_id": (str, type(None)),
+            "namespace": (str, type(None)),
+            "feedback_payload": (dict, type(None)),
+            "feedback_json_text_relation": (dict, type(None)),
+            "note_text_relation": (dict, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "record_paper_recommendation_feedback output: success/error state, canonical feedback/user/subject/"
+            "paper/assertion/profile IDs, optional namespace, structured feedback payload, and persisted text-relation "
+            "metadata for the feedback JSON and optional free-text note."
         ),
     )
 
@@ -22168,6 +22332,20 @@ def build_default_catalogue() -> MethodCatalogue:
                 "Rank represented scholarly-paper candidates against a represented user "
                 "paper recommendation profile and return grounded rationale/provenance. "
                 "This is the workflow-first ranking core, independent of later delivery surfaces."
+            ),
+        ),
+        MethodDefinition(
+            name="record_paper_recommendation_feedback",
+            handler=_record_paper_recommendation_feedback,
+            input_schema=_record_paper_recommendation_feedback_input_schema(),
+            output_schema=_record_paper_recommendation_feedback_output_schema(),
+            category="write",
+            timeout_sec=30.0,
+            description=(
+                "Record graded feedback about a paper recommendation and its explanation, "
+                "including optional free-text correction and conversational session provenance. "
+                "Use when a user says a recommendation was useful, partly useful, or unhelpful, "
+                "and/or comments on the explanation quality."
             ),
         ),
         MethodDefinition(
