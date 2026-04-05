@@ -7,6 +7,7 @@ import pytest
 from src.backend.services.entity_representation_workflow_vontology_service import (
     ENTITY_REPRESENTATION_PAYLOAD_PROMPT_CONCEPT_ID,
     ENTITY_REPRESENTATION_PREFLIGHT_PROMPT_CONCEPT_ID,
+    _ensure_entity_representation_prompt_support,
     ENTITY_REPRESENTATION_WORKFLOW_ID,
     bootstrap_canonical_entity_representation_workflows,
 )
@@ -111,3 +112,37 @@ def test_bootstrap_skips_republication_when_entity_workflow_family_is_current(
     assert second_publication.get("skip_reason") == "existing_materialisation_valid"
     assert second_counts.get("workflows_published") == 0
     assert second_counts.get("errors") == 0
+
+
+def test_entity_representation_prompt_support_seeds_content_from_repo_assets(
+    _reset_mock_db: Any,
+) -> None:
+    report = _ensure_entity_representation_prompt_support()
+
+    assert report.get("success") is True
+    assert report.get("seeded_prompt_count") == 2
+
+    preflight_rows = get_texts_for_concept(
+        ENTITY_REPRESENTATION_PREFLIGHT_PROMPT_CONCEPT_ID,
+        predicate="hasContent",
+        limit=5,
+    )
+    payload_rows = get_texts_for_concept(
+        ENTITY_REPRESENTATION_PAYLOAD_PROMPT_CONCEPT_ID,
+        predicate="hasContent",
+        limit=5,
+    )
+
+    preflight_text = next(
+        ((row or {}).get("text") for row in preflight_rows if (row or {}).get("text")),
+        "",
+    )
+    payload_text = next(
+        ((row or {}).get("text") for row in payload_rows if (row or {}).get("text")),
+        "",
+    )
+
+    assert isinstance(preflight_text, str)
+    assert isinstance(payload_text, str)
+    assert "workflow_creation_prompt must begin with" in preflight_text
+    assert "entity_source_text should preserve" in payload_text

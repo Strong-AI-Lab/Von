@@ -40,38 +40,21 @@ _REPO_SEED_ASSET_PATH = (
     / "repo_seed_bundles"
     / "paper_recommendation_workflow_seed_bundle.json"
 )
-_RERANK_PROMPT_TEXT = """You are a multilingual paper recommendation reranker for Von.
+_RERANK_PROMPT_SEED_ASSET_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "workflows"
+    / "repo_seed_bundles"
+    / "paper_recommendation_rerank_prompt_seed.md"
+)
 
-Use only the supplied subject bundle and candidate paper bundles. Do not assume
-facts that are not grounded in the provided data.
 
-Rank papers for the subject based on semantic fit to the subject's projects,
-interests, organisations, related concepts, and explicit profile overlay. The
-subject may be a person, organisation, project, paper in preparation, or some
-other concept that should be matched against papers.
+def _load_paper_recommendation_prompt_seed_text() -> str:
+    """Return the non-authoritative bootstrap prompt text for missing content."""
 
-Prefer semantically relevant matches across languages; do not privilege English.
-
-Return JSON with exactly one top-level key:
-- recommendations: an array of objects ordered best-first
-
-Each recommendation object must have:
-- paper_concept_id: string
-- score: float between 0.0 and 1.0
-- rationale_summary: short paragraph
-- rationale: fuller explanation grounded in the supplied facts
-- evidence: array of short evidence objects or strings
-
-Rules:
-- Keep only papers that are genuinely plausible recommendations.
-- Reward deep fit to the subject's actual projects and represented context,
-  not just broad topic adjacency.
-- When the subject profile indicates negative interests, avoid recommending
-  papers centred on those areas unless the overall fit is still strong.
-- Use the embedding_score only as one signal, not as the entire decision.
-- Do not invent missing metadata.
-- Output JSON only.
-"""
+    prompt_text = _RERANK_PROMPT_SEED_ASSET_PATH.read_text(encoding="utf-8").strip()
+    if not prompt_text:
+        raise ValueError("paper_recommendation_rerank_prompt_seed_missing")
+    return prompt_text
 
 
 def _ensure_paper_recommendation_prompt_support() -> dict[str, Any]:
@@ -105,7 +88,7 @@ def _ensure_paper_recommendation_prompt_support() -> dict[str, Any]:
         upsert_singleton_text_relation(
             subject_concept_id=PAPER_RECOMMENDATION_RERANK_PROMPT_CONCEPT_ID,
             predicate="hasContent",
-            text=_RERANK_PROMPT_TEXT,
+            text=_load_paper_recommendation_prompt_seed_text(),
             lang="en-NZ",
             context={"jira": _SOURCE_TAG, "source": _MANAGED_BY},
             garbage_collect=True,
@@ -115,7 +98,9 @@ def _ensure_paper_recommendation_prompt_support() -> dict[str, Any]:
     report = dict(report)
     report["seeded_prompt_ids"] = seeded_prompt_ids
     report["seeded_prompt_count"] = len(seeded_prompt_ids)
-    report["success"] = bool(prompt_concept_has_content(PAPER_RECOMMENDATION_RERANK_PROMPT_CONCEPT_ID))
+    report["success"] = bool(
+        prompt_concept_has_content(PAPER_RECOMMENDATION_RERANK_PROMPT_CONCEPT_ID)
+    )
     return report
 
 

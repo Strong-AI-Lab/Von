@@ -107,6 +107,9 @@ WORKFLOW_PROMPT_SOURCE_FUNCTION_PATTERNS = (
 REPO_SEED_AUTHORITY_SCAN_GLOBS = ("src/backend/**/*.py",)
 REPO_SEED_AUTHORITY_ALLOWED_PATHS = frozenset(
     {
+        "src/backend/services/entity_representation_workflow_vontology_service.py",
+        "src/backend/services/episode_evaluation_workflow_vontology_service.py",
+        "src/backend/services/paper_recommendation_workflow_vontology_service.py",
         "src/backend/services/paper_representation_workflow_vontology_service.py",
         "src/backend/services/talk_representation_workflow_vontology_service.py",
         "src/backend/services/testing_workflow_vontology_service.py",

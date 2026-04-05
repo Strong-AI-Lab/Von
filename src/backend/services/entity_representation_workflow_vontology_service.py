@@ -51,82 +51,18 @@ _REPO_SEED_ASSET_PATH = (
     / "repo_seed_bundles"
     / "entity_representation_workflow_seed_bundle.json"
 )
-
-_ENTITY_REPRESENTATION_PREFLIGHT_PROMPT = """You route conversational entity representation requests for Von.
-
-Decide whether the request should:
-- reuse an existing specialised execution workflow,
-- create a missing specialised workflow, or
-- ask the user one minimal clarification question.
-
-You are only handling these entity domains:
-- person
-- company
-- event
-- place
-
-Return JSON only with exactly these keys:
-- decision
-- entity_domain
-- workflow_template_id
-- selected_workflow_id
-- workflow_creation_prompt
-- response_text
-
-Allowed decision values:
-- reuse
-- create
-- clarify
-
-Allowed domain/template/workflow pairs:
-- person -> workflow_creation.person_representation -> #V#person_representation_workflow
-- company -> workflow_creation.company_representation -> #V#company_representation_workflow
-- event -> workflow_creation.event_representation -> #V#event_representation_workflow
-- place -> workflow_creation.place_representation -> #V#place_representation_workflow
-
-Rules:
-- Prefer reuse only when a candidate workflow is clearly an execution workflow for
-  representing the same entity domain.
-- Choose create when the request is about person/company/event/place but no
-  candidate clearly fits.
-- Choose clarify only when the request is too underspecified to determine the
-  domain or the target entity.
-- Do not choose scholarly-paper, arXiv, testing, or workflow-authoring
-  workflows for person/company/event/place requests.
-- selected_workflow_id must be exactly the canonical workflow ID for the chosen
-  entity domain from the allowed pairs above.
-- When decision=create, workflow_creation_prompt must begin with:
-  "Create a workflow from this description request:"
-- response_text should be short and user-facing.
-"""
-
-_ENTITY_REPRESENTATION_PAYLOAD_PROMPT = """You extract a minimal structured payload for a single entity representation.
-
-Return JSON only with exactly these keys:
-- ready_to_materialise
-- needs_user_affirmation
-- entity_name
-- entity_description
-- entity_aliases
-- entity_source_text
-- response_text
-
-Rules:
-- expected_entity_domain tells you whether the entity is a person, company,
-  event, or place.
-- Use only the supplied request text and existing fields.
-- If the entity name is missing or still ambiguous, set
-  needs_user_affirmation=true, ready_to_materialise=false, and ask one short
-  clarification question in response_text.
-- If enough information is present, set ready_to_materialise=true and
-  needs_user_affirmation=false.
-- entity_description should be short, grounded, and empty when there is no safe
-  summary to provide.
-- entity_aliases must be an array of distinct strings and should not repeat the
-  main entity_name.
-- entity_source_text should preserve the best concise textual grounding for the
-  representation.
-"""
+_PREFLIGHT_PROMPT_SEED_ASSET_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "workflows"
+    / "repo_seed_bundles"
+    / "entity_representation_preflight_prompt_seed.md"
+)
+_PAYLOAD_PROMPT_SEED_ASSET_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "workflows"
+    / "repo_seed_bundles"
+    / "entity_representation_payload_prompt_seed.md"
+)
 
 _CANONICAL_ENTITY_EXECUTION_WORKFLOW_SPECS: tuple[dict[str, str], ...] = (
     {
@@ -192,6 +128,15 @@ _CANONICAL_ENTITY_EXECUTION_WORKFLOW_SPECS: tuple[dict[str, str], ...] = (
 )
 
 
+def _load_prompt_seed_text(*, asset_path: Path, error_code: str) -> str:
+    """Return non-authoritative bootstrap prompt text for missing content."""
+
+    prompt_text = asset_path.read_text(encoding="utf-8").strip()
+    if not prompt_text:
+        raise ValueError(error_code)
+    return prompt_text
+
+
 def _ensure_entity_representation_prompt_support() -> dict[str, Any]:
     report = ensure_prompt_concept_support(
         prompt_specs=(
@@ -219,23 +164,28 @@ def _ensure_entity_representation_prompt_support() -> dict[str, Any]:
     )
 
     seeded_prompt_ids: list[str] = []
-    prompt_texts = (
+    prompt_seed_specs = (
         (
             ENTITY_REPRESENTATION_PREFLIGHT_PROMPT_CONCEPT_ID,
-            _ENTITY_REPRESENTATION_PREFLIGHT_PROMPT,
+            _PREFLIGHT_PROMPT_SEED_ASSET_PATH,
+            "entity_representation_preflight_prompt_seed_missing",
         ),
         (
             ENTITY_REPRESENTATION_PAYLOAD_PROMPT_CONCEPT_ID,
-            _ENTITY_REPRESENTATION_PAYLOAD_PROMPT,
+            _PAYLOAD_PROMPT_SEED_ASSET_PATH,
+            "entity_representation_payload_prompt_seed_missing",
         ),
     )
-    for prompt_concept_id, prompt_text in prompt_texts:
+    for prompt_concept_id, asset_path, error_code in prompt_seed_specs:
         if prompt_concept_has_content(prompt_concept_id):
             continue
         upsert_singleton_text_relation(
             subject_concept_id=prompt_concept_id,
             predicate="hasContent",
-            text=prompt_text,
+            text=_load_prompt_seed_text(
+                asset_path=asset_path,
+                error_code=error_code,
+            ),
             lang="en-NZ",
             context={"jira": _SOURCE_TAG, "source": _MANAGED_BY},
             garbage_collect=True,

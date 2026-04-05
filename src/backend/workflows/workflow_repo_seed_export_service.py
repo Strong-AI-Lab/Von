@@ -52,6 +52,30 @@ _SKIPPED_TEXT_RELATION_PREDICATES = {
 }
 
 
+def _load_raw_repo_seed_bundle_payload(
+    *,
+    asset_path: str | Path,
+) -> tuple[Path, dict[str, Any], dict[str, Mapping[str, Any]]]:
+    target_path = Path(asset_path).expanduser().resolve()
+    raw_payload = json.loads(target_path.read_text(encoding="utf-8"))
+    if not isinstance(raw_payload, Mapping):
+        raise ValueError("repo_seed_workflow_bundle_not_mapping")
+    workflows_payload = raw_payload.get("workflows")
+    if not isinstance(workflows_payload, Sequence) or isinstance(
+        workflows_payload,
+        str,
+    ):
+        raise ValueError("repo_seed_workflow_bundle_workflows_missing")
+    raw_workflow_entry_by_id = {
+        str(item.get("workflow_id") or "").strip(): item
+        for item in workflows_payload
+        if isinstance(item, Mapping) and str(item.get("workflow_id") or "").strip()
+    }
+    if not raw_workflow_entry_by_id:
+        raise ValueError("repo_seed_workflow_source_workflow_id_missing")
+    return target_path, dict(raw_payload), raw_workflow_entry_by_id
+
+
 def _stable_json_like(value: Any) -> Any:
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
@@ -539,14 +563,10 @@ def build_repo_seed_workflow_bundle_from_authority(
 ) -> dict[str, Any]:
     """Build a deterministic repo-seed bundle from authoritative Vontology state."""
 
-    seed_bundle = authority_service.load_repo_seed_workflow_bundle(asset_path)
-    raw_payload = json.loads(Path(asset_path).expanduser().resolve().read_text(encoding="utf-8"))
-    raw_workflow_entry_by_id = {
-        str(item.get("workflow_id") or "").strip(): item
-        for item in (raw_payload.get("workflows") or [])
-        if isinstance(item, Mapping) and str(item.get("workflow_id") or "").strip()
-    }
-    workflow_ids = list((seed_bundle.get("publication_specs") or {}).keys())
+    _target_path, raw_payload, raw_workflow_entry_by_id = _load_raw_repo_seed_bundle_payload(
+        asset_path=asset_path
+    )
+    workflow_ids = list(raw_workflow_entry_by_id.keys())
     workflow_entries: list[dict[str, Any]] = []
     supported_action_ids: set[str] = set()
     for workflow_id in workflow_ids:
@@ -567,10 +587,10 @@ def build_repo_seed_workflow_bundle_from_authority(
 
     return _compact_mapping(
         {
-            "family_id": seed_bundle.get("family_id"),
-            "managed_by": seed_bundle.get("managed_by"),
+            "family_id": raw_payload.get("family_id"),
+            "managed_by": raw_payload.get("managed_by"),
             "schema_version": authority_service.REPO_SEED_WORKFLOW_BUNDLE_SCHEMA_VERSION,
-            "source_tag": seed_bundle.get("source_tag"),
+            "source_tag": raw_payload.get("source_tag"),
             "supported_action_ids": ordered_supported_action_ids,
             "workflows": workflow_entries,
         },

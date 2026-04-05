@@ -376,6 +376,54 @@ def test_build_workflow_purity_report_flags_repo_seed_authority_drift(
     ]
 
 
+def test_build_workflow_purity_report_allows_episode_seed_bootstrap_service(
+    tmp_path: Path,
+) -> None:
+    _write(
+        "src/backend/services/episode_evaluation_workflow_vontology_service.py",
+        (
+            "from src.backend.services.workflow_repo_seed_bootstrap import "
+            "bootstrap_repo_seed_workflow_bundle\n\n"
+            "def bootstrap_canonical_episode_evaluation_workflow():\n"
+            "    return bootstrap_repo_seed_workflow_bundle(asset_path='bundle.json')\n"
+        ),
+        root=tmp_path,
+    )
+    baseline_path = tmp_path / "tests" / "backend" / "fixtures" / "workflow_purity_baseline.json"
+    baseline_path.parent.mkdir(parents=True, exist_ok=True)
+    baseline_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "workflow_purity_baseline.v1",
+                "counters": {
+                    "built_in_registration_count": 0,
+                    "remaining_python_workflow_family_count": 0,
+                    "python_authored_canonical_workflow_source_count": 0,
+                    "python_authored_workflow_prompt_source_count": 0,
+                    "direct_instance_create_callsite_count": 0,
+                    "env_event_binding_count": 0,
+                    "legacy_selector_mode_count": 0,
+                    "builtin_capability_override_count": 0,
+                    "non_vontology_discoverable_workflow_count": 0,
+                    "repo_seed_authority_drift_path_count": 0,
+                    "vontology_first_seed_fallback_violation_count": 0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = build_workflow_purity_report(
+        registry=None,
+        project_root=tmp_path,
+        baseline_path=baseline_path,
+    )
+
+    repo_seed_drift = report["details"]["repo_seed_authority_drift"]
+    assert report["counters"]["repo_seed_authority_drift_path_count"] == 0
+    assert repo_seed_drift["offending_paths"] == []
+
+
 def test_build_workflow_purity_report_flags_vontology_first_seed_contract_violations(
     tmp_path: Path,
 ) -> None:

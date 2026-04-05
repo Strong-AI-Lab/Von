@@ -14,6 +14,7 @@ from src.backend.services.episode_evaluation_workflow_contracts import (
     EVENT_TYPE_WORKFLOW_INSTANCE_TERMINAL,
 )
 from src.backend.services.episode_evaluation_workflow_vontology_service import (
+    _ensure_episode_evaluation_prompt_support,
     bootstrap_canonical_episode_evaluation_workflow,
 )
 from src.backend.services.text_value_service import get_texts_for_concept
@@ -116,3 +117,24 @@ def test_bootstrap_materialises_episode_evaluation_workflow_family(
         binding.workflow_id == EPISODE_EVALUATION_WORKFLOW_ID
         for binding in terminal_bindings
     )
+
+
+def test_episode_prompt_support_seeds_content_from_repo_asset(
+    _reset_mock_db: Any,
+) -> None:
+    report = _ensure_episode_evaluation_prompt_support()
+
+    assert report.get("success") is True
+    assert report.get("seeded_prompt_count") == 1
+    prompt_content_rows = get_texts_for_concept(
+        EPISODE_EVALUATION_PROMPT_CONCEPT_ID,
+        predicate="hasContent",
+        limit=5,
+    )
+    prompt_text = next(
+        ((row or {}).get("text") for row in prompt_content_rows if (row or {}).get("text")),
+        "",
+    )
+    assert isinstance(prompt_text, str)
+    assert "routing_quality_signals" in prompt_text
+    assert "workflow/routing selection defects" in prompt_text
