@@ -76,6 +76,10 @@ class _TurnExecutionCollection:
         if isinstance(request_id, str) and doc.get("request_id") != request_id:
             return False
 
+        session_id = query.get("session_id")
+        if isinstance(session_id, str) and doc.get("session_id") != session_id:
+            return False
+
         return True
 
     def find(self, query: dict[str, Any], _projection: dict[str, Any] | None = None):
@@ -949,6 +953,14 @@ def test_turn_execution_get_diagnostics_returns_embedded_payload(monkeypatch):
                             "request_id": "req-diag-1",
                             "generated_at_utc": "2026-04-01T00:00:03Z",
                             "prompt_preview": "Show the turn diagnostics",
+                            "aux_llm_calls": [
+                                {
+                                    "type": "workflow_execution_trace",
+                                    "execution_id": "exec-diag-1",
+                                    "instance_id": "#V#wf_instance_diag_1",
+                                    "workflow_id": "#V#chat_assistant_workflow",
+                                }
+                            ],
                             "progress_events": [],
                             "activity_history": [],
                             "phase_history": [],
@@ -1003,10 +1015,41 @@ def test_turn_execution_get_diagnostics_returns_embedded_payload(monkeypatch):
     assert result["schema_version"] == "turn_execution_diagnostics.v1"
     assert result["request_id"] == "req-diag-1"
     assert result["chat_session_id"] == "chat-diag-1"
+    assert result["history_location"] == {
+        "session_id": "chat-diag-1",
+        "history_index": 1,
+    }
     assert result["source_system"] == "mongo.chat_history"
     assert result["workflow_routing_diagnostics"]["schema_version"] == (
         "workflow_routing_diagnostics.v1"
     )
+    assert result["mcp_access"]["turn_execution_get_diagnostics"]["tool_name"] == (
+        "turn_execution_get_diagnostics"
+    )
+    assert result["mcp_access"]["chat_history_get_debug_entry"]["arguments"] == {
+        "session_id": "chat-diag-1",
+        "history_index": 1,
+        "namespace": "#V#user@org",
+    }
+    assert result["mcp_access"]["conversation_telemetry_get_locator"]["arguments"] == {
+        "session_id": "chat-diag-1",
+        "namespace": "#V#user@org",
+    }
+    assert result["mcp_access"]["workflow_execution_traces"] == [
+        {
+            "execution_id": "exec-diag-1",
+            "instance_id": "#V#wf_instance_diag_1",
+            "workflow_id": "#V#chat_assistant_workflow",
+            "mcp_access": {
+                "tool_name": "workflow_get_execution_trace",
+                "arguments": {
+                    "execution_id": "exec-diag-1",
+                    "instance_id": "#V#wf_instance_diag_1",
+                },
+                "purpose": "Fetch the durable workflow execution trace referenced by this turn.",
+            },
+        }
+    ]
     assert result["provenance"]["item_kind"] == "turn_execution_diagnostics_item"
     assert result["provenance"]["source_system"] == "mongo.chat_history"
 
@@ -1068,6 +1111,51 @@ def test_turn_execution_get_diagnostics_reconstructs_from_projection(monkeypatch
     assert result["workflow_stage_path"]["schema_version"] == (
         "conversation_turn_stage_path.v1"
     )
+
+
+def test_turn_execution_list_filters_by_session_id(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    turn_docs = [
+        {
+            "request_id": "req-session-1",
+            "session_id": "chat-session-1",
+            "namespace": "#V#user@org",
+            "created_at_utc": "2026-04-01T00:00:01Z",
+            "completion_gate": {"decision": "completed", "requires_follow_up": False},
+            "workflow_selection": {"selected_workflow_id": "#V#chat_assistant_workflow"},
+            "prompt": {"preview": "First session"},
+        },
+        {
+            "request_id": "req-session-2",
+            "session_id": "chat-session-2",
+            "namespace": "#V#user@org",
+            "created_at_utc": "2026-04-01T00:00:02Z",
+            "completion_gate": {"decision": "completed", "requires_follow_up": False},
+            "workflow_selection": {"selected_workflow_id": "#V#chat_assistant_workflow"},
+            "prompt": {"preview": "Second session"},
+        },
+    ]
+
+    monkeypatch.setattr(
+        "src.backend.db.connection_manager.get_db",
+        lambda: _DB(
+            {
+                "turn_execution_records": _TurnExecutionCollection(turn_docs),
+                "chat_history": _ChatHistoryCollection([]),
+            }
+        ),
+    )
+
+    result = cat._turn_execution_list(
+        namespace="#V#user@org",
+        session_id="chat-session-2",
+        limit=10,
+        offset=0,
+    )
+
+    assert result["success"] is True
+    assert [item["request_id"] for item in result["items"]] == ["req-session-2"]
 
 
 def test_turn_execution_search_failures_reports_modes_and_recommendations(monkeypatch):

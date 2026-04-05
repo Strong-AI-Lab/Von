@@ -2874,8 +2874,11 @@ describe('thinking card toggle accessibility', () => {
 
         expect(writeText).toHaveBeenCalledTimes(1);
         expect(JSON.parse(writeText.mock.calls[0][0])).toEqual(expect.objectContaining({
-            latest_progress: expect.objectContaining({
-                tool: 'search_knowledge_base'
+            schema_version: 'turn_live_progress_locator.v1',
+            mcp_access: expect.objectContaining({
+                turn_execution_get_live_progress: expect.objectContaining({
+                    tool_name: 'turn_execution_get_live_progress'
+                })
             })
         }));
 
@@ -5124,7 +5127,7 @@ describe('conversation LLM telemetry clipboard export', () => {
             ordering: 'timestamp_then_turn_id'
         });
         expect(payload.turns).toHaveLength(2);
-        expect(payload.turns[0]).toEqual({
+        expect(payload.turns[0]).toMatchObject({
             sequence: 1,
             turn_id: 'assistant-1743760800000',
             timestamp_utc: new Date(firstTimestampMs).toISOString(),
@@ -5134,6 +5137,10 @@ describe('conversation LLM telemetry clipboard export', () => {
             },
             request_id: 'req-1684-a'
         });
+        expect(payload.turns[0].mcp_access).toEqual(expect.objectContaining({
+            chat_history_get_debug_entry: expect.any(Object),
+            turn_execution_get_diagnostics: expect.any(Object)
+        }));
         expect(payload.turns[1]).toMatchObject({
             sequence: 2,
             turn_id: 'assistant-1743760860000',
@@ -5195,7 +5202,7 @@ describe('conversation LLM telemetry clipboard export', () => {
             missing_turn_telemetry_count: 0,
             turns_with_unavailable_locator_fields_count: 1
         });
-        expect(payload.turns[0]).toEqual({
+        expect(payload.turns[0]).toMatchObject({
             sequence: 1,
             turn_id: 'history-assistant-1',
             timestamp_utc: null,
@@ -5249,6 +5256,15 @@ describe('conversation LLM telemetry clipboard export', () => {
         });
         global.fetch = jest.fn((url) => {
             const parsed = new URL(url, 'http://localhost');
+            if (parsed.pathname === '/von/history/telemetry_locator') {
+                return Promise.resolve({
+                    ok: false,
+                    status: 404,
+                    json: async () => ({
+                        error: 'not_available'
+                    })
+                });
+            }
             expect(parsed.pathname).toBe('/von/history/debug');
             expect(parsed.searchParams.get('session_id')).toBe('session-1684');
             expect(parsed.searchParams.get('history_index')).toBe('12');
@@ -5279,14 +5295,14 @@ describe('conversation LLM telemetry clipboard export', () => {
         const copiedPayload = JSON.parse(writeText.mock.calls[0][0]);
 
         expect(copied).toBe(true);
-        expect(global.fetch).toHaveBeenCalledTimes(1);
+        expect(global.fetch).toHaveBeenCalledTimes(2);
         expect(copiedPayload.metadata).toMatchObject({
             assistant_transcript_turn_count: 1,
             has_partial_telemetry: false,
             missing_turn_telemetry_count: 0,
             turns_with_unavailable_locator_fields_count: 0
         });
-        expect(copiedPayload.turns[0]).toEqual({
+        expect(copiedPayload.turns[0]).toMatchObject({
             sequence: 1,
             turn_id: 'history-assistant-12',
             timestamp_utc: new Date(timestampMs).toISOString(),

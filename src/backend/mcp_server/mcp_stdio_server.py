@@ -116,6 +116,9 @@ if TYPE_CHECKING:
         _testing_theory_import_canonical_context,
         _testing_theory_promote_validated_claims,
         _testing_theory_rollback_local_writes,
+        _chat_history_get_debug_entry,
+        _chat_history_get_segments,
+        _conversation_telemetry_get_locator,
         _testing_verify_arxiv_paper_ingestion_result,
         _turn_execution_backfill_from_chat_history,
         _turn_execution_build_benchmark,
@@ -124,6 +127,7 @@ if TYPE_CHECKING:
         _turn_execution_get,
         _turn_execution_get_critic_bundle,
         _turn_execution_get_diagnostics,
+        _turn_execution_get_live_progress,
         _turn_execution_list,
         _turn_execution_namespace_coverage_report,
         _turn_execution_search_failures,
@@ -144,6 +148,7 @@ if TYPE_CHECKING:
         _workflow_list_event_bindings,
         _workflow_list_execution_traces,
         _workflow_list_instances,
+        _workflow_list_use_episodes,
         _workflow_list_schedules,
         _workflow_mcp_health_check,
         _workflow_retry_instance,
@@ -365,8 +370,12 @@ _bind_imports(
         "_testing_theory_import_canonical_context",
         "_testing_theory_promote_validated_claims",
         "_testing_theory_rollback_local_writes",
+        "_chat_history_get_debug_entry",
+        "_chat_history_get_segments",
+        "_conversation_telemetry_get_locator",
         "_turn_execution_get",
         "_turn_execution_get_diagnostics",
+        "_turn_execution_get_live_progress",
         "_turn_execution_get_critic_bundle",
         "_turn_execution_list",
         "_turn_execution_search_failures",
@@ -388,6 +397,7 @@ _bind_imports(
         "_workflow_list_event_bindings",
         "_workflow_list_execution_traces",
         "_workflow_list_instances",
+        "_workflow_list_use_episodes",
         "_workflow_list_schedules",
         "_workflow_mcp_health_check",
         "_workflow_retry_instance",
@@ -2938,6 +2948,16 @@ async def _handle_workflow_list_definitions(
     )
 
 
+async def _handle_workflow_list_use_episodes(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _workflow_list_use_episodes,
+        arguments,
+        tool_family_label="Workflow",
+    )
+
+
 async def _handle_renderer_resolve_applicability(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
@@ -3150,6 +3170,36 @@ async def _handle_workflow_trigger_schedule(
     )
 
 
+async def _handle_chat_history_get_segments(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _chat_history_get_segments,
+        arguments,
+        tool_family_label="ChatHistory",
+    )
+
+
+async def _handle_chat_history_get_debug_entry(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _chat_history_get_debug_entry,
+        arguments,
+        tool_family_label="ChatHistory",
+    )
+
+
+async def _handle_conversation_telemetry_get_locator(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _conversation_telemetry_get_locator,
+        arguments,
+        tool_family_label="ChatHistory",
+    )
+
+
 async def _handle_turn_execution_list(arguments: dict[str, Any]) -> list[TextContent]:
     return _run_catalogue_proxy_handler(
         _turn_execution_list,
@@ -3171,6 +3221,16 @@ async def _handle_turn_execution_get_diagnostics(
 ) -> list[TextContent]:
     return _run_catalogue_proxy_handler(
         _turn_execution_get_diagnostics,
+        arguments,
+        tool_family_label="TurnExecution",
+    )
+
+
+async def _handle_turn_execution_get_live_progress(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _turn_execution_get_live_progress,
         arguments,
         tool_family_label="TurnExecution",
     )
@@ -3815,9 +3875,13 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "testing_prepare_arxiv_paper_ingestion_fixture": _handle_testing_prepare_arxiv_paper_ingestion_fixture,
     "testing_verify_arxiv_paper_ingestion_result": _handle_testing_verify_arxiv_paper_ingestion_result,
     "testing_cleanup_arxiv_paper_ingestion_artifacts": _handle_testing_cleanup_arxiv_paper_ingestion_artifacts,
+    "chat_history_get_segments": _handle_chat_history_get_segments,
+    "chat_history_get_debug_entry": _handle_chat_history_get_debug_entry,
+    "conversation_telemetry_get_locator": _handle_conversation_telemetry_get_locator,
     "turn_execution_list": _handle_turn_execution_list,
     "turn_execution_get": _handle_turn_execution_get,
     "turn_execution_get_diagnostics": _handle_turn_execution_get_diagnostics,
+    "turn_execution_get_live_progress": _handle_turn_execution_get_live_progress,
     "turn_execution_get_critic_bundle": _handle_turn_execution_get_critic_bundle,
     "turn_execution_search_failures": _handle_turn_execution_search_failures,
     "turn_execution_build_benchmark": _handle_turn_execution_build_benchmark,
@@ -3841,6 +3905,7 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "renderer_resolve_applicability": _handle_renderer_resolve_applicability,
     "upsert_renderer_profile": _handle_upsert_renderer_profile,
     "workflow_list_definitions": _handle_workflow_list_definitions,
+    "workflow_list_use_episodes": _handle_workflow_list_use_episodes,
     "workflow_bind_event": _handle_workflow_bind_event,
     "workflow_list_event_bindings": _handle_workflow_list_event_bindings,
     "workflow_set_event_binding_enabled": _handle_workflow_set_event_binding_enabled,

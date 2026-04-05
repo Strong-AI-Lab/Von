@@ -1,0 +1,235 @@
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+
+def test_chat_history_get_segments_returns_provenanced_payload(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    monkeypatch.setattr(
+        cat,
+        "_resolve_chat_history_read_target",
+        lambda _kwargs: {
+            "success": True,
+            "session_id": "chat-1",
+            "read_user_id": "#V#user",
+            "requested_user_id": "#V#user",
+            "read_namespace": "#V#user@org",
+            "access_mode": "owner",
+        },
+    )
+
+    monkeypatch.setattr(
+        "src.backend.services.chat_history_service.get_chat_history_segments",
+        lambda *args, **kwargs: (
+            [{"segment_index": 0, "history": [{"role": "assistant", "content": "Done"}]}],
+            {"history_truncated": False},
+        ),
+    )
+
+    result = cat._chat_history_get_segments(session_id="chat-1", namespace="#V#user@org")
+
+    assert result["success"] is True
+    assert result["session_id"] == "chat-1"
+    assert result["segment_count"] == 1
+    assert result["history_truncated"] is False
+    assert result["provenance"]["item_kind"] == "chat_history_segments"
+
+
+def test_chat_history_get_debug_entry_returns_history_location(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    monkeypatch.setattr(
+        cat,
+        "_resolve_chat_history_read_target",
+        lambda _kwargs: {
+            "success": True,
+            "session_id": "chat-1",
+            "read_user_id": "#V#user",
+            "requested_user_id": "#V#user",
+            "read_namespace": "#V#user@org",
+            "access_mode": "owner",
+        },
+    )
+
+    monkeypatch.setattr(
+        "src.backend.services.chat_history_service.get_chat_history_debug_entry",
+        lambda **kwargs: {"request_id": "req-debug-1", "model": "gpt-test"},
+    )
+
+    result = cat._chat_history_get_debug_entry(
+        session_id="chat-1",
+        history_index=4,
+        namespace="#V#user@org",
+    )
+
+    assert result["success"] is True
+    assert result["history_location"] == {
+        "session_id": "chat-1",
+        "history_index": 4,
+    }
+    assert result["llm_debug_data"]["request_id"] == "req-debug-1"
+    assert result["provenance"]["item_kind"] == "chat_history_debug_entry"
+
+
+def test_conversation_telemetry_get_locator_wraps_builder(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    monkeypatch.setattr(
+        cat,
+        "_resolve_chat_history_read_target",
+        lambda _kwargs: {
+            "success": True,
+            "session_id": "chat-1",
+            "read_user_id": "#V#user",
+            "requested_user_id": "#V#user",
+            "read_namespace": "#V#user@org",
+            "access_mode": "owner",
+        },
+    )
+
+    monkeypatch.setattr(
+        "src.backend.services.conversation_telemetry_locator_service.build_conversation_llm_telemetry_locator",
+        lambda **kwargs: {
+            "schema_version": "conversation_llm_telemetry_locator.v1",
+            "generated_at_utc": "2026-04-05T03:18:49Z",
+            "session_id": "chat-1",
+            "session_name": "Locator Test",
+            "namespace_context": {
+                "namespace": "#V#user@org",
+                "user_id": "#V#user",
+                "org_id": "#V#org",
+            },
+            "metadata": {"total_turns": 1},
+            "mcp_access": {
+                "conversation_telemetry_get_locator": {
+                    "tool_name": "conversation_telemetry_get_locator",
+                    "arguments": {"session_id": "chat-1", "namespace": "#V#user@org"},
+                }
+            },
+            "turns": [],
+        },
+    )
+
+    result = cat._conversation_telemetry_get_locator(
+        session_id="chat-1",
+        namespace="#V#user@org",
+    )
+
+    assert result["session_id"] == "chat-1"
+    assert result["history_owner_user_id"] == "#V#user"
+    assert result["requested_user_id"] == "#V#user"
+    assert result["access_mode"] == "owner"
+    assert result["provenance"]["item_kind"] == "conversation_telemetry_locator"
+
+
+def test_turn_execution_get_live_progress_returns_provenanced_payload(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    monkeypatch.setattr(
+        "src.backend.services.turn_execution_live_progress_service.get_turn_execution_live_progress_payload",
+        lambda **kwargs: {
+            "success": True,
+            "request_id": kwargs["request_id"],
+            "resolved_scope_key": "user:#V#user",
+            "status": "thinking",
+            "mcp_access": {
+                "turn_execution_get_live_progress": {
+                    "tool_name": "turn_execution_get_live_progress",
+                    "arguments": {"request_id": kwargs["request_id"]},
+                }
+            },
+        },
+    )
+
+    result = cat._turn_execution_get_live_progress(
+        request_id="req-live-1",
+        namespace="#V#user@org",
+        user_concept_id="#V#user",
+    )
+
+    assert result["success"] is True
+    assert result["request_id"] == "req-live-1"
+    assert result["resolved_scope_key"] == "user:#V#user"
+    assert result["provenance"]["item_kind"] == "turn_live_progress"
+
+
+def test_workflow_list_definitions_filters_by_workflow_id(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    class _StubRegistry:
+        def all_workflow_ids(self):
+            return ["#V#wf_alpha", "#V#wf_beta"]
+
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.registry_factory.build_durable_workflow_registry_read_only",
+        lambda defer_parity_work=True: _StubRegistry(),
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.registry_factory.get_or_build_workflow_registry_inventory_snapshot",
+        lambda registry, allow_sync_build=False: {"inventory": "ok"},
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.workflow_listing_service.build_workflow_listing_entry",
+        lambda registry, workflow_id: {"workflow_id": workflow_id, "name": workflow_id},
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.workflow_baseline_telemetry.get_workflow_baseline_telemetry_snapshot",
+        lambda: {"baseline": True},
+    )
+    monkeypatch.setattr(
+        cat,
+        "build_workflow_surface_capability_matrix",
+        lambda internal_method_names=None: {"capabilities": []},
+    )
+    monkeypatch.setattr(
+        cat,
+        "build_default_catalogue",
+        lambda: SimpleNamespace(list_methods=lambda: ["workflow_list_definitions"]),
+    )
+
+    result = cat._workflow_list_definitions(workflow_id="#V#wf_beta", limit=10)
+
+    assert result["success"] is True
+    assert result["workflow_id_filter"] == "#V#wf_beta"
+    assert result["count"] == 1
+    assert result["definitions"] == [{"workflow_id": "#V#wf_beta", "name": "#V#wf_beta"}]
+
+
+def test_workflow_list_use_episodes_returns_filtered_payload(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_episode_service.list_workflow_use_episodes",
+        lambda **kwargs: [
+            {
+                "episode_id": "ep-1",
+                "workflow_id": kwargs.get("workflow_id"),
+                "session_id": kwargs.get("session_id"),
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_episode_service.count_workflow_use_episodes",
+        lambda **kwargs: 1,
+    )
+
+    result = cat._workflow_list_use_episodes(
+        workflow_id="#V#wf_beta",
+        namespace="#V#user@org",
+        session_id="chat-ep-1",
+        turn_id="turn-ep-1",
+        limit=5,
+    )
+
+    assert result["success"] is True
+    assert result["count"] == 1
+    assert result["total"] == 1
+    assert result["filters"] == {
+        "workflow_id": "#V#wf_beta",
+        "namespace": "#V#user@org",
+        "session_id": "chat-ep-1",
+        "turn_id": "turn-ep-1",
+        "limit": 5,
+    }
+    assert result["provenance"]["item_kind"] == "workflow_use_episode_list"

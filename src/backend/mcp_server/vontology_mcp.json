@@ -4388,12 +4388,198 @@
             }
         },
         {
+            "name": "chat_history_get_segments",
+            "description": "Fetch the stored conversation transcript in segment form, with optional embedded assistant llm_debug_data and history_location locators.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string"
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "user_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "organisation_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "segment_size": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    },
+                    "history_tail_limit": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    },
+                    "include_debug": {
+                        "type": "boolean"
+                    },
+                    "include_legacy": {
+                        "type": "boolean"
+                    }
+                },
+                "required": [
+                    "session_id"
+                ],
+                "additionalProperties": true,
+                "description": "Fetch stored chat-history segments for a session, including history locations and optional embedded llm_debug_data."
+            }
+        },
+        {
+            "name": "chat_history_get_debug_entry",
+            "description": "Fetch full stored llm_debug_data for one assistant history entry using its history_location locator.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string"
+                    },
+                    "history_index": {
+                        "type": "integer"
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "user_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "organisation_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "include_legacy": {
+                        "type": "boolean"
+                    }
+                },
+                "required": [
+                    "session_id",
+                    "history_index"
+                ],
+                "additionalProperties": true,
+                "description": "Fetch the exact stored llm_debug_data for one session/history_index pair."
+            }
+        },
+        {
+            "name": "conversation_telemetry_get_locator",
+            "description": "Build the compact conversation telemetry locator so agents can fetch the same stored conversation/turn diagnostics without pasting large JSON blobs.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string"
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "user_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "organisation_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "include_legacy": {
+                        "type": "boolean"
+                    }
+                },
+                "required": [
+                    "session_id"
+                ],
+                "additionalProperties": true,
+                "description": "Build a compact server-side locator for conversation turn telemetry."
+            }
+        },
+        {
+            "name": "turn_execution_get_live_progress",
+            "description": "Fetch the serialised live progress snapshot for an active turn so thinking telemetry can be dereferenced through MCP.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "request_id": {
+                        "type": "string"
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "user_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "window_session_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "anonymous_session_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "scope_key": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "request_id"
+                ],
+                "additionalProperties": true,
+                "description": "Fetch the current live progress snapshot for an in-flight turn request."
+            }
+        },
+        {
             "name": "turn_execution_list",
             "description": "List assistant turn execution records (workflow selection, required effects, postcondition checks, completion gate). Use for deterministic evidence triage across conversations. Includes MCP-visible rag_indexing_state diagnostics per record.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "session_id": {
                         "type": [
                             "string",
                             "null"
@@ -5335,11 +5521,56 @@
                 "properties": {
                     "limit": {
                         "type": "integer"
+                    },
+                    "workflow_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
                     }
                 },
                 "required": [],
                 "additionalProperties": true,
                 "description": "List available workflow definitions."
+            }
+        },
+        {
+            "name": "workflow_list_use_episodes",
+            "description": "List workflow-use episodes for execution-monitor drill-down and workflow telemetry locators.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "workflow_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "session_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "turn_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "limit": {
+                        "type": "integer"
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "List workflow-use episodes with optional workflow, session, or turn filters."
             }
         },
         {

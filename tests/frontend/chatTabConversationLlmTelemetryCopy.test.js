@@ -109,9 +109,17 @@ describe('chat conversation LLM telemetry copy control', () => {
 
         const copiedText = navigator.clipboard.writeText.mock.calls[0][0];
         const copiedPayload = JSON.parse(copiedText);
-        expect(copiedPayload.schema_version).toBe('conversation_llm_telemetry.v1');
+        expect(copiedPayload.schema_version).toBe('conversation_llm_telemetry_locator.v1');
         expect(copiedPayload.turns).toHaveLength(2);
         expect(copiedPayload.turns.map((turn) => turn.turn_id)).toEqual(['a-100', 'a-200']);
-        expect(showToast).toHaveBeenCalledWith('Copied conversation LLM telemetry JSON.', 'success');
+        expect(copiedPayload.mcp_access).toEqual(expect.objectContaining({
+            conversation_telemetry_get_locator: expect.any(Object),
+            chat_history_get_segments: expect.any(Object),
+            turn_execution_list: expect.any(Object)
+        }));
+        expect(showToast).toHaveBeenCalledWith(
+            'Copied conversation telemetry locator JSON (partial coverage).',
+            'info'
+        );
     });
 });

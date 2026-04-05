@@ -10801,6 +10801,97 @@ def history_debug():
         return jsonify({"error": str(e)}), 500
 
 
+@von_bp.route("/history/telemetry_locator", methods=["GET"])
+def history_telemetry_locator():
+    """Return a compact server-side locator for conversation turn telemetry."""
+
+    from ...services.conversation_telemetry_locator_service import (
+        build_conversation_llm_telemetry_locator,
+    )
+
+    try:
+        from ...security.access_control import get_effective_user_concept_id
+
+        user_concept_id = get_effective_user_concept_id()
+    except Exception:
+        user_concept_id = session.get("user_concept_id")
+
+    if not isinstance(user_concept_id, str) or not user_concept_id.strip():
+        return jsonify({"error": "Not authenticated"}), 401
+
+    session_id = request.args.get("session_id") or session.get("session_id")
+    if not isinstance(session_id, str) or not session_id.strip():
+        return jsonify({"error": "session_id required"}), 400
+
+    try:
+        session_id = session_id.strip()
+        window_session_id = request.headers.get("X-Von-Window-Session")
+        effective = get_effective_context(
+            window_session_id, dict(session), user_concept_id
+        )
+        namespace = effective.get(
+            "namespace"
+        ) or chat_history_service.resolve_chat_history_namespace(user_concept_id)
+
+        owner_user_id, shared_invite = _resolve_shared_conversation_owner(
+            user_concept_id=user_concept_id,
+            session_id=session_id,
+        )
+        if not owner_user_id:
+            if not chat_history_service.has_chat_history_session(
+                user_concept_id,
+                session_id,
+                namespace=namespace,
+            ) and not chat_history_service.has_chat_history_session(
+                user_concept_id,
+                session_id,
+                namespace=None,
+            ):
+                return jsonify({"error": "Not authorised for conversation"}), 403
+            owner_user_id = user_concept_id
+
+        owner_namespace = _derive_namespace_for_user_org(
+            owner_user_id,
+            shared_invite.get("organisation_concept_id") if shared_invite else None,
+        ) or namespace
+        if not owner_namespace:
+            owner_namespace = chat_history_service.resolve_chat_history_namespace(
+                owner_user_id
+            )
+
+        locator = build_conversation_llm_telemetry_locator(
+            user_id=owner_user_id,
+            session_id=session_id,
+            namespace=owner_namespace,
+            include_legacy=True,
+        )
+        locator["history_owner_user_id"] = owner_user_id
+        locator["requested_user_id"] = user_concept_id
+        locator["access_mode"] = (
+            "invitee" if owner_user_id != user_concept_id else "owner"
+        )
+        return jsonify(locator)
+    except Exception as e:
+        if chat_history_service.is_transient_chat_history_error(e):
+            current_app.logger.warning(
+                "history telemetry locator degraded due to transient chat history error: %s",
+                e,
+                exc_info=True,
+            )
+            return (
+                jsonify(
+                    {
+                        "error": "chat_history_temporarily_unavailable",
+                        "detail": str(e)[:300],
+                        "retryable": True,
+                    }
+                ),
+                503,
+            )
+        print(f"Error retrieving history telemetry locator: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @von_bp.route("/diagnostics/export", methods=["POST"])
 def export_diagnostics_snapshot():
     """Write a sanitised diagnostics snapshot to data/diagnostic_latest.json.

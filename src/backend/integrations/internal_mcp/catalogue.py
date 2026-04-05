@@ -10883,6 +10883,218 @@ def _turn_execution_namespace_coverage_report(**kwargs):
     )
 
 
+def _chat_history_get_segments(**kwargs):
+    from ...services import chat_history_service
+
+    access = _resolve_chat_history_read_target(kwargs)
+    if not isinstance(access, dict) or not access.get("success", False):
+        return access
+
+    include_debug = kwargs.get("include_debug", True)
+    if not isinstance(include_debug, bool):
+        include_debug = bool(include_debug)
+    include_legacy = kwargs.get("include_legacy", True)
+    if not isinstance(include_legacy, bool):
+        include_legacy = bool(include_legacy)
+
+    try:
+        result = chat_history_service.get_chat_history_segments(
+            str(access["read_user_id"]),
+            str(access["session_id"]),
+            include_locations=True,
+            namespace=_clean_optional_string(access.get("read_namespace")),
+            include_legacy=include_legacy,
+            segment_size=kwargs.get("segment_size"),
+            include_debug=include_debug,
+            history_tail_limit=kwargs.get("history_tail_limit"),
+            return_meta=True,
+        )
+    except chat_history_service.ChatHistoryServiceError as exc:
+        return make_error_response(
+            "CHAT_HISTORY_ERROR",
+            str(exc),
+            details={
+                "session_id": access.get("session_id"),
+                "namespace": access.get("read_namespace"),
+            },
+        )
+
+    if isinstance(result, tuple):
+        segments, meta = result
+    else:
+        segments, meta = result, {"history_truncated": False}
+
+    payload = {
+        "success": True,
+        "session_id": access.get("session_id"),
+        "history_owner_user_id": access.get("read_user_id"),
+        "requested_user_id": access.get("requested_user_id"),
+        "namespace": access.get("read_namespace"),
+        "access_mode": access.get("access_mode"),
+        "segments": segments,
+        "segment_count": len(segments) if isinstance(segments, list) else 0,
+        "history_truncated": bool(
+            meta.get("history_truncated") if isinstance(meta, Mapping) else False
+        ),
+    }
+    return _with_rag_provenance(
+        payload=payload,
+        item_kind="chat_history_segments",
+        source_system="mongo.chat_history",
+    )
+
+
+def _chat_history_get_debug_entry(**kwargs):
+    from ...services import chat_history_service
+
+    access = _resolve_chat_history_read_target(kwargs)
+    if not isinstance(access, dict) or not access.get("success", False):
+        return access
+
+    history_index = kwargs.get("history_index")
+    if not isinstance(history_index, int) or history_index < 0:
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: history_index",
+            details={"missing": ["history_index"]},
+            suggestions=["Provide a non-negative history_index"],
+        )
+
+    include_legacy = kwargs.get("include_legacy", True)
+    if not isinstance(include_legacy, bool):
+        include_legacy = bool(include_legacy)
+
+    try:
+        debug_data = chat_history_service.get_chat_history_debug_entry(
+            user_id=str(access["read_user_id"]),
+            session_id=str(access["session_id"]),
+            history_index=history_index,
+            namespace=_clean_optional_string(access.get("read_namespace")),
+            include_legacy=include_legacy,
+        )
+    except chat_history_service.ChatHistoryServiceError as exc:
+        return make_error_response(
+            "CHAT_HISTORY_ERROR",
+            str(exc),
+            details={
+                "session_id": access.get("session_id"),
+                "history_index": history_index,
+                "namespace": access.get("read_namespace"),
+            },
+        )
+
+    if not isinstance(debug_data, dict):
+        return {
+            "success": False,
+            "error": "debug_not_available",
+            "history_location": {
+                "session_id": access.get("session_id"),
+                "history_index": history_index,
+            },
+            "history_owner_user_id": access.get("read_user_id"),
+            "requested_user_id": access.get("requested_user_id"),
+            "namespace": access.get("read_namespace"),
+            "access_mode": access.get("access_mode"),
+        }
+
+    payload = {
+        "success": True,
+        "history_location": {
+            "session_id": access.get("session_id"),
+            "history_index": history_index,
+        },
+        "history_owner_user_id": access.get("read_user_id"),
+        "requested_user_id": access.get("requested_user_id"),
+        "namespace": access.get("read_namespace"),
+        "access_mode": access.get("access_mode"),
+        "llm_debug_data": debug_data,
+    }
+    return _with_rag_provenance(
+        payload=payload,
+        item_kind="chat_history_debug_entry",
+        source_system="mongo.chat_history",
+    )
+
+
+def _conversation_telemetry_get_locator(**kwargs):
+    from ...services.conversation_telemetry_locator_service import (
+        build_conversation_llm_telemetry_locator,
+    )
+
+    access = _resolve_chat_history_read_target(kwargs)
+    if not isinstance(access, dict) or not access.get("success", False):
+        return access
+
+    try:
+        payload = build_conversation_llm_telemetry_locator(
+            user_id=str(access["read_user_id"]),
+            session_id=str(access["session_id"]),
+            namespace=_clean_optional_string(access.get("read_namespace")),
+            include_legacy=bool(kwargs.get("include_legacy", True)),
+        )
+    except Exception as exc:
+        return make_error_response(
+            "conversation_locator_failed",
+            f"Failed to build conversation telemetry locator: {exc}",
+            details={
+                "session_id": access.get("session_id"),
+                "namespace": access.get("read_namespace"),
+            },
+        )
+
+    payload["history_owner_user_id"] = access.get("read_user_id")
+    payload["requested_user_id"] = access.get("requested_user_id")
+    payload["access_mode"] = access.get("access_mode")
+    return _with_rag_provenance(
+        payload=payload,
+        item_kind="conversation_telemetry_locator",
+        source_system="mongo.chat_history",
+    )
+
+
+def _turn_execution_get_live_progress(**kwargs):
+    from ...services.turn_execution_live_progress_service import (
+        get_turn_execution_live_progress_payload,
+    )
+
+    request_id = kwargs.get("request_id")
+    if not isinstance(request_id, str) or not request_id.strip():
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: request_id",
+            details={"missing": ["request_id"]},
+            suggestions=["Provide the request_id of the in-flight turn"],
+        )
+
+    payload = get_turn_execution_live_progress_payload(
+        request_id=request_id.strip(),
+        namespace=_clean_optional_string(kwargs.get("namespace")),
+        user_concept_id=_normalise_optional_concept_id(
+            kwargs.get("user_concept_id")
+            or kwargs.get("acting_user_concept_id")
+            or kwargs.get("actor_user_id")
+        ),
+        window_session_id=_clean_optional_string(kwargs.get("window_session_id")),
+        anonymous_session_id=_clean_optional_string(kwargs.get("anonymous_session_id")),
+        scope_key=_clean_optional_string(kwargs.get("scope_key")),
+    )
+    if not isinstance(payload, dict):
+        return make_error_response(
+            "not_found",
+            f"Live progress for request {request_id.strip()} not found",
+            details={"request_id": request_id.strip()},
+            suggestions=[
+                "Check that the request is still active",
+                "Provide user_concept_id, namespace, or the window_session_id used by the browser",
+            ],
+        )
+    return _with_rag_provenance(
+        payload=payload,
+        item_kind="turn_live_progress",
+        source_system="mongo.tool_progress_state",
+    )
+
+
 def _turn_execution_list(**kwargs):
     forwarded = dict(kwargs)
     forwarded["collection"] = "turn_execution_records"
@@ -12187,12 +12399,15 @@ def _workflow_list_definitions(**kwargs):
     )
 
     limit = min(int(kwargs.get("limit", 50)), 200)
+    requested_workflow_id = _clean_optional_string(kwargs.get("workflow_id"))
 
     try:
         # Diagnostics should be read-only: avoid bootstrap writes on introspection
         # pathways such as workflow_list_definitions and health checks.
         registry = build_durable_workflow_registry_read_only(defer_parity_work=True)
         ids = sorted(list(registry.all_workflow_ids()))
+        if requested_workflow_id:
+            ids = [wid for wid in ids if wid == requested_workflow_id]
 
         # Enriched descriptions
         definitions = []
@@ -12214,6 +12429,7 @@ def _workflow_list_definitions(**kwargs):
             "success": True,
             "definitions": definitions,
             "count": len(definitions),
+            "workflow_id_filter": requested_workflow_id,
             "parity_inventory": get_or_build_workflow_registry_inventory_snapshot(
                 registry=registry,
                 allow_sync_build=False,
@@ -12226,6 +12442,71 @@ def _workflow_list_definitions(**kwargs):
             "list_failed",
             f"Failed to list workflow definitions: {e}",
         )
+
+
+def _workflow_list_use_episodes(**kwargs):
+    from ...services.workflow_episode_service import (
+        count_workflow_use_episodes,
+        list_workflow_use_episodes,
+    )
+
+    workflow_id = _clean_optional_string(kwargs.get("workflow_id"))
+    namespace = _clean_optional_string(kwargs.get("namespace"))
+    session_id = _clean_optional_string(kwargs.get("session_id"))
+    turn_id = _clean_optional_string(kwargs.get("turn_id"))
+
+    try:
+        limit = int(kwargs.get("limit", 50))
+    except Exception:
+        limit = 50
+    limit = max(1, min(limit, 200))
+
+    try:
+        items = list_workflow_use_episodes(
+            workflow_id=workflow_id,
+            namespace=namespace,
+            session_id=session_id,
+            turn_id=turn_id,
+            limit=limit,
+        )
+        total = count_workflow_use_episodes(
+            workflow_id=workflow_id,
+            namespace=namespace,
+            session_id=session_id,
+            turn_id=turn_id,
+        )
+    except Exception as exc:
+        return make_error_response(
+            "workflow_episodes_fetch_failed",
+            f"Failed to list workflow use episodes: {exc}",
+            details={
+                "workflow_id": workflow_id,
+                "namespace": namespace,
+                "session_id": session_id,
+                "turn_id": turn_id,
+                "limit": limit,
+            },
+        )
+
+    payload = {
+        "success": True,
+        "items": items,
+        "count": len(items),
+        "total": int(total),
+        "has_more": bool(total > len(items)),
+        "filters": {
+            "workflow_id": workflow_id,
+            "namespace": namespace,
+            "session_id": session_id,
+            "turn_id": turn_id,
+            "limit": limit,
+        },
+    }
+    return _with_rag_provenance(
+        payload=payload,
+        item_kind="workflow_use_episode_list",
+        source_system="mongo.workflow_use_episodes",
+    )
 
 
 def _workflow_mcp_health_check(**kwargs):
@@ -15533,6 +15814,10 @@ def _rag_list_indexed(**kwargs):
         workflow_id = kwargs.get("workflow_id")
         if isinstance(workflow_id, str) and workflow_id.strip():
             query["workflow_selection.selected_workflow_id"] = workflow_id.strip()
+
+        session_id = kwargs.get("session_id")
+        if isinstance(session_id, str) and session_id.strip():
+            query["session_id"] = session_id.strip()
 
         requires_follow_up = kwargs.get("requires_follow_up")
         if isinstance(requires_follow_up, bool):
@@ -21258,6 +21543,162 @@ def _is_user_member_of_organisation(
     return False
 
 
+def _resolve_chat_history_read_target(
+    payload: Mapping[str, Any],
+) -> dict[str, Any] | dict[str, object]:
+    from ...services import chat_history_service
+    from ...services.shared_conversation_service import (
+        get_accepted_invite_for_user_session,
+        resolve_conversation_owner,
+    )
+
+    user_concept_id, organisation_concept_id, _actor_concept_id, namespace = (
+        _resolve_shared_conversation_actor_context(payload)
+    )
+    session_id = _clean_optional_string(payload.get("session_id"))
+
+    if not session_id:
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: session_id",
+            suggestions=["Provide a non-empty session_id"],
+        )
+    if not user_concept_id:
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: user_concept_id",
+            suggestions=[
+                "Provide user_concept_id explicitly",
+                "Or pass namespace containing a user identity",
+            ],
+        )
+
+    try:
+        owner_user_id = _normalise_optional_concept_id(
+            resolve_conversation_owner(session_id=session_id)
+        )
+    except Exception as exc:
+        return make_error_response(
+            "SHARED_CONVERSATION_LOOKUP_FAILED",
+            f"Failed to resolve conversation owner: {exc}",
+            details={"session_id": session_id},
+        )
+
+    if owner_user_id and owner_user_id != user_concept_id:
+        try:
+            invite = get_accepted_invite_for_user_session(
+                user_concept_id=user_concept_id,
+                session_id=session_id,
+            )
+        except Exception as exc:
+            return make_error_response(
+                "SHARED_CONVERSATION_LOOKUP_FAILED",
+                f"Failed to resolve shared conversation invite: {exc}",
+                details={
+                    "session_id": session_id,
+                    "user_concept_id": user_concept_id,
+                },
+            )
+        if not isinstance(invite, dict):
+            return make_error_response(
+                "PERMISSION_DENIED",
+                "User does not own this conversation and has no accepted invite",
+                details={
+                    "user_concept_id": user_concept_id,
+                    "session_id": session_id,
+                },
+            )
+        invite_org = _normalise_optional_concept_id(
+            invite.get("organisation_concept_id")
+        )
+        effective_org = organisation_concept_id or invite_org
+        if effective_org:
+            try:
+                if not _is_user_member_of_organisation(
+                    user_concept_id=user_concept_id,
+                    organisation_concept_id=effective_org,
+                ):
+                    return make_error_response(
+                        "PERMISSION_DENIED",
+                        f"User {user_concept_id} is not a member of {effective_org}",
+                        details={
+                            "user_concept_id": user_concept_id,
+                            "organisation_concept_id": effective_org,
+                        },
+                    )
+            except Exception as exc:
+                return make_error_response(
+                    "ORG_MEMBERSHIP_CHECK_FAILED",
+                    f"Failed to verify organisation membership: {exc}",
+                    details={
+                        "user_concept_id": user_concept_id,
+                        "organisation_concept_id": effective_org,
+                    },
+                )
+        owner_namespace = (
+            _derive_namespace_for_actor(owner_user_id, effective_org)
+            or namespace
+            or chat_history_service.resolve_chat_history_namespace(owner_user_id)
+        )
+        return {
+            "success": True,
+            "session_id": session_id,
+            "read_user_id": owner_user_id,
+            "requested_user_id": user_concept_id,
+            "read_namespace": owner_namespace,
+            "access_mode": "invitee",
+            "organisation_concept_id": effective_org,
+        }
+
+    read_user_id = owner_user_id or user_concept_id
+    read_namespace = (
+        namespace
+        or _derive_namespace_for_actor(read_user_id, organisation_concept_id)
+        or chat_history_service.resolve_chat_history_namespace(read_user_id)
+    )
+
+    try:
+        has_session = chat_history_service.has_chat_history_session(
+            read_user_id,
+            session_id,
+            namespace=read_namespace,
+            include_legacy=True,
+        )
+    except Exception:
+        has_session = False
+    if not has_session:
+        try:
+            has_session = chat_history_service.has_chat_history_session(
+                read_user_id,
+                session_id,
+                namespace=None,
+                include_legacy=True,
+            )
+        except Exception:
+            has_session = False
+        if has_session:
+            read_namespace = None
+    if not has_session:
+        return make_error_response(
+            "PERMISSION_DENIED",
+            "Not authorised for conversation",
+            details={
+                "user_concept_id": user_concept_id,
+                "session_id": session_id,
+            },
+        )
+
+    return {
+        "success": True,
+        "session_id": session_id,
+        "read_user_id": read_user_id,
+        "requested_user_id": user_concept_id,
+        "read_namespace": read_namespace,
+        "access_mode": "owner" if read_user_id == user_concept_id else "delegated",
+        "organisation_concept_id": organisation_concept_id,
+    }
+
+
 def _shared_conversation_create_session(**kwargs):
     from ...services import chat_history_service
     from ...services.episode_logging_service import log_episode
@@ -23427,12 +23868,110 @@ def build_default_catalogue() -> MethodCatalogue:
             description="Get one namespace-scoped RAG item (session/relation/file copy/turn record) with a safe preview. Respects namespace isolation.",
         ),
         MethodDefinition(
+            name="chat_history_get_segments",
+            handler=_chat_history_get_segments,
+            input_schema=Schema(
+                required={"session_id": str},
+                optional={
+                    "namespace": (str, type(None)),
+                    "user_concept_id": (str, type(None)),
+                    "organisation_concept_id": (str, type(None)),
+                    "segment_size": (int, type(None)),
+                    "history_tail_limit": (int, type(None)),
+                    "include_debug": (bool,),
+                    "include_legacy": (bool,),
+                },
+                allow_unknown=True,
+                description=(
+                    "Fetch stored chat-history segments for a session, including history locations "
+                    "and optional embedded llm_debug_data."
+                ),
+            ),
+            output_schema=None,
+            category="read",
+            description=(
+                "Fetch the stored conversation transcript in segment form, with optional embedded "
+                "assistant llm_debug_data and history_location locators."
+            ),
+        ),
+        MethodDefinition(
+            name="chat_history_get_debug_entry",
+            handler=_chat_history_get_debug_entry,
+            input_schema=Schema(
+                required={"session_id": str, "history_index": int},
+                optional={
+                    "namespace": (str, type(None)),
+                    "user_concept_id": (str, type(None)),
+                    "organisation_concept_id": (str, type(None)),
+                    "include_legacy": (bool,),
+                },
+                allow_unknown=True,
+                description=(
+                    "Fetch the exact stored llm_debug_data for one session/history_index pair."
+                ),
+            ),
+            output_schema=None,
+            category="read",
+            description=(
+                "Fetch full stored llm_debug_data for one assistant history entry using its "
+                "history_location locator."
+            ),
+        ),
+        MethodDefinition(
+            name="conversation_telemetry_get_locator",
+            handler=_conversation_telemetry_get_locator,
+            input_schema=Schema(
+                required={"session_id": str},
+                optional={
+                    "namespace": (str, type(None)),
+                    "user_concept_id": (str, type(None)),
+                    "organisation_concept_id": (str, type(None)),
+                    "include_legacy": (bool,),
+                },
+                allow_unknown=True,
+                description=(
+                    "Build a compact server-side locator for conversation turn telemetry."
+                ),
+            ),
+            output_schema=None,
+            category="read",
+            description=(
+                "Build the compact conversation telemetry locator so agents can fetch the same "
+                "stored conversation/turn diagnostics without pasting large JSON blobs."
+            ),
+        ),
+        MethodDefinition(
+            name="turn_execution_get_live_progress",
+            handler=_turn_execution_get_live_progress,
+            input_schema=Schema(
+                required={"request_id": str},
+                optional={
+                    "namespace": (str, type(None)),
+                    "user_concept_id": (str, type(None)),
+                    "window_session_id": (str, type(None)),
+                    "anonymous_session_id": (str, type(None)),
+                    "scope_key": (str, type(None)),
+                },
+                allow_unknown=True,
+                description=(
+                    "Fetch the current live progress snapshot for an in-flight turn request."
+                ),
+            ),
+            output_schema=None,
+            category="read",
+            description=(
+                "Fetch the serialised live progress snapshot for an active turn so thinking "
+                "telemetry can be dereferenced through MCP."
+            ),
+        ),
+        MethodDefinition(
             name="turn_execution_list",
             handler=_turn_execution_list,
             input_schema=Schema(
                 required={},
                 optional={
                     "namespace": (str, type(None)),
+                    "session_id": (str, type(None)),
                     "limit": (int,),
                     "offset": (int,),
                     "decision": (str, type(None)),
@@ -25189,13 +25728,17 @@ def build_default_catalogue() -> MethodCatalogue:
             handler=_workflow_list_definitions,
             input_schema=Schema(
                 required={},
-                optional={"limit": int},
+                optional={
+                    "limit": int,
+                    "workflow_id": (str, type(None)),
+                },
                 allow_unknown=True,
                 description="List available workflow definitions.",
             ),
             output_schema=Schema(
                 required={"success": bool, "definitions": list, "count": int},
                 optional={
+                    "workflow_id_filter": (str, type(None)),
                     "parity_inventory": dict,
                     "baseline_telemetry": dict,
                     "capability_matrix": dict,
@@ -25207,6 +25750,27 @@ def build_default_catalogue() -> MethodCatalogue:
             ),
             category="read",
             description="List available workflow definitions (IDs, descriptions) that can be instantiated.",
+        ),
+        MethodDefinition(
+            name="workflow_list_use_episodes",
+            handler=_workflow_list_use_episodes,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "workflow_id": (str, type(None)),
+                    "namespace": (str, type(None)),
+                    "session_id": (str, type(None)),
+                    "turn_id": (str, type(None)),
+                    "limit": int,
+                },
+                allow_unknown=True,
+                description="List workflow-use episodes with optional workflow, session, or turn filters.",
+            ),
+            output_schema=None,
+            category="read",
+            description=(
+                "List workflow-use episodes for execution-monitor drill-down and workflow telemetry locators."
+            ),
         ),
         MethodDefinition(
             name="workflow_mcp_health_check",

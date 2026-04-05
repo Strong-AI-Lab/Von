@@ -44,6 +44,25 @@ def _now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _build_tool_call_descriptor(
+    tool_name: str,
+    arguments: Mapping[str, Any],
+    *,
+    purpose: str | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "tool_name": tool_name,
+        "arguments": {
+            key: value
+            for key, value in arguments.items()
+            if value is not None
+        },
+    }
+    if isinstance(purpose, str) and purpose.strip():
+        payload["purpose"] = purpose.strip()
+    return payload
+
+
 def _query_chat_history_document(
     *,
     request_id: str,
@@ -189,6 +208,112 @@ def _load_turn_execution_record(
             f"Could not query turn_execution_records for request_id={request_id}: {exc}"
         ) from exc
     return _safe_mapping(doc)
+
+
+def _extract_workflow_execution_trace_refs(
+    payload: Mapping[str, Any] | None,
+) -> list[dict[str, Any]]:
+    if not isinstance(payload, Mapping):
+        return []
+    aux_llm_calls = payload.get("aux_llm_calls")
+    if not isinstance(aux_llm_calls, Sequence) or isinstance(
+        aux_llm_calls, (str, bytes, bytearray)
+    ):
+        return []
+
+    traces: list[dict[str, Any]] = []
+    seen_pairs: set[tuple[str | None, str | None]] = set()
+    for raw_entry in aux_llm_calls:
+        if not isinstance(raw_entry, Mapping):
+            continue
+        if _safe_str(raw_entry.get("type")) != "workflow_execution_trace":
+            continue
+        execution_id = _safe_str(raw_entry.get("execution_id"))
+        instance_id = _safe_str(raw_entry.get("instance_id"))
+        trace_key = (execution_id, instance_id)
+        if trace_key in seen_pairs:
+            continue
+        seen_pairs.add(trace_key)
+        if not execution_id and not instance_id:
+            continue
+        traces.append(
+            {
+                "execution_id": execution_id,
+                "instance_id": instance_id,
+                "workflow_id": _safe_str(raw_entry.get("workflow_id")),
+                "mcp_access": _build_tool_call_descriptor(
+                    "workflow_get_execution_trace",
+                    {
+                        "execution_id": execution_id,
+                        "instance_id": instance_id,
+                    },
+                    purpose="Fetch the durable workflow execution trace referenced by this turn.",
+                ),
+            }
+        )
+    return traces
+
+
+def _build_turn_diagnostics_mcp_access(
+    *,
+    request_id: str,
+    namespace: str | None,
+    session_id: str | None,
+    history_index: int | None,
+    payload: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    access = {
+        "turn_execution_get_diagnostics": _build_tool_call_descriptor(
+            "turn_execution_get_diagnostics",
+            {
+                "request_id": request_id,
+                "namespace": namespace,
+            },
+            purpose="Fetch the persisted full turn-execution diagnostics payload.",
+        ),
+        "turn_execution_get": _build_tool_call_descriptor(
+            "turn_execution_get",
+            {
+                "request_id": request_id,
+                "namespace": namespace,
+            },
+            purpose="Fetch the projected turn-execution record for this request.",
+        ),
+    }
+    if session_id:
+        access["conversation_telemetry_get_locator"] = _build_tool_call_descriptor(
+            "conversation_telemetry_get_locator",
+            {
+                "session_id": session_id,
+                "namespace": namespace,
+            },
+            purpose="Fetch the compact conversation locator for the surrounding chat session.",
+        )
+        access["chat_history_get_segments"] = _build_tool_call_descriptor(
+            "chat_history_get_segments",
+            {
+                "session_id": session_id,
+                "namespace": namespace,
+                "include_debug": True,
+            },
+            purpose="Fetch the stored transcript segments and embedded debug payloads for this session.",
+        )
+    if session_id and history_index is not None:
+        access["chat_history_get_debug_entry"] = _build_tool_call_descriptor(
+            "chat_history_get_debug_entry",
+            {
+                "session_id": session_id,
+                "history_index": history_index,
+                "namespace": namespace,
+            },
+            purpose="Fetch the exact stored llm_debug_data entry for this assistant turn.",
+        )
+
+    workflow_traces = _extract_workflow_execution_trace_refs(payload)
+    if workflow_traces:
+        access["workflow_execution_traces"] = workflow_traces
+
+    return access
 
 
 def _normalise_tool_history(tool_history: Any) -> list[dict[str, Any]]:
@@ -677,6 +802,26 @@ def get_turn_execution_diagnostics_payload(
         _safe_str(turn_record.get("org_id"))
         if isinstance(turn_record, Mapping)
         else None
+    )
+    history_index = (
+        history_context.get("target_index")
+        if isinstance(history_context, Mapping)
+        else None
+    )
+    payload["history_location"] = (
+        {
+            "session_id": payload["chat_session_id"],
+            "history_index": history_index,
+        }
+        if isinstance(history_index, int) and payload.get("chat_session_id")
+        else None
+    )
+    payload["mcp_access"] = _build_turn_diagnostics_mcp_access(
+        request_id=request_id_value,
+        namespace=_safe_str(payload.get("namespace")),
+        session_id=_safe_str(payload.get("chat_session_id")),
+        history_index=history_index if isinstance(history_index, int) else None,
+        payload=payload,
     )
     payload["success"] = True
     return payload

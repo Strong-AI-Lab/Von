@@ -76,6 +76,11 @@ const CONVERSATION_LLM_COPY_BUTTON_TITLE_READY = 'Copy compact conversation tele
 const CONVERSATION_LLM_COPY_BUTTON_TITLE_DISABLED = 'Conversation telemetry handles are not available yet';
 const CONVERSATION_LLM_TELEMETRY_SCHEMA_VERSION = 'conversation_llm_telemetry.v1';
 const CONVERSATION_LLM_TELEMETRY_LOCATOR_SCHEMA_VERSION = 'conversation_llm_telemetry_locator.v1';
+const TURN_TELEMETRY_LOCATOR_SCHEMA_VERSION = 'turn_telemetry_locator.v1';
+const TURN_LIVE_PROGRESS_LOCATOR_SCHEMA_VERSION = 'turn_live_progress_locator.v1';
+const WORKFLOW_USE_EPISODES_LOCATOR_SCHEMA_VERSION = 'workflow_use_episodes_locator.v1';
+const WORKFLOW_DEFINITION_LOCATOR_SCHEMA_VERSION = 'workflow_definition_locator.v1';
+const WORKFLOW_MONITOR_LOCATOR_SCHEMA_VERSION = 'workflow_monitor_locator.v1';
 // Track conversation turns for Markdown export and state resets
 const transcriptTurns = [];
 // JVNAUTOSCI-1043: Track user edits to assistant messages
@@ -1635,6 +1640,9 @@ function createThinkingCardHistorySnapshot(request) {
     );
 
     return {
+        clientRequestId: typeof request.clientRequestId === 'string' ? request.clientRequestId : null,
+        promptRaw: typeof request.promptRaw === 'string' ? request.promptRaw : '',
+        resultTurnId: typeof request.resultTurnId === 'string' ? request.resultTurnId : null,
         activityHistory,
         progressEvents,
         phaseHistory,
@@ -17976,7 +17984,7 @@ async function fetchWorkflowEpisodesSnapshot(workflowId, { limit = 60 } = {}) {
     }
 }
 
-function buildWorkflowEpisodesExportPayload() {
+function _buildWorkflowEpisodesExportPayload() {
     const namespace = getSessionScopedNamespace();
     const orgContext = getSessionScopedOrgContext();
     const userId = getCurrentUserConceptId();
@@ -18014,7 +18022,7 @@ function buildWorkflowEpisodesExportPayload() {
     };
 }
 
-function buildWorkflowDefinitionExportPayload({
+function _buildWorkflowDefinitionExportPayload({
     workflowId,
     workflowName,
     definitionSummary,
@@ -18084,15 +18092,15 @@ function buildWorkflowDefinitionExportPayload({
 async function handleCopyWorkflowEpisodesJson() {
     const { copyJsonButton } = getWorkflowEpisodesElements();
     if (!copyJsonButton) return;
-    const payload = buildWorkflowEpisodesExportPayload();
+    const payload = buildWorkflowEpisodesLocatorPayload();
     const jsonString = JSON.stringify(payload, null, 2);
 
     const copied = await copyJsonTextWithButtonFeedback(copyJsonButton, jsonString);
     if (copied) {
-        showToast('Workflow episodes JSON copied', 'success');
+        showToast('Workflow episodes locator JSON copied', 'success');
     } else {
-        console.error('[workflowStatus] Failed to copy workflow episodes JSON');
-        showToast('Failed to copy workflow episodes JSON', 'error');
+        console.error('[workflowStatus] Failed to copy workflow episodes locator JSON');
+        showToast('Failed to copy workflow episodes locator JSON', 'error');
     }
 }
 
@@ -18104,26 +18112,19 @@ async function handleCopyWorkflowDefinitionJson(workflowId, workflowName) {
         `.workflow-status-copy-card-json-btn[data-workflow-id="${cssEscape(cleanWorkflowId)}"]`
     );
     const originalContent = copyButton?.textContent || 'Copy JSON';
-    const definitionSummary = workflowDefinitionsState.items.find(
-        (item) => String(item?.workflow_id || '').trim() === cleanWorkflowId
-    ) || null;
     const resolvedWorkflowName = workflowName || formatWorkflowName(cleanWorkflowId);
-    const episodesSnapshot = await fetchWorkflowEpisodesSnapshot(cleanWorkflowId, { limit: 200 });
-
-    const payload = buildWorkflowDefinitionExportPayload({
+    const payload = buildWorkflowDefinitionLocatorPayload({
         workflowId: cleanWorkflowId,
-        workflowName: resolvedWorkflowName,
-        definitionSummary,
-        episodesSnapshot
+        workflowName: resolvedWorkflowName
     });
     const jsonString = JSON.stringify(payload, null, 2);
 
     const copied = await copyJsonTextWithButtonFeedback(copyButton, jsonString, { fallbackLabel: originalContent });
     if (copied) {
-        showToast(`Workflow JSON copied: ${resolvedWorkflowName}`, 'success');
+        showToast(`Workflow locator JSON copied: ${resolvedWorkflowName}`, 'success');
     } else {
-        console.error('[workflowStatus] Failed to copy workflow JSON');
-        showToast('Failed to copy workflow JSON', 'error');
+        console.error('[workflowStatus] Failed to copy workflow locator JSON');
+        showToast('Failed to copy workflow locator JSON', 'error');
     }
 }
 
@@ -18620,15 +18621,15 @@ async function handleCopyWorkflowMonitorJson() {
     const { copyJsonButton } = getWorkflowStatusElements();
     if (!copyJsonButton) return;
 
-    const payload = buildWorkflowMonitorExportPayload();
+    const payload = buildWorkflowMonitorLocatorPayload();
     const jsonString = JSON.stringify(payload, null, 2);
 
     const copied = await copyJsonTextWithButtonFeedback(copyJsonButton, jsonString);
     if (copied) {
-        showToast('Workflow monitor JSON copied', 'success');
+        showToast('Workflow monitor locator JSON copied', 'success');
     } else {
-        console.error('[workflowStatus] Failed to copy monitor JSON');
-        showToast('Failed to copy workflow monitor JSON', 'error');
+        console.error('[workflowStatus] Failed to copy monitor locator JSON');
+        showToast('Failed to copy workflow monitor locator JSON', 'error');
     }
 }
 
@@ -20681,7 +20682,7 @@ async function copyActiveThinkingDiagnostics(button = null, requestOverride = nu
     if (!request) {
         return false;
     }
-    const payload = buildThinkingDiagnosticsPayload(request);
+    const payload = buildThinkingDiagnosticsLocatorPayload(request);
     if (!payload) {
         return false;
     }
@@ -21914,30 +21915,13 @@ function initializeLlmDebugPopup() {
     });
 }
 
-function buildLlmDebugCopyPayload(debugData, metadata, workflowExecutionTrace) {
-    if (!debugData || typeof debugData !== 'object') {
-        return null;
-    }
-
-    const turnExecutionDiagnostics = (
-        debugData.turn_execution_diagnostics
-        && typeof debugData.turn_execution_diagnostics === 'object'
-    )
-        ? { ...debugData.turn_execution_diagnostics }
-        : null;
-
-    if (turnExecutionDiagnostics) {
-        if (!turnExecutionDiagnostics.workflow_discovery && debugData.workflow_discovery) {
-            turnExecutionDiagnostics.workflow_discovery = debugData.workflow_discovery;
-        }
-        return turnExecutionDiagnostics;
-    }
-
-    return {
-        ...debugData,
+function _buildLlmDebugCopyPayload(debugData, metadata, workflowExecutionTrace) {
+    return buildLlmDebugLocatorPayload({
+        turnId: null,
+        debugData,
         metadata,
-        workflow_execution_trace: workflowExecutionTrace || undefined
-    };
+        workflowExecutionTrace
+    });
 }
 
 function buildLlmDebugMetadata(debugData) {
@@ -22368,11 +22352,12 @@ async function showLlmDebugPopup(turnId, options = {}) {
     }
 
     // Prefer turn_execution_diagnostics for parity with active-turn Copy diagnostics.
-    const copyPayload = buildLlmDebugCopyPayload(
+    const copyPayload = buildLlmDebugLocatorPayload({
+        turnId,
         debugData,
         metadata,
-        workflowExecutionTrace,
-    );
+        workflowExecutionTrace
+    });
     popup.dataset.currentDebugData = JSON.stringify(copyPayload, null, 2);
 
     // Show popup - update aria-hidden BEFORE showing to avoid accessibility warning
@@ -22509,6 +22494,308 @@ function buildConversationTelemetryNamespaceContext() {
     };
 }
 
+function buildMcpToolAccess(toolName, args = {}, purpose = null) {
+    const cleanArgs = {};
+    if (args && typeof args === 'object') {
+        Object.entries(args).forEach(([key, value]) => {
+            if (value === undefined || value === null || value === '') {
+                return;
+            }
+            cleanArgs[key] = value;
+        });
+    }
+    const payload = {
+        tool_name: toolName,
+        arguments: cleanArgs
+    };
+    if (typeof purpose === 'string' && purpose.trim()) {
+        payload.purpose = purpose.trim();
+    }
+    return payload;
+}
+
+function buildChatHistoryAccessArgs({ sessionId, historyIndex = undefined } = {}) {
+    const namespaceContext = buildConversationTelemetryNamespaceContext();
+    return {
+        session_id: sessionId || activeChatSessionId || null,
+        history_index: Number.isInteger(historyIndex) ? historyIndex : undefined,
+        namespace: namespaceContext.namespace || null,
+        user_concept_id: namespaceContext.user_id || null,
+        organisation_concept_id: namespaceContext.org_id || null
+    };
+}
+
+function buildThinkingDiagnosticsLocatorPayload(request) {
+    if (!request || typeof request !== 'object') {
+        return null;
+    }
+
+    const namespaceContext = buildConversationTelemetryNamespaceContext();
+    const latestProgress = (request.latestProgress && typeof request.latestProgress === 'object')
+        ? request.latestProgress
+        : null;
+    const requestId = (typeof request.clientRequestId === 'string' ? request.clientRequestId.trim() : '')
+        || (typeof latestProgress?.request_id === 'string' ? latestProgress.request_id.trim() : '');
+    if (!requestId) {
+        return null;
+    }
+
+    return {
+        schema_version: TURN_LIVE_PROGRESS_LOCATOR_SCHEMA_VERSION,
+        generated_at_utc: new Date().toISOString(),
+        request_id: requestId,
+        chat_session_id: activeChatSessionId || null,
+        prompt_preview: typeof request.promptRaw === 'string' ? request.promptRaw.slice(0, 1000) : null,
+        namespace_context: namespaceContext,
+        latest_progress_summary: latestProgress ? {
+            status: latestProgress.status || null,
+            stage: latestProgress.stage || null,
+            phase: latestProgress.phase || null,
+            elapsed_ms: Number.isFinite(Number(latestProgress.elapsed_ms))
+                ? Math.max(0, Math.round(Number(latestProgress.elapsed_ms)))
+                : null
+        } : null,
+        mcp_access: {
+            turn_execution_get_live_progress: buildMcpToolAccess(
+                'turn_execution_get_live_progress',
+                {
+                    request_id: requestId,
+                    namespace: namespaceContext.namespace || null,
+                    user_concept_id: namespaceContext.user_id || null,
+                    window_session_id: getWindowSessionId()
+                },
+                'Fetch the live progress snapshot for this active turn.'
+            ),
+            turn_execution_get_diagnostics: buildMcpToolAccess(
+                'turn_execution_get_diagnostics',
+                {
+                    request_id: requestId,
+                    namespace: namespaceContext.namespace || null
+                },
+                'Fetch the persisted post-turn diagnostics once the request has completed.'
+            )
+        }
+    };
+}
+
+function buildWorkflowEpisodesLocatorPayload() {
+    const namespaceContext = buildConversationTelemetryNamespaceContext();
+    const requestQuery = (workflowEpisodesState.lastRequestQuery && typeof workflowEpisodesState.lastRequestQuery === 'object')
+        ? workflowEpisodesState.lastRequestQuery
+        : {};
+    const workflowId = workflowEpisodesState.workflowId || requestQuery.workflow_id || null;
+
+    return {
+        schema_version: WORKFLOW_USE_EPISODES_LOCATOR_SCHEMA_VERSION,
+        generated_at_utc: new Date().toISOString(),
+        namespace_context: namespaceContext,
+        workflow: {
+            workflow_id: workflowId,
+            workflow_name: workflowEpisodesState.workflowName || null
+        },
+        request_query: requestQuery,
+        mcp_access: {
+            workflow_list_use_episodes: buildMcpToolAccess(
+                'workflow_list_use_episodes',
+                {
+                    workflow_id: workflowId,
+                    namespace: requestQuery.namespace || namespaceContext.namespace || null,
+                    session_id: requestQuery.session_id || null,
+                    turn_id: requestQuery.turn_id || null,
+                    limit: requestQuery.limit || 200
+                },
+                'Fetch the workflow-use episodes shown in this popup.'
+            )
+        }
+    };
+}
+
+function buildWorkflowDefinitionLocatorPayload({ workflowId, workflowName }) {
+    const namespaceContext = buildConversationTelemetryNamespaceContext();
+    const cleanWorkflowId = typeof workflowId === 'string' ? workflowId.trim() : '';
+    if (!cleanWorkflowId) {
+        return null;
+    }
+
+    return {
+        schema_version: WORKFLOW_DEFINITION_LOCATOR_SCHEMA_VERSION,
+        generated_at_utc: new Date().toISOString(),
+        namespace_context: namespaceContext,
+        workflow: {
+            workflow_id: cleanWorkflowId,
+            workflow_name: workflowName || formatWorkflowName(cleanWorkflowId)
+        },
+        mcp_access: {
+            workflow_list_definitions: buildMcpToolAccess(
+                'workflow_list_definitions',
+                {
+                    workflow_id: cleanWorkflowId,
+                    limit: 1
+                },
+                'Fetch the registry/listing summary for this workflow.'
+            ),
+            repo_dossier_workflow_definition_get: buildMcpToolAccess(
+                'repo_dossier_workflow_definition_get',
+                {
+                    workflow_id: cleanWorkflowId,
+                    namespace: namespaceContext.namespace || null
+                },
+                'Fetch the authoritative workflow definition summary from the registry dossier surface.'
+            ),
+            workflow_list_use_episodes: buildMcpToolAccess(
+                'workflow_list_use_episodes',
+                {
+                    workflow_id: cleanWorkflowId,
+                    namespace: namespaceContext.namespace || null,
+                    limit: 200
+                },
+                'Fetch recent workflow-use episodes for this workflow.'
+            )
+        }
+    };
+}
+
+function buildWorkflowMonitorLocatorPayload() {
+    const namespaceContext = buildConversationTelemetryNamespaceContext();
+    const statusQuery = buildWorkflowStatusQuery({ includeStatusFilter: true });
+    const activeStatuses = statusQuery.get('status') || null;
+
+    return {
+        schema_version: WORKFLOW_MONITOR_LOCATOR_SCHEMA_VERSION,
+        generated_at_utc: new Date().toISOString(),
+        namespace_context: namespaceContext,
+        monitor_state: {
+            mode: workflowDefinitionsState.visible ? 'available_workflows' : 'active_instances',
+            show_available: Boolean(workflowDefinitionsState.visible),
+            show_designs: Boolean(workflowDefinitionsState.showDesigns)
+        },
+        mcp_access: {
+            workflow_list_definitions: buildMcpToolAccess(
+                'workflow_list_definitions',
+                {
+                    limit: 200
+                },
+                'Fetch the workflow definitions and parity inventory used by the monitor.'
+            ),
+            workflow_list_instances: buildMcpToolAccess(
+                'workflow_list_instances',
+                {
+                    namespace: namespaceContext.namespace || null,
+                    user_id: namespaceContext.namespace ? null : (namespaceContext.user_id || null),
+                    org_id: namespaceContext.namespace ? null : (namespaceContext.org_id || null),
+                    status: activeStatuses,
+                    limit: 200
+                },
+                'Fetch the workflow instances shown in the active monitor view.'
+            )
+        }
+    };
+}
+
+function buildLlmDebugLocatorPayload({ turnId, debugData, metadata, workflowExecutionTrace }) {
+    if (!debugData || typeof debugData !== 'object') {
+        return null;
+    }
+
+    const namespaceContext = buildConversationTelemetryNamespaceContext();
+    const turnExecutionDiagnostics = (
+        debugData.turn_execution_diagnostics
+        && typeof debugData.turn_execution_diagnostics === 'object'
+    )
+        ? debugData.turn_execution_diagnostics
+        : null;
+    const requestId = resolveConversationTelemetryRequestId(debugData)
+        || (typeof turnExecutionDiagnostics?.request_id === 'string'
+            ? turnExecutionDiagnostics.request_id.trim()
+            : '');
+    const historyLocation = cloneConversationHistoryLocation(
+        turnExecutionDiagnostics?.history_location || debugData.history_location
+    );
+    const sessionId = historyLocation?.session_id || activeChatSessionId || null;
+    const historyIndex = Number.isInteger(historyLocation?.history_index)
+        ? historyLocation.history_index
+        : null;
+
+    const payload = {
+        schema_version: TURN_TELEMETRY_LOCATOR_SCHEMA_VERSION,
+        generated_at_utc: new Date().toISOString(),
+        turn_id: turnId || null,
+        request_id: requestId || null,
+        history_location: historyLocation || null,
+        chat_session_id: sessionId,
+        namespace_context: namespaceContext,
+        metadata: metadata || null,
+        prompt_preview: typeof turnExecutionDiagnostics?.prompt_preview === 'string'
+            ? turnExecutionDiagnostics.prompt_preview
+            : (typeof debugData?.prompt_text === 'string' ? debugData.prompt_text : null),
+        workflow_discovery: (
+            turnExecutionDiagnostics?.workflow_discovery
+            && typeof turnExecutionDiagnostics.workflow_discovery === 'object'
+        )
+            ? turnExecutionDiagnostics.workflow_discovery
+            : ((debugData.workflow_discovery && typeof debugData.workflow_discovery === 'object')
+                ? debugData.workflow_discovery
+                : null),
+        stage_diagnostics: Array.isArray(turnExecutionDiagnostics?.stage_diagnostics)
+            ? turnExecutionDiagnostics.stage_diagnostics
+            : null,
+        mcp_access: {}
+    };
+
+    if (requestId) {
+        payload.mcp_access.turn_execution_get_diagnostics = buildMcpToolAccess(
+            'turn_execution_get_diagnostics',
+            {
+                request_id: requestId,
+                namespace: namespaceContext.namespace || null
+            },
+            'Fetch the persisted turn-execution diagnostics for this turn.'
+        );
+    }
+    if (sessionId && historyIndex !== null) {
+        payload.mcp_access.chat_history_get_debug_entry = buildMcpToolAccess(
+            'chat_history_get_debug_entry',
+            buildChatHistoryAccessArgs({
+                sessionId,
+                historyIndex
+            }),
+            'Fetch the exact stored llm_debug_data entry for this turn.'
+        );
+    }
+    if (sessionId) {
+        payload.mcp_access.conversation_telemetry_get_locator = buildMcpToolAccess(
+            'conversation_telemetry_get_locator',
+            {
+                session_id: sessionId,
+                namespace: namespaceContext.namespace || null,
+                user_concept_id: namespaceContext.user_id || null,
+                organisation_concept_id: namespaceContext.org_id || null
+            },
+            'Fetch the compact conversation locator for the surrounding session.'
+        );
+    }
+    if (workflowExecutionTrace && typeof workflowExecutionTrace === 'object') {
+        const executionId = typeof workflowExecutionTrace.execution_id === 'string'
+            ? workflowExecutionTrace.execution_id.trim()
+            : '';
+        const instanceId = typeof workflowExecutionTrace.instance_id === 'string'
+            ? workflowExecutionTrace.instance_id.trim()
+            : '';
+        if (executionId || instanceId) {
+            payload.mcp_access.workflow_get_execution_trace = buildMcpToolAccess(
+                'workflow_get_execution_trace',
+                {
+                    execution_id: executionId || null,
+                    instance_id: instanceId || null
+                },
+                'Fetch the durable workflow execution trace referenced by this turn.'
+            );
+        }
+    }
+
+    return payload;
+}
+
 function countAssistantTranscriptTurns() {
     if (!Array.isArray(transcriptTurns) || transcriptTurns.length === 0) {
         return 0;
@@ -22553,6 +22840,36 @@ async function hydrateConversationTelemetryLocatorEntries() {
     await Promise.allSettled(hydrationPromises);
 }
 
+async function fetchConversationTelemetryLocatorPayload(sessionId) {
+    const cleanSessionId = typeof sessionId === 'string' ? sessionId.trim() : '';
+    if (!cleanSessionId) {
+        return null;
+    }
+    if (typeof fetch !== 'function') {
+        return null;
+    }
+
+    try {
+        const response = await fetch(
+            `/von/history/telemetry_locator?session_id=${encodeURIComponent(cleanSessionId)}`,
+            {
+                headers: buildChatFetchHeaders()
+            }
+        );
+        const body = await response.json();
+        if (!response.ok || !body || typeof body !== 'object') {
+            return null;
+        }
+        if (body.schema_version !== CONVERSATION_LLM_TELEMETRY_LOCATOR_SCHEMA_VERSION) {
+            return null;
+        }
+        return body;
+    } catch (error) {
+        console.warn('[chatTab] Failed to fetch server conversation telemetry locator:', error);
+        return null;
+    }
+}
+
 function buildConversationLlmTelemetryLocatorPayload() {
     if (llmDebugData.size === 0) {
         return null;
@@ -22595,8 +22912,30 @@ function buildConversationLlmTelemetryLocatorPayload() {
                 ? new Date(entry.timestampMs).toISOString()
                 : null,
             history_location: historyLocation,
-            request_id: requestId
+            request_id: requestId,
+            mcp_access: {
+                chat_history_get_debug_entry: buildMcpToolAccess(
+                    'chat_history_get_debug_entry',
+                    buildChatHistoryAccessArgs({
+                        sessionId: historyLocation?.session_id || activeChatSessionId || null,
+                        historyIndex: Number.isInteger(historyLocation?.history_index)
+                            ? historyLocation.history_index
+                            : undefined
+                    }),
+                    'Fetch the exact stored llm_debug_data for this turn.'
+                )
+            }
         };
+        if (requestId) {
+            turnPayload.mcp_access.turn_execution_get_diagnostics = buildMcpToolAccess(
+                'turn_execution_get_diagnostics',
+                {
+                    request_id: requestId,
+                    namespace: buildConversationTelemetryNamespaceContext().namespace || null
+                },
+                'Fetch the persisted turn-execution diagnostics for this turn.'
+            );
+        }
         if (unavailableLocatorFields.length > 0) {
             turnPayload.unavailable_locator_fields = unavailableLocatorFields;
         }
@@ -22620,6 +22959,37 @@ function buildConversationLlmTelemetryLocatorPayload() {
             turns_with_request_id_count: turnsWithRequestIdCount,
             turns_with_unavailable_locator_fields_count: turnsWithUnavailableLocatorFieldsCount,
             ordering: 'timestamp_then_turn_id'
+        },
+        mcp_access: {
+            conversation_telemetry_get_locator: buildMcpToolAccess(
+                'conversation_telemetry_get_locator',
+                {
+                    session_id: activeChatSessionId || null,
+                    namespace: buildConversationTelemetryNamespaceContext().namespace || null,
+                    user_concept_id: buildConversationTelemetryNamespaceContext().user_id || null,
+                    organisation_concept_id: buildConversationTelemetryNamespaceContext().org_id || null
+                },
+                'Fetch the authoritative server-side conversation telemetry locator.'
+            ),
+            chat_history_get_segments: buildMcpToolAccess(
+                'chat_history_get_segments',
+                {
+                    session_id: activeChatSessionId || null,
+                    namespace: buildConversationTelemetryNamespaceContext().namespace || null,
+                    user_concept_id: buildConversationTelemetryNamespaceContext().user_id || null,
+                    organisation_concept_id: buildConversationTelemetryNamespaceContext().org_id || null,
+                    include_debug: true
+                },
+                'Fetch the stored transcript segments and embedded debug payloads for this session.'
+            ),
+            turn_execution_list: buildMcpToolAccess(
+                'turn_execution_list',
+                {
+                    session_id: activeChatSessionId || null,
+                    namespace: buildConversationTelemetryNamespaceContext().namespace || null
+                },
+                'List turn-execution records for this conversation.'
+            )
         },
         turns
     };
@@ -22713,8 +23083,11 @@ function refreshConversationLlmCopyButtonState() {
 }
 
 async function copyConversationLlmTelemetryToClipboard(button = null) {
-    await hydrateConversationTelemetryLocatorEntries();
-    const payload = buildConversationLlmTelemetryLocatorPayload();
+    let payload = await fetchConversationTelemetryLocatorPayload(activeChatSessionId);
+    if (!payload) {
+        await hydrateConversationTelemetryLocatorEntries();
+        payload = buildConversationLlmTelemetryLocatorPayload();
+    }
     if (!payload) {
         showToast('No conversation-level LLM telemetry is available yet.', 'info');
         refreshConversationLlmCopyButtonState();

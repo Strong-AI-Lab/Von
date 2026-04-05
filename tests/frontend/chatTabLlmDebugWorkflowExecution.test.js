@@ -108,6 +108,7 @@ describe('LLM debug popup workflow execution hook', () => {
         const jsonText = popup.dataset.currentDebugData || '';
         const payload = JSON.parse(jsonText);
 
+        expect(payload.schema_version).toBe('turn_telemetry_locator.v1');
         expect(payload.request_id).toBe('req-456');
         expect(payload.prompt_preview).toBe('hello');
         expect(payload.workflow_discovery).toEqual({ matches: [{ concept_id: '#V#demo' }] });
@@ -117,6 +118,9 @@ describe('LLM debug popup workflow execution hook', () => {
                 event_count: 1
             })
         ]);
+        expect(payload.mcp_access).toEqual(expect.objectContaining({
+            turn_execution_get_diagnostics: expect.any(Object)
+        }));
         expect(payload.model).toBeUndefined();
         expect(payload.messages).toBeUndefined();
     });
