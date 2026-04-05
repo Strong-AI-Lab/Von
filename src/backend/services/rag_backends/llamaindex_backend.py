@@ -29,6 +29,8 @@ _LLAMAINDEX_MISSING_MESSAGE = (
     "LlamaIndex dependencies missing. Install the optional dependency group(s) "
     "that provide `llama-index` for this backend."
 )
+_QUERY_EMBED_TIMEOUT_SECONDS = 8.0
+_QUERY_EMBED_MAX_RETRIES = 0
 
 
 class _MissingVectorStoreIndex:
@@ -182,6 +184,38 @@ class LlamaIndexRAGService(RAGService):
 
     def get_runtime_llm(self) -> Any:
         return self._get_runtime_component("llm")
+
+    def _temporarily_bound_query_embed_model(self) -> tuple[Any, Dict[str, Any]]:
+        """Keep semantic-query embedding failures bounded so callers can fall back."""
+        embed_model = self.get_runtime_embed_model()
+        if embed_model is None:
+            return None, {}
+
+        previous: Dict[str, Any] = {}
+        settings_changed = False
+        current_retries = getattr(embed_model, "max_retries", None)
+        if isinstance(current_retries, int) and current_retries > _QUERY_EMBED_MAX_RETRIES:
+            previous["max_retries"] = current_retries
+            setattr(embed_model, "max_retries", _QUERY_EMBED_MAX_RETRIES)
+            settings_changed = True
+
+        current_timeout = getattr(embed_model, "timeout", None)
+        if isinstance(current_timeout, (int, float)) and current_timeout > _QUERY_EMBED_TIMEOUT_SECONDS:
+            previous["timeout"] = current_timeout
+            setattr(embed_model, "timeout", _QUERY_EMBED_TIMEOUT_SECONDS)
+            settings_changed = True
+
+        # LlamaIndex may keep a cached OpenAI client built with the previous retry
+        # budget. Reset it so the bounded query settings actually take effect.
+        if settings_changed:
+            if hasattr(embed_model, "_client"):
+                previous["_client"] = getattr(embed_model, "_client")
+                setattr(embed_model, "_client", None)
+            if hasattr(embed_model, "_aclient"):
+                previous["_aclient"] = getattr(embed_model, "_aclient")
+                setattr(embed_model, "_aclient", None)
+
+        return embed_model, previous
 
     def _resolve_effective_namespace(self, namespace: Optional[str]) -> str:
         # Keep behaviour consistent with other parts of the system that may
@@ -375,8 +409,14 @@ class LlamaIndexRAGService(RAGService):
         # locally.
         similarity_top_k = max(top_k * 10, top_k)
         start = time.perf_counter()
-        retriever = index.as_retriever(similarity_top_k=similarity_top_k)
-        nodes = retriever.retrieve(query_text)
+        embed_model, previous_embed_settings = self._temporarily_bound_query_embed_model()
+        try:
+            retriever = index.as_retriever(similarity_top_k=similarity_top_k)
+            nodes = retriever.retrieve(query_text)
+        finally:
+            if embed_model is not None:
+                for attr, value in previous_embed_settings.items():
+                    setattr(embed_model, attr, value)
 
         def _matches_permissions(metadata: Any) -> bool:
             if not permissions_context:

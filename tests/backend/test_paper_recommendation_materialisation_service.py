@@ -9,7 +9,7 @@ def test_materialise_paper_recommendations_for_subject_persists_ranked_and_inact
     monkeypatch.setattr(
         service,
         "_build_subject_bundle",
-        lambda _subject_id: {
+        lambda _subject_id, lookup_cache=None: {
             "success": True,
             "subject_concept_id": "#V#project_alpha",
             "profile_concept_id": "#V#paper_recommendation_profile_for_project_alpha",
@@ -219,7 +219,7 @@ def test_materialise_paper_recommendations_for_subject_uses_bounded_fallback_sho
     monkeypatch.setattr(
         service,
         "_build_subject_bundle",
-        lambda _subject_id: {
+        lambda _subject_id, lookup_cache=None: {
             "success": True,
             "subject_concept_id": "#V#michael_witbrock",
             "profile_concept_id": "#V#paper_recommendation_profile_for_michael_witbrock",
@@ -329,7 +329,7 @@ def test_score_candidates_with_embeddings_falls_back_to_local_text_hashing(
     monkeypatch.setattr(
         service,
         "_build_paper_bundle",
-        lambda paper_concept_id: {
+        lambda paper_concept_id, lookup_cache=None: {
             "paper_concept_id": paper_concept_id,
             "paper_title": paper_concept_id,
             "representation_complete": True,
@@ -390,3 +390,200 @@ def test_llm_rerank_candidates_falls_back_when_generation_errors(monkeypatch):
     assert rows is None
     assert diagnostics["decision_mode"] == "embedding_only_fallback"
     assert diagnostics["llm_error"] == "quota exhausted"
+
+
+def test_build_paper_bundle_reuses_lookup_cache(monkeypatch):
+    concept_calls = 0
+    text_calls = 0
+
+    def _fake_get_concept(concept_id):
+        nonlocal concept_calls
+        concept_calls += 1
+        return {
+            "concept_id": concept_id,
+            "name": "Paper 1",
+            "relationships": {
+                "is_an_instance_of": [service.SCHOLARLY_ARTICLE_TYPE_ID],
+            },
+        }
+
+    def _fake_get_texts_for_concept(*, subject_concept_id, predicate, limit):
+        del subject_concept_id, limit
+        nonlocal text_calls
+        text_calls += 1
+        if predicate == "hasDescription":
+            return [{"text": "A summary"}]
+        return []
+
+    monkeypatch.setattr(service, "get_concept_by_concept_id_exact", _fake_get_concept)
+    monkeypatch.setattr(service, "get_texts_for_concept", _fake_get_texts_for_concept)
+
+    lookup_cache = service._LookupCache()
+    first = service._build_paper_bundle("#V#paper_1", lookup_cache=lookup_cache)
+    second = service._build_paper_bundle("#V#paper_1", lookup_cache=lookup_cache)
+
+    assert first == second
+    assert concept_calls == 1
+    assert text_calls == 3
+
+
+def test_materialise_paper_recommendations_for_subject_deduplicates_recalled_candidates(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        service,
+        "_build_subject_bundle",
+        lambda _subject_id, lookup_cache=None: {
+            "success": True,
+            "subject_concept_id": "#V#michael_witbrock",
+            "profile_concept_id": "#V#paper_recommendation_profile_for_michael_witbrock",
+            "profile_source_predicate": "#V#has_paper_recommendation_profile_json",
+            "profile_present": True,
+            "related_concepts": [],
+            "research_interest_concepts": [],
+            "organisation_concept_ids": [],
+            "profile": {},
+        },
+    )
+    monkeypatch.setattr(
+        service,
+        "_semantic_candidate_recall",
+        lambda **_kwargs: (
+            ["#V#paper_1", "#V#paper_1", "#V#paper_2"],
+            {"#V#paper_1": 0.7, "#V#paper_2": 0.5},
+            "semantic_search",
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "_semantic_search_uses_openai_embeddings",
+        lambda: False,
+    )
+
+    captured_candidate_ids: list[str] = []
+
+    def _fake_score_candidates_with_embeddings(**kwargs):
+        captured_candidate_ids.extend(kwargs["candidate_ids"])
+        return [], {"embedding_backend": "local_text_hashing_fallback"}
+
+    monkeypatch.setattr(
+        service,
+        "_score_candidates_with_embeddings",
+        _fake_score_candidates_with_embeddings,
+    )
+    monkeypatch.setattr(
+        service,
+        "_llm_rerank_candidates",
+        lambda **_kwargs: ([], {"decision_mode": "embedding_plus_llm"}),
+    )
+    monkeypatch.setattr(
+        service,
+        "load_materialised_paper_recommendations",
+        lambda **_kwargs: {"success": True, "recommendations": []},
+    )
+
+    payload = service.materialise_paper_recommendations_for_subject(
+        subject_concept_id="#V#michael_witbrock",
+        max_results=5,
+    )
+
+    assert payload["success"] is True
+    assert captured_candidate_ids == ["#V#paper_1", "#V#paper_2"]
+
+
+def test_materialise_paper_recommendations_for_subject_skips_semantic_recall_after_failed_embedding_preflight(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        service,
+        "_build_subject_bundle",
+        lambda _subject_id, lookup_cache=None: {
+            "success": True,
+            "subject_concept_id": "#V#michael_witbrock",
+            "profile_concept_id": "#V#paper_recommendation_profile_for_michael_witbrock",
+            "profile_source_predicate": "#V#has_paper_recommendation_profile_json",
+            "profile_present": True,
+            "related_concepts": [],
+            "research_interest_concepts": [],
+            "organisation_concept_ids": [],
+            "profile": {},
+        },
+    )
+    monkeypatch.setattr(
+        service,
+        "_semantic_search_uses_openai_embeddings",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        service,
+        "_probe_embedding_backend",
+        lambda _subject_id: (False, "quota exhausted"),
+    )
+    monkeypatch.setattr(
+        service,
+        "_semantic_candidate_recall",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("semantic recall should be skipped")),
+    )
+    monkeypatch.setattr(
+        service,
+        "_recent_candidate_pool",
+        lambda _limit: ["#V#paper_1"],
+    )
+
+    captured_embedding_kwargs: list[dict[str, object]] = []
+
+    def _fake_score_candidates_with_embeddings(**kwargs):
+        captured_embedding_kwargs.append(kwargs)
+        return (
+            [
+                {
+                    "paper_concept_id": "#V#paper_1",
+                    "embedding_score": 0.9,
+                    "status": "scored",
+                    "paper_bundle": {
+                        "paper_title": "Paper 1",
+                        "summary_excerpt": "",
+                        "author_names": [],
+                        "topic_labels": [],
+                        "publication_date": None,
+                    },
+                }
+            ],
+            {"embedding_backend": "local_text_hashing_fallback"},
+        )
+
+    monkeypatch.setattr(
+        service,
+        "_score_candidates_with_embeddings",
+        _fake_score_candidates_with_embeddings,
+    )
+    monkeypatch.setattr(
+        service,
+        "_llm_rerank_candidates",
+        lambda **_kwargs: (None, {"decision_mode": "embedding_only_fallback"}),
+    )
+    monkeypatch.setattr(
+        service,
+        "load_materialised_paper_recommendations",
+        lambda **_kwargs: {"success": True, "recommendations": []},
+    )
+    monkeypatch.setattr(
+        service,
+        "upsert_paper_recommendation_assertion",
+        lambda **kwargs: {
+            "success": True,
+            "assertion_concept_id": f"#V#assertion_{kwargs['paper_concept_id']}",
+        },
+    )
+
+    payload = service.materialise_paper_recommendations_for_subject(
+        subject_concept_id="#V#michael_witbrock",
+    )
+
+    assert payload["success"] is True
+    assert payload["profile_diagnostics"]["recall"]["candidate_source"] == (
+        "recent_fallback_pool"
+    )
+    assert payload["profile_diagnostics"]["recall"]["semantic_backend_ready"] is False
+    assert captured_embedding_kwargs[0]["embedding_backend_ready"] is False
+    assert captured_embedding_kwargs[0]["embedding_backend_error"] == "quota exhausted"

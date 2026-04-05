@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import json
 import logging
 from math import sqrt
+import time
 from typing import Any, Mapping, Sequence
 
 from ..languagemodels.llm_interface import get_llm_client
@@ -37,6 +39,7 @@ from .paper_recommendation_vontology_service import (
 from .paper_recommendation_delivery_service import (
     list_paper_recommendation_delivery_subject_ids,
 )
+from .rag_backends.llamaindex_backend import LlamaIndexRAGService
 from .text_value_service import get_texts_for_concept
 from .workflow_event_integration_service import (
     EVENT_TYPE_RELATIONSHIP_ADDED,
@@ -83,6 +86,16 @@ _AFFECTING_PAPER_TEXT_PREDICATES = {
     "#V#has_publication_date",
 }
 _EMBEDDING_ONLY_ACTIVE_LIMIT = 3
+_EMBEDDING_BACKEND_FAILURE_BACKOFF_SECONDS = 300.0
+_embedding_backend_backoff_until = 0.0
+_embedding_backend_backoff_reason: str | None = None
+
+
+@dataclass(slots=True)
+class _LookupCache:
+    concept_docs: dict[str, dict[str, Any] | None] = field(default_factory=dict)
+    first_texts: dict[tuple[str, str], str | None] = field(default_factory=dict)
+    paper_bundles: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 def _safe_str(value: Any) -> str:
@@ -137,15 +150,25 @@ def _normalise_subject_ids(raw_subject_ids: Any) -> list[str]:
     return _normalise_candidate_ids(raw_subject_ids)
 
 
-def _get_concept(concept_id: str) -> dict[str, Any] | None:
+def _get_concept(
+    concept_id: str,
+    *,
+    lookup_cache: _LookupCache | None = None,
+) -> dict[str, Any] | None:
     concept_id = _safe_str(concept_id)
     if not concept_id:
         return None
+    if lookup_cache is not None and concept_id in lookup_cache.concept_docs:
+        return lookup_cache.concept_docs[concept_id]
     try:
         concept = get_concept_by_concept_id_exact(concept_id)
     except Exception:
-        return None
-    return dict(concept) if isinstance(concept, Mapping) else None
+        resolved = None
+    else:
+        resolved = dict(concept) if isinstance(concept, Mapping) else None
+    if lookup_cache is not None:
+        lookup_cache.concept_docs[concept_id] = resolved
+    return resolved
 
 
 def _is_scholarly_article(concept_doc: Mapping[str, Any] | None) -> bool:
@@ -164,24 +187,42 @@ def _is_scholarly_article(concept_doc: Mapping[str, Any] | None) -> bool:
     return False
 
 
-def _first_text(subject_concept_id: str, predicates: Sequence[str]) -> str | None:
+def _first_text(
+    subject_concept_id: str,
+    predicates: Sequence[str],
+    *,
+    lookup_cache: _LookupCache | None = None,
+) -> str | None:
     for predicate in predicates:
-        rows = get_texts_for_concept(
-            subject_concept_id=subject_concept_id,
-            predicate=predicate,
-            limit=8,
-        )
-        for row in rows:
-            if not isinstance(row, Mapping):
-                continue
-            text = _safe_str(row.get("text"))
-            if text:
-                return text
+        cache_key = (subject_concept_id, predicate)
+        text: str | None
+        if lookup_cache is not None and cache_key in lookup_cache.first_texts:
+            text = lookup_cache.first_texts[cache_key]
+        else:
+            text = None
+            rows = get_texts_for_concept(
+                subject_concept_id=subject_concept_id,
+                predicate=predicate,
+                limit=8,
+            )
+            for row in rows:
+                if not isinstance(row, Mapping):
+                    continue
+                text = _safe_str(row.get("text"))
+                if text:
+                    break
+            if lookup_cache is not None:
+                lookup_cache.first_texts[cache_key] = text
+        if text:
+            return text
     return None
 
 
 def _relationship_rows(
-    concept_doc: Mapping[str, Any], *, per_predicate_limit: int = 6
+    concept_doc: Mapping[str, Any],
+    *,
+    per_predicate_limit: int = 6,
+    lookup_cache: _LookupCache | None = None,
 ) -> list[dict[str, str]]:
     relationships = concept_doc.get("relationships")
     if not isinstance(relationships, Mapping):
@@ -203,7 +244,7 @@ def _relationship_rows(
             target_id = _safe_str(target)
             if not target_id:
                 continue
-            target_doc = _get_concept(target_id) or {}
+            target_doc = _get_concept(target_id, lookup_cache=lookup_cache) or {}
             target_name = _safe_str(target_doc.get("name")) or target_id
             rows.append(
                 {
@@ -218,7 +259,11 @@ def _relationship_rows(
     return rows
 
 
-def _build_subject_bundle(subject_concept_id: str) -> dict[str, Any]:
+def _build_subject_bundle(
+    subject_concept_id: str,
+    *,
+    lookup_cache: _LookupCache | None = None,
+) -> dict[str, Any]:
     profile_payload = load_subject_paper_matching_profile(subject_concept_id)
     if not profile_payload.get("success"):
         return {
@@ -229,7 +274,7 @@ def _build_subject_bundle(subject_concept_id: str) -> dict[str, Any]:
 
     subject_doc = dict(profile_payload.get("subject_doc") or {})
     subject_name = _safe_str(subject_doc.get("name")) or subject_concept_id
-    related_rows = _relationship_rows(subject_doc)
+    related_rows = _relationship_rows(subject_doc, lookup_cache=lookup_cache)
     profile = dict(profile_payload.get("profile") or {})
     legacy_payload = profile_payload.get("legacy_profile_payload") or {}
     derived_context = {}
@@ -265,7 +310,10 @@ def _build_subject_bundle(subject_concept_id: str) -> dict[str, Any]:
     if organisation_ids:
         organisation_names: list[str] = []
         for organisation_id in organisation_ids[:8]:
-            organisation_doc = _get_concept(organisation_id) or {}
+            organisation_doc = _get_concept(
+                organisation_id,
+                lookup_cache=lookup_cache,
+            ) or {}
             organisation_names.append(
                 _safe_str(organisation_doc.get("name")) or organisation_id
             )
@@ -300,25 +348,46 @@ def _build_subject_bundle(subject_concept_id: str) -> dict[str, Any]:
     }
 
 
-def _build_paper_bundle(paper_concept_id: str) -> dict[str, Any]:
-    paper_doc = _get_concept(paper_concept_id)
+def _build_paper_bundle(
+    paper_concept_id: str,
+    *,
+    lookup_cache: _LookupCache | None = None,
+) -> dict[str, Any]:
+    paper_id = _safe_str(paper_concept_id)
+    if lookup_cache is not None and paper_id in lookup_cache.paper_bundles:
+        return lookup_cache.paper_bundles[paper_id]
+    paper_doc = _get_concept(paper_id, lookup_cache=lookup_cache)
     if paper_doc is None:
-        return {
-            "paper_concept_id": paper_concept_id,
+        bundle = {
+            "paper_concept_id": paper_id,
             "representation_complete": False,
             "representation_failures": ["paper_not_found"],
         }
+        if lookup_cache is not None:
+            lookup_cache.paper_bundles[paper_id] = bundle
+        return bundle
 
-    paper_title = _safe_str(paper_doc.get("name")) or paper_concept_id
-    summary = _first_text(paper_concept_id, _PAPER_TEXT_PREDICATES["summary"]) or ""
+    paper_title = _safe_str(paper_doc.get("name")) or paper_id
+    summary = (
+        _first_text(
+            paper_id,
+            _PAPER_TEXT_PREDICATES["summary"],
+            lookup_cache=lookup_cache,
+        )
+        or ""
+    )
     publication_date = _first_text(
-        paper_concept_id, _PAPER_TEXT_PREDICATES["publication_date"]
+        paper_id,
+        _PAPER_TEXT_PREDICATES["publication_date"],
+        lookup_cache=lookup_cache,
     )
     topic_label_text = _first_text(
-        paper_concept_id, _PAPER_TEXT_PREDICATES["topic_labels"]
+        paper_id,
+        _PAPER_TEXT_PREDICATES["topic_labels"],
+        lookup_cache=lookup_cache,
     )
     topic_labels = _normalise_string_list(topic_label_text)
-    relationship_rows = _relationship_rows(paper_doc)
+    relationship_rows = _relationship_rows(paper_doc, lookup_cache=lookup_cache)
     author_names = [
         row["target_name"]
         for row in relationship_rows
@@ -332,7 +401,7 @@ def _build_paper_bundle(paper_concept_id: str) -> dict[str, Any]:
         ]
     context_lines = [
         f"Paper title: {paper_title}",
-        f"Paper concept ID: {paper_concept_id}",
+        f"Paper concept ID: {paper_id}",
     ]
     base_text = build_concept_searchable_text(paper_doc)
     if base_text:
@@ -347,7 +416,7 @@ def _build_paper_bundle(paper_concept_id: str) -> dict[str, Any]:
         context_lines.append("Publication date: " + publication_date)
 
     return {
-        "paper_concept_id": paper_concept_id,
+        "paper_concept_id": paper_id,
         "paper_title": paper_title,
         "paper_summary": summary,
         "summary_excerpt": summary[:SUMMARY_EXCERPT_CHARS] if summary else "",
@@ -358,6 +427,9 @@ def _build_paper_bundle(paper_concept_id: str) -> dict[str, Any]:
         "representation_failures": [],
         "matching_text": "\n\n".join(line for line in context_lines if line),
     }
+    if lookup_cache is not None:
+        lookup_cache.paper_bundles[paper_id] = bundle
+    return bundle
 
 
 def _cosine_similarity(left: Sequence[float], right: Sequence[float]) -> float:
@@ -381,6 +453,45 @@ def _build_embedding_client(subject_concept_id: str):
         user_concept_id=subject_concept_id,
         org_concept_id=subject_concept_id,
     )
+
+
+def _semantic_search_uses_openai_embeddings() -> bool:
+    try:
+        embed_model = LlamaIndexRAGService().get_runtime_embed_model()
+    except Exception:
+        return False
+    return type(embed_model).__name__ == "OpenAIEmbedding"
+
+
+def _probe_embedding_backend(
+    subject_concept_id: str,
+) -> tuple[bool, str | None]:
+    global _embedding_backend_backoff_until
+    global _embedding_backend_backoff_reason
+
+    now = time.monotonic()
+    if _embedding_backend_backoff_until > now:
+        return False, _embedding_backend_backoff_reason
+
+    try:
+        client = _build_embedding_client(subject_concept_id)
+        client.get_embedding("paper recommendation embedding healthcheck")
+    except Exception as exc:
+        reason = str(exc)
+        _embedding_backend_backoff_until = (
+            now + _EMBEDDING_BACKEND_FAILURE_BACKOFF_SECONDS
+        )
+        _embedding_backend_backoff_reason = reason
+        logger.warning(
+            "paper_recommendation embedding backend probe failed for %s: %s",
+            subject_concept_id,
+            exc,
+        )
+        return False, reason
+
+    _embedding_backend_backoff_until = 0.0
+    _embedding_backend_backoff_reason = None
+    return True, None
 
 
 def _semantic_candidate_recall(
@@ -418,7 +529,7 @@ def _semantic_candidate_recall(
             or row.get("similarity_score")
             or 0.0
         )
-    return candidate_ids, score_map, "semantic_search"
+    return _normalise_candidate_ids(candidate_ids), score_map, "semantic_search"
 
 
 def _recent_candidate_pool(limit: int) -> list[str]:
@@ -436,11 +547,13 @@ def _recent_candidate_pool(limit: int) -> list[str]:
     rows = result.get("results") if isinstance(result, Mapping) else []
     if not isinstance(rows, list):
         return []
-    return [
-        _safe_str(row.get("concept_id"))
-        for row in rows
-        if isinstance(row, Mapping) and _safe_str(row.get("concept_id"))
-    ]
+    return _normalise_candidate_ids(
+        [
+            _safe_str(row.get("concept_id"))
+            for row in rows
+            if isinstance(row, Mapping) and _safe_str(row.get("concept_id"))
+        ]
+    )
 
 
 def _score_candidate_rows_with_embedding_function(
@@ -448,11 +561,12 @@ def _score_candidate_rows_with_embedding_function(
     subject_text: str,
     candidate_ids: Sequence[str],
     embed_text,
+    lookup_cache: _LookupCache | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     subject_embedding = list(embed_text(subject_text))
     rows: list[dict[str, Any]] = []
     for candidate_id in candidate_ids:
-        paper_bundle = _build_paper_bundle(candidate_id)
+        paper_bundle = _build_paper_bundle(candidate_id, lookup_cache=lookup_cache)
         if not paper_bundle.get("representation_complete"):
             rows.append(
                 {
@@ -487,10 +601,27 @@ def _score_candidates_with_embeddings(
     *,
     subject_bundle: Mapping[str, Any],
     candidate_ids: Sequence[str],
+    lookup_cache: _LookupCache | None = None,
+    embedding_backend_ready: bool | None = None,
+    embedding_backend_error: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     subject_text = _safe_str(subject_bundle.get("matching_text"))
     subject_concept_id = _safe_str(subject_bundle.get("subject_concept_id"))
     client = None
+
+    if embedding_backend_ready is False:
+        rows, dimensions = _score_candidate_rows_with_embedding_function(
+            subject_text=subject_text,
+            candidate_ids=candidate_ids,
+            embed_text=lambda text: build_text_embedding(text).tolist(),
+            lookup_cache=lookup_cache,
+        )
+        return rows, {
+            "embedding_backend": "local_text_hashing_fallback",
+            "embedding_client": None,
+            "embedding_error": embedding_backend_error or "embedding_preflight_failed",
+            "subject_embedding_dimensions": dimensions,
+        }
 
     try:
         client = _build_embedding_client(subject_concept_id)
@@ -498,6 +629,7 @@ def _score_candidates_with_embeddings(
             subject_text=subject_text,
             candidate_ids=candidate_ids,
             embed_text=lambda text: client.get_embedding(text),
+            lookup_cache=lookup_cache,
         )
         return rows, {
             "embedding_backend": "active_llm_client",
@@ -515,6 +647,7 @@ def _score_candidates_with_embeddings(
             subject_text=subject_text,
             candidate_ids=candidate_ids,
             embed_text=lambda text: build_text_embedding(text).tolist(),
+            lookup_cache=lookup_cache,
         )
         return rows, {
             "embedding_backend": "local_text_hashing_fallback",
@@ -785,6 +918,7 @@ def materialise_paper_recommendations_for_subject(
 ) -> dict[str, Any]:
     """Semantic candidate recall + reranking + Vontology materialisation."""
 
+    lookup_cache = _LookupCache()
     subject_id = _safe_str(subject_concept_id)
     if not subject_id:
         return {
@@ -805,7 +939,7 @@ def materialise_paper_recommendations_for_subject(
         minimum=1,
         maximum=MAX_CANDIDATE_RECALL_LIMIT,
     )
-    subject_bundle = _build_subject_bundle(subject_id)
+    subject_bundle = _build_subject_bundle(subject_id, lookup_cache=lookup_cache)
     if not subject_bundle.get("success"):
         return {
             "success": False,
@@ -818,16 +952,31 @@ def materialise_paper_recommendations_for_subject(
     recall_diagnostics: dict[str, Any] = {
         "trigger_source": _safe_str(trigger_source) or None,
     }
+    embedding_backend_ready: bool | None = None
+    embedding_backend_error: str | None = None
     if explicit_candidate_ids:
         candidate_ids = explicit_candidate_ids
         semantic_score_map: dict[str, float] = {}
         recall_diagnostics["candidate_source"] = "explicit_candidate_ids"
     else:
-        candidate_ids, semantic_score_map, candidate_source = _semantic_candidate_recall(
-            subject_bundle=subject_bundle,
-            limit=safe_candidate_limit,
-        )
-        recall_diagnostics["candidate_source"] = candidate_source
+        if _semantic_search_uses_openai_embeddings():
+            embedding_backend_ready, embedding_backend_error = _probe_embedding_backend(
+                subject_id
+            )
+            recall_diagnostics["semantic_backend_ready"] = embedding_backend_ready
+            if embedding_backend_error:
+                recall_diagnostics["semantic_backend_error"] = embedding_backend_error
+        if embedding_backend_ready is False:
+            candidate_ids = []
+            semantic_score_map = {}
+            recall_diagnostics["candidate_source"] = "semantic_search_preflight_skip"
+        else:
+            candidate_ids, semantic_score_map, candidate_source = _semantic_candidate_recall(
+                subject_bundle=subject_bundle,
+                limit=safe_candidate_limit,
+            )
+            candidate_ids = _normalise_candidate_ids(candidate_ids)
+            recall_diagnostics["candidate_source"] = candidate_source
         if not candidate_ids:
             candidate_ids = _recent_candidate_pool(safe_candidate_limit)
             semantic_score_map = {}
@@ -846,6 +995,9 @@ def materialise_paper_recommendations_for_subject(
     scored_candidates, embedding_diagnostics = _score_candidates_with_embeddings(
         subject_bundle=subject_bundle,
         candidate_ids=candidate_ids,
+        lookup_cache=lookup_cache,
+        embedding_backend_ready=embedding_backend_ready,
+        embedding_backend_error=embedding_backend_error,
     )
     llm_candidate_rows = [
         row for row in scored_candidates if row.get("status") == "scored"

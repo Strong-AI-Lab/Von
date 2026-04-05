@@ -1185,7 +1185,10 @@ class OpenAIClient(LLMInterface):
             model or "text-embedding-3-small"
         )  # Default to a common embedding model
         try:
-            response = self.client.embeddings.create(input=[text], model=target_model)
+            response = self.client.with_options(
+                max_retries=0,
+                timeout=8.0,
+            ).embeddings.create(input=[text], model=target_model)
             return response.data[0].embedding
         except Exception as e:
             logger.error(
