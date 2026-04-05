@@ -54,7 +54,7 @@ describe('footer model settings button', () => {
                 return { ok: true, json: async () => ({}) };
             }
             if (path === '/von/api/auth/status' || path === '/api/auth/status') {
-                return { ok: true, json: async () => ({ authenticated: true, email: 'm.witbrock@auckland.ac.nz' }) };
+                return { ok: true, json: async () => ({ authenticated: true, email: 'researcher@example.test' }) };
             }
             return { ok: true, json: async () => ({}) };
         });

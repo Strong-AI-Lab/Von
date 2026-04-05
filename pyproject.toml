@@ -1,9 +1,9 @@
 [project]
-name = "Von-Private"
+name = "Von"
 version = "0.1.0"
-description = "Default template for PDM package"
+description = "Intelligent agent system for scientific research support"
 authors = [
-    {name = "Zhan von Neumarkt", email = "vonneumarkt@gmail.com"},
+    {name = "Strong AI Lab"},
 ]
 
 requires-python = ">=3.11"

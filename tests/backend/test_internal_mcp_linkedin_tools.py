@@ -66,7 +66,7 @@ def test_linkedin_tools_success_through_gateway_invoke(monkeypatch):
                 "success": True,
                 "exports": ["export_a.zip"],
                 "total_exports": 1,
-                "data_root": "W:/LinkedInData/2026",
+                "data_root": "data/linkedin",
                 "data_root_exists": True,
             }
 

@@ -211,7 +211,7 @@ Why this should run in parallel where feasible:
   - The description explicitly says the epic is no longer used and points to `JVNAUTOSCI-739`.
   - It should not remain open in its current state.
 
-- `JVNAUTOSCI-739` Codebase transition - Von-Private to Von
+- `JVNAUTOSCI-739` Codebase transition - private repo to Von
   - Review whether any open children still matter.
   - If not, close or supersede it so it stops competing for attention.
 

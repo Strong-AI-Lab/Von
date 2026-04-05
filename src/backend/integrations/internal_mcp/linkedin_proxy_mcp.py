@@ -20,11 +20,9 @@ from .mcp_proxy_base import MCPServerConfig, MCPStdIOClient, MCPToolClientError
 logger = logging.getLogger(__name__)
 _LOG_TAG = "[linkedin_proxy]"
 
-_DEFAULT_SERVER_PATH = Path(
-    r"C:\Users\witbr\Documents\Programming\Witbrock (Personal)\LinkedInMCP\server.py"
-)
+_DEFAULT_SERVER_PATH = Path("LinkedInMCP") / "server.py"
 _DEFAULT_PYTHONPATH = _DEFAULT_SERVER_PATH.parent
-_DEFAULT_DATA_ROOT = Path(r"W:\LinkedInData\2026")
+_DEFAULT_DATA_ROOT = Path("data") / "linkedin"
 
 
 class LinkedInProxyError(Exception):

@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Unified environment setup for Von-Private (Python + JavaScript).
+    Unified environment setup for Von (Python + JavaScript).
 
 .DESCRIPTION
     Orchestrates Python (pdm/venv) and JavaScript (npm) setup using existing
@@ -58,7 +58,7 @@ function Write-Phase { param([string]$Msg,[ConsoleColor]$Color=[ConsoleColor]::C
 function Write-Err   { param([string]$Msg) Write-Host $Msg -ForegroundColor Red }
 function Duration($since) { return [int]((Get-Date) - $since).TotalSeconds }
 
-Write-Phase "=== Von-Private Unified Setup ==="
+Write-Phase "=== Von Unified Setup ==="
 Write-Host  ("Root: {0}" -f $root)
 
 # Python Phase

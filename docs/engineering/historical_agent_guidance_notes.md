@@ -21,7 +21,7 @@ mining it for lessons that should be promoted into current docs.
 
 ### AI Agent Guide (Trimmed)
 
-This document provides key instructions for AI agents working on the Von-Private project.
+This document provides key instructions for AI agents working on the former private Von project.
 All AI agents must read this file and `docs/engineering/security_considerations.md` before starting any work.
 
 ## General advice:
