@@ -93,6 +93,7 @@ from ...services.python_decision_authority_service import (
 from ...workflows import (
     CHAT_BUTTONIFY_WORKFLOW_ID,
     CHAT_NARRATION_WORKFLOW_ID,
+    CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
     WorkflowExecutionTrace,
     insert_workflow_execution_trace,
 )
@@ -7970,6 +7971,296 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             _set_tool_progress(progress_scope_key, request_id, payload)
 
         tool_invocations: list[dict[str, Any]] = []
+        conversation_turn_instance_manager = None
+        conversation_turn_instance_id: str | None = None
+        conversation_turn_instance_created_new: bool | None = None
+        conversation_turn_instance_finalised = False
+
+        def _append_conversation_turn_instance_event(
+            *,
+            status: str,
+            reason_code: str | None = None,
+            error: str | None = None,
+            submission_payload: Mapping[str, Any] | None = None,
+        ) -> None:
+            payload: dict[str, Any] = {
+                "type": "conversation_turn_instance",
+                "path": "/von/generate",
+                "status": str(status or "").strip() or "unknown",
+                "workflow_id": CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+                "workflow_instance_id": conversation_turn_instance_id,
+                "workflow_instance_created_new": conversation_turn_instance_created_new,
+                "session_id": session_id,
+                "turn_id": request_id,
+                "namespace": user_namespace,
+                "user_concept_id": user_concept_id,
+                "org_concept_id": org_concept_id,
+            }
+            if isinstance(reason_code, str) and reason_code.strip():
+                payload["reason_code"] = reason_code.strip()
+            if isinstance(error, str) and error.strip():
+                payload["error"] = error.strip()
+            if isinstance(submission_payload, Mapping):
+                payload["submission"] = dict(submission_payload)
+            auxiliary_llm_calls.append(payload)
+
+        def _build_conversation_turn_instance_inputs() -> dict[str, Any]:
+            return {
+                "conversation_session_id": session_id,
+                "turn_id": request_id,
+                "namespace_source": namespace_source,
+                "presenter_mode_requested": presenter_mode_requested,
+                "gmail_profile": request_gmail_profile,
+                "preferred_language": request_language,
+                "prompt_preview": (
+                    prompt_text[:1000] if isinstance(prompt_text, str) else None
+                ),
+                "workflow_discovery_result": (
+                    dict(workflow_discovery_result)
+                    if isinstance(workflow_discovery_result, Mapping)
+                    else None
+                ),
+                "workflow_continuation_context": (
+                    dict(workflow_continuation_context)
+                    if isinstance(workflow_continuation_context, Mapping)
+                    else None
+                ),
+            }
+
+        def _build_conversation_turn_instance_outputs(
+            *,
+            completed: bool,
+            final_state: str,
+            debug_payload: Mapping[str, Any] | None,
+            error: str | None = None,
+        ) -> dict[str, Any]:
+            outputs: dict[str, Any] = {
+                "request_id": request_id,
+                "session_id": session_id,
+                "completed": bool(completed),
+                "final_state": final_state,
+                "presenter_mode_requested": presenter_mode_requested,
+            }
+            if isinstance(error, str) and error.strip():
+                outputs["error"] = error.strip()
+            if not isinstance(debug_payload, Mapping):
+                return outputs
+
+            response_value = debug_payload.get("response")
+            if isinstance(response_value, str) and response_value.strip():
+                outputs["response_preview"] = response_value[:1000]
+
+            tool_invocation_payload = debug_payload.get("tool_invocations")
+            if isinstance(tool_invocation_payload, list):
+                outputs["tool_invocation_count"] = len(tool_invocation_payload)
+
+            for key in (
+                "workflow_discovery",
+                "workflow_routing",
+                "turn_execution_record",
+                "turn_execution_diagnostics",
+                "response_transformations",
+                "display_elements",
+            ):
+                value = debug_payload.get(key)
+                if isinstance(value, Mapping):
+                    outputs[key] = dict(value)
+
+            workflow_use_episodes = debug_payload.get("workflow_use_episodes")
+            if isinstance(workflow_use_episodes, list):
+                outputs["workflow_use_episodes"] = [
+                    dict(item)
+                    for item in workflow_use_episodes
+                    if isinstance(item, Mapping)
+                ]
+
+            llm_interaction_payload = debug_payload.get("llm_interaction")
+            if isinstance(llm_interaction_payload, Mapping):
+                outputs["llm_interaction"] = {
+                    "requested_model": llm_interaction_payload.get("requested_model"),
+                    "orchestrator_used": llm_interaction_payload.get("orchestrator_used"),
+                    "duration_ms": llm_interaction_payload.get("duration_ms"),
+                    "orchestrator_duration_ms": llm_interaction_payload.get(
+                        "orchestrator_duration_ms"
+                    ),
+                    "server_elapsed_ms": llm_interaction_payload.get(
+                        "server_elapsed_ms"
+                    ),
+                }
+
+            return outputs
+
+        def _finalise_conversation_turn_instance(
+            *,
+            completed: bool,
+            final_state: str,
+            debug_payload: Mapping[str, Any] | None,
+            error: str | None = None,
+        ) -> None:
+            nonlocal conversation_turn_instance_finalised
+            if (
+                conversation_turn_instance_finalised
+                or conversation_turn_instance_manager is None
+                or not isinstance(conversation_turn_instance_id, str)
+                or not conversation_turn_instance_id.strip()
+            ):
+                return
+
+            runtime_payload: dict[str, Any] = {
+                "schema_version": "conversation_turn_runtime.v1",
+                "request_id": request_id,
+                "session_id": session_id,
+                "completed": bool(completed),
+                "final_state": final_state,
+                "presenter_mode_requested": presenter_mode_requested,
+                "namespace": user_namespace,
+            }
+            if isinstance(debug_payload, Mapping):
+                for key in (
+                    "workflow_routing",
+                    "workflow_discovery",
+                    "turn_execution_record",
+                    "turn_execution_diagnostics",
+                ):
+                    value = debug_payload.get(key)
+                    if isinstance(value, Mapping):
+                        runtime_payload[key] = dict(value)
+
+            try:
+                conversation_turn_instance_manager.checkpoint(
+                    conversation_turn_instance_id,
+                    current_state=final_state,
+                    workflow_data={"conversation_turn_runtime": runtime_payload},
+                    progress_message="conversation_turn_runtime_persisted",
+                )
+                if completed:
+                    conversation_turn_instance_manager.mark_completed(
+                        conversation_turn_instance_id,
+                        outputs=_build_conversation_turn_instance_outputs(
+                            completed=True,
+                            final_state=final_state,
+                            debug_payload=debug_payload,
+                        ),
+                        final_state=final_state,
+                    )
+                else:
+                    conversation_turn_instance_manager.mark_failed(
+                        conversation_turn_instance_id,
+                        error=(
+                            str(error).strip()
+                            if isinstance(error, str) and error.strip()
+                            else "conversation_turn_failed"
+                        ),
+                        error_step=final_state,
+                        increment_retry=False,
+                    )
+                conversation_turn_instance_finalised = True
+            except Exception as exc:
+                current_app.logger.warning(
+                    "[workflow_instance_telemetry] Failed to finalise conversation "
+                    "turn durable instance %s for request %s: %s",
+                    conversation_turn_instance_id,
+                    request_id,
+                    exc,
+                )
+                _append_conversation_turn_instance_event(
+                    status="finalisation_failed",
+                    reason_code=type(exc).__name__,
+                    error=str(exc),
+                )
+
+        def _submit_conversation_turn_instance() -> None:
+            nonlocal conversation_turn_instance_manager
+            nonlocal conversation_turn_instance_id
+            nonlocal conversation_turn_instance_created_new
+
+            if not isinstance(user_namespace, str) or not user_namespace.strip():
+                _append_conversation_turn_instance_event(
+                    status="submission_skipped",
+                    reason_code="missing_namespace",
+                )
+                return
+
+            from ...services.namespace_service import derive_actor_context_from_namespace
+
+            namespace_user_id, namespace_org_id = derive_actor_context_from_namespace(
+                user_namespace
+            )
+            effective_user_id = (
+                user_concept_id
+                if isinstance(user_concept_id, str) and user_concept_id.strip()
+                else namespace_user_id
+            )
+            effective_org_id = (
+                org_concept_id
+                if isinstance(org_concept_id, str) and org_concept_id.strip()
+                else namespace_org_id
+            )
+            if not isinstance(effective_user_id, str) or not effective_user_id.strip():
+                _append_conversation_turn_instance_event(
+                    status="submission_skipped",
+                    reason_code="missing_user_context",
+                )
+                return
+
+            submission = None
+            try:
+                conversation_turn_instance_manager = get_instance_manager()
+                submission = submit_verified_workflow_instance(
+                    manager=conversation_turn_instance_manager,
+                    workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+                    user_id=effective_user_id,
+                    org_id=effective_org_id,
+                    namespace=user_namespace,
+                    inputs=_build_conversation_turn_instance_inputs(),
+                    max_retries=0,
+                    source_event_type="conversation_turn",
+                    source_event_id=request_id,
+                    event_idempotency_key=(
+                        f"von.generate:conversation_turn:{session_id}:{request_id}"
+                    ),
+                )
+                submission_payload = submission.to_dict()
+                if not submission.success or not submission.instance_id:
+                    _append_conversation_turn_instance_event(
+                        status="submission_failed",
+                        reason_code=submission.error_code or "submission_failed",
+                        error=submission.error,
+                        submission_payload=submission_payload,
+                    )
+                    return
+                conversation_turn_instance_id = submission.instance_id
+                conversation_turn_instance_created_new = submission.created_new
+                _append_conversation_turn_instance_event(
+                    status="submitted",
+                    reason_code=(
+                        "durable_instance_reused"
+                        if submission.created_new is False
+                        else "durable_instance_created"
+                    ),
+                    submission_payload=submission_payload,
+                )
+            except Exception as exc:
+                _append_conversation_turn_instance_event(
+                    status="submission_failed",
+                    reason_code=type(exc).__name__,
+                    error=str(exc),
+                    submission_payload=(
+                        submission.to_dict()
+                        if submission is not None
+                        and callable(getattr(submission, "to_dict", None))
+                        else None
+                    ),
+                )
+                current_app.logger.warning(
+                    "[workflow_instance_telemetry] Failed to create conversation "
+                    "turn durable instance for request %s: %s",
+                    request_id,
+                    exc,
+                )
+                conversation_turn_instance_manager = None
+                conversation_turn_instance_id = None
+                conversation_turn_instance_created_new = None
 
         if orchestrator is None:
             orchestrator_status = current_app.config.get(
@@ -8102,6 +8393,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         },
                     )
 
+                _submit_conversation_turn_instance()
                 orchestrator_start_perf = time.perf_counter()
                 orchestrator_result = orchestrator.run(
                     prompt=prompt_text,
@@ -8137,9 +8429,11 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     dict(msg) for msg in orchestrator_result.extra_messages
                 ]
                 tool_invocations = list(orchestrator_result.tool_invocations)
-                auxiliary_llm_calls = list(
+                orchestrator_auxiliary_llm_calls = list(
                     getattr(orchestrator_result, "aux_llm_calls", [])
                 )
+                if orchestrator_auxiliary_llm_calls:
+                    auxiliary_llm_calls.extend(orchestrator_auxiliary_llm_calls)
                 raw_render_plan = getattr(orchestrator_result, "render_plan", None)
                 if isinstance(raw_render_plan, dict):
                     render_plan_debug = dict(raw_render_plan)
@@ -10025,6 +10319,11 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 final_progress_payload,
             )
 
+        _finalise_conversation_turn_instance(
+            completed=True,
+            final_state="completed",
+            debug_payload=llm_debug_info,
+        )
         return jsonify(
             {
                 "request_id": request_id,
@@ -10150,6 +10449,12 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             org_id=org_concept_id if "org_concept_id" in locals() else None,
             workflow_discovery=error_workflow_discovery,
             workflow_routing=error_workflow_routing,
+        )
+        _finalise_conversation_turn_instance(
+            completed=False,
+            final_state="generate_exception",
+            debug_payload=error_debug_info,
+            error=str(e),
         )
         body = {
             "request_id": request_id,

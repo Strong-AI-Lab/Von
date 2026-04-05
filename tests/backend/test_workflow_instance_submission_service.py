@@ -937,6 +937,38 @@ def test_submit_verified_workflow_instance_rejects_unresolvable_namespace() -> N
     manager.create_instance.assert_not_called()
 
 
+def test_submit_verified_workflow_instance_supports_user_only_namespace() -> None:
+    manager = MagicMock()
+    manager.create_instance.return_value = "instance-user-only-1"
+    verification = _make_verification()
+    definition = _make_definition(include_action=True)
+
+    with patch(
+        "src.backend.workflows.durable.workflow_instance_submission_service.verify_workflow_runnable",
+        side_effect=[verification, verification],
+    ), patch(
+        "src.backend.workflows.durable.registry_factory.get_shared_workflow_registry_read_only",
+        return_value=_make_registry(definition),
+    ):
+        result = submit_verified_workflow_instance(
+            manager=manager,
+            workflow_id="#V#candidate_workflow",
+            user_id="#V#user_alice",
+            org_id=None,
+            namespace="#V#user_alice",
+            inputs={"seed": "abc-123"},
+        )
+
+    assert result.success is True
+    assert result.instance_id == "instance-user-only-1"
+    assert result.status == "pending"
+    manager.create_instance_for_event.assert_not_called()
+    manager.create_instance.assert_called_once()
+    assert manager.create_instance.call_args.kwargs["user_id"] == "#V#user_alice"
+    assert manager.create_instance.call_args.kwargs["org_id"] is None
+    assert manager.create_instance.call_args.kwargs["namespace"] == "#V#user_alice"
+
+
 def test_submit_verified_workflow_instance_applies_launch_input_contract() -> None:
     manager = MagicMock()
     manager.create_instance.return_value = "instance-1"

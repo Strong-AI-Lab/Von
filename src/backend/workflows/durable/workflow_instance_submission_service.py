@@ -33,7 +33,10 @@ from ...services.feature_flags import (
     get_durable_workflows_enabled,
     get_event_workflow_integration_enabled,
 )
-from ...services.namespace_service import resolve_canonical_namespace
+from ...services.namespace_service import (
+    derive_actor_context_from_namespace,
+    resolve_canonical_namespace,
+)
 from ..engine import WorkflowDefinition
 from ..mcp_tool_bridge import candidate_internal_mcp_tool_names
 from ..vontology_loader import (
@@ -978,12 +981,36 @@ def _build_submission_verification_payload(
     }
 
 
+def _resolve_submission_actor_context(
+    *,
+    canonical_namespace: str,
+    user_id: str | None,
+    org_id: str | None,
+) -> tuple[str | None, str | None]:
+    """Resolve canonical actor IDs from the namespace first, then caller hints."""
+
+    namespace_user_id, namespace_org_id = derive_actor_context_from_namespace(
+        canonical_namespace
+    )
+    resolved_user_id = (
+        namespace_user_id
+        if isinstance(namespace_user_id, str) and namespace_user_id.strip()
+        else (str(user_id).strip() if isinstance(user_id, str) and user_id.strip() else None)
+    )
+    resolved_org_id = (
+        namespace_org_id
+        if isinstance(namespace_org_id, str) and namespace_org_id.strip()
+        else (str(org_id).strip() if isinstance(org_id, str) and org_id.strip() else None)
+    )
+    return resolved_user_id, resolved_org_id
+
+
 def submit_verified_workflow_instance(
     *,
     manager: WorkflowInstanceManager,
     workflow_id: str,
-    user_id: str,
-    org_id: str,
+    user_id: str | None,
+    org_id: str | None,
     namespace: str,
     inputs: Mapping[str, Any] | None = None,
     schedule_id: str | None = None,
@@ -1020,6 +1047,37 @@ def submit_verified_workflow_instance(
                 },
                 "postflight": None,
                 "namespace_resolution_error": "invalid_namespace",
+            },
+            created_new=None,
+        )
+    resolved_user_id, resolved_org_id = _resolve_submission_actor_context(
+        canonical_namespace=canonical_namespace,
+        user_id=user_id,
+        org_id=org_id,
+    )
+    if not isinstance(resolved_user_id, str) or not resolved_user_id.strip():
+        return WorkflowInstanceSubmissionResult(
+            success=False,
+            workflow_id=workflow_id,
+            status="rejected_preflight",
+            instance_id=None,
+            error_code="invalid_actor_context",
+            error=(
+                "Workflow instance actor context could not be resolved from the "
+                "canonical namespace."
+            ),
+            verification={
+                "runnable_verification_success": False,
+                "preflight_passed": False,
+                "postflight_passed": False,
+                "preflight": {
+                    "workflow_id": workflow_id,
+                    "runnable_verification_success": False,
+                    "errors": ["invalid_actor_context"],
+                    "warnings": [],
+                },
+                "postflight": None,
+                "namespace_resolution_error": "invalid_actor_context",
             },
             created_new=None,
         )
@@ -1104,8 +1162,8 @@ def submit_verified_workflow_instance(
     if use_event_idempotency_submission:
         instance_id, created_new = manager.create_instance_for_event(
             workflow_id=workflow_id,
-            user_id=user_id,
-            org_id=org_id,
+            user_id=resolved_user_id,
+            org_id=resolved_org_id,
             namespace=canonical_namespace,
             event_idempotency_key=str(event_idempotency_key).strip(),
             source_event_type=str(source_event_type).strip(),
@@ -1117,8 +1175,8 @@ def submit_verified_workflow_instance(
     else:
         instance_id = manager.create_instance(
             workflow_id,
-            user_id=user_id,
-            org_id=org_id,
+            user_id=resolved_user_id,
+            org_id=resolved_org_id,
             namespace=canonical_namespace,
             inputs=inputs_payload,
             schedule_id=schedule_id,

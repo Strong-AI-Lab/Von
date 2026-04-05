@@ -530,7 +530,7 @@ class WorkflowInstanceManager:
         workflow_id: str,
         *,
         user_id: str,
-        org_id: str,
+        org_id: str | None,
         namespace: str,
         inputs: dict[str, Any] | None = None,
         schedule_id: str | None = None,
@@ -544,7 +544,7 @@ class WorkflowInstanceManager:
         Args:
             workflow_id: The workflow definition ID.
             user_id: User who initiated the workflow.
-            org_id: Organisation context.
+            org_id: Organisation context, if the namespace is org-scoped.
             namespace: Full namespace for data access.
             inputs: Initial workflow inputs.
             schedule_id: Optional reference to triggering schedule.
@@ -590,7 +590,7 @@ class WorkflowInstanceManager:
         workflow_id: str,
         *,
         user_id: str,
-        org_id: str,
+        org_id: str | None,
         namespace: str,
         event_idempotency_key: str,
         source_event_type: str,

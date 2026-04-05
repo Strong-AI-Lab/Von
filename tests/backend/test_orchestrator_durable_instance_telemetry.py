@@ -120,7 +120,12 @@ def _patch_submit_verified_instance(monkeypatch) -> None:
             instance_id, created_new = manager.create_instance_for_event(
                 workflow_id=workflow_id,
                 user_id=str(kwargs.get("user_id") or "anonymous"),
-                org_id=str(kwargs.get("org_id") or "default"),
+                org_id=(
+                    str(kwargs.get("org_id")).strip()
+                    if isinstance(kwargs.get("org_id"), str)
+                    and str(kwargs.get("org_id")).strip()
+                    else None
+                ),
                 namespace=str(kwargs.get("namespace") or "anonymous/default"),
                 event_idempotency_key=event_idempotency_key,
                 source_event_type=source_event_type,
@@ -133,7 +138,12 @@ def _patch_submit_verified_instance(monkeypatch) -> None:
             instance_id = manager.create_instance(
                 workflow_id,
                 user_id=str(kwargs.get("user_id") or "anonymous"),
-                org_id=str(kwargs.get("org_id") or "default"),
+                org_id=(
+                    str(kwargs.get("org_id")).strip()
+                    if isinstance(kwargs.get("org_id"), str)
+                    and str(kwargs.get("org_id")).strip()
+                    else None
+                ),
                 namespace=str(kwargs.get("namespace") or "anonymous/default"),
                 inputs=dict(inputs or {}),
                 max_retries=int(kwargs.get("max_retries", 3) or 0),
@@ -818,3 +828,112 @@ def test_execute_workflow_fails_closed_when_required_launch_input_unresolved(
         result.data.get("response_text")
     )
     assert fake_manager.create_for_event_calls == []
+
+
+def test_execute_workflow_creates_durable_instance_for_user_only_namespace(
+    monkeypatch,
+) -> None:
+    orchestrator = _build_orchestrator()
+    _register_test_workflow(orchestrator, workflow_id="#V#user_only_namespace_workflow")
+    fake_manager = _FakeWorkflowInstanceManager()
+    _patch_submit_verified_instance(monkeypatch)
+
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: fake_manager,
+    )
+    monkeypatch.setattr(
+        orchestrator._workflow_executor,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            completed=True,
+            final_state="completed",
+            error=None,
+            data={},
+        ),
+    )
+
+    result = orchestrator.execute_workflow(
+        "#V#user_only_namespace_workflow",
+        data={
+            "prompt": "Run in a user-only namespace.",
+            "user_concept_id": "#V#user_only",
+            "conversation_session_id": "chat-user-only",
+            "turn_id": "turn-user-only",
+            "aux_llm_calls": [],
+        },
+        llm_client=object(),
+        model="test-model",
+        user_namespace="#V#user_only",
+        conversation_session_id="chat-user-only",
+        turn_id="turn-user-only",
+        episode_source="chat_turn_workflow",
+    )
+
+    assert result is not None
+    assert len(fake_manager.create_for_event_calls) == 1
+    create_call = fake_manager.create_for_event_calls[0]
+    assert create_call["user_id"] == "#V#user_only"
+    assert create_call["org_id"] is None
+    assert create_call["namespace"] == "#V#user_only"
+
+
+def test_execute_workflow_records_structured_durable_submission_failures(
+    monkeypatch,
+) -> None:
+    orchestrator = _build_orchestrator()
+    _register_test_workflow(orchestrator, workflow_id="#V#submission_failure_workflow")
+    fake_manager = _FakeWorkflowInstanceManager()
+    input_data = {
+        "prompt": "Run despite durable submission failure.",
+        "user_concept_id": "#V#user",
+        "org_concept_id": "#V#org",
+        "conversation_session_id": "chat-fail-telemetry",
+        "turn_id": "turn-fail-telemetry",
+        "aux_llm_calls": [],
+    }
+
+    def _failing_submit_verified_workflow_instance(**_kwargs: Any):
+        raise RuntimeError("durable store unavailable")
+
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.workflow_instance_submission_service.submit_verified_workflow_instance",
+        _failing_submit_verified_workflow_instance,
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: fake_manager,
+    )
+    monkeypatch.setattr(
+        orchestrator._workflow_executor,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            completed=True,
+            final_state="completed",
+            error=None,
+            data={"aux_llm_calls": []},
+        ),
+    )
+
+    result = orchestrator.execute_workflow(
+        "#V#submission_failure_workflow",
+        data=input_data,
+        llm_client=object(),
+        model="test-model",
+        user_namespace="#V#user@org",
+        conversation_session_id="chat-fail-telemetry",
+        turn_id="turn-fail-telemetry",
+        episode_source="chat_turn_workflow",
+    )
+
+    assert result is not None
+    aux_calls = input_data.get("aux_llm_calls")
+    assert isinstance(aux_calls, list)
+    assert any(
+        isinstance(entry, dict)
+        and entry.get("type") == "workflow_instance_submission"
+        and entry.get("status") == "submission_failed"
+        and entry.get("reason_code") == "RuntimeError"
+        and entry.get("workflow_id") == "#V#submission_failure_workflow"
+        for entry in aux_calls
+    )

@@ -178,7 +178,7 @@ class WorkflowInstance:
 
     # Ownership
     user_id: str
-    org_id: str
+    org_id: str | None
     namespace: str
 
     # Status
@@ -229,7 +229,7 @@ class WorkflowInstance:
         workflow_id: str,
         *,
         user_id: str,
-        org_id: str,
+        org_id: str | None,
         namespace: str,
         inputs: dict[str, Any] | None = None,
         schedule_id: str | None = None,
@@ -306,7 +306,7 @@ class WorkflowInstance:
             instance_id=doc["instance_id"],
             workflow_id=doc["workflow_id"],
             user_id=doc["user_id"],
-            org_id=doc["org_id"],
+            org_id=doc.get("org_id"),
             namespace=doc["namespace"],
             status=WorkflowInstanceStatus(doc["status"]),
             created_at=doc["created_at"],

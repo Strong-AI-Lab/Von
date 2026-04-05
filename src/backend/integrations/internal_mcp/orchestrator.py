@@ -19754,13 +19754,64 @@ class InternalMCPChatOrchestrator:
                     exc,
                 )
 
+        def _record_durable_instance_submission_event(
+            *,
+            status: str,
+            reason_code: str | None = None,
+            error: str | None = None,
+            submission_payload: Mapping[str, Any] | None = None,
+        ) -> None:
+            aux_log = data.get("aux_llm_calls")
+            if not isinstance(aux_log, list):
+                return
+            payload: dict[str, Any] = {
+                "type": "workflow_instance_submission",
+                "path": "orchestrator.execute_workflow",
+                "status": str(status or "").strip() or "unknown",
+                "workflow_id": workflow_id,
+                "workflow_instance_id": durable_instance_id,
+                "workflow_instance_created_new": durable_instance_created_new,
+                "source": (
+                    str(resolved_source).strip()
+                    if isinstance(resolved_source, str) and resolved_source.strip()
+                    else None
+                ),
+                "stage": (
+                    str(resolved_stage).strip()
+                    if isinstance(resolved_stage, str) and resolved_stage.strip()
+                    else None
+                ),
+                "session_id": (
+                    str(resolved_session_id).strip()
+                    if isinstance(resolved_session_id, str)
+                    and resolved_session_id.strip()
+                    else None
+                ),
+                "turn_id": (
+                    str(resolved_turn_id).strip()
+                    if isinstance(resolved_turn_id, str) and resolved_turn_id.strip()
+                    else None
+                ),
+                "user_concept_id": resolved_user_id,
+                "org_concept_id": resolved_org_id,
+                "namespace": resolved_namespace,
+                "workflow_definition_identity": workflow_definition_identity,
+            }
+            if isinstance(reason_code, str) and reason_code.strip():
+                payload["reason_code"] = reason_code.strip()
+            if isinstance(error, str) and error.strip():
+                payload["error"] = error.strip()
+            if isinstance(submission_payload, Mapping):
+                payload["submission"] = dict(submission_payload)
+            aux_log.append(payload)
+
         if (
             isinstance(workflow_id, str)
             and workflow_id.strip()
             and resolved_user_id
-            and resolved_org_id
             and resolved_namespace
         ):
+            submission = None
             try:
                 from ...workflows.durable import WorkflowInstanceManager
                 from ...workflows.durable.workflow_instance_submission_service import (
@@ -19813,7 +19864,32 @@ class InternalMCPChatOrchestrator:
                     )
                 durable_instance_id = submission.instance_id
                 durable_instance_created_new = submission.created_new
+                _record_durable_instance_submission_event(
+                    status="submitted",
+                    reason_code=(
+                        "durable_instance_reused"
+                        if submission.created_new is False
+                        else "durable_instance_created"
+                    ),
+                    submission_payload=submission.to_dict(),
+                )
             except Exception as exc:
+                submission_payload = (
+                    submission.to_dict()
+                    if submission is not None and callable(getattr(submission, "to_dict", None))
+                    else None
+                )
+                _record_durable_instance_submission_event(
+                    status="submission_failed",
+                    reason_code=(
+                        str(getattr(submission, "error_code", "")).strip()
+                        if isinstance(getattr(submission, "error_code", None), str)
+                        and str(getattr(submission, "error_code", "")).strip()
+                        else type(exc).__name__
+                    ),
+                    error=str(exc),
+                    submission_payload=submission_payload,
+                )
                 self._logger.warning(
                     "[workflow_instance_telemetry] Failed to create durable instance "
                     "for workflow %s: %s",
@@ -19823,6 +19899,18 @@ class InternalMCPChatOrchestrator:
                 durable_instance_manager = None
                 durable_instance_id = None
                 durable_instance_created_new = None
+        elif isinstance(workflow_id, str) and workflow_id.strip():
+            missing_reason = (
+                "missing_user_context"
+                if not resolved_user_id
+                else "missing_namespace"
+                if not resolved_namespace
+                else "missing_workflow_id"
+            )
+            _record_durable_instance_submission_event(
+                status="submission_skipped",
+                reason_code=missing_reason,
+            )
 
         episode_id: str | None = None
         stable_key: str | None = None
