@@ -52,6 +52,7 @@ describe('Vontology cartouche context menu', () => {
         expect(seen.length).toBe(1);
         expect(seen[0].conceptId).toBe('ai_researcher');
         expect(seen[0].createConceptTab).toBe(true);
+        expect(seen[0].promoteExistingTab).toBe(true);
         expect(seen[0].kind).toBe('type');
         expect(seen[0].modifierKeys.shiftKey).toBe(true);
     });

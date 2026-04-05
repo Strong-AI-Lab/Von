@@ -52,6 +52,52 @@ describe('handleSelectConceptByIdDetail', () => {
         expect(cartouche.querySelector('.vontology-cartouche-kind').textContent).toBe('Type');
     });
 
+    test('cartouche-driven background opens preserve MRU promotion intent for existing tabs', async () => {
+        const { handleSelectConceptByIdDetail } = require(handlerPath);
+
+        const createOrActivateConceptTab = jest.fn();
+        const activateTab = jest.fn();
+        const selectVontologyNodeByIdentifier = jest.fn();
+
+        const fetchFn = jest.fn((url) => {
+            if (typeof url === 'string' && url.startsWith('/vontology/api/vontology/node_content')) {
+                if (url.includes('raw_only=1')) {
+                    return Promise.resolve({
+                        ok: true,
+                        status: 200,
+                        json: async () => ({ display_name: 'Person', kind: 'type', concept_id: '#V#person' })
+                    });
+                }
+                return Promise.resolve({ ok: true, status: 200, text: async () => JSON.stringify({}) });
+            }
+            return Promise.resolve({ ok: true, status: 200, text: async () => JSON.stringify({}) });
+        });
+
+        await handleSelectConceptByIdDetail(
+            {
+                conceptId: 'person',
+                createConceptTab: true,
+                kind: 'type',
+                promoteExistingTab: true,
+                modifierKeys: {}
+            },
+            { createOrActivateConceptTab, activateTab, selectVontologyNodeByIdentifier, fetchFn }
+        );
+
+        expect(createOrActivateConceptTab).toHaveBeenCalledWith(
+            '#V#person',
+            'Loading…',
+            false,
+            { promoteExistingTab: true }
+        );
+        expect(createOrActivateConceptTab).toHaveBeenCalledWith(
+            '#V#person',
+            'Person',
+            false,
+            { promoteExistingTab: true }
+        );
+    });
+
     test('shift-click activates the concept tab', async () => {
         const { handleSelectConceptByIdDetail } = require(handlerPath);
         const { createVontologyCartouche } = require(decoratorPath);

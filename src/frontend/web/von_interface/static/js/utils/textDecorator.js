@@ -93,7 +93,11 @@ export function createAnnotatedFragment(text, options = {}) {
 				e.preventDefault();
 				const event = new CustomEvent('von:selectConceptById', {
 					bubbles: true,
-					detail: { conceptId: seg.conceptId, createConceptTab: true }
+					detail: {
+						conceptId: seg.conceptId,
+						createConceptTab: true,
+						promoteExistingTab: true
+					}
 				});
 				a.dispatchEvent(event);
 			});
@@ -366,6 +370,7 @@ export function createVontologyCartouche(conceptId, opts = {}) {
 			detail: {
 				conceptId: raw,
 				createConceptTab: true,
+				promoteExistingTab: true,
 				kind: btn.dataset.kind || null,
 				modifierKeys: {
 					shiftKey: !!e.shiftKey,

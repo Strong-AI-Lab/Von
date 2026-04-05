@@ -6,6 +6,8 @@
  */
 
 import { getJson, postJson } from '../apiService.js';
+import { hydrateConceptCartouchesInRoot } from '../utils/selectConceptByIdHandler.js';
+import { cartouchifyElementText } from '../utils/textDecorator.js';
 import { showToast } from '../utils/toast.js';
 
 // Message panel state
@@ -313,12 +315,12 @@ async function loadConversation(userId) {
     try {
         const response = await getJson(`/api/messages/conversation/${encodeURIComponent(userId)}?limit=50`);
         _currentMessages = response.messages || [];
-        renderMessages();
+        await renderMessages();
 
         // Mark messages as read
         const unreadIds = _currentMessages
             .filter(m => {
-                const readBy = m.concept_data?.read_by || [];
+                const _readBy = m.concept_data?.read_by || [];
                 // Check if current user hasn't read it yet
                 // We need to get current user ID - for now, check if not sender
                 const senderId = m.relationships?.['#V#has_sender']?.[0];
@@ -348,7 +350,7 @@ async function loadConversation(userId) {
 /**
  * Render messages in the conversation view.
  */
-function renderMessages() {
+async function renderMessages() {
     const contentEl = _messagesContainer?.querySelector('#messageViewContent');
     if (!contentEl) return;
 
@@ -386,6 +388,13 @@ function renderMessages() {
 
     html += '</div>';
     contentEl.innerHTML = html;
+
+    const messageContentEls = Array.from(contentEl.querySelectorAll('.message-list .message-content'));
+    messageContentEls.forEach((messageContentEl, index) => {
+        const content = _currentMessages[index]?.concept_data?.content_fallback || '';
+        cartouchifyElementText(messageContentEl, content);
+    });
+    await hydrateConceptCartouchesInRoot(contentEl);
 
     // Scroll to bottom
     contentEl.scrollTop = contentEl.scrollHeight;

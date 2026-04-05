@@ -1261,6 +1261,8 @@ export function createOrActivateConceptTab(conceptId, conceptName, activate = tr
         console.log(`[dynamicTabs] Tab already exists for ${conceptId}${activate ? ', activating it' : ', not activating (per flag)'}`);
         if (activate) {
             activateTab(existing.tabId);
+        } else if (options?.promoteExistingTab) {
+            touchDynamicConceptTabRecency(conceptId);
         }
         persistOpenConceptTabs({
             activeTabId: activate ? existing.tabId : null,

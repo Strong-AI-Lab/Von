@@ -506,6 +506,48 @@ function updateCartouchesForMissingConcept(conceptId) {
     }
 }
 
+export async function hydrateConceptCartouchesInRoot(root, { fetchFn: explicitFetchFn } = {}) {
+    if (!root || typeof root.querySelectorAll !== 'function') {
+        return [];
+    }
+
+    const cartouches = Array.from(root.querySelectorAll('.vontology-cartouche[data-full-concept-id]'));
+    if (!cartouches.length) {
+        return [];
+    }
+
+    const uniqueIds = [];
+    const seen = new Set();
+    for (const el of cartouches) {
+        const fullId = normaliseVontologyId(el?.dataset?.fullConceptId || '');
+        if (!fullId || seen.has(fullId)) continue;
+        seen.add(fullId);
+        uniqueIds.push(fullId);
+    }
+    if (!uniqueIds.length) {
+        return [];
+    }
+
+    const fetchFn = explicitFetchFn || fetch;
+    await Promise.all(uniqueIds.map(async (conceptId) => {
+        try {
+            const exists = await conceptExists(conceptId, fetchFn);
+            if (!exists) {
+                updateCartouchesForMissingConcept(conceptId);
+                return;
+            }
+            const metadata = await fetchConceptMetadata(conceptId, fetchFn);
+            if (metadata) {
+                updateCartouchesForConcept(conceptId, metadata);
+            }
+        } catch (_) {
+            // Keep placeholder state if hydration fails transiently.
+        }
+    }));
+
+    return uniqueIds;
+}
+
 function _createModalElement() {
     const modal = document.createElement('div');
     modal.className = 'modal';
@@ -1070,12 +1112,21 @@ export async function handleSelectConceptByIdDetail(detail, deps) {
     // Normal click: open in background.
     // Shift-click: open and switch to it.
     const shouldActivate = !!modifierKeys.shiftKey;
+    const openConceptTab = (displayName) => {
+        if (detail?.promoteExistingTab) {
+            deps.createOrActivateConceptTab(id, displayName, shouldActivate, {
+                promoteExistingTab: true
+            });
+            return;
+        }
+        deps.createOrActivateConceptTab(id, displayName, shouldActivate);
+    };
 
     // Open the tab immediately (optimistic) so the UI responds even if the backend
     // is busy (e.g., single-threaded server while chat generation is in flight).
     // Metadata will be hydrated below when available.
     try {
-        deps.createOrActivateConceptTab(id, 'Loading…', shouldActivate);
+        openConceptTab('Loading…');
     } catch (_) {
         // Best-effort; keep going.
     }
@@ -1086,14 +1137,14 @@ export async function handleSelectConceptByIdDetail(detail, deps) {
     } catch (err) {
         console.warn('[selectConceptById] existence check failed', err);
         // Fall back to existing behaviour: ensure the tab exists.
-        deps.createOrActivateConceptTab(id, 'Loading…', shouldActivate);
+        openConceptTab('Loading…');
         return;
     }
 
     if (exists) {
         const metadata = await fetchConceptMetadata(id, fetchFn);
         updateCartouchesForConcept(id, metadata);
-        deps.createOrActivateConceptTab(id, metadata?.displayName || id, shouldActivate);
+        openConceptTab(metadata?.displayName || id);
         return;
     }
 
@@ -1145,7 +1196,7 @@ export async function handleSelectConceptByIdDetail(detail, deps) {
 
     // Re-open a loading tab now that the user has confirmed creation.
     try {
-        deps.createOrActivateConceptTab(id, 'Loading…', shouldActivate);
+        openConceptTab('Loading…');
     } catch (_) {
         // Best-effort; keep going.
     }
@@ -1165,7 +1216,7 @@ export async function handleSelectConceptByIdDetail(detail, deps) {
             if (existsAfterConfirmation) {
                 const existingMetadata = await fetchConceptMetadata(id, fetchFn);
                 updateCartouchesForConcept(id, existingMetadata);
-                deps.createOrActivateConceptTab(id, existingMetadata?.displayName || id, shouldActivate);
+                openConceptTab(existingMetadata?.displayName || id);
                 showToast('Concept already exists; opened existing concept.', 'info');
                 await emitCreateDecisionTelemetry(deps, buildCreateDecisionTelemetryPayload({
                     conceptId: id,
@@ -1191,7 +1242,7 @@ export async function handleSelectConceptByIdDetail(detail, deps) {
         await createConceptForId(id, createOpts, fetchFn);
         const metadata = await fetchConceptMetadata(id, fetchFn);
         updateCartouchesForConcept(id, metadata);
-        deps.createOrActivateConceptTab(id, metadata?.displayName || id, shouldActivate);
+        openConceptTab(metadata?.displayName || id);
         showToast('Concept created.', 'info');
         await emitCreateDecisionTelemetry(deps, buildCreateDecisionTelemetryPayload({
             conceptId: id,

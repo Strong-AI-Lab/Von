@@ -320,6 +320,25 @@ describe('dynamic concept tab buckets', () => {
         ]);
     });
 
+    test('promotes an already-open background tab to MRU when requested without activating it', () => {
+        const dynamicTabs = require(dynamicTabsModulePath);
+        dynamicTabs.initializeDynamicTabs();
+
+        dynamicTabs.createOrActivateConceptTab('#V#alpha', 'Alpha', false, { kind: 'type' });
+        dynamicTabs.createOrActivateConceptTab('#V#beta', 'Beta', false, { kind: 'type' });
+        dynamicTabs.createOrActivateConceptTab('#V#gamma', 'Gamma', false, { kind: 'type' });
+
+        dynamicTabs.createOrActivateConceptTab('#V#alpha', 'Alpha', false, {
+            kind: 'type',
+            promoteExistingTab: true
+        });
+
+        expect(getBucketConceptOrders()).toEqual([
+            { kind: 'type', conceptIds: ['#V#alpha', '#V#gamma', '#V#beta'] }
+        ]);
+        expect(document.querySelector('.tab-button.active[data-concept-id]')).toBeNull();
+    });
+
     test('promotes a disclosed item to MRU and collapses the bucket after selection', () => {
         const dynamicTabs = require(dynamicTabsModulePath);
         dynamicTabs.initializeDynamicTabs();
