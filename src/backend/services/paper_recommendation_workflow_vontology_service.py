@@ -9,6 +9,8 @@ from .paper_recommendation_constants import (
     PAPER_RECOMMENDATION_DELIVERY_PROMPT_CONCEPT_ID,
     PAPER_RECOMMENDATION_DELIVERY_PROMPT_LINK_PREDICATE_ID,
     PAPER_RECOMMENDATION_PROMPT_LINK_PREDICATE_ID,
+    PAPER_RECOMMENDATION_RATIONALE_PROMPT_CONCEPT_ID,
+    PAPER_RECOMMENDATION_RATIONALE_PROMPT_LINK_PREDICATE_ID,
     PAPER_RECOMMENDATION_REQUESTED_EVENT_TYPE,
     PAPER_RECOMMENDATION_RERANK_PROMPT_CONCEPT_ID,
     PAPER_RECOMMENDATION_WORKFLOW_ID,
@@ -54,6 +56,12 @@ _DELIVERY_PROMPT_SEED_ASSET_PATH = (
     / "repo_seed_bundles"
     / "paper_recommendation_delivery_message_prompt_seed.md"
 )
+_RATIONALE_PROMPT_SEED_ASSET_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "workflows"
+    / "repo_seed_bundles"
+    / "paper_recommendation_rationale_prompt_seed.md"
+)
 
 
 def _load_paper_recommendation_prompt_seed_text() -> str:
@@ -69,6 +77,13 @@ def _load_paper_recommendation_delivery_prompt_seed_text() -> str:
     prompt_text = _DELIVERY_PROMPT_SEED_ASSET_PATH.read_text(encoding="utf-8").strip()
     if not prompt_text:
         raise ValueError("paper_recommendation_delivery_prompt_seed_missing")
+    return prompt_text
+
+
+def _load_paper_recommendation_rationale_prompt_seed_text() -> str:
+    prompt_text = _RATIONALE_PROMPT_SEED_ASSET_PATH.read_text(encoding="utf-8").strip()
+    if not prompt_text:
+        raise ValueError("paper_recommendation_rationale_prompt_seed_missing")
     return prompt_text
 
 
@@ -94,6 +109,16 @@ def _ensure_paper_recommendation_prompt_support() -> dict[str, Any]:
                 ),
                 parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
             ),
+            WorkflowPromptConceptSpec(
+                concept_id=PAPER_RECOMMENDATION_RATIONALE_PROMPT_CONCEPT_ID,
+                name="Paper recommendation rationale prompt",
+                description=(
+                    "Canonical prompt for generating user-facing paragraph "
+                    "rationales for one scholarly paper recommendation against a "
+                    "specific Von subject profile."
+                ),
+                parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
+            ),
         ),
         workflow_links=(
             WorkflowPromptLinkSpec(
@@ -110,6 +135,13 @@ def _ensure_paper_recommendation_prompt_support() -> dict[str, Any]:
                 context={"jira": _SOURCE_TAG},
                 reason="paper_recommendation_delivery_prompt_link_bootstrap",
             ),
+            WorkflowPromptLinkSpec(
+                workflow_id=PAPER_RECOMMENDATION_WORKFLOW_ID,
+                prompt_concept_id=PAPER_RECOMMENDATION_RATIONALE_PROMPT_CONCEPT_ID,
+                predicate=PAPER_RECOMMENDATION_RATIONALE_PROMPT_LINK_PREDICATE_ID,
+                context={"jira": _SOURCE_TAG},
+                reason="paper_recommendation_rationale_prompt_link_bootstrap",
+            ),
         ),
         provenance_source=_MANAGED_BY,
     )
@@ -123,6 +155,10 @@ def _ensure_paper_recommendation_prompt_support() -> dict[str, Any]:
         (
             PAPER_RECOMMENDATION_DELIVERY_PROMPT_CONCEPT_ID,
             _load_paper_recommendation_delivery_prompt_seed_text,
+        ),
+        (
+            PAPER_RECOMMENDATION_RATIONALE_PROMPT_CONCEPT_ID,
+            _load_paper_recommendation_rationale_prompt_seed_text,
         ),
     )
     for prompt_concept_id, prompt_loader in seed_specs:
@@ -145,6 +181,8 @@ def _ensure_paper_recommendation_prompt_support() -> dict[str, Any]:
         prompt_concept_has_content(PAPER_RECOMMENDATION_RERANK_PROMPT_CONCEPT_ID)
     ) and bool(
         prompt_concept_has_content(PAPER_RECOMMENDATION_DELIVERY_PROMPT_CONCEPT_ID)
+    ) and bool(
+        prompt_concept_has_content(PAPER_RECOMMENDATION_RATIONALE_PROMPT_CONCEPT_ID)
     )
     return report
 

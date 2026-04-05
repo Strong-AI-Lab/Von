@@ -183,6 +183,23 @@ def test_deliver_paper_recommendation_messages_skips_non_new_recommendations(
     assert result["subject_reports"][0]["reason"] == "no_new_active_recommendations"
 
 
+def test_format_recommendation_block_surfaces_missing_authoritative_rationale_transparently():
+    block = service._format_recommendation_block(
+        1,
+        {
+            "paper_concept_id": "#V#paper_1",
+            "paper_title": "Paper 1",
+            "score": 0.5,
+            "evaluation": {
+                "rationale_generation": {"status": "unavailable"},
+                "paper_representation": {},
+            },
+        },
+    )
+
+    assert "No authoritative relevance explanation was available" in block
+
+
 def test_list_paper_recommendation_delivery_subject_ids_finds_researcher_users(
     monkeypatch,
 ):

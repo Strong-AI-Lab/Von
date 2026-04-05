@@ -35,6 +35,9 @@ _MAX_DELIVERY_PROMPT_CHARS = 12000
 _RESEARCHER_TYPE_ID = "#V#researcher"
 _VON_USER_TYPE_ID = "#V#von_user"
 _ORGANISATION_PREDICATE_ID = "#V#member_of_organisation"
+_RATIONALE_UNAVAILABLE_TEXT = (
+    "No authoritative relevance explanation was available for this recommendation yet."
+)
 
 
 def _safe_str(value: Any) -> str:
@@ -229,11 +232,38 @@ def _resolve_delivery_subject_ids(
     return rows
 
 
+def _user_facing_rationale_text(recommendation: Mapping[str, Any]) -> str:
+    summary = _safe_str(recommendation.get("rationale_summary"))
+    if summary:
+        return summary
+    rationale = _safe_str(recommendation.get("rationale"))
+    if rationale:
+        return rationale
+    raw_evaluation = recommendation.get("evaluation")
+    evaluation: Mapping[str, Any]
+    if isinstance(raw_evaluation, Mapping):
+        evaluation = raw_evaluation
+    else:
+        evaluation = {}
+    evaluation_rationale = _safe_str(evaluation.get("rationale"))
+    if evaluation_rationale:
+        return evaluation_rationale
+    raw_rationale_generation = evaluation.get("rationale_generation")
+    rationale_generation: Mapping[str, Any] = (
+        raw_rationale_generation
+        if isinstance(raw_rationale_generation, Mapping)
+        else {}
+    )
+    if rationale_generation.get("status") == "unavailable":
+        return _RATIONALE_UNAVAILABLE_TEXT
+    return ""
+
+
 def _format_recommendation_block(index: int, recommendation: Mapping[str, Any]) -> str:
     paper_title = _safe_str(recommendation.get("paper_title")) or _safe_str(
         recommendation.get("paper_concept_id")
     )
-    rationale_summary = _safe_str(recommendation.get("rationale_summary"))
+    rationale_summary = _user_facing_rationale_text(recommendation)
     paper_representation = (
         recommendation.get("evaluation", {}).get("paper_representation")
         if isinstance(recommendation.get("evaluation"), Mapping)

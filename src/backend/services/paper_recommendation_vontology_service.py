@@ -751,6 +751,14 @@ def load_materialised_paper_recommendations(
         )
         paper_doc = get_concept_by_concept_id_exact(paper_concept_id) or {}
         paper_title = _safe_str(paper_doc.get("name")) or paper_concept_id
+        rationale_generation = (
+            dict(evaluation.get("rationale_generation") or {})
+            if isinstance(evaluation.get("rationale_generation"), Mapping)
+            else {}
+        )
+        rationale_summary = _safe_str(evaluation.get("rationale_summary"))
+        if not rationale_summary and not rationale_generation:
+            rationale_summary = _load_latest_text(assertion_id, "hasDescription") or ""
         row = {
             "assertion_concept_id": assertion_id,
             "paper_concept_id": paper_concept_id,
@@ -758,8 +766,9 @@ def load_materialised_paper_recommendations(
             "score": float(evaluation.get("score") or 0.0),
             "active": active,
             "delivered_message_ids": delivered_message_ids,
-            "rationale_summary": _safe_str(evaluation.get("rationale_summary"))
-            or _load_latest_text(assertion_id, "hasDescription"),
+            "rationale_summary": rationale_summary,
+            "rationale": _safe_str(evaluation.get("rationale")),
+            "rationale_generation": rationale_generation,
             "evaluation": dict(evaluation),
         }
         rows.append(row)

@@ -24,6 +24,8 @@ from .paper_recommendation_constants import (
     MIN_RECOMMENDATION_SCORE,
     PAPER_RECOMMENDATION_POLICY_VERSION,
     PAPER_RECOMMENDATION_PROMPT_LINK_PREDICATE_ID,
+    PAPER_RECOMMENDATION_RATIONALE_PROMPT_CONCEPT_ID,
+    PAPER_RECOMMENDATION_RATIONALE_PROMPT_LINK_PREDICATE_ID,
     PAPER_RECOMMENDATION_RERANK_PROMPT_CONCEPT_ID,
     PAPER_RECOMMENDATION_WORKFLOW_ID,
     SCHOLARLY_ARTICLE_TYPE_ID,
@@ -87,6 +89,11 @@ _AFFECTING_PAPER_TEXT_PREDICATES = {
 }
 _EMBEDDING_ONLY_ACTIVE_LIMIT = 3
 _EMBEDDING_BACKEND_FAILURE_BACKOFF_SECONDS = 300.0
+_PAPER_CONTEXT_EXCERPT_CHARS = 4000
+_PLACEHOLDER_RATIONALE_SUMMARY = (
+    "Selected by semantic embedding similarity between the "
+    "subject context and the paper representation."
+)
 _embedding_backend_backoff_until = 0.0
 _embedding_backend_backoff_reason: str | None = None
 
@@ -102,6 +109,16 @@ def _safe_str(value: Any) -> str:
     if not isinstance(value, str):
         return ""
     return value.strip()
+
+
+def _excerpt_text(value: Any, *, limit: int) -> str:
+    text = _safe_str(value)
+    if not text or limit <= 0:
+        return ""
+    if len(text) <= limit:
+        return text
+    shortened = text[: max(1, limit - 3)].rstrip()
+    return shortened + "..."
 
 
 def _normalise_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
@@ -216,6 +233,23 @@ def _first_text(
         if text:
             return text
     return None
+
+
+def _first_text_with_predicate(
+    subject_concept_id: str,
+    predicates: Sequence[str],
+    *,
+    lookup_cache: _LookupCache | None = None,
+) -> tuple[str | None, str | None]:
+    for predicate in predicates:
+        text = _first_text(
+            subject_concept_id,
+            (predicate,),
+            lookup_cache=lookup_cache,
+        )
+        if text:
+            return text, predicate
+    return None, None
 
 
 def _relationship_rows(
@@ -368,10 +402,16 @@ def _build_paper_bundle(
         return bundle
 
     paper_title = _safe_str(paper_doc.get("name")) or paper_id
-    summary = (
+    summary, summary_source_predicate = _first_text_with_predicate(
+        paper_id,
+        _PAPER_TEXT_PREDICATES["summary"],
+        lookup_cache=lookup_cache,
+    )
+    summary = summary or ""
+    content_text = (
         _first_text(
             paper_id,
-            _PAPER_TEXT_PREDICATES["summary"],
+            ("hasContent",),
             lookup_cache=lookup_cache,
         )
         or ""
@@ -399,11 +439,17 @@ def _build_paper_bundle(
             for row in relationship_rows
             if row.get("predicate") == "#V#about"
         ]
+    base_text = build_concept_searchable_text(paper_doc)
+    paper_context_text = content_text or summary or base_text
+    paper_context_source = (
+        "hasContent"
+        if content_text
+        else summary_source_predicate or "concept_searchable_text"
+    )
     context_lines = [
         f"Paper title: {paper_title}",
         f"Paper concept ID: {paper_id}",
     ]
-    base_text = build_concept_searchable_text(paper_doc)
     if base_text:
         context_lines.append(base_text)
     if summary and summary not in base_text:
@@ -415,14 +461,20 @@ def _build_paper_bundle(
     if publication_date:
         context_lines.append("Publication date: " + publication_date)
 
-    return {
+    bundle = {
         "paper_concept_id": paper_id,
         "paper_title": paper_title,
         "paper_summary": summary,
-        "summary_excerpt": summary[:SUMMARY_EXCERPT_CHARS] if summary else "",
+        "summary_excerpt": _excerpt_text(summary, limit=SUMMARY_EXCERPT_CHARS),
+        "summary_source_predicate": summary_source_predicate,
         "author_names": author_names,
         "topic_labels": topic_labels,
         "publication_date": publication_date,
+        "paper_context_excerpt": _excerpt_text(
+            paper_context_text,
+            limit=_PAPER_CONTEXT_EXCERPT_CHARS,
+        ),
+        "paper_context_source": paper_context_source,
         "representation_complete": True,
         "representation_failures": [],
         "matching_text": "\n\n".join(line for line in context_lines if line),
@@ -695,6 +747,43 @@ def _resolve_reranker_prompt() -> tuple[str | None, dict[str, Any]]:
     return (rendered.text if rendered is not None else None), diagnostics
 
 
+def _resolve_rationale_prompt() -> tuple[str | None, dict[str, Any]]:
+    prompt_id = resolve_linked_prompt_concept_id(
+        workflow_id=PAPER_RECOMMENDATION_WORKFLOW_ID,
+        prompt_concept_id=None,
+        predicates=(PAPER_RECOMMENDATION_RATIONALE_PROMPT_LINK_PREDICATE_ID,),
+        default_prompt_concept_id=PAPER_RECOMMENDATION_RATIONALE_PROMPT_CONCEPT_ID,
+    )
+    rendered, diagnostics = render_authoritative_prompt(
+        resolved_prompt_id=prompt_id,
+        variables={},
+        max_chars=_SUBJECT_PROMPT_MAX_CHARS,
+        error_prefix="paper_recommendation_rationale",
+    )
+    return (rendered.text if rendered is not None else None), diagnostics
+
+
+def _normalise_evidence_list(value: Any) -> list[Any]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return []
+    rows: list[Any] = []
+    for item in value:
+        if isinstance(item, Mapping):
+            rows.append(dict(item))
+            continue
+        text = _safe_str(item)
+        if text:
+            rows.append(text)
+    return rows
+
+
+def _is_placeholder_rationale(text: Any) -> bool:
+    cleaned = _safe_str(text)
+    if not cleaned:
+        return False
+    return cleaned == _PLACEHOLDER_RATIONALE_SUMMARY
+
+
 def _llm_rerank_candidates(
     *,
     subject_bundle: Mapping[str, Any],
@@ -717,6 +806,12 @@ def _llm_rerank_candidates(
             "paper_title": (row.get("paper_bundle") or {}).get("paper_title"),
             "embedding_score": round(float(row.get("embedding_score") or 0.0), 6),
             "summary": (row.get("paper_bundle") or {}).get("summary_excerpt"),
+            "paper_context_excerpt": (
+                (row.get("paper_bundle") or {}).get("paper_context_excerpt")
+            ),
+            "paper_context_source": (
+                (row.get("paper_bundle") or {}).get("paper_context_source")
+            ),
             "authors": list((row.get("paper_bundle") or {}).get("author_names") or []),
             "topic_labels": list(
                 (row.get("paper_bundle") or {}).get("topic_labels") or []
@@ -790,10 +885,7 @@ def _llm_rerank_candidates(
                 "score": max(0.0, min(score, 1.0)),
                 "rationale_summary": _safe_str(row.get("rationale_summary")),
                 "rationale": _safe_str(row.get("rationale")),
-                "evidence": list(row.get("evidence") or [])
-                if isinstance(row.get("evidence"), Sequence)
-                and not isinstance(row.get("evidence"), (str, bytes, bytearray))
-                else [],
+                "evidence": _normalise_evidence_list(row.get("evidence")),
             }
         )
         if len(results) >= max_results:
@@ -804,6 +896,117 @@ def _llm_rerank_candidates(
         "decision_mode": "embedding_plus_llm",
         "llm_used": True,
     }
+
+
+def _llm_generate_authoritative_rationale(
+    *,
+    subject_bundle: Mapping[str, Any],
+    candidate_row: Mapping[str, Any],
+    decision_mode: str,
+    selection_rule: str,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    prompt_text, prompt_diagnostics = _resolve_rationale_prompt()
+    if not prompt_text:
+        diagnostics = dict(prompt_diagnostics)
+        diagnostics["status"] = "unavailable"
+        return None, diagnostics
+
+    client = _build_embedding_client(
+        _safe_str(subject_bundle.get("subject_concept_id"))
+    )
+    paper_bundle = dict(candidate_row.get("paper_bundle") or {})
+    paper_payload = {
+        "paper_concept_id": candidate_row.get("paper_concept_id"),
+        "paper_title": paper_bundle.get("paper_title"),
+        "summary_excerpt": paper_bundle.get("summary_excerpt"),
+        "summary_source_predicate": paper_bundle.get("summary_source_predicate"),
+        "paper_context_excerpt": paper_bundle.get("paper_context_excerpt"),
+        "paper_context_source": paper_bundle.get("paper_context_source"),
+        "author_names": list(paper_bundle.get("author_names") or []),
+        "topic_labels": list(paper_bundle.get("topic_labels") or []),
+        "publication_date": paper_bundle.get("publication_date"),
+    }
+    recommendation_context = {
+        "decision_mode": decision_mode,
+        "selection_rule": selection_rule,
+        "score": round(float(candidate_row.get("score") or 0.0), 6),
+        "embedding_score": round(float(candidate_row.get("embedding_score") or 0.0), 6),
+    }
+    prompt = (
+        prompt_text
+        + "\n\nSubject bundle JSON:\n"
+        + json.dumps(
+            subject_bundle,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n\nPaper bundle JSON:\n"
+        + json.dumps(
+            paper_payload,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n\nRecommendation context JSON:\n"
+        + json.dumps(
+            recommendation_context,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n\nReturn JSON only."
+    )
+    try:
+        raw_response = client.generate(prompt, llm_params={"temperature": 0.0})
+    except Exception as exc:
+        return None, {
+            **prompt_diagnostics,
+            "status": "unavailable",
+            "llm_error": str(exc),
+        }
+    parsed = _extract_json_value(raw_response)
+    if not isinstance(parsed, Mapping):
+        return None, {
+            **prompt_diagnostics,
+            "status": "unavailable",
+            "llm_parse_error": "missing_rationale_object",
+        }
+
+    rationale_summary = _safe_str(parsed.get("rationale_summary")) or _safe_str(
+        parsed.get("rationale")
+    )
+    rationale = _safe_str(parsed.get("rationale")) or rationale_summary
+    if not rationale_summary:
+        return None, {
+            **prompt_diagnostics,
+            "status": "unavailable",
+            "llm_parse_error": "missing_rationale_summary",
+        }
+
+    return (
+        {
+            "rationale_summary": rationale_summary,
+            "rationale": rationale,
+            "evidence": _normalise_evidence_list(parsed.get("evidence")),
+            "rationale_generation": {
+                "status": "generated",
+                "source": "rationale_prompt",
+                "prompt_concept_id": prompt_diagnostics.get(
+                    "loaded_prompt_concept_id"
+                )
+                or prompt_diagnostics.get("resolved_prompt_concept_id"),
+                "paper_context_source": paper_bundle.get("paper_context_source"),
+                "used_summary_proxy": paper_bundle.get("paper_context_source")
+                != "hasContent",
+            },
+        },
+        {
+            **prompt_diagnostics,
+            "status": "generated",
+            "paper_concept_id": candidate_row.get("paper_concept_id"),
+        },
+    )
 
 
 def _embedding_only_rank(
@@ -823,16 +1026,8 @@ def _embedding_only_rank(
                 "selected_by_fallback_shortlist": (
                     score > 0.0 and index <= _EMBEDDING_ONLY_ACTIVE_LIMIT
                 ),
-                "rationale_summary": (
-                    "Selected by semantic embedding similarity between the "
-                    "subject context and the paper representation."
-                ),
-                "rationale": (
-                    "Embedding-only fallback was used because the authoritative "
-                    "reranker prompt or LLM response was unavailable. "
-                    "A bounded shortlist was materialised from the strongest "
-                    "available semantic matches."
-                ),
+                "rationale_summary": "",
+                "rationale": "",
                 "evidence": [
                     {
                         "kind": "embedding_similarity",
@@ -842,6 +1037,79 @@ def _embedding_only_rank(
             }
         )
     return rows
+
+
+def _apply_authoritative_rationale_generation(
+    *,
+    subject_bundle: Mapping[str, Any],
+    ranked_rows: Sequence[Mapping[str, Any]],
+    max_results: int,
+    decision_mode: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    resolved_rows: list[dict[str, Any]] = []
+    diagnostics_rows: list[dict[str, Any]] = []
+    for index, row in enumerate(ranked_rows):
+        resolved = dict(row)
+        paper_bundle = dict(row.get("paper_bundle") or {})
+        existing_summary = _safe_str(resolved.get("rationale_summary"))
+        existing_rationale = _safe_str(resolved.get("rationale"))
+        if _is_placeholder_rationale(existing_summary):
+            existing_summary = ""
+        if _is_placeholder_rationale(existing_rationale):
+            existing_rationale = ""
+        resolved["rationale_summary"] = existing_summary
+        resolved["rationale"] = existing_rationale
+        resolved["evidence"] = _normalise_evidence_list(resolved.get("evidence"))
+
+        default_generation = {
+            "status": "generated" if existing_summary or existing_rationale else "unavailable",
+            "source": "reranker_llm"
+            if decision_mode == "embedding_plus_llm"
+            else "embedding_only_fallback",
+            "paper_context_source": paper_bundle.get("paper_context_source"),
+            "used_summary_proxy": paper_bundle.get("paper_context_source")
+            != "hasContent",
+        }
+        should_attempt = index < max_results and (
+            decision_mode != "embedding_plus_llm" or not existing_summary
+        )
+        if should_attempt:
+            selection_rule = _safe_str(resolved.get("selection_rule")) or (
+                "score_threshold"
+                if decision_mode == "embedding_plus_llm"
+                else "embedding_only_top_shortlist"
+            )
+            generated, rationale_diagnostics = _llm_generate_authoritative_rationale(
+                subject_bundle=subject_bundle,
+                candidate_row=resolved,
+                decision_mode=decision_mode,
+                selection_rule=selection_rule,
+            )
+            diagnostics_rows.append(rationale_diagnostics)
+            if generated is not None:
+                resolved.update(generated)
+            else:
+                default_generation = {
+                    "status": "unavailable",
+                    "source": "rationale_prompt",
+                    "reason_code": rationale_diagnostics.get("error")
+                    or rationale_diagnostics.get("llm_error")
+                    or rationale_diagnostics.get("llm_parse_error")
+                    or "authoritative_rationale_unavailable",
+                    "prompt_concept_id": rationale_diagnostics.get(
+                        "loaded_prompt_concept_id"
+                    )
+                    or rationale_diagnostics.get("resolved_prompt_concept_id"),
+                    "paper_context_source": paper_bundle.get("paper_context_source"),
+                    "used_summary_proxy": paper_bundle.get("paper_context_source")
+                    != "hasContent",
+                }
+
+        resolved["rationale_generation"] = dict(
+            resolved.get("rationale_generation") or default_generation
+        )
+        resolved_rows.append(resolved)
+    return resolved_rows, diagnostics_rows
 
 
 def _should_mark_recommendation_active(
@@ -1018,6 +1286,12 @@ def materialise_paper_recommendations_for_subject(
         candidate_rows=llm_candidate_rows,
         reranked_rows=llm_rows,
     )
+    merged_rows, rationale_diagnostics = _apply_authoritative_rationale_generation(
+        subject_bundle=subject_bundle,
+        ranked_rows=merged_rows,
+        max_results=safe_max_results,
+        decision_mode=decision_mode,
+    )
 
     existing_rows = load_materialised_paper_recommendations(
         subject_concept_id=subject_id,
@@ -1049,6 +1323,7 @@ def materialise_paper_recommendations_for_subject(
             decision_mode=decision_mode,
             min_score=float(min_score),
         )
+        row["selection_rule"] = selection_rule
         evaluation_payload = {
             "schema_version": "paper_recommendation_assertion.v1",
             "policy_version": PAPER_RECOMMENDATION_POLICY_VERSION,
@@ -1060,12 +1335,15 @@ def materialise_paper_recommendations_for_subject(
             "fallback_rank": row.get("fallback_rank"),
             "rationale_summary": _safe_str(row.get("rationale_summary")),
             "rationale": _safe_str(row.get("rationale")),
-            "evidence": list(row.get("evidence") or []),
+            "evidence": _normalise_evidence_list(row.get("evidence")),
+            "rationale_generation": dict(row.get("rationale_generation") or {}),
             "trigger_source": _safe_str(trigger_source) or None,
             "paper_title": paper_bundle.get("paper_title"),
             "paper_representation": {
                 "paper_title": paper_bundle.get("paper_title"),
                 "summary_excerpt": paper_bundle.get("summary_excerpt"),
+                "summary_source_predicate": paper_bundle.get("summary_source_predicate"),
+                "paper_context_source": paper_bundle.get("paper_context_source"),
                 "author_names": list(paper_bundle.get("author_names") or []),
                 "topic_labels": list(paper_bundle.get("topic_labels") or []),
                 "publication_date": paper_bundle.get("publication_date"),
@@ -1097,7 +1375,8 @@ def materialise_paper_recommendations_for_subject(
                 "recommendation_tier": "recommended" if active else "inactive",
                 "rationale_summary": _safe_str(row.get("rationale_summary")),
                 "rationale": _safe_str(row.get("rationale")),
-                "evidence": list(row.get("evidence") or []),
+                "evidence": _normalise_evidence_list(row.get("evidence")),
+                "rationale_generation": dict(row.get("rationale_generation") or {}),
                 "paper_representation": evaluation_payload["paper_representation"],
                 "provenance": {
                     "decision_mode": decision_mode,
@@ -1107,6 +1386,12 @@ def materialise_paper_recommendations_for_subject(
                     "semantic_recall_score": semantic_score_map.get(paper_concept_id),
                     "embedding_score": float(row.get("embedding_score") or 0.0),
                     "fallback_rank": row.get("fallback_rank"),
+                    "rationale_status": (
+                        (row.get("rationale_generation") or {}).get("status")
+                    ),
+                    "rationale_source": (
+                        (row.get("rationale_generation") or {}).get("source")
+                    ),
                 },
                 "active": active,
             }
@@ -1196,6 +1481,7 @@ def materialise_paper_recommendations_for_subject(
             "recall": recall_diagnostics,
             "embedding": embedding_diagnostics,
             "reranker": llm_diagnostics,
+            "rationale_generation": rationale_diagnostics,
         },
     }
 

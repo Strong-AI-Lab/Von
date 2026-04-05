@@ -2665,6 +2665,18 @@ function formatRecommendationScalar(value, fallback = 'None') {
   return cleaned || fallback;
 }
 
+function resolveRecommendationRationaleSummary(row) {
+  const summary = String(row?.rationale_summary || '').trim();
+  if (summary) return summary;
+  const rationale = String(row?.rationale || '').trim();
+  if (rationale) return rationale;
+  const generationStatus = String(row?.rationale_generation?.status || '').trim().toLowerCase();
+  if (generationStatus === 'unavailable') {
+    return 'No authoritative relevance explanation was generated for this recommendation yet.';
+  }
+  return '';
+}
+
 function appendRecommendationList(container, title, items) {
   if (!container || !Array.isArray(items) || !items.length) return;
   const heading = document.createElement('div');
@@ -2774,8 +2786,8 @@ function renderRecommendationReviewPayload(payload) {
     const summaryText = document.createElement('div');
     summaryText.className = 'recommendation-review-summary';
     summaryText.textContent = formatRecommendationScalar(
-      row?.rationale_summary || row?.paper_representation?.summary_excerpt,
-      'No grounded rationale summary was returned.',
+      resolveRecommendationRationaleSummary(row),
+      'No authoritative relevance explanation was generated for this recommendation yet.',
     );
     card.appendChild(summaryText);
 

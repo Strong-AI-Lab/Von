@@ -84,4 +84,43 @@ describe('settingsPage recommendation review helpers', () => {
     expect(resultsText).toContain('rel-summary-1');
     expect(resultsText).toContain('#V#judea_pearl');
   });
+
+  test('renders explicit unavailable-rationale text instead of a paper summary fallback', () => {
+    __testOnly_renderRecommendationReviewPayload({
+      success: true,
+      authoritative_review_surface: 'settings_tab',
+      external_channels_authoritative: false,
+      trigger: { trigger_source: 'manual_review', label: 'Manual review' },
+      candidate_selection: {
+        source: 'represented_scholarly_articles',
+        candidate_count: 1,
+      },
+      recommendation_report: {
+        success: true,
+        results: [
+          {
+            paper_concept_id: '#V#paper_sparse',
+            paper_title: 'Sparse Metadata Paper',
+            status: 'ranked',
+            score: 0.41,
+            recommendation_tier: 'inactive',
+            rationale_generation: {
+              status: 'unavailable',
+            },
+            paper_representation: {
+              summary_excerpt: 'A generic paper summary that should not appear as the rationale.',
+            },
+          },
+        ],
+      },
+    });
+
+    const resultsText = document.getElementById('recommendationReviewResults').textContent;
+    expect(resultsText).toContain(
+      'No authoritative relevance explanation was generated for this recommendation yet.',
+    );
+    expect(resultsText).not.toContain(
+      'A generic paper summary that should not appear as the rationale.',
+    );
+  });
 });

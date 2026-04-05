@@ -424,7 +424,181 @@ def test_build_paper_bundle_reuses_lookup_cache(monkeypatch):
 
     assert first == second
     assert concept_calls == 1
-    assert text_calls == 3
+    assert text_calls == 4
+
+
+def test_materialise_paper_recommendations_for_subject_uses_authoritative_rationale_prompt_after_fallback(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        service,
+        "_build_subject_bundle",
+        lambda _subject_id, lookup_cache=None: {
+            "success": True,
+            "subject_concept_id": "#V#michael_witbrock",
+            "profile_concept_id": "#V#paper_recommendation_profile_for_michael_witbrock",
+            "profile_source_predicate": "#V#has_paper_recommendation_profile_json",
+            "profile_present": True,
+            "related_concepts": [],
+            "research_interest_concepts": [],
+            "organisation_concept_ids": [],
+            "profile": {},
+        },
+    )
+    monkeypatch.setattr(
+        service,
+        "_score_candidates_with_embeddings",
+        lambda **_kwargs: (
+            [
+                {
+                    "paper_concept_id": "#V#paper_1",
+                    "embedding_score": 0.61,
+                    "status": "scored",
+                    "paper_bundle": {
+                        "paper_title": "Paper 1",
+                        "summary_excerpt": "summary",
+                        "summary_source_predicate": "hasDescription",
+                        "paper_context_excerpt": "direct paper context",
+                        "paper_context_source": "hasContent",
+                        "author_names": [],
+                        "topic_labels": [],
+                        "publication_date": None,
+                    },
+                }
+            ],
+            {"embedding_backend": "local_text_hashing_fallback"},
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "_llm_rerank_candidates",
+        lambda **_kwargs: (None, {"decision_mode": "embedding_only_fallback"}),
+    )
+    monkeypatch.setattr(
+        service,
+        "_llm_generate_authoritative_rationale",
+        lambda **_kwargs: (
+            {
+                "rationale_summary": "This paper is relevant because it directly connects to the represented research context rather than only sharing broad topic words.",
+                "rationale": "This paper is relevant because it directly connects to the represented research context rather than only sharing broad topic words.",
+                "evidence": ["direct paper-context fit"],
+                "rationale_generation": {
+                    "status": "generated",
+                    "source": "rationale_prompt",
+                },
+            },
+            {"status": "generated"},
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "load_materialised_paper_recommendations",
+        lambda **_kwargs: {"success": True, "recommendations": []},
+    )
+
+    captured: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        service,
+        "upsert_paper_recommendation_assertion",
+        lambda **kwargs: captured.append(kwargs)
+        or {
+            "success": True,
+            "assertion_concept_id": f"#V#assertion_{kwargs['paper_concept_id']}",
+        },
+    )
+
+    payload = service.materialise_paper_recommendations_for_subject(
+        subject_concept_id="#V#michael_witbrock",
+        candidate_paper_concept_ids=["#V#paper_1"],
+        max_results=3,
+    )
+
+    assert payload["success"] is True
+    assert payload["results"][0]["rationale_summary"].startswith("This paper is relevant")
+    assert payload["results"][0]["rationale_generation"]["source"] == "rationale_prompt"
+    assert captured[0]["evaluation_payload"]["rationale_generation"]["status"] == "generated"
+
+
+def test_materialise_paper_recommendations_for_subject_does_not_persist_placeholder_rationale(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        service,
+        "_build_subject_bundle",
+        lambda _subject_id, lookup_cache=None: {
+            "success": True,
+            "subject_concept_id": "#V#michael_witbrock",
+            "profile_concept_id": "#V#paper_recommendation_profile_for_michael_witbrock",
+            "profile_source_predicate": "#V#has_paper_recommendation_profile_json",
+            "profile_present": True,
+            "related_concepts": [],
+            "research_interest_concepts": [],
+            "organisation_concept_ids": [],
+            "profile": {},
+        },
+    )
+    monkeypatch.setattr(
+        service,
+        "_score_candidates_with_embeddings",
+        lambda **_kwargs: (
+            [
+                {
+                    "paper_concept_id": "#V#paper_1",
+                    "embedding_score": 0.43,
+                    "status": "scored",
+                    "paper_bundle": {
+                        "paper_title": "Paper 1",
+                        "summary_excerpt": "",
+                        "paper_context_excerpt": "",
+                        "paper_context_source": "concept_searchable_text",
+                        "author_names": [],
+                        "topic_labels": [],
+                        "publication_date": None,
+                    },
+                }
+            ],
+            {"embedding_backend": "local_text_hashing_fallback"},
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "_llm_rerank_candidates",
+        lambda **_kwargs: (None, {"decision_mode": "embedding_only_fallback"}),
+    )
+    monkeypatch.setattr(
+        service,
+        "_llm_generate_authoritative_rationale",
+        lambda **_kwargs: (None, {"status": "unavailable", "llm_error": "quota exhausted"}),
+    )
+    monkeypatch.setattr(
+        service,
+        "load_materialised_paper_recommendations",
+        lambda **_kwargs: {"success": True, "recommendations": []},
+    )
+
+    captured: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        service,
+        "upsert_paper_recommendation_assertion",
+        lambda **kwargs: captured.append(kwargs)
+        or {
+            "success": True,
+            "assertion_concept_id": f"#V#assertion_{kwargs['paper_concept_id']}",
+        },
+    )
+
+    payload = service.materialise_paper_recommendations_for_subject(
+        subject_concept_id="#V#michael_witbrock",
+        candidate_paper_concept_ids=["#V#paper_1"],
+        max_results=3,
+    )
+
+    assert payload["success"] is True
+    assert payload["results"][0]["rationale_summary"] == ""
+    assert (
+        captured[0]["evaluation_payload"]["rationale_summary"] == ""
+    )
+    assert captured[0]["evaluation_payload"]["rationale_generation"]["status"] == "unavailable"
 
 
 def test_materialise_paper_recommendations_for_subject_deduplicates_recalled_candidates(
