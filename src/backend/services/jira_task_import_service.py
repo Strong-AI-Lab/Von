@@ -38,6 +38,7 @@ from .task_management_service import (
     update_task_fields,
     upsert_task_external_reference,
 )
+from .task_ontology_service import JIRA_IMPORTED_TASK_SOURCE_ID
 
 _normalise_issue_key = normalise_jira_issue_key
 
@@ -1613,6 +1614,8 @@ def import_jira_issues_to_tasks(
             "status": mapped_status,
             "priority": mapped_priority,
             "labels": labels,
+            "task_source_id": JIRA_IMPORTED_TASK_SOURCE_ID,
+            "reference_code": issue_key,
         }
         if organisation_concept_id is not None:
             update_fields_payload["organisation_concept_id"] = organisation_concept_id
@@ -1707,6 +1710,8 @@ def import_jira_issues_to_tasks(
                         assignee_concept_id=assignee_concept_id,
                         created_by_concept_id=creator_concept_id or actor_concept_id,
                         organisation_concept_id=organisation_concept_id,
+                        task_source_id=JIRA_IMPORTED_TASK_SOURCE_ID,
+                        reference_code=issue_key,
                     )
                     created_task_id = created.get("task_concept_id")
                     if not isinstance(created_task_id, str) or not created_task_id.strip():

@@ -33,6 +33,24 @@ from .effort_unit_ontology_service import (
     persist_successor_effort_unit_type_links,
     resolve_successor_effort_unit_type_ids,
 )
+from .task_ontology_service import (
+    DEFAULT_TASK_SOURCE_ID,
+    JIRA_IMPORTED_TASK_SOURCE_ID,
+    PREDICATE_HAS_EVIDENCE,
+    PREDICATE_HAS_NEXT_CHECKPOINT,
+    PREDICATE_HAS_PROGRESS_SIGNAL,
+    PREDICATE_HAS_TASK_REFERENCE_CODE,
+    PREDICATE_HAS_TASK_ROLE,
+    PREDICATE_HAS_TASK_SOURCE,
+    PREDICATE_REPORTS_TO,
+    ensure_task_ontology,
+    get_task_source_definition,
+    get_task_taxonomy as get_task_taxonomy_definition,
+    get_task_type_definition,
+    is_known_task_type_id,
+    normalise_task_source_id,
+    normalise_task_type_ids,
+)
 from .workflow_event_integration_service import (
     maybe_launch_effort_unit_completed_workflow,
     maybe_launch_task_created_workflow,
@@ -259,6 +277,110 @@ def _normalise_optional_concept_id(value: Any) -> str | None:
     if not cleaned:
         return None
     return ensure_v_concept_prefix(cleaned)
+
+
+def _relationship_id_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        candidate = _normalise_optional_concept_id(value)
+        return [candidate] if candidate else []
+    if not isinstance(value, list):
+        return []
+
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for item in value:
+        candidate = _normalise_optional_concept_id(item)
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        ordered.append(candidate)
+    return ordered
+
+
+def _normalise_optional_text(value: Any, *, field_name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise InvalidTaskDataError(f"{field_name} must be a string")
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _upsert_optional_task_text(
+    *,
+    task_concept_id: str,
+    predicate: str,
+    value: str | None,
+    lang: str = "en-NZ",
+) -> None:
+    if value is None:
+        _clear_task_datetime_text_relations(
+            task_concept_id=task_concept_id,
+            predicate=predicate,
+            log_field_name=predicate,
+        )
+        return
+    upsert_text_for_concept(
+        subject_concept_id=task_concept_id,
+        predicate=predicate,
+        text=value,
+        lang=lang,
+    )
+
+
+def _replace_single_relationship_target(
+    *,
+    task_concept_id: str,
+    predicate: str,
+    new_target_id: str | None,
+) -> None:
+    _, task_doc = _get_task_doc(task_concept_id)
+    existing_targets = _relationship_id_list(
+        (task_doc.get("relationships") or {}).get(predicate)
+    )
+
+    for existing_target in existing_targets:
+        if existing_target == new_target_id:
+            continue
+        ConceptsRepository.mutate_relationship_edge(
+            source_id=task_concept_id,
+            kind=predicate,
+            target_id=existing_target,
+            action="remove",
+            maintain_inverse=False,
+        )
+
+    if new_target_id and new_target_id not in existing_targets:
+        ConceptsRepository.mutate_relationship_edge(
+            source_id=task_concept_id,
+            kind=predicate,
+            target_id=new_target_id,
+            action="add",
+            maintain_inverse=False,
+        )
+
+
+def _infer_task_source_id(
+    *,
+    explicit_source_id: str | None,
+    external_references: Mapping[str, Any] | None = None,
+) -> str:
+    if explicit_source_id:
+        return explicit_source_id
+    jira_reference = (
+        external_references.get("jira")
+        if isinstance(external_references, Mapping)
+        else None
+    )
+    if isinstance(jira_reference, Mapping) and jira_reference.get("external_id"):
+        return JIRA_IMPORTED_TASK_SOURCE_ID
+    return DEFAULT_TASK_SOURCE_ID
+
+
+def _task_type_ids_from_doc(doc: Dict[str, Any]) -> list[str]:
+    relationships = doc.get("relationships") or {}
+    direct_types = _relationship_id_list(relationships.get("is_an_instance_of"))
+    return [type_id for type_id in direct_types if is_known_task_type_id(type_id)]
 
 
 def _normalise_transition_id(value: Any) -> str | None:
@@ -628,6 +750,15 @@ def create_task(
     backlog_rank: str | None = None,
     priority: str = PRIORITY_MEDIUM,
     organisation_concept_id: Optional[str] = None,
+    task_type_ids: list[str] | str | None = None,
+    task_source_id: str | None = None,
+    report_to_concept_id: str | None = None,
+    task_role: str | None = None,
+    next_checkpoint: str | None = None,
+    progress_signal: str | None = None,
+    evidence: str | None = None,
+    notes: str | None = None,
+    reference_code: str | None = None,
 ) -> Dict[str, Any]:
     """Create a new task as a Vontology concept.
 
@@ -646,6 +777,15 @@ def create_task(
         backlog_rank: Optional backlog rank marker for ordering parity
         priority: Task priority (low, medium, high, critical)
         organisation_concept_id: Organisation context, if applicable
+        task_type_ids: Canonical task category concept IDs (or slugs)
+        task_source_id: Canonical task source concept ID (or slug)
+        report_to_concept_id: Optional concept ID the task reports to
+        task_role: Optional task role text
+        next_checkpoint: Optional next checkpoint text
+        progress_signal: Optional progress-signal text
+        evidence: Optional evidence text
+        notes: Optional notes text
+        reference_code: Optional compact task number / reference code
 
     Returns:
         Dict with task_concept_id, title, status, and other metadata
@@ -677,6 +817,37 @@ def create_task(
         backlog_rank,
         field_name="backlog_rank",
     )
+    try:
+        canonical_task_type_ids = normalise_task_type_ids(
+            task_type_ids,
+            allow_default=True,
+        )
+    except ValueError as exc:
+        raise InvalidTaskDataError(str(exc)) from exc
+    try:
+        canonical_task_source_id = normalise_task_source_id(
+            task_source_id,
+            allow_default=True,
+        )
+    except ValueError as exc:
+        raise InvalidTaskDataError(str(exc)) from exc
+
+    report_to_concept_id = _normalise_optional_concept_id(report_to_concept_id)
+    task_role = _normalise_optional_text(task_role, field_name="task_role")
+    next_checkpoint = _normalise_optional_text(
+        next_checkpoint,
+        field_name="next_checkpoint",
+    )
+    progress_signal = _normalise_optional_text(
+        progress_signal,
+        field_name="progress_signal",
+    )
+    evidence = _normalise_optional_text(evidence, field_name="evidence")
+    notes = _normalise_optional_text(notes, field_name="notes")
+    reference_code = _normalise_optional_text(
+        reference_code,
+        field_name="reference_code",
+    )
 
     parsed_start_date = _parse_datetime(start_date)
     if start_date is not None and parsed_start_date is None:
@@ -703,6 +874,10 @@ def create_task(
         ensure_effort_unit_ontology()
     except Exception as exc:
         logger.debug("Effort-unit ontology bootstrap skipped during task create: %s", exc)
+    try:
+        ensure_task_ontology()
+    except Exception as exc:
+        logger.debug("Task ontology bootstrap skipped during task create: %s", exc)
 
     # Normalise concept IDs
     if assignee_concept_id:
@@ -711,6 +886,8 @@ def create_task(
         created_by_concept_id = ensure_v_concept_prefix(created_by_concept_id)
     if organisation_concept_id:
         organisation_concept_id = ensure_v_concept_prefix(organisation_concept_id)
+    if report_to_concept_id:
+        report_to_concept_id = ensure_v_concept_prefix(report_to_concept_id)
     epic_task_concept_id = _normalise_optional_concept_id(epic_task_concept_id)
     if epic_task_concept_id and epic_task_concept_id == task_concept_id:
         raise InvalidTaskDataError("A task cannot reference itself as epic")
@@ -721,13 +898,17 @@ def create_task(
 
     # Build relationships
     relationships: Dict[str, Any] = {
-        "is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID],
+        "is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID, *canonical_task_type_ids],
     }
 
     if assignee_concept_id:
         relationships[PREDICATE_HAS_ASSIGNEE] = [assignee_concept_id]
     if created_by_concept_id:
         relationships[PREDICATE_HAS_CREATED_BY] = [created_by_concept_id]
+    if canonical_task_source_id:
+        relationships[PREDICATE_HAS_TASK_SOURCE] = [canonical_task_source_id]
+    if report_to_concept_id:
+        relationships[PREDICATE_REPORTS_TO] = [report_to_concept_id]
     if epic_task_concept_id:
         relationships[PREDICATE_HAS_EPIC_TASK] = [epic_task_concept_id]
 
@@ -737,6 +918,8 @@ def create_task(
         visible_to_users.append(created_by_concept_id)
     if assignee_concept_id and assignee_concept_id not in visible_to_users:
         visible_to_users.append(assignee_concept_id)
+    if report_to_concept_id and report_to_concept_id not in visible_to_users:
+        visible_to_users.append(report_to_concept_id)
     if visible_to_users:
         relationships = set_specific_to_user_values(relationships, visible_to_users)
 
@@ -860,6 +1043,38 @@ def create_task(
         except Exception as e:
             logger.warning(f"Failed to store task due date: {e}")
 
+    for predicate, value in (
+        (PREDICATE_HAS_TASK_ROLE, task_role),
+        (PREDICATE_HAS_NEXT_CHECKPOINT, next_checkpoint),
+        (PREDICATE_HAS_PROGRESS_SIGNAL, progress_signal),
+        (PREDICATE_HAS_EVIDENCE, evidence),
+        (PREDICATE_HAS_TASK_REFERENCE_CODE, reference_code),
+        ("hasNote", notes),
+    ):
+        if value is None:
+            continue
+        try:
+            upsert_text_for_concept(
+                subject_concept_id=task_concept_id,
+                predicate=predicate,
+                text=value,
+                lang="en-NZ",
+            )
+        except Exception as exc:
+            logger.warning("Failed to store task text field %s: %s", predicate, exc)
+
+    task_type_payload = [
+        definition
+        for type_id in canonical_task_type_ids
+        for definition in [get_task_type_definition(type_id)]
+        if isinstance(definition, dict)
+    ]
+    source_definition = (
+        get_task_source_definition(canonical_task_source_id)
+        if canonical_task_source_id
+        else None
+    )
+
     result = {
         "task_concept_id": task_concept_id,
         "title": title,
@@ -877,6 +1092,32 @@ def create_task(
         "sprint_values": normalised_sprint_values,
         "backlog_rank": normalised_backlog_rank,
         "organisation_concept_id": organisation_concept_id,
+        "task_type_ids": canonical_task_type_ids,
+        "task_types": task_type_payload,
+        "primary_task_type_id": canonical_task_type_ids[0]
+        if canonical_task_type_ids
+        else None,
+        "primary_task_type_label": task_type_payload[0]["label"]
+        if task_type_payload
+        else None,
+        "task_source_id": canonical_task_source_id,
+        "task_source_label": (
+            source_definition.get("label")
+            if isinstance(source_definition, dict)
+            else None
+        ),
+        "task_source_slug": (
+            source_definition.get("slug")
+            if isinstance(source_definition, dict)
+            else None
+        ),
+        "report_to_concept_id": report_to_concept_id,
+        "task_role": task_role,
+        "next_checkpoint": next_checkpoint,
+        "progress_signal": progress_signal,
+        "evidence": evidence,
+        "notes": notes,
+        "reference_code": reference_code,
         "created_at": now.isoformat(),
     }
 
@@ -899,6 +1140,14 @@ def create_task(
                 "fix_versions": normalised_fix_versions,
                 "sprint_values": normalised_sprint_values,
                 "backlog_rank": normalised_backlog_rank,
+                "task_type_ids": canonical_task_type_ids,
+                "task_source_id": canonical_task_source_id,
+                "report_to_concept_id": report_to_concept_id,
+                "task_role": task_role,
+                "next_checkpoint": next_checkpoint,
+                "progress_signal": progress_signal,
+                "evidence": evidence,
+                "reference_code": reference_code,
             },
             touch_updated_at=False,
         )
@@ -966,6 +1215,12 @@ def _build_task_response(doc: Dict[str, Any]) -> Dict[str, Any]:
     priority = PRIORITY_MEDIUM
     start_date = None
     due_date = None
+    task_role = None
+    next_checkpoint = None
+    progress_signal = None
+    evidence = None
+    notes = None
+    reference_code = None
 
     for text_item in texts:
         predicate = text_item.get("predicate", "")
@@ -983,13 +1238,27 @@ def _build_task_response(doc: Dict[str, Any]) -> Dict[str, Any]:
             start_date = text_value
         elif predicate in (PREDICATE_HAS_DUE_DATE, "hasDueDate"):
             due_date = text_value
+        elif predicate in (PREDICATE_HAS_TASK_ROLE, "hasTaskRole"):
+            task_role = text_value
+        elif predicate in (PREDICATE_HAS_NEXT_CHECKPOINT, "hasNextCheckpoint"):
+            next_checkpoint = text_value
+        elif predicate in (PREDICATE_HAS_PROGRESS_SIGNAL, "hasProgressSignal"):
+            progress_signal = text_value
+        elif predicate in (PREDICATE_HAS_EVIDENCE, "hasEvidence"):
+            evidence = text_value
+        elif predicate in (PREDICATE_HAS_TASK_REFERENCE_CODE, "hasTaskReferenceCode"):
+            reference_code = text_value
+        elif predicate in ("hasNote", "#V#hasNote"):
+            notes = text_value
 
     # Get relationship values
     assignee = _first_relationship_value(relationships.get(PREDICATE_HAS_ASSIGNEE))
     created_by = _first_relationship_value(relationships.get(PREDICATE_HAS_CREATED_BY))
+    report_to = _first_relationship_value(relationships.get(PREDICATE_REPORTS_TO))
     originating_conversation = _first_relationship_value(
         relationships.get(PREDICATE_HAS_ORIGINATING_CONVERSATION)
     )
+    task_type_ids = _task_type_ids_from_doc(doc)
 
     metadata = doc.get("metadata", {})
     labels = _metadata_string_list(metadata.get(TASK_METADATA_KEY_LABELS))
@@ -1022,6 +1291,20 @@ def _build_task_response(doc: Dict[str, Any]) -> Dict[str, Any]:
     external_references = (
         raw_external_references if isinstance(raw_external_references, dict) else {}
     )
+    explicit_task_source = _first_relationship_value(
+        relationships.get(PREDICATE_HAS_TASK_SOURCE)
+    )
+    task_source_id = _infer_task_source_id(
+        explicit_source_id=explicit_task_source,
+        external_references=external_references,
+    )
+    task_source_definition = get_task_source_definition(task_source_id)
+    task_type_payload = [
+        definition
+        for type_id in task_type_ids
+        for definition in [get_task_type_definition(type_id)]
+        if isinstance(definition, dict)
+    ]
     parent_task_id = _task_parent_id_from_doc(doc)
     epic_task_id = _task_epic_id_from_doc(doc)
     subtask_ids = _task_subtask_ids_from_doc(doc)
@@ -1073,6 +1356,7 @@ def _build_task_response(doc: Dict[str, Any]) -> Dict[str, Any]:
         "priority": priority,
         "assignee_concept_id": assignee,
         "created_by_concept_id": created_by,
+        "report_to_concept_id": report_to,
         "originating_conversation_id": originating_conversation,
         "conversation_session_id": conversation_session_id,
         "conversation_name": conversation_name,
@@ -1086,6 +1370,30 @@ def _build_task_response(doc: Dict[str, Any]) -> Dict[str, Any]:
         "backlog_rank": backlog_rank,
         "reporter_concept_id": reporter_concept_id,
         "watcher_concept_ids": watcher_concept_ids,
+        "task_type_ids": task_type_ids,
+        "task_types": task_type_payload,
+        "primary_task_type_id": task_type_ids[0] if task_type_ids else None,
+        "primary_task_type_label": (
+            task_type_payload[0]["label"] if task_type_payload else None
+        ),
+        "task_source_id": task_source_id,
+        "task_source_label": (
+            task_source_definition.get("label")
+            if isinstance(task_source_definition, dict)
+            else None
+        ),
+        "task_source_slug": (
+            task_source_definition.get("slug")
+            if isinstance(task_source_definition, dict)
+            else None
+        ),
+        "is_imported_jira_task": task_source_id == JIRA_IMPORTED_TASK_SOURCE_ID,
+        "task_role": task_role,
+        "next_checkpoint": next_checkpoint,
+        "progress_signal": progress_signal,
+        "evidence": evidence,
+        "notes": notes,
+        "reference_code": reference_code,
         "parent_task_concept_id": parent_task_id,
         "epic_task_concept_id": epic_task_id,
         "subtask_concept_ids": subtask_ids,
@@ -1397,6 +1705,8 @@ def list_tasks(
     organisation_concept_id: Optional[str] = None,
     status_filter: Optional[str] = None,
     priority_filter: Optional[str] = None,
+    task_type_ids: list[str] | str | None = None,
+    task_source_ids: list[str] | str | None = None,
     limit: int = 50,
 ) -> List[Dict[str, Any]]:
     """List tasks with optional filters.
@@ -1405,6 +1715,8 @@ def list_tasks(
         organisation_concept_id: Filter by organisation
         status_filter: Filter by status
         priority_filter: Filter by priority
+        task_type_ids: Filter by canonical task category IDs/slugs
+        task_source_ids: Filter by canonical task source IDs/slugs
         limit: Maximum number of tasks to return
 
     Returns:
@@ -1418,7 +1730,11 @@ def list_tasks(
         organisation_concept_id = ensure_v_concept_prefix(organisation_concept_id)
         query["metadata.organisation_concept_id"] = organisation_concept_id
 
-    cursor = ConceptsRepository.find(query, limit=limit)
+    cursor = ConceptsRepository.find(
+        query,
+        sort=[("updated_at", -1), ("created_at", -1), ("concept_id", 1)],
+        limit=limit,
+    )
     tasks = [_build_task_response(doc) for doc in cursor]
 
     # Apply status and priority filters (post-query since they're in text relations)
@@ -1426,6 +1742,37 @@ def list_tasks(
         tasks = [t for t in tasks if t.get("status") == status_filter]
     if priority_filter:
         tasks = [t for t in tasks if t.get("priority") == priority_filter]
+    if task_type_ids is not None:
+        try:
+            required_type_ids = set(normalise_task_type_ids(task_type_ids))
+        except ValueError as exc:
+            raise InvalidTaskDataError(str(exc)) from exc
+        if required_type_ids:
+            tasks = [
+                task
+                for task in tasks
+                if required_type_ids.intersection(set(task.get("task_type_ids") or []))
+            ]
+    if task_source_ids is not None:
+        raw_source_values = (
+            [task_source_ids]
+            if isinstance(task_source_ids, str)
+            else (task_source_ids or [])
+        )
+        normalised_source_ids: set[str] = set()
+        for raw_value in raw_source_values:
+            try:
+                source_id = normalise_task_source_id(raw_value)
+            except ValueError as exc:
+                raise InvalidTaskDataError(str(exc)) from exc
+            if source_id:
+                normalised_source_ids.add(source_id)
+        if normalised_source_ids:
+            tasks = [
+                task
+                for task in tasks
+                if task.get("task_source_id") in normalised_source_ids
+            ]
 
     return tasks
 
@@ -1435,7 +1782,12 @@ def search_tasks(
     query: str | None = None,
     status_filter: str | None = None,
     statuses: list[str] | None = None,
+    task_type_ids: list[str] | str | None = None,
+    task_source_id: str | None = None,
+    task_source_ids: list[str] | str | None = None,
     assignee_concept_id: str | None = None,
+    created_by_concept_id: str | None = None,
+    report_to_concept_id: str | None = None,
     labels: list[str] | None = None,
     components: list[str] | None = None,
     fix_versions: list[str] | None = None,
@@ -1507,6 +1859,41 @@ def search_tasks(
             and str(task.get("status")).lower() in status_values
         ]
 
+    if task_type_ids is not None:
+        try:
+            required_type_ids = set(normalise_task_type_ids(task_type_ids))
+        except ValueError as exc:
+            raise InvalidTaskDataError(str(exc)) from exc
+        if required_type_ids:
+            tasks = [
+                task
+                for task in tasks
+                if required_type_ids.intersection(set(task.get("task_type_ids") or []))
+            ]
+
+    raw_source_values: list[str] = []
+    if isinstance(task_source_id, str) and task_source_id.strip():
+        raw_source_values.append(task_source_id)
+    if isinstance(task_source_ids, str) and task_source_ids.strip():
+        raw_source_values.append(task_source_ids)
+    elif isinstance(task_source_ids, list):
+        raw_source_values.extend(
+            value for value in task_source_ids if isinstance(value, str) and value.strip()
+        )
+    if raw_source_values:
+        source_filters: set[str] = set()
+        for raw_value in raw_source_values:
+            try:
+                source_id = normalise_task_source_id(raw_value)
+            except ValueError as exc:
+                raise InvalidTaskDataError(str(exc)) from exc
+            if source_id:
+                source_filters.add(source_id)
+        if source_filters:
+            tasks = [
+                task for task in tasks if task.get("task_source_id") in source_filters
+            ]
+
     if assignee_concept_id is not None:
         assignee_id = _normalise_optional_concept_id(assignee_concept_id)
         if not assignee_id:
@@ -1517,6 +1904,26 @@ def search_tasks(
             task
             for task in tasks
             if task.get("assignee_concept_id") == assignee_id
+        ]
+
+    if created_by_concept_id is not None:
+        creator_id = _normalise_optional_concept_id(created_by_concept_id)
+        if not creator_id:
+            raise InvalidTaskDataError(
+                f"Invalid created_by_concept_id: {created_by_concept_id}"
+            )
+        tasks = [
+            task for task in tasks if task.get("created_by_concept_id") == creator_id
+        ]
+
+    if report_to_concept_id is not None:
+        report_to_id = _normalise_optional_concept_id(report_to_concept_id)
+        if not report_to_id:
+            raise InvalidTaskDataError(
+                f"Invalid report_to_concept_id: {report_to_concept_id}"
+            )
+        tasks = [
+            task for task in tasks if task.get("report_to_concept_id") == report_to_id
         ]
 
     if labels is not None:
@@ -1731,6 +2138,18 @@ def search_tasks(
             for task in tasks
             if query_lower in str(task.get("title") or "").lower()
             or query_lower in str(task.get("description") or "").lower()
+            or query_lower in str(task.get("reference_code") or "").lower()
+            or query_lower in str(task.get("task_role") or "").lower()
+            or query_lower in str(task.get("next_checkpoint") or "").lower()
+            or query_lower in str(task.get("progress_signal") or "").lower()
+            or query_lower in str(task.get("evidence") or "").lower()
+            or query_lower in str(task.get("notes") or "").lower()
+            or query_lower in str(task.get("task_source_label") or "").lower()
+            or any(
+                query_lower in str(item.get("label") or "").lower()
+                for item in (task.get("task_types") or [])
+                if isinstance(item, dict)
+            )
         ]
 
     if isinstance(dependency_state, str) and dependency_state.strip():
@@ -2481,6 +2900,7 @@ def update_task_fields(
     existing_task = _build_task_response(task_doc)
     changed_fields: list[str] = []
     warnings: list[str] = []
+    existing_task_type_ids = set(existing_task.get("task_type_ids") or [])
 
     current_start = _parse_datetime(existing_task.get("start_date"))
     current_due = _parse_datetime(existing_task.get("due_date"))
@@ -2628,6 +3048,93 @@ def update_task_fields(
             lang="en",
         )
         changed_fields.append("priority")
+
+    task_type_field_present = "task_type_ids" in fields or "task_type_id" in fields
+    if task_type_field_present:
+        raw_task_types = fields.get("task_type_ids", fields.get("task_type_id"))
+        try:
+            next_task_type_ids = set(normalise_task_type_ids(raw_task_types))
+        except ValueError as exc:
+            raise InvalidTaskDataError(str(exc)) from exc
+
+        for existing_type_id in sorted(existing_task_type_ids - next_task_type_ids):
+            ConceptsRepository.mutate_relationship_edge(
+                source_id=task_concept_id,
+                kind="is_an_instance_of",
+                target_id=existing_type_id,
+                action="remove",
+                maintain_inverse=False,
+            )
+        for new_type_id in sorted(next_task_type_ids - existing_task_type_ids):
+            ConceptsRepository.mutate_relationship_edge(
+                source_id=task_concept_id,
+                kind="is_an_instance_of",
+                target_id=new_type_id,
+                action="add",
+                maintain_inverse=False,
+            )
+        changed_fields.append("task_type_ids")
+
+    task_source_field_present = "task_source_id" in fields or "source_id" in fields
+    if task_source_field_present:
+        try:
+            source_id = normalise_task_source_id(
+                fields.get("task_source_id", fields.get("source_id")),
+                allow_default=False,
+            )
+        except ValueError as exc:
+            raise InvalidTaskDataError(str(exc)) from exc
+        _replace_single_relationship_target(
+            task_concept_id=task_concept_id,
+            predicate=PREDICATE_HAS_TASK_SOURCE,
+            new_target_id=source_id,
+        )
+        changed_fields.append("task_source_id")
+
+    report_to_field_present = "report_to_concept_id" in fields or "reports_to_concept_id" in fields
+    if report_to_field_present:
+        report_to_raw = fields.get(
+            "report_to_concept_id",
+            fields.get("reports_to_concept_id"),
+        )
+        report_to_concept_id = _normalise_optional_concept_id(report_to_raw)
+        if report_to_raw not in (None, "") and report_to_concept_id is None:
+            raise InvalidTaskDataError(
+                f"Invalid report_to_concept_id: {report_to_raw}"
+            )
+        _replace_single_relationship_target(
+            task_concept_id=task_concept_id,
+            predicate=PREDICATE_REPORTS_TO,
+            new_target_id=report_to_concept_id,
+        )
+        if report_to_concept_id:
+            for predicate in SPECIFIC_TO_USER_PREDICATES:
+                ConceptsRepository.mutate_relationship_edge(
+                    source_id=task_concept_id,
+                    kind=predicate,
+                    target_id=report_to_concept_id,
+                    action="add",
+                )
+        changed_fields.append("report_to_concept_id")
+
+    for field_name, predicate in (
+        ("task_role", PREDICATE_HAS_TASK_ROLE),
+        ("next_checkpoint", PREDICATE_HAS_NEXT_CHECKPOINT),
+        ("progress_signal", PREDICATE_HAS_PROGRESS_SIGNAL),
+        ("evidence", PREDICATE_HAS_EVIDENCE),
+        ("reference_code", PREDICATE_HAS_TASK_REFERENCE_CODE),
+        ("notes", "hasNote"),
+    ):
+        if field_name not in fields:
+            continue
+        value = _normalise_optional_text(fields.get(field_name), field_name=field_name)
+        _upsert_optional_task_text(
+            task_concept_id=task_concept_id,
+            predicate=predicate,
+            value=value,
+            lang="en-NZ",
+        )
+        changed_fields.append(field_name)
 
     if "due_date" in fields:
         due_value = fields.get("due_date")
@@ -2865,6 +3372,18 @@ def update_task_fields(
             "title",
             "description",
             "priority",
+            "task_type_ids",
+            "task_type_id",
+            "task_source_id",
+            "source_id",
+            "report_to_concept_id",
+            "reports_to_concept_id",
+            "task_role",
+            "next_checkpoint",
+            "progress_signal",
+            "evidence",
+            "notes",
+            "reference_code",
             "start_date",
             "due_date",
             "labels",
@@ -2990,6 +3509,19 @@ def upsert_task_external_reference(
             }
         },
     )
+    if source_key == "jira":
+        try:
+            _replace_single_relationship_target(
+                task_concept_id=task_concept_id,
+                predicate=PREDICATE_HAS_TASK_SOURCE,
+                new_target_id=JIRA_IMPORTED_TASK_SOURCE_ID,
+            )
+        except Exception as exc:
+            logger.debug(
+                "Failed to persist Jira task-source relationship for %s: %s",
+                task_concept_id,
+                exc,
+            )
     try:
         _append_task_history_event(
             task_concept_id=task_concept_id,
@@ -3090,6 +3622,14 @@ def delete_task(task_concept_id: str) -> bool:
     return True
 
 
+def get_task_taxonomy() -> Dict[str, Any]:
+    try:
+        ensure_task_ontology()
+    except Exception as exc:
+        logger.debug("Task taxonomy bootstrap skipped during taxonomy read: %s", exc)
+    return get_task_taxonomy_definition()
+
+
 __all__ = [
     "TASK_SPECIFICATION_TYPE_ID",
     "TASK_EXECUTION_TYPE_ID",
@@ -3117,6 +3657,7 @@ __all__ = [
     "get_tasks_for_conversation",
     "list_tasks",
     "search_tasks",
+    "get_task_taxonomy",
     "get_task_transitions",
     "transition_task",
     "set_task_parent",

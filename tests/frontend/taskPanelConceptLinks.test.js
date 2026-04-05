@@ -24,6 +24,21 @@ function flushMicrotasks() {
 }
 
 describe('task panel concept links', () => {
+    function buildTaxonomyResponse() {
+        return {
+            task_types: [
+                { concept_id: '#V#one_off_task_specification', label: 'One-off' },
+            ],
+            task_sources: [
+                { concept_id: '#V#von_native_task_source', label: 'Von native' },
+            ],
+            defaults: {
+                task_type_id: '#V#one_off_task_specification',
+                task_source_id: '#V#von_native_task_source',
+            },
+        };
+    }
+
     beforeEach(() => {
         jest.resetModules();
         document.body.innerHTML = `
@@ -39,17 +54,27 @@ describe('task panel concept links', () => {
 
     test('renders task title and parent as clickable concept links and dispatches concept navigation', async () => {
         const { getJson } = require(apiServiceModulePath);
-        getJson.mockResolvedValue({
-            tasks: [
-                {
-                    task_concept_id: '#V#task_1282',
-                    title: 'Task card concept links',
-                    description: 'Make task card links clickable.',
-                    status: 'pending',
-                    priority: 'medium',
-                    parent_task_concept_id: '#V#task_programme',
-                },
-            ],
+        getJson.mockImplementation((url) => {
+            if (url === '/api/tasks/taxonomy') {
+                return Promise.resolve(buildTaxonomyResponse());
+            }
+            if (url === '/api/tasks/?limit=500') {
+                return Promise.resolve({
+                    tasks: [
+                        {
+                            task_concept_id: '#V#task_1282',
+                            title: 'Task card concept links',
+                            description: 'Make task card links clickable.',
+                            status: 'pending',
+                            priority: 'medium',
+                            task_type_ids: ['#V#one_off_task_specification'],
+                            task_source_id: '#V#von_native_task_source',
+                            parent_task_concept_id: '#V#task_programme',
+                        },
+                    ],
+                });
+            }
+            return Promise.resolve({});
         });
 
         const { showGlobalTasks } = require(taskPanelModulePath);
@@ -94,17 +119,25 @@ describe('task panel concept links', () => {
 
     test('renders non-clickable title and hierarchy text when concept IDs are missing or non-canonical', async () => {
         const { getJson } = require(apiServiceModulePath);
-        getJson.mockResolvedValue({
-            tasks: [
-                {
-                    task_concept_id: 'legacy-task-id',
-                    title: 'Legacy task',
-                    description: '',
-                    status: 'pending',
-                    priority: 'low',
-                    parent_task_concept_id: 'parent-legacy',
-                },
-            ],
+        getJson.mockImplementation((url) => {
+            if (url === '/api/tasks/taxonomy') {
+                return Promise.resolve(buildTaxonomyResponse());
+            }
+            if (url === '/api/tasks/?limit=500') {
+                return Promise.resolve({
+                    tasks: [
+                        {
+                            task_concept_id: 'legacy-task-id',
+                            title: 'Legacy task',
+                            description: '',
+                            status: 'pending',
+                            priority: 'low',
+                            parent_task_concept_id: 'parent-legacy',
+                        },
+                    ],
+                });
+            }
+            return Promise.resolve({});
         });
 
         const { showGlobalTasks } = require(taskPanelModulePath);
@@ -129,7 +162,7 @@ describe('task panel concept links', () => {
         document.removeEventListener('open-concept-tab', handler);
     });
 
-    test('retains existing task controls without event conflicts', async () => {
+    test('inspector loading still works when using the global task controls', async () => {
         const { getJson } = require(apiServiceModulePath);
         const task = {
             task_concept_id: '#V#task_1282',
@@ -137,10 +170,15 @@ describe('task panel concept links', () => {
             description: '',
             status: 'pending',
             priority: 'medium',
+            task_type_ids: ['#V#one_off_task_specification'],
+            task_source_id: '#V#von_native_task_source',
             parent_task_concept_id: '#V#task_group',
         };
         getJson.mockImplementation((url) => {
-            if (url === '/api/tasks/my?include_created=true') {
+            if (url === '/api/tasks/taxonomy') {
+                return Promise.resolve(buildTaxonomyResponse());
+            }
+            if (url === '/api/tasks/?limit=500') {
                 return Promise.resolve({ tasks: [task] });
             }
             if (url === '/api/tasks/%23V%23task_1282') {
@@ -169,6 +207,7 @@ describe('task panel concept links', () => {
         await flushMicrotasks();
 
         expect(getJson).toHaveBeenCalledWith('/api/tasks/%23V%23task_1282');
-        expect(document.querySelector('.task-detail-panel[data-task-id="#V#task_1282"]')).toBeTruthy();
+        expect(document.querySelector('.task-inspector-card[data-task-id="#V#task_1282"]')).toBeTruthy();
+        expect(document.querySelector('#globalTaskInspector')?.textContent || '').toContain('Detail toggle check');
     });
 });

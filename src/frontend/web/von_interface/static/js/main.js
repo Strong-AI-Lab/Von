@@ -76,20 +76,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     console.error('Error loading chat tab module:', err);
   }
 
-  // JVNAUTOSCI-1040: Initialize global tasks button (shows all user's tasks)
-  try {
-    const taskPanelModule = await import('./components/taskPanel.js');
-    const globalTasksBtn = document.getElementById('globalTasksBtn');
-    if (globalTasksBtn && taskPanelModule.showGlobalTasks) {
-      globalTasksBtn.addEventListener('click', () => {
-        taskPanelModule.showGlobalTasks();
-      });
-      console.log('[main] Global tasks button initialized');
-    }
-  } catch (err) {
-    console.warn('[main] Failed to initialize global tasks button:', err);
-  }
-
   // JVNAUTOSCI-1071: Initialize messages button
   try {
     const messagePanelModule = await import('./components/messagePanel.js');
@@ -611,6 +597,7 @@ function setupDynamicLayout() {
   const searchInput = document.getElementById('vontologySearchInput');
   // Re-select header here (local inside updateLayout previously) to avoid scope errors
   const headerEl = document.getElementById('globalHeader');
+  const tabContainer = document.querySelector('.tab-container');
   if (searchInput && headerEl && !headerEl._dynamicLayoutObserved) {
     try {
       const resizeObserver = new ResizeObserver(() => {

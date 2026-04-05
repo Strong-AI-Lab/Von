@@ -3695,6 +3695,18 @@ async def _handle_create_task(arguments: dict[str, Any]) -> list[TextContent]:
             epic_task_concept_id=arguments.get("epic_task_concept_id"),
             priority=arguments.get("priority", "medium"),
             organisation_concept_id=arguments.get("organisation_concept_id"),
+            task_type_ids=arguments.get("task_type_ids")
+            or arguments.get("task_type_id"),
+            task_source_id=arguments.get("task_source_id")
+            or arguments.get("source_id"),
+            report_to_concept_id=arguments.get("report_to_concept_id")
+            or arguments.get("reports_to_concept_id"),
+            task_role=arguments.get("task_role"),
+            next_checkpoint=arguments.get("next_checkpoint"),
+            progress_signal=arguments.get("progress_signal"),
+            evidence=arguments.get("evidence"),
+            notes=arguments.get("notes"),
+            reference_code=arguments.get("reference_code"),
         )
         return [_json_text({"success": True, **result})]
     except Exception as exc:

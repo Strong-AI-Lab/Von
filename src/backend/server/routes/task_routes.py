@@ -13,6 +13,7 @@ from flask.typing import ResponseReturnValue
 from ...services.task_management_service import (
     create_task,
     get_task,
+    get_task_taxonomy,
     update_task_fields,
     get_tasks_for_user,
     get_tasks_for_conversation,
@@ -166,6 +167,18 @@ def create_task_route() -> ResponseReturnValue:
             backlog_rank=data.get("backlog_rank"),
             priority=data.get("priority", "medium"),
             organisation_concept_id=organisation_concept_id,
+            task_type_ids=data.get("task_type_ids", data.get("task_type_id")),
+            task_source_id=data.get("task_source_id", data.get("source_id")),
+            report_to_concept_id=data.get(
+                "report_to_concept_id",
+                data.get("reports_to_concept_id"),
+            ),
+            task_role=data.get("task_role"),
+            next_checkpoint=data.get("next_checkpoint"),
+            progress_signal=data.get("progress_signal"),
+            evidence=data.get("evidence"),
+            notes=data.get("notes"),
+            reference_code=data.get("reference_code"),
         )
 
         return jsonify(result), 201
@@ -177,6 +190,16 @@ def create_task_route() -> ResponseReturnValue:
         return jsonify({"error": str(e)}), 500
     except Exception as e:
         logger.error(f"Unexpected error creating task: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@task_bp.route("/taxonomy", methods=["GET"])
+def get_task_taxonomy_route() -> ResponseReturnValue:
+    """Return canonical task type/source options for task UIs and clients."""
+    try:
+        return jsonify(get_task_taxonomy()), 200
+    except Exception as e:
+        logger.error(f"Unexpected error getting task taxonomy: {e}")
         return jsonify({"error": "Internal server error"}), 500
 
 
@@ -274,6 +297,17 @@ def list_tasks_route() -> ResponseReturnValue:
         session_id = request.args.get("session_id")
         priority_filter = request.args.get("priority")
         include_created = request.args.get("include_created", "false").lower() == "true"
+        task_type_ids = (
+            request.args.getlist("task_type_id")
+            or request.args.getlist("task_type_ids")
+            or _parse_csv_param(request.args.get("task_type_ids"))
+        )
+        task_source_ids = (
+            request.args.getlist("task_source_id")
+            or request.args.getlist("task_source_ids")
+            or _parse_csv_param(request.args.get("task_source_ids"))
+        )
+        limit = _parse_int_param(request.args.get("limit"), 50)
 
         # If filtering by user, use get_tasks_for_user
         if user_concept_id:
@@ -282,6 +316,25 @@ def list_tasks_route() -> ResponseReturnValue:
                 status_filter=status_filter,
                 include_created=include_created,
             )
+            if priority_filter:
+                tasks = [
+                    task for task in tasks if task.get("priority") == priority_filter
+                ]
+            if task_type_ids:
+                task_type_set = set(task_type_ids)
+                tasks = [
+                    task
+                    for task in tasks
+                    if task_type_set.intersection(set(task.get("task_type_ids") or []))
+                ]
+            if task_source_ids:
+                task_source_set = set(task_source_ids)
+                tasks = [
+                    task
+                    for task in tasks
+                    if task.get("task_source_id") in task_source_set
+                ]
+            tasks = tasks[:limit]
         # If filtering by session, use get_tasks_for_conversation
         elif session_id:
             tasks = get_tasks_for_conversation(session_id=session_id)
@@ -290,6 +343,9 @@ def list_tasks_route() -> ResponseReturnValue:
             tasks = list_tasks(
                 status_filter=status_filter,
                 priority_filter=priority_filter,
+                task_type_ids=task_type_ids,
+                task_source_ids=task_source_ids,
+                limit=limit,
             )
 
         return jsonify({"tasks": tasks, "count": len(tasks)}), 200
@@ -337,9 +393,24 @@ def search_tasks_route() -> ResponseReturnValue:
             query=request.args.get("query"),
             status_filter=request.args.get("status_filter"),
             statuses=statuses or None,
+            task_type_ids=(
+                request.args.getlist("task_type_id")
+                or request.args.getlist("task_type_ids")
+                or _parse_csv_param(request.args.get("task_type_ids"))
+            ),
+            task_source_id=request.args.get("task_source_id")
+            or request.args.get("source_id"),
+            task_source_ids=(
+                request.args.getlist("task_source_ids")
+                or _parse_csv_param(request.args.get("task_source_ids"))
+            ),
             assignee_concept_id=request.args.get("assignee_concept_id")
             or request.args.get("assignee_id")
             or request.args.get("user_concept_id"),
+            created_by_concept_id=request.args.get("created_by_concept_id")
+            or request.args.get("creator_concept_id"),
+            report_to_concept_id=request.args.get("report_to_concept_id")
+            or request.args.get("reports_to_concept_id"),
             labels=labels or None,
             components=components or None,
             fix_versions=fix_versions or None,

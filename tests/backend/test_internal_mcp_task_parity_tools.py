@@ -778,6 +778,15 @@ def test_task_create_gateway_supports_start_date_and_epic(monkeypatch):
         backlog_rank=None,
         priority="medium",
         organisation_concept_id=None,
+        task_type_ids=None,
+        task_source_id=None,
+        report_to_concept_id=None,
+        task_role=None,
+        next_checkpoint=None,
+        progress_signal=None,
+        evidence=None,
+        notes=None,
+        reference_code=None,
     ):
         return {
             "task_concept_id": "#V#task_123",
@@ -796,6 +805,15 @@ def test_task_create_gateway_supports_start_date_and_epic(monkeypatch):
             "sprint_values": sprint_values,
             "backlog_rank": backlog_rank,
             "organisation_concept_id": organisation_concept_id,
+            "task_type_ids": task_type_ids,
+            "task_source_id": task_source_id,
+            "report_to_concept_id": report_to_concept_id,
+            "task_role": task_role,
+            "next_checkpoint": next_checkpoint,
+            "progress_signal": progress_signal,
+            "evidence": evidence,
+            "notes": notes,
+            "reference_code": reference_code,
         }
 
     monkeypatch.setattr(
@@ -811,12 +829,25 @@ def test_task_create_gateway_supports_start_date_and_epic(monkeypatch):
             "start_date": "2026-03-01T10:00:00Z",
             "due_date": "2026-03-05T10:00:00Z",
             "epic_task_concept_id": "#V#task_epic_1",
+            "task_type_ids": ["#V#delegated_task_specification"],
+            "task_source_id": "#V#jira_imported_task_source",
+            "report_to_concept_id": "#V#user_manager",
+            "task_role": "Communicator",
+            "next_checkpoint": "Tomorrow morning",
+            "progress_signal": "Confirmed by chat",
+            "evidence": "Printed document",
+            "notes": "Needs a coloured copy",
+            "reference_code": "TASK-001",
         },
     ).payload
     assert payload.get("success") is True
     assert payload.get("start_date") == "2026-03-01T10:00:00+00:00"
     assert payload.get("due_date") == "2026-03-05T10:00:00+00:00"
     assert payload.get("epic_task_concept_id") == "#V#task_epic_1"
+    assert payload.get("task_type_ids") == ["#V#delegated_task_specification"]
+    assert payload.get("task_source_id") == "#V#jira_imported_task_source"
+    assert payload.get("report_to_concept_id") == "#V#user_manager"
+    assert payload.get("reference_code") == "TASK-001"
     _assert_schema_conformance(gateway, "task_create", payload)
 
 
@@ -834,6 +865,11 @@ def test_task_search_gateway_supports_start_and_epic_filters(monkeypatch):
     assert "sprint_values" in definition.input_schema.optional
     assert "backlog_rank" in definition.input_schema.optional
     assert "has_backlog_rank" in definition.input_schema.optional
+    assert "task_type_ids" in definition.input_schema.optional
+    assert "task_source_id" in definition.input_schema.optional
+    assert "task_source_ids" in definition.input_schema.optional
+    assert "created_by_concept_id" in definition.input_schema.optional
+    assert "report_to_concept_id" in definition.input_schema.optional
 
     captured: dict = {}
 
@@ -864,6 +900,11 @@ def test_task_search_gateway_supports_start_and_epic_filters(monkeypatch):
             "sprint_values": ["Sprint 6"],
             "backlog_rank": "0|i00123:",
             "has_backlog_rank": True,
+            "task_type_ids": ["#V#delegated_task_specification"],
+            "task_source_id": "#V#jira_imported_task_source",
+            "task_source_ids": ["#V#jira_imported_task_source"],
+            "created_by_concept_id": "#V#user_creator",
+            "report_to_concept_id": "#V#user_manager",
         },
     ).payload
     assert payload.get("success") is True
@@ -876,4 +917,9 @@ def test_task_search_gateway_supports_start_and_epic_filters(monkeypatch):
     assert captured.get("sprint_values") == ["Sprint 6"]
     assert captured.get("backlog_rank") == "0|i00123:"
     assert captured.get("has_backlog_rank") is True
+    assert captured.get("task_type_ids") == ["#V#delegated_task_specification"]
+    assert captured.get("task_source_id") == "#V#jira_imported_task_source"
+    assert captured.get("task_source_ids") == ["#V#jira_imported_task_source"]
+    assert captured.get("created_by_concept_id") == "#V#user_creator"
+    assert captured.get("report_to_concept_id") == "#V#user_manager"
     _assert_schema_conformance(gateway, "task_search", payload)
