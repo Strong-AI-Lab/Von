@@ -2870,6 +2870,41 @@ def _materialise_paper_recommendations(**kwargs):
         candidate_limit=kwargs.get("candidate_limit", 24),
         max_results=kwargs.get("max_results", 10),
         trigger_source=kwargs.get("trigger_source"),
+        discover_subjects_if_missing=bool(
+            kwargs.get("discover_subjects_if_missing", False)
+        ),
+    )
+
+
+def _deliver_paper_recommendation_messages(**kwargs):
+    from ...services.paper_recommendation_delivery_service import (
+        deliver_paper_recommendation_messages,
+    )
+
+    raw_subject_ids = kwargs.get("subject_concept_ids")
+    if raw_subject_ids is None:
+        raw_subject_ids = kwargs.get("target_subject_concept_ids")
+    if raw_subject_ids is None:
+        single_subject = kwargs.get("subject_concept_id") or kwargs.get(
+            "target_subject_concept_id"
+        )
+        if isinstance(single_subject, str) and single_subject.strip():
+            raw_subject_ids = [single_subject.strip()]
+    if isinstance(raw_subject_ids, str):
+        raw_subject_ids = [raw_subject_ids]
+
+    refresh_reports = kwargs.get("refresh_reports")
+    if refresh_reports is None:
+        refresh_reports = kwargs.get("reports")
+
+    return deliver_paper_recommendation_messages(
+        refresh_reports=refresh_reports,
+        subject_concept_ids=raw_subject_ids,
+        trigger_source=kwargs.get("trigger_source"),
+        max_recommendations_per_message=kwargs.get(
+            "max_recommendations_per_message",
+            3,
+        ),
     )
 
 
@@ -7429,12 +7464,15 @@ def _materialise_paper_recommendations_input_schema() -> Schema:
             "event_type": (str, type(None)),
             "event": (dict, type(None)),
             "trigger_source": (str, type(None)),
+            "discover_subjects_if_missing": (bool, type(None)),
         },
         allow_unknown=True,
         description=(
             "materialise_paper_recommendations input: optional subject concept IDs, "
             "optional candidate paper concept IDs, optional candidate_limit/max_results, "
-            "and optional event/event_type payload used to infer impacted subjects or papers."
+            "optional discovery of eligible researcher-user subjects when no explicit "
+            "subjects are supplied, and optional event/event_type payload used to infer "
+            "impacted subjects or papers."
         ),
     )
 
@@ -7457,6 +7495,51 @@ def _materialise_paper_recommendations_output_schema() -> Schema:
         description=(
             "materialise_paper_recommendations output: whether a refresh was triggered, "
             "the impacted subject/paper IDs, and per-subject recommendation materialisation reports."
+        ),
+    )
+
+
+def _deliver_paper_recommendation_messages_input_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "refresh_reports": (list, type(None)),
+            "reports": (list, type(None)),
+            "subject_concept_id": (str, type(None)),
+            "subject_concept_ids": (list, type(None)),
+            "target_subject_concept_id": (str, type(None)),
+            "target_subject_concept_ids": (list, type(None)),
+            "trigger_source": (str, type(None)),
+            "max_recommendations_per_message": (int, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "deliver_paper_recommendation_messages input: optional per-subject refresh "
+            "reports or subject concept IDs, optional trigger_source, and optional "
+            "message-size limit for newly active recommendation assertions."
+        ),
+    )
+
+
+def _deliver_paper_recommendation_messages_output_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "success": (bool, type(None)),
+            "triggered": (bool, type(None)),
+            "reason": (str, type(None)),
+            "delivered_message_count": (int, type(None)),
+            "delivered_assertion_count": (int, type(None)),
+            "delivered_message_ids": (list, type(None)),
+            "delivered_subject_concept_ids": (list, type(None)),
+            "subject_reports": (list, type(None)),
+            "errors": (list, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "deliver_paper_recommendation_messages output: whether direct messages "
+            "were created, which subjects and message concepts were affected, and "
+            "per-subject delivery diagnostics."
         ),
     )
 
@@ -22512,6 +22595,19 @@ def build_default_catalogue() -> MethodCatalogue:
             description=(
                 "Materialise semantic paper recommendations for one or more subject concepts, "
                 "optionally resolving impacted subjects and candidate papers from an event payload."
+            ),
+        ),
+        MethodDefinition(
+            name="deliver_paper_recommendation_messages",
+            handler=_deliver_paper_recommendation_messages,
+            input_schema=_deliver_paper_recommendation_messages_input_schema(),
+            output_schema=_deliver_paper_recommendation_messages_output_schema(),
+            category="write",
+            timeout_sec=30.0,
+            description=(
+                "Create direct Von messages for newly active materialised paper "
+                "recommendations and link the delivered message concepts back to "
+                "their recommendation assertions."
             ),
         ),
         MethodDefinition(

@@ -9,6 +9,7 @@ from typing import Any, Mapping, Sequence
 
 from ..languagemodels.llm_interface import get_llm_client
 from .concept_embedding_service import build_concept_searchable_text
+from .concept_similarity_service import build_text_embedding
 from .concept_search_service import search_concepts
 from .concept_service import get_concept_by_concept_id_exact
 from .paper_recommendation_constants import (
@@ -32,6 +33,9 @@ from .paper_recommendation_vontology_service import (
     load_subject_paper_matching_profile,
     resolve_subject_ids_for_legacy_profile_concept,
     upsert_paper_recommendation_assertion,
+)
+from .paper_recommendation_delivery_service import (
+    list_paper_recommendation_delivery_subject_ids,
 )
 from .text_value_service import get_texts_for_concept
 from .workflow_event_integration_service import (
@@ -78,6 +82,7 @@ _AFFECTING_PAPER_TEXT_PREDICATES = {
     "#V#has_topic_labels",
     "#V#has_publication_date",
 }
+_EMBEDDING_ONLY_ACTIVE_LIMIT = 3
 
 
 def _safe_str(value: Any) -> str:
@@ -438,20 +443,13 @@ def _recent_candidate_pool(limit: int) -> list[str]:
     ]
 
 
-def _score_candidates_with_embeddings(
+def _score_candidate_rows_with_embedding_function(
     *,
-    subject_bundle: Mapping[str, Any],
+    subject_text: str,
     candidate_ids: Sequence[str],
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    client = _build_embedding_client(
-        _safe_str(subject_bundle.get("subject_concept_id"))
-    )
-    subject_text = _safe_str(subject_bundle.get("matching_text"))
-    subject_embedding = client.get_embedding(subject_text)
-    diagnostics: dict[str, Any] = {
-        "embedding_client": type(client).__name__,
-        "subject_embedding_dimensions": len(subject_embedding),
-    }
+    embed_text,
+) -> tuple[list[dict[str, Any]], int]:
+    subject_embedding = list(embed_text(subject_text))
     rows: list[dict[str, Any]] = []
     for candidate_id in candidate_ids:
         paper_bundle = _build_paper_bundle(candidate_id)
@@ -465,9 +463,7 @@ def _score_candidates_with_embeddings(
                 }
             )
             continue
-        paper_embedding = client.get_embedding(
-            _safe_str(paper_bundle.get("matching_text"))
-        )
+        paper_embedding = list(embed_text(_safe_str(paper_bundle.get("matching_text"))))
         score = _cosine_similarity(subject_embedding, paper_embedding)
         rows.append(
             {
@@ -484,7 +480,48 @@ def _score_candidates_with_embeddings(
             _safe_str(item.get("paper_concept_id")).casefold(),
         )
     )
-    return rows, diagnostics
+    return rows, len(subject_embedding)
+
+
+def _score_candidates_with_embeddings(
+    *,
+    subject_bundle: Mapping[str, Any],
+    candidate_ids: Sequence[str],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    subject_text = _safe_str(subject_bundle.get("matching_text"))
+    subject_concept_id = _safe_str(subject_bundle.get("subject_concept_id"))
+    client = None
+
+    try:
+        client = _build_embedding_client(subject_concept_id)
+        rows, dimensions = _score_candidate_rows_with_embedding_function(
+            subject_text=subject_text,
+            candidate_ids=candidate_ids,
+            embed_text=lambda text: client.get_embedding(text),
+        )
+        return rows, {
+            "embedding_backend": "active_llm_client",
+            "embedding_client": type(client).__name__,
+            "subject_embedding_dimensions": dimensions,
+        }
+    except Exception as exc:
+        logger.warning(
+            "paper_recommendation embedding backend unavailable for %s; "
+            "falling back to local deterministic text embeddings: %s",
+            subject_concept_id,
+            exc,
+        )
+        rows, dimensions = _score_candidate_rows_with_embedding_function(
+            subject_text=subject_text,
+            candidate_ids=candidate_ids,
+            embed_text=lambda text: build_text_embedding(text).tolist(),
+        )
+        return rows, {
+            "embedding_backend": "local_text_hashing_fallback",
+            "embedding_client": type(client).__name__ if client is not None else None,
+            "embedding_error": str(exc),
+            "subject_embedding_dimensions": dimensions,
+        }
 
 
 def _extract_json_value(raw_text: str) -> Any:
@@ -573,7 +610,15 @@ def _llm_rerank_candidates(
         )
         + "\n\nReturn JSON only."
     )
-    raw_response = client.generate(prompt, llm_params={"temperature": 0.0})
+    try:
+        raw_response = client.generate(prompt, llm_params={"temperature": 0.0})
+    except Exception as exc:
+        return None, {
+            **prompt_diagnostics,
+            "decision_mode": "embedding_only_fallback",
+            "llm_used": True,
+            "llm_error": str(exc),
+        }
     parsed = _extract_json_value(raw_response)
     parsed_rows = parsed.get("recommendations") if isinstance(parsed, Mapping) else parsed
     if not isinstance(parsed_rows, Sequence) or isinstance(
@@ -634,20 +679,26 @@ def _embedding_only_rank(
     max_results: int,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    for candidate_row in candidate_rows[:max_results]:
+    for index, candidate_row in enumerate(candidate_rows[:max_results], start=1):
         paper_concept_id = _safe_str(candidate_row.get("paper_concept_id"))
         score = float(candidate_row.get("embedding_score") or 0.0)
         rows.append(
             {
                 "paper_concept_id": paper_concept_id,
                 "score": score,
+                "fallback_rank": index,
+                "selected_by_fallback_shortlist": (
+                    score > 0.0 and index <= _EMBEDDING_ONLY_ACTIVE_LIMIT
+                ),
                 "rationale_summary": (
                     "Selected by semantic embedding similarity between the "
                     "subject context and the paper representation."
                 ),
                 "rationale": (
                     "Embedding-only fallback was used because the authoritative "
-                    "reranker prompt or LLM response was unavailable."
+                    "reranker prompt or LLM response was unavailable. "
+                    "A bounded shortlist was materialised from the strongest "
+                    "available semantic matches."
                 ),
                 "evidence": [
                     {
@@ -658,6 +709,22 @@ def _embedding_only_rank(
             }
         )
     return rows
+
+
+def _should_mark_recommendation_active(
+    *,
+    row: Mapping[str, Any],
+    decision_mode: str,
+    min_score: float,
+) -> tuple[bool, str]:
+    score = float(row.get("score") or 0.0)
+    if score >= float(min_score):
+        return True, "score_threshold"
+    if decision_mode != "embedding_plus_llm" and bool(
+        row.get("selected_by_fallback_shortlist")
+    ):
+        return True, "embedding_only_top_shortlist"
+    return False, "below_threshold"
 
 
 def _merge_rankings(
@@ -683,6 +750,10 @@ def _merge_rankings(
                 "paper_bundle": paper_bundle,
                 "embedding_score": float(candidate_row.get("embedding_score") or 0.0),
                 "score": float(reranked.get("score") or 0.0),
+                "fallback_rank": reranked.get("fallback_rank"),
+                "selected_by_fallback_shortlist": bool(
+                    reranked.get("selected_by_fallback_shortlist")
+                ),
                 "rationale_summary": _safe_str(reranked.get("rationale_summary")),
                 "rationale": _safe_str(reranked.get("rationale")),
                 "evidence": list(reranked.get("evidence") or [])
@@ -812,7 +883,8 @@ def materialise_paper_recommendations_for_subject(
     warnings: list[str] = []
     if decision_mode != "embedding_plus_llm":
         warnings.append(
-            "Authoritative LLM reranking was unavailable; embedding-only fallback was used."
+            "Authoritative LLM reranking was unavailable; a bounded embedding-only "
+            "fallback shortlist was used."
         )
     for row in merged_rows:
         paper_concept_id = _safe_str(row.get("paper_concept_id"))
@@ -820,14 +892,20 @@ def materialise_paper_recommendations_for_subject(
             continue
         score = float(row.get("score") or 0.0)
         paper_bundle = dict(row.get("paper_bundle") or {})
-        active = score >= float(min_score)
+        active, selection_rule = _should_mark_recommendation_active(
+            row=row,
+            decision_mode=decision_mode,
+            min_score=float(min_score),
+        )
         evaluation_payload = {
             "schema_version": "paper_recommendation_assertion.v1",
             "policy_version": PAPER_RECOMMENDATION_POLICY_VERSION,
             "decision_mode": decision_mode,
+            "selection_rule": selection_rule,
             "active": active,
             "score": score,
             "embedding_score": float(row.get("embedding_score") or 0.0),
+            "fallback_rank": row.get("fallback_rank"),
             "rationale_summary": _safe_str(row.get("rationale_summary")),
             "rationale": _safe_str(row.get("rationale")),
             "evidence": list(row.get("evidence") or []),
@@ -873,8 +951,10 @@ def materialise_paper_recommendations_for_subject(
                     "decision_mode": decision_mode,
                     "assertion_concept_id": persistence.get("assertion_concept_id"),
                     "policy_version": PAPER_RECOMMENDATION_POLICY_VERSION,
+                    "selection_rule": selection_rule,
                     "semantic_recall_score": semantic_score_map.get(paper_concept_id),
                     "embedding_score": float(row.get("embedding_score") or 0.0),
+                    "fallback_rank": row.get("fallback_rank"),
                 },
                 "active": active,
             }
@@ -981,9 +1061,7 @@ def _impacted_subjects_from_text_mutation(
         return resolve_subject_ids_for_legacy_profile_concept(subject_concept_id), []
     concept_doc = _get_concept(subject_concept_id)
     if _is_scholarly_article(concept_doc) and predicate in _AFFECTING_PAPER_TEXT_PREDICATES:
-        return list_subject_concept_ids_with_paper_matching_profiles(limit=50), [
-            subject_concept_id
-        ]
+        return _default_refresh_subject_ids(limit=50), [subject_concept_id]
     return [], []
 
 
@@ -998,8 +1076,26 @@ def _impacted_subjects_from_relationship_mutation(
         return [source_id], []
     source_doc = _get_concept(source_id)
     if _is_scholarly_article(source_doc):
-        return list_subject_concept_ids_with_paper_matching_profiles(limit=50), [source_id]
+        return _default_refresh_subject_ids(limit=50), [source_id]
     return [], []
+
+
+def _default_refresh_subject_ids(*, limit: int = 50) -> list[str]:
+    rows: list[str] = []
+    seen: set[str] = set()
+    for subject_id in list_subject_concept_ids_with_paper_matching_profiles(limit=limit):
+        if subject_id not in seen:
+            seen.add(subject_id)
+            rows.append(subject_id)
+        if len(rows) >= limit:
+            return rows
+    for subject_id in list_paper_recommendation_delivery_subject_ids(limit=limit):
+        if subject_id not in seen:
+            seen.add(subject_id)
+            rows.append(subject_id)
+        if len(rows) >= limit:
+            break
+    return rows
 
 
 def materialise_paper_recommendations_from_event(
@@ -1010,6 +1106,7 @@ def materialise_paper_recommendations_from_event(
     candidate_limit: int = DEFAULT_CANDIDATE_RECALL_LIMIT,
     max_results: int = DEFAULT_MAX_RESULTS,
     trigger_source: str | None = None,
+    discover_subjects_if_missing: bool = False,
 ) -> dict[str, Any]:
     """Resolve affected subjects/candidate papers from an event and refresh them."""
 
@@ -1037,9 +1134,9 @@ def materialise_paper_recommendations_from_event(
         if not resolved_candidate_ids:
             resolved_candidate_ids = event_candidates
     if not resolved_subject_ids and resolved_candidate_ids:
-        resolved_subject_ids = list_subject_concept_ids_with_paper_matching_profiles(
-            limit=50
-        )
+        resolved_subject_ids = _default_refresh_subject_ids(limit=50)
+    if not resolved_subject_ids and bool(discover_subjects_if_missing):
+        resolved_subject_ids = list_paper_recommendation_delivery_subject_ids(limit=50)
 
     if not resolved_subject_ids:
         return {

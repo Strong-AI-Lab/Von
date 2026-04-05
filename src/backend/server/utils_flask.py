@@ -606,6 +606,28 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             )
 
         try:
+            from ..services.paper_recommendation_background_schedule_bootstrap_service import (
+                ensure_paper_recommendation_background_schedule,
+            )
+
+            paper_recommendation_schedule_report = (
+                ensure_paper_recommendation_background_schedule()
+            )
+            result["paper_recommendation_schedule_bootstrap"] = (
+                paper_recommendation_schedule_report
+            )
+            if not bool(paper_recommendation_schedule_report.get("success", False)):
+                app_logger.warning(
+                    "[durable_workflows] paper recommendation schedule bootstrap failed: %s",
+                    paper_recommendation_schedule_report,
+                )
+        except Exception as schedule_exc:
+            app_logger.warning(
+                "[durable_workflows] paper recommendation schedule bootstrap error: %s",
+                schedule_exc,
+            )
+
+        try:
             from ..services.parent_specificity_schedule_bootstrap_service import (
                 ensure_parent_specificity_background_schedule,
             )

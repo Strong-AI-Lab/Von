@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .paper_recommendation_constants import (
+    PAPER_RECOMMENDATION_DELIVERY_PROMPT_CONCEPT_ID,
+    PAPER_RECOMMENDATION_DELIVERY_PROMPT_LINK_PREDICATE_ID,
     PAPER_RECOMMENDATION_PROMPT_LINK_PREDICATE_ID,
     PAPER_RECOMMENDATION_REQUESTED_EVENT_TYPE,
     PAPER_RECOMMENDATION_RERANK_PROMPT_CONCEPT_ID,
@@ -46,6 +48,12 @@ _RERANK_PROMPT_SEED_ASSET_PATH = (
     / "repo_seed_bundles"
     / "paper_recommendation_rerank_prompt_seed.md"
 )
+_DELIVERY_PROMPT_SEED_ASSET_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "workflows"
+    / "repo_seed_bundles"
+    / "paper_recommendation_delivery_message_prompt_seed.md"
+)
 
 
 def _load_paper_recommendation_prompt_seed_text() -> str:
@@ -54,6 +62,13 @@ def _load_paper_recommendation_prompt_seed_text() -> str:
     prompt_text = _RERANK_PROMPT_SEED_ASSET_PATH.read_text(encoding="utf-8").strip()
     if not prompt_text:
         raise ValueError("paper_recommendation_rerank_prompt_seed_missing")
+    return prompt_text
+
+
+def _load_paper_recommendation_delivery_prompt_seed_text() -> str:
+    prompt_text = _DELIVERY_PROMPT_SEED_ASSET_PATH.read_text(encoding="utf-8").strip()
+    if not prompt_text:
+        raise ValueError("paper_recommendation_delivery_prompt_seed_missing")
     return prompt_text
 
 
@@ -70,6 +85,15 @@ def _ensure_paper_recommendation_prompt_support() -> dict[str, Any]:
                 ),
                 parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
             ),
+            WorkflowPromptConceptSpec(
+                concept_id=PAPER_RECOMMENDATION_DELIVERY_PROMPT_CONCEPT_ID,
+                name="Paper recommendation delivery message prompt",
+                description=(
+                    "Canonical message template for delivering newly active paper "
+                    "recommendations to researcher Von users."
+                ),
+                parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
+            ),
         ),
         workflow_links=(
             WorkflowPromptLinkSpec(
@@ -79,27 +103,48 @@ def _ensure_paper_recommendation_prompt_support() -> dict[str, Any]:
                 context={"jira": _SOURCE_TAG},
                 reason="paper_recommendation_prompt_link_bootstrap",
             ),
+            WorkflowPromptLinkSpec(
+                workflow_id=PAPER_RECOMMENDATION_WORKFLOW_ID,
+                prompt_concept_id=PAPER_RECOMMENDATION_DELIVERY_PROMPT_CONCEPT_ID,
+                predicate=PAPER_RECOMMENDATION_DELIVERY_PROMPT_LINK_PREDICATE_ID,
+                context={"jira": _SOURCE_TAG},
+                reason="paper_recommendation_delivery_prompt_link_bootstrap",
+            ),
         ),
         provenance_source=_MANAGED_BY,
     )
 
     seeded_prompt_ids: list[str] = []
-    if not prompt_concept_has_content(PAPER_RECOMMENDATION_RERANK_PROMPT_CONCEPT_ID):
+    seed_specs = (
+        (
+            PAPER_RECOMMENDATION_RERANK_PROMPT_CONCEPT_ID,
+            _load_paper_recommendation_prompt_seed_text,
+        ),
+        (
+            PAPER_RECOMMENDATION_DELIVERY_PROMPT_CONCEPT_ID,
+            _load_paper_recommendation_delivery_prompt_seed_text,
+        ),
+    )
+    for prompt_concept_id, prompt_loader in seed_specs:
+        if prompt_concept_has_content(prompt_concept_id):
+            continue
         upsert_singleton_text_relation(
-            subject_concept_id=PAPER_RECOMMENDATION_RERANK_PROMPT_CONCEPT_ID,
+            subject_concept_id=prompt_concept_id,
             predicate="hasContent",
-            text=_load_paper_recommendation_prompt_seed_text(),
+            text=prompt_loader(),
             lang="en-NZ",
             context={"jira": _SOURCE_TAG, "source": _MANAGED_BY},
             garbage_collect=True,
         )
-        seeded_prompt_ids.append(PAPER_RECOMMENDATION_RERANK_PROMPT_CONCEPT_ID)
+        seeded_prompt_ids.append(prompt_concept_id)
 
     report = dict(report)
     report["seeded_prompt_ids"] = seeded_prompt_ids
     report["seeded_prompt_count"] = len(seeded_prompt_ids)
     report["success"] = bool(
         prompt_concept_has_content(PAPER_RECOMMENDATION_RERANK_PROMPT_CONCEPT_ID)
+    ) and bool(
+        prompt_concept_has_content(PAPER_RECOMMENDATION_DELIVERY_PROMPT_CONCEPT_ID)
     )
     return report
 

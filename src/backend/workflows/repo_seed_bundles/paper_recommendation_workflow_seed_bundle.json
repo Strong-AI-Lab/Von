@@ -4,7 +4,8 @@
   "schema_version": "repo_seed_workflow_bundle.v1",
   "source_tag": "JVNAUTOSCI-1679",
   "supported_action_ids": [
-    "materialise_paper_recommendations"
+    "materialise_paper_recommendations",
+    "deliver_paper_recommendation_messages"
   ],
   "workflows": [
     {
@@ -70,10 +71,16 @@
                 "context_key": "trigger_source",
                 "required": false,
                 "tool_param": "trigger_source"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_paper_recommendation_evaluation_workflow_materialise_recommendations_discover_subjects_if_missing_to_discover_subjects_if_missing_parameter",
+                "context_key": "discover_subjects_if_missing",
+                "required": false,
+                "tool_param": "discover_subjects_if_missing"
               }
             ],
             "execution_mode": "deterministic",
-            "next_state": "completed",
+            "next_state": "deliver_messages",
             "on_failure_state": "failed",
             "state_id": "materialise_recommendations",
             "tool_output_mapping_specs": [
@@ -97,6 +104,55 @@
               "refresh_reports",
               "subject_concept_ids",
               "candidate_paper_concept_ids"
+            ]
+          },
+          {
+            "action_id": "deliver_paper_recommendation_messages",
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_paper_recommendation_evaluation_workflow_deliver_messages_refresh_reports_to_refresh_reports_parameter",
+                "context_key": "refresh_reports",
+                "required": false,
+                "tool_param": "refresh_reports"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_paper_recommendation_evaluation_workflow_deliver_messages_subject_concept_ids_to_subject_concept_ids_parameter",
+                "context_key": "subject_concept_ids",
+                "required": false,
+                "tool_param": "subject_concept_ids"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_paper_recommendation_evaluation_workflow_deliver_messages_trigger_source_to_trigger_source_parameter",
+                "context_key": "trigger_source",
+                "required": false,
+                "tool_param": "trigger_source"
+              }
+            ],
+            "execution_mode": "deterministic",
+            "next_state": "completed",
+            "on_failure_state": "failed",
+            "state_id": "deliver_messages",
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_paper_recommendation_evaluation_workflow_deliver_messages_delivered_message_ids_to_delivered_message_ids",
+                "context_key": "delivered_message_ids",
+                "tool_output_field": "delivered_message_ids"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_paper_recommendation_evaluation_workflow_deliver_messages_delivered_subject_concept_ids_to_delivered_subject_concept_ids",
+                "context_key": "delivered_subject_concept_ids",
+                "tool_output_field": "delivered_subject_concept_ids"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_paper_recommendation_evaluation_workflow_deliver_messages_delivered_assertion_count_to_delivered_assertion_count",
+                "context_key": "delivered_assertion_count",
+                "tool_output_field": "delivered_assertion_count"
+              }
+            ],
+            "writes_context_keys": [
+              "delivered_message_ids",
+              "delivered_subject_concept_ids",
+              "delivered_assertion_count"
             ]
           },
           {

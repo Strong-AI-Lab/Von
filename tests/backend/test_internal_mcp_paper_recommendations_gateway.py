@@ -129,6 +129,56 @@ def test_materialise_paper_recommendations_gateway_invoke(monkeypatch):
         "candidate_limit": 24,
         "max_results": 10,
         "trigger_source": "test",
+        "discover_subjects_if_missing": False,
+    }
+
+
+def test_deliver_paper_recommendation_messages_gateway_invoke(monkeypatch):
+    gateway = _build_gateway()
+
+    captured: dict[str, object] = {}
+
+    def _fake_deliver(**kwargs):
+        captured.update(kwargs)
+        return {
+            "success": True,
+            "triggered": True,
+            "delivered_message_count": 1,
+            "delivered_assertion_count": 2,
+            "delivered_message_ids": ["#V#message_von_system_1"],
+            "delivered_subject_concept_ids": ["#V#lu_yunli"],
+            "subject_reports": [
+                {
+                    "subject_concept_id": "#V#lu_yunli",
+                    "triggered": True,
+                    "message_concept_id": "#V#message_von_system_1",
+                }
+            ],
+            "errors": [],
+        }
+
+    monkeypatch.setattr(
+        "src.backend.services.paper_recommendation_delivery_service.deliver_paper_recommendation_messages",
+        _fake_deliver,
+    )
+
+    payload = gateway.invoke(
+        "deliver_paper_recommendation_messages",
+        {
+            "subject_concept_id": "#V#lu_yunli",
+            "trigger_source": "test",
+            "max_recommendations_per_message": 2,
+        },
+    ).payload
+
+    assert payload["success"] is True
+    assert payload["triggered"] is True
+    assert payload["delivered_message_ids"] == ["#V#message_von_system_1"]
+    assert captured == {
+        "refresh_reports": None,
+        "subject_concept_ids": ["#V#lu_yunli"],
+        "trigger_source": "test",
+        "max_recommendations_per_message": 2,
     }
 
 

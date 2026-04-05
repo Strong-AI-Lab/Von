@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
 from ..db.repositories.concepts_repository import ConceptsRepository
+from ..db.repositories.text_value_repository import TextRelationsRepository
 from . import concept_service
 from .concept_service import get_concept_by_concept_id_exact
 from .paper_recommendation_constants import (
@@ -18,6 +19,7 @@ from .paper_recommendation_constants import (
     PAPER_RECOMMENDATION_ASSERTION_TYPE_ID,
     PAPER_RECOMMENDATION_ASSERTS_PAPER_PREDICATE_ID,
     PAPER_RECOMMENDATION_ASSERTS_SUBJECT_PREDICATE_ID,
+    PAPER_RECOMMENDATION_DELIVERED_VIA_MESSAGE_PREDICATE_ID,
     PAPER_RECOMMENDATION_EVALUATION_JSON_PREDICATE_ID,
     PAPER_RECOMMENDATION_FEEDBACK_ASSERTION_PREDICATE_ID,
     PAPER_RECOMMENDATION_FEEDBACK_JSON_PREDICATE_ID,
@@ -276,6 +278,15 @@ def ensure_paper_recommendation_primitives() -> dict[str, Any]:
         )
         ensured.append(PAPER_RECOMMENDATION_EVALUATION_JSON_PREDICATE_ID)
         _ensure_predicate_concept(
+            concept_id=PAPER_RECOMMENDATION_DELIVERED_VIA_MESSAGE_PREDICATE_ID,
+            name="Paper recommendation delivered via message",
+            description=(
+                "Links a paper recommendation assertion to a direct-message "
+                "concept that delivered the recommendation to a Von user."
+            ),
+        )
+        ensured.append(PAPER_RECOMMENDATION_DELIVERED_VIA_MESSAGE_PREDICATE_ID)
+        _ensure_predicate_concept(
             concept_id=HAS_PAPER_RECOMMENDATION_FEEDBACK_PREDICATE_ID,
             name="Has paper recommendation feedback",
             description=(
@@ -498,37 +509,43 @@ def persist_subject_paper_matching_profile(
 def list_subject_concept_ids_with_paper_matching_profiles(*, limit: int = 200) -> list[str]:
     """List concepts that carry an explicit paper matching profile overlay."""
 
+    safe_limit = max(1, int(limit))
     subject_ids: list[str] = []
     seen: set[str] = set()
 
-    generic_profile_relation_rows = ConceptsRepository.find(
-        {"concept_id": {"$exists": True}},
-        projection={
-            "concept_id": 1,
-            f"relationships.{_LEGACY_PROFILE_LINK_PREDICATE_ID}": 1,
+    generic_profile_relation_rows = TextRelationsRepository.find(
+        {
+            "predicate": GENERIC_PAPER_MATCH_PROFILE_JSON_PREDICATE_ID,
+            "subject_concept_id": {"$exists": True},
         },
-        limit=max(1, limit),
+        projection={"subject_concept_id": 1},
+        limit=safe_limit * 4,
     )
     for row in generic_profile_relation_rows:
+        if not isinstance(row, Mapping):
+            continue
+        concept_id = _safe_str(row.get("subject_concept_id"))
+        if not concept_id or concept_id in seen:
+            continue
+        seen.add(concept_id)
+        subject_ids.append(concept_id)
+        if len(subject_ids) >= safe_limit:
+            return subject_ids
+
+    legacy_profile_link_rows = ConceptsRepository.find(
+        {f"relationships.{_LEGACY_PROFILE_LINK_PREDICATE_ID}": {"$exists": True}},
+        projection={"concept_id": 1},
+        limit=safe_limit * 4,
+    )
+    for row in legacy_profile_link_rows:
         if not isinstance(row, Mapping):
             continue
         concept_id = _safe_str(row.get("concept_id"))
         if not concept_id or concept_id in seen:
             continue
-        generic_profile, _source_predicate = _load_profile_json_from_text_relations(
-            subject_concept_id=concept_id,
-            predicate_ids=(GENERIC_PAPER_MATCH_PROFILE_JSON_PREDICATE_ID,),
-        )
-        has_legacy_link = bool(
-            normalise_relationship_targets(
-                (row.get("relationships") or {}).get(_LEGACY_PROFILE_LINK_PREDICATE_ID)
-            )
-        )
-        if generic_profile is None and not has_legacy_link:
-            continue
         seen.add(concept_id)
         subject_ids.append(concept_id)
-        if len(subject_ids) >= limit:
+        if len(subject_ids) >= safe_limit:
             break
 
     return subject_ids
@@ -727,6 +744,11 @@ def load_materialised_paper_recommendations(
         active = bool(evaluation.get("active", True))
         if not active and not include_inactive:
             continue
+        delivered_message_ids = normalise_relationship_targets(
+            (assertion_doc.get("relationships") or {}).get(
+                PAPER_RECOMMENDATION_DELIVERED_VIA_MESSAGE_PREDICATE_ID
+            )
+        )
         paper_doc = get_concept_by_concept_id_exact(paper_concept_id) or {}
         paper_title = _safe_str(paper_doc.get("name")) or paper_concept_id
         row = {
@@ -735,6 +757,7 @@ def load_materialised_paper_recommendations(
             "paper_title": paper_title,
             "score": float(evaluation.get("score") or 0.0),
             "active": active,
+            "delivered_message_ids": delivered_message_ids,
             "rationale_summary": _safe_str(evaluation.get("rationale_summary"))
             or _load_latest_text(assertion_id, "hasDescription"),
             "evaluation": dict(evaluation),

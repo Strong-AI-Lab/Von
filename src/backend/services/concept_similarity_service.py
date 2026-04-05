@@ -250,6 +250,12 @@ def build_concept_embedding(concept: Dict[str, Any]) -> np.ndarray:
     return _tokens_to_embedding(tokens)
 
 
+def build_text_embedding(text: str) -> np.ndarray:
+    """Build a deterministic local embedding for free text."""
+
+    return _tokens_to_embedding(_normalise_tokens(text))
+
+
 def search_similar_concepts(
     query: str, limit: int = 10
 ) -> List[ConceptSimilarityResult]:
@@ -331,5 +337,6 @@ __all__ = [
     "ConceptSimilarityResult",
     "ConceptSimilarityServiceError",
     "build_concept_embedding",
+    "build_text_embedding",
     "search_similar_concepts",
 ]
