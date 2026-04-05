@@ -53,6 +53,33 @@ PARENT_SPECIFICITY_DOSSIER_TOOL_OUTPUT_MAPPINGS: tuple[
     ParentSpecificityToolOutputMappingSpec(
         concept_id=(
             "#V#workflow_mapping_tool_field_"
+            "result_context_dossier_id_to_context_dossier_id"
+        ),
+        tool_output_field="result.context_dossier_id",
+        context_key="context_dossier_id",
+        child_output_field="context_dossier_id",
+    ),
+    ParentSpecificityToolOutputMappingSpec(
+        concept_id=(
+            "#V#workflow_mapping_tool_field_"
+            "result_report_revision_id_to_report_revision_id"
+        ),
+        tool_output_field="result.report_revision_id",
+        context_key="report_revision_id",
+        child_output_field="report_revision_id",
+    ),
+    ParentSpecificityToolOutputMappingSpec(
+        concept_id=(
+            "#V#workflow_mapping_tool_field_"
+            "result_reconstructed_workspace_to_reconstructed_workspace"
+        ),
+        tool_output_field="result.reconstructed_workspace",
+        context_key="reconstructed_workspace",
+        child_output_field="reconstructed_workspace",
+    ),
+    ParentSpecificityToolOutputMappingSpec(
+        concept_id=(
+            "#V#workflow_mapping_tool_field_"
             "child_workflow_failed_to_dossier_child_failed"
         ),
         tool_output_field="child_workflow_failed",
@@ -68,6 +95,9 @@ PARENT_SPECIFICITY_DOSSIER_TOOL_OUTPUT_MAPPINGS: tuple[
 PARENT_SPECIFICITY_DOSSIER_WRITES_CONTEXT_KEYS: tuple[str, ...] = (
     "concept_dossier",
     "concept_dossier_summary",
+    "context_dossier_id",
+    "report_revision_id",
+    "reconstructed_workspace",
     "dossier_child_failed",
     "dossier_error",
 )

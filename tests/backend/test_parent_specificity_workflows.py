@@ -89,6 +89,95 @@ def test_collect_dossier_gathers_multilingual_texts_and_relations(monkeypatch) -
     assert result.outputs["concept_dossier_summary"]["languages_seen"] == ["en-NZ", "fr"]
 
 
+def test_collect_dossier_materialises_context_dossier_and_workspace(monkeypatch) -> None:
+    from src.backend.workflows.action_registry import (
+        WorkflowActionRequest,
+        WorkflowEnvironment,
+    )
+    from src.backend.workflows.durable import (
+        parent_specificity_concept_dossier_workflow as mod,
+    )
+
+    monkeypatch.setattr(
+        mod,
+        "get_concept_by_concept_id",
+        lambda concept_id: {
+            "concept_id": concept_id,
+            "computed_kind": "type",
+            "relationships": {"is_a_type_of": ["#V#researcher"]},
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "get_texts_for_concept",
+        lambda concept_id, limit=120: [
+            {"predicate": "hasDescription", "lang": "en-NZ", "text": "Studies graph structure."},
+        ],
+    )
+    monkeypatch.setattr(
+        mod,
+        "find_relations_with_argument",
+        lambda *_args, **_kwargs: {"hits": []},
+    )
+    monkeypatch.setattr(
+        mod,
+        "get_concept_display_name_with_names_fallback",
+        lambda _concept: "Graph theorist",
+    )
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        mod,
+        "assemble_context_dossier",
+        lambda **kwargs: captured.update(kwargs)
+        or {
+            "success": True,
+            "dossier_id": "#V#context_dossier_graph_theorist",
+            "report_revision_id": "#V#workflow_report_revision_graph_theorist",
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "build_reconstructed_workspace",
+        lambda **kwargs: {
+            "success": True,
+            "workspace": {"workspace_fingerprint": "fp-graph-theorist"},
+        },
+    )
+
+    request = WorkflowActionRequest(
+        action_id="parent_specificity.collect_dossier",
+        inputs={
+            "concept_id": "#V#graph_theorist",
+            "materialise_context_dossier": True,
+            "materialise_report_revision": True,
+            "build_reconstructed_workspace": True,
+        },
+        environment=WorkflowEnvironment(
+            llm_client=None,
+            user_namespace="#V#user@org",
+        ),
+        data={},
+    )
+
+    result = mod._handle_collect_dossier(request)
+
+    assert result.ok
+    assert result.outputs["context_dossier_id"] == "#V#context_dossier_graph_theorist"
+    assert (
+        result.outputs["report_revision_id"]
+        == "#V#workflow_report_revision_graph_theorist"
+    )
+    assert (
+        result.outputs["reconstructed_workspace"]["workspace_fingerprint"]
+        == "fp-graph-theorist"
+    )
+    assert captured["namespace"] == "#V#user@org"
+    assert captured["user_id"] == "#V#user"
+    assert captured["org_id"] == "#V#org"
+    assert "Parent-specificity dossier scaffold" in str(captured["report_text"])
+
+
 def test_parent_specificity_rumination_workflow_definition_structure() -> None:
     from src.backend.workflows.durable.parent_specificity_rumination_workflow import (
         build_parent_specificity_rumination_workflow_test_definition,

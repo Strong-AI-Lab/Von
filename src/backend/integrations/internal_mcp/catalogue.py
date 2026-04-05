@@ -10973,6 +10973,102 @@ def _repo_dossier_git_metadata(**kwargs):
     return repo_dossier_git_metadata(**kwargs)
 
 
+def _context_bundle_resolve_effective_context(**kwargs):
+    from ...services.context_bundle_service import resolve_effective_context
+
+    return resolve_effective_context(
+        subject_kind=str(kwargs.get("subject_kind") or "").strip(),
+        subject_id=str(kwargs.get("subject_id") or "").strip(),
+        explicit_bundle_ids=kwargs.get("explicit_bundle_ids") or (),
+        workflow_step_bundle_ids=kwargs.get("workflow_step_bundle_ids") or (),
+        local_default_bundle_ids=kwargs.get("local_default_bundle_ids") or (),
+        include_type_hierarchy=bool(kwargs.get("include_type_hierarchy", True)),
+    )
+
+
+def _context_bundle_assemble_context_dossier(**kwargs):
+    from ...services.context_bundle_service import assemble_context_dossier
+
+    return assemble_context_dossier(
+        name=str(kwargs.get("name") or "Context dossier").strip(),
+        dossier_id=kwargs.get("dossier_id"),
+        subject_kind=str(kwargs.get("subject_kind") or "").strip(),
+        subject_id=str(kwargs.get("subject_id") or "").strip(),
+        dossier_kind=kwargs.get("dossier_kind"),
+        effective_context_bundle_ids=kwargs.get("effective_context_bundle_ids") or (),
+        open_questions=kwargs.get("open_questions") or (),
+        evidence_receipts=kwargs.get("evidence_receipts") or (),
+        immediate_context=kwargs.get("immediate_context"),
+        search_history=kwargs.get("search_history") or (),
+        testing_theory_ids=kwargs.get("testing_theory_ids") or (),
+        local_assertions=kwargs.get("local_assertions") or (),
+        hypotheses=kwargs.get("hypotheses") or (),
+        promotion_candidates=kwargs.get("promotion_candidates") or (),
+        branch_specs=kwargs.get("branch_specs") or (),
+        report_text=kwargs.get("report_text"),
+        report_title=kwargs.get("report_title"),
+        report_summary=kwargs.get("report_summary"),
+        namespace=kwargs.get("namespace"),
+        user_id=kwargs.get("user_id"),
+        org_id=kwargs.get("org_id"),
+    )
+
+
+def _context_bundle_update_report_revision(**kwargs):
+    from ...services.context_bundle_service import update_context_report_revision
+
+    return update_context_report_revision(
+        dossier_id=str(kwargs.get("dossier_id") or "").strip(),
+        report_text=str(kwargs.get("report_text") or "").strip(),
+        revision_id=kwargs.get("revision_id"),
+        title=kwargs.get("title"),
+        summary=kwargs.get("summary"),
+        open_questions=kwargs.get("open_questions") or (),
+        evidence_receipts=kwargs.get("evidence_receipts") or (),
+        branch_id=kwargs.get("branch_id"),
+        status=kwargs.get("status"),
+        namespace=kwargs.get("namespace"),
+        user_id=kwargs.get("user_id"),
+        org_id=kwargs.get("org_id"),
+    )
+
+
+def _context_bundle_build_reconstructed_workspace(**kwargs):
+    from ...services.context_bundle_service import build_reconstructed_workspace
+
+    return build_reconstructed_workspace(
+        subject_kind=str(kwargs.get("subject_kind") or "").strip(),
+        subject_id=str(kwargs.get("subject_id") or "").strip(),
+        question=kwargs.get("question"),
+        task=kwargs.get("task"),
+        dossier_id=kwargs.get("dossier_id"),
+        report_revision_id=kwargs.get("report_revision_id"),
+        effective_context_bundle_ids=kwargs.get("effective_context_bundle_ids") or (),
+        immediate_context=kwargs.get("immediate_context"),
+        open_questions=kwargs.get("open_questions") or (),
+        evidence_receipts=kwargs.get("evidence_receipts") or (),
+        search_history=kwargs.get("search_history") or (),
+        interaction_budget=kwargs.get("interaction_budget"),
+        termination_status=kwargs.get("termination_status"),
+        reconstruction_round=kwargs.get("reconstruction_round"),
+        compression_decisions=kwargs.get("compression_decisions") or (),
+        guardrail_events=kwargs.get("guardrail_events") or (),
+        promotion_attempts=kwargs.get("promotion_attempts") or (),
+        branch_transitions=kwargs.get("branch_transitions") or (),
+    )
+
+
+def _context_bundle_build_benchmark(**kwargs):
+    from ...services.context_bundle_benchmark_service import (
+        build_context_bundle_benchmark_report,
+    )
+
+    return build_context_bundle_benchmark_report(
+        case_set=kwargs.get("case_set"),
+        max_cases=kwargs.get("max_cases"),
+    )
+
+
 def _testing_theory_create_slice(**kwargs):
     from ...services.testing_theory_service import create_testing_theory_slice
 
@@ -23467,6 +23563,154 @@ def build_default_catalogue() -> MethodCatalogue:
             category="read",
             description=(
                 "Inspect bounded git metadata for critic or maintenance workflows without exposing unrestricted shell access."
+            ),
+        ),
+        MethodDefinition(
+            name="context_bundle_resolve_effective_context",
+            handler=_context_bundle_resolve_effective_context,
+            input_schema=Schema(
+                required={"subject_kind": str, "subject_id": str},
+                optional={
+                    "explicit_bundle_ids": (list,),
+                    "workflow_step_bundle_ids": (list,),
+                    "local_default_bundle_ids": (list,),
+                    "include_type_hierarchy": (bool,),
+                    "namespace": (str, type(None)),
+                },
+                allow_unknown=True,
+                description=(
+                    "Resolve effective context bundles for a workflow or concept using "
+                    "direct attachments, inheritance, type ancestry, and local defaults."
+                ),
+            ),
+            output_schema=None,
+            category="read",
+            description=(
+                "Resolve the effective bundle/facet working set for a workflow or concept."
+            ),
+        ),
+        MethodDefinition(
+            name="context_bundle_assemble_context_dossier",
+            handler=_context_bundle_assemble_context_dossier,
+            input_schema=Schema(
+                required={"name": str, "subject_kind": str, "subject_id": str},
+                optional={
+                    "dossier_id": (str, type(None)),
+                    "dossier_kind": (str, type(None)),
+                    "effective_context_bundle_ids": (list,),
+                    "open_questions": (list,),
+                    "evidence_receipts": (list,),
+                    "immediate_context": (dict, type(None)),
+                    "search_history": (list,),
+                    "testing_theory_ids": (list,),
+                    "local_assertions": (list,),
+                    "hypotheses": (list,),
+                    "promotion_candidates": (list,),
+                    "branch_specs": (list,),
+                    "report_text": (str, type(None)),
+                    "report_title": (str, type(None)),
+                    "report_summary": (dict, type(None)),
+                    "namespace": (str, type(None)),
+                    "user_id": (str, type(None)),
+                    "org_id": (str, type(None)),
+                },
+                allow_unknown=True,
+                description=(
+                    "Create or update a bounded hybrid context dossier, optionally "
+                    "including theory-local branches and an initial report revision."
+                ),
+            ),
+            output_schema=None,
+            category="write",
+            description=(
+                "Persist a hybrid context dossier with report scaffolding, open questions, and theory-local branch state."
+            ),
+        ),
+        MethodDefinition(
+            name="context_bundle_update_report_revision",
+            handler=_context_bundle_update_report_revision,
+            input_schema=Schema(
+                required={"dossier_id": str, "report_text": str},
+                optional={
+                    "revision_id": (str, type(None)),
+                    "title": (str, type(None)),
+                    "summary": (dict, type(None)),
+                    "open_questions": (list,),
+                    "evidence_receipts": (list,),
+                    "branch_id": (str, type(None)),
+                    "status": (str, type(None)),
+                    "namespace": (str, type(None)),
+                    "user_id": (str, type(None)),
+                    "org_id": (str, type(None)),
+                },
+                allow_unknown=True,
+                description=(
+                    "Append or update a bounded report revision linked to an "
+                    "existing context dossier."
+                ),
+            ),
+            output_schema=None,
+            category="write",
+            description=(
+                "Persist a bounded report revision backed by explicit evidence receipts."
+            ),
+        ),
+        MethodDefinition(
+            name="context_bundle_build_reconstructed_workspace",
+            handler=_context_bundle_build_reconstructed_workspace,
+            input_schema=Schema(
+                required={"subject_kind": str, "subject_id": str},
+                optional={
+                    "question": (str, type(None)),
+                    "task": (str, type(None)),
+                    "dossier_id": (str, type(None)),
+                    "report_revision_id": (str, type(None)),
+                    "effective_context_bundle_ids": (list,),
+                    "immediate_context": (dict, type(None)),
+                    "open_questions": (list,),
+                    "evidence_receipts": (list,),
+                    "search_history": (list,),
+                    "interaction_budget": (dict, type(None)),
+                    "termination_status": (dict, type(None)),
+                    "reconstruction_round": (int, type(None)),
+                    "compression_decisions": (list,),
+                    "guardrail_events": (list,),
+                    "promotion_attempts": (list,),
+                    "branch_transitions": (list,),
+                    "namespace": (str, type(None)),
+                },
+                allow_unknown=True,
+                description=(
+                    "Reconstruct a bounded iterative-workspace payload from the "
+                    "current dossier, report revision, and effective context state."
+                ),
+            ),
+            output_schema=None,
+            category="write",
+            description=(
+                "Build a bounded reconstructed workspace with telemetry over compression, guardrails, and promotion attempts."
+            ),
+        ),
+        MethodDefinition(
+            name="context_bundle_build_benchmark",
+            handler=_context_bundle_build_benchmark,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "case_set": (str, type(None)),
+                    "max_cases": (int, type(None)),
+                    "namespace": (str, type(None)),
+                },
+                allow_unknown=True,
+                description=(
+                    "Build the deterministic context-bundle ablation report over the "
+                    "seed benchmark corpus."
+                ),
+            ),
+            output_schema=None,
+            category="read",
+            description=(
+                "Generate the ablation/retained-case evaluation report for context bundles, dossiers, and report revision."
             ),
         ),
         MethodDefinition(

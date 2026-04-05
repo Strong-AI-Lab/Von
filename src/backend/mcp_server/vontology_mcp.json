@@ -163,6 +163,383 @@
             }
         },
         {
+            "name": "context_bundle_assemble_context_dossier",
+            "description": "Persist a hybrid context dossier with report scaffolding, open questions, and theory-local branch state.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string"
+                    },
+                    "subject_kind": {
+                        "type": "string"
+                    },
+                    "subject_id": {
+                        "type": "string"
+                    },
+                    "dossier_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "dossier_kind": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "effective_context_bundle_ids": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "open_questions": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "evidence_receipts": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "immediate_context": {
+                        "type": [
+                            "object",
+                            "null"
+                        ],
+                        "additionalProperties": true
+                    },
+                    "search_history": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "testing_theory_ids": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "local_assertions": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "hypotheses": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "promotion_candidates": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "branch_specs": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "report_text": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "report_title": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "report_summary": {
+                        "type": [
+                            "object",
+                            "null"
+                        ],
+                        "additionalProperties": true
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "user_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "org_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "name",
+                    "subject_kind",
+                    "subject_id"
+                ],
+                "additionalProperties": true,
+                "description": "Create or update a bounded hybrid context dossier, optionally including theory-local branches and an initial report revision."
+            }
+        },
+        {
+            "name": "context_bundle_build_benchmark",
+            "description": "Generate the ablation/retained-case evaluation report for context bundles, dossiers, and report revision.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "case_set": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "max_cases": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "Build the deterministic context-bundle ablation report over the seed benchmark corpus."
+            }
+        },
+        {
+            "name": "context_bundle_build_reconstructed_workspace",
+            "description": "Build a bounded reconstructed workspace with telemetry over compression, guardrails, and promotion attempts.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "subject_kind": {
+                        "type": "string"
+                    },
+                    "subject_id": {
+                        "type": "string"
+                    },
+                    "question": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "task": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "dossier_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "report_revision_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "effective_context_bundle_ids": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "immediate_context": {
+                        "type": [
+                            "object",
+                            "null"
+                        ],
+                        "additionalProperties": true
+                    },
+                    "open_questions": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "evidence_receipts": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "search_history": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "interaction_budget": {
+                        "type": [
+                            "object",
+                            "null"
+                        ],
+                        "additionalProperties": true
+                    },
+                    "termination_status": {
+                        "type": [
+                            "object",
+                            "null"
+                        ],
+                        "additionalProperties": true
+                    },
+                    "reconstruction_round": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    },
+                    "compression_decisions": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "guardrail_events": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "promotion_attempts": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "branch_transitions": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "subject_kind",
+                    "subject_id"
+                ],
+                "additionalProperties": true,
+                "description": "Reconstruct a bounded iterative-workspace payload from the current dossier, report revision, and effective context state."
+            }
+        },
+        {
+            "name": "context_bundle_resolve_effective_context",
+            "description": "Resolve the effective bundle/facet working set for a workflow or concept.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "subject_kind": {
+                        "type": "string"
+                    },
+                    "subject_id": {
+                        "type": "string"
+                    },
+                    "explicit_bundle_ids": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "workflow_step_bundle_ids": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "local_default_bundle_ids": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "include_type_hierarchy": {
+                        "type": "boolean"
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "subject_kind",
+                    "subject_id"
+                ],
+                "additionalProperties": true,
+                "description": "Resolve effective context bundles for a workflow or concept using direct attachments, inheritance, type ancestry, and local defaults."
+            }
+        },
+        {
+            "name": "context_bundle_update_report_revision",
+            "description": "Persist a bounded report revision backed by explicit evidence receipts.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "dossier_id": {
+                        "type": "string"
+                    },
+                    "report_text": {
+                        "type": "string"
+                    },
+                    "revision_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "title": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "summary": {
+                        "type": [
+                            "object",
+                            "null"
+                        ],
+                        "additionalProperties": true
+                    },
+                    "open_questions": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "evidence_receipts": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "branch_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "status": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "user_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "org_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "dossier_id",
+                    "report_text"
+                ],
+                "additionalProperties": true,
+                "description": "Append or update a bounded report revision linked to an existing context dossier."
+            }
+        },
+        {
             "name": "context_search",
             "description": "Context-aware web search that uses provided context to improve search relevance. Use when you have background information that would help narrow or focus the search. The context parameter should contain relevant information about the topic, domain, or specific requirements. More precise than basic search when you have contextual information. Example: query='latest research', context='machine learning interpretability in healthcare applications'.",
             "inputSchema": {

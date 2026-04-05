@@ -64,6 +64,11 @@ if TYPE_CHECKING:
     from src.backend.integrations.internal_mcp.catalogue import (
         _add_relationship,
         _build_paper_recommendations,
+        _context_bundle_assemble_context_dossier,
+        _context_bundle_build_benchmark,
+        _context_bundle_build_reconstructed_workspace,
+        _context_bundle_resolve_effective_context,
+        _context_bundle_update_report_revision,
         _episode_critique_build_benchmark,
         _episode_critique_memory_get,
         _episode_critique_memory_list,
@@ -303,6 +308,11 @@ _bind_imports(
     [
         "_add_relationship",
         "_build_paper_recommendations",
+        "_context_bundle_assemble_context_dossier",
+        "_context_bundle_build_benchmark",
+        "_context_bundle_build_reconstructed_workspace",
+        "_context_bundle_resolve_effective_context",
+        "_context_bundle_update_report_revision",
         "_jira_add_comment",
         "_jira_add_attachment",
         "_jira_create_issue",
@@ -3362,6 +3372,56 @@ async def _handle_repo_dossier_git_metadata(
     )
 
 
+async def _handle_context_bundle_resolve_effective_context(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _context_bundle_resolve_effective_context,
+        arguments,
+        tool_family_label="ContextBundle",
+    )
+
+
+async def _handle_context_bundle_assemble_context_dossier(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _context_bundle_assemble_context_dossier,
+        arguments,
+        tool_family_label="ContextBundle",
+    )
+
+
+async def _handle_context_bundle_update_report_revision(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _context_bundle_update_report_revision,
+        arguments,
+        tool_family_label="ContextBundle",
+    )
+
+
+async def _handle_context_bundle_build_reconstructed_workspace(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _context_bundle_build_reconstructed_workspace,
+        arguments,
+        tool_family_label="ContextBundle",
+    )
+
+
+async def _handle_context_bundle_build_benchmark(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _context_bundle_build_benchmark,
+        arguments,
+        tool_family_label="ContextBundle",
+    )
+
+
 async def _handle_testing_theory_create_slice(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
@@ -3731,6 +3791,11 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "repo_dossier_workflow_definition_get": _handle_repo_dossier_workflow_definition_get,
     "repo_dossier_prompt_definition_get": _handle_repo_dossier_prompt_definition_get,
     "repo_dossier_git_metadata": _handle_repo_dossier_git_metadata,
+    "context_bundle_resolve_effective_context": _handle_context_bundle_resolve_effective_context,
+    "context_bundle_assemble_context_dossier": _handle_context_bundle_assemble_context_dossier,
+    "context_bundle_update_report_revision": _handle_context_bundle_update_report_revision,
+    "context_bundle_build_reconstructed_workspace": _handle_context_bundle_build_reconstructed_workspace,
+    "context_bundle_build_benchmark": _handle_context_bundle_build_benchmark,
     "testing_theory_create_slice": _handle_testing_theory_create_slice,
     "testing_theory_import_canonical_context": _handle_testing_theory_import_canonical_context,
     "testing_theory_assert_local_claims": _handle_testing_theory_assert_local_claims,

@@ -41,6 +41,11 @@ def test_internal_mcp_catalogue_builds_and_includes_relationship_tools():
     assert "episode_critique_build_benchmark" in methods
     assert "episode_critique_memory_list" in methods
     assert "episode_critique_memory_get" in methods
+    assert "context_bundle_resolve_effective_context" in methods
+    assert "context_bundle_assemble_context_dossier" in methods
+    assert "context_bundle_update_report_revision" in methods
+    assert "context_bundle_build_reconstructed_workspace" in methods
+    assert "context_bundle_build_benchmark" in methods
     assert "repo_dossier_file_snapshot" in methods
     assert "repo_dossier_search" in methods
     assert "repo_dossier_workflow_definition_get" in methods

@@ -1,0 +1,148 @@
+{
+  "schema_version": "context_bundle_benchmark.seed_bundle.v1",
+  "default_case_set": "phase2_seed",
+  "case_sets": {
+    "phase2_seed": [
+      {
+        "case_id": "repo_document_iterative_analysis",
+        "workflow_class": "repo_document_analysis",
+        "task_summary": "Iteratively inspect repository evidence, revise a bounded report, and preserve explicit receipts rather than re-reading the whole repo transcript each round.",
+        "expected_best_strategy": "bundles_plus_dossier_reconstruction_plus_report_revision",
+        "retention_priority": "high",
+        "jira_issue_keys": ["JVNAUTOSCI-254"],
+        "notes": "Representative repo-dossier case for critic-grounded diagnosis and revision.",
+        "strategies": {
+          "bundles_only": {
+            "success": false,
+            "efficiency_score": 0.38,
+            "interaction_depth": 6,
+            "compression_events": 0,
+            "guardrail_hits": 1,
+            "failure_modes": ["lost_working_set", "receipt_drift"]
+          },
+          "bundles_plus_dossier_reconstruction": {
+            "success": true,
+            "efficiency_score": 0.73,
+            "interaction_depth": 4,
+            "compression_events": 1,
+            "guardrail_hits": 0,
+            "failure_modes": []
+          },
+          "bundles_plus_dossier_reconstruction_plus_report_revision": {
+            "success": true,
+            "efficiency_score": 0.86,
+            "interaction_depth": 3,
+            "compression_events": 2,
+            "guardrail_hits": 0,
+            "failure_modes": []
+          }
+        }
+      },
+      {
+        "case_id": "paper_analysis_hybrid_theory_branch",
+        "workflow_class": "paper_analysis",
+        "task_summary": "Track paper findings, open questions, and theory-local counterfactual hypotheses without collapsing them into one unstructured note.",
+        "expected_best_strategy": "bundles_plus_dossier_reconstruction_plus_report_revision",
+        "retention_priority": "high",
+        "jira_issue_keys": ["JVNAUTOSCI-1563"],
+        "notes": "Representative hybrid dossier/theory case with explicit branch semantics.",
+        "strategies": {
+          "bundles_only": {
+            "success": false,
+            "efficiency_score": 0.34,
+            "interaction_depth": 7,
+            "compression_events": 0,
+            "guardrail_hits": 1,
+            "failure_modes": ["branch_loss", "hypothesis_conflation"]
+          },
+          "bundles_plus_dossier_reconstruction": {
+            "success": true,
+            "efficiency_score": 0.71,
+            "interaction_depth": 4,
+            "compression_events": 1,
+            "guardrail_hits": 0,
+            "failure_modes": []
+          },
+          "bundles_plus_dossier_reconstruction_plus_report_revision": {
+            "success": true,
+            "efficiency_score": 0.88,
+            "interaction_depth": 3,
+            "compression_events": 2,
+            "guardrail_hits": 0,
+            "failure_modes": []
+          }
+        }
+      },
+      {
+        "case_id": "ontology_refinement_parent_specificity",
+        "workflow_class": "ontology_refinement",
+        "task_summary": "Carry multilingual concept evidence, revision history, and promotable typing hypotheses through an autospecialisation workflow.",
+        "expected_best_strategy": "bundles_plus_dossier_reconstruction_plus_report_revision",
+        "retention_priority": "high",
+        "jira_issue_keys": ["JVNAUTOSCI-1564"],
+        "notes": "Representative ontology-refinement case aligned with parent-specificity rumination.",
+        "strategies": {
+          "bundles_only": {
+            "success": false,
+            "efficiency_score": 0.42,
+            "interaction_depth": 5,
+            "compression_events": 0,
+            "guardrail_hits": 1,
+            "failure_modes": ["revision_loss"]
+          },
+          "bundles_plus_dossier_reconstruction": {
+            "success": true,
+            "efficiency_score": 0.78,
+            "interaction_depth": 4,
+            "compression_events": 1,
+            "guardrail_hits": 0,
+            "failure_modes": []
+          },
+          "bundles_plus_dossier_reconstruction_plus_report_revision": {
+            "success": true,
+            "efficiency_score": 0.89,
+            "interaction_depth": 3,
+            "compression_events": 2,
+            "guardrail_hits": 0,
+            "failure_modes": []
+          }
+        }
+      },
+      {
+        "case_id": "chat_long_horizon_follow_up",
+        "workflow_class": "chat_long_horizon",
+        "task_summary": "Resume a bounded multi-turn research-support thread with explicit open questions, evidence receipts, and termination budget instead of replaying the whole history.",
+        "expected_best_strategy": "bundles_plus_dossier_reconstruction_plus_report_revision",
+        "retention_priority": "medium",
+        "jira_issue_keys": ["JVNAUTOSCI-1565"],
+        "notes": "Chat-compatible long-horizon case for bounded workspace reconstruction.",
+        "strategies": {
+          "bundles_only": {
+            "success": false,
+            "efficiency_score": 0.29,
+            "interaction_depth": 8,
+            "compression_events": 0,
+            "guardrail_hits": 2,
+            "failure_modes": ["history_sprawl", "budget_blindness"]
+          },
+          "bundles_plus_dossier_reconstruction": {
+            "success": true,
+            "efficiency_score": 0.69,
+            "interaction_depth": 5,
+            "compression_events": 2,
+            "guardrail_hits": 1,
+            "failure_modes": ["report_revision_missing"]
+          },
+          "bundles_plus_dossier_reconstruction_plus_report_revision": {
+            "success": true,
+            "efficiency_score": 0.82,
+            "interaction_depth": 4,
+            "compression_events": 3,
+            "guardrail_hits": 0,
+            "failure_modes": []
+          }
+        }
+      }
+    ]
+  }
+}

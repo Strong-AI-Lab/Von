@@ -1110,6 +1110,7 @@ def _register_durable_action_modules(registry: ActionRegistry) -> None:
     """
 
     from ..skill_interop import register_skill_interop_actions
+    from .context_bundle_actions import register_context_bundle_actions
     from .control_flow_actions import register_control_flow_actions
     from .enrichment_workflow import register_enrichment_actions
     from .episode_evaluation_workflow import register_episode_evaluation_actions
@@ -1156,6 +1157,7 @@ def _register_durable_action_modules(registry: ActionRegistry) -> None:
         register_workflow_introspection_maintenance_actions,
     )
 
+    register_context_bundle_actions(registry)
     register_rag_sync_actions(registry)
     register_enrichment_actions(registry)
     register_episode_evaluation_actions(registry)

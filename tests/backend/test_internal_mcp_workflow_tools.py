@@ -1442,6 +1442,120 @@ def test_repo_dossier_git_metadata_invokes_service(monkeypatch):
     assert payload["paths"] == ["src/backend/example.py"]
 
 
+def test_context_bundle_resolve_effective_context_invokes_service(monkeypatch):
+    gateway = _build_gateway()
+    monkeypatch.setattr(
+        "src.backend.services.context_bundle_service.resolve_effective_context",
+        lambda **kwargs: {
+            "success": True,
+            "subject_id": kwargs.get("subject_id"),
+            "effective_context_bundle_ids": ["#V#bundle_parent_specificity"],
+        },
+    )
+
+    payload = gateway.invoke(
+        "context_bundle_resolve_effective_context",
+        {"subject_kind": "concept", "subject_id": "#V#graph_theorist"},
+    ).payload
+
+    assert payload["success"] is True
+    assert payload["subject_id"] == "#V#graph_theorist"
+    assert payload["effective_context_bundle_ids"] == ["#V#bundle_parent_specificity"]
+
+
+def test_context_bundle_assemble_context_dossier_invokes_service(monkeypatch):
+    gateway = _build_gateway()
+    monkeypatch.setattr(
+        "src.backend.services.context_bundle_service.assemble_context_dossier",
+        lambda **kwargs: {
+            "success": True,
+            "dossier_id": "#V#context_dossier_graph_theorist",
+            "subject_id": kwargs.get("subject_id"),
+        },
+    )
+
+    payload = gateway.invoke(
+        "context_bundle_assemble_context_dossier",
+        {
+            "name": "Concept dossier",
+            "subject_kind": "concept",
+            "subject_id": "#V#graph_theorist",
+        },
+    ).payload
+
+    assert payload["success"] is True
+    assert payload["dossier_id"] == "#V#context_dossier_graph_theorist"
+    assert payload["subject_id"] == "#V#graph_theorist"
+
+
+def test_context_bundle_update_report_revision_invokes_service(monkeypatch):
+    gateway = _build_gateway()
+    monkeypatch.setattr(
+        "src.backend.services.context_bundle_service.update_context_report_revision",
+        lambda **kwargs: {
+            "success": True,
+            "dossier_id": kwargs.get("dossier_id"),
+            "report_revision_id": "#V#workflow_report_revision_1",
+        },
+    )
+
+    payload = gateway.invoke(
+        "context_bundle_update_report_revision",
+        {
+            "dossier_id": "#V#context_dossier_graph_theorist",
+            "report_text": "Revision text",
+        },
+    ).payload
+
+    assert payload["success"] is True
+    assert payload["dossier_id"] == "#V#context_dossier_graph_theorist"
+    assert payload["report_revision_id"] == "#V#workflow_report_revision_1"
+
+
+def test_context_bundle_build_reconstructed_workspace_invokes_service(monkeypatch):
+    gateway = _build_gateway()
+    monkeypatch.setattr(
+        "src.backend.services.context_bundle_service.build_reconstructed_workspace",
+        lambda **kwargs: {
+            "success": True,
+            "workspace": {
+                "subject_id": kwargs.get("subject_id"),
+                "workspace_fingerprint": "fp-context-bundle",
+            },
+        },
+    )
+
+    payload = gateway.invoke(
+        "context_bundle_build_reconstructed_workspace",
+        {"subject_kind": "concept", "subject_id": "#V#graph_theorist"},
+    ).payload
+
+    assert payload["success"] is True
+    assert payload["workspace"]["subject_id"] == "#V#graph_theorist"
+    assert payload["workspace"]["workspace_fingerprint"] == "fp-context-bundle"
+
+
+def test_context_bundle_build_benchmark_invokes_service(monkeypatch):
+    gateway = _build_gateway()
+    monkeypatch.setattr(
+        "src.backend.services.context_bundle_benchmark_service.build_context_bundle_benchmark_report",
+        lambda **kwargs: {
+            "success": True,
+            "corpus": {"case_set": kwargs.get("case_set") or "phase2_seed"},
+            "metrics": {"case_count": 4},
+        },
+    )
+
+    payload = gateway.invoke(
+        "context_bundle_build_benchmark",
+        {"case_set": "phase2_seed"},
+    ).payload
+
+    assert payload["success"] is True
+    assert payload["corpus"]["case_set"] == "phase2_seed"
+    assert payload["metrics"]["case_count"] == 4
+
+
 def test_workflow_list_execution_traces_returns_bounded_summaries(monkeypatch):
     gateway = _build_gateway()
     monkeypatch.setattr(

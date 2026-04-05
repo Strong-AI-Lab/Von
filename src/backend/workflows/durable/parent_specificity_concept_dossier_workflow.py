@@ -13,6 +13,11 @@ from typing import Any, Mapping
 
 from ...services.concept_relation_service import find_relations_with_argument
 from ...services.concept_service import get_concept_by_concept_id
+from ...services.context_bundle_service import (
+    assemble_context_dossier,
+    build_reconstructed_workspace,
+)
+from ...services.namespace_service import derive_actor_context_from_namespace
 from ...services.text_value_service import get_texts_for_concept
 from ...vontology.utils_vontology import get_concept_display_name_with_names_fallback
 from ..action_registry import (
@@ -61,6 +66,16 @@ def _normalise_predicate(value: Any) -> str:
 def _normalise_language(value: Any) -> str | None:
     text = _normalise_text(value)
     return text or None
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
 
 
 def _infer_subject_kind(concept_doc: Mapping[str, Any]) -> str:
@@ -138,12 +153,47 @@ def _split_relation_hits(hits: list[dict[str, Any]]) -> tuple[list[dict[str, Any
     return outgoing, incoming
 
 
+def _build_parent_specificity_report_text(
+    *,
+    dossier: Mapping[str, Any],
+    summary: Mapping[str, Any],
+) -> str:
+    display_name = _normalise_text(dossier.get("display_name")) or _normalise_text(
+        dossier.get("concept_id")
+    )
+    languages = ", ".join(summary.get("languages_seen") or []) or "unknown"
+    parent_ids = ", ".join(dossier.get("current_parent_ids") or []) or "none"
+    instance_type_ids = ", ".join(dossier.get("current_instance_of_ids") or []) or "none"
+    non_hierarchy = ", ".join(
+        (dossier.get("relationship_summary") or {}).get("non_hierarchy_predicates") or []
+    ) or "none"
+
+    lines = [
+        f"Parent-specificity dossier scaffold for {display_name}.",
+        f"Languages represented: {languages}.",
+        f"Description count: {summary.get('description_count', 0)}.",
+        f"Direct parent IDs: {parent_ids}.",
+        f"Direct instance-of IDs: {instance_type_ids}.",
+        f"Non-hierarchy predicates observed: {non_hierarchy}.",
+        (
+            "Open question: do the multilingual descriptions and non-hierarchy "
+            "relations justify a narrower existing type or a new intervening subtype?"
+        ),
+    ]
+    return "\n".join(lines)
+
+
 def build_parent_specificity_concept_dossier_workflow_test_definition() -> WorkflowDefinition:
     collect = WorkflowStateSpec(
         state_id="collect",
         actions=(
             WorkflowActionInvocation(
                 action_id="parent_specificity.collect_dossier",
+                inputs={
+                    "materialise_context_dossier": True,
+                    "materialise_report_revision": True,
+                    "build_reconstructed_workspace": True,
+                },
                 description=(
                     "Assemble multilingual descriptions, names, and relation "
                     "evidence for one concept."
@@ -163,6 +213,9 @@ def build_parent_specificity_concept_dossier_workflow_test_definition() -> Workf
                 "concept_dossier_summary",
                 "concept_dossier_languages",
                 "concept_dossier_relation_count",
+                "context_dossier_id",
+                "report_revision_id",
+                "reconstructed_workspace",
             ],
         },
     )
@@ -305,12 +358,99 @@ def _handle_collect_dossier(request: WorkflowActionRequest) -> WorkflowActionRes
         "non_hierarchy_predicate_count": len(non_hierarchy_predicates),
     }
 
+    materialise_context_dossier = _truthy(
+        request.inputs.get("materialise_context_dossier")
+        or request.data.get("materialise_context_dossier")
+    )
+    materialise_report_revision = _truthy(
+        request.inputs.get("materialise_report_revision")
+        or request.data.get("materialise_report_revision")
+        or materialise_context_dossier
+    )
+    build_workspace = _truthy(
+        request.inputs.get("build_reconstructed_workspace")
+        or request.data.get("build_reconstructed_workspace")
+        or materialise_context_dossier
+    )
+
+    context_dossier_id = None
+    report_revision_id = None
+    reconstructed_workspace = None
+
+    if materialise_context_dossier:
+        namespace = request.environment.user_namespace if request.environment else None
+        user_id, org_id = derive_actor_context_from_namespace(namespace)
+        open_questions = [
+            (
+                "Do the multilingual descriptions and non-hierarchy relations justify "
+                "a narrower existing type?"
+            ),
+            (
+                "Is an intervening subtype required before changing the current "
+                "parent/type assignment?"
+            ),
+        ]
+        dossier_result = assemble_context_dossier(
+            name=f"{display_name} parent-specificity dossier",
+            dossier_id=_normalise_text(request.inputs.get("context_dossier_id")) or None,
+            subject_kind="concept",
+            subject_id=concept_id,
+            dossier_kind="ontology_refinement",
+            effective_context_bundle_ids=(
+                request.inputs.get("effective_context_bundle_ids")
+                or request.data.get("effective_context_bundle_ids")
+                or ()
+            ),
+            open_questions=open_questions,
+            immediate_context={
+                "concept_dossier": dossier,
+                "concept_dossier_summary": summary,
+            },
+            search_history=request.data.get("search_history") or (),
+            report_text=(
+                _build_parent_specificity_report_text(dossier=dossier, summary=summary)
+                if materialise_report_revision
+                else None
+            ),
+            report_title=f"{display_name} parent-specificity scaffold",
+            report_summary={
+                "source_workflow_id": PARENT_SPECIFICITY_DOSSIER_WORKFLOW_ID,
+                "concept_id": concept_id,
+                "summary": summary,
+            },
+            namespace=namespace,
+            user_id=user_id,
+            org_id=org_id,
+        )
+        if bool(dossier_result.get("success")):
+            context_dossier_id = _normalise_text(dossier_result.get("dossier_id")) or None
+            report_revision_id = (
+                _normalise_text(dossier_result.get("report_revision_id")) or None
+            )
+            if build_workspace and context_dossier_id:
+                workspace_result = build_reconstructed_workspace(
+                    subject_kind="concept",
+                    subject_id=concept_id,
+                    question=(
+                        "Assess whether this concept should gain a narrower parent "
+                        "or an intervening subtype."
+                    ),
+                    task="Prepare bounded ontology-refinement context for parent-specificity analysis.",
+                    dossier_id=context_dossier_id,
+                    report_revision_id=report_revision_id,
+                )
+                if bool(workspace_result.get("success")):
+                    reconstructed_workspace = workspace_result.get("workspace")
+
     return WorkflowActionResult(
         outputs={
             "concept_dossier": dossier,
             "concept_dossier_summary": summary,
             "concept_dossier_languages": text_summary["languages_seen"],
             "concept_dossier_relation_count": len(outgoing_hits) + len(incoming_hits),
+            "context_dossier_id": context_dossier_id,
+            "report_revision_id": report_revision_id,
+            "reconstructed_workspace": reconstructed_workspace,
         }
     )
 
