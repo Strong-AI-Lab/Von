@@ -90,6 +90,9 @@ from .workflow_registry import WorkflowRegistry
 
 logger = logging.getLogger(__name__)
 
+WORKFLOW_PUBLICATION_LIFECYCLE_SCHEMA_VERSION = "workflow_publication_lifecycle.v1"
+WORKFLOW_PUBLICATION_LIFECYCLE_TEXT_PREDICATE = "#V#hasWorkflowLifecycleJson"
+
 # Keep durable workflow identity constants local in this module to avoid importing
 # ``workflows.durable`` during authority bootstrap (that path imports registry
 # factory and can create circular imports).
@@ -116,6 +119,54 @@ JIRA_TASK_INCREMENTAL_IMPORT_WORKFLOW_ID = (
 )
 PLANNING_WORKFLOW_ID = "#V#planning_workflow"
 RUMINATION_WORKFLOW_ID = "#V#rumination_workflow"
+
+
+def upsert_workflow_publication_lifecycle(
+    *,
+    workflow_id: str,
+    phase: str,
+    published: bool,
+    validation_passed: bool | None = None,
+    postconditions_verified: bool | None = None,
+    optional_test_instance_id: str | None = None,
+    last_error: str | None = None,
+) -> dict[str, Any]:
+    """Persist canonical publication lifecycle metadata for a workflow."""
+
+    workflow_id_text = str(workflow_id or "").strip()
+    phase_text = str(phase or "").strip() or "draft"
+    if not workflow_id_text:
+        raise ValueError("workflow_id_required")
+
+    payload: dict[str, Any] = {
+        "schema_version": WORKFLOW_PUBLICATION_LIFECYCLE_SCHEMA_VERSION,
+        "phase": phase_text,
+        "published": bool(published),
+    }
+    if validation_passed is not None:
+        payload["validation_passed"] = bool(validation_passed)
+    if postconditions_verified is not None:
+        payload["postconditions_verified"] = bool(postconditions_verified)
+    optional_test_instance_id_text = str(optional_test_instance_id or "").strip()
+    if optional_test_instance_id_text:
+        payload["optional_test_instance_id"] = optional_test_instance_id_text
+    last_error_text = str(last_error or "").strip()
+    if last_error_text:
+        payload["last_error"] = last_error_text
+
+    concept_service.update_concept(
+        workflow_id_text,
+        {"concept_data.workflow_publication_lifecycle": payload},
+    )
+    upsert_singleton_text_relation(
+        subject_concept_id=workflow_id_text,
+        predicate=WORKFLOW_PUBLICATION_LIFECYCLE_TEXT_PREDICATE,
+        text=json.dumps(payload, ensure_ascii=True, sort_keys=True),
+        lang="en-NZ",
+        context={"source": "workflow_concept_authority_service"},
+        garbage_collect=True,
+    )
+    return payload
 
 
 # Ordered from preferred canonical type to legacy fallbacks.
@@ -2026,6 +2077,7 @@ def publish_canonical_chat_workflow_graphs(
     *,
     registry: WorkflowRegistry | None = None,
     create_missing: bool = True,
+    upsert_publication_lifecycle_metadata: bool = False,
     target_workflow_ids: Sequence[str] | None = None,
     publication_specs: Mapping[str, _CanonicalWorkflowPublicationSpec] | None = None,
     publication_definitions: Mapping[str, WorkflowDefinition] | None = None,
@@ -2747,6 +2799,21 @@ def publish_canonical_chat_workflow_graphs(
                 )
                 continue
 
+            if upsert_publication_lifecycle_metadata:
+                try:
+                    upsert_workflow_publication_lifecycle(
+                        workflow_id=workflow_id,
+                        phase="published",
+                        published=True,
+                        last_error=None,
+                    )
+                except Exception as exc:
+                    errors_by_workflow_id[workflow_id] = (
+                        "publication_lifecycle_upsert_failed:"
+                        f"{workflow_id}:{type(exc).__name__}:{exc}"
+                    )
+                    continue
+
             published.append(workflow_id)
             _invalidate_runnable_verification_for_workflow(
                 workflow_id,
@@ -2796,6 +2863,7 @@ def publish_workflow_definition_from_definition(
     )
     return publish_canonical_chat_workflow_graphs(
         create_missing=create_missing,
+        upsert_publication_lifecycle_metadata=True,
         target_workflow_ids=[workflow_id],
         publication_specs={workflow_id: publication_spec},
         publication_definitions={workflow_id: definition},

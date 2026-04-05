@@ -2078,6 +2078,17 @@ def _download_paper(**kwargs):
     namespace_override = _normalise_namespace_override(kwargs.get("namespace"))
     cache_diagnostics = _inspect_arxiv_cache(str(arxiv_id))
     cache_recovery_action = _recommended_arxiv_cache_recovery_action(cache_diagnostics)
+    partial_cache_recovery_attempted = False
+    partial_cache_markdown_deleted = False
+    partial_cache_recovery_error: str | None = None
+    if cache_diagnostics.get("cache_state") == "markdown_only_partial_cache":
+        partial_cache_recovery_attempted = True
+        partial_cache_markdown_deleted, partial_cache_recovery_error = (
+            _best_effort_delete_cached_file(
+                cache_root=_get_arxiv_cache_root(),
+                file_path=cache_diagnostics.get("cached_markdown_path"),
+            )
+        )
 
     # If the PDF is already present in the local arXiv cache, prefer finalise_cached_paper so
     # we can upload to durable storage and register the Computer File Copy without calling
@@ -2118,6 +2129,19 @@ def _download_paper(**kwargs):
                     stored.setdefault("success", True)
                 stored.setdefault("cache_diagnostics", cache_diagnostics)
                 stored.setdefault("cache_recovery_action", cache_recovery_action)
+                stored.setdefault(
+                    "partial_cache_recovery_attempted",
+                    partial_cache_recovery_attempted,
+                )
+                stored.setdefault(
+                    "partial_cache_markdown_deleted",
+                    partial_cache_markdown_deleted,
+                )
+                if partial_cache_recovery_error:
+                    stored.setdefault(
+                        "partial_cache_recovery_error",
+                        partial_cache_recovery_error,
+                    )
                 if cache_diagnostics.get("cache_state") == "markdown_only_partial_cache":
                     stored.setdefault("cache_recovery_performed", True)
                     stored.setdefault("acquisition_path", "reacquire_partial_cache")
@@ -2256,6 +2280,9 @@ def _download_paper(**kwargs):
                     "cache_state": cache_diagnostics.get("cache_state"),
                     "cache_diagnostics": cache_diagnostics,
                     "recommended_recovery_action": cache_recovery_action,
+                    "partial_cache_recovery_attempted": partial_cache_recovery_attempted,
+                    "partial_cache_markdown_deleted": partial_cache_markdown_deleted,
+                    "partial_cache_recovery_error": partial_cache_recovery_error,
                 },
             )
         except Exception as e:
@@ -2268,6 +2295,9 @@ def _download_paper(**kwargs):
                     "cache_state": cache_diagnostics.get("cache_state"),
                     "cache_diagnostics": cache_diagnostics,
                     "recommended_recovery_action": cache_recovery_action,
+                    "partial_cache_recovery_attempted": partial_cache_recovery_attempted,
+                    "partial_cache_markdown_deleted": partial_cache_markdown_deleted,
+                    "partial_cache_recovery_error": partial_cache_recovery_error,
                 },
             )
 

@@ -6463,6 +6463,81 @@ def test_tool_planner_skips_continuation_after_explicit_workflow_divergence(
     )
 
 
+def test_tool_planner_skips_continuation_when_selected_workflow_is_not_executable(
+    monkeypatch,
+):
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_continuation_service.get_session_workflow_continuation_context",
+        lambda **_kwargs: {
+            "session_id": "session-1718",
+            "selected_workflow_id": "#V#arxiv_paper_representation_workflow",
+            "selected_workflow_is_executable": False,
+            "selected_workflow_executability_reason": "draft_not_published",
+            "selected_workflow_executability_detail": (
+                "workflow_not_published:phase=draft"
+            ),
+            "completion_gate_decision": "follow_up_required",
+            "requires_follow_up": True,
+            "safe_to_claim_completion": False,
+            "has_unresolved_required_effects": True,
+            "unresolved_required_effects": [
+                {
+                    "effect_id": "effect_workflow_execution_1",
+                    "effect_type": "workflow_execution",
+                    "description": (
+                        "Execute the selected custom workflow to a successful terminal state."
+                    ),
+                }
+            ],
+        },
+    )
+
+    llm = _CapturingLLM(
+        [
+            TOOL_CALLING_WORKFLOW_ID,
+            "I will continue by inspecting the available workflow candidates.",
+            "Follow-through response.",
+            "Final response after tool workflow.",
+        ]
+    )
+
+    result = orchestrator.run(
+        prompt="Represent this paper https://arxiv.org/abs/2603.01896",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+        conversation_session_id="session-1718",
+    )
+
+    assert result.workflow_routing is not None
+    planner_context = llm.calls[1]["context"] or []
+    planner_prompt_context = "\n".join(
+        str(message.get("content") or "")
+        for message in planner_context
+        if isinstance(message, dict)
+    )
+    assert "ACTIVE WORKFLOW CONTINUATION CONTEXT" not in planner_prompt_context
+
+    continuation_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "workflow_continuation_context"
+        ),
+        None,
+    )
+    assert continuation_entry is not None
+    assert continuation_entry.get("applied") is False
+    assert continuation_entry.get("reason") == "selected_workflow_not_executable"
+    assert continuation_entry.get("context", {}).get(
+        "selected_workflow_executability_reason"
+    ) == "draft_not_published"
+
+
 # ---------------------------------------------------------------------------
 # JVNAUTOSCI-825: Routing info on tool-calling path.
 # ---------------------------------------------------------------------------

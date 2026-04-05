@@ -110,6 +110,68 @@ def test_workflow_state_authoritative_overrides_prompt_shape() -> None:
     assert decision["decision_source"] == "workflow_state"
 
 
+def test_non_executable_selected_workflow_fails_closed(monkeypatch) -> None:
+    monkeypatch.setattr(
+        service,
+        "classify_workflow_concept_executability",
+        lambda _workflow_id: (False, "draft_not_published", "workflow_not_published"),
+    )
+
+    monkeypatch.setattr(
+        service,
+        "get_latest_turn_execution_record_projection",
+        lambda **_kwargs: {
+            "request_id": "req-1718",
+            "workflow_selection": {
+                "selected_workflow_id": "#V#arxiv_paper_representation_workflow",
+                "selector_verdict": "rag_selected",
+                "selector_source": "selector",
+            },
+            "completion_gate": {
+                "decision": "follow_up_required",
+                "requires_follow_up": True,
+                "safe_to_claim_completion": False,
+            },
+            "required_effects": [
+                {
+                    "effect_id": "effect_workflow_execution_1",
+                    "effect_type": "workflow_execution",
+                    "status": "not_executed",
+                    "description": "Execute the selected custom workflow to a successful terminal state.",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        service,
+        "get_latest_workflow_use_episode",
+        lambda **_kwargs: {
+            "workflow_id": "#V#arxiv_paper_representation_workflow",
+            "session_id": "session-1718",
+        },
+    )
+
+    context = service.get_session_workflow_continuation_context(
+        session_id="session-1718",
+        namespace="#V#user@test_org",
+        user_id="#V#user",
+    )
+
+    assert context is not None
+    assert context["selected_workflow_is_executable"] is False
+    assert context["selected_workflow_executability_reason"] == "draft_not_published"
+
+    decision = service.assess_prompt_for_workflow_continuation(
+        prompt="Represent this paper https://arxiv.org/abs/2603.01896",
+        continuation_context=context,
+    )
+
+    assert decision["applies"] is False
+    assert decision["reason"] == "selected_workflow_not_executable"
+    assert decision["decision_source"] == "workflow_state"
+    assert decision["selected_workflow_executability_reason"] == "draft_not_published"
+
+
 def test_explicit_workflow_rejection_suppresses_authoritative_continuation() -> None:
     decision = service.assess_prompt_for_workflow_continuation(
         prompt=(

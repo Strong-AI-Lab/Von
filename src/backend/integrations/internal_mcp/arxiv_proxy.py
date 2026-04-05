@@ -427,8 +427,13 @@ def _normalise_path_candidate(value: str) -> str | None:
         if parsed.scheme != "file":
             return None
         path = unquote(parsed.path or "")
-        if parsed.netloc and parsed.netloc not in {"", "localhost"}:
-            path = f"//{parsed.netloc}{path}"
+        netloc = unquote(parsed.netloc or "")
+        if re.match(r"^[A-Za-z]:$", netloc):
+            path = f"{netloc}{path}"
+        elif re.match(r"^[A-Za-z]:[\\\\/]", netloc):
+            path = netloc + path
+        elif netloc and netloc not in {"", "localhost"}:
+            path = f"//{netloc}{path}"
         if re.match(r"^/[A-Za-z]:/", path):
             path = path[1:]
         if path and path.lower().endswith(".md"):

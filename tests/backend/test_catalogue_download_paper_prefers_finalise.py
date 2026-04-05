@@ -218,6 +218,85 @@ def test_download_paper_reports_partial_cache_diagnostics_on_proxy_failure(
     assert cache_diagnostics["partial_cache_without_pdf"] is True
 
 
+def test_download_paper_reacquires_pdf_after_partial_markdown_cache(
+    monkeypatch, tmp_path
+):
+    cache_dir = tmp_path / "arxiv_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    markdown_path = cache_dir / "2603.21702.md"
+    markdown_path.write_text("# Partial cache only\n", encoding="utf-8")
+    monkeypatch.setenv("ARXIV_CACHE_PATH", str(cache_dir))
+
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: "#V#workflow_user",
+    )
+
+    from src.backend.integrations.internal_mcp import catalogue
+
+    pdf_path = cache_dir / "2603.21702.pdf"
+    download_calls: list[dict[str, Any]] = []
+
+    class _Proxy:
+        async def download_paper(self, *, arxiv_id: str, filename=None):
+            download_calls.append(
+                {
+                    "arxiv_id": arxiv_id,
+                    "markdown_exists_before_download": markdown_path.exists(),
+                }
+            )
+            pdf_path.write_bytes(b"%PDF-1.4\n%fake\n")
+            return {
+                "success": True,
+                "arxiv_id": arxiv_id,
+                "file_path": str(pdf_path),
+                "size_bytes": pdf_path.stat().st_size,
+                "sha256": "deadbeef",
+                "storage": {
+                    "backend": "local",
+                    "key": f"arxiv/papers/{arxiv_id}.pdf",
+                    "uri": f"local://arxiv/papers/{arxiv_id}.pdf",
+                },
+            }
+
+    async def _fake_get_proxy():
+        return _Proxy()
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.arxiv_proxy_mcp.get_arxiv_proxy",
+        _fake_get_proxy,
+    )
+
+    class _FakeRecord:
+        concept_id = "#V#computer_file_copy_test"
+        uploaded_at = "2026-01-01T00:00:00+00:00"
+
+    monkeypatch.setattr(
+        "src.backend.services.computer_file_copy_service.create_computer_file_copy_instance",
+        lambda **_kwargs: _FakeRecord(),
+    )
+
+    result = catalogue._download_paper(
+        arxiv_id="2603.21702",
+        namespace="#V#workflow_user@default",
+    )
+
+    assert result["success"] is True
+    assert result["computer_file_copy_concept_id"] == "#V#computer_file_copy_test"
+    assert result["cache_recovery_action"] == "reacquire_pdf_from_source"
+    assert result["cache_recovery_performed"] is True
+    assert result["partial_cache_recovery_attempted"] is True
+    assert result["partial_cache_markdown_deleted"] is True
+    assert download_calls == [
+        {
+            "arxiv_id": "2603.21702",
+            "markdown_exists_before_download": False,
+        }
+    ]
+    assert markdown_path.exists() is False
+    assert pdf_path.exists() is False
+
+
 def test_materialise_scholarly_representation_for_file_copy_prefers_explicit_arxiv_path(
     monkeypatch, tmp_path
 ):

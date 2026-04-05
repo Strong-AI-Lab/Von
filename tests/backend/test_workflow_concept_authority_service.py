@@ -4,7 +4,10 @@ from typing import Any, cast
 import pytest
 
 from src.backend.workflows import workflow_concept_authority_service as authority_service
-from src.backend.workflows.vontology_loader import load_workflow_definition_from_vontology
+from src.backend.workflows.vontology_loader import (
+    load_workflow_definition_from_vontology,
+    resolve_workflow_publication_lifecycle,
+)
 from src.backend.workflows.workflow_definition_identity_service import (
     build_workflow_definition_identity,
 )
@@ -1417,3 +1420,35 @@ def test_publish_canonical_graphs_materialises_routing_and_discovery_metadata(
         "Create a workflow from this description request" in example
         for example in examples
     )
+
+
+def test_publish_workflow_definition_from_definition_marks_workflow_published(
+    _reset_mock_workflow_graph_db,
+) -> None:
+    from workflow_test_support import build_authoritative_test_workflow_definition
+
+    definition = build_authoritative_test_workflow_definition(
+        authority_service.WORKFLOW_CREATION_WORKFLOW_ID
+    )
+
+    report = authority_service.publish_workflow_definition_from_definition(
+        definition=definition,
+        create_missing=True,
+        purpose="Workflow Studio apply path test.",
+    )
+
+    assert authority_service.WORKFLOW_CREATION_WORKFLOW_ID in (
+        report.get("published_workflow_ids") or []
+    )
+    lifecycle, lifecycle_source = resolve_workflow_publication_lifecycle(
+        authority_service.WORKFLOW_CREATION_WORKFLOW_ID
+    )
+    assert lifecycle == {
+        "schema_version": "workflow_publication_lifecycle.v1",
+        "phase": "published",
+        "published": True,
+    }
+    assert lifecycle_source in {
+        "concept_data",
+        "text_relation:#V#hasWorkflowLifecycleJson",
+    }

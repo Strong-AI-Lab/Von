@@ -67,6 +67,21 @@ def test_extract_download_file_path_from_markdown_uri():
     )
 
 
+def test_extract_download_file_path_from_windows_file_uri_with_drive_path():
+    payload = {
+        "resource": {
+            "uri": "file://C:\\Users\\witbr\\data\\arxiv_cache\\2506.16596.pdf"
+        }
+    }
+
+    assert _assert_extract(arxiv_proxy, payload).startswith(
+        "C:/Users/witbr/data/arxiv_cache/"
+    )
+    assert _assert_extract(arxiv_proxy_mcp, payload).startswith(
+        "C:/Users/witbr/data/arxiv_cache/"
+    )
+
+
 def test_extract_download_file_path_from_unexpected_key():
     payload = {"result": {"file": "data/arxiv_cache/2506.16596.pdf"}}
 

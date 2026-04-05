@@ -22180,7 +22180,18 @@ async function showLlmDebugPopup(turnId, options = {}) {
     if (!hasLlmDebugPayload(debugDataRaw)) {
         debugDataRaw = await loadLlmDebugDataForTurn(turnId, options);
     }
-    const debugData = enrichDebugDataWithSpeechPlanning(debugDataRaw, { turnId });
+    let debugData = enrichDebugDataWithSpeechPlanning(debugDataRaw, { turnId });
+    if (
+        debugData
+        && !cloneConversationHistoryLocation(
+            debugData.turn_execution_diagnostics?.history_location || debugData.history_location
+        )
+    ) {
+        debugData = await hydrateTurnHistoryLocationFromConversationLocator(
+            turnId,
+            debugData
+        );
+    }
     if (!debugData) {
         console.warn('[chatTab] No debug data for turn:', turnId);
         return;
@@ -22868,6 +22879,81 @@ async function fetchConversationTelemetryLocatorPayload(sessionId) {
         console.warn('[chatTab] Failed to fetch server conversation telemetry locator:', error);
         return null;
     }
+}
+
+function findConversationTelemetryLocatorTurn(payload, { turnId = null, requestId = null } = {}) {
+    const turns = Array.isArray(payload?.turns) ? payload.turns : [];
+    const cleanRequestId = typeof requestId === 'string' ? requestId.trim() : '';
+    const cleanTurnId = typeof turnId === 'string' ? turnId.trim() : '';
+
+    if (cleanRequestId) {
+        const matchedByRequestId = turns.find((entry) => {
+            const candidate = typeof entry?.request_id === 'string' ? entry.request_id.trim() : '';
+            return candidate && candidate === cleanRequestId;
+        });
+        if (matchedByRequestId) {
+            return matchedByRequestId;
+        }
+    }
+
+    if (!cleanTurnId) {
+        return null;
+    }
+
+    return turns.find((entry) => {
+        const candidate = typeof entry?.turn_id === 'string' ? entry.turn_id.trim() : '';
+        return candidate && candidate === cleanTurnId;
+    }) || null;
+}
+
+async function hydrateTurnHistoryLocationFromConversationLocator(turnId, debugData) {
+    if (!debugData || typeof debugData !== 'object') {
+        return debugData;
+    }
+
+    const existingHistoryLocation = cloneConversationHistoryLocation(
+        debugData.turn_execution_diagnostics?.history_location || debugData.history_location
+    );
+    if (existingHistoryLocation) {
+        return debugData;
+    }
+
+    const requestId = resolveConversationTelemetryRequestId(debugData);
+    const sessionId = typeof activeChatSessionId === 'string' ? activeChatSessionId.trim() : '';
+    if (!sessionId || (!requestId && !(typeof turnId === 'string' && turnId.trim()))) {
+        return debugData;
+    }
+
+    const locatorPayload = await fetchConversationTelemetryLocatorPayload(sessionId);
+    if (!locatorPayload) {
+        return debugData;
+    }
+
+    const matchedTurn = findConversationTelemetryLocatorTurn(locatorPayload, {
+        turnId,
+        requestId
+    });
+    const historyLocation = cloneConversationHistoryLocation(matchedTurn?.history_location);
+    if (!historyLocation) {
+        return debugData;
+    }
+
+    const merged = {
+        ...debugData,
+        history_location: historyLocation
+    };
+    if (debugData.turn_execution_diagnostics && typeof debugData.turn_execution_diagnostics === 'object') {
+        merged.turn_execution_diagnostics = {
+            ...debugData.turn_execution_diagnostics,
+            history_location: cloneConversationHistoryLocation(
+                debugData.turn_execution_diagnostics.history_location || historyLocation
+            )
+        };
+    }
+    if (typeof turnId === 'string' && turnId.trim()) {
+        setLlmDebugDataEntry(turnId, merged);
+    }
+    return merged;
 }
 
 function buildConversationLlmTelemetryLocatorPayload() {

@@ -19,6 +19,7 @@ from ..workflows.static_input_binding_utils import stable_static_input_bindings
 from ..workflows.vontology_loader import (
     build_workflow_process_graph,
     load_workflow_definition_from_vontology,
+    resolve_workflow_publication_lifecycle,
 )
 from ..workflows.workflow_definition_identity_service import (
     validate_workflow_definition_contract,
@@ -762,6 +763,22 @@ def _validate_existing_materialisation(
             workflow_status_by_id[workflow_id] = workflow_status
             continue
 
+        publication_lifecycle, publication_lifecycle_source = (
+            resolve_workflow_publication_lifecycle(workflow_id)
+        )
+        if (
+            isinstance(publication_lifecycle, dict)
+            and publication_lifecycle.get("published") is False
+        ):
+            workflow_status["status"] = "workflow_not_published"
+            workflow_status["issue_code"] = "workflow_not_published"
+            workflow_status["publication_lifecycle"] = dict(publication_lifecycle)
+            workflow_status["publication_lifecycle_source"] = (
+                str(publication_lifecycle_source or "").strip() or None
+            )
+            workflow_status_by_id[workflow_id] = workflow_status
+            continue
+
         publication_spec = publication_specs.get(workflow_id)
         validation = validate_workflow_definition_contract(
             definition=definition,
@@ -920,6 +937,7 @@ def bootstrap_repo_seed_workflow_bundle(
         else:
             publication_report = authority_service.publish_canonical_chat_workflow_graphs(
                 target_workflow_ids=target_workflow_ids,
+                upsert_publication_lifecycle_metadata=True,
                 publication_specs=publication_specs,
                 publication_definitions=authority_service._build_definition_map_from_publication_specs(
                     publication_specs

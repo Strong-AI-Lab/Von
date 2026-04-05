@@ -12,6 +12,7 @@ from typing import Any, Mapping
 
 from .file_copy_reference_service import is_file_copy_concept_id
 from .turn_execution_record_service import get_latest_turn_execution_record_projection
+from .workflow_discovery_service import classify_workflow_concept_executability
 from .workflow_episode_service import get_latest_workflow_use_episode
 
 _CONCEPT_ID_PATTERN = re.compile(
@@ -107,6 +108,32 @@ def _normalise_required_effect(effect: Mapping[str, Any]) -> dict[str, Any] | No
         ),
         "failure_code": _safe_str(effect.get("failure_code")),
         "status_reason": _safe_str(effect.get("status_reason")),
+    }
+
+
+def _classify_selected_workflow_executability(
+    selected_workflow_id: str | None,
+) -> dict[str, Any] | None:
+    workflow_id = _safe_str(selected_workflow_id)
+    if not workflow_id:
+        return None
+    try:
+        is_executable, reason, detail = classify_workflow_concept_executability(
+            workflow_id
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        return {
+            "selected_workflow_id": workflow_id,
+            "selected_workflow_is_executable": False,
+            "selected_workflow_executability_reason": "classification_error",
+            "selected_workflow_executability_detail": type(exc).__name__,
+        }
+
+    return {
+        "selected_workflow_id": workflow_id,
+        "selected_workflow_is_executable": bool(is_executable),
+        "selected_workflow_executability_reason": _safe_str(reason),
+        "selected_workflow_executability_detail": _safe_str(detail),
     }
 
 
@@ -209,6 +236,9 @@ def get_session_workflow_continuation_context(
     selected_workflow_id = _safe_str(workflow_selection.get("selected_workflow_id"))
     if selected_workflow_id is None and isinstance(latest_episode, Mapping):
         selected_workflow_id = _safe_str(latest_episode.get("workflow_id"))
+    selected_workflow_executability = _classify_selected_workflow_executability(
+        selected_workflow_id
+    )
 
     if (
         not unresolved_required_effects
@@ -232,6 +262,29 @@ def get_session_workflow_continuation_context(
             else None
         ),
         "selected_workflow_id": selected_workflow_id,
+        "selected_workflow_is_executable": (
+            selected_workflow_executability.get("selected_workflow_is_executable")
+            if isinstance(selected_workflow_executability, Mapping)
+            else None
+        ),
+        "selected_workflow_executability_reason": (
+            _safe_str(
+                selected_workflow_executability.get(
+                    "selected_workflow_executability_reason"
+                )
+            )
+            if isinstance(selected_workflow_executability, Mapping)
+            else None
+        ),
+        "selected_workflow_executability_detail": (
+            _safe_str(
+                selected_workflow_executability.get(
+                    "selected_workflow_executability_detail"
+                )
+            )
+            if isinstance(selected_workflow_executability, Mapping)
+            else None
+        ),
         "selector_verdict": _safe_str(workflow_selection.get("selector_verdict")),
         "selector_source": _safe_str(workflow_selection.get("selector_source")) or "default",
         "completion_gate_decision": _safe_str(completion_gate.get("decision")),
@@ -290,6 +343,26 @@ def assess_prompt_for_workflow_continuation(
             "decision_source": "workflow_state",
         }
 
+    selected_workflow_id = _safe_str(continuation_context.get("selected_workflow_id"))
+    selected_workflow_is_executable = continuation_context.get(
+        "selected_workflow_is_executable"
+    )
+    if (
+        selected_workflow_id
+        and selected_workflow_is_executable is False
+    ):
+        return {
+            "applies": False,
+            "reason": "selected_workflow_not_executable",
+            "decision_source": "workflow_state",
+            "selected_workflow_executability_reason": _safe_str(
+                continuation_context.get("selected_workflow_executability_reason")
+            ),
+            "selected_workflow_executability_detail": _safe_str(
+                continuation_context.get("selected_workflow_executability_detail")
+            ),
+        }
+
     prompt_divergence = _detect_prompt_level_workflow_divergence(
         prompt=prompt_text,
         continuation_context=continuation_context,
@@ -308,9 +381,7 @@ def assess_prompt_for_workflow_continuation(
     # Workflow-state-authoritative path: when open work exists under a
     # specific workflow, the persisted continuation state is authoritative
     # unless the user explicitly rejects or redirects it.
-    has_specific_workflow = bool(
-        _safe_str(continuation_context.get("selected_workflow_id"))
-    )
+    has_specific_workflow = bool(selected_workflow_id)
     if has_specific_workflow:
         return {
             "applies": True,

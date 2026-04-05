@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from src.backend.services import concept_service
+from src.backend.services.arxiv_ingestion_testing_service import (
+    cleanup_arxiv_paper_ingestion_test_artifacts,
+    prepare_arxiv_paper_ingestion_test_fixture,
+    verify_arxiv_paper_ingestion_test_result,
+)
 from src.backend.services.paper_representation_workflow_vontology_service import (
     ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
     SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID,
@@ -18,11 +24,15 @@ from src.backend.services.workflow_discovery_service import (
     invalidate_workflow_discovery_executability_caches,
 )
 from src.backend.services.text_value_service import upsert_singleton_text_relation
+from src.backend.workflows.action_registry import WorkflowEnvironment
 from src.backend.workflows import workflow_concept_authority_service as authority_service
+from src.backend.workflows.durable import registry_factory
+from src.backend.workflows.engine import WorkflowExecutor
 from src.backend.workflows.vontology_loader import (
     load_workflow_definition_from_vontology,
     resolve_workflow_discovery_exemplars,
     resolve_workflow_launch_input_contract,
+    resolve_workflow_publication_lifecycle,
     resolve_workflow_routing_profile,
 )
 
@@ -467,6 +477,60 @@ def test_bootstrap_preserves_authoritative_state_when_repo_seed_snapshot_is_stal
     assert repaired_discovery_exemplars == updated_discovery_exemplars
 
 
+def test_bootstrap_repairs_explicit_unpublished_lifecycle(
+    _reset_mock_db: Any,
+) -> None:
+    bootstrap_canonical_paper_representation_workflows()
+
+    unpublished_payload = {
+        "schema_version": "workflow_publication_lifecycle.v1",
+        "phase": "draft",
+        "published": False,
+        "validation_passed": False,
+        "postconditions_verified": False,
+    }
+    concept_service.update_concept(
+        ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+        {"concept_data.workflow_publication_lifecycle": unpublished_payload},
+    )
+    upsert_singleton_text_relation(
+        subject_concept_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+        predicate="#V#hasWorkflowLifecycleJson",
+        text=json.dumps(unpublished_payload, ensure_ascii=True, sort_keys=True),
+        lang="en-NZ",
+        context={"source": "test_bootstrap_repairs_explicit_unpublished_lifecycle"},
+        garbage_collect=True,
+    )
+    invalidate_workflow_discovery_executability_caches()
+
+    repair_report = bootstrap_canonical_paper_representation_workflows()
+    preflight = repair_report.get("materialisation_preflight") or {}
+    publication = repair_report.get("publication") or {}
+
+    assert preflight.get("drift_detected") is True
+    assert ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID in (
+        preflight.get("drift_workflow_ids") or []
+    )
+    assert "workflow_not_published" in (preflight.get("issue_codes") or [])
+    assert publication.get("materialisation_status") == "repaired_from_repo_seed"
+    assert ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID in (
+        publication.get("published_workflow_ids") or []
+    )
+
+    repaired_lifecycle, repaired_source = resolve_workflow_publication_lifecycle(
+        ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
+    )
+    assert repaired_lifecycle == {
+        "schema_version": "workflow_publication_lifecycle.v1",
+        "phase": "published",
+        "published": True,
+    }
+    assert repaired_source in {
+        "concept_data",
+        "text_relation:#V#hasWorkflowLifecycleJson",
+    }
+
+
 def test_export_refreshes_paper_repo_seed_bundle_from_authority(
     _reset_mock_db: Any,
     tmp_path: Path,
@@ -560,3 +624,88 @@ def test_export_refreshes_paper_repo_seed_bundle_from_authority(
         asset_path=tmp_asset_path
     )
     assert after_diff.get("has_differences") is False
+
+
+def test_live_arxiv_paper_representation_workflow_acceptance(
+    _reset_mock_db: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if os.getenv("VON_RUN_LIVE_ARXIV_WORKFLOW_ACCEPTANCE") != "1":
+        pytest.skip("Set VON_RUN_LIVE_ARXIV_WORKFLOW_ACCEPTANCE=1 to run live arXiv acceptance.")
+
+    monkeypatch.setenv("VON_BLOB_STORE_BACKEND", "local")
+    monkeypatch.setenv("VON_EVENT_WORKFLOW_INTEGRATION_ENABLE", "0")
+
+    bootstrap_canonical_paper_representation_workflows()
+    registry_factory._resolve_subworkflow_definition.cache_clear()
+
+    definition = load_workflow_definition_from_vontology(
+        ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
+    )
+    assert definition is not None
+
+    fixture = prepare_arxiv_paper_ingestion_test_fixture(
+        prompt_text="Represent this paper https://arxiv.org/abs/2603.01896",
+        source_uri="https://arxiv.org/abs/2603.01896",
+        arxiv_id="2603.01896",
+        user_concept_id="#V#michael_witbrock",
+        timeout_seconds=45.0,
+        repair_existing_artifacts=True,
+    )
+    assert fixture.get("success") is True, fixture
+
+    result = WorkflowExecutor(
+        registry=registry_factory.build_durable_action_registry(),
+        max_transitions=40,
+    ).run(
+        definition,
+        environment=WorkflowEnvironment(
+            llm_client=None,
+            user_namespace="#V#michael_witbrock@university_of_auckland_strong_ai_lab",
+            user_concept_id="#V#michael_witbrock",
+            org_concept_id="#V#university_of_auckland_strong_ai_lab",
+        ),
+        data={
+            "prompt": fixture["prompt_text"],
+            "arxiv_id": fixture["arxiv_id"],
+            "source_uri": fixture["source_uri"],
+            "original_filename": fixture["original_filename"],
+        },
+    )
+
+    verification = verify_arxiv_paper_ingestion_test_result(
+        workflow_execution={
+            "completed": result.completed,
+            "final_state": result.final_state,
+            "error": result.error,
+            "final_status": "completed" if result.completed else "failed",
+            "outputs": dict(result.data),
+        },
+        arxiv_id=fixture["arxiv_id"],
+        source_uri=fixture["source_uri"],
+        expected_title=fixture["expected_title"],
+        expected_summary=fixture["expected_summary"],
+        expected_publication_date=fixture["expected_publication_date"],
+        expected_author_names=fixture["expected_author_names"],
+        expected_author_concept_ids=fixture["expected_author_concept_ids"],
+        expected_topic_labels=fixture["expected_topic_labels"],
+        expected_topic_concept_ids=fixture["expected_topic_concept_ids"],
+        paper_concept_id=fixture["paper_concept_id"],
+    )
+
+    cleanup = cleanup_arxiv_paper_ingestion_test_artifacts(
+        paper_concept_id=verification.get("paper_concept_id") or fixture["paper_concept_id"],
+        file_copy_concept_id=verification.get("file_copy_concept_id"),
+        author_concept_ids=fixture["expected_author_concept_ids"],
+        topic_concept_ids=fixture["expected_topic_concept_ids"],
+        preexisting_author_concept_ids=fixture["preexisting_author_concept_ids"],
+        preexisting_topic_concept_ids=fixture["preexisting_topic_concept_ids"],
+    )
+
+    assert result.completed is True
+    assert result.final_state == authority_service._step_concept_id(
+        workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+        state_id="completed",
+    )
+    assert verification.get("verification_passed") is True, verification
+    assert cleanup.get("cleanup_passed") is True, cleanup
