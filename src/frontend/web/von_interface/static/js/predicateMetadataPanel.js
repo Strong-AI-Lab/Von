@@ -6,6 +6,7 @@
  */
 
 import { fetchPredicateMetadata } from './predicateUtils.js';
+import { createVontologyCartouche, normalisePotentialConceptId } from './utils/textDecorator.js';
 
 /**
  * Create a predicate metadata display panel.
@@ -103,28 +104,16 @@ export function createPredicateMetadataPanel(conceptId, container) {
 
             // Domain constraints (subject types)
             if (state.metadata.domain_constraints && state.metadata.domain_constraints.length > 0) {
-                const domainList = document.createElement('div');
-                domainList.className = 'constraint-list';
-                domainList.innerHTML = `
-                    <strong>Domain (Subject Types):</strong>
-                    <ul>
-                        ${state.metadata.domain_constraints.map(c => `<li>${formatConcept(c)}</li>`).join('')}
-                    </ul>
-                `;
-                constraintsSection.appendChild(domainList);
+                constraintsSection.appendChild(
+                    createConstraintList('Domain (Subject Types)', state.metadata.domain_constraints)
+                );
             }
 
             // Range constraints (object types) - for binary predicates
             if (state.metadata.range_constraints && state.metadata.range_constraints.length > 0) {
-                const rangeList = document.createElement('div');
-                rangeList.className = 'constraint-list';
-                rangeList.innerHTML = `
-                    <strong>Range (Object Types):</strong>
-                    <ul>
-                        ${state.metadata.range_constraints.map(c => `<li>${formatConcept(c)}</li>`).join('')}
-                    </ul>
-                `;
-                constraintsSection.appendChild(rangeList);
+                constraintsSection.appendChild(
+                    createConstraintList('Range (Object Types)', state.metadata.range_constraints)
+                );
             }
 
             // Argument types - for n-ary predicates
@@ -136,7 +125,11 @@ export function createPredicateMetadataPanel(conceptId, container) {
                 const argsList = document.createElement('ul');
                 Object.entries(state.metadata.argument_types).sort(([a], [b]) => parseInt(a) - parseInt(b)).forEach(([argNum, types]) => {
                     const li = document.createElement('li');
-                    li.innerHTML = `<strong>Argument ${argNum}:</strong> ${types.map(t => formatConcept(t)).join(', ')}`;
+                    const label = document.createElement('strong');
+                    label.textContent = `Argument ${argNum}:`;
+                    li.appendChild(label);
+                    li.appendChild(document.createTextNode(' '));
+                    appendConceptReferenceSequence(li, types);
                     argsList.appendChild(li);
                 });
                 argsDiv.appendChild(argsList);
@@ -280,7 +273,96 @@ export function createPredicateMetadataPanel(conceptId, container) {
         if (!concept) return 'N/A';
 
         // Remove #V# prefix for cleaner display
-        return concept.replace(/^#V#/, '');
+        return String(concept).replace(/^#V#/, '').replace(/_/g, ' ').replace(/\s+/g, ' ').trim() || 'N/A';
+    }
+
+    /**
+     * Create a constraint list containing clickable cartouches where possible.
+     *
+     * @param {string} label - Constraint label
+     * @param {Array<string>} concepts - Referenced concept ids or labels
+     * @returns {HTMLElement} The rendered list element
+     */
+    function createConstraintList(label, concepts) {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'constraint-list';
+
+        const heading = document.createElement('strong');
+        heading.textContent = `${label}:`;
+        wrapper.appendChild(heading);
+
+        const list = document.createElement('ul');
+        concepts.forEach((concept) => {
+            const item = document.createElement('li');
+            item.appendChild(createConceptReferenceNode(concept));
+            list.appendChild(item);
+        });
+        wrapper.appendChild(list);
+
+        return wrapper;
+    }
+
+    /**
+     * Append a comma-separated sequence of concept references to a parent element.
+     *
+     * @param {HTMLElement} parent - Parent element
+     * @param {Array<string>} concepts - Referenced concept ids or labels
+     */
+    function appendConceptReferenceSequence(parent, concepts) {
+        if (!Array.isArray(concepts) || concepts.length === 0) {
+            parent.appendChild(document.createTextNode('N/A'));
+            return;
+        }
+
+        concepts.forEach((concept, index) => {
+            if (index > 0) {
+                parent.appendChild(document.createTextNode(', '));
+            }
+            parent.appendChild(createConceptReferenceNode(concept));
+        });
+    }
+
+    /**
+     * Create a cartouche for a referenced concept, or plain text when no canonical id is available.
+     *
+     * @param {string} concept - Referenced concept id or label
+     * @returns {Node} Cartouche button or safe text fallback
+     */
+    function createConceptReferenceNode(concept) {
+        const label = formatConcept(concept);
+        const conceptId = normaliseConstraintConceptId(concept);
+        if (!conceptId) {
+            return document.createTextNode(label);
+        }
+
+        return createVontologyCartouche(conceptId, {
+            name: label,
+            kind: 'type',
+            title: conceptId,
+            mode: 'compact_kind_bg'
+        });
+    }
+
+    /**
+     * Normalise a metadata concept reference into a canonical concept id when possible.
+     *
+     * @param {string} concept - Raw metadata concept reference
+     * @returns {string} Canonical concept id or empty string
+     */
+    function normaliseConstraintConceptId(concept) {
+        const raw = String(concept ?? '').trim();
+        if (!raw) return '';
+
+        const normalised = normalisePotentialConceptId(raw);
+        if (normalised) {
+            return normalised;
+        }
+
+        if (/^[A-Za-z0-9_./:–—-]+$/.test(raw)) {
+            return `#V#${raw}`;
+        }
+
+        return '';
     }
 
     /**

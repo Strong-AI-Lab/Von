@@ -1,6 +1,7 @@
 import { fetchConceptList, resetConceptTab, updateConceptTabUI } from './conceptTab.js';
 import { clearContainer, elements, getCurrentUserConceptId } from './domUtils.js';
 import { handleVontologyNodeSelection } from './dynamicTabs.js';
+import { createPredicateBadge, getPredicateType } from './predicateUtils.js';
 import { ProgressManager, ProgressPhase } from './progress.js';
 import {
   currentVontologyNodeId,
@@ -14,7 +15,7 @@ import {
   vontologyTreeData
 } from './state.js';
 import { finishBackgroundTask, startBackgroundTask } from './backgroundTaskTracker.js';
-import { createAnnotatedFragment } from './utils/textDecorator.js';
+import { createAnnotatedFragment, createVontologyCartouche, normalisePotentialConceptId } from './utils/textDecorator.js';
 
 // Search configuration constants
 const ENABLE_VONTOLOGY_SEARCH_TOOLTIPS = false; // Disabled for now
@@ -1740,6 +1741,7 @@ export async function toggleKeyConceptMarking(node, targetElement) {
     return;
   }
 
+  let isCurrentlyKey = false;
   try {
     // Get current user concept ID
     const userConceptId = getCurrentUserConceptId();
@@ -1750,7 +1752,7 @@ export async function toggleKeyConceptMarking(node, targetElement) {
       return;
     }
 
-    const isCurrentlyKey = keyConceptIds.has(node.id);
+    isCurrentlyKey = keyConceptIds.has(node.id);
     const action = isCurrentlyKey ? 'remove' : 'add';
 
     console.log(`[toggleKeyConceptMarking] ${action === 'add' ? 'Marking' : 'Unmarking'} ${node.name} (${node.id}) as key concept`);
@@ -2328,7 +2330,11 @@ export async function handleNodeSelect(nodeName, nodeId, mongoId, createConceptT
     } else {
       // If an Individual tab is active, prefer singular; otherwise types may display plurals elsewhere.
       // Here we keep the node label itself as provided (nodeName), and include the ID.
-      elements.selectedNodePathSpan.textContent = `Selected: ${nodeName} (${nodeId})`; // Initial update with concept ID
+      renderSelectedNodePathContent(
+        elements.selectedNodePathSpan,
+        { name: nodeName, conceptId: nodeId },
+        []
+      );
       elements.selectedNodePathSpan.style.fontStyle = 'normal';
       elements.selectedNodePathSpan.style.color = '';
     }
@@ -2577,20 +2583,90 @@ async function updateParentDisplay(identifier, nodeName = null, nodeId = null) {
 
     // Use provided nodeName and nodeId if available, otherwise fall back to API data
     const displayNodeName = nodeName || data.node.name;
-    const displayNodeId = nodeId || data.node.id;
-    const parentNames = data.parents.map(p => `${p.name} (${p.id})`); // Include concept IDs in parent names
-
-    let displayText = `Selected: ${displayNodeName} (${displayNodeId})`;
-    if (parentNames.length > 0) {
-      displayText += `. Parents: ${parentNames.join(', ')}`;
-    }
-
-    elements.selectedNodePathSpan.textContent = displayText;
+    const displayNodeId = nodeId || data?.node?.concept_id || data?.node?.id;
+    renderSelectedNodePathContent(
+      elements.selectedNodePathSpan,
+      { name: displayNodeName, conceptId: displayNodeId },
+      Array.isArray(data.parents) ? data.parents.map((parent) => ({
+        name: parent?.name,
+        conceptId: parent?.concept_id || parent?.id
+      })) : []
+    );
     elements.selectedNodePathSpan.title = `Identifier: ${identifier}`;
 
   } catch (error) {
     console.error(`Error in updateParentDisplay:`, error);
   }
+}
+
+function normaliseSelectedNodePathConceptId(conceptId) {
+  const raw = String(conceptId ?? '').trim();
+  if (!raw) return '';
+
+  const normalised = normalisePotentialConceptId(raw);
+  if (normalised) {
+    return normalised;
+  }
+
+  if (/^[A-Za-z0-9_./:–—-]+$/.test(raw)) {
+    return `#V#${raw}`;
+  }
+
+  return '';
+}
+
+function formatSelectedNodePathLabel(name, conceptId) {
+  const displayName = String(name ?? '').trim();
+  if (displayName) {
+    return displayName;
+  }
+
+  const rawConceptId = String(conceptId ?? '').trim();
+  if (!rawConceptId) {
+    return 'Unknown concept';
+  }
+
+  return rawConceptId.replace(/^#V#/, '').replace(/_/g, ' ').replace(/\s+/g, ' ').trim() || rawConceptId;
+}
+
+function createSelectedNodePathReference(entry) {
+  const name = formatSelectedNodePathLabel(entry?.name, entry?.conceptId);
+  const conceptId = normaliseSelectedNodePathConceptId(entry?.conceptId);
+  if (!conceptId) {
+    const fallback = String(entry?.conceptId ?? '').trim();
+    return document.createTextNode(fallback && fallback !== name ? `${name} (${fallback})` : name);
+  }
+
+  const cartouche = createVontologyCartouche(conceptId, {
+    name,
+    title: conceptId
+  });
+  cartouche.classList.add('cartouche-hide-kind');
+  return cartouche;
+}
+
+function renderSelectedNodePathContent(target, selectedNode, parents = []) {
+  if (!target) return;
+
+  const preservedBadges = Array.from(target.querySelectorAll('.forced-visible-badge, .predicate-badge'))
+    .map((badge) => badge.cloneNode(true));
+
+  target.textContent = '';
+  target.appendChild(createSelectedNodePathReference(selectedNode));
+
+  if (Array.isArray(parents) && parents.length > 0) {
+    target.appendChild(document.createTextNode('. Parents: '));
+    parents.forEach((parent, index) => {
+      if (index > 0) {
+        target.appendChild(document.createTextNode(', '));
+      }
+      target.appendChild(createSelectedNodePathReference(parent));
+    });
+  }
+
+  preservedBadges.forEach((badge) => {
+    target.appendChild(badge);
+  });
 }
 
 // Function to fetch the main content of a node
@@ -4667,6 +4743,10 @@ export function __test_clearPendingSelections() { if (Array.isArray(__pendingTre
 
 // Export for testing
 export function __test_selectSearchItem(item) { return selectSearchItem(item); }
+// Export for testing
+export function __test_renderSelectedNodePathContent(target, selectedNode, parents = []) {
+  renderSelectedNodePathContent(target, selectedNode, parents);
+}
 
 
 // Build a map of how many times each node appears as a child in the tree
