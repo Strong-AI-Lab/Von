@@ -262,7 +262,7 @@ def _build_turn_diagnostics_mcp_access(
     history_index: int | None,
     payload: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
-    access = {
+    access: dict[str, Any] = {
         "turn_execution_get_diagnostics": _build_tool_call_descriptor(
             "turn_execution_get_diagnostics",
             {
