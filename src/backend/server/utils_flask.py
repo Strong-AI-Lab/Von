@@ -3,6 +3,7 @@ import importlib
 import logging
 import os
 import sys
+import threading
 import time
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
@@ -675,6 +676,55 @@ def _stop_durable_workflow_system():
         stop_worker_and_scheduler(timeout=10.0)
     except Exception:
         pass
+
+
+def _start_async_process_shutdown(
+    app_logger: logging.Logger,
+    *,
+    werkzeug_shutdown: Callable[..., object] | None,
+    fallback_delay_seconds: float = 0.2,
+) -> None:
+    """Finish graceful shutdown work in the background.
+
+    The caller can return an HTTP response immediately while the durable worker
+    drains and the process exits shortly afterwards.
+    """
+
+    def _run_shutdown() -> None:
+        try:
+            _stop_durable_workflow_system()
+        except Exception as exc:
+            try:
+                app_logger.warning("[shutdown] Durable workflow stop error: %s", exc)
+            except Exception:
+                pass
+
+        # Give the response a moment to flush before terminating the server.
+        time.sleep(max(float(fallback_delay_seconds), 0.0))
+
+        if werkzeug_shutdown is not None:
+            try:
+                werkzeug_shutdown()
+            except Exception as exc:
+                try:
+                    app_logger.warning("[shutdown] Werkzeug shutdown error: %s", exc)
+                except Exception:
+                    pass
+            return
+
+        try:
+            os._exit(0)
+        except Exception as exc:
+            try:
+                app_logger.warning("[shutdown] Fallback exit error: %s", exc)
+            except Exception:
+                pass
+
+    threading.Thread(
+        target=_run_shutdown,
+        name="von-admin-shutdown",
+        daemon=True,
+    ).start()
 
 
 def _is_running_under_pytest() -> bool:
@@ -2978,34 +3028,13 @@ def create_flask_app(
         if provided != expected:
             return jsonify(success=False, error="unauthorized"), 401
 
-        # Gracefully stop durable workflow system before server shutdown
-        try:
-            _stop_durable_workflow_system()
-        except Exception as exc:
-            app.logger.warning("[shutdown] Durable workflow stop error: %s", exc)
-
         func = request.environ.get("werkzeug.server.shutdown")
-        if func is None:
-            # Fallback for production servers like Waitress: schedule hard exit
-            try:
-                import threading
-                import time
-                import os as _os
-
-                def delayed_exit():
-                    time.sleep(0.2)
-                    _os._exit(0)
-
-                threading.Thread(target=delayed_exit, daemon=True).start()
-                return jsonify(success=True, status="shutting_down_fallback")
-            except Exception as e:
-                return (
-                    jsonify(success=False, error="shutdown_failed", detail=str(e)),
-                    500,
-                )
-        else:
-            func()
-            return jsonify(success=True, status="shutting_down")
+        _start_async_process_shutdown(
+            app.logger,
+            werkzeug_shutdown=func if callable(func) else None,
+        )
+        status = "shutting_down" if callable(func) else "shutting_down_fallback"
+        return jsonify(success=True, status=status), 202
 
     # Backwards-compatible alias for tests and older clients that call the shorter '/api/vontology' path.
     @app.route("/api/vontology/instance_counts")

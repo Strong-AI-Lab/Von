@@ -1874,7 +1874,7 @@ function Stop-VonServer {
         try {
             Write-LauncherLog "Attempting graceful shutdown (PID=$targetPid)..."
             $resp = Invoke-WebRequest -Method POST -Uri "http://localhost:$Port/admin/shutdown" -UseBasicParsing -Headers @{ 'X-Admin-Token' = $token } -TimeoutSec 5
-            if ($resp.StatusCode -eq 200) { $graceful = $true }
+            if ($resp.StatusCode -ge 200 -and $resp.StatusCode -lt 300) { $graceful = $true }
             else { Write-LauncherLog "Graceful shutdown endpoint returned status $($resp.StatusCode)" }
         }
         catch { Write-LauncherLog "Graceful shutdown request failed: $($_.Exception.Message)" }
