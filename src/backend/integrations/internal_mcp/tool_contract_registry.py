@@ -171,6 +171,7 @@ VONTOLOGY_STDIO_EXPOSED_TOOL_NAMES: tuple[str, ...] = (
     "workflow_list_instances",
     "workflow_list_schedules",
     "workflow_mcp_health_check",
+    "workflow_materialisation_diagnostics",
     "workflow_retry_instance",
     "workflow_set_event_binding_enabled",
     "workflow_set_schedule_enabled",
@@ -247,6 +248,7 @@ class CanonicalMCPToolContract:
             "description": self.description,
             "inputSchema": self.input_schema,
         }
+
 
 def _infer_tool_family(tool_name: str) -> str:
     if tool_name.startswith("jira_"):
@@ -454,7 +456,10 @@ def _supplemental_surface_only_contracts() -> dict[str, CanonicalMCPToolContract
                             "required": ["role", "content"],
                         },
                     },
-                    "model": {"type": "string", "description": "Optional model override"},
+                    "model": {
+                        "type": "string",
+                        "description": "Optional model override",
+                    },
                     "user_namespace": {
                         "type": "string",
                         "description": "Optional namespace (e.g., #V#michael_witbrock) injected into tool payloads",
@@ -678,7 +683,9 @@ def _supplemental_surface_only_contracts() -> dict[str, CanonicalMCPToolContract
     return contracts
 
 
-def _validate_surface_coverage(contracts: Mapping[str, CanonicalMCPToolContract]) -> None:
+def _validate_surface_coverage(
+    contracts: Mapping[str, CanonicalMCPToolContract],
+) -> None:
     contract_names = set(contracts.keys())
     declared: dict[str, set[str]] = {
         SURFACE_VONTOLOGY_STDIO: set(VONTOLOGY_STDIO_EXPOSED_TOOL_NAMES),
@@ -726,7 +733,9 @@ def get_surface_contracts(surface: str) -> list[CanonicalMCPToolContract]:
 
 
 def get_surface_tool_payloads(surface: str) -> list[dict[str, Any]]:
-    return [contract.to_surface_payload() for contract in get_surface_contracts(surface)]
+    return [
+        contract.to_surface_payload() for contract in get_surface_contracts(surface)
+    ]
 
 
 def get_manifest_payload() -> dict[str, Any]:
@@ -739,4 +748,3 @@ def get_manifest_payload() -> dict[str, Any]:
 def iter_exposed_tool_names(surface: str) -> Iterable[str]:
     for contract in get_surface_contracts(surface):
         yield contract.name
-

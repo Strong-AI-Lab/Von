@@ -1,7 +1,6 @@
 import json
 from pathlib import Path
 
-
 WORKFLOW_TOOL_NAMES = {
     "workflow_list_definitions",
     "workflow_bind_event",
@@ -9,6 +8,7 @@ WORKFLOW_TOOL_NAMES = {
     "workflow_set_event_binding_enabled",
     "workflow_delete_event_binding",
     "workflow_mcp_health_check",
+    "workflow_materialisation_diagnostics",
     "workflow_create_instance",
     "workflow_execute",
     "workflow_list_instances",

@@ -43,6 +43,7 @@ WORKFLOW_INTROSPECTION_TOOL_NAMES: tuple[str, ...] = (
 
 WORKFLOW_HEALTHCHECK_TOOL_NAMES: tuple[str, ...] = (
     "workflow_mcp_health_check",
+    "workflow_materialisation_diagnostics",
 )
 
 WORKFLOW_STDIO_EXPOSED_TOOL_NAMES: tuple[str, ...] = tuple(
@@ -146,4 +147,3 @@ def classify_stdio_missing_tool(tool_name: str | None) -> dict[str, Any] | None:
             f"See {matrix['docs_reference']} for per-surface tool availability.",
         ],
     }
-

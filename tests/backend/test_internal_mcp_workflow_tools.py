@@ -210,10 +210,7 @@ class _StubWorkflowManager:
             instance.source_event_type = source_event_type.strip()
         if isinstance(source_event_id, str) and source_event_id.strip():
             instance.source_event_id = source_event_id.strip()
-        if (
-            isinstance(event_idempotency_key, str)
-            and event_idempotency_key.strip()
-        ):
+        if isinstance(event_idempotency_key, str) and event_idempotency_key.strip():
             instance.event_idempotency_key = event_idempotency_key.strip()
         return instance_id
 
@@ -286,8 +283,7 @@ class _StubWorkflowManager:
             and (status_value is None or inst.status.value == status_value)
             and (workflow_id is None or inst.workflow_id == workflow_id)
             and (
-                source_event_type is None
-                or inst.source_event_type == source_event_type
+                source_event_type is None or inst.source_event_type == source_event_type
             )
             and (source_event_id is None or inst.source_event_id == source_event_id)
             and (
@@ -382,7 +378,9 @@ class _StubWorkflowManager:
         mapping = dict(input_mapping or {})
         existing = self.bindings.get(key)
         if existing is not None:
-            if existing.input_mapping == mapping and bool(existing.enabled) == bool(enabled):
+            if existing.input_mapping == mapping and bool(existing.enabled) == bool(
+                enabled
+            ):
                 return existing, False, False
             if not replace_existing:
                 raise ValueError("binding_conflict")
@@ -635,12 +633,10 @@ def test_workflow_list_definitions_exists_and_returns_data():
         == "vontology"
     )
     assert (
-        source_by_workflow_id["#V#entity_identity_resolution_workflow"]
-        == "vontology"
+        source_by_workflow_id["#V#entity_identity_resolution_workflow"] == "vontology"
     )
     assert (
-        source_by_workflow_id["#V#jira_task_incremental_import_workflow"]
-        == "vontology"
+        source_by_workflow_id["#V#jira_task_incremental_import_workflow"] == "vontology"
     )
     assert source_by_workflow_id["#V#planning_workflow"] == "vontology"
     assert source_by_workflow_id["#V#rumination_workflow"] == "vontology"
@@ -757,7 +753,9 @@ def test_workflow_list_definitions_requests_pending_inventory_when_snapshot_abse
                 return self._registration
             return None
 
-        def get_registration_source(self, workflow_id: str, *, resolve_lazy: bool = False):
+        def get_registration_source(
+            self, workflow_id: str, *, resolve_lazy: bool = False
+        ):
             if workflow_id == "#V#meeting_invitation_testing_workflow":
                 return "vontology"
             return None
@@ -845,7 +843,9 @@ def test_workflow_list_definitions_does_not_resolve_lazy_definitions_for_summary
         def get(self, workflow_id: str):
             raise AssertionError("workflow definition should not be loaded")
 
-        def get_registration_source(self, workflow_id: str, *, resolve_lazy: bool = False):
+        def get_registration_source(
+            self, workflow_id: str, *, resolve_lazy: bool = False
+        ):
             if workflow_id == "#V#meeting_invitation_testing_workflow":
                 return "vontology"
             return None
@@ -1198,13 +1198,15 @@ def test_workflow_get_execution_trace_resolves_instance_link(monkeypatch):
 
     monkeypatch.setattr(
         "src.backend.workflows.get_workflow_execution_trace",
-        lambda execution_id: {
-            "execution_id": execution_id,
-            "workflow_id": "#V#enrichment_workflow",
-            "status": "completed",
-        }
-        if execution_id == "trace-lookup-1"
-        else None,
+        lambda execution_id: (
+            {
+                "execution_id": execution_id,
+                "workflow_id": "#V#enrichment_workflow",
+                "status": "completed",
+            }
+            if execution_id == "trace-lookup-1"
+            else None
+        ),
     )
 
     payload = gateway.invoke(
@@ -1268,7 +1270,11 @@ def test_turn_execution_get_diagnostics_invokes_service(monkeypatch):
                 "schema_version": "conversation_turn_timing_breakdown.v1",
                 "stages": [],
                 "llm_calls_by_stage_model": [],
-                "totals": {"elapsed_ms": None, "llm_elapsed_ms": 0, "llm_call_count": 0},
+                "totals": {
+                    "elapsed_ms": None,
+                    "llm_elapsed_ms": 0,
+                    "llm_call_count": 0,
+                },
             },
         },
     )
@@ -1283,7 +1289,9 @@ def test_turn_execution_get_diagnostics_invokes_service(monkeypatch):
     assert payload["schema_version"] == "turn_execution_diagnostics.v1"
 
 
-def test_turn_execution_get_diagnostics_returns_not_found_when_service_misses(monkeypatch):
+def test_turn_execution_get_diagnostics_returns_not_found_when_service_misses(
+    monkeypatch,
+):
     gateway = _build_gateway()
     monkeypatch.setattr(
         "src.backend.services.turn_execution_diagnostics_service.get_turn_execution_diagnostics_payload",
@@ -1416,7 +1424,9 @@ def test_repo_dossier_search_invokes_service(monkeypatch):
         },
     )
 
-    payload = gateway.invoke("repo_dossier_search", {"query": "WorkflowDefinition"}).payload
+    payload = gateway.invoke(
+        "repo_dossier_search", {"query": "WorkflowDefinition"}
+    ).payload
 
     assert payload["success"] is True
     assert payload["query"] == "WorkflowDefinition"
@@ -1624,8 +1634,7 @@ def test_workflow_create_instance_preserves_event_idempotency_submission(monkeyp
     assert instance.source_event_type == "turn_execution.completion_gate"
     assert instance.source_event_id == "req-1548"
     assert (
-        instance.event_idempotency_key
-        == "evt:turn_execution.completion_gate:req-1548"
+        instance.event_idempotency_key == "evt:turn_execution.completion_gate:req-1548"
     )
 
 
@@ -1701,7 +1710,9 @@ def test_workflow_cancel_instance_gateway_paths(monkeypatch):
     assert repeated.get("error_code") == "already_terminal"
 
 
-def test_workflow_retry_instance_restores_pending_and_keeps_checkpoint_state(monkeypatch):
+def test_workflow_retry_instance_restores_pending_and_keeps_checkpoint_state(
+    monkeypatch,
+):
     manager = _StubWorkflowManager()
     _patch_submit_verified_instance_success(monkeypatch)
     workflow_id = "#V#enrichment_workflow"
@@ -1827,11 +1838,61 @@ def test_workflow_mcp_health_check_gateway_invoke_success_path():
     assert "capability_matrix" in payload
 
 
+def test_workflow_materialisation_diagnostics_exists_and_runs(monkeypatch):
+    import src.backend.services.workflow_materialisation_diagnostics_service as service
+
+    monkeypatch.setattr(
+        service,
+        "build_workflow_materialisation_diagnostics",
+        lambda **kwargs: {
+            "success": True,
+            "classification": {"state": "healthy"},
+            "required_concept_ids": kwargs.get("required_concept_ids") or [],
+        },
+    )
+
+    catalogue = build_default_catalogue()
+    methods = catalogue.list_methods()
+    assert "workflow_materialisation_diagnostics" in methods
+
+    handler = catalogue.get("workflow_materialisation_diagnostics").handler
+    result = handler(required_concept_ids=["#V#ephemeral_theory"])
+    assert result.get("success") is True
+    assert result.get("classification", {}).get("state") == "healthy"
+    assert result.get("required_concept_ids") == ["#V#ephemeral_theory"]
+
+
+def test_workflow_materialisation_diagnostics_gateway_invoke_success_path(monkeypatch):
+    import src.backend.services.workflow_materialisation_diagnostics_service as service
+
+    monkeypatch.setattr(
+        service,
+        "build_workflow_materialisation_diagnostics",
+        lambda **kwargs: {
+            "success": True,
+            "classification": {"state": "partial_bootstrap"},
+            "required_concept_ids": kwargs.get("required_concept_ids") or [],
+        },
+    )
+
+    gateway = _build_gateway()
+    payload = gateway.invoke(
+        "workflow_materialisation_diagnostics",
+        {"required_concept_ids": ["#V#ephemeral_theory"]},
+    ).payload
+
+    assert payload.get("success") is True
+    assert payload.get("classification", {}).get("state") == "partial_bootstrap"
+    assert payload.get("required_concept_ids") == ["#V#ephemeral_theory"]
+
+
 def test_workflow_surface_capability_tools_exist_in_internal_catalogue():
     methods = set(build_default_catalogue().list_methods())
     tracked = set(tracked_workflow_surface_tool_names())
     missing = sorted(tracked - methods)
-    assert not missing, f"Tracked workflow surface tools missing from catalogue: {missing}"
+    assert (
+        not missing
+    ), f"Tracked workflow surface tools missing from catalogue: {missing}"
 
 
 def test_workflow_bind_event_and_list_event_bindings_gateway_paths(monkeypatch):

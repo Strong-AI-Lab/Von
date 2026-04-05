@@ -36,7 +36,9 @@ if TYPE_CHECKING:
     from src.backend.services.concept_embedding_service import (
         get_concept_embedding_stats,
     )
-    from src.backend.services.namespace_service import derive_actor_context_from_namespace
+    from src.backend.services.namespace_service import (
+        derive_actor_context_from_namespace,
+    )
     from src.backend.services.text_value_service import (
         delete_text_relation,
         delete_text_relation_by_predicate_and_text,
@@ -150,6 +152,7 @@ if TYPE_CHECKING:
         _workflow_list_instances,
         _workflow_list_use_episodes,
         _workflow_list_schedules,
+        _workflow_materialisation_diagnostics,
         _workflow_mcp_health_check,
         _workflow_retry_instance,
         _workflow_set_event_binding_enabled,
@@ -228,6 +231,7 @@ try:
 except ImportError:
     print("Error: MCP package not installed. Run: pdm add mcp", file=sys.stderr)
     sys.exit(1)
+
 
 def _bind_imports(module_name: str, names: list[str]) -> None:
     module = importlib.import_module(module_name)
@@ -454,7 +458,10 @@ _TOOL_MANIFEST_PATH = (
     Path(project_root) / "src" / "backend" / "mcp_server" / "vontology_mcp.json"
 )
 _tool_cache_dependency_paths: list[Path] = [Path(__file__).resolve()]
-for _dependency_module in (tool_contract_registry_module, internal_mcp_catalogue_module):
+for _dependency_module in (
+    tool_contract_registry_module,
+    internal_mcp_catalogue_module,
+):
     _dependency_file = getattr(_dependency_module, "__file__", None)
     if isinstance(_dependency_file, str) and _dependency_file:
         _tool_cache_dependency_paths.append(Path(_dependency_file).resolve())
@@ -1685,7 +1692,9 @@ async def _handle_find_relations_with_argument(
             relation_kind=arguments.get("relation_kind"),
             scope=arguments.get("scope"),
             include_text_snippets=bool(arguments.get("include_text_snippets", False)),
-            include_concept_preview=bool(arguments.get("include_concept_preview", True)),
+            include_concept_preview=bool(
+                arguments.get("include_concept_preview", True)
+            ),
             limit=arguments.get("limit"),
             offset=arguments.get("offset"),
             sort_by=arguments.get("sort_by"),
@@ -2135,8 +2144,10 @@ async def _handle_materialise_scholarly_representation_for_file_copy(
             catalogue as internal_catalogue,
         )
 
-        result = internal_catalogue._materialise_scholarly_representation_for_file_copy_tool(
-            **arguments
+        result = (
+            internal_catalogue._materialise_scholarly_representation_for_file_copy_tool(
+                **arguments
+            )
         )
         return [_json_text(result)]
     except Exception as exc:
@@ -3026,6 +3037,16 @@ async def _handle_workflow_mcp_health_check(
     )
 
 
+async def _handle_workflow_materialisation_diagnostics(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _workflow_materialisation_diagnostics,
+        arguments,
+        tool_family_label="Workflow",
+    )
+
+
 async def _handle_workflow_create_instance(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
@@ -3552,7 +3573,9 @@ async def _handle_testing_theory_gc_expired(
     )
 
 
-async def _handle_experiment_create_spec(arguments: dict[str, Any]) -> list[TextContent]:
+async def _handle_experiment_create_spec(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
     return _run_catalogue_proxy_handler(
         _experiment_create_spec,
         arguments,
@@ -3923,6 +3946,7 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "workflow_set_event_binding_enabled": _handle_workflow_set_event_binding_enabled,
     "workflow_delete_event_binding": _handle_workflow_delete_event_binding,
     "workflow_mcp_health_check": _handle_workflow_mcp_health_check,
+    "workflow_materialisation_diagnostics": _handle_workflow_materialisation_diagnostics,
     "workflow_create_instance": _handle_workflow_create_instance,
     "workflow_execute": _handle_workflow_execute,
     "workflow_list_instances": _handle_workflow_list_instances,
@@ -3955,4 +3979,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-

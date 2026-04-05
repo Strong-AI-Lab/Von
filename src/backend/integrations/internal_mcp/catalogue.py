@@ -316,7 +316,9 @@ def _get_paper_metadata(**kwargs):
     return _run_async_compat(_async_metadata)
 
 
-def _coerce_arxiv_metadata_record(metadata_payload: Any) -> tuple[dict[str, Any] | None, str | None]:
+def _coerce_arxiv_metadata_record(
+    metadata_payload: Any,
+) -> tuple[dict[str, Any] | None, str | None]:
     """Normalise arXiv metadata payloads to a single mapping shape."""
 
     if not isinstance(metadata_payload, Mapping):
@@ -602,9 +604,7 @@ def _coerce_scholarly_materialisation_metadata(
     if isinstance(publication_date, str) and publication_date.strip():
         metadata["publication_date"] = publication_date.strip()
     elif "publication_date" not in metadata and "published" not in metadata:
-        derived_publication_date = extract_scholarly_metadata_publication_date(
-            metadata
-        )
+        derived_publication_date = extract_scholarly_metadata_publication_date(metadata)
         if derived_publication_date:
             metadata["publication_date"] = derived_publication_date
 
@@ -723,7 +723,9 @@ def _create_concepts(**kwargs):
             ],
         )
 
-    from ...services.workflow_event_integration_service import resolve_event_actor_context
+    from ...services.workflow_event_integration_service import (
+        resolve_event_actor_context,
+    )
 
     actor_user_id, actor_org_id = resolve_event_actor_context(
         user_id=kwargs.get("created_by_concept_id"),
@@ -956,18 +958,22 @@ def _create_concepts(**kwargs):
     applied_scope_modes = sorted(
         {
             str(
-                (((r.get("concept") or {}).get("creation_visibility") or {}).get(
-                    "effective_scope_mode"
-                ))
+                (
+                    ((r.get("concept") or {}).get("creation_visibility") or {}).get(
+                        "effective_scope_mode"
+                    )
+                )
             ).strip()
             for r in results
             if isinstance(r, dict)
             and isinstance(r.get("concept"), dict)
             and isinstance((r.get("concept") or {}).get("creation_visibility"), dict)
             and str(
-                (((r.get("concept") or {}).get("creation_visibility") or {}).get(
-                    "effective_scope_mode"
-                ))
+                (
+                    ((r.get("concept") or {}).get("creation_visibility") or {}).get(
+                        "effective_scope_mode"
+                    )
+                )
             ).strip()
         }
     )
@@ -2015,7 +2021,9 @@ def _undo_relationship_removal(**kwargs):
             "missing_parameter",
             "Missing 'undo_token' parameter",
             details={"missing": ["undo_token"]},
-            suggestions=["Provide the undo_token returned by remove_relationship(s)_bulk"],
+            suggestions=[
+                "Provide the undo_token returned by remove_relationship(s)_bulk"
+            ],
         )
 
     try:
@@ -2142,7 +2150,10 @@ def _download_paper(**kwargs):
                         "partial_cache_recovery_error",
                         partial_cache_recovery_error,
                     )
-                if cache_diagnostics.get("cache_state") == "markdown_only_partial_cache":
+                if (
+                    cache_diagnostics.get("cache_state")
+                    == "markdown_only_partial_cache"
+                ):
                     stored.setdefault("cache_recovery_performed", True)
                     stored.setdefault("acquisition_path", "reacquire_partial_cache")
                 else:
@@ -2153,7 +2164,9 @@ def _download_paper(**kwargs):
             try:
                 from pathlib import Path
 
-                from src.backend.security.access_control import get_effective_user_concept_id
+                from src.backend.security.access_control import (
+                    get_effective_user_concept_id,
+                )
 
                 with _with_namespace_actor_override(namespace_override):
                     user_concept_id = get_effective_user_concept_id()
@@ -2488,9 +2501,11 @@ def _finalise_cached_paper(**kwargs):
                 file_path=cached,
             )
         if bool(delete_local_cache) and markdown_cached is not None:
-            markdown_local_deleted, markdown_local_error = _best_effort_delete_cached_file(
-                cache_root=storage_path,
-                file_path=markdown_cached,
+            markdown_local_deleted, markdown_local_error = (
+                _best_effort_delete_cached_file(
+                    cache_root=storage_path,
+                    file_path=markdown_cached,
+                )
             )
 
         if markdown_payload is not None:
@@ -2960,9 +2975,7 @@ def _skill_catalogue_list(**kwargs):
         include_default_roots=bool(kwargs.get("include_default_roots", True)),
         project_roots=_normalise_string_list_argument(kwargs.get("project_roots")),
         personal_roots=_normalise_string_list_argument(kwargs.get("personal_roots")),
-        extension_roots=_normalise_string_list_argument(
-            kwargs.get("extension_roots")
-        ),
+        extension_roots=_normalise_string_list_argument(kwargs.get("extension_roots")),
         shared_roots=_normalise_string_list_argument(kwargs.get("shared_roots")),
         include_body=bool(kwargs.get("include_body", False)),
     )
@@ -2975,9 +2988,7 @@ def _skill_catalogue_sync(**kwargs):
         include_default_roots=bool(kwargs.get("include_default_roots", True)),
         project_roots=_normalise_string_list_argument(kwargs.get("project_roots")),
         personal_roots=_normalise_string_list_argument(kwargs.get("personal_roots")),
-        extension_roots=_normalise_string_list_argument(
-            kwargs.get("extension_roots")
-        ),
+        extension_roots=_normalise_string_list_argument(kwargs.get("extension_roots")),
         shared_roots=_normalise_string_list_argument(kwargs.get("shared_roots")),
         dry_run=bool(kwargs.get("dry_run", False)),
     )
@@ -3109,6 +3120,7 @@ def _download_result_is_materially_successful(payload: Any) -> bool:
     key = str(storage.get("key") or "").strip()
     uri = str(storage.get("uri") or "").strip()
     return bool(backend and (key or uri))
+
 
 # Blob/file-copy retrieval
 def _read_file_copy(**kwargs):
@@ -4107,8 +4119,12 @@ def _interpret_file_copy(**kwargs):
     persist_description = bool(kwargs.get("persist_description", True))
     persist_content = bool(kwargs.get("persist_content", True))
     persist_interpretation_json = bool(kwargs.get("persist_interpretation_json", True))
-    include_semantic_description = bool(kwargs.get("include_semantic_description", True))
-    include_pdf_diagram_analysis = bool(kwargs.get("include_pdf_diagram_analysis", True))
+    include_semantic_description = bool(
+        kwargs.get("include_semantic_description", True)
+    )
+    include_pdf_diagram_analysis = bool(
+        kwargs.get("include_pdf_diagram_analysis", True)
+    )
     include_text = bool(kwargs.get("include_text", False))
     max_diagram_pages_raw = kwargs.get("max_diagram_pages")
     if max_diagram_pages_raw is None:
@@ -4204,9 +4220,7 @@ def _interpret_file_copy(**kwargs):
     content_type = read_payload.get("content_type")
     original_filename = read_payload.get("original_filename")
     extracted_text_raw = read_payload.get("text")
-    extracted_text = (
-        extracted_text_raw if isinstance(extracted_text_raw, str) else None
-    )
+    extracted_text = extracted_text_raw if isinstance(extracted_text_raw, str) else None
     file_kind = (
         "image"
         if is_image_file(
@@ -4628,9 +4642,7 @@ def _interpret_file_copy(**kwargs):
     text_preview = None
     if isinstance(content_text, str):
         text_preview = (
-            content_text[:4000] + "..."
-            if len(content_text) > 4000
-            else content_text
+            content_text[:4000] + "..." if len(content_text) > 4000 else content_text
         )
 
     diagram_only_count = 0
@@ -4641,7 +4653,9 @@ def _interpret_file_copy(**kwargs):
         raw_candidates = diagram_analysis.get("diagram_organisations")
         raw_relationships = diagram_analysis.get("diagram_relationship_candidates")
         diagram_only_count = len(raw_only) if isinstance(raw_only, list) else 0
-        diagram_candidate_count = len(raw_candidates) if isinstance(raw_candidates, list) else 0
+        diagram_candidate_count = (
+            len(raw_candidates) if isinstance(raw_candidates, list) else 0
+        )
         diagram_relationship_count = (
             len(raw_relationships) if isinstance(raw_relationships, list) else 0
         )
@@ -4652,7 +4666,8 @@ def _interpret_file_copy(**kwargs):
         "file_kind": file_kind,
         "subtype_type_concept_id": (
             subtype_type_concept_id
-            if isinstance(subtype_type_concept_id, str) and subtype_type_concept_id.strip()
+            if isinstance(subtype_type_concept_id, str)
+            and subtype_type_concept_id.strip()
             else None
         ),
         "description": description,
@@ -4775,9 +4790,13 @@ def _index_file_copy(**kwargs):
         }
 
     try:
-        from ...services.computer_file_copy_service import build_file_copy_artifact_record
+        from ...services.computer_file_copy_service import (
+            build_file_copy_artifact_record,
+        )
 
-        artifact_record = build_file_copy_artifact_record(file_copy_concept_id=concept_id)
+        artifact_record = build_file_copy_artifact_record(
+            file_copy_concept_id=concept_id
+        )
     except Exception:
         artifact_record = None
 
@@ -5116,9 +5135,7 @@ def _import_url_file_copy(**kwargs):
                     or None,
                     original_filename=(
                         str(filename_resolution.get("original_filename")).strip()
-                        if isinstance(
-                            filename_resolution.get("original_filename"), str
-                        )
+                        if isinstance(filename_resolution.get("original_filename"), str)
                         and str(filename_resolution.get("original_filename")).strip()
                         else None
                     ),
@@ -5310,7 +5327,9 @@ def _list_recent_screenshots(**kwargs):
 
             if not explicit_paths:
                 parent_lower = entry.parent.name.lower()
-                if parent_lower != "screenshots" and not _is_screenshot_like_name(entry):
+                if parent_lower != "screenshots" and not _is_screenshot_like_name(
+                    entry
+                ):
                     continue
 
             try:
@@ -5351,7 +5370,8 @@ def _list_recent_screenshots(**kwargs):
 
     # Newest first before optional clipboard re-ranking.
     candidate_items.sort(
-        key=lambda item: item.get("modified_at_dt") or datetime.min.replace(tzinfo=timezone.utc),
+        key=lambda item: item.get("modified_at_dt")
+        or datetime.min.replace(tzinfo=timezone.utc),
         reverse=True,
     )
 
@@ -5463,9 +5483,11 @@ def _list_recent_screenshots(**kwargs):
 
         candidate_items.sort(
             key=lambda item: (
-                item["clipboard_distance"]
-                if isinstance(item.get("clipboard_distance"), int)
-                else 10**9,
+                (
+                    item["clipboard_distance"]
+                    if isinstance(item.get("clipboard_distance"), int)
+                    else 10**9
+                ),
                 -int(item["modified_at_dt"].timestamp()),
             )
         )
@@ -8652,7 +8674,11 @@ def _resolve_rag_namespace_from_kwargs(kwargs: dict) -> dict:
             )
         return enriched
 
-    if explicit_namespace and derived_namespace and explicit_namespace != derived_namespace:
+    if (
+        explicit_namespace
+        and derived_namespace
+        and explicit_namespace != derived_namespace
+    ):
         return _finalise_report(
             {
                 "namespace": None,
@@ -8743,7 +8769,10 @@ def _with_rag_provenance(*, payload: dict, item_kind: str, source_system: str) -
     if not isinstance(user_concept_id, str) or not user_concept_id.strip():
         user_concept_id = payload.get("derived_user_concept_id")
     organisation_concept_id = payload.get("organisation_concept_id")
-    if not isinstance(organisation_concept_id, str) or not organisation_concept_id.strip():
+    if (
+        not isinstance(organisation_concept_id, str)
+        or not organisation_concept_id.strip()
+    ):
         organisation_concept_id = payload.get("derived_organisation_concept_id")
 
     provenance = {
@@ -8783,10 +8812,9 @@ def _derive_turn_execution_failure_recommendations(
     recommendations: list[str] = []
     mutation_not_executed = int(failure_mode_counts.get("mutation_not_executed", 0))
     failed_or_blocked = int(failure_mode_counts.get("mutation_failed_or_blocked", 0))
-    verification_issues = (
-        int(failure_mode_counts.get("postcondition_inconclusive", 0))
-        + int(failure_mode_counts.get("unresolved_required_effects", 0))
-    )
+    verification_issues = int(
+        failure_mode_counts.get("postcondition_inconclusive", 0)
+    ) + int(failure_mode_counts.get("unresolved_required_effects", 0))
     false_completion = int(failure_mode_counts.get("false_completion_claim", 0)) + int(
         failure_mode_counts.get("false_completion_gate_state", 0)
     )
@@ -8850,9 +8878,7 @@ def _turn_execution_failure_mode_confidence(failure_mode: str) -> str:
 
 def _turn_execution_failure_mode_expected_action(failure_mode: str) -> str:
     if failure_mode in {"mutation_not_executed", "mutation_failed_or_blocked"}:
-        return (
-            "Attempt and complete the required mutation tools, then verify state changes."
-        )
+        return "Attempt and complete the required mutation tools, then verify state changes."
     if failure_mode in {"unresolved_required_effects", "postcondition_inconclusive"}:
         return "Run deterministic postcondition checks and require verified satisfied status."
     if failure_mode in {"false_completion_claim", "false_completion_gate_state"}:
@@ -8943,9 +8969,7 @@ def _build_turn_execution_case_triage(
         else None
     )
     suggested_jql = (
-        f'project = JVNAUTOSCI AND text ~ "\\"{request_id}\\""'
-        if request_id
-        else None
+        f'project = JVNAUTOSCI AND text ~ "\\"{request_id}\\""' if request_id else None
     )
     return {
         "jira_issue_keys": issue_keys,
@@ -9040,9 +9064,13 @@ def _build_turn_execution_triage_index(
 
     for case in replay_cases:
         triage_raw = case.get("triage")
-        triage: Mapping[str, Any] = triage_raw if isinstance(triage_raw, Mapping) else {}
+        triage: Mapping[str, Any] = (
+            triage_raw if isinstance(triage_raw, Mapping) else {}
+        )
         issue_keys_raw_value = triage.get("jira_issue_keys")
-        issue_keys_raw = issue_keys_raw_value if isinstance(issue_keys_raw_value, list) else []
+        issue_keys_raw = (
+            issue_keys_raw_value if isinstance(issue_keys_raw_value, list) else []
+        )
         issue_keys = [
             key.strip()
             for key in issue_keys_raw
@@ -9081,7 +9109,9 @@ def _build_turn_execution_triage_index(
         links_by_issue.values(),
         key=lambda row: str(row.get("issue_key") or ""),
     )
-    unique_request_ids_without_issue_keys = list(dict.fromkeys(request_ids_without_issue_keys))
+    unique_request_ids_without_issue_keys = list(
+        dict.fromkeys(request_ids_without_issue_keys)
+    )
     return {
         "jira_base_url": jira_base_url,
         "issue_link_count": len(issue_links),
@@ -9194,7 +9224,10 @@ def _derive_turn_execution_capability_gaps(
         if not isinstance(request_id, str) or not request_id.strip():
             missing_request_id_count += 1
         selected_workflow_id = item.get("selected_workflow_id")
-        if not isinstance(selected_workflow_id, str) or not selected_workflow_id.strip():
+        if (
+            not isinstance(selected_workflow_id, str)
+            or not selected_workflow_id.strip()
+        ):
             missing_workflow_selection_count += 1
         prompt_preview = item.get("prompt_preview")
         if not isinstance(prompt_preview, str) or not prompt_preview.strip():
@@ -9372,7 +9405,9 @@ def _build_turn_execution_benchmark_signals(
         },
     )
 
-    follow_up_rate_pct = _safe_float_or_none(user_metrics.get("follow_up_turn_rate_pct"))
+    follow_up_rate_pct = _safe_float_or_none(
+        user_metrics.get("follow_up_turn_rate_pct")
+    )
     baseline_follow_up_rate_pct = _safe_float_or_none(
         baseline_unresolved_follow_up_rate_pct
     )
@@ -9514,16 +9549,16 @@ def _build_turn_execution_latency_and_trend_views(
         )
         created_at_dt = _parse_iso_datetime_or_none(created_at_utc)
         bucket_key = (
-            created_at_dt.date().isoformat()
-            if created_at_dt is not None
-            else "undated"
+            created_at_dt.date().isoformat() if created_at_dt is not None else "undated"
         )
         bucket_start_utc = (
             datetime.combine(
                 created_at_dt.date(),
                 datetime.min.time(),
                 tzinfo=timezone.utc,
-            ).isoformat().replace("+00:00", "Z")
+            )
+            .isoformat()
+            .replace("+00:00", "Z")
             if created_at_dt is not None
             else None
         )
@@ -9542,9 +9577,11 @@ def _build_turn_execution_latency_and_trend_views(
             },
         )
         bucket["scanned_count"] += 1
-        if request_id and request_id not in bucket["request_ids"] and len(
-            bucket["request_ids"]
-        ) < 10:
+        if (
+            request_id
+            and request_id not in bucket["request_ids"]
+            and len(bucket["request_ids"]) < 10
+        ):
             bucket["request_ids"].append(request_id)
 
         execution_correctness_raw = item.get("execution_correctness")
@@ -9554,7 +9591,9 @@ def _build_turn_execution_latency_and_trend_views(
             else {}
         )
         metric_labels_raw = execution_correctness.get("metric_labels")
-        metric_labels = metric_labels_raw if isinstance(metric_labels_raw, Mapping) else {}
+        metric_labels = (
+            metric_labels_raw if isinstance(metric_labels_raw, Mapping) else {}
+        )
         for label_name in _TURN_EXECUTION_OUTCOME_LABEL_NAMES:
             if bool(metric_labels.get(label_name, False)):
                 bucket["outcome_label_counts"][label_name] += 1
@@ -9656,7 +9695,9 @@ def _build_turn_execution_latency_and_trend_views(
             observed_pre_dispatch_count, total_items
         ),
         "avg_pre_dispatch_duration_ms": avg_pre_dispatch_duration_ms,
-        "median_pre_dispatch_duration_ms": _compute_percentile(pre_dispatch_durations, 50),
+        "median_pre_dispatch_duration_ms": _compute_percentile(
+            pre_dispatch_durations, 50
+        ),
         "p95_pre_dispatch_duration_ms": _compute_percentile(pre_dispatch_durations, 95),
         "max_pre_dispatch_duration_ms": (
             max(pre_dispatch_durations) if observed_pre_dispatch_count > 0 else None
@@ -9718,9 +9759,7 @@ def _build_turn_execution_latency_and_trend_views(
                 },
                 "pre_dispatch_observed_count": len(durations),
                 "avg_pre_dispatch_duration_ms": (
-                    round(sum(durations) / len(durations), 2)
-                    if durations
-                    else None
+                    round(sum(durations) / len(durations), 2) if durations else None
                 ),
                 "p95_pre_dispatch_duration_ms": _compute_percentile(durations, 95),
             }
@@ -9732,7 +9771,9 @@ def _build_turn_execution_latency_and_trend_views(
     }
     trend_views = {
         "bucket_granularity": "day",
-        "item_scope": "all_matching_turns" if include_completed else "likely_failure_subset",
+        "item_scope": (
+            "all_matching_turns" if include_completed else "likely_failure_subset"
+        ),
         "turn_outcome_buckets": turn_outcome_buckets,
     }
     return latency_views, trend_views
@@ -9752,10 +9793,14 @@ def _build_selector_regression_assessment(
     comparisons: list[dict[str, Any]] = []
     regression_detected = False
 
-    current_accuracy_pct = _safe_float_or_none(selector_metrics.get("selector_accuracy_pct"))
+    current_accuracy_pct = _safe_float_or_none(
+        selector_metrics.get("selector_accuracy_pct")
+    )
     baseline_accuracy_pct = _safe_float_or_none(baseline_selector_accuracy_pct)
     if current_accuracy_pct is not None and baseline_accuracy_pct is not None:
-        min_expected_accuracy_pct = round(max(0.0, baseline_accuracy_pct - tolerance), 2)
+        min_expected_accuracy_pct = round(
+            max(0.0, baseline_accuracy_pct - tolerance), 2
+        )
         accuracy_regressed = current_accuracy_pct < min_expected_accuracy_pct
         regression_detected = regression_detected or accuracy_regressed
         comparisons.append(
@@ -9779,12 +9824,17 @@ def _build_selector_regression_assessment(
     baseline_misrouting_rate_pct = _safe_float_or_none(
         baseline_selector_misrouting_rate_pct
     )
-    if current_misrouting_rate_pct is not None and baseline_misrouting_rate_pct is not None:
+    if (
+        current_misrouting_rate_pct is not None
+        and baseline_misrouting_rate_pct is not None
+    ):
         max_expected_misrouting_rate_pct = round(
             baseline_misrouting_rate_pct + tolerance,
             2,
         )
-        misrouting_regressed = current_misrouting_rate_pct > max_expected_misrouting_rate_pct
+        misrouting_regressed = (
+            current_misrouting_rate_pct > max_expected_misrouting_rate_pct
+        )
         regression_detected = regression_detected or misrouting_regressed
         comparisons.append(
             {
@@ -9943,9 +9993,10 @@ def _build_execution_dashboard_summary_cards(
             payload["comparison"] = dict(comparison)
             if bool(comparison.get("regressed")):
                 payload["status"] = "fail"
-            elif comparison.get("baseline_pct") is not None or comparison.get(
-                "baseline_ms"
-            ) is not None:
+            elif (
+                comparison.get("baseline_pct") is not None
+                or comparison.get("baseline_ms") is not None
+            ):
                 payload["status"] = "pass"
         return payload
 
@@ -10028,11 +10079,15 @@ def _build_execution_dashboard_summary_cards(
             status=(
                 "pass"
                 if str(imposition_assessment.get("status") or "") == "good"
-                else "warn"
-                if str(imposition_assessment.get("status") or "") == "caution"
-                else "fail"
-                if str(imposition_assessment.get("status") or "") == "high"
-                else "info"
+                else (
+                    "warn"
+                    if str(imposition_assessment.get("status") or "") == "caution"
+                    else (
+                        "fail"
+                        if str(imposition_assessment.get("status") or "") == "high"
+                        else "info"
+                    )
+                )
             ),
         ),
     ]
@@ -10071,7 +10126,9 @@ def _combine_dashboard_recommendations(
             report.get("recommendations")
         ):
             summary = str(recommendation.get("summary") or "").strip()
-            recommendation_id = str(recommendation.get("recommendation_id") or "").strip()
+            recommendation_id = str(
+                recommendation.get("recommendation_id") or ""
+            ).strip()
             dedupe_key = recommendation_id or summary
             if not dedupe_key or dedupe_key in seen_keys:
                 continue
@@ -10113,7 +10170,8 @@ def _combine_dashboard_recommendations(
                     "comparisons": [
                         dict(comparison)
                         for comparison in comparisons
-                        if isinstance(comparison, Mapping) and comparison.get("regressed")
+                        if isinstance(comparison, Mapping)
+                        and comparison.get("regressed")
                     ]
                 },
                 "source_surface": "pre_dispatch_latency",
@@ -10269,7 +10327,9 @@ def _turn_execution_build_benchmark(**kwargs):
             else {}
         )
         metric_labels_raw = execution_correctness.get("metric_labels")
-        metric_labels = metric_labels_raw if isinstance(metric_labels_raw, Mapping) else {}
+        metric_labels = (
+            metric_labels_raw if isinstance(metric_labels_raw, Mapping) else {}
+        )
         for label_name in outcome_label_counts:
             if bool(metric_labels.get(label_name, False)):
                 outcome_label_counts[label_name] += 1
@@ -10417,7 +10477,10 @@ def _turn_execution_build_benchmark(**kwargs):
     missing_imposition_dimensions = imposition_assessment.get(
         "missing_telemetry_dimensions"
     )
-    if isinstance(missing_imposition_dimensions, list) and missing_imposition_dimensions:
+    if (
+        isinstance(missing_imposition_dimensions, list)
+        and missing_imposition_dimensions
+    ):
         capability_gaps.append(
             {
                 "gap_id": "minimal_imposition_telemetry_missing",
@@ -10608,9 +10671,7 @@ def _turn_execution_build_dashboard(**kwargs):
         baseline_pre_dispatch_p95_duration_ms=kwargs.get(
             "baseline_pre_dispatch_p95_duration_ms"
         ),
-        latency_regression_tolerance_pct=kwargs.get(
-            "latency_regression_tolerance_pct"
-        ),
+        latency_regression_tolerance_pct=kwargs.get("latency_regression_tolerance_pct"),
     )
 
     turn_regression_assessment_raw = turn_execution_report.get("regression_assessment")
@@ -10653,7 +10714,8 @@ def _turn_execution_build_dashboard(**kwargs):
                     latency_regression_assessment.get("regression_detected")
                 ),
                 "details": {
-                    "comparisons": latency_regression_assessment.get("comparisons") or []
+                    "comparisons": latency_regression_assessment.get("comparisons")
+                    or []
                 },
                 "source_surface": "pre_dispatch_latency",
             }
@@ -10740,7 +10802,9 @@ def _turn_execution_build_dashboard(**kwargs):
                     selector_metrics.get("outcome_label_rates_pct", {}).get(
                         "tool_or_workflow_misrouting_rate_pct"
                     )
-                    if isinstance(selector_metrics.get("outcome_label_rates_pct"), Mapping)
+                    if isinstance(
+                        selector_metrics.get("outcome_label_rates_pct"), Mapping
+                    )
                     else None
                 ),
             },
@@ -10762,7 +10826,8 @@ def _turn_execution_build_dashboard(**kwargs):
         "trend_views": turn_execution_report.get("trend_views") or {},
         "latency_views": latency_views,
         "drilldowns": {
-            "turn_execution_replay_cases": turn_execution_report.get("replay_cases") or [],
+            "turn_execution_replay_cases": turn_execution_report.get("replay_cases")
+            or [],
             "selector_replay_cases": selector_report.get("replay_cases") or [],
             "turn_execution_triage_index": turn_execution_report.get("triage_index")
             or {},
@@ -10775,19 +10840,21 @@ def _turn_execution_build_dashboard(**kwargs):
         "recommendations": recommendations,
         "data_sources": {
             "turn_execution_report": {
-                "item_kind": turn_execution_report.get("provenance", {}).get(
-                    "item_kind"
-                )
-                if isinstance(turn_execution_report.get("provenance"), Mapping)
-                else None,
+                "item_kind": (
+                    turn_execution_report.get("provenance", {}).get("item_kind")
+                    if isinstance(turn_execution_report.get("provenance"), Mapping)
+                    else None
+                ),
                 "benchmark_fingerprint": turn_execution_report.get(
                     "benchmark_fingerprint"
                 ),
             },
             "selector_report": {
-                "item_kind": selector_report.get("provenance", {}).get("item_kind")
-                if isinstance(selector_report.get("provenance"), Mapping)
-                else None,
+                "item_kind": (
+                    selector_report.get("provenance", {}).get("item_kind")
+                    if isinstance(selector_report.get("provenance"), Mapping)
+                    else None
+                ),
                 "benchmark_fingerprint": selector_report.get("benchmark_fingerprint"),
                 "corpus": selector_report.get("corpus") or {},
             },
@@ -11403,7 +11470,8 @@ def _testing_theory_create_slice(**kwargs):
         namespace=kwargs.get("namespace"),
         user_id=kwargs.get("user_id"),
         org_id=kwargs.get("org_id"),
-        included_canonical_concept_ids=kwargs.get("included_canonical_concept_ids") or (),
+        included_canonical_concept_ids=kwargs.get("included_canonical_concept_ids")
+        or (),
         included_theory_ids=kwargs.get("included_theory_ids") or (),
         expected_observations=kwargs.get("expected_observations") or (),
         promotion_policy=kwargs.get("promotion_policy"),
@@ -11439,7 +11507,9 @@ def _testing_theory_assert_local_claims(**kwargs):
 def _testing_theory_compute_diff(**kwargs):
     from ...services.testing_theory_service import compute_testing_theory_diff
 
-    return compute_testing_theory_diff(theory_id=str(kwargs.get("theory_id") or "").strip())
+    return compute_testing_theory_diff(
+        theory_id=str(kwargs.get("theory_id") or "").strip()
+    )
 
 
 def _testing_theory_rollback_local_writes(**kwargs):
@@ -11453,7 +11523,9 @@ def _testing_theory_rollback_local_writes(**kwargs):
 
 
 def _testing_theory_promote_validated_claims(**kwargs):
-    from ...services.testing_theory_service import promote_testing_theory_validated_claims
+    from ...services.testing_theory_service import (
+        promote_testing_theory_validated_claims,
+    )
 
     return promote_testing_theory_validated_claims(
         theory_id=str(kwargs.get("theory_id") or "").strip(),
@@ -11464,7 +11536,9 @@ def _testing_theory_promote_validated_claims(**kwargs):
 
 
 def _testing_theory_gc_expired(**kwargs):
-    from ...services.testing_theory_service import garbage_collect_expired_testing_theories
+    from ...services.testing_theory_service import (
+        garbage_collect_expired_testing_theories,
+    )
 
     return garbage_collect_expired_testing_theories(
         now_utc=kwargs.get("now_utc"),
@@ -11654,7 +11728,9 @@ def _testing_prepare_arxiv_paper_ingestion_fixture(**kwargs):
         arxiv_source=str(kwargs.get("arxiv_source") or "").strip() or None,
         source_uri=str(kwargs.get("source_uri") or "").strip() or None,
         arxiv_id=str(kwargs.get("arxiv_id") or "").strip() or None,
-        user_concept_id=str(kwargs.get("user_concept_id") or kwargs.get("user_id") or "").strip()
+        user_concept_id=str(
+            kwargs.get("user_concept_id") or kwargs.get("user_id") or ""
+        ).strip()
         or None,
         timeout_seconds=float(kwargs.get("timeout_seconds") or 15.0),
         repair_existing_artifacts=_coerce_bool_input(
@@ -11700,8 +11776,7 @@ def _testing_cleanup_arxiv_paper_ingestion_artifacts(**kwargs):
         topic_concept_ids=kwargs.get("topic_concept_ids") or (),
         preexisting_author_concept_ids=kwargs.get("preexisting_author_concept_ids")
         or (),
-        preexisting_topic_concept_ids=kwargs.get("preexisting_topic_concept_ids")
-        or (),
+        preexisting_topic_concept_ids=kwargs.get("preexisting_topic_concept_ids") or (),
     )
 
 
@@ -11751,9 +11826,7 @@ def _turn_execution_search_failures(**kwargs):
                 completion_gate={
                     "decision": item.get("decision"),
                     "decision_reason": item.get("decision_reason"),
-                    "safe_to_claim_completion": item.get(
-                        "safe_to_claim_completion"
-                    ),
+                    "safe_to_claim_completion": item.get("safe_to_claim_completion"),
                     "requires_follow_up": item.get("requires_follow_up"),
                 },
                 required_effects=[
@@ -11764,13 +11837,13 @@ def _turn_execution_search_failures(**kwargs):
                     for effect_id in (item.get("blocking_effect_ids") or [])
                     if isinstance(effect_id, str) and effect_id.strip()
                 ],
-                critic_summary=item.get("critic_summary")
-                if isinstance(item.get("critic_summary"), Mapping)
-                else {},
+                critic_summary=(
+                    item.get("critic_summary")
+                    if isinstance(item.get("critic_summary"), Mapping)
+                    else {}
+                ),
                 final_response={
-                    "completion_claim_detected": item.get(
-                        "completion_claim_detected"
-                    ),
+                    "completion_claim_detected": item.get("completion_claim_detected"),
                     "completion_claim_validated": item.get(
                         "completion_claim_validated"
                     ),
@@ -11779,9 +11852,11 @@ def _turn_execution_search_failures(**kwargs):
                     "selected_workflow_id": item.get("selected_workflow_id"),
                     "selector_verdict": item.get("selector_verdict"),
                 },
-                workflow_routing_diagnostics=item.get("workflow_routing_diagnostics")
-                if isinstance(item.get("workflow_routing_diagnostics"), Mapping)
-                else {},
+                workflow_routing_diagnostics=(
+                    item.get("workflow_routing_diagnostics")
+                    if isinstance(item.get("workflow_routing_diagnostics"), Mapping)
+                    else {}
+                ),
             )
         )
         item["execution_correctness"] = execution_correctness
@@ -12260,7 +12335,9 @@ def _renderer_resolve_applicability(**kwargs):
             "invalid_parameter",
             "renderer_definitions must be a list when provided",
             details={"parameter": "renderer_definitions"},
-            suggestions=["Provide renderer_definitions as a list of renderer metadata objects"],
+            suggestions=[
+                "Provide renderer_definitions as a list of renderer metadata objects"
+            ],
         )
     if renderer_definition_concept_ids is not None and not isinstance(
         renderer_definition_concept_ids, list
@@ -12269,14 +12346,19 @@ def _renderer_resolve_applicability(**kwargs):
             "invalid_parameter",
             "renderer_definition_concept_ids must be a list when provided",
             details={"parameter": "renderer_definition_concept_ids"},
-            suggestions=["Provide renderer_definition_concept_ids as a list of concept IDs"],
+            suggestions=[
+                "Provide renderer_definition_concept_ids as a list of concept IDs"
+            ],
         )
 
     effective_renderer_definitions = list(renderer_definitions or [])
     loading_diagnostics = {"renderer_definition_source": "inline_payload_only"}
-    if isinstance(renderer_definition_concept_ids, list) and renderer_definition_concept_ids:
-        loaded_definitions, loading_diagnostics = load_renderer_definitions_from_concept_ids(
-            renderer_definition_concept_ids
+    if (
+        isinstance(renderer_definition_concept_ids, list)
+        and renderer_definition_concept_ids
+    ):
+        loaded_definitions, loading_diagnostics = (
+            load_renderer_definitions_from_concept_ids(renderer_definition_concept_ids)
         )
         effective_renderer_definitions.extend(loaded_definitions)
 
@@ -12295,7 +12377,9 @@ def _renderer_resolve_applicability(**kwargs):
             "renderer_definition_loading": loading_diagnostics,
         }
         if canonical_profile_ids:
-            error_details["canonical_renderer_profile_concept_ids"] = canonical_profile_ids
+            error_details["canonical_renderer_profile_concept_ids"] = (
+                canonical_profile_ids
+            )
         return make_error_response(
             "missing_parameter",
             "No renderer definitions were supplied. Provide renderer_definitions or renderer_definition_concept_ids with valid profile text.",
@@ -12307,8 +12391,8 @@ def _renderer_resolve_applicability(**kwargs):
             ],
         )
 
-    enriched_request_payload, request_enrichment_diagnostics = enrich_request_payload_from_concept(
-        request_payload
+    enriched_request_payload, request_enrichment_diagnostics = (
+        enrich_request_payload_from_concept(request_payload)
     )
 
     allow_multimodal = kwargs.get("allow_multimodal", True)
@@ -12369,7 +12453,9 @@ def _upsert_renderer_profile(**kwargs):
             "missing_parameter",
             "renderer_concept_id is required and must be a non-empty string",
             details={"missing": ["renderer_concept_id"]},
-            suggestions=["Provide the renderer concept ID (for example #V#timeline_renderer)"],
+            suggestions=[
+                "Provide the renderer concept ID (for example #V#timeline_renderer)"
+            ],
         )
     if not isinstance(renderer_profile, dict):
         return make_error_response(
@@ -12390,7 +12476,9 @@ def _upsert_renderer_profile(**kwargs):
             policy=policy,
             provenance=provenance if isinstance(provenance, dict) else None,
             context=context if isinstance(context, dict) else None,
-            garbage_collect=(True if garbage_collect is None else bool(garbage_collect)),
+            garbage_collect=(
+                True if garbage_collect is None else bool(garbage_collect)
+            ),
         )
     except ValueError as exc:
         return make_error_response(
@@ -12583,7 +12671,9 @@ def _workflow_mcp_health_check(**kwargs):
         started = perf_counter()
         try:
             result = gateway.invoke(tool_name, payload)
-            response_payload = result.payload if isinstance(result.payload, dict) else {}
+            response_payload = (
+                result.payload if isinstance(result.payload, dict) else {}
+            )
             ok = bool(response_payload.get("success"))
             error_code = response_payload.get("error_code")
             error = response_payload.get("error")
@@ -12603,9 +12693,11 @@ def _workflow_mcp_health_check(**kwargs):
                 "latency_ms": round((perf_counter() - started) * 1000.0, 2),
                 "error_code": error_code,
                 "error": error,
-                "details": response_payload.get("error_details")
-                if isinstance(response_payload, dict)
-                else None,
+                "details": (
+                    response_payload.get("error_details")
+                    if isinstance(response_payload, dict)
+                    else None
+                ),
             }
         )
 
@@ -12616,6 +12708,29 @@ def _workflow_mcp_health_check(**kwargs):
         "failed_tools": failed_tools,
         "capability_matrix": capability_matrix,
     }
+
+
+def _workflow_materialisation_diagnostics(**kwargs):
+    """Diagnose workflow/testing concept materialisation parity state."""
+
+    from ...services.workflow_materialisation_diagnostics_service import (
+        build_workflow_materialisation_diagnostics,
+    )
+
+    include_present_concepts = kwargs.get("include_present_concepts", True)
+    if not isinstance(include_present_concepts, bool):
+        include_present_concepts = bool(include_present_concepts)
+
+    try:
+        return build_workflow_materialisation_diagnostics(
+            required_concept_ids=kwargs.get("required_concept_ids"),
+            include_present_concepts=include_present_concepts,
+        )
+    except Exception as exc:
+        return make_error_response(
+            "workflow_materialisation_diagnostics_failed",
+            f"Failed to build workflow materialisation diagnostics: {exc}",
+        )
 
 
 def _workflow_bind_event(**kwargs):
@@ -13063,7 +13178,8 @@ def _workflow_execute(**kwargs):
         timed_out = False
         instance_id = (
             submission.instance_id
-            if isinstance(submission.instance_id, str) and submission.instance_id.strip()
+            if isinstance(submission.instance_id, str)
+            and submission.instance_id.strip()
             else None
         )
         if instance_id:
@@ -13283,10 +13399,12 @@ def _workflow_list_instances(**kwargs):
         workflow_id=workflow_id,
         source_event_type=source_event_type,
         source_event_id=source_event_id,
-        conversation_session_id=session_id
-        if isinstance(session_id, str) and session_id.strip()
-        else None,
-        request_id=request_id if isinstance(request_id, str) and request_id.strip() else None,
+        conversation_session_id=(
+            session_id if isinstance(session_id, str) and session_id.strip() else None
+        ),
+        request_id=(
+            request_id if isinstance(request_id, str) and request_id.strip() else None
+        ),
         from_utc=from_utc if isinstance(from_utc, str) and from_utc.strip() else None,
         to_utc=to_utc if isinstance(to_utc, str) and to_utc.strip() else None,
         limit=limit,
@@ -15409,7 +15527,9 @@ def _summarise_turn_execution_rag_indexing_states(
         status = None
         if isinstance(state, Mapping):
             status = state.get("status")
-        status_key = status.strip() if isinstance(status, str) and status.strip() else "unknown"
+        status_key = (
+            status.strip() if isinstance(status, str) and status.strip() else "unknown"
+        )
         counts[status_key] = counts.get(status_key, 0) + 1
     return counts
 
@@ -15428,7 +15548,10 @@ def _resolve_rag_actor_scope_ids(
         user_concept_id = None
 
     organisation_concept_id = ns_report.get("organisation_concept_id")
-    if not isinstance(organisation_concept_id, str) or not organisation_concept_id.strip():
+    if (
+        not isinstance(organisation_concept_id, str)
+        or not organisation_concept_id.strip()
+    ):
         organisation_concept_id = ns_report.get("derived_organisation_concept_id")
     if isinstance(organisation_concept_id, str):
         organisation_concept_id = organisation_concept_id.strip() or None
@@ -15542,7 +15665,9 @@ def _build_rag_file_copy_item(
 
     artifact_record: dict[str, Any] | None = None
     try:
-        from ...services.computer_file_copy_service import build_file_copy_artifact_record
+        from ...services.computer_file_copy_service import (
+            build_file_copy_artifact_record,
+        )
 
         artifact_record = build_file_copy_artifact_record(
             file_copy_concept_id=concept_id,
@@ -15942,7 +16067,10 @@ def _rag_list_indexed(**kwargs):
                 if not isinstance(effect, dict):
                     continue
                 status = effect.get("status")
-                if isinstance(status, str) and status in {"not_executed", "not_satisfied"}:
+                if isinstance(status, str) and status in {
+                    "not_executed",
+                    "not_satisfied",
+                }:
                     unresolved_effect_count += 1
 
             workflow_selection_raw = doc.get("workflow_selection")
@@ -16710,23 +16838,31 @@ def _rag_get_item(**kwargs):
             if isinstance(doc.get("workflow_routing_diagnostics"), dict)
             else {}
         )
-        prompt_payload = doc.get("prompt") if isinstance(doc.get("prompt"), dict) else {}
+        prompt_payload = (
+            doc.get("prompt") if isinstance(doc.get("prompt"), dict) else {}
+        )
         required_effects = (
-            doc.get("required_effects") if isinstance(doc.get("required_effects"), list) else []
+            doc.get("required_effects")
+            if isinstance(doc.get("required_effects"), list)
+            else []
         )
         postcondition_checks = (
             doc.get("postcondition_checks")
             if isinstance(doc.get("postcondition_checks"), list)
             else []
         )
-        critic_payload = doc.get("critic") if isinstance(doc.get("critic"), dict) else {}
+        critic_payload = (
+            doc.get("critic") if isinstance(doc.get("critic"), dict) else {}
+        )
         critic_summary = (
             critic_payload.get("summary")
             if isinstance(critic_payload.get("summary"), dict)
             else {}
         )
         final_response_payload = (
-            doc.get("final_response") if isinstance(doc.get("final_response"), dict) else {}
+            doc.get("final_response")
+            if isinstance(doc.get("final_response"), dict)
+            else {}
         )
         execution_correctness_raw = doc.get("execution_correctness")
         execution_correctness = (
@@ -16745,9 +16881,11 @@ def _rag_get_item(**kwargs):
             _load_turn_execution_rag_indexing_state_map(
                 db=db,
                 namespace=ns,
-                chat_session_ids=[doc.get("session_id")]
-                if isinstance(doc.get("session_id"), str)
-                else [],
+                chat_session_ids=(
+                    [doc.get("session_id")]
+                    if isinstance(doc.get("session_id"), str)
+                    else []
+                ),
             )
         )
         rag_indexing_state = _build_turn_execution_rag_indexing_state(
@@ -16767,18 +16905,14 @@ def _rag_get_item(**kwargs):
             "namespace": doc.get("namespace"),
             "decision": completion_gate.get("decision"),
             "decision_reason": completion_gate.get("decision_reason"),
-            "safe_to_claim_completion": completion_gate.get(
-                "safe_to_claim_completion"
-            ),
+            "safe_to_claim_completion": completion_gate.get("safe_to_claim_completion"),
             "requires_follow_up": completion_gate.get("requires_follow_up"),
             "blocking_effect_ids": completion_gate.get("blocking_effect_ids"),
             "selected_workflow_id": workflow_selection.get("selected_workflow_id"),
             "selector_verdict": workflow_selection.get("selector_verdict"),
             "overall_outcome": execution_correctness.get("overall_outcome"),
             "failure_mode": execution_correctness.get("failure_mode"),
-            "likely_failure_to_act": execution_correctness.get(
-                "likely_failure_to_act"
-            ),
+            "likely_failure_to_act": execution_correctness.get("likely_failure_to_act"),
             "metric_labels": execution_correctness.get("metric_labels"),
             "execution_correctness": execution_correctness,
             "workflow_routing_diagnostics": workflow_routing_diagnostics,
@@ -17441,7 +17575,9 @@ def _github_resolve_proxy_call(
     return tool_name, proxy_arguments
 
 
-def _github_invoke_proxy_tool(tool_name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
+def _github_invoke_proxy_tool(
+    tool_name: str, arguments: Mapping[str, Any]
+) -> dict[str, Any]:
     from .github_proxy_mcp import GitHubProxyError, get_github_proxy
 
     resolved_call = _github_resolve_proxy_call(tool_name, arguments)
@@ -17493,13 +17629,17 @@ def _github_invoke_proxy_tool(tool_name: str, arguments: Mapping[str, Any]) -> d
     )
 
 
-def _github_extract_owner_repo(kwargs: Mapping[str, Any]) -> tuple[str | None, str | None]:
+def _github_extract_owner_repo(
+    kwargs: Mapping[str, Any],
+) -> tuple[str | None, str | None]:
     owner = _github_clean_text(kwargs.get("owner"))
     repo = _github_clean_text(kwargs.get("repo"))
     return owner, repo
 
 
-def _github_require_owner_repo(kwargs: Mapping[str, Any]) -> tuple[str, str] | dict[str, Any]:
+def _github_require_owner_repo(
+    kwargs: Mapping[str, Any],
+) -> tuple[str, str] | dict[str, Any]:
     owner, repo = _github_extract_owner_repo(kwargs)
     if not owner or not repo:
         return make_error_response(
@@ -17614,7 +17754,11 @@ def _github_get_auth_config(**kwargs):
         "token_length": len(token) if token else 0,
         "env_keys_used": {
             "token": token_key,
-            "command": "VON_GITHUB_MCP_COMMAND" if os.getenv("VON_GITHUB_MCP_COMMAND") else None,
+            "command": (
+                "VON_GITHUB_MCP_COMMAND"
+                if os.getenv("VON_GITHUB_MCP_COMMAND")
+                else None
+            ),
             "args": "VON_GITHUB_MCP_ARGS" if os.getenv("VON_GITHUB_MCP_ARGS") else None,
             "allow_list": "VON_GITHUB_REPO_ALLOW_LIST",
             "execute_mode": "VON_INTERNAL_MCP_GITHUB_EXECUTE_MODE",
@@ -17829,9 +17973,8 @@ def _jira_attachment_max_size_bytes() -> int:
 def _jira_attachment_allowed_mime_types() -> set[str]:
     import os
 
-    raw = (
-        os.getenv("VON_INTERNAL_MCP_JIRA_ATTACHMENT_ALLOWED_MIME_TYPES")
-        or os.getenv("VON_JIRA_ATTACHMENT_ALLOWED_MIME_TYPES")
+    raw = os.getenv("VON_INTERNAL_MCP_JIRA_ATTACHMENT_ALLOWED_MIME_TYPES") or os.getenv(
+        "VON_JIRA_ATTACHMENT_ALLOWED_MIME_TYPES"
     )
     if not isinstance(raw, str) or not raw.strip():
         return set(_JIRA_ATTACHMENT_ALLOWED_MIME_TYPES_DEFAULT)
@@ -18420,9 +18563,7 @@ def _jira_add_attachment(**kwargs):
             "missing_parameter",
             f"Missing required parameters: {', '.join(missing)}",
             details={"missing": missing},
-            suggestions=[
-                "Provide issue_key, filename, content_base64, and mime_type"
-            ],
+            suggestions=["Provide issue_key, filename, content_base64, and mime_type"],
         )
 
     issue_key_str = str(issue_key).strip()
@@ -18593,7 +18734,9 @@ def _jira_add_attachment(**kwargs):
     return {
         "success": True,
         "issue_key": issue_key_str,
-        "attachment_id": str(attachment_id_raw) if attachment_id_raw is not None else None,
+        "attachment_id": (
+            str(attachment_id_raw) if attachment_id_raw is not None else None
+        ),
         "filename": str(attachment_filename),
         "size_bytes": attachment_size,
         "content_type": str(attachment_content_type),
@@ -19071,7 +19214,9 @@ def _jira_delete_issue_link(**kwargs):
     target_key = _clean_issue_key_param("target_issue_key")
 
     source_project = (
-        _jira_project_from_issue_key(source_key) if isinstance(source_key, str) else None
+        _jira_project_from_issue_key(source_key)
+        if isinstance(source_key, str)
+        else None
     )
     if source_key and not source_project:
         return make_error_response(
@@ -19081,7 +19226,9 @@ def _jira_delete_issue_link(**kwargs):
         )
 
     target_project = (
-        _jira_project_from_issue_key(target_key) if isinstance(target_key, str) else None
+        _jira_project_from_issue_key(target_key)
+        if isinstance(target_key, str)
+        else None
     )
     if target_key and not target_project:
         return make_error_response(
@@ -19277,9 +19424,11 @@ def _jira_hygiene_execute_batches(**kwargs):
         or approval_payload.get("approved_operations"),
         execution_mode=kwargs.get("execution_mode")
         or approval_payload.get("execution_mode"),
-        approved=kwargs.get("approved")
-        if kwargs.get("approved") is not None
-        else approved_from_payload,
+        approved=(
+            kwargs.get("approved")
+            if kwargs.get("approved") is not None
+            else approved_from_payload
+        ),
         batch_size=kwargs.get("batch_size")
         or approval_payload.get("resolved_batch_size"),
         max_retries=kwargs.get("max_retries"),
@@ -19588,7 +19737,9 @@ def _chat_introspect(
                     )
             return cleaned
         if isinstance(value, list):
-            return [_sanitise_for_introspection(item, depth=depth + 1) for item in value]
+            return [
+                _sanitise_for_introspection(item, depth=depth + 1) for item in value
+            ]
         if isinstance(value, tuple):
             return tuple(
                 _sanitise_for_introspection(item, depth=depth + 1) for item in value
@@ -20376,7 +20527,9 @@ def _task_import_jira_issues(**kwargs):
         resolve_event_actor_context,
     )
 
-    issue_keys, seeded_issue_docs = _normalise_issue_keys_input(kwargs.get("issue_keys"))
+    issue_keys, seeded_issue_docs = _normalise_issue_keys_input(
+        kwargs.get("issue_keys")
+    )
     jql = kwargs.get("jql")
     backfill_existing_imports = _coerce_bool_input(
         kwargs.get("backfill_existing_imports"),
@@ -20442,8 +20595,9 @@ def _task_import_jira_issues(**kwargs):
     if actor_concept_id is None:
         # Backwards compatibility for callers passing namespace=#V#user only.
         actor_concept_id = _normalise_optional_concept_id(namespace_value)
-    organisation_concept_id = requested_org_concept_id or _normalise_optional_concept_id(
-        resolved_org_concept_id
+    organisation_concept_id = (
+        requested_org_concept_id
+        or _normalise_optional_concept_id(resolved_org_concept_id)
     )
     try:
         backfill_limit = int(kwargs.get("backfill_limit", 2000))
@@ -20503,9 +20657,7 @@ def _task_import_jira_issues(**kwargs):
                 fields=["key"],
             )
             issues = (
-                search_result.get("issues")
-                if isinstance(search_result, dict)
-                else None
+                search_result.get("issues") if isinstance(search_result, dict) else None
             )
             if isinstance(issues, list):
                 search_count = len(issues)
@@ -20562,7 +20714,9 @@ def _task_import_jira_issues(**kwargs):
 
             if include_watchers and hasattr(proxy, "get_watchers"):
                 try:
-                    watchers_payload = await proxy.get_watchers(issue_key=resolved_key.strip())
+                    watchers_payload = await proxy.get_watchers(
+                        issue_key=resolved_key.strip()
+                    )
                     if isinstance(watchers_payload, Mapping):
                         issue_doc = dict(issue_doc)
                         issue_doc["watchers"] = watchers_payload
@@ -20596,7 +20750,9 @@ def _task_import_jira_issues(**kwargs):
     except Exception as exc:
         return make_error_response("UNEXPECTED_ERROR", f"Unexpected error: {exc}")
 
-    issue_docs = fetch_payload.get("issues") if isinstance(fetch_payload, dict) else None
+    issue_docs = (
+        fetch_payload.get("issues") if isinstance(fetch_payload, dict) else None
+    )
     if not isinstance(issue_docs, list):
         issue_docs = []
     namespace_account_id = (
@@ -20639,7 +20795,9 @@ def _task_import_jira_issues(**kwargs):
         create_missing_participant_concepts=create_missing_participant_concepts,
     )
     if not isinstance(report, dict):
-        return make_error_response("UNEXPECTED_ERROR", "Importer returned invalid payload")
+        return make_error_response(
+            "UNEXPECTED_ERROR", "Importer returned invalid payload"
+        )
 
     issue_docs_by_key: dict[str, Mapping[str, Any]] = {}
     for issue_doc in issue_docs:
@@ -20710,17 +20868,15 @@ def _task_import_jira_issues(**kwargs):
                 issue_doc.get("fields") if isinstance(issue_doc, Mapping) else None
             )
             labels_value = (
-                fields_value.get("labels") if isinstance(fields_value, Mapping) else None
+                fields_value.get("labels")
+                if isinstance(fields_value, Mapping)
+                else None
             )
             existing_labels = _normalise_jira_labels(labels_value)
 
             # If labels are missing from the fetched payload, re-fetch just labels to
             # avoid overwriting existing source labels.
-            if (
-                not dry_run
-                and labels_value is None
-                and proxy is not None
-            ):
+            if not dry_run and labels_value is None and proxy is not None:
                 try:
                     refreshed_issue = await proxy.get_issue(
                         issue_key=issue_key,
@@ -20745,9 +20901,9 @@ def _task_import_jira_issues(**kwargs):
             )
 
             if has_label:
-                sync_report["already_present_count"] = int(
-                    sync_report["already_present_count"]
-                ) + 1
+                sync_report["already_present_count"] = (
+                    int(sync_report["already_present_count"]) + 1
+                )
                 sync_report["results"].append(
                     {
                         "issue_key": issue_key,
@@ -20758,9 +20914,9 @@ def _task_import_jira_issues(**kwargs):
                 continue
 
             if dry_run:
-                sync_report["would_update_count"] = int(
-                    sync_report["would_update_count"]
-                ) + 1
+                sync_report["would_update_count"] = (
+                    int(sync_report["would_update_count"]) + 1
+                )
                 sync_report["results"].append(
                     {
                         "issue_key": issue_key,
@@ -20789,7 +20945,9 @@ def _task_import_jira_issues(**kwargs):
                 )
                 if isinstance(update_result, Mapping):
                     if update_result.get("success") is False:
-                        raise RuntimeError(str(update_result.get("error") or update_result))
+                        raise RuntimeError(
+                            str(update_result.get("error") or update_result)
+                        )
                     if update_result.get("error"):
                         raise RuntimeError(str(update_result.get("error")))
                 sync_report["updated_count"] = int(sync_report["updated_count"]) + 1
@@ -20865,9 +21023,11 @@ def _task_import_jira_issues(**kwargs):
         report["success"] = False
     report["source_label_sync"] = source_label_sync_report
     report["fetch"] = {
-        "requested_issue_count": len(fetch_payload.get("requested_issue_keys", []))
-        if isinstance(fetch_payload, dict)
-        else 0,
+        "requested_issue_count": (
+            len(fetch_payload.get("requested_issue_keys", []))
+            if isinstance(fetch_payload, dict)
+            else 0
+        ),
         "fetched_issue_count": len(issue_docs),
         "search_result_count": (
             fetch_payload.get("search_result_count", 0)
@@ -21249,7 +21409,8 @@ def _task_add_comment(**kwargs):
         comment = add_task_comment(
             task_id,
             body=body.strip(),
-            author_concept_id=kwargs.get("author_concept_id") or kwargs.get("namespace"),
+            author_concept_id=kwargs.get("author_concept_id")
+            or kwargs.get("namespace"),
         )
         return {"success": True, "task_concept_id": task_id, "comment": comment}
     except TaskNotFoundError as exc:
@@ -21556,7 +21717,9 @@ def _resolve_shared_conversation_actor_context(
     *,
     allow_actor_bootstrap_writes: bool = False,
 ) -> tuple[str | None, str | None, str | None, str | None]:
-    from ...services.workflow_event_integration_service import resolve_event_actor_context
+    from ...services.workflow_event_integration_service import (
+        resolve_event_actor_context,
+    )
 
     namespace = _clean_optional_string(payload.get("namespace"))
     requested_user = _normalise_optional_concept_id(
@@ -22425,9 +22588,7 @@ def build_default_catalogue() -> MethodCatalogue:
     jira_hygiene_discover_output_schema = _jira_generic_output_schema(
         "hygiene_discover"
     )
-    jira_hygiene_propose_output_schema = _jira_generic_output_schema(
-        "hygiene_propose"
-    )
+    jira_hygiene_propose_output_schema = _jira_generic_output_schema("hygiene_propose")
     jira_hygiene_check_approval_output_schema = _jira_generic_output_schema(
         "hygiene_check_approval"
     )
@@ -22468,8 +22629,8 @@ def build_default_catalogue() -> MethodCatalogue:
     github_update_pull_request_output_schema = _github_generic_output_schema(
         "update_pull_request"
     )
-    github_create_pull_request_with_copilot_output_schema = _github_generic_output_schema(
-        "create_pull_request_with_copilot"
+    github_create_pull_request_with_copilot_output_schema = (
+        _github_generic_output_schema("create_pull_request_with_copilot")
     )
     task_create_output_schema = _task_generic_output_schema("create")
     task_get_output_schema = _task_generic_output_schema("get")
@@ -25898,6 +26059,50 @@ def build_default_catalogue() -> MethodCatalogue:
             ),
         ),
         MethodDefinition(
+            name="workflow_materialisation_diagnostics",
+            handler=_workflow_materialisation_diagnostics,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "required_concept_ids": (list, str, type(None)),
+                    "include_present_concepts": bool,
+                },
+                allow_unknown=True,
+                description=(
+                    "Diagnose why required workflow/testing concepts appear "
+                    "missing in the current environment."
+                ),
+            ),
+            output_schema=Schema(
+                required={"success": bool, "classification": dict},
+                optional={
+                    "schema_version": str,
+                    "generated_at_utc": str,
+                    "required_concept_ids": list,
+                    "environment": dict,
+                    "durable_workflow_startup": dict,
+                    "workflow_bootstrap": dict,
+                    "parity_inventory": dict,
+                    "testing_type_parity": dict,
+                    "required_concepts": list,
+                    "errors": list,
+                    "error": str,
+                    "error_code": str,
+                },
+                allow_unknown=True,
+                description=(
+                    "Workflow/testing concept materialisation diagnostics with "
+                    "environment, startup, parity, and per-concept provenance."
+                ),
+            ),
+            category="read",
+            description=(
+                "Explain whether missing workflow/testing concepts reflect a "
+                "fresh/test DB, skipped bootstrap, pending parity, partial "
+                "bootstrap, or true missing authority."
+            ),
+        ),
+        MethodDefinition(
             name="workflow_create_instance",
             handler=_workflow_create_instance,
             input_schema=Schema(
@@ -26483,7 +26688,9 @@ def build_default_catalogue() -> MethodCatalogue:
         catalogue.register(definition)
 
     try:
-        built_in_definitions = {definition.name: definition for definition in definitions}
+        built_in_definitions = {
+            definition.name: definition for definition in definitions
+        }
         dynamic_result = load_dynamic_method_definitions(
             base_definitions=built_in_definitions,
             protected_method_names=built_in_definitions.keys(),

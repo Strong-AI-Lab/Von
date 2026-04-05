@@ -1,3 +1,4 @@
+import copy
 import datetime as _dt
 import importlib
 import logging
@@ -71,6 +72,7 @@ try:  # pragma: no cover - exercised implicitly in dev runs
         load_dotenv(env_path, override=False)
 except Exception:
     pass
+
 
 def _bind_imports(module_name: str, names: list[str]) -> None:
     module = importlib.import_module(module_name)
@@ -168,6 +170,47 @@ APP_VERSION = DEFAULT_APP_VERSION
 _durable_workflow_registry = None
 # Type: ActionRegistry | None (from ..workflows)
 _durable_action_registry = None
+_durable_workflow_components_snapshot = None
+_durable_workflow_startup_status_snapshot = None
+
+
+def _copy_runtime_snapshot_payload(payload: Any) -> Any:
+    try:
+        return copy.deepcopy(payload)
+    except Exception:
+        return payload
+
+
+def _set_durable_workflow_components_snapshot(
+    app: Flask,
+    components: dict[str, Any] | None,
+) -> None:
+    global _durable_workflow_components_snapshot
+    _durable_workflow_components_snapshot = _copy_runtime_snapshot_payload(components)
+    app.config["DURABLE_WORKFLOW_COMPONENTS"] = _copy_runtime_snapshot_payload(
+        components
+    )
+
+
+def _set_durable_workflow_startup_status_snapshot(
+    app: Flask,
+    status: dict[str, Any] | None,
+) -> None:
+    global _durable_workflow_startup_status_snapshot
+    _durable_workflow_startup_status_snapshot = _copy_runtime_snapshot_payload(status)
+    app.config["DURABLE_WORKFLOW_STARTUP_STATUS"] = _copy_runtime_snapshot_payload(
+        status
+    )
+
+
+def get_durable_workflow_components_snapshot() -> dict[str, Any] | None:
+    snapshot = _copy_runtime_snapshot_payload(_durable_workflow_components_snapshot)
+    return snapshot if isinstance(snapshot, dict) else None
+
+
+def get_durable_workflow_startup_status_snapshot() -> dict[str, Any] | None:
+    snapshot = _copy_runtime_snapshot_payload(_durable_workflow_startup_status_snapshot)
+    return snapshot if isinstance(snapshot, dict) else None
 
 
 def _build_durable_workflow_bootstrap_summary(
@@ -250,7 +293,9 @@ def _bootstrap_workflow_authority_for_startup(app_logger) -> dict[str, Any]:
         bootstrap_report = dict(
             bootstrap_workflow_concept_identities(registry=authority_registry)
         )
-        after_report = build_workflow_concept_authority_report(registry=authority_registry)
+        after_report = build_workflow_concept_authority_report(
+            registry=authority_registry
+        )
         invalidate_shared_workflow_registry_read_only()
 
         report = {
@@ -481,7 +526,11 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
                 "[durable_workflows] paper workflow bootstrap failed: %s",
                 paper_workflow_bootstrap_report,
             )
-        elif bool((paper_workflow_bootstrap_report.get("publication") or {}).get("drift_detected")):
+        elif bool(
+            (paper_workflow_bootstrap_report.get("publication") or {}).get(
+                "drift_detected"
+            )
+        ):
             app_logger.warning(
                 "[durable_workflows] paper workflow repo-seed repair applied for Vontology drift: %s",
                 (paper_workflow_bootstrap_report.get("publication") or {}).get(
@@ -489,9 +538,7 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
                 )
                 or (paper_workflow_bootstrap_report.get("workflow_ids") or []),
             )
-        if not bool(
-            episode_evaluation_workflow_bootstrap_report.get("success", False)
-        ):
+        if not bool(episode_evaluation_workflow_bootstrap_report.get("success", False)):
             app_logger.warning(
                 "[durable_workflows] episode evaluation workflow bootstrap failed: %s",
                 episode_evaluation_workflow_bootstrap_report,
@@ -526,9 +573,7 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
                 ensure_identity_resolution_background_schedule,
             )
 
-            identity_schedule_report = (
-                ensure_identity_resolution_background_schedule()
-            )
+            identity_schedule_report = ensure_identity_resolution_background_schedule()
             result["identity_resolution_schedule_bootstrap"] = identity_schedule_report
             if not bool(identity_schedule_report.get("success", False)):
                 app_logger.warning(
@@ -886,9 +931,7 @@ def create_flask_app(
 
     # --- Configuration Setup ---
     # Set secret key for session management (required for Google OAuth)
-    app.secret_key = os.environ.get(
-        "FLASK_SECRET_KEY", _DEV_SECRET_KEY
-    )
+    app.secret_key = os.environ.get("FLASK_SECRET_KEY", _DEV_SECRET_KEY)
     strict_oauth_startup = google_oauth_strict_startup_enabled()
 
     # Cookie defaults are conservative, and become strict-by-default when OAuth
@@ -1077,13 +1120,12 @@ def create_flask_app(
     }
 
     if gateway_instance is not None:
-        orchestrator_logger = app.logger.getChild("mcp_orchestrator") if app.logger else None
-        blocking_orchestrator_start = (
-            os.getenv("VON_INTERNAL_MCP_ORCHESTRATOR_BLOCKING_STARTUP", "0")
-            .strip()
-            .lower()
-            in {"1", "true", "yes", "on"}
+        orchestrator_logger = (
+            app.logger.getChild("mcp_orchestrator") if app.logger else None
         )
+        blocking_orchestrator_start = os.getenv(
+            "VON_INTERNAL_MCP_ORCHESTRATOR_BLOCKING_STARTUP", "0"
+        ).strip().lower() in {"1", "true", "yes", "on"}
 
         def _build_orchestrator() -> None:
             start_perf = time.perf_counter()
@@ -1108,7 +1150,8 @@ def create_flask_app(
                     logger=orchestrator_logger,
                     max_tool_invocations=bootstrap_max_tool_invocations,
                     tool_batch_cap=bootstrap_tool_batch_cap,
-                    default_gmail_profile=os.getenv("VON_GMAIL_DEFAULT_PROFILE") or None,
+                    default_gmail_profile=os.getenv("VON_GMAIL_DEFAULT_PROFILE")
+                    or None,
                 )
                 duration_ms = int((time.perf_counter() - start_perf) * 1000)
                 app.config["INTERNAL_MCP_ORCHESTRATOR"] = orchestrator_instance
@@ -1134,7 +1177,9 @@ def create_flask_app(
                     "error": str(exc),
                 }
                 try:
-                    app.logger.warning("[mcp_orchestrator] Failed to initialise: %s", exc)
+                    app.logger.warning(
+                        "[mcp_orchestrator] Failed to initialise: %s", exc
+                    )
                 except Exception:
                     pass
 
@@ -1202,39 +1247,49 @@ def create_flask_app(
     # Keep HTTP startup non-blocking: durable startup can synchronously build
     # workflow/action registries and perform recovery, which can take minutes
     # and delay the first HTTP bind.
-    app.config["DURABLE_WORKFLOW_COMPONENTS"] = None
-    app.config["DURABLE_WORKFLOW_STARTUP_STATUS"] = {
-        "state": "skipped_pytest" if _is_running_under_pytest() else "pending",
-        "ready": False,
-        "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-    }
+    _set_durable_workflow_components_snapshot(app, None)
+    _set_durable_workflow_startup_status_snapshot(
+        app,
+        {
+            "state": "skipped_pytest" if _is_running_under_pytest() else "pending",
+            "ready": False,
+            "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+        },
+    )
     if not _is_running_under_pytest():
-        blocking_durable_startup = (
-            os.getenv("VON_DURABLE_WORKFLOWS_BLOCKING_STARTUP", "0").strip().lower()
-            in {"1", "true", "yes", "on"}
-        )
+        blocking_durable_startup = os.getenv(
+            "VON_DURABLE_WORKFLOWS_BLOCKING_STARTUP", "0"
+        ).strip().lower() in {"1", "true", "yes", "on"}
 
         def _bootstrap_durable_workflow_system() -> None:
-            app.config["DURABLE_WORKFLOW_STARTUP_STATUS"] = {
-                "state": "initialising",
-                "ready": False,
-                "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-            }
+            _set_durable_workflow_startup_status_snapshot(
+                app,
+                {
+                    "state": "initialising",
+                    "ready": False,
+                    "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                },
+            )
             startup_perf = time.perf_counter()
             try:
                 components = _start_durable_workflow_system(app.logger)
                 duration_ms = int((time.perf_counter() - startup_perf) * 1000)
                 if components is not None:
-                    app.config["DURABLE_WORKFLOW_COMPONENTS"] = components
-                    app.config["DURABLE_WORKFLOW_STARTUP_STATUS"] = {
-                        "state": "ready",
-                        "ready": True,
-                        "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-                        "duration_ms": duration_ms,
-                        "workflow_bootstrap_summary": _build_durable_workflow_bootstrap_summary(
-                            components
-                        ),
-                    }
+                    _set_durable_workflow_components_snapshot(app, components)
+                    _set_durable_workflow_startup_status_snapshot(
+                        app,
+                        {
+                            "state": "ready",
+                            "ready": True,
+                            "started_at": _dt.datetime.now(
+                                _dt.timezone.utc
+                            ).isoformat(),
+                            "duration_ms": duration_ms,
+                            "workflow_bootstrap_summary": _build_durable_workflow_bootstrap_summary(
+                                components
+                            ),
+                        },
+                    )
                     try:
                         app.logger.info(
                             "[durable_workflows] Initialised in %dms (blocking_startup=%s).",
@@ -1249,19 +1304,27 @@ def create_flask_app(
 
                     atexit.register(_stop_durable_workflow_system)
                 else:
-                    app.config["DURABLE_WORKFLOW_STARTUP_STATUS"] = {
-                        "state": "not_started",
+                    _set_durable_workflow_startup_status_snapshot(
+                        app,
+                        {
+                            "state": "not_started",
+                            "ready": False,
+                            "started_at": _dt.datetime.now(
+                                _dt.timezone.utc
+                            ).isoformat(),
+                            "duration_ms": duration_ms,
+                        },
+                    )
+            except Exception as exc:  # pragma: no cover
+                _set_durable_workflow_startup_status_snapshot(
+                    app,
+                    {
+                        "state": "failed",
                         "ready": False,
                         "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-                        "duration_ms": duration_ms,
-                    }
-            except Exception as exc:  # pragma: no cover
-                app.config["DURABLE_WORKFLOW_STARTUP_STATUS"] = {
-                    "state": "failed",
-                    "ready": False,
-                    "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-                    "error": str(exc),
-                }
+                        "error": str(exc),
+                    },
+                )
                 try:
                     app.logger.warning(
                         "[startup] Durable workflow system startup failed: %s", exc
@@ -1288,12 +1351,15 @@ def create_flask_app(
                     daemon=True,
                 ).start()
             except Exception as exc:  # pragma: no cover
-                app.config["DURABLE_WORKFLOW_STARTUP_STATUS"] = {
-                    "state": "failed",
-                    "ready": False,
-                    "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-                    "error": f"thread_start_failed:{exc}",
-                }
+                _set_durable_workflow_startup_status_snapshot(
+                    app,
+                    {
+                        "state": "failed",
+                        "ready": False,
+                        "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                        "error": f"thread_start_failed:{exc}",
+                    },
+                )
                 try:
                     app.logger.warning(
                         "[durable_workflows] Failed to start async startup thread: %s",
