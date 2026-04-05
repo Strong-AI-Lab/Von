@@ -34,6 +34,18 @@ from src.backend.services.task_management_service import (
     search_tasks,
     delete_task,
 )
+from src.backend.services.task_ontology_service import (
+    DEFAULT_TASK_SOURCE_ID,
+    DEFAULT_TASK_TYPE_ID,
+    JIRA_IMPORTED_TASK_SOURCE_ID,
+    PREDICATE_HAS_TASK_REFERENCE_CODE,
+    PREDICATE_HAS_TASK_ROLE,
+    PREDICATE_HAS_TASK_SOURCE,
+    PREDICATE_HAS_NEXT_CHECKPOINT,
+    PREDICATE_HAS_PROGRESS_SIGNAL,
+    PREDICATE_HAS_EVIDENCE,
+    PREDICATE_REPORTS_TO,
+)
 
 
 class TestTaskConstants:
@@ -89,6 +101,8 @@ class TestCreateTask:
         assert result["priority"] == PRIORITY_MEDIUM
         assert "task_concept_id" in result
         assert result["task_concept_id"].startswith("#V#task_")
+        assert result["task_type_ids"] == [DEFAULT_TASK_TYPE_ID]
+        assert result["task_source_id"] == DEFAULT_TASK_SOURCE_ID
         mock_launch_workflow.assert_called_once()
 
     @patch("src.backend.services.task_management_service.ConceptsRepository")
@@ -117,12 +131,36 @@ class TestCreateTask:
             due_date=datetime(2025, 2, 1, 12, 0, 0, tzinfo=timezone.utc),
             priority="high",
             organisation_concept_id="#V#nao_institute",
+            task_type_ids=["#V#delegated_task_specification"],
+            task_source_id=JIRA_IMPORTED_TASK_SOURCE_ID,
+            report_to_concept_id="#V#user_carol",
+            task_role="Communicator",
+            next_checkpoint="Tomorrow morning",
+            progress_signal="Confirmed by chat",
+            evidence="Printed document",
+            notes="Needs a coloured copy",
+            reference_code="TASK-001",
         )
 
         assert result["title"] == "Full Task"
         assert result["status"] == TASK_STATUS_PENDING
         assert result["priority"] == "high"
         assert result["assignee_concept_id"] == "#V#user_alice"
+        assert result["task_type_ids"] == ["#V#delegated_task_specification"]
+        assert result["task_source_id"] == JIRA_IMPORTED_TASK_SOURCE_ID
+        assert result["report_to_concept_id"] == "#V#user_carol"
+        assert result["task_role"] == "Communicator"
+        assert result["next_checkpoint"] == "Tomorrow morning"
+        assert result["progress_signal"] == "Confirmed by chat"
+        assert result["evidence"] == "Printed document"
+        assert result["notes"] == "Needs a coloured copy"
+        assert result["reference_code"] == "TASK-001"
+        stored_predicates = {call.kwargs.get("predicate") for call in mock_upsert.call_args_list}
+        assert PREDICATE_HAS_TASK_ROLE in stored_predicates
+        assert PREDICATE_HAS_NEXT_CHECKPOINT in stored_predicates
+        assert PREDICATE_HAS_PROGRESS_SIGNAL in stored_predicates
+        assert PREDICATE_HAS_EVIDENCE in stored_predicates
+        assert PREDICATE_HAS_TASK_REFERENCE_CODE in stored_predicates
         mock_launch_workflow.assert_called_once()
 
     def test_create_task_invalid_title(self) -> None:
@@ -662,6 +700,86 @@ class TestTaskParityDatesAndEpic:
     @patch("src.backend.services.task_management_service.get_task")
     @patch("src.backend.services.task_management_service.ConceptsRepository")
     @patch("src.backend.services.task_management_service.get_texts_for_concept")
+    @patch("src.backend.services.task_management_service.upsert_text_for_concept")
+    def test_update_task_fields_supports_task_taxonomy_context(
+        self,
+        mock_upsert: MagicMock,
+        mock_get_texts: MagicMock,
+        mock_repo: MagicMock,
+        mock_get_task: MagicMock,
+    ) -> None:
+        task_doc = {
+            "concept_id": "#V#task_1",
+            "relationships": {
+                "is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID, DEFAULT_TASK_TYPE_ID],
+                PREDICATE_HAS_TASK_SOURCE: [DEFAULT_TASK_SOURCE_ID],
+            },
+            "metadata": {},
+            "created_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc),
+        }
+        mock_repo.find_one.return_value = task_doc
+        mock_get_texts.return_value = []
+        mock_get_task.return_value = {
+            "task_concept_id": "#V#task_1",
+            "task_type_ids": ["#V#delegated_task_specification"],
+            "task_source_id": JIRA_IMPORTED_TASK_SOURCE_ID,
+            "report_to_concept_id": "#V#user_manager",
+            "task_role": "Communicator",
+            "next_checkpoint": "Tomorrow morning",
+            "progress_signal": "Confirmed by chat",
+            "evidence": "Printed document",
+            "notes": "Needs a coloured copy",
+            "reference_code": "TASK-001",
+        }
+
+        result = update_task_fields(
+            "#V#task_1",
+            fields={
+                "task_type_ids": ["#V#delegated_task_specification"],
+                "task_source_id": JIRA_IMPORTED_TASK_SOURCE_ID,
+                "report_to_concept_id": "#V#user_manager",
+                "task_role": "Communicator",
+                "next_checkpoint": "Tomorrow morning",
+                "progress_signal": "Confirmed by chat",
+                "evidence": "Printed document",
+                "notes": "Needs a coloured copy",
+                "reference_code": "TASK-001",
+            },
+            actor_concept_id="#V#user_alice",
+        )
+
+        assert "task_type_ids" in result["changed_fields"]
+        assert "task_source_id" in result["changed_fields"]
+        assert "report_to_concept_id" in result["changed_fields"]
+        assert "task_role" in result["changed_fields"]
+        assert "next_checkpoint" in result["changed_fields"]
+        assert "progress_signal" in result["changed_fields"]
+        assert "evidence" in result["changed_fields"]
+        assert "notes" in result["changed_fields"]
+        assert "reference_code" in result["changed_fields"]
+        assert any(
+            call.kwargs.get("kind") == "is_an_instance_of"
+            and call.kwargs.get("target_id") == "#V#delegated_task_specification"
+            and call.kwargs.get("action") == "add"
+            for call in mock_repo.mutate_relationship_edge.call_args_list
+        )
+        assert any(
+            call.kwargs.get("kind") == PREDICATE_REPORTS_TO
+            and call.kwargs.get("target_id") == "#V#user_manager"
+            and call.kwargs.get("action") == "add"
+            for call in mock_repo.mutate_relationship_edge.call_args_list
+        )
+        stored_predicates = {call.kwargs.get("predicate") for call in mock_upsert.call_args_list}
+        assert PREDICATE_HAS_TASK_ROLE in stored_predicates
+        assert PREDICATE_HAS_NEXT_CHECKPOINT in stored_predicates
+        assert PREDICATE_HAS_PROGRESS_SIGNAL in stored_predicates
+        assert PREDICATE_HAS_EVIDENCE in stored_predicates
+        assert PREDICATE_HAS_TASK_REFERENCE_CODE in stored_predicates
+
+    @patch("src.backend.services.task_management_service.get_task")
+    @patch("src.backend.services.task_management_service.ConceptsRepository")
+    @patch("src.backend.services.task_management_service.get_texts_for_concept")
     def test_update_task_fields_supports_creator_reporter_and_watchers(
         self,
         mock_get_texts: MagicMock,
@@ -907,6 +1025,60 @@ class TestTaskParityDatesAndEpic:
             fix_versions=["R1"],
             sprint_values=["Sprint 6"],
             has_backlog_rank=True,
+            limit=10,
+        )
+
+        assert result["count"] == 1
+        assert result["tasks"][0]["task_concept_id"] == "#V#task_1"
+
+    @patch("src.backend.services.task_management_service.ConceptsRepository")
+    @patch("src.backend.services.task_management_service.get_texts_for_concept")
+    def test_search_tasks_filters_task_taxonomy_and_source(
+        self,
+        mock_get_texts: MagicMock,
+        mock_repo: MagicMock,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        mock_repo.find.return_value = [
+            {
+                "concept_id": "#V#task_1",
+                "relationships": {
+                    "is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID, "#V#delegated_task_specification"],
+                    "#V#hasCreatedBy": ["#V#user_creator"],
+                    PREDICATE_HAS_TASK_SOURCE: [JIRA_IMPORTED_TASK_SOURCE_ID],
+                    PREDICATE_REPORTS_TO: ["#V#user_manager"],
+                },
+                "metadata": {},
+                "created_at": now,
+                "updated_at": now,
+            },
+            {
+                "concept_id": "#V#task_2",
+                "relationships": {
+                    "is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID, DEFAULT_TASK_TYPE_ID],
+                    "#V#hasCreatedBy": ["#V#other_user"],
+                    PREDICATE_HAS_TASK_SOURCE: [DEFAULT_TASK_SOURCE_ID],
+                    PREDICATE_REPORTS_TO: ["#V#user_other_manager"],
+                },
+                "metadata": {},
+                "created_at": now,
+                "updated_at": now,
+            },
+        ]
+
+        def _fake_get_texts(concept_id: str, *args: Any, **kwargs: Any) -> list[dict[str, str]]:
+            return [
+                {"predicate": "#V#hasName", "text": concept_id},
+                {"predicate": "#V#hasTaskStatus", "text": "pending"},
+            ]
+
+        mock_get_texts.side_effect = _fake_get_texts
+
+        result = search_tasks(
+            task_type_ids=["#V#delegated_task_specification"],
+            task_source_id=JIRA_IMPORTED_TASK_SOURCE_ID,
+            created_by_concept_id="#V#user_creator",
+            report_to_concept_id="#V#user_manager",
             limit=10,
         )
 

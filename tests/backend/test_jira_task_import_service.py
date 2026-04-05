@@ -242,6 +242,56 @@ def test_import_jira_issues_maps_parent_and_links_when_targets_available(monkeyp
     assert ("#V#task_child", "#V#task_parent", "relates_to") in link_calls
 
 
+def test_import_jira_issues_marks_imported_task_source_and_reference_code(monkeypatch):
+    captured_create_kwargs: list[dict[str, Any]] = []
+    mappings: dict[str, str] = {}
+
+    def _fake_find(**kwargs):
+        issue_key = kwargs.get("external_id")
+        if isinstance(issue_key, str) and issue_key in mappings:
+            return {"task_concept_id": mappings[issue_key]}
+        return None
+
+    def _fake_create_task(**kwargs):
+        captured_create_kwargs.append(dict(kwargs))
+        return {"task_concept_id": "#V#task_imported_3000"}
+
+    def _fake_upsert_external_ref(
+        task_concept_id: str,
+        *,
+        external_id: str,
+        **_kwargs,
+    ):
+        mappings[external_id] = task_concept_id
+        return {"task_concept_id": task_concept_id}
+
+    monkeypatch.setattr(import_service, "find_task_by_external_reference", _fake_find)
+    monkeypatch.setattr(import_service, "create_task", _fake_create_task)
+    monkeypatch.setattr(
+        import_service,
+        "upsert_task_external_reference",
+        _fake_upsert_external_ref,
+    )
+    monkeypatch.setattr(
+        import_service,
+        "update_task_fields",
+        lambda *_args, **_kwargs: {"task": {}},
+    )
+    monkeypatch.setattr(import_service, "set_task_parent", lambda *_a, **_k: {})
+    monkeypatch.setattr(import_service, "set_task_epic", lambda *_a, **_k: {})
+    monkeypatch.setattr(import_service, "link_tasks", lambda *_a, **_k: {})
+
+    report = import_service.import_jira_issues_to_tasks(
+        issues=[_jira_issue("JVNAUTOSCI-3000")],
+        dry_run=False,
+    )
+
+    assert report["success"] is True
+    assert len(captured_create_kwargs) == 1
+    assert captured_create_kwargs[0]["task_source_id"] == "#V#jira_imported_task_source"
+    assert captured_create_kwargs[0]["reference_code"] == "JVNAUTOSCI-3000"
+
+
 def test_import_jira_issues_reports_project_level_parity_findings(monkeypatch):
     monkeypatch.setattr(
         import_service,

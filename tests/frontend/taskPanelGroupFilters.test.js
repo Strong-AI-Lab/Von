@@ -25,6 +25,23 @@ async function flushRenderQueue() {
 }
 
 describe('task panel ontology-backed groups', () => {
+    function buildTaxonomyResponse() {
+        return {
+            task_types: [
+                { concept_id: '#V#one_off_task_specification', label: 'One-off' },
+                { concept_id: '#V#delegated_task_specification', label: 'Delegated' },
+            ],
+            task_sources: [
+                { concept_id: '#V#von_native_task_source', label: 'Von native' },
+                { concept_id: '#V#jira_imported_task_source', label: 'Jira migrated' },
+            ],
+            defaults: {
+                task_type_id: '#V#one_off_task_specification',
+                task_source_id: '#V#von_native_task_source',
+            },
+        };
+    }
+
     beforeEach(() => {
         jest.resetModules();
         localStorage.clear();
@@ -42,7 +59,10 @@ describe('task panel ontology-backed groups', () => {
     test('derives groups from ontology-linked task parents and filters visible tasks', async () => {
         const { getJson } = require(apiServiceModulePath);
         getJson.mockImplementation((url) => {
-            if (url === '/api/tasks/my?include_created=true') {
+            if (url === '/api/tasks/taxonomy') {
+                return Promise.resolve(buildTaxonomyResponse());
+            }
+            if (url === '/api/tasks/?limit=500') {
                 return Promise.resolve({
                     tasks: [
                         {
@@ -51,6 +71,8 @@ describe('task panel ontology-backed groups', () => {
                             description: '',
                             status: 'pending',
                             priority: 'medium',
+                            task_type_ids: ['#V#one_off_task_specification'],
+                            task_source_id: '#V#von_native_task_source',
                             parent_task_concept_id: '#V#activity_alpha',
                         },
                         {
@@ -59,6 +81,8 @@ describe('task panel ontology-backed groups', () => {
                             description: '',
                             status: 'pending',
                             priority: 'medium',
+                            task_type_ids: ['#V#delegated_task_specification'],
+                            task_source_id: '#V#jira_imported_task_source',
                             parent_task_concept_id: '#V#activity_beta',
                         },
                         {
@@ -67,6 +91,8 @@ describe('task panel ontology-backed groups', () => {
                             description: '',
                             status: 'pending',
                             priority: 'medium',
+                            task_type_ids: ['#V#one_off_task_specification'],
+                            task_source_id: '#V#von_native_task_source',
                         },
                     ],
                 });
@@ -127,7 +153,10 @@ describe('task panel ontology-backed groups', () => {
         );
 
         getJson.mockImplementation((url) => {
-            if (url === '/api/tasks/my?include_created=true') {
+            if (url === '/api/tasks/taxonomy') {
+                return Promise.resolve(buildTaxonomyResponse());
+            }
+            if (url === '/api/tasks/?limit=500') {
                 return Promise.resolve({
                     tasks: [
                         {
@@ -136,6 +165,8 @@ describe('task panel ontology-backed groups', () => {
                             description: '',
                             status: 'pending',
                             priority: 'medium',
+                            task_type_ids: ['#V#one_off_task_specification'],
+                            task_source_id: '#V#von_native_task_source',
                             parent_task_concept_id: '#V#activity_alpha',
                         },
                         {
@@ -144,6 +175,8 @@ describe('task panel ontology-backed groups', () => {
                             description: '',
                             status: 'pending',
                             priority: 'medium',
+                            task_type_ids: ['#V#delegated_task_specification'],
+                            task_source_id: '#V#jira_imported_task_source',
                             parent_task_concept_id: '#V#activity_beta',
                         },
                     ],
@@ -179,5 +212,59 @@ describe('task panel ontology-backed groups', () => {
             '#globalTaskGroupFilterRow .task-group-filter-btn.active[data-group-id="#V#activity_beta"]',
         );
         expect(selectedButton).toBeTruthy();
+    });
+
+    test('filters visible tasks by Vontology task type and source', async () => {
+        const { getJson } = require(apiServiceModulePath);
+        getJson.mockImplementation((url) => {
+            if (url === '/api/tasks/taxonomy') {
+                return Promise.resolve(buildTaxonomyResponse());
+            }
+            if (url === '/api/tasks/?limit=500') {
+                return Promise.resolve({
+                    tasks: [
+                        {
+                            task_concept_id: '#V#task_native_one_off',
+                            title: 'Native one-off',
+                            description: '',
+                            status: 'pending',
+                            priority: 'medium',
+                            task_type_ids: ['#V#one_off_task_specification'],
+                            task_source_id: '#V#von_native_task_source',
+                        },
+                        {
+                            task_concept_id: '#V#task_jira_delegated',
+                            title: 'Jira delegated',
+                            description: '',
+                            status: 'pending',
+                            priority: 'high',
+                            task_type_ids: ['#V#delegated_task_specification'],
+                            task_source_id: '#V#jira_imported_task_source',
+                        },
+                    ],
+                });
+            }
+            return Promise.resolve({});
+        });
+
+        const { showGlobalTasks } = require(taskPanelModulePath);
+        await showGlobalTasks();
+        await flushRenderQueue();
+
+        const typeFilter = document.querySelector('#globalTaskTypeFilter');
+        const sourceFilter = document.querySelector('#globalTaskSourceFilter');
+        expect(typeFilter).toBeTruthy();
+        expect(sourceFilter).toBeTruthy();
+
+        typeFilter.value = '#V#delegated_task_specification';
+        typeFilter.dispatchEvent(new Event('change', { bubbles: true }));
+        sourceFilter.value = '#V#jira_imported_task_source';
+        sourceFilter.dispatchEvent(new Event('change', { bubbles: true }));
+        await flushRenderQueue();
+
+        const visibleTitles = Array.from(
+            document.querySelectorAll('.task-item .task-title'),
+        ).map((el) => (el.textContent || '').trim());
+        expect(visibleTitles).toEqual(['Jira delegated']);
     });
 });

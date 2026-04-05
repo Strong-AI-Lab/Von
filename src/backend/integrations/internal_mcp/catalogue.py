@@ -19951,6 +19951,17 @@ def _task_create(**kwargs):
     fix_versions = kwargs.get("fix_versions")
     sprint_values = kwargs.get("sprint_values")
     backlog_rank = kwargs.get("backlog_rank")
+    task_type_ids = kwargs.get("task_type_ids") or kwargs.get("task_type_id")
+    task_source_id = kwargs.get("task_source_id") or kwargs.get("source_id")
+    report_to_concept_id = kwargs.get("report_to_concept_id") or kwargs.get(
+        "reports_to_concept_id"
+    )
+    task_role = kwargs.get("task_role")
+    next_checkpoint = kwargs.get("next_checkpoint")
+    progress_signal = kwargs.get("progress_signal")
+    evidence = kwargs.get("evidence")
+    notes = kwargs.get("notes")
+    reference_code = kwargs.get("reference_code")
 
     start_date, start_error = _parse_optional_iso_datetime_param(
         kwargs.get("start_date"),
@@ -19981,6 +19992,15 @@ def _task_create(**kwargs):
             backlog_rank=backlog_rank,
             priority=priority,
             organisation_concept_id=org_id,
+            task_type_ids=task_type_ids,
+            task_source_id=task_source_id,
+            report_to_concept_id=report_to_concept_id,
+            task_role=task_role,
+            next_checkpoint=next_checkpoint,
+            progress_signal=progress_signal,
+            evidence=evidence,
+            notes=notes,
+            reference_code=reference_code,
         )
         result["success"] = True
         return result
@@ -20022,6 +20042,12 @@ def _task_list(**kwargs):
     status = kwargs.get("status_filter") or kwargs.get("status")
     priority = kwargs.get("priority_filter") or kwargs.get("priority")
     org_id = kwargs.get("organisation_concept_id")
+    task_type_ids = kwargs.get("task_type_ids") or kwargs.get("task_type_id")
+    task_source_ids = (
+        kwargs.get("task_source_ids")
+        or kwargs.get("task_source_id")
+        or kwargs.get("source_id")
+    )
     limit = kwargs.get("limit", 50)
 
     try:
@@ -20043,6 +20069,8 @@ def _task_list(**kwargs):
                 organisation_concept_id=org_id,
                 status_filter=status if isinstance(status, str) else None,
                 priority_filter=priority if isinstance(priority, str) else None,
+                task_type_ids=task_type_ids,
+                task_source_ids=task_source_ids,
                 limit=limit,
             )
         return {"success": True, "tasks": tasks, "count": len(tasks)}
@@ -20164,9 +20192,16 @@ def _task_search(**kwargs):
             query=kwargs.get("query"),
             status_filter=kwargs.get("status_filter") or kwargs.get("status"),
             statuses=kwargs.get("statuses"),
+            task_type_ids=kwargs.get("task_type_ids") or kwargs.get("task_type_id"),
+            task_source_id=kwargs.get("task_source_id") or kwargs.get("source_id"),
+            task_source_ids=kwargs.get("task_source_ids"),
             assignee_concept_id=kwargs.get("assignee_concept_id")
             or kwargs.get("assignee_id")
             or kwargs.get("user_concept_id"),
+            created_by_concept_id=kwargs.get("created_by_concept_id")
+            or kwargs.get("creator_concept_id"),
+            report_to_concept_id=kwargs.get("report_to_concept_id")
+            or kwargs.get("reports_to_concept_id"),
             labels=kwargs.get("labels"),
             components=kwargs.get("components"),
             fix_versions=kwargs.get("fix_versions") or kwargs.get("fixVersions"),
@@ -25045,6 +25080,18 @@ def build_default_catalogue() -> MethodCatalogue:
                     "sprint_values": (list, type(None)),
                     "backlog_rank": (str, type(None)),
                     "organisation_concept_id": (str, type(None)),
+                    "task_type_ids": (list, str, type(None)),
+                    "task_type_id": (list, str, type(None)),
+                    "task_source_id": (str, type(None)),
+                    "source_id": (str, type(None)),
+                    "report_to_concept_id": (str, type(None)),
+                    "reports_to_concept_id": (str, type(None)),
+                    "task_role": (str, type(None)),
+                    "next_checkpoint": (str, type(None)),
+                    "progress_signal": (str, type(None)),
+                    "evidence": (str, type(None)),
+                    "notes": (str, type(None)),
+                    "reference_code": (str, type(None)),
                 },
                 allow_unknown=True,
                 description="Create a new task in Vontology.",
@@ -25055,7 +25102,8 @@ def build_default_catalogue() -> MethodCatalogue:
                 "Create a Von task (stored as a Vontology concept). Use this to track work items, "
                 "action items, or to-dos. Tasks can be assigned to users and linked to conversations. "
                 "Priority: low, medium, high, critical. Tasks start in 'pending' status and can include "
-                "planning metadata (components, fix versions, sprint values, backlog rank)."
+                "planning metadata (components, fix versions, sprint values, backlog rank), canonical "
+                "task categories, source semantics, and richer task-detail fields."
             ),
         ),
         MethodDefinition(
@@ -25090,6 +25138,11 @@ def build_default_catalogue() -> MethodCatalogue:
                     "priority_filter": (str, type(None)),
                     "priority": (str, type(None)),
                     "organisation_concept_id": (str, type(None)),
+                    "task_type_ids": (list, str, type(None)),
+                    "task_type_id": (list, str, type(None)),
+                    "task_source_ids": (list, str, type(None)),
+                    "task_source_id": (str, type(None)),
+                    "source_id": (str, type(None)),
                     "limit": (int,),
                     "include_created": (bool,),
                 },
@@ -25099,7 +25152,8 @@ def build_default_catalogue() -> MethodCatalogue:
             output_schema=task_list_output_schema,
             category="read",
             description=(
-                "List Von tasks. Filter by user (assignee), status, priority, or organisation. "
+                "List Von tasks. Filter by user (assignee), status, priority, task category, "
+                "task source, or organisation. "
                 "If user_concept_id is provided, returns tasks assigned to that user. "
                 "Valid statuses: pending, in_progress, completed, cancelled, blocked."
             ),
@@ -25114,9 +25168,18 @@ def build_default_catalogue() -> MethodCatalogue:
                     "status_filter": (str, type(None)),
                     "status": (str, type(None)),
                     "statuses": (list, type(None)),
+                    "task_type_ids": (list, str, type(None)),
+                    "task_type_id": (list, str, type(None)),
+                    "task_source_id": (str, type(None)),
+                    "task_source_ids": (list, str, type(None)),
+                    "source_id": (str, type(None)),
                     "assignee_concept_id": (str, type(None)),
                     "assignee_id": (str, type(None)),
                     "user_concept_id": (str, type(None)),
+                    "created_by_concept_id": (str, type(None)),
+                    "creator_concept_id": (str, type(None)),
+                    "report_to_concept_id": (str, type(None)),
+                    "reports_to_concept_id": (str, type(None)),
                     "labels": (list, type(None)),
                     "components": (list, type(None)),
                     "fix_versions": (list, type(None)),
@@ -25149,9 +25212,9 @@ def build_default_catalogue() -> MethodCatalogue:
             output_schema=task_search_output_schema,
             category="read",
             description=(
-                "Search Von tasks with rich filters (status, assignee, labels, planning "
-                "metadata, hierarchy, date ranges, dependency state) to support Jira-like "
-                "triage and planning."
+                "Search Von tasks with rich filters (status, assignee, creator, report-to, "
+                "labels, planning metadata, category/source semantics, hierarchy, date ranges, "
+                "dependency state) to support Jira-like triage and planning."
             ),
         ),
         MethodDefinition(
@@ -25216,9 +25279,12 @@ def build_default_catalogue() -> MethodCatalogue:
                 description=(
                     "Update multiple task fields in one operation. "
                     "Supported fields: status, assignee_concept_id, created_by_concept_id, "
-                    "title, description, priority, start_date, due_date, labels, components, "
-                    "fix_versions, sprint_values, backlog_rank, reporter_concept_id, "
-                    "watcher_concept_ids, parent_task_concept_id, epic_task_concept_id."
+                    "title, description, priority, task_type_ids, task_source_id, "
+                    "report_to_concept_id, task_role, next_checkpoint, progress_signal, "
+                    "evidence, notes, reference_code, start_date, due_date, labels, "
+                    "components, fix_versions, sprint_values, backlog_rank, "
+                    "reporter_concept_id, watcher_concept_ids, parent_task_concept_id, "
+                    "epic_task_concept_id."
                 ),
             ),
             output_schema=task_update_fields_output_schema,

@@ -249,9 +249,17 @@ export async function loadTabData(tabId) {
       console.log('Import/Export tab initialized, no additional data loading needed.');
       break;
     case 'vontologyTab':
-      // Load vontology tree data
-      const { maybeLoadVontologyTree } = await import('./vontology.js');
-      await maybeLoadVontologyTree();
+      {
+        // Load vontology tree data
+        const { maybeLoadVontologyTree } = await import('./vontology.js');
+        await maybeLoadVontologyTree();
+      }
+      break;
+    case 'globalTasksTab':
+      {
+        const { showGlobalTasks } = await import('./components/taskPanel.js');
+        await showGlobalTasks();
+      }
       break;
     case 'chatTab':
     case 'settingsTab':
