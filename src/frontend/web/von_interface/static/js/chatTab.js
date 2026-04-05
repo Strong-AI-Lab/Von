@@ -18077,9 +18077,11 @@ function setWorkflowEpisodesPopupVisible(visible) {
 
 function formatWorkflowEpisodeTimestamp(value) {
     if (!value) return 'Unknown time';
-    const dt = new Date(value);
-    if (Number.isNaN(dt.getTime())) return String(value);
-    return dt.toLocaleString();
+    const explicitLabel = formatAbsoluteTimestamp(value);
+    if (explicitLabel) {
+        return explicitLabel;
+    }
+    return String(value);
 }
 
 function renderWorkflowEpisodesPopup() {

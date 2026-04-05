@@ -1104,6 +1104,36 @@ describe('workflow monitor active snapshot degradation handling', () => {
         expect(expandedGroupBody.classList.contains('is-collapsed')).toBe(false);
     });
 
+    test('renders workflow monitor timestamps with an explicit timezone label', async () => {
+        global.fetch = jest.fn(() => Promise.resolve({
+            ok: false,
+            status: 503,
+            headers: { get: () => null },
+            json: async () => ({
+                items: [],
+                count: 0,
+                degraded: true,
+                retryable: true,
+                error: 'Workflow monitor temporarily unavailable; please retry.',
+                detail: 'read circuit open'
+            })
+        }));
+
+        await __testOnly_refreshWorkflowStatusSnapshot();
+
+        __testOnly_applyWorkflowStatusUpdate({
+            instance_id: 'wf-tz-1',
+            workflow_id: '#V#workflow_introspection_maintenance_workflow',
+            status: 'running',
+            current_state: 'diagnose',
+            progress: { current: 1, total: 7, updated_at: '2026-03-20T07:05:19.686Z' }
+        });
+
+        const bodyText = document.getElementById('workflowStatusBody').textContent;
+        expect(bodyText).toContain('Updated:');
+        expect(bodyText).toMatch(/Updated:\s+.*(?:GMT|UTC|[+-]\d{1,2})/i);
+    });
+
     test('preserves richer snapshot fields when a thinner live status event arrives', async () => {
         global.fetch = jest.fn(() => Promise.resolve({
             ok: true,
