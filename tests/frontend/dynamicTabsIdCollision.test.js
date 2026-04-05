@@ -617,6 +617,31 @@ describe('individual concept detail fallbacks', () => {
         jest.resetModules();
     });
 
+    test('deriveInstanceTypeSummaryEntries preserves labels for clickable and fallback values', () => {
+        const { deriveInstanceTypeSummaryEntries } = require(dynamicTabsModulePath);
+
+        const entries = deriveInstanceTypeSummaryEntries(
+            {
+                parents: [
+                    { concept_id: '#V#scholarly_article', name: 'Scholarly article' },
+                    { name: 'Unresolved parent label' }
+                ]
+            },
+            {
+                relationships: {
+                    is_an_instance_of: ['paper_on_arxiv']
+                }
+            },
+            {}
+        );
+
+        expect(entries).toEqual([
+            { conceptId: '#V#scholarly_article', label: 'Scholarly article' },
+            { conceptId: '', label: 'Unresolved parent label' },
+            { conceptId: '#V#paper_on_arxiv', label: '#V#paper_on_arxiv' }
+        ]);
+    });
+
     test('deriveInstanceTypeSummaryLabels uses instance-of relationships when parents endpoint is empty', () => {
         const { deriveInstanceTypeSummaryLabels } = require(dynamicTabsModulePath);
 
@@ -631,6 +656,50 @@ describe('individual concept detail fallbacks', () => {
         );
 
         expect(labels).toEqual(['#V#software_repository']);
+    });
+
+    test('populateInstanceTypeSummary renders clickable cartouches and safe text fallback', () => {
+        const { populateInstanceTypeSummary } = require(dynamicTabsModulePath);
+        const summary = document.createElement('div');
+        document.body.appendChild(summary);
+
+        const seen = [];
+        const onSelect = (event) => seen.push(event.detail);
+        document.addEventListener('von:selectConceptById', onSelect);
+
+        try {
+            populateInstanceTypeSummary(
+                summary,
+                {
+                    parents: [
+                        { concept_id: '#V#scholarly_article', name: 'Scholarly article' },
+                        { name: 'Unresolved parent label' }
+                    ]
+                },
+                {
+                    relationships: {
+                        is_an_instance_of: ['#V#paper_on_arxiv']
+                    }
+                },
+                {}
+            );
+
+            expect(summary.querySelector('.concept-types-summary-label')?.textContent).toBe('Instance of:');
+            const cartouches = Array.from(summary.querySelectorAll('button.vontology-cartouche'));
+            expect(cartouches).toHaveLength(2);
+            expect(cartouches[0].querySelector('.vontology-cartouche-name')?.textContent).toBe('Scholarly article');
+            expect(summary.querySelector('.concept-types-summary-fallback')?.textContent).toBe('Unresolved parent label');
+
+            cartouches[0].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+            expect(seen).toHaveLength(1);
+            expect(seen[0]).toMatchObject({
+                conceptId: 'scholarly_article',
+                createConceptTab: true,
+                kind: 'type'
+            });
+        } finally {
+            document.removeEventListener('von:selectConceptById', onSelect);
+        }
     });
 
     test('deriveRelationshipExtentFallbackRows synthesises structured rows from concept relationships', () => {

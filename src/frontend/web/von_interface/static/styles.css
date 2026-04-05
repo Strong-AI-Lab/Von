@@ -8150,6 +8150,30 @@ button.prompt-vontology-cartouche {
     display: none;
 }
 
+.concept-types-summary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
+.concept-types-summary-label {
+    font-weight: 600;
+}
+
+.concept-types-summary-values {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+}
+
+.concept-types-summary-fallback {
+    color: #475569;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    font-size: 0.92em;
+}
+
 .settings-subsection {
     margin-top: 12px;
 }

@@ -624,25 +624,46 @@ function normaliseRelationshipTargets(raw) {
     return [];
 }
 
-export function deriveInstanceTypeSummaryLabels(parentsData, conceptData, nodeData) {
+function normaliseInstanceTypeConceptId(value) {
+    if (typeof value !== 'string') return '';
+    const trimmed = value.trim();
+    if (!trimmed) return '';
+    return normalisePotentialConceptId(trimmed) || normalisePotentialConceptId(`#V#${trimmed}`) || '';
+}
+
+export function deriveInstanceTypeSummaryEntries(parentsData, conceptData, nodeData) {
     const parentEntries = Array.isArray(parentsData?.parents) ? parentsData.parents : [];
     const nameById = new Map();
-    const orderedIds = [];
+    const entries = [];
+    const seenConceptIds = new Set();
+    const seenFallbackLabels = new Set();
+
+    const pushEntry = (conceptId, label) => {
+        const safeLabel = typeof label === 'string' ? label.trim() : '';
+        if (conceptId) {
+            if (seenConceptIds.has(conceptId)) return;
+            seenConceptIds.add(conceptId);
+            entries.push({ conceptId, label: safeLabel || conceptId });
+            return;
+        }
+        if (!safeLabel || seenFallbackLabels.has(safeLabel)) return;
+        seenFallbackLabels.add(safeLabel);
+        entries.push({ conceptId: '', label: safeLabel });
+    };
 
     for (const entry of parentEntries) {
         if (!entry || typeof entry !== 'object') continue;
-        const candidateId = typeof entry.concept_id === 'string'
+        const rawId = typeof entry.concept_id === 'string'
             ? entry.concept_id
             : (typeof entry.id === 'string' ? entry.id : '');
         const candidateName = typeof entry.name === 'string' && entry.name.trim()
             ? entry.name.trim()
             : '';
-        if (candidateId) {
-            if (!orderedIds.includes(candidateId)) orderedIds.push(candidateId);
-            if (candidateName) nameById.set(candidateId, candidateName);
-        } else if (candidateName && !orderedIds.includes(candidateName)) {
-            orderedIds.push(candidateName);
+        const conceptId = normaliseInstanceTypeConceptId(rawId);
+        if (conceptId && candidateName) {
+            nameById.set(conceptId, candidateName);
         }
+        pushEntry(conceptId, candidateName || conceptId || rawId);
     }
 
     const conceptRels = (conceptData && typeof conceptData === 'object' && conceptData.relationships && typeof conceptData.relationships === 'object')
@@ -662,11 +683,59 @@ export function deriveInstanceTypeSummaryLabels(parentsData, conceptData, nodeDa
     for (const raw of relCandidates) {
         const ids = normaliseRelationshipTargets(raw);
         for (const id of ids) {
-            if (!orderedIds.includes(id)) orderedIds.push(id);
+            const conceptId = normaliseInstanceTypeConceptId(id);
+            const label = conceptId ? (nameById.get(conceptId) || conceptId) : id;
+            pushEntry(conceptId, label);
         }
     }
 
-    return orderedIds.map((id) => nameById.get(id) || id);
+    return entries;
+}
+
+export function deriveInstanceTypeSummaryLabels(parentsData, conceptData, nodeData) {
+    return deriveInstanceTypeSummaryEntries(parentsData, conceptData, nodeData).map((entry) => entry.label);
+}
+
+export function populateInstanceTypeSummary(summaryEl, parentsData, conceptData, nodeData) {
+    if (!summaryEl) return [];
+
+    const entries = deriveInstanceTypeSummaryEntries(parentsData, conceptData, nodeData);
+    summaryEl.textContent = '';
+
+    if (!entries.length) {
+        summaryEl.textContent = 'No parent type recorded.';
+        return entries;
+    }
+
+    const label = document.createElement('span');
+    label.className = 'concept-types-summary-label';
+    label.textContent = 'Instance of:';
+    summaryEl.appendChild(label);
+
+    const values = document.createElement('span');
+    values.className = 'concept-types-summary-values';
+    summaryEl.appendChild(values);
+
+    entries.forEach((entry) => {
+        if (entry.conceptId) {
+            const chip = createVontologyCartouche(entry.conceptId, {
+                name: entry.label || entry.conceptId,
+                kind: 'type',
+                title: entry.conceptId,
+                mode: 'compact_kind_bg'
+            });
+            chip.classList.add('concept-types-summary-cartouche');
+            values.appendChild(chip);
+            return;
+        }
+
+        const fallback = document.createElement('span');
+        fallback.className = 'concept-types-summary-fallback';
+        fallback.textContent = entry.label;
+        values.appendChild(fallback);
+    });
+
+    return entries;
 }
 
 export function deriveRelationshipExtentFallbackRows(conceptId, conceptData) {
@@ -2940,13 +3009,12 @@ async function adaptIndividualConceptTabUI(conceptId, suffix) {
         // Insert a small types summary line under the title
         const step1 = document.getElementById(`conceptStep1_${suffix}`) || document.getElementById('conceptStep1');
         if (step1 && !step1.querySelector('.concept-types-summary')) {
-            const types = deriveInstanceTypeSummaryLabels(parentsData, conceptData, nodeData);
             const summary = document.createElement('div');
             summary.className = 'concept-types-summary';
             summary.style.margin = '6px 0 10px 0';
             summary.style.color = '#374151';
             summary.style.fontSize = '0.95rem';
-            summary.textContent = types.length ? `Instance of: ${types.join(', ')}` : 'No parent type recorded.';
+            populateInstanceTypeSummary(summary, parentsData, conceptData, nodeData);
             step1.insertBefore(summary, step1.querySelector('label'));
         }
 
