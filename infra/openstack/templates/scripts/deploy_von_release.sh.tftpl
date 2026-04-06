@@ -167,6 +167,23 @@ rollback_release() {
   return 1
 }
 
+prepare_release_environment() {
+  local release_path="$1"
+  if [[ ! -d "$release_path" ]]; then
+    log "ERROR: release path is unavailable for environment preparation: $release_path"
+    return 1
+  fi
+
+  if [[ ! -x "$release_path/.venv/bin/python" ]]; then
+    log "Creating release virtual environment in $release_path/.venv"
+    run_as_service_user python3 -m venv "$release_path/.venv"
+  fi
+
+  log "Installing release dependencies into $release_path/.venv"
+  run_as_service_user "$release_path/.venv/bin/python" -m pip install --upgrade pip setuptools wheel
+  run_as_service_user "$release_path/.venv/bin/python" -m pip install -e "$release_path"
+}
+
 if [[ "${EUID}" -ne 0 ]]; then
   log "ERROR: deploy_von_release.sh must run as root."
   exit 1
@@ -273,6 +290,7 @@ elif [[ -n "$ARTIFACT_PATH" ]]; then
   mkdir -p "$NEW_RELEASE"
   tar -xzf "$ARTIFACT_PATH" -C "$NEW_RELEASE" --strip-components=1
   chown -R "$SERVICE_USER:$SERVICE_GROUP" "$NEW_RELEASE"
+  prepare_release_environment "$NEW_RELEASE"
 else
   TIMESTAMP="$(date -u '+%Y%m%d%H%M%S')"
   NEW_RELEASE="$RELEASE_ROOT/von-$TIMESTAMP"
@@ -281,10 +299,7 @@ else
   run_as_service_user git clone --depth 1 "$REPO_URL" "$NEW_RELEASE"
   run_as_service_user git -C "$NEW_RELEASE" fetch --depth 1 origin "$REPO_REF" || true
   run_as_service_user git -C "$NEW_RELEASE" checkout "$REPO_REF"
-
-  run_as_service_user python3 -m venv "$NEW_RELEASE/.venv"
-  run_as_service_user "$NEW_RELEASE/.venv/bin/python" -m pip install --upgrade pip setuptools wheel
-  run_as_service_user "$NEW_RELEASE/.venv/bin/python" -m pip install -e "$NEW_RELEASE"
+  prepare_release_environment "$NEW_RELEASE"
 fi
 
 if [[ ! -x "$NEW_RELEASE/.venv/bin/python" ]]; then

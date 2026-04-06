@@ -210,7 +210,10 @@ class SwiftBlobStore:
             connection_mod = importlib.import_module("openstack.connection")
         except ModuleNotFoundError as exc:  # pragma: no cover
             raise RuntimeError(
-                "OpenStack Swift backend requires 'openstacksdk'. Add it via PDM."
+                "OpenStack Swift backend requires 'openstacksdk' in the active "
+                "runtime environment. Rebuild the release virtualenv and ensure "
+                "the dependency is installed (for local development, install it "
+                "via PDM)."
             ) from exc
 
         if self._cloud:

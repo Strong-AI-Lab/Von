@@ -60,7 +60,9 @@ from ...workflows.action_registry import (
     WorkflowEnvironment,
 )
 from ...workflows.execution_contracts import (
+    LAST_WORKFLOW_STEP_RESULT_ENVELOPE_KEY,
     WORKFLOW_RUNTIME_EVENTS_KEY,
+    WORKFLOW_RESULT_ENVELOPE_KEY,
     WORKFLOW_STEP_RESULT_ENVELOPES_KEY,
 )
 from ...workflows.mcp_tool_bridge import workflow_action_result_from_mcp_payload
@@ -381,6 +383,80 @@ def _workflow_execution_summary_mapping_list(value: Any) -> list[Mapping[str, An
     ):
         return []
     return [cast(Mapping[str, Any], item) for item in value if isinstance(item, Mapping)]
+
+
+def _extract_workflow_step_failure_detail(envelope: Any) -> str | None:
+    if not isinstance(envelope, Mapping):
+        return None
+
+    diagnostics = envelope.get("diagnostics")
+    if isinstance(diagnostics, Mapping):
+        error_text = _workflow_execution_summary_text(diagnostics.get("error"))
+        if error_text:
+            return error_text
+
+    for key in ("error", "action_error"):
+        error_text = _workflow_execution_summary_text(envelope.get(key))
+        if error_text:
+            return error_text
+
+    output_payload = envelope.get("output_payload")
+    if isinstance(output_payload, Mapping):
+        for payload_key in ("result", "mcp_result"):
+            payload = output_payload.get(payload_key)
+            if not isinstance(payload, Mapping):
+                continue
+            error_text = _workflow_execution_summary_text(payload.get("error"))
+            if error_text:
+                return error_text
+            message_text = _workflow_execution_summary_text(payload.get("message"))
+            if message_text:
+                return message_text
+
+    return None
+
+
+def _extract_explicit_workflow_failure_detail(workflow_result: Any) -> str | None:
+    if _workflow_result_effective_completed(workflow_result):
+        return None
+
+    result_data = getattr(workflow_result, "data", None)
+    if not isinstance(result_data, Mapping):
+        return None
+
+    for key in (
+        "last_action_error",
+        "workflow_error",
+        "failure_detail",
+        "termination_detail",
+        "error",
+    ):
+        error_text = _workflow_execution_summary_text(result_data.get(key))
+        if error_text:
+            return error_text
+
+    last_step_envelope = result_data.get(LAST_WORKFLOW_STEP_RESULT_ENVELOPE_KEY)
+    step_error = _extract_workflow_step_failure_detail(last_step_envelope)
+    if step_error:
+        return step_error
+
+    step_envelopes = _workflow_execution_summary_mapping_list(
+        result_data.get(WORKFLOW_STEP_RESULT_ENVELOPES_KEY)
+    )
+    for envelope in reversed(step_envelopes):
+        step_error = _extract_workflow_step_failure_detail(envelope)
+        if step_error:
+            return step_error
+
+    result_envelope = result_data.get(WORKFLOW_RESULT_ENVELOPE_KEY)
+    if isinstance(result_envelope, Mapping):
+        diagnostics = result_envelope.get("diagnostics")
+        if isinstance(diagnostics, Mapping):
+            error_text = _workflow_execution_summary_text(diagnostics.get("error"))
+            if error_text:
+                return error_text
+
+    return None
 
 
 def _safe_workflow_execution_aux_snapshot_value(
@@ -3704,9 +3780,23 @@ class InternalMCPChatOrchestrator:
         if not isinstance(data, Mapping):
             data = {}
 
+        workflow_completed = _workflow_result_effective_completed(workflow_result)
+        response_text = cls._coerce_non_empty_text(data.get("response_text"))
+        summary_text = cls._coerce_non_empty_text(data.get("summary"))
+        final_response_text = cls._coerce_non_empty_text(data.get("final_response"))
+
+        if not workflow_completed:
+            if response_text and not cls._looks_like_machine_json_text(response_text):
+                return response_text
+            failure_text = _extract_explicit_workflow_failure_detail(workflow_result)
+            if failure_text:
+                return failure_text
+            for text in (summary_text, final_response_text):
+                if text and not cls._looks_like_machine_json_text(text):
+                    return text
+
         candidate_text: str | None = None
-        for key in ("response_text", "summary", "final_response"):
-            text = cls._coerce_non_empty_text(data.get(key))
+        for text in (response_text, summary_text, final_response_text):
             if text:
                 candidate_text = text
                 if not cls._looks_like_machine_json_text(text):
@@ -3780,9 +3870,8 @@ class InternalMCPChatOrchestrator:
         final_state = cls._coerce_non_empty_text(
             getattr(workflow_result, "final_state", None)
         )
-        completed = _workflow_result_effective_completed(workflow_result)
         if final_state:
-            status = "completed" if completed else "failed"
+            status = "completed" if workflow_completed else "failed"
             return f"Workflow {workflow_id} {status} (state: {final_state})."
         return None
 
@@ -20117,15 +20206,16 @@ class InternalMCPChatOrchestrator:
                 else None
             )
             error_value = result.error if isinstance(result.error, str) else None
+            explicit_failure_detail = _extract_explicit_workflow_failure_detail(result)
             if completed:
                 termination_code = "completed"
                 termination_detail = None
             elif error_value:
                 termination_code = _normalise_error_code(error_value)
-                termination_detail = error_value
+                termination_detail = explicit_failure_detail or error_value
             elif _workflow_final_state_is_failure_like(final_state):
                 termination_code = "failed_terminal_state"
-                termination_detail = final_state
+                termination_detail = explicit_failure_detail or final_state
             else:
                 termination_code = "terminated"
                 termination_detail = None
@@ -26551,18 +26641,24 @@ class InternalMCPChatOrchestrator:
                 reason_code = result_error.split(":", 1)[0].strip()
                 if reason_code:
                     extra_payload["reason"] = reason_code
-            elif _workflow_final_state_is_failure_like(result_final_state):
+            explicit_failure_detail = _clean_boundary_scalar_text(
+                _extract_explicit_workflow_failure_detail(result)
+            )
+            if explicit_failure_detail:
+                extra_payload["detail"] = explicit_failure_detail
+            if (
+                not result_error
+                and _workflow_final_state_is_failure_like(result_final_state)
+            ):
                 extra_payload["reason"] = "failed_terminal_state"
 
             result_data = getattr(result, "data", None)
             if isinstance(result_data, Mapping):
                 failure_detail = _clean_boundary_scalar_text(
-                    result_data.get("summary")
-                ) or (
-                    _clean_boundary_scalar_text(result_data.get("response_text"))
-                )
+                    result_data.get("response_text")
+                ) or _clean_boundary_scalar_text(result_data.get("summary"))
                 if failure_detail:
-                    extra_payload["detail"] = failure_detail
+                    extra_payload.setdefault("detail", failure_detail)
                 launch_resolution = result_data.get("workflow_launch_input_resolution")
                 if isinstance(launch_resolution, Mapping):
                     resolution_status = _clean_boundary_scalar_text(

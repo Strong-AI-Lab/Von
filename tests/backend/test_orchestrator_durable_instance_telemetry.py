@@ -425,6 +425,78 @@ def test_execute_workflow_marks_failure_like_terminal_state_as_failed(
     )
 
 
+def test_execute_workflow_uses_explicit_failure_detail_for_failure_like_terminal_state(
+    monkeypatch,
+) -> None:
+    orchestrator = _build_orchestrator()
+    _register_test_workflow(
+        orchestrator,
+        workflow_id="#V#arxiv_paper_representation_workflow",
+    )
+    fake_manager = _FakeWorkflowInstanceManager()
+    _patch_submit_verified_instance(monkeypatch)
+
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: fake_manager,
+    )
+
+    actionable_error = (
+        "Unexpected error: Failed to store PDF in blob store: Blob store "
+        "initialisation failed: OpenStack Swift backend requires 'openstacksdk' "
+        "in the active runtime environment."
+    )
+    workflow_result = SimpleNamespace(
+        completed=True,
+        final_state="#V#workflow_step_arxiv_paper_representation_workflow_failed",
+        error=None,
+        data={
+            "last_action_error": actionable_error,
+            "workflow_step_result_envelopes": [
+                {
+                    "schema_version": "workflow_step_result_envelope.v1",
+                    "state_id": (
+                        "#V#workflow_step_arxiv_paper_representation_workflow_"
+                        "download_or_finalise"
+                    ),
+                    "action_id": "download_paper",
+                    "action_status": "failed",
+                    "action_outcome": "failure",
+                    "diagnostics": {"error": actionable_error},
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        orchestrator._workflow_executor,
+        "run",
+        lambda *args, **kwargs: workflow_result,
+    )
+
+    result = orchestrator.execute_workflow(
+        "#V#arxiv_paper_representation_workflow",
+        data={
+            "prompt": "Represent this paper https://arxiv.org/abs/2411.04983",
+            "user_concept_id": "#V#user",
+            "org_concept_id": "#V#org",
+            "conversation_session_id": "chat-1740",
+            "turn_id": "turn-1740",
+        },
+        llm_client=object(),
+        model="test-model",
+        user_namespace="#V#user@org",
+        conversation_session_id="chat-1740",
+        turn_id="turn-1740",
+        episode_source="chat_turn_workflow",
+    )
+
+    assert result is workflow_result
+    assert len(fake_manager.mark_failed_calls) == 1
+    failed_call = fake_manager.mark_failed_calls[0]
+    assert failed_call["instance_id"] == "wf-inst-1"
+    assert failed_call["error"] == f"failed_terminal_state:{actionable_error}"
+
+
 def test_execute_workflow_marks_durable_instance_failed_on_exception(
     monkeypatch,
 ) -> None:

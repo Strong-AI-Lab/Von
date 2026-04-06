@@ -7088,6 +7088,107 @@ def test_entity_representation_failure_family_replays_with_truthful_gap_recovery
     )
 
 
+def test_custom_workflow_failure_prefers_explicit_action_error_over_metadata_summary(
+    monkeypatch,
+):
+    import src.backend.services.workflow_selection_policy_service as policy_module
+
+    monkeypatch.setattr(policy_module, "get_live_selection_policy", lambda: None)
+    monkeypatch.setenv("VON_WORKFLOW_SELECTOR_ALLOW_POLICY_UNSAFE", "1")
+
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    selected_workflow_id = "#V#arxiv_paper_representation_workflow"
+    _register_terminal_custom_workflow(
+        orchestrator,
+        workflow_id=selected_workflow_id,
+        purpose="Canonical arXiv wrapper workflow for explicit failure-detail tests.",
+    )
+
+    actionable_error = (
+        "Unexpected error: Failed to store PDF in blob store: Blob store "
+        "initialisation failed: OpenStack Swift backend requires 'openstacksdk' "
+        "in the active runtime environment."
+    )
+    masked_summary = (
+        "The ability to predict future outcomes given control actions is "
+        "fundamental for physical reasoning."
+    )
+
+    def _fake_execute_workflow(workflow_id: str, **_kwargs: Any):
+        if workflow_id != selected_workflow_id:
+            raise AssertionError(f"Unexpected workflow execution: {workflow_id}")
+        return SimpleNamespace(
+            data={
+                "summary": masked_summary,
+                "last_action_error": actionable_error,
+                "workflow_step_result_envelopes": [
+                    {
+                        "schema_version": "workflow_step_result_envelope.v1",
+                        "workflow_id": selected_workflow_id,
+                        "state_id": (
+                            "#V#workflow_step_arxiv_paper_representation_workflow_"
+                            "download_or_finalise"
+                        ),
+                        "action_id": "download_paper",
+                        "action_status": "failed",
+                        "action_outcome": "failure",
+                        "diagnostics": {"error": actionable_error},
+                        "output_payload": {},
+                    }
+                ],
+            },
+            final_state="#V#workflow_step_arxiv_paper_representation_workflow_failed",
+            completed=True,
+            error=None,
+        )
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _fake_execute_workflow)
+
+    result = orchestrator.run(
+        prompt="https://arxiv.org/abs/2411.04983",
+        context=[],
+        llm_client=_CapturingLLM([selected_workflow_id]),
+        model=None,
+        user_namespace="#V#user",
+        workflow_gap_recovery_enabled=False,
+        workflow_discovery_result={
+            "matches": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Arxiv Paper Representation Workflow",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                }
+            ],
+            "candidates": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Arxiv Paper Representation Workflow",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                }
+            ],
+        },
+    )
+
+    assert result.response_text == actionable_error
+    terminal_boundary = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "workflow_dispatch_boundary"
+            and entry.get("boundary") == "workflow_terminal"
+            and entry.get("selected_execution_mode") == "custom_workflow"
+        ),
+        None,
+    )
+    assert terminal_boundary is not None
+    assert terminal_boundary.get("status") == "failed"
+    assert terminal_boundary.get("detail") == actionable_error
+    assert terminal_boundary.get("detail") != masked_summary
+
+
 def test_custom_workflow_result_preserves_messages_and_invocations(monkeypatch):
     import src.backend.services.workflow_selection_policy_service as policy_module
 

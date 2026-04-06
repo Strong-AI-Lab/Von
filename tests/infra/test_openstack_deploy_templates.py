@@ -36,6 +36,14 @@ def test_deploy_template_supports_artifact_and_audit_logging() -> None:
     assert "JSONL audit event" in content
 
 
+def test_deploy_template_prepares_runtime_environment_for_artifact_releases() -> None:
+    content = DEPLOY_TEMPLATE.read_text(encoding="utf-8")
+    assert "prepare_release_environment()" in content
+    assert 'prepare_release_environment "$NEW_RELEASE"' in content
+    assert 'python3 -m venv "$release_path/.venv"' in content
+    assert 'pip install -e "$release_path"' in content
+
+
 def test_cloud_init_bootstrap_executes_non_interactive_bootstrap_deploy() -> None:
     content = CLOUD_INIT_TEMPLATE.read_text(encoding="utf-8")
     assert "/usr/local/bin/deploy_von_release.sh" in content
