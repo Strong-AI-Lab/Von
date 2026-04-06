@@ -2,6 +2,7 @@
 
 Initial review: 2026-04-03
 Refreshed: 2026-04-07
+Actions executed (JVNAUTOSCI-1758): 2026-04-07
 
 ## Objective
 
@@ -42,7 +43,7 @@ These completions shift the portfolio balance. The agentic-behaviour umbrella an
 | JVNAUTOSCI-1714 | Paper recommendation workflow extensions | To Do | Medium — extends the completed paper-recommender vertical slice |
 | JVNAUTOSCI-1752 | Type-specific instance renderers for concept pages | To Do | High — KB-driven presentation that directly improves how users recognise, orient, and act on represented knowledge |
 
-### Open epic inventory (27 epics, excluding SUPERSEDED-933)
+### Open epic inventory (22 epics, after 1758 cleanup)
 
 **In Progress (4):**
 - JVNAUTOSCI-144 — Document Representation and Handling
@@ -51,22 +52,18 @@ These completions shift the portfolio balance. The agentic-behaviour umbrella an
 - JVNAUTOSCI-932 — Memory and knowledge retention
 - JVNAUTOSCI-936 — Representationally rich Vontology + inference engine
 
-**To Do (19):**
+**To Do (15):**
 - JVNAUTOSCI-535 — Data Model & Normalisation
 - JVNAUTOSCI-536 — Observability & Performance
 - JVNAUTOSCI-538 — Knowledge Discovery & Recommendation
 - JVNAUTOSCI-539 — Access & Governance
 - JVNAUTOSCI-541 — Onboarding & Lab Operations
-- JVNAUTOSCI-710 — Project Codebase Refactoring for Public Release
-- JVNAUTOSCI-739 — Codebase transition (private to Von)
-- JVNAUTOSCI-766 — Vontology-based Tool Usage Heuristics
 - JVNAUTOSCI-857 — Production hardening
 - JVNAUTOSCI-866 — Beautiful, flexible UX
 - JVNAUTOSCI-885 — Multimodal/sensory I/O enablement
 - JVNAUTOSCI-934 — Project admin/coordination
 - JVNAUTOSCI-977 — External communications channels (Gmail, Slack)
 - JVNAUTOSCI-1116 — Architectural De-bloating & Modularisation
-- JVNAUTOSCI-1117 — UI/UX Modernisation & Onboarding
 - JVNAUTOSCI-1119 — System Reliability & Type Safety
 - JVNAUTOSCI-1460 — External interaction surfaces (channels, voice, devices)
 - JVNAUTOSCI-1667 — Von Coding Agent VS Code Extension
@@ -75,6 +72,12 @@ These completions shift the portfolio balance. The agentic-behaviour umbrella an
 
 **Backlog (1):**
 - JVNAUTOSCI-540 — Developer Platform & Infrastructure
+
+**Retired/Superseded (removed from active portfolio by 1758):**
+- JVNAUTOSCI-710 — Project Codebase Refactoring for Public Release → SUPERSEDED (child 725→540)
+- JVNAUTOSCI-739 — Codebase transition (private to Von) → SUPERSEDED (children 740→857, 749→535)
+- JVNAUTOSCI-766 — Vontology-based Tool Usage Heuristics → SUPERSEDED, 9 children reparented to 936
+- JVNAUTOSCI-1117 — UI/UX Modernisation & Onboarding → SUPERSEDED, 4 children reparented to 537
 
 ## Recommended next tranche (refreshed)
 
@@ -404,3 +407,64 @@ The next portfolio centre of gravity should be:
 5. **Fail-closed hardening** — auth, namespace, rate-limit protections (857, 539)
 
 The biggest planning mistake to avoid is fragmenting effort across new interaction surfaces (VS Code extension, multimodal, external channels) or generic UX modernisation before Von can reliably complete, verify, and explain the intents it already supports.
+
+## Actions taken (JVNAUTOSCI-1758, 2026-04-07)
+
+The following actions were executed per the 1758 task plan. All changes are recorded in Jira comments with rationale.
+
+### Step 1 — Retired stale epics
+
+- **710** (Codebase Refactoring for Public Release) → SUPERSEDED. Open child 725 reparented to 540.
+- **739** (Codebase transition private→Von) → SUPERSEDED. Open children: 740→857, 749→535.
+- **933** — confirmed already SUPERSEDED in Jira ✓
+
+### Step 2 — Consolidated overlapping epics
+
+- **766** (Vontology-based Tool Usage Heuristics) → SUPERSEDED. 9 open children (767–774, 845) reparented to 936.
+- **1117** (UI/UX Modernisation & Onboarding) → SUPERSEDED. 4 open children (1124–1127) reparented to 537.
+- Issue links created: 538↔144, 538↔1714, 144↔1714 (all "Relates")
+
+### Step 3 — Established tranche 1 (KB substrate)
+
+- **254** (context bundles/dossiers): confirmed already Done ✓
+- Core memory/retention tasks confirmed under 932 with comments: 820, 968–973, 995, 1035, 1222
+- 9 misparented tasks reparented out of 932 with comments:
+  - 312→538, 366→936, 522→537, 527→537, 529→535, 572→535, 603→540, 624→540, 683→535
+- 936 open children confirmed correctly scoped
+
+### Step 4 — Established tranche 2 (paper recommendation extension)
+
+- All 4 existing 1714 tasks confirmed: 1, 34, 270, 776
+- **Created JVNAUTOSCI-1759** — Paper recommendation feedback capture and learning loop
+- **Created JVNAUTOSCI-1760** — Evaluate and improve paper recommendation explanation quality
+- 1714 now covers the full recommendation lifecycle (6 tasks): discovery → ranking → explanation → presentation → feedback → learning
+
+### Step 5 — Established tranche 3 (observability)
+
+- **1429** (dispatch latency): confirmed already Done under 536 ✓
+- **775** (MCP call logging): confirmed correctly scoped under 536
+- **Created JVNAUTOSCI-1761** — Selector evaluation benchmark for tool/action selection accuracy
+- 536 now has 2 open actionable tasks: 775, 1761
+
+### Step 6 — Established tranche 4 (KB-driven presentation)
+
+- **1752** links confirmed/added: already linked to 866, 1750, 1751; newly linked to 537
+- **1750** and **1751** subordinated as children of 1752 (were unparented)
+
+### Step 7 — Triaged tranche 5 (fail-closed hardening)
+
+- 857 has ~57 open children; triaged into two tiers:
+- **RELIABILITY-CRITICAL** (5 tasks, tagged with comments):
+  - 1438 — Add authentication to admin endpoints
+  - 1437 — Implement rate limiting on Flask API endpoints
+  - 871 — Visibility / Permission Semantics Are Broken
+  - 638 — Secure user/org-specific concept access control
+  - 627 — Harden concept scoping relation toggles
+- **Security-adjacent** (next tier): 858, 859, 835, 861
+- **Later hardening**: remaining ~48 tasks (CI, UI polish, caching, docs, infrastructure)
+
+### Remaining gaps
+
+- 857 has many children that could benefit from further reparenting to more specific epics (CI tasks to 540, UI tasks to 537, etc.) — deferred as a future cleanup pass.
+- JVNAUTOSCI-1655 and JVNAUTOSCI-1657 remain open under 934; consider superseding now that 1758 has executed the concrete plan.
+- Some older tasks under 144 and 538 may need sceptical reinterpretation in a future review.
