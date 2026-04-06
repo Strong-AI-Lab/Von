@@ -18,6 +18,8 @@ def test_read_file_copy_returns_text(monkeypatch):
     from src.backend.integrations.internal_mcp import catalogue
     from src.backend.services.computer_file_copy_service import FileCopyBlobInfo
 
+    captured_kwargs: dict[str, object] = {}
+
     monkeypatch.setattr(
         "src.backend.security.access_control.get_effective_user_concept_id",
         lambda: "#V#user_test",
@@ -35,10 +37,13 @@ def test_read_file_copy_returns_text(monkeypatch):
 
     monkeypatch.setattr(
         "src.backend.services.computer_file_copy_service.fetch_file_copy_bytes",
-        lambda **kwargs: {"success": True, "info": info, "data": b"hello world"},
+        lambda **kwargs: captured_kwargs.update(kwargs)
+        or {"success": True, "info": info, "data": b"hello world"},
     )
 
     result = catalogue._read_file_copy(concept_id="#V#file_copy_test", max_bytes=20)
     assert result["success"] is True
     assert result["text"] == "hello world"
     assert result["original_filename"] == "notes.txt"
+    assert captured_kwargs["user_concept_id"] == "#V#user_test"
+    assert captured_kwargs["namespace"] is None

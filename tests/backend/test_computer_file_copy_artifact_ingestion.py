@@ -34,6 +34,10 @@ def test_build_file_copy_artifact_record_includes_provenance(monkeypatch):
                 "source_system": "filesystem_import",
                 "source_identifier": "C:/repo/notes.txt",
                 "source_uri": "file:///C:/repo/notes.txt",
+                "user_concept_id": "#V#user_test",
+                "organisation_concept_id": "#V#org_test",
+                "namespace": "#V#user_test@org_test",
+                "namespace_source": "request.namespace",
                 "ingested_at": "2026-01-01T00:00:01+00:00",
             },
             "relationships": {"is_an_instance_of": ["#V#computer_file_copy"]},
@@ -48,6 +52,10 @@ def test_build_file_copy_artifact_record_includes_provenance(monkeypatch):
     assert record["sha256"] == "deadbeef"
     assert record["provenance"]["source"] == "filesystem_import"
     assert record["provenance"]["source_uri"] == "file:///C:/repo/notes.txt"
+    assert record["provenance"]["user_concept_id"] == "#V#user_test"
+    assert record["provenance"]["organisation_concept_id"] == "#V#org_test"
+    assert record["provenance"]["namespace"] == "#V#user_test@org_test"
+    assert record["provenance"]["namespace_source"] == "request.namespace"
     assert record["provenance"]["uploaded_at"] == "2026-01-01T00:00:00+00:00"
     assert record["type_concept_ids"] == ["#V#computer_file_copy"]
 
@@ -81,9 +89,15 @@ def test_import_local_file_copy_registers_blob_and_concept(monkeypatch, tmp_path
         type_concept_id = "#V#computer_file_copy"
         uploaded_at = "2026-01-01T00:00:00+00:00"
 
+    captured_create_kwargs: dict[str, object] = {}
+
+    def _fake_create_computer_file_copy_instance(**kwargs):
+        captured_create_kwargs.update(kwargs)
+        return _Record()
+
     monkeypatch.setattr(
         "src.backend.services.computer_file_copy_service.create_computer_file_copy_instance",
-        lambda **_kwargs: _Record(),
+        _fake_create_computer_file_copy_instance,
     )
     monkeypatch.setattr(
         "src.backend.services.computer_file_copy_service.build_file_copy_artifact_record",
@@ -93,6 +107,9 @@ def test_import_local_file_copy_registers_blob_and_concept(monkeypatch, tmp_path
     result = svc.import_local_file_copy(
         local_path=str(local_file),
         user_concept_id="#V#user",
+        organisation_concept_id="#V#org",
+        namespace="#V#user@org",
+        namespace_source="request.namespace",
         allowed_root=tmp_path,
     )
 
@@ -100,6 +117,9 @@ def test_import_local_file_copy_registers_blob_and_concept(monkeypatch, tmp_path
     assert result["concept_id"] == "#V#imported_file_copy"
     assert result["artifact_record"]["artifact_id"] == "#V#imported_file_copy"
     assert result["storage"]["key"].startswith("imports/user/")
+    assert captured_create_kwargs["organisation_concept_id"] == "#V#org"
+    assert captured_create_kwargs["namespace"] == "#V#user@org"
+    assert captured_create_kwargs["namespace_source"] == "request.namespace"
 
 
 def test_import_local_file_copy_rejects_path_outside_allowed_root(tmp_path):

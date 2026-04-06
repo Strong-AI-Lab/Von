@@ -599,6 +599,7 @@ def _register_arxiv_file_copy_instance(
     from ...services.computer_file_copy_service import (
         create_computer_file_copy_instance,
     )
+    from ...services.namespace_service import derive_actor_context_from_namespace
 
     metadata: dict[str, Any] = {
         "source": "arxiv",
@@ -614,10 +615,17 @@ def _register_arxiv_file_copy_instance(
             }
         )
 
+    _namespace_user_concept_id, namespace_organisation_concept_id = (
+        derive_actor_context_from_namespace(namespace)
+    )
+
     with _with_namespace_actor_override(namespace):
         return create_computer_file_copy_instance(
             type_concept_id=type_concept_id,
             user_concept_id=str(user_concept_id),
+            organisation_concept_id=namespace_organisation_concept_id,
+            namespace=namespace,
+            namespace_source="request.namespace" if namespace else None,
             name=str(name),
             sha256=str(sha256),
             size_bytes=int(size_bytes),
@@ -2517,8 +2525,13 @@ def _finalise_cached_paper(**kwargs):
             if isinstance(durable_pdf_payload, Mapping):
                 cached = Path(str(durable_pdf_payload.get("file_path") or ""))
             else:
-                message = f"No cached arXiv PDF found for {arxiv_id} under {storage_path}"
-                if cache_diagnostics.get("cache_state") == "markdown_only_partial_cache":
+                message = (
+                    f"No cached arXiv PDF found for {arxiv_id} under {storage_path}"
+                )
+                if (
+                    cache_diagnostics.get("cache_state")
+                    == "markdown_only_partial_cache"
+                ):
                     message = (
                         f"No cached arXiv PDF found for {arxiv_id} under {storage_path}; "
                         "Markdown exists without the reusable PDF, so the cache needs "
@@ -3298,6 +3311,7 @@ def _download_result_is_materially_successful(payload: Any) -> bool:
 # Blob/file-copy retrieval
 def _read_file_copy(**kwargs):
     import os
+    from flask import has_request_context, session as flask_session
     from ...security.access_control import get_effective_user_concept_id
     from ...services.computer_file_copy_service import fetch_file_copy_bytes
 
@@ -3360,8 +3374,25 @@ def _read_file_copy(**kwargs):
                 suggestions=["Ensure user context is set before calling this tool"],
             )
 
+        organisation_concept_id = None
+        try:
+            if has_request_context():
+                org_raw = flask_session.get("organisation_concept_id")
+                if isinstance(org_raw, str) and org_raw.strip():
+                    organisation_concept_id = org_raw.strip()
+        except Exception:
+            organisation_concept_id = None
+        _namespace_user, namespace_org = _namespace_actor_overrides_from_namespace(
+            namespace
+        )
+        if namespace_org:
+            organisation_concept_id = namespace_org
+
         result = fetch_file_copy_bytes(
             file_copy_concept_id=concept_id,
+            user_concept_id=user_concept_id,
+            organisation_concept_id=organisation_concept_id,
+            namespace=namespace,
             max_bytes=max_bytes,
             allow_large=allow_large,
         )
@@ -4423,6 +4454,7 @@ def _interpret_file_copy(**kwargs):
         with _with_namespace_actor_override(effective_namespace):
             image_fetch = fetch_file_copy_bytes(
                 file_copy_concept_id=concept_id,
+                namespace=effective_namespace,
                 max_bytes=max_bytes,
                 allow_large=allow_large,
             )
@@ -4477,6 +4509,7 @@ def _interpret_file_copy(**kwargs):
             with _with_namespace_actor_override(effective_namespace):
                 pdf_fetch = fetch_file_copy_bytes(
                     file_copy_concept_id=concept_id,
+                    namespace=effective_namespace,
                     max_bytes=max_bytes,
                     allow_large=allow_large,
                 )
@@ -5074,6 +5107,12 @@ def _import_local_file_copy(**kwargs):
             details={"namespace_report": ns_report},
         )
     ns = ns.strip()
+    _user_scope_concept_id, organisation_concept_id = _resolve_rag_actor_scope_ids(
+        ns_report
+    )
+    namespace_source = ns_report.get("namespace_source")
+    if not isinstance(namespace_source, str) or not namespace_source.strip():
+        namespace_source = None
 
     type_concept_id_raw = kwargs.get("type_concept_id")
     type_concept_id = (
@@ -5114,6 +5153,9 @@ def _import_local_file_copy(**kwargs):
         result = import_local_file_copy(
             local_path=local_path,
             user_concept_id=user_concept_id.strip(),
+            organisation_concept_id=organisation_concept_id,
+            namespace=ns,
+            namespace_source=namespace_source,
             type_concept_id=type_concept_id,
             allowed_root=workspace_root,
             source_system=source_system,
@@ -5162,6 +5204,12 @@ def _import_url_file_copy(**kwargs):
             details={"namespace_report": ns_report},
         )
     ns = ns.strip()
+    _user_scope_concept_id, organisation_concept_id = _resolve_rag_actor_scope_ids(
+        ns_report
+    )
+    namespace_source = ns_report.get("namespace_source")
+    if not isinstance(namespace_source, str) or not namespace_source.strip():
+        namespace_source = None
 
     filename_raw = kwargs.get("filename")
     filename = (
@@ -5234,6 +5282,9 @@ def _import_url_file_copy(**kwargs):
         result = import_remote_url_file_copy(
             url=url,
             user_concept_id=user_concept_id.strip(),
+            organisation_concept_id=organisation_concept_id,
+            namespace=ns,
+            namespace_source=namespace_source,
             filename=filename,
             type_concept_id=type_concept_id,
             source_system=source_system,
@@ -5251,9 +5302,10 @@ def _import_url_file_copy(**kwargs):
             return result
 
         file_copy_concept_id = result.get("concept_id")
-        user_scope_concept_id, organisation_concept_id = _resolve_rag_actor_scope_ids(
-            ns_report
-        )
+        (
+            user_scope_concept_id,
+            resolved_organisation_concept_id,
+        ) = _resolve_rag_actor_scope_ids(ns_report)
         if isinstance(file_copy_concept_id, str) and file_copy_concept_id.strip():
             try:
                 artifact_record_raw = result.get("artifact_record")
@@ -5295,7 +5347,7 @@ def _import_url_file_copy(**kwargs):
                 workflow_event_launch = maybe_launch_file_copy_uploaded_workflow(
                     file_copy_concept_id=file_copy_concept_id.strip(),
                     uploaded_by_concept_id=user_scope_concept_id,
-                    organisation_concept_id=organisation_concept_id,
+                    organisation_concept_id=resolved_organisation_concept_id,
                     namespace=ns,
                     content_type=str(
                         (
@@ -12762,9 +12814,7 @@ def _workflow_validate_candidate(**kwargs):
             base_definition_hash=_clean_optional_string(
                 kwargs.get("base_definition_hash")
             ),
-            validation_profile=_clean_optional_string(
-                kwargs.get("validation_profile")
-            ),
+            validation_profile=_clean_optional_string(kwargs.get("validation_profile")),
             include_preview=bool(kwargs.get("include_preview", False)),
         )
     except Exception as exc:

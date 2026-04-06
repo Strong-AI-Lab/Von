@@ -112,7 +112,9 @@ def test_download_remote_file_copy_bytes_blocks_private_host(monkeypatch):
         ],
     )
 
-    result = svc.download_remote_file_copy_bytes(url="https://files.example.com/data.pdf")
+    result = svc.download_remote_file_copy_bytes(
+        url="https://files.example.com/data.pdf"
+    )
 
     assert result["success"] is False
     assert result["error"] == "blocked_private_host"
@@ -201,10 +203,17 @@ def test_import_remote_url_file_copy_persists_download_provenance(monkeypatch):
             "concept_id": "#V#imported_remote_file",
             "type_concept_id": "#V#computer_file_copy",
             "uploaded_at": "2026-03-08T00:00:00+00:00",
-            "storage": {"backend": "swift", "key": "imports/user/hash/paper.pdf", "uri": "swift://bucket/imports/user/hash/paper.pdf", "size_bytes": 7},
+            "storage": {
+                "backend": "swift",
+                "key": "imports/user/hash/paper.pdf",
+                "uri": "swift://bucket/imports/user/hash/paper.pdf",
+                "size_bytes": 7,
+            },
             "artifact_record": {"artifact_id": "#V#imported_remote_file"},
             "typing": {"typing_persisted": True},
-            "typing_result": {"detected_type_concept_ids": ["#V#pdf_computer_file_copy"]},
+            "typing_result": {
+                "detected_type_concept_ids": ["#V#pdf_computer_file_copy"]
+            },
         }
 
     monkeypatch.setattr(svc, "import_bytes_file_copy", _fake_import_bytes_file_copy)
@@ -212,10 +221,16 @@ def test_import_remote_url_file_copy_persists_download_provenance(monkeypatch):
     result = svc.import_remote_url_file_copy(
         url="https://example.com/paper",
         user_concept_id="#V#user",
+        organisation_concept_id="#V#org",
+        namespace="#V#user@org",
+        namespace_source="request.namespace",
     )
 
     assert result["success"] is True
     assert captured["original_filename"] == "paper.pdf"
+    assert captured["organisation_concept_id"] == "#V#org"
+    assert captured["namespace"] == "#V#user@org"
+    assert captured["namespace_source"] == "request.namespace"
     assert captured["source_identifier"] == "https://example.com/paper"
     assert captured["source_uri"] == "https://cdn.example.com/paper.pdf"
     metadata = captured["metadata"]
@@ -225,4 +240,6 @@ def test_import_remote_url_file_copy_persists_download_provenance(monkeypatch):
     assert result["response"]["status_code"] == 200
     assert result["response"]["size_bytes"] == 7
     assert result["filename_resolution"]["source"] == "response.content_disposition"
-    assert result["content_type_resolution"]["effective_content_type"] == "application/pdf"
+    assert (
+        result["content_type_resolution"]["effective_content_type"] == "application/pdf"
+    )

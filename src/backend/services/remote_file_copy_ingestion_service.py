@@ -155,7 +155,9 @@ def _choose_filename(
     if explicit_filename:
         return explicit_filename, "request.filename"
 
-    disposition_filename = _extract_filename_from_content_disposition(content_disposition)
+    disposition_filename = _extract_filename_from_content_disposition(
+        content_disposition
+    )
     if disposition_filename:
         return disposition_filename, "response.content_disposition"
 
@@ -429,7 +431,10 @@ def download_remote_file_copy_bytes(
                         content_length = int(content_length_raw.strip())
                     except ValueError:
                         content_length = None
-                if isinstance(content_length, int) and content_length > resolved_max_bytes:
+                if (
+                    isinstance(content_length, int)
+                    and content_length > resolved_max_bytes
+                ):
                     return {
                         "success": False,
                         "error": "remote_file_too_large",
@@ -532,6 +537,9 @@ def import_remote_url_file_copy(
     *,
     url: str,
     user_concept_id: str,
+    organisation_concept_id: str | None = None,
+    namespace: str | None = None,
+    namespace_source: str | None = None,
     filename: str | None = None,
     type_concept_id: str = "#V#computer_file_copy",
     source_system: str = "remote_url_import",
@@ -562,6 +570,9 @@ def import_remote_url_file_copy(
     import_result = import_bytes_file_copy(
         data=bytes(download_result["data"]),
         user_concept_id=user_concept_id,
+        organisation_concept_id=organisation_concept_id,
+        namespace=namespace,
+        namespace_source=namespace_source,
         original_filename=str(download_result["original_filename"]),
         content_type=download_result.get("content_type"),
         type_concept_id=type_concept_id,
@@ -572,12 +583,12 @@ def import_remote_url_file_copy(
             "requested_url": str(download_result["requested_url"]),
             "final_url": str(download_result["final_url"]),
             "filename_source": str(download_result.get("filename_source") or ""),
-            "content_type_source": str(download_result.get("content_type_source") or ""),
+            "content_type_source": str(
+                download_result.get("content_type_source") or ""
+            ),
             "response_status_code": str(download_result.get("status_code") or ""),
             "response_content_type": response_headers.get("content_type"),
-            "response_content_disposition": response_headers.get(
-                "content_disposition"
-            ),
+            "response_content_disposition": response_headers.get("content_disposition"),
             "response_etag": response_headers.get("etag"),
             "response_last_modified": response_headers.get("last_modified"),
             "redirect_count": len(redirects),

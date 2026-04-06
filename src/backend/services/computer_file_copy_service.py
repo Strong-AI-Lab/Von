@@ -28,6 +28,148 @@ class FileCopyBlobInfo:
     size_bytes: int | None
 
 
+def _normalise_optional_concept_id(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    if cleaned.startswith("#v#"):
+        return "#V#" + cleaned[3:]
+    if cleaned.startswith("#V#"):
+        return cleaned
+    if cleaned.startswith("#"):
+        return cleaned
+    return f"#V#{cleaned.lstrip('#')}"
+
+
+def _resolve_file_copy_actor_scope(
+    *,
+    user_concept_id: Any = None,
+    organisation_concept_id: Any = None,
+    namespace: Any = None,
+) -> tuple[str | None, str | None, str | None]:
+    from .namespace_service import (
+        derive_actor_context_from_namespace,
+        resolve_canonical_namespace,
+    )
+
+    clean_user = _normalise_optional_concept_id(user_concept_id)
+    clean_org = _normalise_optional_concept_id(organisation_concept_id)
+    canonical_namespace = resolve_canonical_namespace(namespace, clean_user, clean_org)
+    namespace_user, namespace_org = derive_actor_context_from_namespace(
+        canonical_namespace
+    )
+    return (
+        namespace_user or clean_user,
+        namespace_org or clean_org,
+        canonical_namespace,
+    )
+
+
+def _resolve_namespace_source(
+    *,
+    namespace: Any,
+    namespace_source: Any,
+    canonical_namespace: str | None,
+) -> str | None:
+    clean_source = _normalise_optional_text(namespace_source)
+    if clean_source:
+        return clean_source
+    if isinstance(namespace, str) and namespace.strip():
+        return "request.namespace"
+    if canonical_namespace:
+        return "derived.user_org"
+    return None
+
+
+def _load_file_copy_concept_doc(
+    *,
+    file_copy_concept_id: str,
+) -> Mapping[str, Any] | None:
+    if not isinstance(file_copy_concept_id, str) or not file_copy_concept_id.strip():
+        return None
+
+    from ..db.repositories.concepts_repository import ConceptsRepository
+
+    return ConceptsRepository.find_one(
+        {"concept_id": file_copy_concept_id.strip()},
+        {
+            "concept_id": 1,
+            "name": 1,
+            "attributes": 1,
+            "relationships": 1,
+            "created_at": 1,
+            "updated_at": 1,
+        },
+    )
+
+
+def _file_copy_visibility_targets(
+    concept_doc: Mapping[str, Any] | None,
+) -> tuple[list[str], list[str]]:
+    from ..security.visibility_predicates import (
+        get_specific_to_org_values,
+        get_specific_to_user_values,
+    )
+
+    attributes_raw = (
+        concept_doc.get("attributes") if isinstance(concept_doc, Mapping) else None
+    )
+    attributes: Mapping[str, Any] = (
+        attributes_raw if isinstance(attributes_raw, Mapping) else {}
+    )
+    relationships_raw = (
+        concept_doc.get("relationships") if isinstance(concept_doc, Mapping) else None
+    )
+    relationships: Mapping[str, Any] = (
+        relationships_raw if isinstance(relationships_raw, Mapping) else {}
+    )
+
+    specific_users = list(get_specific_to_user_values(dict(relationships)))
+    specific_orgs = list(get_specific_to_org_values(dict(relationships)))
+    if specific_users or specific_orgs:
+        return specific_users, specific_orgs
+
+    fallback_user = _normalise_optional_concept_id(attributes.get("user_concept_id"))
+    fallback_org = _normalise_optional_concept_id(
+        attributes.get("organisation_concept_id")
+    )
+    fallback_namespace = _normalise_optional_text(attributes.get("namespace"))
+    namespace_user, namespace_org, _ignored_namespace = _resolve_file_copy_actor_scope(
+        namespace=fallback_namespace
+    )
+    fallback_user_value = fallback_user or namespace_user
+    fallback_org_value = fallback_org or namespace_org
+    return (
+        [fallback_user_value] if isinstance(fallback_user_value, str) else [],
+        [fallback_org_value] if isinstance(fallback_org_value, str) else [],
+    )
+
+
+def _file_copy_visible_to_actor(
+    *,
+    concept_doc: Mapping[str, Any] | None,
+    user_concept_id: Any = None,
+    organisation_concept_id: Any = None,
+    namespace: Any = None,
+) -> bool:
+    allowed_users, allowed_orgs = _file_copy_visibility_targets(concept_doc)
+    if not allowed_users and not allowed_orgs:
+        return True
+
+    actor_user, actor_org, _canonical_namespace = _resolve_file_copy_actor_scope(
+        user_concept_id=user_concept_id,
+        organisation_concept_id=organisation_concept_id,
+        namespace=namespace,
+    )
+    if actor_user and actor_user in allowed_users:
+        return True
+    if actor_org and actor_org in allowed_orgs:
+        return True
+    return False
+
+
 def _now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -260,6 +402,9 @@ def create_computer_file_copy_instance(
     *,
     type_concept_id: str = "#V#computer_file_copy",
     user_concept_id: str,
+    organisation_concept_id: str | None = None,
+    namespace: str | None = None,
+    namespace_source: str | None = None,
     name: str,
     sha256: str,
     size_bytes: int,
@@ -270,7 +415,7 @@ def create_computer_file_copy_instance(
     metadata: Mapping[str, Any] | None = None,
     logger: Any | None = None,
 ) -> ComputerFileCopyRecord:
-    """Create a Computer File Copy instance scoped to the current user.
+    """Create a Computer File Copy instance with explicit visibility provenance.
 
     This matches the existing upload flow behaviour (text relations are treated
     as authoritative metadata for retrieval).
@@ -294,6 +439,22 @@ def create_computer_file_copy_instance(
     )
     instance_concept_id = f"#V#{type_slug}_{uuid.uuid4().hex}"
     uploaded_at = _now_utc_iso()
+    (
+        effective_user_concept_id,
+        effective_organisation_concept_id,
+        canonical_namespace,
+    ) = _resolve_file_copy_actor_scope(
+        user_concept_id=user_concept_id,
+        organisation_concept_id=organisation_concept_id,
+        namespace=namespace,
+    )
+    if not effective_user_concept_id:
+        raise ValueError("user_concept_id is required")
+    resolved_namespace_source = _resolve_namespace_source(
+        namespace=namespace,
+        namespace_source=namespace_source,
+        canonical_namespace=canonical_namespace,
+    )
 
     from . import concept_service
     from .text_value_service import upsert_text_for_concept
@@ -305,9 +466,23 @@ def create_computer_file_copy_instance(
         "blob_backend": blob_backend,
         "blob_key": blob_key,
         "blob_uri": blob_uri,
+        "uploaded_at": uploaded_at,
     }
     if metadata:
         attributes.update(dict(metadata))
+    attributes["user_concept_id"] = effective_user_concept_id
+    if effective_organisation_concept_id:
+        attributes["organisation_concept_id"] = effective_organisation_concept_id
+    else:
+        attributes.pop("organisation_concept_id", None)
+    if canonical_namespace:
+        attributes["namespace"] = canonical_namespace
+    else:
+        attributes.pop("namespace", None)
+    if resolved_namespace_source:
+        attributes["namespace_source"] = resolved_namespace_source
+    else:
+        attributes.pop("namespace_source", None)
 
     tags = ["file", "blob_store"]
     if type_concept_id == "#V#arxiv_pdf_file":
@@ -322,11 +497,9 @@ def create_computer_file_copy_instance(
         create_as_instance=True,
         system_tags=tags,
         attributes=attributes,
-    )
-
-    concept_service.update_concept(
-        instance_concept_id,
-        {"relationships.specific_to_user": [user_concept_id.strip()]},
+        created_by_concept_id=effective_user_concept_id,
+        organisation_concept_id=effective_organisation_concept_id,
+        event_namespace=canonical_namespace,
     )
 
     upsert_text_for_concept(
@@ -398,9 +571,7 @@ def find_existing_computer_file_copy_instance(
 
     clean_user = user_concept_id.strip() if isinstance(user_concept_id, str) else ""
     clean_blob_key = blob_key.strip() if isinstance(blob_key, str) else ""
-    clean_type = (
-        type_concept_id.strip() if isinstance(type_concept_id, str) else ""
-    )
+    clean_type = type_concept_id.strip() if isinstance(type_concept_id, str) else ""
     clean_sha256 = sha256.strip() if isinstance(sha256, str) else ""
     if not clean_user or not clean_blob_key:
         return None
@@ -472,17 +643,17 @@ def _first_text_value(concept_id: str, predicate: str) -> str | None:
 def resolve_file_copy_blob_info(
     *,
     file_copy_concept_id: str,
+    concept_doc: Mapping[str, Any] | None = None,
 ) -> FileCopyBlobInfo | None:
     if not isinstance(file_copy_concept_id, str) or not file_copy_concept_id.strip():
         return None
 
-    from ..db.repositories.concepts_repository import ConceptsRepository
-
     concept_id = file_copy_concept_id.strip()
-    concept_doc = ConceptsRepository.find_one(
-        {"concept_id": concept_id}, {"concept_id": 1, "name": 1}
-    )
-    if not isinstance(concept_doc, dict):
+    if isinstance(concept_doc, Mapping):
+        loaded_doc: Mapping[str, Any] | None = concept_doc
+    else:
+        loaded_doc = _load_file_copy_concept_doc(file_copy_concept_id=concept_id)
+    if not isinstance(loaded_doc, Mapping):
         return None
 
     blob_key = _first_text_value(concept_id, "#V#has_blob_key")
@@ -494,7 +665,7 @@ def resolve_file_copy_blob_info(
     content_type = _first_text_value(concept_id, "#V#has_mime_type")
     original_filename = _first_text_value(concept_id, "#V#has_original_filename")
     if not original_filename:
-        name = concept_doc.get("name")
+        name = loaded_doc.get("name")
         if isinstance(name, str) and name.strip():
             original_filename = name.strip()
 
@@ -520,11 +691,37 @@ def resolve_file_copy_blob_info(
 def fetch_file_copy_bytes(
     *,
     file_copy_concept_id: str,
+    user_concept_id: str | None = None,
+    organisation_concept_id: str | None = None,
+    namespace: str | None = None,
     max_bytes: int | None = None,
     allow_large: bool = False,
     logger: Any | None = None,
 ) -> dict[str, Any]:
-    info = resolve_file_copy_blob_info(file_copy_concept_id=file_copy_concept_id)
+    concept_doc = _load_file_copy_concept_doc(file_copy_concept_id=file_copy_concept_id)
+    if not isinstance(concept_doc, Mapping):
+        return {"success": False, "error": "not_found"}
+
+    if not _file_copy_visible_to_actor(
+        concept_doc=concept_doc,
+        user_concept_id=user_concept_id,
+        organisation_concept_id=organisation_concept_id,
+        namespace=namespace,
+    ):
+        if logger is not None:
+            logger.info(
+                "[file_copy] Access denied for concept=%s user=%s org=%s namespace=%s",
+                file_copy_concept_id,
+                user_concept_id,
+                organisation_concept_id,
+                namespace,
+            )
+        return {"success": False, "error": "not_found"}
+
+    info = resolve_file_copy_blob_info(
+        file_copy_concept_id=file_copy_concept_id,
+        concept_doc=concept_doc,
+    )
     if info is None:
         return {"success": False, "error": "not_found"}
 
@@ -533,8 +730,8 @@ def fetch_file_copy_bytes(
             import os
 
             env_backend = (
-                os.environ.get("VON_BLOB_STORE_BACKEND") or "local"
-            ).strip().lower()
+                (os.environ.get("VON_BLOB_STORE_BACKEND") or "local").strip().lower()
+            )
             if info.blob_backend.strip().lower() != env_backend and logger is not None:
                 logger.warning(
                     "[file_copy] Blob backend mismatch for %s: concept=%s env=%s",
@@ -618,7 +815,9 @@ def delete_file_copy_blob_and_concept(
         store.delete(info.blob_key)
     except Exception as exc:
         if logger is not None:
-            logger.warning("[file_copy] Blob delete failed for %s: %s", info.concept_id, exc)
+            logger.warning(
+                "[file_copy] Blob delete failed for %s: %s", info.concept_id, exc
+            )
         return {
             "success": False,
             "error": "blob_delete_failed",
@@ -726,19 +925,7 @@ def build_file_copy_artifact_record(
     doc: Mapping[str, Any] | None = concept_doc
     if not isinstance(doc, Mapping):
         try:
-            from ..db.repositories.concepts_repository import ConceptsRepository
-
-            resolved = ConceptsRepository.find_one(
-                {"concept_id": concept_id},
-                {
-                    "concept_id": 1,
-                    "name": 1,
-                    "attributes": 1,
-                    "relationships.is_an_instance_of": 1,
-                    "created_at": 1,
-                    "updated_at": 1,
-                },
-            )
+            resolved = _load_file_copy_concept_doc(file_copy_concept_id=concept_id)
         except Exception:
             resolved = None
         if not isinstance(resolved, Mapping):
@@ -754,25 +941,25 @@ def build_file_copy_artifact_record(
         relationships_raw if isinstance(relationships_raw, Mapping) else {}
     )
 
-    info = resolve_file_copy_blob_info(file_copy_concept_id=concept_id)
+    info = resolve_file_copy_blob_info(
+        file_copy_concept_id=concept_id,
+        concept_doc=doc,
+    )
     if info is None:
         return None
 
-    original_filename = _normalise_optional_text(info.original_filename) or _normalise_optional_text(
-        doc.get("name")
-    )
-    source_system = (
-        _normalise_optional_text(attributes.get("source_system"))
-        or _normalise_optional_text(attributes.get("source"))
-    )
-    source_identifier = (
-        _normalise_optional_text(attributes.get("source_identifier"))
-        or _normalise_optional_text(attributes.get("original_identifier"))
-    )
-    source_uri = (
-        _normalise_optional_text(attributes.get("source_uri"))
-        or _normalise_optional_text(attributes.get("source_url"))
-    )
+    original_filename = _normalise_optional_text(
+        info.original_filename
+    ) or _normalise_optional_text(doc.get("name"))
+    source_system = _normalise_optional_text(
+        attributes.get("source_system")
+    ) or _normalise_optional_text(attributes.get("source"))
+    source_identifier = _normalise_optional_text(
+        attributes.get("source_identifier")
+    ) or _normalise_optional_text(attributes.get("original_identifier"))
+    source_uri = _normalise_optional_text(
+        attributes.get("source_uri")
+    ) or _normalise_optional_text(attributes.get("source_url"))
     sha256 = _first_text_value(concept_id, "#V#has_sha256") or _normalise_optional_text(
         attributes.get("sha256")
     )
@@ -783,6 +970,18 @@ def build_file_copy_artifact_record(
     created_at = _normalise_optional_text(doc.get("created_at"))
     updated_at = _normalise_optional_text(doc.get("updated_at"))
     type_concept_ids = _normalise_type_concept_ids(relationships)
+    namespace = _normalise_optional_text(attributes.get("namespace"))
+    namespace_source = _normalise_optional_text(attributes.get("namespace_source"))
+    user_concept_id = _normalise_optional_concept_id(attributes.get("user_concept_id"))
+    organisation_concept_id = _normalise_optional_concept_id(
+        attributes.get("organisation_concept_id")
+    )
+    if namespace and (user_concept_id is None or organisation_concept_id is None):
+        namespace_user, namespace_org, _ignored_namespace = (
+            _resolve_file_copy_actor_scope(namespace=namespace)
+        )
+        user_concept_id = user_concept_id or namespace_user
+        organisation_concept_id = organisation_concept_id or namespace_org
 
     return {
         "artifact_id": concept_id,
@@ -801,6 +1000,10 @@ def build_file_copy_artifact_record(
             "source": source_system,
             "source_identifier": source_identifier,
             "source_uri": source_uri,
+            "namespace": namespace,
+            "namespace_source": namespace_source,
+            "user_concept_id": user_concept_id,
+            "organisation_concept_id": organisation_concept_id,
             "uploaded_at": uploaded_at,
             "ingested_at": ingested_at,
             "created_at": created_at,
@@ -829,6 +1032,9 @@ def import_bytes_file_copy(
     *,
     data: bytes,
     user_concept_id: str,
+    organisation_concept_id: str | None = None,
+    namespace: str | None = None,
+    namespace_source: str | None = None,
     original_filename: str,
     content_type: str | None = None,
     type_concept_id: str = "#V#computer_file_copy",
@@ -846,21 +1052,34 @@ def import_bytes_file_copy(
 
     if not isinstance(data, (bytes, bytearray)) or not bytes(data):
         return {"success": False, "error": "empty_file"}
-    if not isinstance(user_concept_id, str) or not user_concept_id.strip():
-        return {"success": False, "error": "missing_user_concept_id"}
     if not isinstance(original_filename, str) or not original_filename.strip():
         return {"success": False, "error": "missing_original_filename"}
 
     data_bytes = bytes(data)
-    user_concept_id = user_concept_id.strip()
     original_filename = original_filename.strip()
     content_type = _normalise_optional_text(content_type)
     source_system = _normalise_optional_text(source_system) or "bytes_import"
+    (
+        effective_user_concept_id,
+        effective_organisation_concept_id,
+        canonical_namespace,
+    ) = _resolve_file_copy_actor_scope(
+        user_concept_id=user_concept_id,
+        organisation_concept_id=organisation_concept_id,
+        namespace=namespace,
+    )
+    if not effective_user_concept_id:
+        return {"success": False, "error": "missing_user_concept_id"}
+    resolved_namespace_source = _resolve_namespace_source(
+        namespace=namespace,
+        namespace_source=namespace_source,
+        canonical_namespace=canonical_namespace,
+    )
 
     sha256 = hashlib.sha256(data_bytes).hexdigest()
     size_bytes = len(data_bytes)
     uploaded_at = _now_utc_iso()
-    user_slug = _slugify_concept_id_for_blob_key(user_concept_id)
+    user_slug = _slugify_concept_id_for_blob_key(effective_user_concept_id)
     safe_filename = _safe_filename_for_blob_key(original_filename)
 
     resolved_blob_key = (
@@ -873,7 +1092,7 @@ def import_bytes_file_copy(
     persisted_metadata.update(
         {
             "original_filename": original_filename,
-            "user_concept_id": user_concept_id,
+            "user_concept_id": effective_user_concept_id,
             "uploaded_at": uploaded_at,
             "source_system": source_system,
             "source_identifier": source_identifier,
@@ -881,6 +1100,20 @@ def import_bytes_file_copy(
             "ingested_at": uploaded_at,
         }
     )
+    if effective_organisation_concept_id:
+        persisted_metadata["organisation_concept_id"] = (
+            effective_organisation_concept_id
+        )
+    else:
+        persisted_metadata.pop("organisation_concept_id", None)
+    if canonical_namespace:
+        persisted_metadata["namespace"] = canonical_namespace
+    else:
+        persisted_metadata.pop("namespace", None)
+    if resolved_namespace_source:
+        persisted_metadata["namespace_source"] = resolved_namespace_source
+    else:
+        persisted_metadata.pop("namespace_source", None)
 
     try:
         from .blob_uploads import BlobUploadError, put_bytes_durable
@@ -904,7 +1137,10 @@ def import_bytes_file_copy(
     try:
         created = create_computer_file_copy_instance(
             type_concept_id=type_concept_id,
-            user_concept_id=user_concept_id,
+            user_concept_id=effective_user_concept_id,
+            organisation_concept_id=effective_organisation_concept_id,
+            namespace=canonical_namespace,
+            namespace_source=resolved_namespace_source,
             name=original_filename,
             sha256=sha256,
             size_bytes=size_bytes,
@@ -947,7 +1183,9 @@ def import_bytes_file_copy(
             "message": str(exc),
         }
 
-    artifact_record = build_file_copy_artifact_record(file_copy_concept_id=created.concept_id)
+    artifact_record = build_file_copy_artifact_record(
+        file_copy_concept_id=created.concept_id
+    )
 
     return {
         "success": True,
@@ -972,6 +1210,9 @@ def import_local_file_copy(
     *,
     local_path: str,
     user_concept_id: str,
+    organisation_concept_id: str | None = None,
+    namespace: str | None = None,
+    namespace_source: str | None = None,
     type_concept_id: str = "#V#computer_file_copy",
     allowed_root: str | Path | None = None,
     source_system: str = "filesystem_import",
@@ -989,9 +1230,17 @@ def import_local_file_copy(
     try:
         resolved = path.resolve(strict=True)
     except Exception:
-        return {"success": False, "error": "local_path_not_found", "local_path": local_path}
+        return {
+            "success": False,
+            "error": "local_path_not_found",
+            "local_path": local_path,
+        }
     if not resolved.is_file():
-        return {"success": False, "error": "local_path_not_file", "local_path": str(resolved)}
+        return {
+            "success": False,
+            "error": "local_path_not_file",
+            "local_path": str(resolved),
+        }
 
     if allowed_root is not None:
         try:
@@ -1029,6 +1278,9 @@ def import_local_file_copy(
     result = import_bytes_file_copy(
         data=data,
         user_concept_id=user_concept_id,
+        organisation_concept_id=organisation_concept_id,
+        namespace=namespace,
+        namespace_source=namespace_source,
         original_filename=original_filename,
         content_type=content_type,
         type_concept_id=type_concept_id,

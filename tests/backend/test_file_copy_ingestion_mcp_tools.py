@@ -47,7 +47,9 @@ def test_index_file_copy_indexes_blob_backed_text(monkeypatch):
     assert result["document_id"] == "file_copy:#V#file_copy_test"
     assert result["indexed_count"] == 1
     assert rag.namespace == "#V#user@org"
-    assert rag.docs[0]["metadata"]["artifact_record"]["artifact_id"] == "#V#file_copy_test"
+    assert (
+        rag.docs[0]["metadata"]["artifact_record"]["artifact_id"] == "#V#file_copy_test"
+    )
 
 
 def test_index_file_copy_requires_namespace(monkeypatch):
@@ -62,13 +64,16 @@ def test_index_file_copy_requires_namespace(monkeypatch):
 def test_import_local_file_copy_uses_authenticated_context(monkeypatch):
     from src.backend.integrations.internal_mcp import catalogue as cat
 
+    captured_kwargs: dict[str, object] = {}
+
     monkeypatch.setattr(
         "src.backend.security.access_control.get_effective_user_concept_id",
         lambda: "#V#user",
     )
     monkeypatch.setattr(
         "src.backend.services.computer_file_copy_service.import_local_file_copy",
-        lambda **_kwargs: {
+        lambda **kwargs: captured_kwargs.update(kwargs)
+        or {
             "success": True,
             "concept_id": "#V#imported_file",
             "artifact_record": {"artifact_id": "#V#imported_file"},
@@ -84,6 +89,9 @@ def test_import_local_file_copy_uses_authenticated_context(monkeypatch):
     assert result["success"] is True
     assert result["concept_id"] == "#V#imported_file"
     assert result["namespace"] == "#V#user@org"
+    assert captured_kwargs["organisation_concept_id"] == "#V#org"
+    assert captured_kwargs["namespace"] == "#V#user@org"
+    assert captured_kwargs["namespace_source"] == "request.namespace"
 
 
 def test_import_url_file_copy_uses_authenticated_context_and_triggers_workflow(
@@ -91,13 +99,16 @@ def test_import_url_file_copy_uses_authenticated_context_and_triggers_workflow(
 ):
     from src.backend.integrations.internal_mcp import catalogue as cat
 
+    captured_kwargs: dict[str, object] = {}
+
     monkeypatch.setattr(
         "src.backend.security.access_control.get_effective_user_concept_id",
         lambda: "#V#user",
     )
     monkeypatch.setattr(
         "src.backend.services.remote_file_copy_ingestion_service.import_remote_url_file_copy",
-        lambda **_kwargs: {
+        lambda **kwargs: captured_kwargs.update(kwargs)
+        or {
             "success": True,
             "concept_id": "#V#imported_url_file",
             "type_concept_id": "#V#computer_file_copy",
@@ -146,6 +157,9 @@ def test_import_url_file_copy_uses_authenticated_context_and_triggers_workflow(
     assert result["success"] is True
     assert result["concept_id"] == "#V#imported_url_file"
     assert result["namespace"] == "#V#user@org"
+    assert captured_kwargs["organisation_concept_id"] == "#V#org"
+    assert captured_kwargs["namespace"] == "#V#user@org"
+    assert captured_kwargs["namespace_source"] == "request.namespace"
     assert result["workflow_event_launch"]["triggered"] is True
     assert workflow_calls == [
         {
@@ -374,7 +388,9 @@ def test_interpret_file_copy_reports_subtype_assertion_failure(monkeypatch):
 
     assert result["success"] is False
     assert result["subtype_type_concept_id"] == "#V#msword_docx_computer_file_copy"
-    assert result["diagnostics"]["subtype_assertion_outcome"] == "subtype_assertion_failed"
+    assert (
+        result["diagnostics"]["subtype_assertion_outcome"] == "subtype_assertion_failed"
+    )
     assert result["persist_errors"]
     assert result["persist_errors"][0]["predicate"] == "is_an_instance_of"
     assert result["persist_errors"][0]["error"] == "target_not_found"
@@ -523,7 +539,9 @@ def test_interpret_file_copy_reports_explicit_scholarly_materialisation_requirem
     assert scholarly.get("arxiv_id") == "2502.14996"
 
 
-def test_interpret_file_copy_fails_closed_when_person_representation_unverified(monkeypatch):
+def test_interpret_file_copy_fails_closed_when_person_representation_unverified(
+    monkeypatch,
+):
     from src.backend.integrations.internal_mcp import catalogue as cat
 
     monkeypatch.setattr(
@@ -607,7 +625,10 @@ def test_interpret_file_copy_fails_closed_when_company_representation_unverified
             "original_filename": "company-webpage.txt",
             "size_bytes": 256,
             "byte_length": 256,
-            "blob": {"backend": "local", "key": "uploads/user/hash/company-webpage.txt"},
+            "blob": {
+                "backend": "local",
+                "key": "uploads/user/hash/company-webpage.txt",
+            },
         },
     )
     monkeypatch.setattr(
@@ -679,7 +700,10 @@ def test_interpret_file_copy_fails_closed_when_meeting_representation_unverified
             "original_filename": "meeting-transcript.txt",
             "size_bytes": 256,
             "byte_length": 256,
-            "blob": {"backend": "local", "key": "uploads/user/hash/meeting-transcript.txt"},
+            "blob": {
+                "backend": "local",
+                "key": "uploads/user/hash/meeting-transcript.txt",
+            },
         },
     )
     monkeypatch.setattr(
@@ -786,7 +810,11 @@ def test_interpret_file_copy_includes_pdf_diagram_analysis(monkeypatch):
                 }
             ],
             "page_summaries": [
-                {"page_number": 2, "diagram_candidate": True, "signals": ["embedded_images"]}
+                {
+                    "page_number": 2,
+                    "diagram_candidate": True,
+                    "signals": ["embedded_images"],
+                }
             ],
             "errors": [],
         },
@@ -823,8 +851,6 @@ def test_interpret_file_copy_includes_pdf_diagram_analysis(monkeypatch):
     assert result["success"] is True
     assert result["file_kind"] == "document"
     assert result["diagram_analysis"]["available"] is True
-    assert (
-        result["interpretation"]["candidate_assertions_require_confirmation"] is True
-    )
+    assert result["interpretation"]["candidate_assertions_require_confirmation"] is True
     assert "diagram_organisation_candidates" in result["interpretation"]["subject_tags"]
     assert result["diagnostics"]["diagram_analysis"]["diagram_only_count"] == 1
