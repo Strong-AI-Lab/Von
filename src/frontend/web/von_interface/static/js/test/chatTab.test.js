@@ -58,6 +58,7 @@ import {
     __testOnly_buildConversationTelemetryExportPayload,
     __testOnly_copyConversationInfoToClipboard,
     __testOnly_clearLlmDebugData,
+    __testOnly_resetChatRequestState,
     __testOnly_setSessionTabsCache,
     __testOnly_setTranscriptTurns,
     setLlmDebugDataForTurn,
@@ -88,6 +89,10 @@ jest.mock('../utils/sessionScopedStorage.js', () => ({
     getSessionScopedNamespace: jest.fn(),
     getSessionScopedOrgContext: jest.fn()
 }));
+
+beforeEach(() => {
+    __testOnly_resetChatRequestState();
+});
 jest.mock('../utils/textDecorator.js', () => ({
     annotateElementText: jest.fn(),
     applyCartoucheAppearance: jest.fn(),
@@ -3530,7 +3535,7 @@ describe('chat session composer state', () => {
         delete global.fetch;
     });
 
-    test('switching chat sessions does not restore the aborted prompt into an empty composer', async () => {
+    test('switching chat sessions keeps the originating request running in the background', async () => {
         const promptInput = document.getElementById('promptInput');
         initializePromptCartoucheOverlay(promptInput);
 
@@ -3547,9 +3552,11 @@ describe('chat session composer state', () => {
         ]);
         __testOnly_setThinkingCardRequests({
             abortController,
+            sessionId: 'session-1',
             promptRaw: 'https://arxiv.org/abs/2411.04983',
             selectionStart: 31,
             selectionEnd: 31,
+            clientRequestId: 'request-session-1',
             activityHistory: [],
             progressEvents: [],
             phaseHistory: [],
@@ -3590,9 +3597,138 @@ describe('chat session composer state', () => {
             expect.objectContaining({ ok: true })
         );
 
-        expect(abortSpy).toHaveBeenCalledTimes(1);
+        const backgroundTab = document.querySelector('.chat-session-tab[data-session-id="session-1"]');
+        expect(backgroundTab).not.toBeNull();
+        expect(backgroundTab.classList.contains('has-background-request')).toBe(true);
+        expect(abortSpy).not.toHaveBeenCalled();
+        expect(document.getElementById('sendButton').textContent).toBe('Queue Prompt');
         expect(promptInput.value).toBe('');
         expect(overlayContent.textContent).toBe('');
+    });
+
+    test('queued prompts stay pinned to their originating session after switching away again', async () => {
+        const promptInput = document.getElementById('promptInput');
+        initializePromptCartoucheOverlay(promptInput);
+
+        __testOnly_setActiveChatSession('session-1', 'Current');
+        __testOnly_setSessionTabsCache([
+            { session_id: 'session-1', session_name: 'Current', message_count: 1, last_message_at: '2026-04-06T06:00:00Z' },
+            { session_id: 'session-2', session_name: 'Target', message_count: 0, last_message_at: '2026-04-06T06:05:00Z' }
+        ]);
+
+        let resolveFirstGenerate;
+        const firstGeneratePromise = new Promise((resolve) => {
+            resolveFirstGenerate = resolve;
+        });
+        const generateBodies = [];
+
+        global.fetch = jest.fn((url, options = {}) => {
+            if (typeof url === 'string' && url.startsWith('/api/settings/')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ show_tool_use_during_thinking: true })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/api/session/set_chat_session')) {
+                const body = JSON.parse(options.body || '{}');
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        session_id: body.session_id,
+                        session_name: body.session_id === 'session-2' ? 'Target' : 'Current'
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/api/session/chat_session_links')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ session_links: {} })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history?')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        history: [],
+                        segments_returned: 1,
+                        total_segments: 0,
+                        total_messages: 0
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ history_length: 0, session_count: 2, authenticated: true })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/progress/')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        status: 'completed',
+                        phase: 'tool_execute',
+                        phase_label: 'Executing tools',
+                        tool: 'search_knowledge_base',
+                        result_summary: 'Completed'
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                generateBodies.push(JSON.parse(options.body || '{}'));
+                if (generateBodies.length === 1) {
+                    return firstGeneratePromise;
+                }
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        response: 'Queued session response',
+                        llm_debug: { model: 'gpt-5.2' }
+                    })
+                });
+            }
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        promptInput.value = 'request for session 1';
+        const firstSendPromise = sendMessage();
+        await Promise.resolve();
+        await Promise.resolve();
+
+        await expect(switchToChatSession('session-2')).resolves.toEqual(
+            expect.objectContaining({ ok: true })
+        );
+
+        promptInput.value = 'queued for session 2';
+        await expect(sendMessage()).resolves.toBeUndefined();
+
+        const queueLabels = Array.from(document.querySelectorAll('.chat-task-queue-item-label'))
+            .map((node) => node.textContent || '');
+        expect(queueLabels).toContain('Next up • Target');
+
+        await expect(switchToChatSession('session-1')).resolves.toEqual(
+            expect.objectContaining({ ok: true })
+        );
+
+        resolveFirstGenerate({
+            ok: true,
+            json: async () => ({
+                response: 'First session response',
+                llm_debug: { model: 'gpt-5.2' }
+            })
+        });
+
+        await firstSendPromise;
+        await Promise.resolve();
+        await Promise.resolve();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(generateBodies).toHaveLength(2);
+        expect(generateBodies[0].conversation_session_id).toBe('session-1');
+        expect(generateBodies[1].conversation_session_id).toBe('session-2');
+        expect(document.getElementById('scrollableField').textContent).not.toContain('queued for session 2');
     });
 
     test('creating a new chat session clears the composer overlay as well as the textarea value', async () => {

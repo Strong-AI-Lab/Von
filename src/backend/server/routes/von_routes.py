@@ -6543,6 +6543,22 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
     request_user_id = data.get("user_id")
     request_org_id = data.get("org_id")
     request_language = data.get("language", "en-NZ")
+    request_conversation_session_id_raw = data.get("conversation_session_id")
+    request_conversation_session_id = None
+    if isinstance(request_conversation_session_id_raw, str):
+        request_conversation_session_id = (
+            request_conversation_session_id_raw.strip() or None
+        )
+    elif request_conversation_session_id_raw is not None:
+        return (
+            jsonify(
+                {
+                    "error": "invalid_conversation_session_id",
+                    "detail": "conversation_session_id must be a string.",
+                }
+            ),
+            400,
+        )
     request_gmail_profile_raw = data.get("gmail_profile")
     request_gmail_profile = None
     if isinstance(request_gmail_profile_raw, str):
@@ -6623,7 +6639,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
     # JVNAUTOSCI-1011: Get session_id from window context (or flask session fallback).
     # This ensures each browser window uses its own active chat session.
-    session_id = effective.get("chat_session_id")
+    session_id = request_conversation_session_id or effective.get("chat_session_id")
     if not session_id:
         # Fallback to flask session for legacy clients
         if "session_id" not in session:

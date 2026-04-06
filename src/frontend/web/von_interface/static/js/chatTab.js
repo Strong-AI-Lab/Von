@@ -1576,6 +1576,9 @@ function refreshThinkingCardProgressUi(request, cardRoot = null) {
     if (!request || typeof request !== 'object') {
         return;
     }
+    if (!(cardRoot instanceof HTMLElement) && !isRequestInActiveChatSession(request)) {
+        return;
+    }
 
     persistThinkingCardBodyHeightFromDom(request, cardRoot);
     setLoadingIndicatorText(formatToolUseProgressText(request.latestProgress, request), cardRoot);
@@ -1762,17 +1765,20 @@ function renderRetainedThinkingCardForTurn(request, turnId) {
 function persistFinishedThinkingCard(request) {
     const snapshot = createThinkingCardHistorySnapshot(request);
     if (!snapshot) {
-        lastFinishedThinkingCard = null;
+        setFinishedThinkingCardForSession(request?.sessionId, null);
         return false;
     }
 
     const detailHtml = renderThinkingCardBodyHTML(snapshot);
     if (!detailHtml) {
-        lastFinishedThinkingCard = null;
+        setFinishedThinkingCardForSession(request?.sessionId, null);
         return false;
     }
 
-    lastFinishedThinkingCard = snapshot;
+    setFinishedThinkingCardForSession(request?.sessionId, snapshot);
+    if (!isRequestInActiveChatSession(snapshot)) {
+        return true;
+    }
     return renderRetainedThinkingCardForTurn(snapshot, request.resultTurnId);
 }
 
@@ -1814,6 +1820,9 @@ function getSessionHistoryCache(sessionId) {
 function canReuseSessionHistory(sessionId) {
     const sid = String(sessionId || '').trim();
     if (!sid) {
+        return false;
+    }
+    if (getLiveChatRequestForSession(sid) || getFinishedThinkingCardForSession(sid)) {
         return false;
     }
     const cached = getSessionHistoryCache(sid);
@@ -1858,6 +1867,149 @@ function normaliseHistorySessionId(sessionId) {
     return (typeof sessionId === 'string' && sessionId.trim())
         ? sessionId.trim()
         : null;
+}
+
+function getChatRequestSessionKey(sessionId = null) {
+    return normaliseHistorySessionId(sessionId) || LEGACY_CHAT_REQUEST_SESSION_KEY;
+}
+
+function getLiveChatRequestForSession(sessionId = activeChatSessionId) {
+    return liveChatRequestsBySession.get(getChatRequestSessionKey(sessionId)) || null;
+}
+
+function getFinishedThinkingCardForSession(sessionId = activeChatSessionId) {
+    return finishedThinkingCardsBySession.get(getChatRequestSessionKey(sessionId)) || null;
+}
+
+function syncActiveChatRequestPointers() {
+    activeChatRequest = getLiveChatRequestForSession(activeChatSessionId);
+    lastFinishedThinkingCard = getFinishedThinkingCardForSession(activeChatSessionId);
+}
+
+function hasAnyLiveChatRequest() {
+    return liveChatRequestsBySession.size > 0;
+}
+
+function isLiveChatRequest(request) {
+    if (!request || typeof request !== 'object') {
+        return false;
+    }
+    return liveChatRequestsBySession.get(request.sessionKey) === request;
+}
+
+function isRequestInActiveChatSession(request) {
+    if (!request || typeof request !== 'object') {
+        return false;
+    }
+    return request.sessionKey === getChatRequestSessionKey(activeChatSessionId);
+}
+
+function getQueuedChatPromptCountForSession(sessionId = activeChatSessionId) {
+    const sessionKey = getChatRequestSessionKey(sessionId);
+    return queuedChatPrompts.filter((entry) => entry?.sessionKey === sessionKey).length;
+}
+
+function getQueuedChatPromptSessionLabel(entry) {
+    const explicitName = (typeof entry?.sessionName === 'string' && entry.sessionName.trim())
+        ? entry.sessionName.trim()
+        : '';
+    if (explicitName) {
+        return explicitName;
+    }
+    const sid = normaliseHistorySessionId(entry?.sessionId);
+    if (!sid) {
+        return 'Current conversation';
+    }
+    const session = sessionTabsCache.find(
+        candidate => String(candidate?.session_id || '') === sid
+    );
+    return getSessionDisplayName(session || { session_id: sid, session_name: null });
+}
+
+function refreshChatSessionTabActivityIndicators() {
+    const container = getChatSessionTabsContainer();
+    if (!container || !Array.isArray(sessionTabsCache) || sessionTabsCache.length === 0) {
+        return;
+    }
+    renderChatSessionTabs(sessionTabsCache, activeChatSessionId);
+}
+
+function invalidateSessionHistoryCache(sessionId) {
+    const sid = normaliseHistorySessionId(sessionId);
+    if (!sid) {
+        return;
+    }
+    sessionHistoryCache.delete(sid);
+}
+
+function setLiveChatRequestForSession(sessionId, request = null) {
+    const sessionKey = getChatRequestSessionKey(sessionId);
+    if (request && typeof request === 'object') {
+        request.sessionId = normaliseHistorySessionId(sessionId);
+        request.sessionKey = sessionKey;
+        liveChatRequestsBySession.set(sessionKey, request);
+    } else {
+        liveChatRequestsBySession.delete(sessionKey);
+    }
+    syncActiveChatRequestPointers();
+    refreshChatSessionTabActivityIndicators();
+}
+
+function setFinishedThinkingCardForSession(sessionId, request = null) {
+    const sessionKey = getChatRequestSessionKey(sessionId);
+    if (request && typeof request === 'object') {
+        request.sessionId = normaliseHistorySessionId(sessionId);
+        request.sessionKey = sessionKey;
+        finishedThinkingCardsBySession.set(sessionKey, request);
+    } else {
+        finishedThinkingCardsBySession.delete(sessionKey);
+    }
+    syncActiveChatRequestPointers();
+    refreshChatSessionTabActivityIndicators();
+}
+
+function updateSendButtonForCurrentChatState() {
+    const sendButton = document.getElementById('sendButton');
+    if (!sendButton) {
+        return;
+    }
+    sendButton.disabled = false;
+    sendButton.textContent = hasAnyLiveChatRequest() ? 'Queue Prompt' : 'Send Prompt';
+}
+
+function syncActiveChatSessionThinkingState() {
+    syncActiveChatRequestPointers();
+
+    if (activeChatRequest) {
+        setThinkingState(true, activeChatRequest, { resetDisplayState: false });
+        refreshThinkingCardProgressUi(activeChatRequest);
+        updateSendButtonForCurrentChatState();
+        return;
+    }
+
+    if (lastFinishedThinkingCard) {
+        let renderedInline = false;
+        if (typeof lastFinishedThinkingCard.resultTurnId === 'string' && lastFinishedThinkingCard.resultTurnId) {
+            renderedInline = renderRetainedThinkingCardForTurn(
+                lastFinishedThinkingCard,
+                lastFinishedThinkingCard.resultTurnId
+            );
+        }
+        if (renderedInline) {
+            setThinkingState(false, null);
+        } else {
+            setThinkingState(false, lastFinishedThinkingCard, {
+                preserveFinishedCard: true,
+                resetDisplayState: false
+            });
+            refreshThinkingCardProgressUi(lastFinishedThinkingCard);
+        }
+        updateSendButtonForCurrentChatState();
+        return;
+    }
+
+    setThinkingState(false, null);
+    updateSendButtonForCurrentChatState();
 }
 
 function clearHistoryLoadState({ sessionId = null } = {}) {
@@ -1927,8 +2079,10 @@ async function refreshToolUseDuringThinkingSetting(force = false) {
         const data = await resp.json();
         if (data && typeof data.show_tool_use_during_thinking !== 'undefined') {
             showToolUseDuringThinkingSetting = !!data.show_tool_use_during_thinking;
-            if (!showToolUseDuringThinkingSetting && activeChatRequest) {
-                stopToolUseProgressPolling(activeChatRequest);
+            if (!showToolUseDuringThinkingSetting) {
+                liveChatRequestsBySession.forEach((request) => {
+                    stopToolUseProgressPolling(request);
+                });
                 setLoadingIndicatorText(DEFAULT_THINKING_TEXT);
             }
         }
@@ -2239,8 +2393,18 @@ export async function __testOnly_copyActiveThinkingDiagnostics(button = null, re
 }
 
 export function __testOnly_setThinkingCardRequests(activeRequest = null, finishedRequest = null) {
-    activeChatRequest = activeRequest;
-    lastFinishedThinkingCard = finishedRequest;
+    liveChatRequestsBySession.clear();
+    finishedThinkingCardsBySession.clear();
+    if (activeRequest && typeof activeRequest === 'object') {
+        setLiveChatRequestForSession(activeRequest.sessionId ?? activeChatSessionId, activeRequest);
+    }
+    if (finishedRequest && typeof finishedRequest === 'object') {
+        setFinishedThinkingCardForSession(
+            finishedRequest.sessionId ?? activeChatSessionId,
+            finishedRequest
+        );
+    }
+    syncActiveChatRequestPointers();
 }
 
 export function __testOnly_persistThinkingCardBodyHeightFromDom(request = getThinkingCardDisplayRequest(), cardRoot = null) {
@@ -4379,12 +4543,14 @@ function startThinkingTooltipTicker(request) {
     // Update once per second so the elapsed time stays current,
     // even if tool-progress polling backs off (e.g., repeated 404s).
     request.thinkingTooltipIntervalId = setInterval(() => {
-        if (request.aborted || activeChatRequest !== request) {
+        if (request.aborted || !isLiveChatRequest(request)) {
             stopThinkingTooltipTicker(request);
             return;
         }
-        setLoadingIndicatorDetailHtml(renderThinkingCardBodyHTML(request));
-        updateThinkingCardMeta(request, request.latestProgress || null);
+        if (isRequestInActiveChatSession(request)) {
+            setLoadingIndicatorDetailHtml(renderThinkingCardBodyHTML(request));
+            updateThinkingCardMeta(request, request.latestProgress || null);
+        }
     }, 1000);
 }
 
@@ -4415,7 +4581,7 @@ function startToolUseProgressPolling(request) {
     };
 
     const scheduleNextPoll = (delayMs) => {
-        if (request.aborted || activeChatRequest !== request) {
+        if (request.aborted || !isLiveChatRequest(request)) {
             return;
         }
         poll.timeoutId = setTimeout(() => {
@@ -4424,13 +4590,15 @@ function startToolUseProgressPolling(request) {
     };
 
     const pollOnce = async () => {
-        if (request.aborted || activeChatRequest !== request) {
+        if (request.aborted || !isLiveChatRequest(request)) {
             return;
         }
 
         // Keep detail text "alive" even before the server has any tool-progress state.
-        setLoadingIndicatorDetailHtml(renderThinkingCardBodyHTML(request));
-        updateThinkingCardMeta(request, request.latestProgress || null);
+        if (isRequestInActiveChatSession(request)) {
+            setLoadingIndicatorDetailHtml(renderThinkingCardBodyHTML(request));
+            updateThinkingCardMeta(request, request.latestProgress || null);
+        }
 
         try {
             const resp = await fetchWithTimeout(`/von/progress/${encodeURIComponent(requestId)}`,
@@ -12610,9 +12778,12 @@ function createChatDebugWarningIndicator(warnings) {
 
 let activeChatRequest = null;
 let lastFinishedThinkingCard = null;
+const liveChatRequestsBySession = new Map();
+const finishedThinkingCardsBySession = new Map();
 let queuedChatPrompts = [];
 let queuedChatPromptCounter = 0;
 let queuedChatPromptDrainTimer = null;
+const LEGACY_CHAT_REQUEST_SESSION_KEY = '__legacy_active_chat_session__';
 
 const CHAT_TASK_QUEUE_PANEL_ID = 'chatTaskQueuePanel';
 const CHAT_TASK_QUEUE_LIST_ID = 'chatTaskQueueList';
@@ -15042,6 +15213,9 @@ function renderChatSessionTabs(sessions, activeSessionId) {
             tab.classList.add('is-active');
         }
 
+        const hasLiveRequest = !!getLiveChatRequestForSession(sid);
+        const queuedPromptCount = getQueuedChatPromptCountForSession(sid);
+
         if (groupLabelText) {
             tab.classList.add('chat-session-tab-group-start');
             const groupBadge = document.createElement('span');
@@ -15059,6 +15233,14 @@ function renderChatSessionTabs(sessions, activeSessionId) {
 
         if (sid === loadingChatSessionId) {
             tab.classList.add('is-loading');
+        }
+
+        if (hasLiveRequest) {
+            tab.classList.add('has-background-request');
+        }
+
+        if (queuedPromptCount > 0) {
+            tab.classList.add('has-queued-prompts');
         }
 
         if (isPinned) {
@@ -15120,6 +15302,19 @@ function renderChatSessionTabs(sessions, activeSessionId) {
         label.className = 'chat-session-tab-label';
         label.textContent = displayName;
         header.appendChild(label);
+
+        if (hasLiveRequest || queuedPromptCount > 0) {
+            const activityBadge = document.createElement('span');
+            activityBadge.className = 'chat-session-tab-activity';
+            if (hasLiveRequest) {
+                activityBadge.textContent = sid === activeSessionId ? 'Thinking' : 'Background';
+                tab.title = `${tab.title} • ${sid === activeSessionId ? 'Thinking' : 'Background request active'}`;
+            } else {
+                activityBadge.textContent = queuedPromptCount === 1 ? 'Queued' : `Queued ${queuedPromptCount}`;
+                tab.title = `${tab.title} • ${queuedPromptCount} queued prompt${queuedPromptCount === 1 ? '' : 's'}`;
+            }
+            header.appendChild(activityBadge);
+        }
 
         const unreadCount = Number.isFinite(session?.shared_unread_count)
             ? Number(session.shared_unread_count)
@@ -15441,8 +15636,6 @@ async function promptRenameChatSession(sessionId, currentName) {
 }
 
 async function createChatSession(sessionName) {
-    abortActiveChatRequest({ restorePrompt: false });
-
     const payload = {};
     if (typeof sessionName === 'string' && sessionName.trim()) {
         payload.session_name = sessionName.trim();
@@ -15461,6 +15654,7 @@ async function createChatSession(sessionName) {
     }
 
     setActiveChatSession(data?.session_id, data?.session_name);
+    syncActiveChatSessionThinkingState();
 
     const nowIso = new Date().toISOString();
     const effectiveSessionId = (typeof data?.session_id === 'string' && data.session_id.trim())
@@ -15618,9 +15812,7 @@ async function switchToChatSession(sessionId) {
     void loadChatSessionLinks(sid, { force: false });
 
     abortActiveHistoryRequest();
-    abortActiveChatRequest({ restorePrompt: false });
-    lastFinishedThinkingCard = null;
-    setThinkingState(false, null);
+    syncActiveChatSessionThinkingState();
 
     const scrollableField = document.getElementById('scrollableField');
     if (!scrollableField) {
@@ -16469,8 +16661,6 @@ function rehydrateHistory(scrollableField, historyMessages, options = {}) {
     scrollableField.innerHTML = '';
     transcriptTurns.length = 0;
     clearLlmDebugDataEntries();
-    lastFinishedThinkingCard = null;
-    setThinkingState(false, null);
 
     historyMessages.forEach((msg, index) => {
         if (msg.role === 'user' || msg.role === 'assistant') {
@@ -16532,6 +16722,7 @@ function rehydrateHistory(scrollableField, historyMessages, options = {}) {
         // Update history display to reflect new context count
         updateHistoryLength();
         updateScrollToEndButtonVisibility(scrollableField);
+        syncActiveChatSessionThinkingState();
     });
 }
 
@@ -20251,6 +20442,7 @@ export function initializeChatTab() {
 
 function setThinkingState(isThinking, request = activeChatRequest, options = {}) {
     const preserveFinishedCard = !!options.preserveFinishedCard;
+    const shouldResetDisplayState = options.resetDisplayState !== false;
     const wrapper = getThinkingCardWrapperEl();
     const loadingIndicator = getLoadingIndicatorEl();
     const loadingDetail = getLoadingIndicatorDetailEl();
@@ -20264,7 +20456,7 @@ function setThinkingState(isThinking, request = activeChatRequest, options = {})
     const sizeDecreaseButton = getThinkingCardSizeDecreaseButtonEl();
     const sizeIncreaseButton = getThinkingCardSizeIncreaseButtonEl();
 
-    if (isThinking && request) {
+    if (isThinking && request && shouldResetDisplayState) {
         request.thinkingCardDisplayState = reduceThinkingCardDisplayState(
             request.thinkingCardDisplayState,
             { type: 'reset_for_active' }
@@ -20318,7 +20510,7 @@ function setThinkingState(isThinking, request = activeChatRequest, options = {})
 
     if (sendButton) {
         sendButton.disabled = false;
-        sendButton.textContent = isThinking ? 'Queue Prompt' : 'Send Prompt';
+        sendButton.textContent = hasAnyLiveChatRequest() ? 'Queue Prompt' : 'Send Prompt';
     }
 
     if (toggleButton) {
@@ -20404,8 +20596,9 @@ function abortActiveChatRequest(options = {}) {
         // Ignore abort errors.
     }
 
-    setThinkingState(false, request);
-    activeChatRequest = null;
+    setLiveChatRequestForSession(request.sessionId, null);
+    setFinishedThinkingCardForSession(request.sessionId, null);
+    syncActiveChatSessionThinkingState();
     restorePromptEditingState(request, options);
 }
 
@@ -20878,6 +21071,8 @@ function ensureChatTaskQueuePanel() {
             }
             queuedChatPrompts = queuedChatPrompts.filter((entry) => entry.id !== queueId);
             renderChatTaskQueuePanel();
+            refreshChatSessionTabActivityIndicators();
+            updateSendButtonForCurrentChatState();
         });
     }
 
@@ -20916,7 +21111,10 @@ function renderChatTaskQueuePanel() {
 
         const label = document.createElement('div');
         label.className = 'chat-task-queue-item-label';
-        label.textContent = index === 0 ? 'Next up' : `Queue #${index + 1}`;
+        const sessionLabel = getQueuedChatPromptSessionLabel(entry);
+        label.textContent = index === 0
+            ? `Next up • ${sessionLabel}`
+            : `Queue #${index + 1} • ${sessionLabel}`;
 
         const editor = document.createElement('textarea');
         editor.className = 'chat-task-queue-edit';
@@ -20943,17 +21141,26 @@ function renderChatTaskQueuePanel() {
     });
 }
 
-function queuePromptForLater(promptRaw) {
+function queuePromptForLater(promptRaw, options = {}) {
     const value = String(promptRaw ?? '');
+    const sessionId = normaliseHistorySessionId(options.sessionId);
+    const sessionName = (typeof options.sessionName === 'string' && options.sessionName.trim())
+        ? options.sessionName.trim()
+        : null;
     queuedChatPrompts.push({
         id: createQueuedChatPromptId(),
         promptRaw: value,
+        sessionId,
+        sessionKey: getChatRequestSessionKey(sessionId),
+        sessionName
     });
     renderChatTaskQueuePanel();
+    refreshChatSessionTabActivityIndicators();
+    updateSendButtonForCurrentChatState();
 }
 
 function drainQueuedChatPromptIfIdle() {
-    if (activeChatRequest || queuedChatPrompts.length === 0) {
+    if (hasAnyLiveChatRequest() || queuedChatPrompts.length === 0) {
         return;
     }
 
@@ -20961,16 +21168,22 @@ function drainQueuedChatPromptIfIdle() {
     if (!nextEntry || typeof nextEntry.promptRaw !== 'string' || !nextEntry.promptRaw.trim()) {
         queuedChatPrompts = queuedChatPrompts.slice(1);
         renderChatTaskQueuePanel();
+        refreshChatSessionTabActivityIndicators();
+        updateSendButtonForCurrentChatState();
         scheduleQueuedChatPromptDrain();
         return;
     }
 
     queuedChatPrompts = queuedChatPrompts.slice(1);
     renderChatTaskQueuePanel();
+    refreshChatSessionTabActivityIndicators();
+    updateSendButtonForCurrentChatState();
 
     void handleSendPrompt({
         promptOverride: nextEntry.promptRaw,
         fromQueue: true,
+        sessionId: nextEntry.sessionId || null,
+        sessionName: nextEntry.sessionName || null
     });
 }
 
@@ -20991,6 +21204,10 @@ async function handleSendPrompt(options = {}) {
     }
 
     const fromQueue = options && options.fromQueue === true;
+    const targetSessionId = normaliseHistorySessionId(options?.sessionId ?? activeChatSessionId);
+    const targetSessionName = (typeof options?.sessionName === 'string' && options.sessionName.trim())
+        ? options.sessionName.trim()
+        : activeChatSessionName;
     const hasPromptOverride = options && typeof options.promptOverride === 'string';
     const promptRaw = hasPromptOverride ? options.promptOverride : promptInput.value;
     const selectionStart = hasPromptOverride
@@ -21002,7 +21219,7 @@ async function handleSendPrompt(options = {}) {
     const promptForSend = normaliseVontologyIdsForBackend(promptRaw);
     const promptText = promptForSend.trim();
 
-    if (activeChatRequest) {
+    if (hasAnyLiveChatRequest()) {
         if (fromQueue) {
             scheduleQueuedChatPromptDrain();
             return;
@@ -21010,7 +21227,10 @@ async function handleSendPrompt(options = {}) {
         if (!promptText) {
             return;
         }
-        queuePromptForLater(promptRaw);
+        queuePromptForLater(promptRaw, {
+            sessionId: targetSessionId,
+            sessionName: targetSessionName
+        });
         setPromptComposerValue('', { promptInput });
         return;
     }
@@ -21030,6 +21250,9 @@ async function handleSendPrompt(options = {}) {
     const clientRequestId = createClientRequestId();
     const request = {
         abortController: new AbortController(),
+        sessionId: targetSessionId,
+        sessionKey: getChatRequestSessionKey(targetSessionId),
+        sessionName: targetSessionName,
         promptRaw,
         selectionStart,
         selectionEnd,
@@ -21046,31 +21269,41 @@ async function handleSendPrompt(options = {}) {
         turnOutcome: null,
         thinkingCardDisplayState: reduceThinkingCardDisplayState(null, { type: 'reset_for_active' })
     };
-    activeChatRequest = request;
+    setFinishedThinkingCardForSession(targetSessionId, null);
+    setLiveChatRequestForSession(targetSessionId, request);
+    invalidateSessionHistoryCache(targetSessionId);
+
+    const isRequestVisible = () => isRequestInActiveChatSession(request);
 
     // Show loading indicator and disable send button
-    setThinkingState(true, request);
-    setLoadingIndicatorText(
-        formatToolUseProgressText(buildInitialThinkingProgressPlaceholder(clientRequestId), request)
-    );
+    if (isRequestVisible()) {
+        setThinkingState(true, request);
+        setLoadingIndicatorText(
+            formatToolUseProgressText(buildInitialThinkingProgressPlaceholder(clientRequestId), request)
+        );
+    } else {
+        syncActiveChatSessionThinkingState();
+    }
 
     // Create turn IDs for user and assistant
     const userTurnId = `u-${Date.now()}`;
     const assistantTurnId = `a-${Date.now()}`;
 
     // Add user message to chat with turnId
-    appendMessage('User', promptText, userTurnId);
-    // Fire-and-forget annotate user turn (do not await) - only if toggle is enabled
-    const annotationToggle = document.getElementById('annotationToggle');
-    if (annotationToggle && annotationToggle.checked) {
-        try {
-            annotateTurn({
-                conversation_id: elements.conversationId || 'local',
-                turn_id: userTurnId,
-                speaker: 'user',
-                text: promptText
-            }).catch(e => console.info('[annotations] user annotate error', e));
-        } catch (e) { console.info('[annotations] annotate user failed', e); }
+    if (isRequestVisible()) {
+        appendMessage('User', promptText, userTurnId);
+        // Fire-and-forget annotate user turn (do not await) - only if toggle is enabled
+        const annotationToggle = document.getElementById('annotationToggle');
+        if (annotationToggle && annotationToggle.checked) {
+            try {
+                annotateTurn({
+                    conversation_id: elements.conversationId || 'local',
+                    turn_id: userTurnId,
+                    speaker: 'user',
+                    text: promptText
+                }).catch(e => console.info('[annotations] user annotate error', e));
+            } catch (e) { console.info('[annotations] annotate user failed', e); }
+        }
     }
 
     if (!fromQueue) {
@@ -21101,6 +21334,7 @@ async function handleSendPrompt(options = {}) {
             body: JSON.stringify({
                 prompt: promptText,
                 client_request_id: request.clientRequestId,
+                conversation_session_id: targetSessionId,
                 user_id: userContext.user_id,
                 org_id: userContext.org_id,
                 language: userContext.language,
@@ -21121,7 +21355,9 @@ async function handleSendPrompt(options = {}) {
         // of falling through to the network-error catch path.
         if (!response || typeof response.json !== 'function') {
             request.resultTurnId = `e-${Date.now()}`;
-            appendMessage('Error', 'Server error', request.resultTurnId);
+            if (isRequestVisible()) {
+                appendMessage('Error', 'Server error', request.resultTurnId);
+            }
             return;
         }
 
@@ -21181,23 +21417,25 @@ async function handleSendPrompt(options = {}) {
 
             // Append assistant message with turnId and llm_debug flag
             request.resultTurnId = assistantTurnId;
-            appendMessage('Von', screenText, assistantTurnId, !!data.llm_debug, false, null, fastpathMeta, spokenText);
-            // Annotate assistant turn and render suggestions when returned - only if toggle is enabled
-            const annotationToggle = document.getElementById('annotationToggle');
-            if (annotationToggle && annotationToggle.checked) {
-                try {
-                    annotateTurn({
-                        conversation_id: elements.conversationId || 'local',
-                        turn_id: assistantTurnId,
-                        speaker: 'assistant',
-                        text: screenText
-                    }).then((resp) => {
-                        console.info('[annotations] annotateTurn response (chatTab)', resp);
-                        if (resp && resp.suggestions) {
-                            renderSpanSuggestions(assistantTurnId, resp.suggestions);
-                        }
-                    }).catch(e => console.info('[annotations] assistant annotate error', e));
-                } catch (e) { console.info('[annotations] annotate assistant failed', e); }
+            if (isRequestVisible()) {
+                appendMessage('Von', screenText, assistantTurnId, !!data.llm_debug, false, null, fastpathMeta, spokenText);
+                // Annotate assistant turn and render suggestions when returned - only if toggle is enabled
+                const annotationToggle = document.getElementById('annotationToggle');
+                if (annotationToggle && annotationToggle.checked) {
+                    try {
+                        annotateTurn({
+                            conversation_id: elements.conversationId || 'local',
+                            turn_id: assistantTurnId,
+                            speaker: 'assistant',
+                            text: screenText
+                        }).then((resp) => {
+                            console.info('[annotations] annotateTurn response (chatTab)', resp);
+                            if (resp && resp.suggestions) {
+                                renderSpanSuggestions(assistantTurnId, resp.suggestions);
+                            }
+                        }).catch(e => console.info('[annotations] assistant annotate error', e));
+                    } catch (e) { console.info('[annotations] annotate assistant failed', e); }
+                }
             }
         } else {
             request.turnOutcome = {
@@ -21212,7 +21450,9 @@ async function handleSendPrompt(options = {}) {
                 console.log('[chatTab] Stored LLM debug data for error turn:', errorTurnId);
             }
             request.resultTurnId = errorTurnId;
-            appendMessage('Error', data.error || 'An error occurred', errorTurnId, !!data.llm_debug);
+            if (isRequestVisible()) {
+                appendMessage('Error', data.error || 'An error occurred', errorTurnId, !!data.llm_debug);
+            }
         }
     } catch (error) {
         if (request && (request.aborted || (error && error.name === 'AbortError'))) {
@@ -21225,20 +21465,22 @@ async function handleSendPrompt(options = {}) {
         };
         console.error('Error:', error);
         request.resultTurnId = `e-${Date.now()}`;
-        appendMessage('Error', 'Network error occurred', request.resultTurnId);
+        if (isRequestVisible()) {
+            appendMessage('Error', 'Network error occurred', request.resultTurnId);
+        }
     } finally {
-        const isStillActive = activeChatRequest === request;
-        if (isStillActive) {
+        if (isLiveChatRequest(request)) {
             stopToolUseProgressPolling(request);
             stopThinkingTooltipTicker(request);
             const persisted = !request.aborted && persistFinishedThinkingCard(request);
             if (!persisted) {
-                lastFinishedThinkingCard = null;
+                setFinishedThinkingCardForSession(request.sessionId, null);
             }
-            setThinkingState(false, request);
-            activeChatRequest = null;
+            setLiveChatRequestForSession(request.sessionId, null);
         }
+        syncActiveChatSessionThinkingState();
         updateHistoryLength();
+        scheduleChatSessionTabsRefresh(true);
         scheduleQueuedChatPromptDrain();
     }
 }
@@ -21268,8 +21510,8 @@ async function handleResetContext() {
 
             transcriptTurns.length = 0;
             clearLlmDebugDataEntries();
-            lastFinishedThinkingCard = null;
-            setThinkingState(false, null);
+            setFinishedThinkingCardForSession(activeChatSessionId, null);
+            syncActiveChatSessionThinkingState();
             updateHistoryLength();
             scheduleChatSessionTabsRefresh(true);
 
@@ -23502,6 +23744,7 @@ export async function __testOnly_refreshChatSessionTabs() {
 }
 export function __testOnly_setActiveChatSession(sessionId, sessionName = null) {
     setActiveChatSession(sessionId, sessionName);
+    syncActiveChatRequestPointers();
 }
 export function __testOnly_setDisplayedHistorySession(sessionId) {
     displayedHistorySessionId = normaliseHistorySessionId(sessionId);
@@ -23522,6 +23765,23 @@ export function __testOnly_setSessionTabsCache(sessions = []) {
     sessionTabsCache = normaliseConversationSessionViewModels(
         Array.isArray(sessions) ? sessions : []
     );
+}
+export function __testOnly_resetChatRequestState() {
+    liveChatRequestsBySession.clear();
+    finishedThinkingCardsBySession.clear();
+    queuedChatPrompts = [];
+    if (queuedChatPromptDrainTimer !== null) {
+        clearTimeout(queuedChatPromptDrainTimer);
+        queuedChatPromptDrainTimer = null;
+    }
+    queuedChatPromptCounter = 0;
+    activeChatRequest = null;
+    lastFinishedThinkingCard = null;
+    activeChatSessionId = null;
+    activeChatSessionName = null;
+    activeChatSessionOwnerId = null;
+    renderChatTaskQueuePanel();
+    updateSendButtonForCurrentChatState();
 }
 export function __testOnly_shouldMaintainSharedConversationStreamForInputs(inputs = {}) {
     return shouldMaintainSharedConversationStreamForInputs(inputs);

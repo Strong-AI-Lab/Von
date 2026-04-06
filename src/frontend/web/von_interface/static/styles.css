@@ -5994,6 +5994,38 @@ footer {
     animation: chatSessionLoadingBar 0.9s ease-in-out infinite;
 }
 
+.chat-session-tab.has-background-request {
+    border-color: #0f766e;
+}
+
+.chat-session-tab.has-background-request:not(.is-active) {
+    background: #ecfeff;
+    color: #155e75;
+}
+
+.chat-session-tab.has-queued-prompts:not(.has-background-request):not(.is-active) {
+    background: #eff6ff;
+    border-color: #93c5fd;
+    color: #1d4ed8;
+}
+
+.chat-session-tab-activity {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 6px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    background: rgba(37, 99, 235, 0.12);
+    color: #1d4ed8;
+}
+
+.chat-session-tab.has-background-request .chat-session-tab-activity {
+    background: rgba(13, 148, 136, 0.16);
+    color: #115e59;
+}
+
 .chat-session-tab-new {
     font-weight: 700;
     padding: 6px 10px;
