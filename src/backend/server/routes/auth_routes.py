@@ -35,6 +35,40 @@ def _set_google_auth_service(service: GoogleAuthService | None) -> None:
 _oauth_states = {}
 
 
+def _build_auth_status_payload() -> dict:
+    """Build the canonical auth-status payload for browser consumers."""
+    try:
+        from ...services.browser_test_auth_service import describe_browser_test_mode
+
+        browser_test_mode = describe_browser_test_mode()
+    except Exception:
+        browser_test_mode = {
+            "configured": False,
+            "available": False,
+            "reason": "unavailable",
+        }
+
+    user_email = session.get("user_email")
+    user_info = session.get("google_user_info")
+    user_concept_id = session.get("user_concept_id")
+    auth_provider = session.get("auth_provider")
+    if not isinstance(auth_provider, str) or not auth_provider.strip():
+        auth_provider = (
+            "browser_test_fixture"
+            if session.get("browser_test_fixture_id")
+            else ("google_oauth" if user_email else None)
+        )
+
+    return {
+        "authenticated": bool(user_email),
+        "email": user_email,
+        "name": user_info.get("name") if isinstance(user_info, dict) else None,
+        "user_concept_id": user_concept_id,
+        "auth_provider": auth_provider,
+        "browser_test_mode": browser_test_mode,
+    }
+
+
 @auth_bp.route("/api/auth/google/login")
 def login():
     """Redirects the user to Google's OAuth 2.0 consent screen."""
@@ -164,6 +198,8 @@ def callback():
         session["user_email"] = email
         session["google_user_info"] = {"name": name, "email": email}
         session["user_concept_id"] = user.get("concept_id") if user else None
+        session["auth_provider"] = "google_oauth"
+        session.pop("browser_test_fixture_id", None)
         print(f"[auth_callback] session_updated user_email={email}")
 
         # Create a temporary auth token for the popup to send to the parent window
@@ -309,6 +345,8 @@ def exchange_auth_token():
     session["user_email"] = user.get("email")
     session["google_user_info"] = {"name": user.get("name"), "email": user.get("email")}
     session["user_concept_id"] = user.get("concept_id")
+    session["auth_provider"] = "google_oauth"
+    session.pop("browser_test_fixture_id", None)
 
     # Provide a consistent slug-style user_id for downstream session-aware routes
     # (org selection, namespace derivation) that currently expect a plain slug.
@@ -342,28 +380,73 @@ def get_auth_status():
     print(
         f"[auth_status] Host={host_hdr} Cookies={cookie_keys} Session={dict(session)}"
     )
-    user_email = session.get("user_email")
-    user_info = session.get("google_user_info")
-    user_concept_id = session.get("user_concept_id")
+    return jsonify(_build_auth_status_payload())
 
-    if user_email:
-        return jsonify(
-            {
-                "authenticated": True,
-                "email": user_email,
-                "name": user_info.get("name") if user_info else None,
-                "user_concept_id": user_concept_id,
-            }
+
+@auth_bp.route("/api/auth/browser-test-login", methods=["POST"])
+def browser_test_login():
+    """Establish a localhost-only pseudouser session for browser acceptance testing."""
+    from ...services.browser_test_auth_service import (
+        browser_test_auth_allowed_for_request,
+        describe_browser_test_mode,
+        login_browser_test_user,
+    )
+
+    allowed, reason = browser_test_auth_allowed_for_request()
+    if not allowed:
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": reason or "Browser-test auth is unavailable",
+                    "browser_test_mode": describe_browser_test_mode(),
+                }
+            ),
+            403,
         )
-    else:
-        return jsonify(
-            {
-                "authenticated": False,
-                "email": None,
-                "name": None,
-                "user_concept_id": None,
-            }
+
+    data = request.get_json(silent=True) or {}
+    window_session_id = request.headers.get("X-Von-Window-Session") or data.get(
+        "window_session_id"
+    )
+    try:
+        result = login_browser_test_user(window_session_id=window_session_id)
+    except MultipleUsersForEmailError as exc:
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "Multiple users found for browser-test email",
+                    "conflicting_users": exc.user_ids,
+                    "browser_test_mode": describe_browser_test_mode(),
+                }
+            ),
+            409,
         )
+    except Exception as exc:
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": str(exc),
+                    "browser_test_mode": describe_browser_test_mode(),
+                }
+            ),
+            500,
+        )
+
+    payload = _build_auth_status_payload()
+    payload.update(
+        {
+            "success": True,
+            "fixture": result.get("fixture"),
+            "organisation": result.get("organisation"),
+            "namespace": result.get("namespace"),
+            "window_session_id": result.get("window_session_id"),
+            "active_chat_session_id": result.get("active_chat_session_id"),
+        }
+    )
+    return jsonify(payload)
 
 
 @auth_bp.route("/api/auth/logout", methods=["POST"])

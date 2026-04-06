@@ -1,4 +1,6 @@
 import {
+    __testOnly_applyStoredSelection,
+    __testOnly_buildStoredUserContextFromOption,
     __testOnly_formatRagSummaryForSettings,
     __testOnly_getPreferredRagNamespace,
     __testOnly_resolveDisplayedProviderModels,
@@ -198,6 +200,86 @@ describe('settingsPage RAG status summary', () => {
             'University Of Auckland Strong Ai Lab',
         );
         expect(refreshRagStatus).toHaveBeenCalled();
+    });
+
+    test('placeholder user option is treated as no selection rather than stored user context', () => {
+        document.body.innerHTML = `
+            <select id="currentUserSelect">
+                <option value="" selected>-- No user selected --</option>
+            </select>
+        `;
+
+        const option = document.querySelector('#currentUserSelect option');
+        expect(__testOnly_buildStoredUserContextFromOption(option)).toBeNull();
+    });
+
+    test('stored browser-test user is re-injected and selected when the dropdown is rebuilt without it', () => {
+        document.body.innerHTML = `
+            <select id="currentUserSelect">
+                <option value="" selected>-- No user selected --</option>
+                <option data-id="user-1" data-concept-id="#V#michael_witbrock">Michael Witbrock</option>
+            </select>
+        `;
+
+        const storedUser = {
+            id: null,
+            concept_id: '#V#zhan_von_witbrock',
+            name: 'Zhan von Witbrock',
+        };
+
+        const applied = __testOnly_applyStoredSelection('currentUserSelect', storedUser);
+        const select = document.getElementById('currentUserSelect');
+
+        expect(applied).toEqual(storedUser);
+        expect(select.selectedOptions[0].dataset.conceptId).toBe('#V#zhan_von_witbrock');
+        expect([...select.options].map((option) => option.textContent)).toContain('Zhan von Witbrock');
+    });
+
+    test('initial scoped selection sync preserves stored browser-test user when the visible select is still on the placeholder option', async () => {
+        localStorage.setItem(
+            'von_current_user',
+            JSON.stringify({ concept_id: '#V#zhan_von_witbrock', name: 'Zhan von Witbrock' }),
+        );
+        sessionStorage.setItem(
+            'von_current_user',
+            JSON.stringify({ concept_id: '#V#zhan_von_witbrock', name: 'Zhan von Witbrock' }),
+        );
+        document.body.innerHTML = `
+            <select id="currentUserSelect">
+                <option value="" selected>-- No user selected --</option>
+            </select>
+            <select id="currentOrganisationSelect">
+                <option value="">Personal</option>
+                <option data-id="org-1" data-concept-id="#V#university_of_auckland_strong_ai_lab" selected>
+                    University Of Auckland Strong Ai Lab (admin)
+                </option>
+            </select>
+            <div id="settingsActiveNamespaceValue"></div>
+            <div id="settingsActiveNamespaceHint"></div>
+        `;
+
+        const setUserConcept = jest.fn().mockResolvedValue({
+            namespace: '#V#zhan_von_witbrock',
+        });
+        const switchOrganisationFn = jest.fn().mockResolvedValue({
+            namespace: '#V#zhan_von_witbrock@university_of_auckland_strong_ai_lab',
+        });
+        const refreshRagStatus = jest.fn();
+
+        await __testOnly_syncInitialScopedSelections({
+            setUserConcept,
+            switchOrganisationFn,
+            refreshRagStatus,
+        });
+
+        expect(JSON.parse(localStorage.getItem('von_current_user'))).toMatchObject({
+            concept_id: '#V#zhan_von_witbrock',
+            name: 'Zhan von Witbrock',
+        });
+        expect(setUserConcept).toHaveBeenCalledWith('#V#zhan_von_witbrock');
+        expect(localStorage.getItem('current_user_namespace')).toBe(
+            '#V#zhan_von_witbrock@university_of_auckland_strong_ai_lab',
+        );
     });
 });
 

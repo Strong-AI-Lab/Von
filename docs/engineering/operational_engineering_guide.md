@@ -241,6 +241,14 @@ In particular, prefer authenticated user-view validation over anonymous-mode
 checks when the important surface is Messages, saved conversations, invites, or
 other user-scoped UI.
 
+For local browser acceptance work, the implemented pseudouser path from
+`JVNAUTOSCI-1747` is now the preferred entry point:
+
+- enable `VON_BROWSER_TEST_AUTH_ENABLED=1` locally;
+- restart Von;
+- use the Settings-tab `Browser Test Login` control on a `localhost` /
+  `127.0.0.1` session to establish the representative user-view fixture.
+
 ## 8. Practical Refactoring and Consistency Habits
 
 - Search first before adding helpers or parallel pathways.

@@ -396,14 +396,20 @@ async function ensureUserContext() {
         const storedUser = JSON.parse(localStorage.getItem('von_current_user') || 'null');
         if (storedUser?.concept_id) {
           await hydrateStoredSelectionsFromUserPreferences(storedUser.concept_id);
+          // CRITICAL: Even with localStorage data, we must sync session org
+          // to avoid race condition where /history/sessions is called before org context is set.
+          await syncFlaskSessionOrg();
+          return;
         }
       } catch (e) {
         console.warn('[main] Failed to hydrate stored selections from user preferences:', e);
       }
-      // CRITICAL: Even with localStorage data, we must sync session org
-      // to avoid race condition where /history/sessions is called before org context is set.
-      await syncFlaskSessionOrg();
-      return;
+      try {
+        localStorage.removeItem('von_current_user');
+        sessionStorage.removeItem('von_current_user');
+      } catch {
+        // Ignore storage cleanup failures and continue with settings fetch.
+      }
     }
 
     console.log('[main] Fetching settings to populate user context...');
@@ -953,7 +959,7 @@ function startHealthPolling() {
     try {
       copied = await copyTextWithClipboardFallback(payloadText);
     } catch (_) {
-      copied = false;
+      // Ignore copy failures and record them below.
     }
     const attemptCompletedAtMs = Date.now();
     lastHealthTelemetryCopyAttempt = {
@@ -1114,7 +1120,7 @@ function startHealthPolling() {
       updateBusyIndicator();
       busy = isVontologyBusy();
     } catch (_) {
-      busy = false;
+      // Ignore best-effort busy indicator failures.
     }
     let nextDelay = 5000; // base
     try {
@@ -1442,8 +1448,6 @@ function startHealthPolling() {
                   let sessionIndexableTotal = null;
                   let sessionProcessed = 0;
                   const sessionChunks = [];
-                  let sessionHadFailure = false;
-
                   // Adaptive timeout for slow embedding/indexing. Starts at 2 min, grows on AbortError.
                   let timeoutMs = 120000;
                   const maxTimeoutMs = 15 * 60 * 1000;
@@ -1507,7 +1511,6 @@ function startHealthPolling() {
                         message: 'Request timed out; server may still be processing.'
                       };
                       aggregate.errors.push(err);
-                      sessionHadFailure = true;
                       perSessionResults.push({ session_id: sid, ok: false, error: err, chunks: sessionChunks });
 
                       window.__vonLastRagReindexJson = {
@@ -1537,7 +1540,6 @@ function startHealthPolling() {
                         response_text: txt || ''
                       };
                       aggregate.errors.push(err);
-                      sessionHadFailure = true;
                       perSessionResults.push({ session_id: sid, ok: false, error: err, chunks: sessionChunks });
 
                       window.__vonLastRagReindexJson = {
@@ -1609,7 +1611,7 @@ function startHealthPolling() {
                   }
 
                   aggregate.sessions_completed += 1;
-                  perSessionResults.push({ session_id: sid, ok: !sessionHadFailure, chunks: sessionChunks });
+                  perSessionResults.push({ session_id: sid, ok: true, chunks: sessionChunks });
                 }
 
                 if (progressEl) progressEl.value = targets.length;
