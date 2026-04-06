@@ -1608,11 +1608,16 @@ def _normalise_workflow_routing_profile(
     authoring_intent_required = _coerce_bool(
         raw_profile.get("authoring_intent_required")
     )
+    explicit_workflow_context_required = _coerce_bool(
+        raw_profile.get("explicit_workflow_context_required")
+    )
     prefer_existing_capability = _coerce_bool(
         raw_profile.get("prefer_existing_capability")
     )
     if authoring_intent_required is None:
         authoring_intent_required = role == "authoring"
+    if explicit_workflow_context_required is None:
+        explicit_workflow_context_required = role == "maintenance"
     if prefer_existing_capability is None:
         prefer_existing_capability = role == "authoring"
 
@@ -1620,6 +1625,9 @@ def _normalise_workflow_routing_profile(
         "schema_version": WORKFLOW_ROUTING_PROFILE_SCHEMA_VERSION,
         "role": role,
         "authoring_intent_required": bool(authoring_intent_required),
+        "explicit_workflow_context_required": bool(
+            explicit_workflow_context_required
+        ),
         "prefer_existing_capability": bool(prefer_existing_capability),
     }
 

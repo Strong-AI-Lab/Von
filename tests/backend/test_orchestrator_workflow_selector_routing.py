@@ -4101,28 +4101,37 @@ def test_launchability_replacement_declines_testing_workflow_for_conceptual_prom
     )
     assert override_policy_entry is not None
     assert override_policy_entry.get("outcome") == "decline"
-    assert (
-        override_policy_entry.get("reason_code")
-        == "workflow_profile_requires_explicit_workflow_context"
-    )
+    assert override_policy_entry.get("reason_code") == "no_custom_workflow_candidates"
     assert override_policy_entry.get("explicit_execution_request") is False
     assert override_policy_entry.get("workflow_query_intent") is False
 
     candidate_assessments = override_policy_entry.get("candidate_assessments")
     assert isinstance(candidate_assessments, list)
-    testing_assessment = next(
+    assert candidate_assessments == []
+
+    selector_prompt_entry = next(
         (
-            item
-            for item in candidate_assessments
-            if isinstance(item, dict) and item.get("workflow_id") == testing_workflow_id
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict) and entry.get("type") == "workflow_selector_prompt"
         ),
         None,
     )
-    assert isinstance(testing_assessment, dict)
-    assert testing_assessment.get("role") == "maintenance"
-    assert testing_assessment.get("suitable") is False
+    assert selector_prompt_entry is not None
+    excluded_candidates = selector_prompt_entry.get("discovery_excluded_candidates")
+    assert isinstance(excluded_candidates, list)
+    excluded_testing = next(
+        (
+            item
+            for item in excluded_candidates
+            if isinstance(item, dict) and item.get("concept_id") == testing_workflow_id
+        ),
+        None,
+    )
+    assert isinstance(excluded_testing, dict)
+    assert excluded_testing.get("routing_profile_role") == "maintenance"
     assert (
-        testing_assessment.get("suitability_reason")
+        excluded_testing.get("routing_exclusion_reason")
         == "explicit_workflow_context_required_by_workflow_profile"
     )
 
@@ -4140,9 +4149,8 @@ def test_launchability_replacement_declines_testing_workflow_for_conceptual_prom
     assert override_entry is not None
     assert override_entry.get("prior_selected_workflow_id") == selected_workflow_id
     assert override_entry.get("selected_workflow_id") == TOOL_CALLING_WORKFLOW_ID
-    assert (
-        override_entry.get("custom_workflow_override_reason")
-        == "workflow_profile_requires_explicit_workflow_context"
+    assert override_entry.get("custom_workflow_override_reason") == (
+        "no_custom_workflow_candidates"
     )
     assert (
         override_entry.get("launch_viability_probe", {})
@@ -5541,6 +5549,155 @@ def test_prepare_selector_discovered_matches_allows_authoring_profile_for_explic
     )
 
 
+def test_prepare_selector_discovered_matches_excludes_maintenance_profile_without_explicit_workflow_context(
+    monkeypatch,
+):
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    workflow_id = "#V#arxiv_paper_ingestion_testing_workflow"
+
+    orchestrator._workflow_registry.register_or_replace(
+        WorkflowRegistration(
+            workflow_id=workflow_id,
+            definition=WorkflowDefinition(
+                workflow_id=workflow_id,
+                initial_state="complete",
+                states={
+                    "complete": WorkflowStateSpec(
+                        state_id="complete",
+                        actions=(
+                            WorkflowActionInvocation(
+                                action_id="testing.prepare_arxiv_paper_ingestion_fixture"
+                            ),
+                        ),
+                        terminal=True,
+                    )
+                },
+                metadata={
+                    "routing_profile": {
+                        "role": "testing",
+                        "authoring_intent_required": False,
+                        "explicit_workflow_context_required": True,
+                        "prefer_existing_capability": False,
+                    }
+                },
+            ),
+            purpose=(
+                "Execute the canonical arXiv ingestion workflow against one live "
+                "arXiv paper, verify represented scholarly metadata and provenance, "
+                "and clean up transient artefacts afterwards."
+            ),
+            source="test",
+        )
+    )
+
+    included, excluded = orchestrator._prepare_selector_discovered_matches(
+        {
+            "candidates": [
+                {
+                    "concept_id": workflow_id,
+                    "name": "Arxiv Paper Ingestion Testing Workflow",
+                    "description": "Run the canonical arXiv ingestion workflow as a test.",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "relevance_score": 0.77,
+                    "confidence_score": 0.84,
+                }
+            ]
+        },
+        turn_text="https://arxiv.org/abs/2411.04983",
+    )
+
+    assert included == []
+    assert len(excluded) == 1
+    assert excluded[0]["routing_profile"]["role"] == "testing"
+    assert excluded[0]["routing_profile"][
+        "explicit_workflow_context_required"
+    ] is True
+    assert (
+        excluded[0]["routing_exclusion_reason"]
+        == "explicit_workflow_context_required_by_workflow_profile"
+    )
+    assert excluded[0]["routing_profile_role"] == "maintenance"
+    assert (
+        excluded[0]["routing_policy_lexical_signals"]["workflow_query_intent"]
+        is False
+    )
+
+
+def test_prepare_selector_discovered_matches_allows_maintenance_profile_for_explicit_workflow_context(
+    monkeypatch,
+):
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    workflow_id = "#V#arxiv_paper_ingestion_testing_workflow"
+
+    orchestrator._workflow_registry.register_or_replace(
+        WorkflowRegistration(
+            workflow_id=workflow_id,
+            definition=WorkflowDefinition(
+                workflow_id=workflow_id,
+                initial_state="complete",
+                states={
+                    "complete": WorkflowStateSpec(
+                        state_id="complete",
+                        actions=(
+                            WorkflowActionInvocation(
+                                action_id="testing.prepare_arxiv_paper_ingestion_fixture"
+                            ),
+                        ),
+                        terminal=True,
+                    )
+                },
+                metadata={
+                    "routing_profile": {
+                        "role": "testing",
+                        "authoring_intent_required": False,
+                        "explicit_workflow_context_required": True,
+                        "prefer_existing_capability": False,
+                    }
+                },
+            ),
+            purpose=(
+                "Execute the canonical arXiv ingestion workflow against one live "
+                "arXiv paper, verify represented scholarly metadata and provenance, "
+                "and clean up transient artefacts afterwards."
+            ),
+            source="test",
+        )
+    )
+
+    included, excluded = orchestrator._prepare_selector_discovered_matches(
+        {
+            "candidates": [
+                {
+                    "concept_id": workflow_id,
+                    "name": "Arxiv Paper Ingestion Testing Workflow",
+                    "description": "Run the canonical arXiv ingestion workflow as a test.",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "relevance_score": 0.99,
+                    "confidence_score": 0.99,
+                }
+            ]
+        },
+        turn_text=(
+            "Run the arXiv paper ingestion testing workflow on "
+            "https://arxiv.org/abs/2411.04983 and verify the workflow result."
+        ),
+    )
+
+    assert excluded == []
+    assert len(included) == 1
+    assert included[0]["routing_profile"]["role"] == "testing"
+    assert included[0]["routing_profile"][
+        "explicit_workflow_context_required"
+    ] is True
+    assert included[0]["routing_eligible"] is True
+    assert (
+        included[0]["routing_policy_lexical_signals"]["workflow_query_intent"]
+        is True
+    )
+
+
 def test_explicit_tool_requirement_is_telemetry_visible_even_without_python_routing_override(
     monkeypatch,
 ):
@@ -5925,6 +6082,203 @@ def test_explicit_arxiv_representation_request_selects_representation_workflow_o
     assert "routing eligible" in candidate_list_text
     assert "executable" in candidate_list_text
     assert selector_entry.get("workflow_id") == selected_workflow_id
+
+
+def test_bare_arxiv_url_excludes_testing_workflow_before_selector_and_routes_to_representation_workflow(
+    monkeypatch,
+):
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    selected_workflow_id = "#V#arxiv_paper_representation_workflow"
+    testing_workflow_id = "#V#arxiv_paper_ingestion_testing_workflow"
+
+    _register_terminal_custom_workflow(
+        orchestrator,
+        workflow_id=selected_workflow_id,
+        purpose=(
+            "Canonical arXiv wrapper workflow that normalises an arXiv source, "
+            "fetches authoritative metadata, and delegates to scholarly-paper "
+            "representation."
+        ),
+    )
+    orchestrator._workflow_registry.register_or_replace(
+        WorkflowRegistration(
+            workflow_id=testing_workflow_id,
+            definition=WorkflowDefinition(
+                workflow_id=testing_workflow_id,
+                initial_state="prepare_fixture",
+                states={
+                    "prepare_fixture": WorkflowStateSpec(
+                        state_id="prepare_fixture",
+                        actions=(
+                            WorkflowActionInvocation(
+                                action_id="testing.prepare_arxiv_paper_ingestion_fixture"
+                            ),
+                        ),
+                        terminal=True,
+                    )
+                },
+                metadata={
+                    "routing_profile": {
+                        "role": "testing",
+                        "authoring_intent_required": False,
+                        "explicit_workflow_context_required": True,
+                        "prefer_existing_capability": False,
+                    }
+                },
+            ),
+            purpose=(
+                "Execute the canonical arXiv ingestion workflow against one live "
+                "arXiv paper, verify represented scholarly metadata and provenance, "
+                "and clean up transient artefacts afterwards."
+            ),
+            source="test",
+        )
+    )
+
+    _stub_execute_workflow_result(
+        monkeypatch,
+        orchestrator,
+        expected_workflow_id=selected_workflow_id,
+        final_state="complete",
+        data={"response_text": "Executed via arXiv representation workflow."},
+    )
+
+    result = orchestrator.run(
+        prompt="https://arxiv.org/abs/2411.04983",
+        context=[],
+        llm_client=_CapturingLLM(
+            [
+                json.dumps(
+                    {
+                        "workflow_id": selected_workflow_id,
+                        "confidence": 1.0,
+                        "reasoning": (
+                            "The request is a bare arXiv URL, so the canonical "
+                            "execution workflow for arXiv representation is the "
+                            "best executable route."
+                        ),
+                    }
+                )
+            ]
+        ),
+        model=None,
+        user_namespace="#V#user",
+        workflow_discovery_result={
+            "matches": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Arxiv Paper Representation Workflow",
+                    "description": (
+                        "Canonical arXiv wrapper workflow that normalises an arXiv "
+                        "source, fetches authoritative metadata, acquires or "
+                        "finalises the paper artefact, delegates to the scholarly-"
+                        "paper workflow, and fails closed on incomplete "
+                        "representation."
+                    ),
+                    "match_source": "capability_index",
+                    "confidence_score": 1.0,
+                    "relevance_score": 1.0,
+                    "routing_eligible": True,
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "candidate_source": "workflow_discovery",
+                },
+                {
+                    "concept_id": testing_workflow_id,
+                    "name": "Arxiv Paper Ingestion Testing Workflow",
+                    "description": (
+                        "Execute the canonical arXiv ingestion workflow against "
+                        "one live arXiv paper, verify represented scholarly "
+                        "metadata and provenance, and clean up transient "
+                        "artefacts afterwards."
+                    ),
+                    "match_source": "capability_index",
+                    "confidence_score": 0.84,
+                    "relevance_score": 0.77,
+                    "routing_eligible": True,
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "candidate_source": "workflow_discovery",
+                },
+            ],
+            "candidates": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Arxiv Paper Representation Workflow",
+                    "description": (
+                        "Canonical arXiv wrapper workflow that normalises an arXiv "
+                        "source, fetches authoritative metadata, acquires or "
+                        "finalises the paper artefact, delegates to the scholarly-"
+                        "paper workflow, and fails closed on incomplete "
+                        "representation."
+                    ),
+                    "match_source": "capability_index",
+                    "confidence_score": 1.0,
+                    "relevance_score": 1.0,
+                    "routing_eligible": True,
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "candidate_source": "workflow_discovery",
+                },
+                {
+                    "concept_id": testing_workflow_id,
+                    "name": "Arxiv Paper Ingestion Testing Workflow",
+                    "description": (
+                        "Execute the canonical arXiv ingestion workflow against "
+                        "one live arXiv paper, verify represented scholarly "
+                        "metadata and provenance, and clean up transient "
+                        "artefacts afterwards."
+                    ),
+                    "match_source": "capability_index",
+                    "confidence_score": 0.84,
+                    "relevance_score": 0.77,
+                    "routing_eligible": True,
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "candidate_source": "workflow_discovery",
+                },
+            ],
+            "match_count": 2,
+        },
+        conversation_session_id="session-bare-arxiv-routing-regression",
+        turn_id="turn-bare-arxiv-routing-regression",
+    )
+
+    assert result.workflow_routing is not None
+    assert result.workflow_routing.workflow_id == selected_workflow_id
+    assert result.workflow_routing.verdict == "rag_selected"
+    assert result.workflow_routing.source == "selector"
+    assert result.response_text == "Executed via arXiv representation workflow."
+
+    selector_prompt_entry = next(
+        entry
+        for entry in result.aux_llm_calls
+        if isinstance(entry, dict) and entry.get("type") == "workflow_selector_prompt"
+    )
+    candidate_list_text = str(
+        selector_prompt_entry.get("candidate_list", {}).get("text") or ""
+    )
+    assert selected_workflow_id in candidate_list_text
+    assert testing_workflow_id not in candidate_list_text
+
+    excluded_candidates = selector_prompt_entry.get("discovery_excluded_candidates")
+    assert isinstance(excluded_candidates, list)
+    excluded_testing = next(
+        item
+        for item in excluded_candidates
+        if isinstance(item, dict) and item.get("concept_id") == testing_workflow_id
+    )
+    assert excluded_testing.get("routing_profile_role") == "maintenance"
+    assert (
+        excluded_testing.get("routing_exclusion_reason")
+        == "explicit_workflow_context_required_by_workflow_profile"
+    )
+    assert (
+        excluded_testing.get("routing_policy_flags", {}).get(
+            "explicit_workflow_context_required"
+        )
+        is True
+    )
 
 
 def test_generic_tool_fallback_records_disqualifying_reason_for_specialised_candidate(

@@ -827,6 +827,7 @@ class TestDiscoverWorkflowsForTurn:
             {
                 "role": "authoring",
                 "authoring_intent_required": True,
+                "explicit_workflow_context_required": False,
                 "prefer_existing_capability": True,
             },
             "text_relation:#V#hasWorkflowRoutingProfileJson",
@@ -838,6 +839,7 @@ class TestDiscoverWorkflowsForTurn:
         assert annotated[0].routing_profile == {
             "role": "authoring",
             "authoring_intent_required": True,
+            "explicit_workflow_context_required": False,
             "prefer_existing_capability": True,
         }
         assert annotated[0].to_dict()["routing_profile"]["role"] == "authoring"

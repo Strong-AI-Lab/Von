@@ -144,6 +144,9 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
     assert routing_source.startswith("text_relation:")
     assert isinstance(routing_profile.get("role"), str)
     assert isinstance(routing_profile.get("authoring_intent_required"), bool)
+    assert isinstance(
+        routing_profile.get("explicit_workflow_context_required"), bool
+    )
 
     discovery_exemplars, discovery_source = resolve_workflow_discovery_exemplars(
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID

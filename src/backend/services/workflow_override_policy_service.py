@@ -162,11 +162,16 @@ def _normalise_profile(profile: Any) -> tuple[dict[str, Any] | None, str]:
     authoring_intent_required = _coerce_bool(
         profile.get("authoring_intent_required")
     )
+    explicit_workflow_context_required = _coerce_bool(
+        profile.get("explicit_workflow_context_required")
+    )
     prefer_existing_capability = _coerce_bool(
         profile.get("prefer_existing_capability")
     )
     if authoring_intent_required is None:
         authoring_intent_required = role == _ROLE_AUTHORING
+    if explicit_workflow_context_required is None:
+        explicit_workflow_context_required = role == _ROLE_MAINTENANCE
     if prefer_existing_capability is None:
         prefer_existing_capability = role == _ROLE_AUTHORING
 
@@ -174,6 +179,9 @@ def _normalise_profile(profile: Any) -> tuple[dict[str, Any] | None, str]:
         {
             "role": role,
             "authoring_intent_required": bool(authoring_intent_required),
+            "explicit_workflow_context_required": bool(
+                explicit_workflow_context_required
+            ),
             "prefer_existing_capability": bool(prefer_existing_capability),
         },
         "routing_profile",
@@ -190,6 +198,9 @@ def _resolve_candidate_role(candidate: Mapping[str, Any]) -> tuple[str, str, dic
                 "authoring_intent_required": bool(
                     profile.get("authoring_intent_required")
                 ),
+                "explicit_workflow_context_required": bool(
+                    profile.get("explicit_workflow_context_required")
+                ),
                 "prefer_existing_capability": bool(
                     profile.get("prefer_existing_capability")
                 ),
@@ -200,6 +211,7 @@ def _resolve_candidate_role(candidate: Mapping[str, Any]) -> tuple[str, str, dic
         "none",
         {
             "authoring_intent_required": False,
+            "explicit_workflow_context_required": False,
             "prefer_existing_capability": False,
         },
     )
@@ -272,7 +284,7 @@ def assess_workflow_routing_candidate_policy(
     ):
         suitable = False
         suitability_reason = "authoring_intent_required_by_workflow_profile"
-    elif role == _ROLE_MAINTENANCE and not workflow_query_intent:
+    elif bool(policy_flags.get("explicit_workflow_context_required")) and not workflow_query_intent:
         suitable = False
         suitability_reason = "explicit_workflow_context_required_by_workflow_profile"
 
@@ -337,6 +349,7 @@ def choose_custom_workflow_override_candidate(
         if not isinstance(policy_flags, Mapping):
             policy_flags = {
                 "authoring_intent_required": False,
+                "explicit_workflow_context_required": False,
                 "prefer_existing_capability": False,
             }
         discovery_score = max(

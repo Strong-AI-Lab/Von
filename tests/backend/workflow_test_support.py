@@ -218,6 +218,13 @@ TEST_WORKFLOW_SELECTOR_PROMPT_TEMPLATE = (
     "You are a workflow router. Given the user's request and the candidate "
     "workflows below, select the single best workflow.\n\n"
     "Return JSON with fields workflow_id, confidence, and reasoning.\n\n"
+    "Rules:\n"
+    "- Prefer the most specific routing-eligible executable workflow.\n"
+    "- Treat maintenance or testing workflows as requiring explicit workflow, "
+    "test, or experiment intent when the candidate evidence says workflow "
+    "context is required.\n"
+    "- If a specialised candidate is disqualified, name that evidence in the "
+    "reasoning.\n\n"
     "User request:\n{turn_text}\n\n"
     "Candidate workflows:\n{candidate_list}\n"
 )
