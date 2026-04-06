@@ -1,5 +1,7 @@
+import asyncio
 import json
 from pathlib import Path
+from typing import Any, cast
 
 WORKFLOW_TOOL_NAMES = {
     "workflow_list_definitions",
@@ -82,3 +84,35 @@ def test_vontology_mcp_manifest_includes_workflow_tools():
     names = {t.get("name") for t in tools if isinstance(t, dict)}
     missing = WORKFLOW_TOOL_NAMES - names
     assert not missing, f"Manifest missing workflow tools: {sorted(missing)}"
+
+
+def test_workflow_materialisation_diagnostics_stdio_call_path(monkeypatch):
+    from src.backend.mcp_server import mcp_stdio_server
+    import src.backend.services.workflow_materialisation_diagnostics_service as service
+
+    monkeypatch.setattr(
+        service,
+        "build_workflow_materialisation_diagnostics",
+        lambda **kwargs: {
+            "success": True,
+            "classification": {"state": "healthy"},
+            "required_concept_ids": kwargs.get("required_concept_ids") or [],
+        },
+    )
+
+    async def _runner():
+        result = await mcp_stdio_server.call_tool(
+            "workflow_materialisation_diagnostics",
+            {"required_concept_ids": ["#V#arxiv_paper_representation_workflow"]},
+        )
+        items = cast(list[Any], result)
+        first = items[0]
+        return cast(dict[str, Any], json.loads(cast(str, getattr(first, "text"))))
+
+    payload = asyncio.run(_runner())
+
+    assert payload["success"] is True
+    assert payload["classification"]["state"] == "healthy"
+    assert payload["required_concept_ids"] == [
+        "#V#arxiv_paper_representation_workflow"
+    ]

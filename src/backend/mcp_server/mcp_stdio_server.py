@@ -407,6 +407,7 @@ _bind_imports(
         "_workflow_list_instances",
         "_workflow_list_use_episodes",
         "_workflow_list_schedules",
+        "_workflow_materialisation_diagnostics",
         "_workflow_mcp_health_check",
         "_workflow_retry_instance",
         "_workflow_set_event_binding_enabled",
