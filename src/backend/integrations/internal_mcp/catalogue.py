@@ -12946,6 +12946,29 @@ def _workflow_materialisation_diagnostics(**kwargs):
         )
 
 
+def _workflow_concept_parity_audit(**kwargs):
+    """Audit workflow-related concept parity with environment/bootstrap provenance."""
+
+    from ...services.workflow_materialisation_diagnostics_service import (
+        build_workflow_concept_parity_audit,
+    )
+
+    include_present_concepts = kwargs.get("include_present_concepts", True)
+    if not isinstance(include_present_concepts, bool):
+        include_present_concepts = bool(include_present_concepts)
+
+    try:
+        return build_workflow_concept_parity_audit(
+            concept_ids=kwargs.get("concept_ids", kwargs.get("required_concept_ids")),
+            include_present_concepts=include_present_concepts,
+        )
+    except Exception as exc:
+        return make_error_response(
+            "workflow_concept_parity_audit_failed",
+            f"Failed to build workflow concept parity audit: {exc}",
+        )
+
+
 def _coding_agent_mcp_access_profile(**kwargs):
     from ...services.coding_agent_mcp_access_profile_service import (
         build_coding_agent_mcp_access_profile,
@@ -26419,6 +26442,50 @@ def build_default_catalogue() -> MethodCatalogue:
                 "Explain whether missing workflow/testing concepts reflect a "
                 "fresh/test DB, skipped bootstrap, pending parity, partial "
                 "bootstrap, or true missing authority."
+            ),
+        ),
+        MethodDefinition(
+            name="workflow_concept_parity_audit",
+            handler=_workflow_concept_parity_audit,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "concept_ids": (list, str, type(None)),
+                    "required_concept_ids": (list, str, type(None)),
+                    "include_present_concepts": bool,
+                },
+                allow_unknown=True,
+                description=(
+                    "Audit one or more workflow/testing concept IDs for parity state "
+                    "with summary counts and provenance."
+                ),
+            ),
+            output_schema=Schema(
+                required={"success": bool, "summary": dict, "concepts": list},
+                optional={
+                    "schema_version": str,
+                    "generated_at_utc": str,
+                    "concept_ids": list,
+                    "classification": dict,
+                    "environment": dict,
+                    "durable_workflow_startup": dict,
+                    "workflow_bootstrap": dict,
+                    "parity_inventory": dict,
+                    "testing_type_parity": dict,
+                    "errors": list,
+                    "error": str,
+                    "error_code": str,
+                },
+                allow_unknown=True,
+                description=(
+                    "Bulk workflow concept parity audit with counts by diagnostic "
+                    "state plus environment/startup/bootstrap provenance."
+                ),
+            ),
+            category="read",
+            description=(
+                "Audit multiple workflow/testing concepts at once and return parity "
+                "counts, per-concept states, and environment/bootstrap provenance."
             ),
         ),
         MethodDefinition(

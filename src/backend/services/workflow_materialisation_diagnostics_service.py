@@ -64,6 +64,7 @@ WORKFLOW_BOOTSTRAP_REPORT_KEYS: tuple[str, ...] = (
     "talk_workflow_bootstrap",
     "testing_workflow_bootstrap",
     "workflow_authority_bootstrap",
+    "workflow_authoring_prompt_bootstrap",
 )
 
 
@@ -630,10 +631,70 @@ def build_workflow_materialisation_diagnostics(
     }
 
 
+def build_workflow_concept_parity_audit(
+    *,
+    concept_ids: Any = None,
+    include_present_concepts: bool = True,
+) -> dict[str, Any]:
+    """Audit workflow-related concept parity with summary counts and provenance."""
+
+    diagnostics = build_workflow_materialisation_diagnostics(
+        required_concept_ids=concept_ids,
+        include_present_concepts=include_present_concepts,
+    )
+    audited_concepts = [
+        item
+        for item in diagnostics.get("required_concepts", [])
+        if isinstance(item, dict)
+    ]
+    diagnostic_state_counts: dict[str, int] = {}
+    present_count = 0
+    missing_count = 0
+    authority_drift_count = 0
+    for row in audited_concepts:
+        state = str(row.get("diagnostic_state") or "unknown").strip() or "unknown"
+        diagnostic_state_counts[state] = diagnostic_state_counts.get(state, 0) + 1
+        if bool(row.get("exists")):
+            present_count += 1
+        else:
+            missing_count += 1
+        if state == "authority_drift":
+            authority_drift_count += 1
+
+    classification = diagnostics.get("classification")
+    classification_map = classification if isinstance(classification, dict) else {}
+    return {
+        "success": True,
+        "schema_version": "workflow_concept_parity_audit.v1",
+        "generated_at_utc": diagnostics.get("generated_at_utc"),
+        "concept_ids": diagnostics.get("required_concept_ids", []),
+        "summary": {
+            "audited_count": len(audited_concepts),
+            "present_count": present_count,
+            "missing_count": missing_count,
+            "authority_drift_count": authority_drift_count,
+            "diagnostic_state_counts": diagnostic_state_counts,
+            "classification_state": classification_map.get("state"),
+            "ready_for_authoritative_checks": bool(
+                classification_map.get("ready_for_authoritative_checks")
+            ),
+        },
+        "classification": classification_map,
+        "environment": diagnostics.get("environment"),
+        "durable_workflow_startup": diagnostics.get("durable_workflow_startup"),
+        "workflow_bootstrap": diagnostics.get("workflow_bootstrap"),
+        "parity_inventory": diagnostics.get("parity_inventory"),
+        "testing_type_parity": diagnostics.get("testing_type_parity"),
+        "concepts": audited_concepts,
+        "errors": diagnostics.get("errors", []),
+    }
+
+
 __all__ = [
     "CANONICAL_TESTING_WORKFLOW_IDS",
     "CRITICAL_TESTING_TYPE_CONCEPT_IDS",
     "DEFAULT_REQUIRED_CONCEPT_IDS",
     "TESTING_TYPE_CONCEPT_IDS",
+    "build_workflow_concept_parity_audit",
     "build_workflow_materialisation_diagnostics",
 ]

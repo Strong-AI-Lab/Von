@@ -5063,6 +5063,37 @@
             }
         },
         {
+            "name": "workflow_concept_parity_audit",
+            "description": "Audit multiple workflow/testing concepts at once and return parity counts, per-concept states, and environment/bootstrap provenance.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "concept_ids": {
+                        "type": [
+                            "array",
+                            "string",
+                            "null"
+                        ],
+                        "items": {}
+                    },
+                    "required_concept_ids": {
+                        "type": [
+                            "array",
+                            "string",
+                            "null"
+                        ],
+                        "items": {}
+                    },
+                    "include_present_concepts": {
+                        "type": "boolean"
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "Audit one or more workflow/testing concept IDs for parity state with summary counts and provenance."
+            }
+        },
+        {
             "name": "workflow_create_instance",
             "description": "Create a new durable workflow instance. The workflow will be queued for execution by a background worker. Use workflow_get_instance to check status.",
             "inputSchema": {

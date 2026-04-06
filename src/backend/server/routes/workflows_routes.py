@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from flask import Blueprint, jsonify, request, session
 
+from ...db.repositories.concepts_repository import ConceptsRepository
 from ...db.transient_errors import is_transient_mongo_error
 from ...security.access_control import get_effective_user_concept_id
 from ...services.workflow_episode_service import (
@@ -52,7 +53,12 @@ from ...workflows.workflow_studio_service import (
     build_workflow_catalogue_payload,
     build_workflow_description_proposal,
     build_workflow_studio_detail_payload,
+    demote_workflow_routing,
     preview_workflow_authoring_spec,
+    review_workflow_authoring_proposal,
+    rollback_workflow_authoring_promotion,
+    submit_workflow_authoring_proposal,
+    supersede_workflow_publication,
 )
 
 logger = logging.getLogger(__name__)
@@ -807,6 +813,223 @@ def api_apply_workflow_studio_authoring(workflow_id: str):
             jsonify(
                 {
                     "error": "workflow_studio_authoring_apply_failed",
+                    "workflow_id": workflow_id,
+                    "detail": str(exc),
+                }
+            ),
+            500,
+        )
+
+
+@workflows_bp.post("/api/workflow-studio/workflows/<path:workflow_id>/proposals/authoring")
+def api_submit_workflow_studio_authoring_proposal(workflow_id: str):
+    payload = request.get_json(silent=True) or {}
+    authoring_spec = payload.get("authoring_spec")
+    base_definition_hash = payload.get("base_definition_hash")
+    if not isinstance(authoring_spec, dict):
+        return jsonify({"error": "authoring_spec_dict_required"}), 400
+    user_concept_id, _org_concept_id = _resolve_request_llm_scope_ids()
+    namespace = _safe_request_arg(payload.get("namespace")) or None
+    try:
+        result = submit_workflow_authoring_proposal(
+            workflow_id,
+            authoring_spec=authoring_spec,
+            base_definition_hash=(
+                str(base_definition_hash).strip()
+                if isinstance(base_definition_hash, str)
+                else None
+            ),
+            session_id=_safe_request_arg(payload.get("session_id")) or None,
+            turn_id=_safe_request_arg(payload.get("turn_id")) or None,
+            proposed_by=user_concept_id,
+        )
+        result["namespace"] = namespace
+        return jsonify(result)
+    except WorkflowStudioConflictError as exc:
+        return jsonify({"error": str(exc), "workflow_id": workflow_id}), 409
+    except ValueError as exc:
+        return jsonify({"error": str(exc), "workflow_id": workflow_id}), 400
+    except Exception as exc:
+        logger.exception(
+            "Workflow studio authoring proposal submit failed for %s",
+            workflow_id,
+        )
+        return (
+            jsonify(
+                {
+                    "error": "workflow_studio_authoring_proposal_submit_failed",
+                    "workflow_id": workflow_id,
+                    "detail": str(exc),
+                }
+            ),
+            500,
+        )
+
+
+@workflows_bp.post("/api/workflow-studio/workflows/<path:workflow_id>/proposals/review")
+def api_review_workflow_studio_authoring_proposal(workflow_id: str):
+    payload = request.get_json(silent=True) or {}
+    action = _safe_request_arg(payload.get("action"))
+    review_reason = _safe_request_arg(payload.get("review_reason")) or None
+    namespace = _safe_request_arg(payload.get("namespace")) or None
+    user_concept_id, org_concept_id = _resolve_request_llm_scope_ids()
+    if not action:
+        return jsonify({"error": "review_action_required", "workflow_id": workflow_id}), 400
+    try:
+        result = review_workflow_authoring_proposal(
+            workflow_id,
+            action=action,
+            review_reason=review_reason,
+            reviewed_by=user_concept_id,
+            user_id=user_concept_id,
+            org_id=org_concept_id,
+            namespace=namespace,
+        )
+        try:
+            from ...workflows.durable.registry_factory import (
+                invalidate_shared_workflow_registry_read_only,
+            )
+
+            invalidate_shared_workflow_registry_read_only()
+        except Exception:
+            logger.debug(
+                "workflow studio proposal review could not invalidate shared workflow registry",
+                exc_info=True,
+            )
+        _clear_workflow_definitions_cache()
+        return jsonify(result)
+    except WorkflowStudioConflictError as exc:
+        return jsonify({"error": str(exc), "workflow_id": workflow_id}), 409
+    except ValueError as exc:
+        return jsonify({"error": str(exc), "workflow_id": workflow_id}), 400
+    except Exception as exc:
+        logger.exception(
+            "Workflow studio authoring proposal review failed for %s",
+            workflow_id,
+        )
+        return (
+            jsonify(
+                {
+                    "error": "workflow_studio_authoring_proposal_review_failed",
+                    "workflow_id": workflow_id,
+                    "detail": str(exc),
+                }
+            ),
+            500,
+        )
+
+
+@workflows_bp.post("/api/workflow-studio/workflows/<path:workflow_id>/proposals/rollback")
+def api_rollback_workflow_studio_authoring_promotion(workflow_id: str):
+    payload = request.get_json(silent=True) or {}
+    review_reason = _safe_request_arg(payload.get("review_reason")) or None
+    namespace = _safe_request_arg(payload.get("namespace")) or None
+    user_concept_id, org_concept_id = _resolve_request_llm_scope_ids()
+    try:
+        result = rollback_workflow_authoring_promotion(
+            workflow_id,
+            review_reason=review_reason,
+            reviewed_by=user_concept_id,
+            user_id=user_concept_id,
+            org_id=org_concept_id,
+            namespace=namespace,
+        )
+        try:
+            from ...workflows.durable.registry_factory import (
+                invalidate_shared_workflow_registry_read_only,
+            )
+
+            invalidate_shared_workflow_registry_read_only()
+        except Exception:
+            logger.debug(
+                "workflow studio promotion rollback could not invalidate shared workflow registry",
+                exc_info=True,
+            )
+        _clear_workflow_definitions_cache()
+        return jsonify(result)
+    except WorkflowStudioConflictError as exc:
+        return jsonify({"error": str(exc), "workflow_id": workflow_id}), 409
+    except ValueError as exc:
+        return jsonify({"error": str(exc), "workflow_id": workflow_id}), 400
+    except Exception as exc:
+        logger.exception(
+            "Workflow studio promotion rollback failed for %s",
+            workflow_id,
+        )
+        return (
+            jsonify(
+                {
+                    "error": "workflow_studio_authoring_promotion_rollback_failed",
+                    "workflow_id": workflow_id,
+                    "detail": str(exc),
+                }
+            ),
+            500,
+        )
+
+
+@workflows_bp.post("/api/workflow-studio/workflows/<path:workflow_id>/publication/demote")
+def api_demote_workflow_studio_publication(workflow_id: str):
+    payload = request.get_json(silent=True) or {}
+    review_reason = _safe_request_arg(payload.get("review_reason")) or None
+    user_concept_id, _org_concept_id = _resolve_request_llm_scope_ids()
+    try:
+        result = demote_workflow_routing(
+            workflow_id,
+            review_reason=review_reason,
+            reviewed_by=user_concept_id,
+        )
+        _clear_workflow_definitions_cache()
+        return jsonify(result)
+    except ValueError as exc:
+        return jsonify({"error": str(exc), "workflow_id": workflow_id}), 400
+    except Exception as exc:
+        logger.exception("Workflow studio demotion failed for %s", workflow_id)
+        return (
+            jsonify(
+                {
+                    "error": "workflow_studio_publication_demote_failed",
+                    "workflow_id": workflow_id,
+                    "detail": str(exc),
+                }
+            ),
+            500,
+        )
+
+
+@workflows_bp.post("/api/workflow-studio/workflows/<path:workflow_id>/publication/supersede")
+def api_supersede_workflow_studio_publication(workflow_id: str):
+    payload = request.get_json(silent=True) or {}
+    replacement_workflow_id = _safe_request_arg(payload.get("replacement_workflow_id"))
+    review_reason = _safe_request_arg(payload.get("review_reason")) or None
+    user_concept_id, _org_concept_id = _resolve_request_llm_scope_ids()
+    if not replacement_workflow_id:
+        return (
+            jsonify(
+                {
+                    "error": "replacement_workflow_id_required",
+                    "workflow_id": workflow_id,
+                }
+            ),
+            400,
+        )
+    try:
+        result = supersede_workflow_publication(
+            workflow_id,
+            replacement_workflow_id=replacement_workflow_id,
+            review_reason=review_reason,
+            reviewed_by=user_concept_id,
+        )
+        _clear_workflow_definitions_cache()
+        return jsonify(result)
+    except ValueError as exc:
+        return jsonify({"error": str(exc), "workflow_id": workflow_id}), 400
+    except Exception as exc:
+        logger.exception("Workflow studio supersession failed for %s", workflow_id)
+        return (
+            jsonify(
+                {
+                    "error": "workflow_studio_publication_supersede_failed",
                     "workflow_id": workflow_id,
                     "detail": str(exc),
                 }

@@ -49,6 +49,7 @@ def build_workflow_listing_entry(
     *,
     registry: WorkflowRegistry,
     workflow_id: str,
+    resolve_vontology_metadata: bool = True,
 ) -> dict[str, Any]:
     """Build a workflow-listing summary without forcing lazy definition loads."""
 
@@ -62,12 +63,22 @@ def build_workflow_listing_entry(
 
     registration_purpose = getattr(registration, "purpose", None)
     definition_purpose = getattr(definition, "purpose", "") if definition is not None else None
-    description, description_source = resolve_workflow_description(
-        workflow_id,
-        workflow_source=source,
-        registration_purpose=registration_purpose,
-        definition_purpose=definition_purpose,
-    )
+    description = ""
+    description_source = "none"
+    if resolve_vontology_metadata:
+        description, description_source = resolve_workflow_description(
+            workflow_id,
+            workflow_source=source,
+            registration_purpose=registration_purpose,
+            definition_purpose=definition_purpose,
+        )
+    else:
+        if isinstance(registration_purpose, str) and registration_purpose.strip():
+            description = registration_purpose.strip()
+            description_source = "registration.purpose"
+        elif isinstance(definition_purpose, str) and definition_purpose.strip():
+            description = definition_purpose.strip()
+            description_source = "definition.purpose"
     description_quality = assess_workflow_description_quality(
         description=description,
         description_source=description_source,
@@ -76,7 +87,7 @@ def build_workflow_listing_entry(
     initial_state = ""
     if definition is not None:
         initial_state = str(getattr(definition, "initial_state", "") or "").strip()
-    if not initial_state:
+    if resolve_vontology_metadata and not initial_state:
         initial_state = str(resolve_workflow_initial_step(workflow_id) or "").strip()
 
     background_launch_policy = None
@@ -90,7 +101,7 @@ def build_workflow_listing_entry(
                 definition_metadata.get("background_launch_policy_source")
                 or "definition.metadata"
             )
-    if background_launch_policy is None:
+    if resolve_vontology_metadata and background_launch_policy is None:
         (
             background_launch_policy,
             background_launch_policy_source,

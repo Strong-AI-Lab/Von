@@ -2135,16 +2135,22 @@ def _normalise_workflow_publication_lifecycle(
         return None
 
     phase = _normalise_non_empty_text(value.get("phase")) or "published"
+    non_published_phases = {
+        "draft",
+        "validated",
+        "validation_failed",
+        "draft_failed_completion_gate",
+        "pending_review",
+        "rejected",
+        "superseded",
+        "rolled_back",
+        "demoted",
+    }
     published_raw = value.get("published")
     if isinstance(published_raw, bool):
         published = published_raw
     else:
-        published = phase not in {
-            "draft",
-            "validated",
-            "validation_failed",
-            "draft_failed_completion_gate",
-        }
+        published = phase not in non_published_phases
 
     payload: dict[str, Any] = {
         "schema_version": (
@@ -2166,6 +2172,40 @@ def _normalise_workflow_publication_lifecycle(
     last_error = _normalise_non_empty_text(value.get("last_error"))
     if last_error:
         payload["last_error"] = last_error
+    for key in (
+        "review_state",
+        "review_reason",
+        "reviewed_at",
+        "reviewed_by",
+        "proposal_id",
+        "proposal_source_session_id",
+        "proposal_source_turn_id",
+        "experiment_run_id",
+        "supersedes_workflow_id",
+        "superseded_by_workflow_id",
+        "rollout_state",
+        "promotion_decision",
+    ):
+        cleaned = _normalise_non_empty_text(value.get(key))
+        if cleaned:
+            payload[key] = cleaned
+    for key in ("routing_eligible", "approval_required"):
+        raw_flag = value.get(key)
+        if isinstance(raw_flag, bool):
+            payload[key] = raw_flag
+    for key in ("event_binding_ids", "schedule_ids"):
+        raw_values = value.get(key)
+        if isinstance(raw_values, Sequence) and not isinstance(
+            raw_values,
+            (str, bytes, bytearray),
+        ):
+            cleaned_values = [
+                item_text
+                for item in raw_values
+                if (item_text := _normalise_non_empty_text(item))
+            ]
+            if cleaned_values:
+                payload[key] = cleaned_values
     return payload
 
 

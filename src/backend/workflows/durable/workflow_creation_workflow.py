@@ -11,6 +11,10 @@ from ...services import concept_search_service, concept_service
 from ...services.concept_service import ConceptNotFoundError
 from ...services.relationship_write_service import add_relationship
 from ...services.workflow_discovery_service import discover_workflows
+from ...services.workflow_authoring_vontology_service import (
+    build_workflow_authoring_prompt_contract,
+    get_workflow_authoring_prompt_health_status,
+)
 from ...services.text_value_service import (
     get_texts_for_concept,
     upsert_text_for_concept,
@@ -1197,6 +1201,10 @@ def _handle_discover_existing_workflows(
             and str(item.get("concept_id")).strip()
         ],
         "workflow_authoring_candidate_count": len(candidate_rows),
+        "workflow_authoring_prompt_contract": build_workflow_authoring_prompt_contract(),
+        "workflow_authoring_prompt_health": (
+            get_workflow_authoring_prompt_health_status()
+        ),
     }
     return WorkflowActionResult(status="success", outputs=outputs)
 
@@ -1648,6 +1656,10 @@ def _handle_extract_existing_workflow_spec(
         "existing_workflow_spec": authoring_spec,
         "existing_workflow_state_count": len(definition.states or {}),
         "existing_workflow_action_ids": list(collect_workflow_action_ids(definition)),
+        "workflow_authoring_prompt_contract": build_workflow_authoring_prompt_contract(),
+        "workflow_authoring_prompt_health": (
+            get_workflow_authoring_prompt_health_status()
+        ),
     }
     return WorkflowActionResult(status="success", outputs=outputs)
 

@@ -72,6 +72,7 @@ EXECUTABILITY_WORKFLOW_STEP_COMPLETELY_VACUOUS = (
 ROUTING_EXCLUSION_MISSING_AUTHORITATIVE_PURPOSE = (
     "missing_authoritative_purpose"
 )
+ROUTING_EXCLUSION_EXPLICITLY_DISABLED = "routing_explicitly_disabled"
 
 _EXECUTABILITY_REASON_PRIORITY = {
     EXECUTABILITY_EXECUTABLE_NOW: 2,
@@ -818,6 +819,39 @@ def _resolve_workflow_routing_profile_data(
     return dict(profile), str(source or "").strip() or None
 
 
+@lru_cache(maxsize=1024)
+def _resolve_workflow_publication_lifecycle_data(
+    concept_id: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    if not isinstance(concept_id, str) or not concept_id.strip():
+        return None, None
+    try:
+        from ..workflows.vontology_loader import resolve_workflow_publication_lifecycle
+
+        lifecycle, source = resolve_workflow_publication_lifecycle(concept_id)
+    except Exception:
+        return None, None
+    if not isinstance(lifecycle, Mapping):
+        return None, None
+    return dict(lifecycle), str(source or "").strip() or None
+
+
+def _lifecycle_allows_routing(
+    lifecycle: Mapping[str, Any] | None,
+) -> tuple[bool, str | None]:
+    if not isinstance(lifecycle, Mapping):
+        return True, None
+    if lifecycle.get("routing_eligible") is False:
+        return False, ROUTING_EXCLUSION_EXPLICITLY_DISABLED
+    phase = str(lifecycle.get("phase") or "").strip().lower()
+    review_state = str(lifecycle.get("review_state") or "").strip().lower()
+    if phase in {"superseded", "demoted"}:
+        return False, ROUTING_EXCLUSION_EXPLICITLY_DISABLED
+    if review_state in {"pending_review", "rejected", "superseded"}:
+        return False, ROUTING_EXCLUSION_EXPLICITLY_DISABLED
+    return True, None
+
+
 def _annotate_and_rank_candidates(
     matches: List[WorkflowMatch],
     *,
@@ -836,19 +870,31 @@ def _annotate_and_rank_candidates(
         routing_profile, _routing_profile_source = _resolve_workflow_routing_profile_data(
             match.concept_id
         )
+        publication_lifecycle, _publication_lifecycle_source = (
+            _resolve_workflow_publication_lifecycle_data(match.concept_id)
+        )
+        lifecycle_allows_routing, lifecycle_exclusion_reason = (
+            _lifecycle_allows_routing(publication_lifecycle)
+        )
         match.is_executable = bool(is_executable)
         match.executability_reason = reason
         match.executability_detail = detail
         # Discovery-level policy baseline: only executable candidates are
         # considered safe before orchestrator-level policy checks are applied.
-        match.is_policy_safe = bool(is_executable and has_authoritative_text)
-        match.routing_eligible = bool(is_executable and has_authoritative_text)
+        match.is_policy_safe = bool(
+            is_executable and has_authoritative_text and lifecycle_allows_routing
+        )
+        match.routing_eligible = bool(
+            is_executable and has_authoritative_text and lifecycle_allows_routing
+        )
         if not is_executable:
             match.routing_exclusion_reason = reason
         elif not has_authoritative_text:
             match.routing_exclusion_reason = (
                 ROUTING_EXCLUSION_MISSING_AUTHORITATIVE_PURPOSE
             )
+        elif lifecycle_exclusion_reason:
+            match.routing_exclusion_reason = lifecycle_exclusion_reason
         else:
             match.routing_exclusion_reason = None
         if isinstance(routing_profile, dict):

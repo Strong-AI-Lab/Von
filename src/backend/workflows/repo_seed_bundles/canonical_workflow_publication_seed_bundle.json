@@ -4743,6 +4743,14 @@
                 {
                   "context_key": "existing_workflow_spec",
                   "label": "Existing workflow authoring spec"
+                },
+                {
+                  "context_key": "workflow_authoring_prompt_contract",
+                  "label": "Workflow authoring prompt contract"
+                },
+                {
+                  "context_key": "workflow_authoring_prompt_health",
+                  "label": "Workflow authoring prompt health"
                 }
               ],
               "response_contract_text": "Return JSON with keys \"target_workflow_id\", \"repair_summary\", and \"repaired_workflow_spec\"."
@@ -5028,6 +5036,14 @@
                 {
                   "context_key": "workflow_authoring_candidate_workflows",
                   "label": "Candidate workflows"
+                },
+                {
+                  "context_key": "workflow_authoring_prompt_contract",
+                  "label": "Workflow authoring prompt contract"
+                },
+                {
+                  "context_key": "workflow_authoring_prompt_health",
+                  "label": "Workflow authoring prompt health"
                 }
               ],
               "response_contract_text": "Return JSON with keys \"decision\", \"target_workflow_id\", \"target_workflow_name\", \"reasoning\", \"evidence\", and \"response_text\"."

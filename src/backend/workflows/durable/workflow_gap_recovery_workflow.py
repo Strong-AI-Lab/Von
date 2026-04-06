@@ -22,6 +22,9 @@ from ...services.settings_service import (
 )
 from ...services.namespace_service import derive_actor_context_from_namespace
 from ...services.text_value_service import upsert_singleton_text_relation
+from ...services.testing_workflow_contracts import (
+    CAPABILITY_TEST_EXECUTION_WORKFLOW_ID,
+)
 from ...services.workflow_gap_vontology_service import (
     render_workflow_gap_candidate_prompt,
     render_workflow_gap_analysis_prompt,
@@ -50,6 +53,8 @@ from ..workflow_template_profile_service import (
     WORKFLOW_GAP_CANDIDATE_EXECUTION_TEMPLATE_ID,
     resolve_workflow_spec_template,
 )
+from ..workflow_authoring_service import serialise_workflow_definition_to_authoring_spec
+from ..workflow_definition_identity_service import build_workflow_definition_identity
 from ..vontology_loader import load_workflow_definition_from_vontology
 from ..workflow_gap_workflow_contracts import (
     WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
@@ -64,6 +69,7 @@ from ..workflow_gap_workflow_contracts import (
     WORKFLOW_GAP_DECIDE_TEST_ACTION_ID,
     WORKFLOW_GAP_EXECUTE_CANDIDATE_ACTION_ID,
     WORKFLOW_GAP_FINALISE_RECOVERY_ACTION_ID,
+    WORKFLOW_GAP_MAX_REPAIR_ATTEMPTS,
     WORKFLOW_GAP_PREPARE_CANDIDATE_ACTION_ID,
     WORKFLOW_GAP_RUN_CANDIDATE_TEST_ACTION_ID,
     WORKFLOW_GAP_TEST_ACCEPTANCE_MAPPING_ID,
@@ -186,6 +192,10 @@ def _coerce_mapping_list(value: Any, *, max_items: int = 40) -> list[dict[str, A
     return rows
 
 
+def _mapping_or_empty(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
 def _json_text(value: Any) -> str:
     return json.dumps(value, ensure_ascii=True, indent=2, sort_keys=True)
 
@@ -255,6 +265,171 @@ def _safe_get_concept(concept_id: str) -> Mapping[str, Any] | None:
     except Exception:
         return None
     return concept if isinstance(concept, Mapping) else None
+
+
+def _load_runtime_workflow_definition(workflow_id: str) -> WorkflowDefinition | None:
+    workflow_id_clean = _clean_text(workflow_id)
+    if not workflow_id_clean:
+        return None
+
+    try:
+        from .registry_factory import build_durable_workflow_registry_read_only
+
+        registry = build_durable_workflow_registry_read_only(defer_parity_work=True)
+        definition = registry.get(workflow_id_clean)
+        if isinstance(definition, WorkflowDefinition):
+            return definition
+    except Exception:
+        logger.debug(
+            "workflow gap recovery registry lookup failed for %s",
+            workflow_id_clean,
+            exc_info=True,
+        )
+
+    try:
+        definition = load_workflow_definition_from_vontology(workflow_id_clean)
+    except Exception:
+        logger.debug(
+            "workflow gap recovery Vontology definition lookup failed for %s",
+            workflow_id_clean,
+            exc_info=True,
+        )
+        return None
+    return definition if isinstance(definition, WorkflowDefinition) else None
+
+
+def _extract_capability_execution_outputs(
+    payload: Mapping[str, Any] | None,
+) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
+    workflow_execution = _mapping_or_empty((payload or {}).get("workflow_execution"))
+    outputs = _mapping_or_empty(workflow_execution.get("outputs"))
+    response_text = _clean_text(outputs.get("response_text"))
+    tool_invocations = _coerce_mapping_list(outputs.get("tool_invocations"), max_items=32)
+    tool_messages = _coerce_mapping_list(outputs.get("extra_messages"), max_items=32)
+    return response_text, tool_invocations, tool_messages
+
+
+def _build_capability_test_summary(
+    *,
+    payload: Mapping[str, Any] | None,
+    action_error: str | None,
+) -> dict[str, Any]:
+    raw = _mapping_or_empty(payload)
+    workflow_execution = _mapping_or_empty(raw.get("workflow_execution"))
+    candidate_validation = _mapping_or_empty(raw.get("candidate_validation"))
+    side_effect_audit = _mapping_or_empty(raw.get("side_effect_audit"))
+    trace_summary = _mapping_or_empty(raw.get("trace_summary"))
+    quality_signals = _mapping_or_empty(raw.get("quality_signals"))
+    promotion_recommendation = _mapping_or_empty(raw.get("promotion_recommendation"))
+    verdict_summary = _mapping_or_empty(raw.get("verdict_summary"))
+    repair_hints = _coerce_mapping_list(
+        raw.get("repair_hints") or candidate_validation.get("repair_hints"),
+        max_items=16,
+    )
+    final_status = _clean_text(raw.get("final_status") or workflow_execution.get("final_status"))
+    verdict = _clean_text(raw.get("verdict"))
+    blocked_event_count = int(side_effect_audit.get("blocked_event_count") or 0)
+    candidate_validation_valid = candidate_validation.get("valid")
+    timed_out = bool(raw.get("timed_out"))
+    error_text = (
+        _clean_text(action_error)
+        or _clean_text(raw.get("error"))
+        or _clean_text(workflow_execution.get("error"))
+        or _clean_text(trace_summary.get("last_error"))
+    )
+    passed = (
+        final_status == "completed"
+        and not timed_out
+        and blocked_event_count == 0
+        and candidate_validation_valid is not False
+        and verdict not in {"fail", "inconclusive"}
+    )
+    return {
+        "schema_version": "workflow_gap_capability_test_summary.v1",
+        "passed": passed,
+        "final_status": final_status or None,
+        "timed_out": timed_out,
+        "error": error_text or None,
+        "verdict": verdict or None,
+        "verdict_summary": verdict_summary or None,
+        "promotion_recommendation": promotion_recommendation or None,
+        "candidate_validation": candidate_validation or None,
+        "repair_hints": repair_hints,
+        "quality_signals": quality_signals or None,
+        "side_effect_audit": side_effect_audit or None,
+        "trace_summary": trace_summary or None,
+        "workflow_execution": workflow_execution or None,
+    }
+
+
+def _build_actionable_escalation_message(
+    *,
+    attempt_count: int,
+    capability_summary: Mapping[str, Any] | None,
+    acceptance_report: Mapping[str, Any] | None,
+    creation_error: str | None = None,
+) -> str | None:
+    reasons: list[str] = []
+    summary = _mapping_or_empty(capability_summary)
+    acceptance = _mapping_or_empty(acceptance_report)
+
+    creation_error_clean = _clean_text(creation_error)
+    if creation_error_clean:
+        reasons.append(f"creation failure: {creation_error_clean}")
+
+    capability_error = _clean_text(summary.get("error"))
+    if capability_error:
+        reasons.append(f"capability test failure: {capability_error}")
+
+    candidate_validation = _mapping_or_empty(summary.get("candidate_validation"))
+    if candidate_validation.get("valid") is False:
+        reasons.append("candidate validation failed before safe execution")
+
+    blocked_event_count = int(
+        _mapping_or_empty(summary.get("side_effect_audit")).get("blocked_event_count")
+        or 0
+    )
+    if blocked_event_count > 0:
+        reasons.append(
+            f"side-effect policy blocked {blocked_event_count} event"
+            f"{'' if blocked_event_count == 1 else 's'}"
+        )
+
+    trace_error = _clean_text(_mapping_or_empty(summary.get("trace_summary")).get("last_error"))
+    if trace_error:
+        reasons.append(f"execution trace error: {trace_error}")
+
+    acceptance_reason = _clean_text(acceptance.get("reason"))
+    if acceptance_reason:
+        reasons.append(f"acceptance failure: {acceptance_reason}")
+
+    missing_requirements = _coerce_string_list(
+        acceptance.get("missing_requirements"),
+        max_items=8,
+    )
+    if missing_requirements:
+        reasons.append(
+            "missing acceptance requirements: "
+            + "; ".join(missing_requirements[:3])
+        )
+
+    repair_hints = _coerce_mapping_list(summary.get("repair_hints"), max_items=3)
+    hint_texts = [
+        _clean_text(item.get("repair_hint") or item.get("reason_code"))
+        for item in repair_hints
+        if _clean_text(item.get("repair_hint") or item.get("reason_code"))
+    ]
+    if hint_texts:
+        reasons.append("suggested repairs: " + "; ".join(hint_texts))
+
+    if not reasons:
+        return None
+    joined = " | ".join(reasons)
+    return (
+        f"Repair loop exhausted after {attempt_count} attempt"
+        f"{'' if attempt_count == 1 else 's'}. "
+        f"{joined}"
+    )
 
 
 def _normalise_candidate_workflow_id(
@@ -636,6 +811,13 @@ def _handle_prepare_candidate_spec(request: WorkflowActionRequest) -> WorkflowAc
             outputs={"workflow_gap_candidate_prepared": False},
         )
 
+    previous_attempt_count = 0
+    try:
+        previous_attempt_count = int(context.get("workflow_gap_repair_attempt_count") or 0)
+    except Exception:
+        previous_attempt_count = 0
+    attempt_count = max(1, previous_attempt_count + 1)
+
     request_text = _clean_text(context.get("workflow_gap_request_text"))
     workflow_name = _clean_text(analysis_result.get("workflow_name")) or "Workflow Gap Candidate"
     workflow_description = (
@@ -732,6 +914,11 @@ def _handle_prepare_candidate_spec(request: WorkflowActionRequest) -> WorkflowAc
             "candidate_workflow_name": workflow_name,
             "candidate_prompt_concept_id": prompt_concept_id,
             "candidate_prompt_created": False,
+            "workflow_gap_repair_attempt_count": attempt_count,
+            "workflow_gap_repair_attempts_remaining": max(
+                0,
+                WORKFLOW_GAP_MAX_REPAIR_ATTEMPTS - attempt_count,
+            ),
             "workflow_gap_candidate_prompt_diagnostics": candidate_prompt_diagnostics,
             "workflow_gap_candidate_prepared": True,
             "workflow_gap_acceptance_requirements": acceptance_requirements,
@@ -741,6 +928,8 @@ def _handle_prepare_candidate_spec(request: WorkflowActionRequest) -> WorkflowAc
             "workflow_gap_guidance": workflow_guidance,
             "workflow_gap_guidance_json": _json_text(workflow_guidance),
             "workflow_gap_candidate_template_resolution": template_resolution,
+            "workflow_gap_repair_loop_active": attempt_count
+            < WORKFLOW_GAP_MAX_REPAIR_ATTEMPTS,
         },
     )
 
@@ -754,10 +943,50 @@ def _handle_decide_test(request: WorkflowActionRequest) -> WorkflowActionResult:
     creation_failed = bool(request.data.get("candidate_creation_child_failed")) or bool(
         _clean_text(request.data.get("candidate_creation_error"))
     )
-    should_test = should_test and bool(candidate_workflow_id) and not creation_failed
+    try:
+        attempt_count = int(request.data.get("workflow_gap_repair_attempt_count") or 0)
+    except Exception:
+        attempt_count = 0
+    try:
+        last_test_attempt_count = int(
+            request.data.get("workflow_gap_last_test_attempt_count") or 0
+        )
+    except Exception:
+        last_test_attempt_count = 0
+    attempts_remaining = max(0, WORKFLOW_GAP_MAX_REPAIR_ATTEMPTS - attempt_count)
+    test_passed = bool(request.data.get("workflow_gap_test_passed"))
+    test_failed = (
+        bool(_clean_text(request.data.get("workflow_gap_test_error")))
+        or bool(request.data.get("workflow_gap_test_child_failed"))
+        or (last_test_attempt_count == attempt_count and attempt_count > 0 and not test_passed)
+    )
+    should_test = (
+        should_test
+        and bool(candidate_workflow_id)
+        and not creation_failed
+        and attempt_count > last_test_attempt_count
+    )
+    should_repair = False
+    repair_reason = ""
+    if creation_failed and attempt_count < WORKFLOW_GAP_MAX_REPAIR_ATTEMPTS:
+        should_repair = True
+        repair_reason = "candidate_creation_failed"
+    elif test_failed and attempt_count < WORKFLOW_GAP_MAX_REPAIR_ATTEMPTS:
+        should_repair = True
+        repair_reason = "candidate_test_failed"
+    repair_attempts_exhausted = bool(
+        (creation_failed or test_failed)
+        and attempt_count >= WORKFLOW_GAP_MAX_REPAIR_ATTEMPTS
+    )
     return WorkflowActionResult(
         status="success",
-        outputs={"workflow_gap_should_test_candidate_now": should_test},
+        outputs={
+            "workflow_gap_should_test_candidate_now": should_test,
+            "workflow_gap_should_repair_candidate_now": should_repair,
+            "workflow_gap_repair_reason": repair_reason or None,
+            "workflow_gap_repair_attempts_remaining": attempts_remaining,
+            "workflow_gap_repair_attempts_exhausted": repair_attempts_exhausted,
+        },
     )
 
 
@@ -967,18 +1196,30 @@ def _handle_run_candidate_test(request: WorkflowActionRequest) -> WorkflowAction
             error="workflow_gap_test_candidate_workflow_missing",
         )
 
-    definition = load_workflow_definition_from_vontology(candidate_workflow_id)
+    definition = _load_runtime_workflow_definition(candidate_workflow_id)
     if definition is None:
         return WorkflowActionResult(
             status="failed",
             error=f"workflow_gap_test_definition_not_loadable:{candidate_workflow_id}",
         )
 
+    capability_test_definition = _load_runtime_workflow_definition(
+        CAPABILITY_TEST_EXECUTION_WORKFLOW_ID
+    )
+    if capability_test_definition is None:
+        return WorkflowActionResult(
+            status="failed",
+            error=(
+                "workflow_gap_capability_test_definition_not_loadable:"
+                f"{CAPABILITY_TEST_EXECUTION_WORKFLOW_ID}"
+            ),
+        )
+
     from .registry_factory import build_durable_action_registry
 
     executor = WorkflowExecutor(
         registry=build_durable_action_registry(),
-        max_transitions=30,
+        max_transitions=80,
     )
     recent_turns = _coerce_message_sequence(
         request.data.get("workflow_gap_recent_turns"),
@@ -1007,26 +1248,44 @@ def _handle_run_candidate_test(request: WorkflowActionRequest) -> WorkflowAction
         "org_concept_id": _clean_text(request.data.get("org_concept_id")) or None,
         "workflow_gap_dry_run": _coerce_bool(request.data.get("workflow_gap_dry_run")),
     }
-    candidate_result = executor.run(
-        definition,
+    definition_identity = build_workflow_definition_identity(
+        workflow_id=candidate_workflow_id,
+        source="workflow_gap_candidate_runtime",
+        definition=definition,
+        authoritative_definition=definition,
+    )
+    capability_test_inputs = {
+        "workflow_id": candidate_workflow_id,
+        "candidate_workflow_ids": [candidate_workflow_id],
+        "authoring_spec": serialise_workflow_definition_to_authoring_spec(definition),
+        "base_definition_hash": _clean_text(definition_identity.get("definition_hash"))
+        or None,
+        "workflow_inputs": test_context,
+        "target_capability_ids": [candidate_workflow_id],
+        "expected_outcomes": [
+            {"label": "target_workflow_execution", "expected": "completed"}
+        ],
+        "allowed_side_effects": [],
+        "forbidden_side_effects": [],
+    }
+    capability_result = executor.run(
+        capability_test_definition,
         environment=request.environment,
-        data=test_context,
+        data=capability_test_inputs,
     )
-    candidate_response_text = _clean_text(candidate_result.data.get("response_text"))
-    candidate_tool_invocations = _coerce_mapping_list(
-        candidate_result.data.get("tool_invocations"),
-        max_items=32,
+    capability_summary = _build_capability_test_summary(
+        payload=capability_result.data,
+        action_error=capability_result.error,
     )
-    candidate_tool_messages = _coerce_mapping_list(
-        candidate_result.data.get("extra_messages"),
-        max_items=32,
+    candidate_response_text, candidate_tool_invocations, candidate_tool_messages = (
+        _extract_capability_execution_outputs(capability_result.data)
     )
 
     test_payload = {
         "candidate_workflow_id": candidate_workflow_id,
-        "candidate_completed": bool(candidate_result.completed),
-        "candidate_final_state": _clean_text(candidate_result.final_state),
-        "candidate_error": _clean_text(candidate_result.error),
+        "candidate_completed": bool(capability_result.completed),
+        "candidate_final_state": _clean_text(capability_result.final_state),
+        "candidate_error": _clean_text(capability_result.error),
         "candidate_response_text": candidate_response_text,
         "candidate_tool_invocations": candidate_tool_invocations,
         "candidate_tool_messages": candidate_tool_messages,
@@ -1034,6 +1293,7 @@ def _handle_run_candidate_test(request: WorkflowActionRequest) -> WorkflowAction
         "request_text": _clean_text(request.data.get("workflow_gap_request_text")),
         "recent_turns": recent_turns,
         "base_response_text": _clean_text(request.data.get("workflow_gap_base_response_text")),
+        "capability_test": capability_summary,
     }
     rendered_prompt, prompt_diagnostics = render_workflow_gap_test_prompt(
         workflow_id=WORKFLOW_GAP_TEST_WORKFLOW_ID,
@@ -1052,10 +1312,23 @@ def _handle_run_candidate_test(request: WorkflowActionRequest) -> WorkflowAction
             "reason": "Workflow-gap test prompt unavailable.",
             "prompt_diagnostics": prompt_diagnostics,
         }
+        actionable_escalation = _build_actionable_escalation_message(
+            attempt_count=int(request.data.get("workflow_gap_repair_attempt_count") or 0),
+            capability_summary=capability_summary,
+            acceptance_report=report,
+        )
         return WorkflowActionResult(
             status="success",
             outputs={
                 "workflow_gap_test_passed": False,
+                "workflow_gap_test_error": "workflow_gap_test_prompt_unavailable",
+                "workflow_gap_capability_test": capability_summary,
+                "workflow_gap_failure_evidence": {
+                    "schema_version": "workflow_gap_failure_evidence.v1",
+                    "capability_test": capability_summary,
+                    "acceptance_test": report,
+                },
+                "workflow_gap_actionable_escalation": actionable_escalation,
                 "workflow_gap_test_response_text": candidate_response_text,
                 "workflow_gap_test_tool_invocations": candidate_tool_invocations,
                 "workflow_gap_test_tool_messages": candidate_tool_messages,
@@ -1096,10 +1369,42 @@ def _handle_run_candidate_test(request: WorkflowActionRequest) -> WorkflowAction
         "parse_mode": parse_mode,
         "prompt_diagnostics": prompt_diagnostics,
     }
+    capability_passed = bool(capability_summary.get("passed"))
+    overall_test_passed = bool(test_report["pass"]) and capability_passed
+    if not overall_test_passed and not _clean_text(test_report.get("reason")):
+        test_report["reason"] = (
+            "Candidate failed capability execution workflow validation."
+            if not capability_passed
+            else "Candidate failed workflow-gap acceptance evaluation."
+        )
+    failure_evidence = {
+        "schema_version": "workflow_gap_failure_evidence.v1",
+        "capability_test": capability_summary,
+        "acceptance_test": test_report,
+    }
+    actionable_escalation = _build_actionable_escalation_message(
+        attempt_count=int(request.data.get("workflow_gap_repair_attempt_count") or 0),
+        capability_summary=capability_summary,
+        acceptance_report=test_report,
+    )
     return WorkflowActionResult(
         status="success",
         outputs={
-            "workflow_gap_test_passed": bool(test_report["pass"]),
+            "workflow_gap_test_passed": overall_test_passed,
+            "workflow_gap_last_test_attempt_count": int(
+                request.data.get("workflow_gap_repair_attempt_count") or 0
+            ),
+            "workflow_gap_test_error": (
+                _clean_text(capability_summary.get("error"))
+                or (
+                    _clean_text(test_report.get("reason"))
+                    if not overall_test_passed
+                    else None
+                )
+            ),
+            "workflow_gap_capability_test": capability_summary,
+            "workflow_gap_failure_evidence": failure_evidence,
+            "workflow_gap_actionable_escalation": actionable_escalation,
             "workflow_gap_test_response_text": candidate_response_text,
             "workflow_gap_test_tool_invocations": candidate_tool_invocations,
             "workflow_gap_test_tool_messages": candidate_tool_messages,
@@ -1139,6 +1444,15 @@ def _handle_finalise_recovery(request: WorkflowActionRequest) -> WorkflowActionR
         max_items=24,
     )
     outcome = "no_gap"
+    try:
+        attempt_count = int(context.get("workflow_gap_repair_attempt_count") or 0)
+    except Exception:
+        attempt_count = 0
+    attempts_exhausted = bool(context.get("workflow_gap_repair_attempts_exhausted"))
+    actionable_escalation = _clean_text(
+        context.get("workflow_gap_actionable_escalation")
+    ) or None
+    failure_evidence = _mapping_or_empty(context.get("workflow_gap_failure_evidence"))
     if decision == "create_and_retry" and bool(context.get("workflow_gap_test_passed")):
         final_response_text = _clean_text(context.get("workflow_gap_test_response_text"))
         final_extra_messages = _coerce_mapping_list(
@@ -1150,6 +1464,25 @@ def _handle_finalise_recovery(request: WorkflowActionRequest) -> WorkflowActionR
             max_items=32,
         )
         outcome = "candidate_retried_successfully"
+    elif decision == "create_and_retry" and attempts_exhausted:
+        test_report = (
+            dict(context.get("workflow_gap_test_report") or {})
+            if isinstance(context.get("workflow_gap_test_report"), Mapping)
+            else {}
+        )
+        failure_reason = _clean_text(test_report.get("reason")) or _clean_text(
+            context.get("candidate_creation_error")
+        )
+        candidate_label = candidate_workflow_name or candidate_workflow_id or "candidate workflow"
+        final_response_text = (
+            f"{base_response_text}\n\n"
+            f"I exhausted the bounded workflow-gap repair loop after {attempt_count} attempts."
+            f" Candidate: {candidate_label}."
+            f"{f' Latest failure: {failure_reason}.' if failure_reason else ''}"
+            f"{f' {actionable_escalation}.' if actionable_escalation else ''}"
+            " Please review the proposal/evidence before promoting or retrying manually."
+        ).strip()
+        outcome = "candidate_repair_exhausted"
     elif decision == "ask_user" and candidate_workflow_id:
         summary = _clean_text(analysis_result.get("gap_summary"))
         confirmation_prompt = _clean_text(analysis_result.get("user_confirmation_prompt"))
@@ -1174,6 +1507,7 @@ def _handle_finalise_recovery(request: WorkflowActionRequest) -> WorkflowActionR
             f"I created candidate workflow {candidate_label} ({candidate_workflow_id}), "
             "but the immediate test did not satisfy the explicit acceptance requirements."
             f"{f' Reason: {failure_reason}' if failure_reason else ''}"
+            f"{f' {actionable_escalation}' if actionable_escalation else ''}"
         ).strip()
         outcome = "candidate_created_test_failed"
 
@@ -1184,6 +1518,10 @@ def _handle_finalise_recovery(request: WorkflowActionRequest) -> WorkflowActionR
         "workflow_gap_final_tool_invocations": final_tool_invocations,
         "workflow_gap_candidate_workflow_id": candidate_workflow_id or None,
         "workflow_gap_candidate_prompt_concept_id": candidate_prompt_concept_id or None,
+        "workflow_gap_repair_attempt_count": attempt_count,
+        "workflow_gap_repair_attempts_exhausted": attempts_exhausted,
+        "workflow_gap_actionable_escalation": actionable_escalation,
+        "workflow_gap_failure_evidence": failure_evidence or None,
     }
     if prompt_link_error:
         outputs["workflow_gap_candidate_prompt_link_error"] = prompt_link_error
@@ -1327,6 +1665,11 @@ def build_workflow_discovery_gap_recovery_workflow_test_definition() -> Workflow
         ),
         transitions=(
             WorkflowTransitionSpec(
+                to_state="prepare_candidate",
+                condition=lambda ctx: bool(ctx.get("workflow_gap_should_repair_candidate_now")),
+                reason="repair_candidate_again",
+            ),
+            WorkflowTransitionSpec(
                 to_state="test_candidate",
                 condition=lambda ctx: bool(ctx.get("workflow_gap_should_test_candidate_now")),
                 reason="test_candidate_now",
@@ -1393,6 +1736,11 @@ def build_workflow_discovery_gap_recovery_workflow_test_definition() -> Workflow
             ),
         ),
         transitions=(
+            WorkflowTransitionSpec(
+                to_state="decide_test",
+                condition=lambda ctx: not bool(ctx.get("workflow_gap_test_passed")),
+                reason="candidate_test_requires_repair_decision",
+            ),
             WorkflowTransitionSpec(
                 to_state="complete",
                 condition=lambda _ctx: True,

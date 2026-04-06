@@ -8,6 +8,7 @@ from src.backend.services.testing_workflow_contracts import (
 )
 from src.backend.services.workflow_materialisation_diagnostics_service import (
     TESTING_TYPE_CONCEPT_IDS,
+    build_workflow_concept_parity_audit,
     build_workflow_materialisation_diagnostics,
 )
 
@@ -196,3 +197,69 @@ def test_workflow_materialisation_diagnostics_classifies_fresh_test_db(
     assert payload["testing_type_parity"]["required_concept_ids"] == list(
         TESTING_TYPE_CONCEPT_IDS
     )
+
+
+def test_workflow_concept_parity_audit_summarises_state_counts(monkeypatch) -> None:
+    import src.backend.services.workflow_materialisation_diagnostics_service as service
+
+    monkeypatch.setattr(
+        service,
+        "build_workflow_materialisation_diagnostics",
+        lambda **_kwargs: {
+            "success": True,
+            "generated_at_utc": "2026-04-07T00:00:00+00:00",
+            "required_concept_ids": [
+                "#V#alpha_workflow",
+                "#V#beta_workflow",
+                "#V#gamma_workflow",
+            ],
+            "classification": {
+                "state": "missing_authority",
+                "ready_for_authoritative_checks": True,
+            },
+            "environment": {"configured_database_name": "von_db"},
+            "durable_workflow_startup": {"state": "ready"},
+            "workflow_bootstrap": {"summary": {"testing_workflow_bootstrap": {"success": True}}},
+            "parity_inventory": {"build_state": "ready"},
+            "testing_type_parity": {"missing_concept_ids": []},
+            "required_concepts": [
+                {
+                    "concept_id": "#V#alpha_workflow",
+                    "exists": True,
+                    "diagnostic_state": "present",
+                },
+                {
+                    "concept_id": "#V#beta_workflow",
+                    "exists": False,
+                    "diagnostic_state": "absent_missing_authority",
+                },
+                {
+                    "concept_id": "#V#gamma_workflow",
+                    "exists": True,
+                    "diagnostic_state": "authority_drift",
+                },
+            ],
+            "errors": [],
+        },
+    )
+
+    payload = build_workflow_concept_parity_audit(
+        concept_ids=["#V#alpha_workflow", "#V#beta_workflow", "#V#gamma_workflow"]
+    )
+
+    assert payload["success"] is True
+    assert payload["schema_version"] == "workflow_concept_parity_audit.v1"
+    assert payload["summary"] == {
+        "audited_count": 3,
+        "present_count": 2,
+        "missing_count": 1,
+        "authority_drift_count": 1,
+        "diagnostic_state_counts": {
+            "present": 1,
+            "absent_missing_authority": 1,
+            "authority_drift": 1,
+        },
+        "classification_state": "missing_authority",
+        "ready_for_authoritative_checks": True,
+    }
+    assert payload["concepts"][1]["concept_id"] == "#V#beta_workflow"

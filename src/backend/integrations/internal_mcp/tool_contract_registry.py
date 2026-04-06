@@ -173,6 +173,7 @@ VONTOLOGY_STDIO_EXPOSED_TOOL_NAMES: tuple[str, ...] = (
     "workflow_list_instances",
     "workflow_list_schedules",
     "workflow_mcp_health_check",
+    "workflow_concept_parity_audit",
     "workflow_materialisation_diagnostics",
     "workflow_retry_instance",
     "workflow_set_event_binding_enabled",

@@ -12666,6 +12666,12 @@ body.settings-body {
     min-height: 110px;
 }
 
+.workflow-studio-field textarea[data-policy-field] {
+    min-height: 150px;
+    font-family: Consolas, 'Courier New', monospace;
+    font-size: 0.88rem;
+}
+
 .workflow-studio-sidebar-actions {
     display: flex;
     justify-content: space-between;
@@ -13022,6 +13028,11 @@ body.settings-body {
 .workflow-studio-callout.info {
     background: #ede9fe;
     color: #5b21b6;
+}
+
+.workflow-studio-callout.success {
+    background: #dcfce7;
+    color: #166534;
 }
 
 .workflow-studio-button-row.anchored {

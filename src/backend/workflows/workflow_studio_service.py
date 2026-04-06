@@ -1,12 +1,23 @@
 from __future__ import annotations
 
+import json
 import logging
+import uuid
 from collections.abc import Mapping, Sequence
+from datetime import datetime, timezone
 from typing import Any
 
 from ..db.transient_errors import is_transient_mongo_error
 from ..languagemodels.llm_interface import get_active_model_name, get_llm_client
 from ..prompt.annotation_prompt import AnnotationPromptBuilder
+from ..services.text_value_service import (
+    get_texts_for_concept,
+    upsert_singleton_text_relation,
+)
+from ..services.workflow_authoring_vontology_service import (
+    build_workflow_authoring_prompt_contract,
+    get_workflow_authoring_prompt_health_status,
+)
 from ..services.workflow_description_vontology_service import (
     WORKFLOW_DESCRIPTION_PROMPT_CONCEPT_ID,
     build_deterministic_workflow_description,
@@ -26,18 +37,23 @@ from ..services.workflow_event_integration_service import (
     build_event_workflow_binding_diagnostics,
 )
 from .durable.registry_factory import (
-    build_durable_workflow_registry_read_only,
     get_or_build_workflow_registry_inventory_snapshot,
     get_shared_durable_action_registry,
+    get_shared_workflow_registry_read_only,
 )
-from .durable.models import WorkflowInstanceStatus
+from .durable.models import ScheduleType, WorkflowInstanceStatus, WorkflowSchedule
 from .durable.startup import get_instance_manager
 from .trace_store import list_recent_workflow_execution_traces
 from .vontology_loader import (
     build_workflow_process_graph,
     build_workflow_process_graph_from_definition,
     load_workflow_definition_from_vontology,
+    resolve_workflow_background_launch_policy,
+    resolve_workflow_discovery_exemplars,
+    resolve_workflow_launch_input_contract,
     resolve_workflow_narrative_text,
+    resolve_workflow_publication_lifecycle,
+    resolve_workflow_routing_profile,
 )
 from .workflow_authoring_service import (
     build_workflow_definition_from_authoring_spec,
@@ -45,6 +61,12 @@ from .workflow_authoring_service import (
 )
 from .workflow_concept_authority_service import (
     publish_workflow_definition_from_definition,
+    upsert_workflow_json_policy_text,
+    upsert_workflow_publication_lifecycle,
+    WORKFLOW_BACKGROUND_LAUNCH_POLICY_TEXT_PREDICATE,
+    WORKFLOW_DISCOVERY_EXEMPLARS_TEXT_PREDICATE,
+    WORKFLOW_LAUNCH_INPUT_CONTRACT_TEXT_PREDICATE,
+    WORKFLOW_ROUTING_PROFILE_TEXT_PREDICATE,
 )
 from .workflow_definition_identity_service import (
     build_workflow_definition_identity,
@@ -59,6 +81,13 @@ _TRANSIENT_INSTANCE_ERROR_MARKERS = ("temporarily unavailable",)
 _WORKFLOW_STUDIO_AI_PROPOSAL_MIN_LENGTH = 20
 _WORKFLOW_CANDIDATE_VALIDATION_PROFILE_CONTRACT_ONLY = "contract_only"
 _WORKFLOW_CANDIDATE_VALIDATION_PROFILE_GENERATION_SAFE = "generation_safe"
+_WORKFLOW_AUTHORING_PROPOSAL_SCHEMA_VERSION = "workflow_authoring_proposal.v1"
+_WORKFLOW_AUTHORING_PROPOSAL_TEXT_PREDICATE = "#V#hasWorkflowAuthoringProposalJson"
+_WORKFLOW_AUTHORING_PROPOSAL_STATUS_PENDING_REVIEW = "pending_review"
+_WORKFLOW_AUTHORING_PROPOSAL_STATUS_APPROVED = "approved"
+_WORKFLOW_AUTHORING_PROPOSAL_STATUS_REJECTED = "rejected"
+_WORKFLOW_AUTHORING_PROPOSAL_STATUS_ROLLED_BACK = "rolled_back"
+_WORKFLOW_ROUTING_ROLE_VALUES = {"execution", "authoring", "maintenance"}
 
 
 class WorkflowStudioConflictError(RuntimeError):
@@ -79,6 +108,51 @@ def _as_list_of_mappings(value: Any) -> list[dict[str, Any]]:
     return [dict(item) for item in value if isinstance(item, Mapping)]
 
 
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _clean_string_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        raw_values = [item.strip() for item in value.split(",")]
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        raw_values = [str(item or "").strip() for item in value]
+    else:
+        return []
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in raw_values:
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        cleaned.append(item)
+    return cleaned
+
+
+def _json_roundtrip(value: Any) -> Any:
+    return json.loads(json.dumps(value))
+
+
+def _coerce_bool(value: Any, *, default: bool | None = None) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        cleaned = value.strip().lower()
+        if cleaned in {"1", "true", "yes", "on"}:
+            return True
+        if cleaned in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
+def _coerce_positive_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except Exception:
+        return None
+    return parsed if parsed > 0 else None
+
+
 def _is_retryable_instance_error(exc: Exception) -> bool:
     if is_transient_mongo_error(exc):
         return True
@@ -91,7 +165,7 @@ def _workflow_definition_loader(workflow_id: str):
     if not workflow_id_clean:
         return None
     try:
-        registry = build_durable_workflow_registry_read_only(defer_parity_work=True)
+        registry = get_shared_workflow_registry_read_only(defer_parity_work=True)
         definition = registry.get(workflow_id_clean)
         if definition is not None:
             return definition
@@ -116,7 +190,7 @@ def _load_runtime_definition(
     workflow_id: str,
 ) -> tuple[Any | None, str, Any]:
     workflow_id_clean = _clean_text(workflow_id)
-    registry = build_durable_workflow_registry_read_only(defer_parity_work=True)
+    registry = get_shared_workflow_registry_read_only(defer_parity_work=True)
     definition = None
     source = "unknown"
     try:
@@ -153,7 +227,7 @@ def build_workflow_catalogue_payload(
     turn_id: str | None,
     include_designs: bool = True,
 ) -> dict[str, Any]:
-    registry = build_durable_workflow_registry_read_only(defer_parity_work=True)
+    registry = get_shared_workflow_registry_read_only(defer_parity_work=True)
     inventory_snapshot = get_or_build_workflow_registry_inventory_snapshot(
         registry=registry,
         allow_sync_build=False,
@@ -176,6 +250,7 @@ def build_workflow_catalogue_payload(
         listing_entry = build_workflow_listing_entry(
             registry=registry,
             workflow_id=workflow_id,
+            resolve_vontology_metadata=False,
         )
         usage = (
             usage_aggregate_map.get(workflow_id, {})
@@ -370,8 +445,7 @@ def _build_operations_payload(workflow_id: str) -> dict[str, Any]:
 
     schedules = [
         schedule.to_status_dict()
-        for schedule in manager.list_schedules(limit=200)
-        if _clean_text(getattr(schedule, "workflow_id", "")) == workflow_id
+        for schedule in manager.list_schedules(workflow_id=workflow_id, limit=200)
     ]
 
     all_bindings = [
@@ -451,19 +525,519 @@ def _build_operations_payload(workflow_id: str) -> dict[str, Any]:
     }
 
 
+def _build_current_policy_payload(workflow_id: str) -> dict[str, Any]:
+    publication_lifecycle, publication_lifecycle_source = (
+        resolve_workflow_publication_lifecycle(workflow_id)
+    )
+    routing_profile, routing_profile_source = resolve_workflow_routing_profile(
+        workflow_id
+    )
+    discovery_exemplars, discovery_exemplars_source = (
+        resolve_workflow_discovery_exemplars(workflow_id)
+    )
+    background_launch_policy, background_launch_policy_source = (
+        resolve_workflow_background_launch_policy(workflow_id)
+    )
+    launch_input_contract, launch_input_contract_source = (
+        resolve_workflow_launch_input_contract(workflow_id)
+    )
+    return {
+        "publication_lifecycle": _as_mapping(publication_lifecycle),
+        "publication_lifecycle_source": publication_lifecycle_source,
+        "routing_profile": _as_mapping(routing_profile),
+        "routing_profile_source": routing_profile_source,
+        "discovery_exemplars": _as_mapping(discovery_exemplars),
+        "discovery_exemplars_source": discovery_exemplars_source,
+        "background_launch_policy": _as_mapping(background_launch_policy),
+        "background_launch_policy_source": background_launch_policy_source,
+        "launch_input_contract": _as_mapping(launch_input_contract),
+        "launch_input_contract_source": launch_input_contract_source,
+    }
+
+
+def _build_authoring_spec_with_policy_metadata(
+    *,
+    authoring_spec: Mapping[str, Any],
+    policy_payload: Mapping[str, Any] | None,
+    operations_payload: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    spec = _json_roundtrip(dict(authoring_spec))
+    if not isinstance(spec, dict):
+        spec = dict(authoring_spec)
+    workflow_metadata = _as_mapping(spec.get("workflow_metadata"))
+    policy = _as_mapping(policy_payload)
+    for key in (
+        "routing_profile",
+        "discovery_exemplars",
+        "background_launch_policy",
+        "launch_input_contract",
+    ):
+        value = policy.get(key)
+        if isinstance(value, Mapping) and value:
+            workflow_metadata[key] = _json_roundtrip(dict(value))
+    operations = _as_mapping(operations_payload)
+    bindings = _as_mapping(operations.get("bindings"))
+    schedules = _as_mapping(operations.get("schedules"))
+    if isinstance(bindings.get("items"), list) and bindings.get("items"):
+        workflow_metadata.setdefault(
+            "event_bindings",
+            _json_roundtrip(bindings.get("items")),
+        )
+    if isinstance(schedules.get("items"), list) and schedules.get("items"):
+        workflow_metadata.setdefault(
+            "schedule_specs",
+            _json_roundtrip(schedules.get("items")),
+        )
+    if workflow_metadata:
+        spec["workflow_metadata"] = workflow_metadata
+    return spec
+
+
+def _load_workflow_authoring_proposal(workflow_id: str) -> dict[str, Any] | None:
+    rows = get_texts_for_concept(
+        subject_concept_id=workflow_id,
+        predicate=_WORKFLOW_AUTHORING_PROPOSAL_TEXT_PREDICATE,
+        limit=1,
+    )
+    if not isinstance(rows, list) or not rows:
+        return None
+    text = _clean_text((rows[0] or {}).get("text"))
+    if not text:
+        return None
+    try:
+        payload = json.loads(text)
+    except Exception:
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    return {str(key): value for key, value in payload.items() if str(key).strip()}
+
+
+def _store_workflow_authoring_proposal(
+    workflow_id: str,
+    proposal_payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    payload = _json_roundtrip(dict(proposal_payload))
+    upsert_singleton_text_relation(
+        subject_concept_id=workflow_id,
+        predicate=_WORKFLOW_AUTHORING_PROPOSAL_TEXT_PREDICATE,
+        text=json.dumps(payload, ensure_ascii=True, sort_keys=True),
+        lang="en-NZ",
+        context={"source": "workflow_studio_service"},
+        garbage_collect=True,
+    )
+    return payload if isinstance(payload, dict) else dict(proposal_payload)
+
+
+def _proposal_summary(proposal_payload: Mapping[str, Any] | None) -> dict[str, Any]:
+    proposal = _as_mapping(proposal_payload)
+    if not proposal:
+        return {"available": False, "active": False}
+    status = _clean_text(proposal.get("status")) or "unknown"
+    candidate_validation = _as_mapping(proposal.get("candidate_validation"))
+    preview_summary = _as_mapping(proposal.get("preview_summary"))
+    return {
+        "available": True,
+        "active": status == _WORKFLOW_AUTHORING_PROPOSAL_STATUS_PENDING_REVIEW,
+        "proposal_id": _clean_text(proposal.get("proposal_id")) or None,
+        "status": status,
+        "created_at_utc": proposal.get("created_at_utc"),
+        "updated_at_utc": proposal.get("updated_at_utc"),
+        "created_by": proposal.get("created_by"),
+        "reviewed_at_utc": proposal.get("reviewed_at_utc"),
+        "reviewed_by": proposal.get("reviewed_by"),
+        "review_reason": _clean_text(proposal.get("review_reason")) or None,
+        "candidate_validation": candidate_validation or None,
+        "preview_summary": preview_summary or None,
+        "authoring_spec": proposal.get("authoring_spec")
+        if isinstance(proposal.get("authoring_spec"), Mapping)
+        else None,
+        "previous_authoring_spec_available": isinstance(
+            proposal.get("previous_authoring_spec"),
+            Mapping,
+        ),
+    }
+
+
+def _normalise_routing_profile(value: Any) -> dict[str, Any] | None:
+    raw = _as_mapping(value)
+    if not raw:
+        return None
+    role = _clean_text(raw.get("role")).lower().replace("-", "_")
+    if role not in _WORKFLOW_ROUTING_ROLE_VALUES:
+        return None
+    payload = {
+        "schema_version": "workflow_routing_profile.v1",
+        "role": role,
+        "authoring_intent_required": bool(
+            _coerce_bool(raw.get("authoring_intent_required"), default=role == "authoring")
+        ),
+        "explicit_workflow_context_required": bool(
+            _coerce_bool(
+                raw.get("explicit_workflow_context_required"),
+                default=role == "maintenance",
+            )
+        ),
+        "prefer_existing_capability": bool(
+            _coerce_bool(raw.get("prefer_existing_capability"), default=role == "authoring")
+        ),
+    }
+    routing_eligible = _coerce_bool(raw.get("routing_eligible"))
+    if routing_eligible is not None:
+        payload["routing_eligible"] = routing_eligible
+    return payload
+
+
+def _normalise_discovery_exemplars(value: Any) -> dict[str, Any] | None:
+    raw = _as_mapping(value)
+    if not raw:
+        return None
+    keywords = _clean_string_list(raw.get("keywords"))
+    examples = _clean_string_list(raw.get("examples") or raw.get("exemplars"))
+    if not keywords and not examples:
+        return None
+    return {
+        "schema_version": "workflow_discovery_exemplars.v1",
+        "keywords": keywords,
+        "examples": examples,
+    }
+
+
+def _normalise_background_launch_policy(value: Any) -> dict[str, Any] | None:
+    raw = _as_mapping(value)
+    if not raw:
+        return None
+    interval_seconds = _coerce_positive_int(raw.get("min_interval_seconds"))
+    if interval_seconds is None:
+        interval_minutes = _coerce_positive_int(raw.get("min_interval_minutes"))
+        if interval_minutes is not None:
+            interval_seconds = interval_minutes * 60
+    enabled = bool(
+        _coerce_bool(raw.get("enabled"), default=bool(interval_seconds))
+    )
+    return {
+        "schema_version": "workflow_background_launch_policy.v1",
+        "enabled": enabled and bool(interval_seconds),
+        "min_interval_seconds": interval_seconds or 0,
+        "scope": _clean_text(raw.get("scope")) or "global_per_server",
+        "applies_to_sources": _clean_string_list(
+            raw.get("applies_to_sources") or raw.get("applies_to")
+        )
+        or ["event"],
+    }
+
+
+def _normalise_launch_input_contract(value: Any) -> dict[str, Any] | None:
+    raw = _as_mapping(value)
+    return raw or None
+
+
+def _normalise_event_binding_specs(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return []
+    specs: list[dict[str, Any]] = []
+    for item in value:
+        raw = _as_mapping(item)
+        event_type = _clean_text(raw.get("event_type"))
+        if not event_type:
+            continue
+        input_mapping_raw = _as_mapping(raw.get("input_mapping"))
+        input_mapping = {
+            _clean_text(key): _clean_text(value)
+            for key, value in input_mapping_raw.items()
+            if _clean_text(key) and _clean_text(value)
+        }
+        specs.append(
+            {
+                "event_type": event_type,
+                "input_mapping": input_mapping,
+                "enabled": bool(_coerce_bool(raw.get("enabled"), default=True)),
+            }
+        )
+    return specs
+
+
+def _normalise_schedule_specs(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return []
+    specs: list[dict[str, Any]] = []
+    for item in value:
+        raw = _as_mapping(item)
+        schedule_type = _clean_text(raw.get("schedule_type")).lower()
+        if schedule_type not in {"interval", "cron", "once"}:
+            continue
+        row: dict[str, Any] = {
+            "schedule_type": schedule_type,
+            "enabled": bool(_coerce_bool(raw.get("enabled"), default=True)),
+            "description": _clean_text(raw.get("description")) or None,
+            "default_inputs": _as_mapping(raw.get("default_inputs")),
+        }
+        interval_seconds = _coerce_positive_int(raw.get("interval_seconds"))
+        if interval_seconds is not None:
+            row["interval_seconds"] = interval_seconds
+        cron_expression = _clean_text(raw.get("cron_expression"))
+        if cron_expression:
+            row["cron_expression"] = cron_expression
+        run_at = _clean_text(raw.get("run_at"))
+        if run_at:
+            row["run_at"] = run_at
+        specs.append(row)
+    return specs
+
+
+def _metadata_routing_eligible(
+    *,
+    publication_lifecycle: Mapping[str, Any] | None,
+    routing_profile: Mapping[str, Any] | None,
+) -> bool:
+    lifecycle = _as_mapping(publication_lifecycle)
+    if isinstance(lifecycle.get("routing_eligible"), bool):
+        return bool(lifecycle.get("routing_eligible"))
+    profile = _as_mapping(routing_profile)
+    if isinstance(profile.get("routing_eligible"), bool):
+        return bool(profile.get("routing_eligible"))
+    return bool(lifecycle.get("published", True))
+
+
+def _lifecycle_passthrough(lifecycle: Mapping[str, Any] | None) -> dict[str, Any]:
+    current = _as_mapping(lifecycle)
+    passthrough: dict[str, Any] = {}
+    for key in (
+        "validation_passed",
+        "postconditions_verified",
+        "optional_test_instance_id",
+        "last_error",
+        "review_state",
+        "review_reason",
+        "reviewed_at",
+        "reviewed_by",
+        "proposal_id",
+        "proposal_source_session_id",
+        "proposal_source_turn_id",
+        "experiment_run_id",
+        "supersedes_workflow_id",
+        "superseded_by_workflow_id",
+        "routing_eligible",
+        "rollout_state",
+        "approval_required",
+        "promotion_decision",
+        "event_binding_ids",
+        "schedule_ids",
+    ):
+        if key in current:
+            passthrough[key] = current.get(key)
+    return passthrough
+
+
+def _apply_workflow_policy_metadata(
+    *,
+    workflow_id: str,
+    workflow_metadata: Mapping[str, Any] | None,
+    user_id: str | None = None,
+    org_id: str | None = None,
+    namespace: str | None = None,
+) -> dict[str, Any]:
+    metadata = _as_mapping(workflow_metadata)
+    manager = get_instance_manager()
+    applied: dict[str, Any] = {
+        "routing_profile": None,
+        "discovery_exemplars": None,
+        "background_launch_policy": None,
+        "launch_input_contract": None,
+        "event_binding_ids": [],
+        "schedule_ids": [],
+        "disabled_binding_ids": [],
+        "disabled_schedule_ids": [],
+    }
+
+    routing_profile = _normalise_routing_profile(metadata.get("routing_profile"))
+    if routing_profile is not None:
+        applied["routing_profile"] = upsert_workflow_json_policy_text(
+            workflow_id=workflow_id,
+            predicate=WORKFLOW_ROUTING_PROFILE_TEXT_PREDICATE,
+            payload=routing_profile,
+            context={"source": "workflow_studio_service"},
+        )
+
+    discovery_exemplars = _normalise_discovery_exemplars(
+        metadata.get("discovery_exemplars")
+    )
+    if discovery_exemplars is not None:
+        applied["discovery_exemplars"] = upsert_workflow_json_policy_text(
+            workflow_id=workflow_id,
+            predicate=WORKFLOW_DISCOVERY_EXEMPLARS_TEXT_PREDICATE,
+            payload=discovery_exemplars,
+            context={"source": "workflow_studio_service"},
+        )
+
+    background_launch_policy = _normalise_background_launch_policy(
+        metadata.get("background_launch_policy")
+    )
+    if background_launch_policy is not None:
+        applied["background_launch_policy"] = upsert_workflow_json_policy_text(
+            workflow_id=workflow_id,
+            predicate=WORKFLOW_BACKGROUND_LAUNCH_POLICY_TEXT_PREDICATE,
+            payload=background_launch_policy,
+            context={"source": "workflow_studio_service"},
+        )
+
+    launch_input_contract = _normalise_launch_input_contract(
+        metadata.get("launch_input_contract")
+    )
+    if launch_input_contract is not None:
+        applied["launch_input_contract"] = upsert_workflow_json_policy_text(
+            workflow_id=workflow_id,
+            predicate=WORKFLOW_LAUNCH_INPUT_CONTRACT_TEXT_PREDICATE,
+            payload=launch_input_contract,
+            context={"source": "workflow_studio_service"},
+        )
+
+    if "event_bindings" in metadata:
+        desired_bindings = _normalise_event_binding_specs(metadata.get("event_bindings"))
+        existing_bindings = [
+            binding
+            for binding in manager.list_event_bindings(limit=500)
+            if _clean_text(getattr(binding, "workflow_id", "")) == workflow_id
+        ]
+        desired_event_types = {item["event_type"] for item in desired_bindings}
+        for binding in existing_bindings:
+            binding_id = _clean_text(getattr(binding, "binding_id", ""))
+            if (
+                binding_id
+                and _clean_text(getattr(binding, "event_type", "")) not in desired_event_types
+            ):
+                if manager.set_event_binding_enabled(binding_id, enabled=False):
+                    applied["disabled_binding_ids"].append(binding_id)
+        actor = _clean_text(user_id) or None
+        for spec in desired_bindings:
+            binding, _created, _updated = manager.upsert_event_binding(
+                event_type=spec["event_type"],
+                workflow_id=workflow_id,
+                input_mapping=spec["input_mapping"],
+                enabled=spec["enabled"],
+                actor=actor,
+                replace_existing=True,
+            )
+            binding_id = _clean_text(getattr(binding, "binding_id", ""))
+            if binding_id:
+                applied["event_binding_ids"].append(binding_id)
+
+    if "schedule_specs" in metadata:
+        desired_schedules = _normalise_schedule_specs(metadata.get("schedule_specs"))
+        existing_schedules = [
+            schedule
+            for schedule in manager.list_schedules(limit=200)
+            if _clean_text(getattr(schedule, "workflow_id", "")) == workflow_id
+        ]
+        for schedule in existing_schedules:
+            schedule_id = _clean_text(getattr(schedule, "schedule_id", ""))
+            if schedule_id and manager.set_schedule_enabled(schedule_id, False):
+                applied["disabled_schedule_ids"].append(schedule_id)
+        actor_user = _clean_text(user_id) or "workflow_studio"
+        actor_org = _clean_text(org_id) or "default"
+        actor_namespace = _clean_text(namespace) or actor_user or "#V#workflow_studio"
+        for spec in desired_schedules:
+            schedule_type = spec["schedule_type"]
+            default_inputs = _as_mapping(spec.get("default_inputs"))
+            description = _clean_text(spec.get("description")) or None
+            if schedule_type == "interval":
+                interval_seconds = _coerce_positive_int(spec.get("interval_seconds"))
+                if interval_seconds is None:
+                    continue
+                schedule = WorkflowSchedule.create_interval(
+                    workflow_id,
+                    interval_seconds,
+                    user_id=actor_user,
+                    org_id=actor_org,
+                    namespace=actor_namespace,
+                    default_inputs=default_inputs,
+                    description=description,
+                )
+            elif schedule_type == "cron":
+                cron_expression = _clean_text(spec.get("cron_expression"))
+                if not cron_expression:
+                    continue
+                schedule = WorkflowSchedule.create_cron(
+                    workflow_id,
+                    cron_expression,
+                    user_id=actor_user,
+                    org_id=actor_org,
+                    namespace=actor_namespace,
+                    default_inputs=default_inputs,
+                    description=description,
+                )
+            else:
+                run_at = _clean_text(spec.get("run_at"))
+                if not run_at:
+                    continue
+                try:
+                    run_at_dt = datetime.fromisoformat(run_at)
+                except Exception:
+                    continue
+                schedule = WorkflowSchedule.create_once(
+                    workflow_id,
+                    run_at_dt,
+                    user_id=actor_user,
+                    org_id=actor_org,
+                    namespace=actor_namespace,
+                    default_inputs=default_inputs,
+                    description=description,
+                )
+            schedule_id = manager.create_schedule(schedule)
+            if not spec.get("enabled", True):
+                manager.set_schedule_enabled(schedule_id, False)
+            applied["schedule_ids"].append(schedule_id)
+
+    return applied
+
+
+def _set_workflow_runtime_enablement(workflow_id: str, *, enabled: bool) -> dict[str, Any]:
+    manager = get_instance_manager()
+    binding_ids: list[str] = []
+    schedule_ids: list[str] = []
+    for binding in manager.list_event_bindings(limit=500):
+        if _clean_text(getattr(binding, "workflow_id", "")) != workflow_id:
+            continue
+        binding_id = _clean_text(getattr(binding, "binding_id", ""))
+        if binding_id and manager.set_event_binding_enabled(binding_id, enabled=enabled):
+            binding_ids.append(binding_id)
+    for schedule in manager.list_schedules(limit=200):
+        if _clean_text(getattr(schedule, "workflow_id", "")) != workflow_id:
+            continue
+        schedule_id = _clean_text(getattr(schedule, "schedule_id", ""))
+        if schedule_id and manager.set_schedule_enabled(schedule_id, enabled):
+            schedule_ids.append(schedule_id)
+    return {
+        "binding_ids": binding_ids,
+        "schedule_ids": schedule_ids,
+        "enabled": enabled,
+    }
+
+
 def _build_authoring_payload(
     *,
     workflow_id: str,
     definition: Any | None,
     source: str,
+    operations_payload: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    policy_payload = _build_current_policy_payload(workflow_id)
+    prompt_health = get_workflow_authoring_prompt_health_status()
     if definition is None:
         return {
             "available": False,
             "reason": "workflow_definition_not_loaded",
+            "policy": policy_payload,
+            "prompt_contract": build_workflow_authoring_prompt_contract(),
+            "prompt_health": prompt_health,
         }
 
     authoring_spec = serialise_workflow_definition_to_authoring_spec(definition)
+    authoring_spec = _build_authoring_spec_with_policy_metadata(
+        authoring_spec=authoring_spec,
+        policy_payload=policy_payload,
+        operations_payload=operations_payload,
+    )
     definition_identity = build_workflow_definition_identity(
         workflow_id=workflow_id,
         source=source,
@@ -475,7 +1049,7 @@ def _build_authoring_payload(
         definition=definition,
         supported_action_ids=action_registry.all_action_ids(),
         enforce_supported_actions=True,
-        known_workflow_ids=build_durable_workflow_registry_read_only(
+        known_workflow_ids=get_shared_workflow_registry_read_only(
             defer_parity_work=True
         ).all_workflow_ids(),
         workflow_definition_loader=_workflow_definition_loader,
@@ -485,6 +1059,9 @@ def _build_authoring_payload(
         "current_spec": authoring_spec,
         "base_definition_hash": definition_identity.get("definition_hash"),
         "validation": validation,
+        "policy": policy_payload,
+        "prompt_contract": build_workflow_authoring_prompt_contract(),
+        "prompt_health": prompt_health,
     }
 
 
@@ -541,9 +1118,13 @@ def build_workflow_studio_detail_payload(
     if not workflow_id_clean:
         raise ValueError("workflow_id is required")
 
-    definition_graph, warnings = build_workflow_process_graph(workflow_id_clean)
-    raw, raw_source = resolve_workflow_narrative_text(workflow_id_clean)
     runtime_definition, source, registry = _load_runtime_definition(workflow_id_clean)
+    if runtime_definition is not None:
+        definition_graph = build_workflow_process_graph_from_definition(runtime_definition)
+        warnings = list((definition_graph or {}).get("warnings") or [])
+    else:
+        definition_graph, warnings = build_workflow_process_graph(workflow_id_clean)
+    raw, raw_source = resolve_workflow_narrative_text(workflow_id_clean)
 
     listing_entry = build_workflow_listing_entry(
         registry=registry,
@@ -595,6 +1176,10 @@ def build_workflow_studio_detail_payload(
     )
 
     completion_rate = usage.get("completion_rate")
+    current_policy = _build_current_policy_payload(workflow_id_clean)
+    current_proposal = _proposal_summary(
+        _load_workflow_authoring_proposal(workflow_id_clean)
+    )
 
     return {
         "workflow_id": workflow_id_clean,
@@ -613,12 +1198,18 @@ def build_workflow_studio_detail_payload(
             "executability_reason": executability_reason,
             "executability_detail": executability_detail,
             "definition_identity": definition_identity,
+            "publication_lifecycle": current_policy.get("publication_lifecycle") or None,
+            "routing_profile": current_policy.get("routing_profile") or None,
         },
         "authority": {
             "authoritative_store": "vontology",
             "derived_view_model": "workflow_studio.read_model.v1",
             "preview_required": True,
-            "supported_edit_modes": ["authoring_spec", "workflow_description_proposal"],
+            "supported_edit_modes": [
+                "authoring_spec",
+                "workflow_description_proposal",
+                "authoring_proposal_review",
+            ],
             "runtime_source": source,
         },
         "views": {
@@ -634,7 +1225,9 @@ def build_workflow_studio_detail_payload(
             workflow_id=workflow_id_clean,
             definition=runtime_definition,
             source=source,
+            operations_payload=operations,
         ),
+        "proposal": current_proposal,
         "raw": raw,
         "raw_source": raw_source,
         "warnings": list(warnings or []),
@@ -680,7 +1273,9 @@ def _build_generation_safe_validation(
     warnings: list[dict[str, Any]] = []
 
     publication_spec = _as_mapping(authoring_spec.get("publication_spec"))
-    steps = publication_spec.get("steps")
+    steps = authoring_spec.get("steps")
+    if not isinstance(steps, Sequence) or isinstance(steps, (str, bytes, bytearray)):
+        steps = publication_spec.get("steps")
     if not isinstance(steps, Sequence) or isinstance(steps, (str, bytes, bytearray)):
         steps = []
 
@@ -923,7 +1518,7 @@ def preview_workflow_authoring_spec(
         raise ValueError("workflow_id_mismatch")
 
     action_registry = get_shared_durable_action_registry()
-    known_workflow_ids = build_durable_workflow_registry_read_only(
+    known_workflow_ids = get_shared_workflow_registry_read_only(
         defer_parity_work=True
     ).all_workflow_ids()
     contract_validation = validate_workflow_definition_contract(
@@ -998,6 +1593,485 @@ def apply_workflow_authoring_spec(
         "workflow_id": _clean_text(workflow_id),
         "publication": publication,
         "preview": _as_mapping(preview.get("preview")),
+    }
+
+
+def submit_workflow_authoring_proposal(
+    workflow_id: str,
+    *,
+    authoring_spec: Mapping[str, Any],
+    base_definition_hash: str | None = None,
+    session_id: str | None = None,
+    turn_id: str | None = None,
+    proposed_by: str | None = None,
+) -> dict[str, Any]:
+    workflow_id_clean = _clean_text(workflow_id)
+    preview_payload = preview_workflow_authoring_spec(
+        workflow_id_clean,
+        authoring_spec=authoring_spec,
+        base_definition_hash=base_definition_hash,
+    )
+    preview = _as_mapping(preview_payload.get("preview"))
+    validation_payload = validate_workflow_candidate(
+        workflow_id_clean,
+        authoring_spec=authoring_spec,
+        base_definition_hash=base_definition_hash,
+        include_preview=False,
+    )
+    candidate_validation = _as_mapping(validation_payload.get("candidate_validation"))
+    runtime_definition, runtime_source, _registry = _load_runtime_definition(
+        workflow_id_clean
+    )
+    current_spec = (
+        serialise_workflow_definition_to_authoring_spec(runtime_definition)
+        if runtime_definition is not None
+        else None
+    )
+    existing_proposal = _load_workflow_authoring_proposal(workflow_id_clean)
+    proposal_id = (
+        _clean_text((existing_proposal or {}).get("proposal_id"))
+        if _clean_text((existing_proposal or {}).get("status"))
+        == _WORKFLOW_AUTHORING_PROPOSAL_STATUS_PENDING_REVIEW
+        else ""
+    )
+    if not proposal_id:
+        proposal_id = str(uuid.uuid4())
+    proposal_payload = {
+        "schema_version": _WORKFLOW_AUTHORING_PROPOSAL_SCHEMA_VERSION,
+        "proposal_id": proposal_id,
+        "workflow_id": workflow_id_clean,
+        "status": _WORKFLOW_AUTHORING_PROPOSAL_STATUS_PENDING_REVIEW,
+        "created_at_utc": (
+            (existing_proposal or {}).get("created_at_utc") or _utc_now_iso()
+        ),
+        "updated_at_utc": _utc_now_iso(),
+        "created_by": _clean_text(proposed_by) or None,
+        "base_definition_hash": _clean_text(base_definition_hash) or None,
+        "runtime_source": runtime_source,
+        "authoring_spec": _json_roundtrip(
+            serialise_workflow_definition_to_authoring_spec(
+                build_workflow_definition_from_authoring_spec(authoring_spec)
+            )
+        ),
+        "candidate_validation": _json_roundtrip(candidate_validation),
+        "preview_summary": {
+            "definition_identity": _json_roundtrip(
+                _as_mapping(preview.get("definition_identity"))
+            ),
+            "diff_summary": _json_roundtrip(_as_mapping(preview.get("diff_summary"))),
+            "contract_validation": _json_roundtrip(
+                _as_mapping(preview.get("contract_validation"))
+            ),
+        },
+        "proposal_source_session_id": _clean_text(session_id) or None,
+        "proposal_source_turn_id": _clean_text(turn_id) or None,
+        "prompt_contract": build_workflow_authoring_prompt_contract(),
+        "prompt_health": get_workflow_authoring_prompt_health_status(),
+    }
+    if isinstance(existing_proposal, Mapping) and isinstance(
+        existing_proposal.get("previous_authoring_spec"),
+        Mapping,
+    ):
+        proposal_payload["previous_authoring_spec"] = _json_roundtrip(
+            existing_proposal.get("previous_authoring_spec")
+        )
+    elif current_spec is not None:
+        proposal_payload["previous_authoring_spec"] = _json_roundtrip(current_spec)
+
+    stored_proposal = _store_workflow_authoring_proposal(
+        workflow_id_clean,
+        proposal_payload,
+    )
+    current_lifecycle, _current_lifecycle_source = resolve_workflow_publication_lifecycle(
+        workflow_id_clean
+    )
+    lifecycle = _as_mapping(current_lifecycle)
+    upsert_workflow_publication_lifecycle(
+        workflow_id=workflow_id_clean,
+        phase=_clean_text(lifecycle.get("phase")) or "published",
+        published=bool(lifecycle.get("published", True)),
+        validation_passed=lifecycle.get("validation_passed")
+        if isinstance(lifecycle.get("validation_passed"), bool)
+        else None,
+        postconditions_verified=lifecycle.get("postconditions_verified")
+        if isinstance(lifecycle.get("postconditions_verified"), bool)
+        else None,
+        optional_test_instance_id=_clean_text(lifecycle.get("optional_test_instance_id"))
+        or None,
+        last_error=None,
+        review_state=_WORKFLOW_AUTHORING_PROPOSAL_STATUS_PENDING_REVIEW,
+        review_reason=None,
+        proposal_id=_clean_text(stored_proposal.get("proposal_id")) or None,
+        proposal_source_session_id=_clean_text(session_id) or None,
+        proposal_source_turn_id=_clean_text(turn_id) or None,
+        approval_required=True,
+        routing_eligible=bool(lifecycle.get("routing_eligible", lifecycle.get("published", True))),
+        rollout_state=_clean_text(lifecycle.get("rollout_state")) or "proposal_pending_review",
+        event_binding_ids=_clean_string_list(lifecycle.get("event_binding_ids")),
+        schedule_ids=_clean_string_list(lifecycle.get("schedule_ids")),
+    )
+    return {
+        "success": True,
+        "workflow_id": workflow_id_clean,
+        "proposal": _proposal_summary(stored_proposal),
+        "candidate_validation": candidate_validation,
+        "guardrails": {
+            "preview_required": True,
+            "approval_required": True,
+            "publishes_to_vontology": False,
+        },
+        "next_step": "approval",
+    }
+
+
+def review_workflow_authoring_proposal(
+    workflow_id: str,
+    *,
+    action: str,
+    review_reason: str | None = None,
+    reviewed_by: str | None = None,
+    user_id: str | None = None,
+    org_id: str | None = None,
+    namespace: str | None = None,
+) -> dict[str, Any]:
+    workflow_id_clean = _clean_text(workflow_id)
+    review_action = _clean_text(action).lower()
+    if review_action not in {"approve", "reject"}:
+        raise ValueError("review_action_invalid")
+    proposal = _load_workflow_authoring_proposal(workflow_id_clean)
+    if not isinstance(proposal, Mapping):
+        raise ValueError("workflow_authoring_proposal_missing")
+    proposal_payload = _as_mapping(proposal)
+    authoring_spec_raw = proposal_payload.get("authoring_spec")
+    authoring_spec = (
+        dict(authoring_spec_raw)
+        if isinstance(authoring_spec_raw, Mapping)
+        else None
+    )
+    if review_action == "approve" and authoring_spec is None:
+        raise ValueError("workflow_authoring_proposal_authoring_spec_missing")
+
+    current_lifecycle, _current_lifecycle_source = resolve_workflow_publication_lifecycle(
+        workflow_id_clean
+    )
+    lifecycle = _as_mapping(current_lifecycle)
+
+    if review_action == "reject":
+        proposal_payload["status"] = _WORKFLOW_AUTHORING_PROPOSAL_STATUS_REJECTED
+        proposal_payload["reviewed_at_utc"] = _utc_now_iso()
+        proposal_payload["reviewed_by"] = _clean_text(reviewed_by) or None
+        proposal_payload["review_reason"] = _clean_text(review_reason) or None
+        proposal_payload["updated_at_utc"] = _utc_now_iso()
+        stored_proposal = _store_workflow_authoring_proposal(
+            workflow_id_clean,
+            proposal_payload,
+        )
+        upsert_workflow_publication_lifecycle(
+            workflow_id=workflow_id_clean,
+            phase=_clean_text(lifecycle.get("phase")) or "published",
+            published=bool(lifecycle.get("published", True)),
+            validation_passed=lifecycle.get("validation_passed")
+            if isinstance(lifecycle.get("validation_passed"), bool)
+            else None,
+            postconditions_verified=lifecycle.get("postconditions_verified")
+            if isinstance(lifecycle.get("postconditions_verified"), bool)
+            else None,
+            optional_test_instance_id=_clean_text(
+                lifecycle.get("optional_test_instance_id")
+            )
+            or None,
+            last_error=None,
+            review_state=_WORKFLOW_AUTHORING_PROPOSAL_STATUS_REJECTED,
+            review_reason=_clean_text(review_reason) or None,
+            reviewed_at=_clean_text(stored_proposal.get("reviewed_at_utc")) or None,
+            reviewed_by=_clean_text(reviewed_by) or None,
+            proposal_id=_clean_text(stored_proposal.get("proposal_id")) or None,
+            approval_required=False,
+            routing_eligible=bool(
+                lifecycle.get("routing_eligible", lifecycle.get("published", True))
+            ),
+            rollout_state=_clean_text(lifecycle.get("rollout_state")) or "published",
+            event_binding_ids=_clean_string_list(lifecycle.get("event_binding_ids")),
+            schedule_ids=_clean_string_list(lifecycle.get("schedule_ids")),
+        )
+        return {
+            "success": True,
+            "workflow_id": workflow_id_clean,
+            "proposal": _proposal_summary(stored_proposal),
+            "review_action": review_action,
+        }
+
+    runtime_definition, runtime_source, _registry = _load_runtime_definition(
+        workflow_id_clean
+    )
+    current_spec = (
+        serialise_workflow_definition_to_authoring_spec(runtime_definition)
+        if runtime_definition is not None
+        else None
+    )
+    if authoring_spec is None:
+        raise ValueError("workflow_authoring_proposal_authoring_spec_missing")
+    apply_result = apply_workflow_authoring_spec(
+        workflow_id_clean,
+        authoring_spec=authoring_spec,
+        base_definition_hash=_clean_text(proposal_payload.get("base_definition_hash"))
+        or None,
+    )
+    definition = build_workflow_definition_from_authoring_spec(authoring_spec)
+    metadata_sync = _apply_workflow_policy_metadata(
+        workflow_id=workflow_id_clean,
+        workflow_metadata=_as_mapping(getattr(definition, "metadata", None)),
+        user_id=user_id,
+        org_id=org_id,
+        namespace=namespace,
+    )
+    proposal_payload["status"] = _WORKFLOW_AUTHORING_PROPOSAL_STATUS_APPROVED
+    proposal_payload["reviewed_at_utc"] = _utc_now_iso()
+    proposal_payload["reviewed_by"] = _clean_text(reviewed_by) or None
+    proposal_payload["review_reason"] = _clean_text(review_reason) or None
+    proposal_payload["updated_at_utc"] = _utc_now_iso()
+    if current_spec is not None:
+        proposal_payload["previous_authoring_spec"] = _json_roundtrip(current_spec)
+    stored_proposal = _store_workflow_authoring_proposal(
+        workflow_id_clean,
+        proposal_payload,
+    )
+    routing_profile = metadata_sync.get("routing_profile")
+    upsert_workflow_publication_lifecycle(
+        workflow_id=workflow_id_clean,
+        phase="published",
+        published=True,
+        validation_passed=True,
+        postconditions_verified=True,
+        optional_test_instance_id=_clean_text(
+            lifecycle.get("optional_test_instance_id")
+        )
+        or None,
+        last_error=None,
+        review_state=_WORKFLOW_AUTHORING_PROPOSAL_STATUS_APPROVED,
+        review_reason=_clean_text(review_reason) or None,
+        reviewed_at=_clean_text(stored_proposal.get("reviewed_at_utc")) or None,
+        reviewed_by=_clean_text(reviewed_by) or None,
+        proposal_id=_clean_text(stored_proposal.get("proposal_id")) or None,
+        proposal_source_session_id=_clean_text(
+            stored_proposal.get("proposal_source_session_id")
+        )
+        or None,
+        proposal_source_turn_id=_clean_text(
+            stored_proposal.get("proposal_source_turn_id")
+        )
+        or None,
+        approval_required=False,
+        routing_eligible=_metadata_routing_eligible(
+            publication_lifecycle=lifecycle,
+            routing_profile=_as_mapping(routing_profile),
+        ),
+        rollout_state="published",
+        event_binding_ids=_clean_string_list(metadata_sync.get("event_binding_ids")),
+        schedule_ids=_clean_string_list(metadata_sync.get("schedule_ids")),
+    )
+    return {
+        "success": True,
+        "workflow_id": workflow_id_clean,
+        "review_action": review_action,
+        "publication": apply_result.get("publication"),
+        "preview": apply_result.get("preview"),
+        "proposal": _proposal_summary(stored_proposal),
+        "metadata_sync": metadata_sync,
+        "runtime_source_before_review": runtime_source,
+    }
+
+
+def rollback_workflow_authoring_promotion(
+    workflow_id: str,
+    *,
+    review_reason: str | None = None,
+    reviewed_by: str | None = None,
+    user_id: str | None = None,
+    org_id: str | None = None,
+    namespace: str | None = None,
+) -> dict[str, Any]:
+    workflow_id_clean = _clean_text(workflow_id)
+    proposal = _load_workflow_authoring_proposal(workflow_id_clean)
+    proposal_payload = _as_mapping(proposal)
+    previous_authoring_spec = proposal_payload.get("previous_authoring_spec")
+    if not isinstance(previous_authoring_spec, Mapping):
+        raise ValueError("workflow_authoring_previous_spec_missing")
+    runtime_definition, runtime_source, _registry = _load_runtime_definition(
+        workflow_id_clean
+    )
+    current_identity = (
+        build_workflow_definition_identity(
+            workflow_id=workflow_id_clean,
+            source=runtime_source or "unknown",
+            definition=runtime_definition,
+            authoritative_definition=(
+                runtime_definition if runtime_source.lower() == "vontology" else None
+            ),
+        )
+        if runtime_definition is not None
+        else {}
+    )
+    apply_result = apply_workflow_authoring_spec(
+        workflow_id_clean,
+        authoring_spec=previous_authoring_spec,
+        base_definition_hash=_clean_text(current_identity.get("definition_hash")) or None,
+    )
+    definition = build_workflow_definition_from_authoring_spec(previous_authoring_spec)
+    metadata_sync = _apply_workflow_policy_metadata(
+        workflow_id=workflow_id_clean,
+        workflow_metadata=_as_mapping(getattr(definition, "metadata", None)),
+        user_id=user_id,
+        org_id=org_id,
+        namespace=namespace,
+    )
+    proposal_payload["status"] = _WORKFLOW_AUTHORING_PROPOSAL_STATUS_ROLLED_BACK
+    proposal_payload["reviewed_at_utc"] = _utc_now_iso()
+    proposal_payload["reviewed_by"] = _clean_text(reviewed_by) or None
+    proposal_payload["review_reason"] = _clean_text(review_reason) or None
+    proposal_payload["updated_at_utc"] = _utc_now_iso()
+    stored_proposal = _store_workflow_authoring_proposal(
+        workflow_id_clean,
+        proposal_payload,
+    )
+    upsert_workflow_publication_lifecycle(
+        workflow_id=workflow_id_clean,
+        phase="published",
+        published=True,
+        validation_passed=True,
+        postconditions_verified=True,
+        last_error=None,
+        review_state=_WORKFLOW_AUTHORING_PROPOSAL_STATUS_APPROVED,
+        review_reason=_clean_text(review_reason) or "rollback_applied",
+        reviewed_at=_clean_text(stored_proposal.get("reviewed_at_utc")) or None,
+        reviewed_by=_clean_text(reviewed_by) or None,
+        proposal_id=_clean_text(stored_proposal.get("proposal_id")) or None,
+        approval_required=False,
+        routing_eligible=_metadata_routing_eligible(
+            publication_lifecycle={},
+            routing_profile=_as_mapping(metadata_sync.get("routing_profile")),
+        ),
+        rollout_state="rolled_back",
+        event_binding_ids=_clean_string_list(metadata_sync.get("event_binding_ids")),
+        schedule_ids=_clean_string_list(metadata_sync.get("schedule_ids")),
+    )
+    return {
+        "success": True,
+        "workflow_id": workflow_id_clean,
+        "publication": apply_result.get("publication"),
+        "proposal": _proposal_summary(stored_proposal),
+        "metadata_sync": metadata_sync,
+    }
+
+
+def demote_workflow_routing(
+    workflow_id: str,
+    *,
+    review_reason: str | None = None,
+    reviewed_by: str | None = None,
+) -> dict[str, Any]:
+    workflow_id_clean = _clean_text(workflow_id)
+    lifecycle, _source = resolve_workflow_publication_lifecycle(workflow_id_clean)
+    current = _as_mapping(lifecycle)
+    runtime_enablement = _set_workflow_runtime_enablement(workflow_id_clean, enabled=False)
+    stored = upsert_workflow_publication_lifecycle(
+        workflow_id=workflow_id_clean,
+        phase="demoted",
+        published=False,
+        validation_passed=current.get("validation_passed")
+        if isinstance(current.get("validation_passed"), bool)
+        else None,
+        postconditions_verified=current.get("postconditions_verified")
+        if isinstance(current.get("postconditions_verified"), bool)
+        else None,
+        optional_test_instance_id=_clean_text(current.get("optional_test_instance_id"))
+        or None,
+        last_error=None,
+        review_state="demoted",
+        review_reason=_clean_text(review_reason) or None,
+        reviewed_at=_utc_now_iso(),
+        reviewed_by=_clean_text(reviewed_by) or None,
+        proposal_id=_clean_text(current.get("proposal_id")) or None,
+        approval_required=False,
+        routing_eligible=False,
+        rollout_state="demoted",
+        event_binding_ids=[],
+        schedule_ids=[],
+    )
+    return {
+        "success": True,
+        "workflow_id": workflow_id_clean,
+        "publication_lifecycle": stored,
+        "runtime_enablement": runtime_enablement,
+    }
+
+
+def supersede_workflow_publication(
+    workflow_id: str,
+    *,
+    replacement_workflow_id: str,
+    review_reason: str | None = None,
+    reviewed_by: str | None = None,
+) -> dict[str, Any]:
+    workflow_id_clean = _clean_text(workflow_id)
+    replacement_workflow_id_clean = _clean_text(replacement_workflow_id)
+    if not replacement_workflow_id_clean:
+        raise ValueError("replacement_workflow_id_required")
+    current_runtime_enablement = _set_workflow_runtime_enablement(
+        workflow_id_clean,
+        enabled=False,
+    )
+    current_lifecycle = upsert_workflow_publication_lifecycle(
+        workflow_id=workflow_id_clean,
+        phase="superseded",
+        published=False,
+        last_error=None,
+        review_state="superseded",
+        review_reason=_clean_text(review_reason) or None,
+        reviewed_at=_utc_now_iso(),
+        reviewed_by=_clean_text(reviewed_by) or None,
+        superseded_by_workflow_id=replacement_workflow_id_clean,
+        routing_eligible=False,
+        rollout_state="superseded",
+        event_binding_ids=[],
+        schedule_ids=[],
+    )
+    replacement_existing, _source = resolve_workflow_publication_lifecycle(
+        replacement_workflow_id_clean
+    )
+    replacement_lifecycle = _as_mapping(replacement_existing)
+    replacement_stored = upsert_workflow_publication_lifecycle(
+        workflow_id=replacement_workflow_id_clean,
+        phase="published",
+        published=True,
+        validation_passed=replacement_lifecycle.get("validation_passed")
+        if isinstance(replacement_lifecycle.get("validation_passed"), bool)
+        else None,
+        postconditions_verified=replacement_lifecycle.get("postconditions_verified")
+        if isinstance(replacement_lifecycle.get("postconditions_verified"), bool)
+        else None,
+        optional_test_instance_id=_clean_text(
+            replacement_lifecycle.get("optional_test_instance_id")
+        )
+        or None,
+        last_error=None,
+        review_state=_WORKFLOW_AUTHORING_PROPOSAL_STATUS_APPROVED,
+        review_reason=_clean_text(review_reason) or None,
+        reviewed_at=_utc_now_iso(),
+        reviewed_by=_clean_text(reviewed_by) or None,
+        supersedes_workflow_id=workflow_id_clean,
+        routing_eligible=True,
+        rollout_state="published",
+        event_binding_ids=_clean_string_list(replacement_lifecycle.get("event_binding_ids")),
+        schedule_ids=_clean_string_list(replacement_lifecycle.get("schedule_ids")),
+    )
+    return {
+        "success": True,
+        "workflow_id": workflow_id_clean,
+        "replacement_workflow_id": replacement_workflow_id_clean,
+        "superseded_lifecycle": current_lifecycle,
+        "replacement_lifecycle": replacement_stored,
+        "runtime_enablement": current_runtime_enablement,
     }
 
 
@@ -1097,6 +2171,11 @@ __all__ = [
     "build_workflow_catalogue_payload",
     "build_workflow_description_proposal",
     "build_workflow_studio_detail_payload",
+    "demote_workflow_routing",
     "preview_workflow_authoring_spec",
+    "review_workflow_authoring_proposal",
+    "rollback_workflow_authoring_promotion",
+    "submit_workflow_authoring_proposal",
+    "supersede_workflow_publication",
     "validate_workflow_candidate",
 ]

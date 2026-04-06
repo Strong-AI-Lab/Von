@@ -11,6 +11,7 @@ WORKFLOW_TOOL_NAMES = {
     "workflow_set_event_binding_enabled",
     "workflow_delete_event_binding",
     "workflow_mcp_health_check",
+    "workflow_concept_parity_audit",
     "workflow_materialisation_diagnostics",
     "workflow_create_instance",
     "workflow_execute",
@@ -116,3 +117,38 @@ def test_workflow_materialisation_diagnostics_stdio_call_path(monkeypatch):
     assert payload["required_concept_ids"] == [
         "#V#arxiv_paper_representation_workflow"
     ]
+
+
+def test_workflow_concept_parity_audit_stdio_call_path(monkeypatch):
+    from src.backend.mcp_server import mcp_stdio_server
+    import src.backend.services.workflow_materialisation_diagnostics_service as service
+
+    monkeypatch.setattr(
+        service,
+        "build_workflow_concept_parity_audit",
+        lambda **kwargs: {
+            "success": True,
+            "summary": {"audited_count": 1},
+            "concepts": [
+                {
+                    "concept_id": (kwargs.get("concept_ids") or ["#V#alpha_workflow"])[0],
+                    "diagnostic_state": "present",
+                }
+            ],
+        },
+    )
+
+    async def _runner():
+        result = await mcp_stdio_server.call_tool(
+            "workflow_concept_parity_audit",
+            {"concept_ids": ["#V#alpha_workflow"]},
+        )
+        items = cast(list[Any], result)
+        first = items[0]
+        return cast(dict[str, Any], json.loads(cast(str, getattr(first, "text"))))
+
+    payload = asyncio.run(_runner())
+
+    assert payload["success"] is True
+    assert payload["summary"]["audited_count"] == 1
+    assert payload["concepts"][0]["concept_id"] == "#V#alpha_workflow"

@@ -21,6 +21,7 @@ def test_internal_mcp_catalogue_builds_and_includes_relationship_tools():
     assert "turn_execution_namespace_coverage_report" in methods
     assert "workflow_build_prediction_envelope" in methods
     assert "workflow_validate_candidate" in methods
+    assert "workflow_concept_parity_audit" in methods
     assert "skill_catalogue_list" in methods
     assert "skill_catalogue_sync" in methods
     assert "testing_theory_create_slice" in methods

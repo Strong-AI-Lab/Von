@@ -1413,6 +1413,46 @@ class TestScheduleManagement:
         # Check against the created_id, not original schedule.schedule_id
         assert any(s.schedule_id == created_id for s in schedules)
 
+    @patch(
+        "src.backend.workflows.durable.vontology_schedule_repository.concept_service.list_concepts"
+    )
+    def test_list_schedules_filters_by_workflow_id(self, mock_list_concepts) -> None:
+        """list_schedules(workflow_id=...) should avoid unrelated schedule lookups."""
+
+        def side_effect(*args, **kwargs):
+            from src.backend.db.repositories.concepts_repository import (
+                ConceptsRepository,
+            )
+
+            all_docs = list(ConceptsRepository.find({}))
+            return all_docs, len(all_docs)
+
+        mock_list_concepts.side_effect = side_effect
+
+        manager = WorkflowInstanceManager()
+        first = WorkflowSchedule.create_interval(
+            "#V#alpha_workflow",
+            interval_seconds=3600,
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+        second = WorkflowSchedule.create_interval(
+            "#V#beta_workflow",
+            interval_seconds=1800,
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+
+        manager.create_schedule(first)
+        manager.create_schedule(second)
+
+        schedules = manager.list_schedules(workflow_id="#V#beta_workflow")
+
+        assert len(schedules) == 1
+        assert schedules[0].workflow_id == "#V#beta_workflow"
+
     def test_find_due_schedules(self) -> None:
         """find_due_schedules() should return schedules due to run."""
 

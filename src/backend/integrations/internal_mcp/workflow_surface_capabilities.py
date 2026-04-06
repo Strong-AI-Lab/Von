@@ -45,6 +45,7 @@ WORKFLOW_INTROSPECTION_TOOL_NAMES: tuple[str, ...] = (
 WORKFLOW_HEALTHCHECK_TOOL_NAMES: tuple[str, ...] = (
     "workflow_mcp_health_check",
     "workflow_materialisation_diagnostics",
+    "workflow_concept_parity_audit",
 )
 
 WORKFLOW_STDIO_EXPOSED_TOOL_NAMES: tuple[str, ...] = tuple(

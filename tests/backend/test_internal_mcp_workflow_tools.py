@@ -1959,6 +1959,65 @@ def test_workflow_materialisation_diagnostics_gateway_invoke_success_path(monkey
     assert payload.get("required_concept_ids") == ["#V#ephemeral_theory"]
 
 
+def test_workflow_concept_parity_audit_exists_and_runs(monkeypatch):
+    import src.backend.services.workflow_materialisation_diagnostics_service as service
+
+    monkeypatch.setattr(
+        service,
+        "build_workflow_concept_parity_audit",
+        lambda **kwargs: {
+            "success": True,
+            "summary": {"audited_count": 2},
+            "concepts": [
+                {"concept_id": concept_id, "diagnostic_state": "present"}
+                for concept_id in (kwargs.get("concept_ids") or [])
+            ],
+        },
+    )
+
+    catalogue = build_default_catalogue()
+    methods = catalogue.list_methods()
+    assert "workflow_concept_parity_audit" in methods
+
+    handler = catalogue.get("workflow_concept_parity_audit").handler
+    result = handler(concept_ids=["#V#alpha_workflow", "#V#beta_workflow"])
+    assert result.get("success") is True
+    assert result.get("summary", {}).get("audited_count") == 2
+    assert [item["concept_id"] for item in result.get("concepts", [])] == [
+        "#V#alpha_workflow",
+        "#V#beta_workflow",
+    ]
+
+
+def test_workflow_concept_parity_audit_gateway_invoke_success_path(monkeypatch):
+    import src.backend.services.workflow_materialisation_diagnostics_service as service
+
+    monkeypatch.setattr(
+        service,
+        "build_workflow_concept_parity_audit",
+        lambda **kwargs: {
+            "success": True,
+            "summary": {"audited_count": 1},
+            "concepts": [
+                {
+                    "concept_id": (kwargs.get("concept_ids") or ["#V#alpha_workflow"])[0],
+                    "diagnostic_state": "authority_drift",
+                }
+            ],
+        },
+    )
+
+    gateway = _build_gateway()
+    payload = gateway.invoke(
+        "workflow_concept_parity_audit",
+        {"concept_ids": ["#V#alpha_workflow"]},
+    ).payload
+
+    assert payload.get("success") is True
+    assert payload.get("summary", {}).get("audited_count") == 1
+    assert payload.get("concepts", [])[0]["diagnostic_state"] == "authority_drift"
+
+
 def test_workflow_surface_capability_tools_exist_in_internal_catalogue():
     methods = set(build_default_catalogue().list_methods())
     tracked = set(tracked_workflow_surface_tool_names())

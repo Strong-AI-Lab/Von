@@ -1,4 +1,6 @@
 import {
+  buildDraftSource,
+  buildPolicyEditors,
   buildWorkflowStudioRequestHeaders,
   buildWorkflowLayout,
   normaliseAuthoringSpecForEditor,
@@ -74,5 +76,33 @@ describe('workflowStudioPage helpers', () => {
     expect(getHeaders['X-Von-Window-Session']).toBe('ws_test123');
     expect(postHeaders['Content-Type']).toBe('application/json');
     expect(postHeaders['X-Von-Window-Session']).toBe('ws_test123');
+  });
+
+  test('prefers a pending proposal draft over the authoritative current spec', () => {
+    const result = buildDraftSource({
+      authoring: {
+        current_spec: { workflow_id: '#V#alpha_workflow', description: 'Current' }
+      },
+      proposal: {
+        active: true,
+        authoring_spec: { workflow_id: '#V#alpha_workflow', description: 'Pending' }
+      }
+    });
+
+    expect(result.label).toBe('pending proposal');
+    expect(result.spec.description).toBe('Pending');
+  });
+
+  test('serialises workflow policy metadata into stable editor JSON', () => {
+    const editors = buildPolicyEditors({
+      workflow_metadata: {
+        routing_profile: { role: 'authoring' },
+        event_bindings: [{ event_type: 'concept.created' }]
+      }
+    });
+
+    expect(editors.routing_profile).toContain('"role": "authoring"');
+    expect(editors.event_bindings).toContain('"event_type": "concept.created"');
+    expect(editors.schedule_specs).toBe('');
   });
 });

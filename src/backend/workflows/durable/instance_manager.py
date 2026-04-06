@@ -1758,6 +1758,7 @@ class WorkflowInstanceManager:
         self,
         *,
         user_id: str | None = None,
+        workflow_id: str | None = None,
         enabled_only: bool = False,
         limit: int = 50,
     ) -> list[WorkflowSchedule]:
@@ -1773,6 +1774,7 @@ class WorkflowInstanceManager:
         """
         return self._schedule_repo.list_schedules(
             user_id=user_id,
+            workflow_id=workflow_id,
             enabled_only=enabled_only,
             limit=limit,
         )

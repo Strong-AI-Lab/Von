@@ -226,6 +226,7 @@ def _build_durable_workflow_bootstrap_summary(
         "episode_evaluation_workflow_bootstrap",
         "talk_workflow_bootstrap",
         "testing_workflow_bootstrap",
+        "workflow_authoring_prompt_bootstrap",
     ):
         report = components.get(key)
         if not isinstance(report, dict):
@@ -648,6 +649,28 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         except Exception as prompt_exc:
             app_logger.warning(
                 "[durable_workflows] workflow-description prompt bootstrap error: %s",
+                prompt_exc,
+            )
+
+        try:
+            from ..services.workflow_authoring_vontology_service import (
+                ensure_workflow_authoring_prompt_support,
+            )
+
+            workflow_authoring_prompt_report = (
+                ensure_workflow_authoring_prompt_support()
+            )
+            result["workflow_authoring_prompt_bootstrap"] = (
+                workflow_authoring_prompt_report
+            )
+            if not bool(workflow_authoring_prompt_report.get("success", False)):
+                app_logger.warning(
+                    "[durable_workflows] workflow-authoring prompt bootstrap failed: %s",
+                    workflow_authoring_prompt_report,
+                )
+        except Exception as prompt_exc:
+            app_logger.warning(
+                "[durable_workflows] workflow-authoring prompt bootstrap error: %s",
                 prompt_exc,
             )
 

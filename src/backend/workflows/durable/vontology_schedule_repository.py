@@ -174,6 +174,7 @@ class VontologyScheduleRepository:
         self,
         *,
         user_id: str | None = None,
+        workflow_id: str | None = None,
         enabled_only: bool = False,
         limit: int = 50,
     ) -> List[WorkflowSchedule]:
@@ -190,6 +191,7 @@ class VontologyScheduleRepository:
         # Note: Efficient filtering by attribute/text relation is tricky in current Vontology.
         # Ideally we'd use semantic search or filtered list.
         # For now, we fetch candidates and filter in memory.
+        workflow_id_clean = str(workflow_id or "").strip()
 
         concepts, _ = concept_service.list_concepts(
             concept_id=TYPE_WORKFLOW_SCHEDULE,
@@ -204,6 +206,22 @@ class VontologyScheduleRepository:
                 if user_id:
                     attrs = concept.get("attributes", {})
                     if attrs.get("user_id") != user_id:
+                        continue
+
+                if workflow_id_clean:
+                    relationships = concept.get("relationships", {})
+                    links = (
+                        relationships.get("linked_to", [])
+                        if isinstance(relationships, dict)
+                        else []
+                    )
+                    if not any(
+                        link.get("predicate") == PRED_TRIGGERS_WORKFLOW
+                        and str(link.get("target_id") or "").strip()
+                        == workflow_id_clean
+                        for link in links
+                        if isinstance(link, dict)
+                    ):
                         continue
 
                 # 2. Enabled Filter (Text Relation)

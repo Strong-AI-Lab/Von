@@ -1487,6 +1487,99 @@ def test_workflow_studio_authoring_apply_endpoint(monkeypatch, app_client):
     assert payload["publication"]["summary"]["workflows_published"] == 1
 
 
+def test_workflow_studio_authoring_proposal_submit_endpoint(monkeypatch, app_client):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        workflows_routes,
+        "_resolve_request_llm_scope_ids",
+        lambda: ("#V#test_user", "#V#test_org"),
+    )
+    monkeypatch.setattr(
+        workflows_routes,
+        "submit_workflow_authoring_proposal",
+        lambda workflow_id, **kwargs: (
+            captured.update({"workflow_id": workflow_id, **kwargs})
+            or {
+                "success": True,
+                "proposal": {"status": "pending_review"},
+            }
+        ),
+    )
+
+    resp = app_client.post(
+        "/api/workflow-studio/workflows/%23V%23alpha_workflow/proposals/authoring",
+        json={
+            "authoring_spec": {"workflow_id": "#V#alpha_workflow", "steps": [{"state_id": "start"}]},
+            "base_definition_hash": "base-hash",
+            "session_id": "session-1",
+            "turn_id": "turn-1",
+            "namespace": "#V#test_user@test_org",
+        },
+    )
+
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["proposal"]["status"] == "pending_review"
+    assert captured["workflow_id"] == "#V#alpha_workflow"
+    assert captured["base_definition_hash"] == "base-hash"
+    assert captured["proposed_by"] == "#V#test_user"
+    assert payload["namespace"] == "#V#test_user@test_org"
+
+
+def test_workflow_studio_authoring_proposal_review_endpoint(monkeypatch, app_client):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        workflows_routes,
+        "_resolve_request_llm_scope_ids",
+        lambda: ("#V#reviewer", "#V#test_org"),
+    )
+    monkeypatch.setattr(
+        workflows_routes,
+        "review_workflow_authoring_proposal",
+        lambda workflow_id, **kwargs: (
+            captured.update({"workflow_id": workflow_id, **kwargs})
+            or {"success": True, "review_action": kwargs["action"]}
+        ),
+    )
+
+    resp = app_client.post(
+        "/api/workflow-studio/workflows/%23V%23alpha_workflow/proposals/review",
+        json={"action": "approve", "review_reason": "Safe to publish", "namespace": "#V#reviewer@test_org"},
+    )
+
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["review_action"] == "approve"
+    assert captured == {
+        "workflow_id": "#V#alpha_workflow",
+        "action": "approve",
+        "review_reason": "Safe to publish",
+        "reviewed_by": "#V#reviewer",
+        "user_id": "#V#reviewer",
+        "org_id": "#V#test_org",
+        "namespace": "#V#reviewer@test_org",
+    }
+
+
+def test_workflow_studio_publication_supersede_endpoint_requires_replacement_id(
+    app_client,
+):
+    resp = app_client.post(
+        "/api/workflow-studio/workflows/%23V%23alpha_workflow/publication/supersede",
+        json={},
+    )
+
+    assert resp.status_code == 400
+    payload = resp.get_json()
+    assert payload["error"] == "replacement_workflow_id_required"
+
+
 def test_workflow_studio_description_proposal_endpoint(monkeypatch, app_client):
     import src.backend.server.routes.workflows_routes as workflows_routes
 

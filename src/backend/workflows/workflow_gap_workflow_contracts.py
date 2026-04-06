@@ -23,6 +23,7 @@ WORKFLOW_GAP_DECIDE_TEST_ACTION_ID = "workflow_gap.decide_test"
 WORKFLOW_GAP_FINALISE_RECOVERY_ACTION_ID = "workflow_gap.finalise_recovery"
 WORKFLOW_GAP_EXECUTE_CANDIDATE_ACTION_ID = "workflow_gap.execute_candidate"
 WORKFLOW_GAP_RUN_CANDIDATE_TEST_ACTION_ID = "workflow_gap.run_candidate_test"
+WORKFLOW_GAP_MAX_REPAIR_ATTEMPTS = 3
 
 WORKFLOW_GAP_ANALYSIS_PROMPT_TYPE_ID = "#V#prompt_for_llm"
 WORKFLOW_GAP_ANALYSIS_PROMPT_CONCEPT_ID = "#V#workflow_gap_analysis_prompt"

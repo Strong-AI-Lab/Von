@@ -130,6 +130,22 @@ def upsert_workflow_publication_lifecycle(
     postconditions_verified: bool | None = None,
     optional_test_instance_id: str | None = None,
     last_error: str | None = None,
+    review_state: str | None = None,
+    review_reason: str | None = None,
+    reviewed_at: str | None = None,
+    reviewed_by: str | None = None,
+    proposal_id: str | None = None,
+    proposal_source_session_id: str | None = None,
+    proposal_source_turn_id: str | None = None,
+    experiment_run_id: str | None = None,
+    supersedes_workflow_id: str | None = None,
+    superseded_by_workflow_id: str | None = None,
+    routing_eligible: bool | None = None,
+    rollout_state: str | None = None,
+    approval_required: bool | None = None,
+    promotion_decision: str | None = None,
+    event_binding_ids: Sequence[str] | None = None,
+    schedule_ids: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Persist canonical publication lifecycle metadata for a workflow."""
 
@@ -153,6 +169,50 @@ def upsert_workflow_publication_lifecycle(
     last_error_text = str(last_error or "").strip()
     if last_error_text:
         payload["last_error"] = last_error_text
+    for key, value in (
+        ("review_state", review_state),
+        ("review_reason", review_reason),
+        ("reviewed_at", reviewed_at),
+        ("reviewed_by", reviewed_by),
+        ("proposal_id", proposal_id),
+        ("proposal_source_session_id", proposal_source_session_id),
+        ("proposal_source_turn_id", proposal_source_turn_id),
+        ("experiment_run_id", experiment_run_id),
+        ("supersedes_workflow_id", supersedes_workflow_id),
+        ("superseded_by_workflow_id", superseded_by_workflow_id),
+        ("rollout_state", rollout_state),
+        ("promotion_decision", promotion_decision),
+    ):
+        text = str(value or "").strip()
+        if text:
+            payload[key] = text
+    if routing_eligible is not None:
+        payload["routing_eligible"] = bool(routing_eligible)
+    if approval_required is not None:
+        payload["approval_required"] = bool(approval_required)
+
+    def _clean_string_ids(values: Sequence[str] | None) -> list[str]:
+        cleaned: list[str] = []
+        if not isinstance(values, Sequence) or isinstance(
+            values,
+            (str, bytes, bytearray),
+        ):
+            return cleaned
+        seen: set[str] = set()
+        for item in values:
+            text = str(item or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            cleaned.append(text)
+        return cleaned
+
+    cleaned_event_binding_ids = _clean_string_ids(event_binding_ids)
+    if cleaned_event_binding_ids:
+        payload["event_binding_ids"] = cleaned_event_binding_ids
+    cleaned_schedule_ids = _clean_string_ids(schedule_ids)
+    if cleaned_schedule_ids:
+        payload["schedule_ids"] = cleaned_schedule_ids
 
     concept_service.update_concept(
         workflow_id_text,
@@ -167,6 +227,55 @@ def upsert_workflow_publication_lifecycle(
         garbage_collect=True,
     )
     return payload
+
+
+WORKFLOW_ROUTING_PROFILE_TEXT_PREDICATE = "#V#hasWorkflowRoutingProfileJson"
+WORKFLOW_DISCOVERY_EXEMPLARS_TEXT_PREDICATE = "#V#hasWorkflowDiscoveryExemplarsJson"
+WORKFLOW_BACKGROUND_LAUNCH_POLICY_TEXT_PREDICATE = "#V#hasBackgroundLaunchPolicyJson"
+WORKFLOW_LAUNCH_INPUT_CONTRACT_TEXT_PREDICATE = "#V#hasWorkflowLaunchInputContractJson"
+
+
+def upsert_workflow_json_policy_text(
+    *,
+    workflow_id: str,
+    predicate: str,
+    payload: Mapping[str, Any],
+    context: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Persist one authoritative workflow policy JSON text relation."""
+
+    workflow_id_text = str(workflow_id or "").strip()
+    predicate_text = str(predicate or "").strip()
+    if not workflow_id_text:
+        raise ValueError("workflow_id_required")
+    if not predicate_text:
+        raise ValueError("predicate_required")
+    if not isinstance(payload, Mapping) or not payload:
+        raise ValueError("payload_mapping_required")
+
+    normalised_payload = {
+        str(key): value for key, value in payload.items() if str(key).strip()
+    }
+    upsert_singleton_text_relation(
+        subject_concept_id=workflow_id_text,
+        predicate=predicate_text,
+        text=json.dumps(normalised_payload, ensure_ascii=True, sort_keys=True),
+        lang="en-NZ",
+        context={
+            "source": "workflow_concept_authority_service",
+            **(
+                {
+                    str(key): value
+                    for key, value in context.items()
+                    if str(key).strip()
+                }
+                if isinstance(context, Mapping)
+                else {}
+            ),
+        },
+        garbage_collect=True,
+    )
+    return normalised_payload
 
 
 # Ordered from preferred canonical type to legacy fallbacks.

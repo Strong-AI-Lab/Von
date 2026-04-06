@@ -116,6 +116,57 @@ function serialiseDraftSpec(spec) {
   return JSON.stringify(spec || {});
 }
 
+function prettyJson(value, fallback = '') {
+  if (value === null || value === undefined || value === '') {
+    return fallback;
+  }
+  if (typeof value === 'string') {
+    const cleaned = cleanText(value);
+    if (!cleaned) return fallback;
+    try {
+      return JSON.stringify(JSON.parse(cleaned), null, 2);
+    } catch (_error) {
+      return cleaned;
+    }
+  }
+  if (typeof value === 'object') {
+    try {
+      return JSON.stringify(value, null, 2);
+    } catch (_error) {
+      return fallback;
+    }
+  }
+  return fallback;
+}
+
+function buildPolicyEditors(spec) {
+  const metadata = spec?.workflow_metadata && typeof spec.workflow_metadata === 'object'
+    ? spec.workflow_metadata
+    : {};
+  return {
+    routing_profile: prettyJson(metadata.routing_profile, ''),
+    discovery_exemplars: prettyJson(metadata.discovery_exemplars, ''),
+    background_launch_policy: prettyJson(metadata.background_launch_policy, ''),
+    launch_input_contract: prettyJson(metadata.launch_input_contract, ''),
+    event_bindings: prettyJson(metadata.event_bindings, ''),
+    schedule_specs: prettyJson(metadata.schedule_specs, '')
+  };
+}
+
+function buildDraftSource(detail) {
+  const proposal = detail?.proposal;
+  if (proposal?.active && proposal?.authoring_spec) {
+    return {
+      spec: proposal.authoring_spec,
+      label: 'pending proposal'
+    };
+  }
+  return {
+    spec: detail?.authoring?.current_spec,
+    label: 'authoritative definition'
+  };
+}
+
 function buildOutgoingCounts(definition) {
   const counts = new Map();
   asArray(definition?.edges).forEach((edge) => {
@@ -235,6 +286,10 @@ const state = {
   draftSpec: null,
   preview: null,
   previewSignature: '',
+  draftSourceLabel: '',
+  policyEditors: buildPolicyEditors(null),
+  proposalReviewReason: '',
+  supersedeReplacementWorkflowId: '',
   search: '',
   showDesigns: true
 };
@@ -389,6 +444,8 @@ function renderSummaryHeader() {
     return;
   }
   const summary = state.workflowDetail.summary || {};
+  const lifecycle = summary.publication_lifecycle || {};
+  const proposal = state.workflowDetail.proposal || {};
   elements.title.textContent = summary.workflow_id || state.selectedWorkflowId;
   elements.summary.textContent = cleanText(summary.description) || 'No workflow description yet. Use the editor to propose and publish one through the authoritative workflow path.';
   const chips = [];
@@ -398,6 +455,10 @@ function renderSummaryHeader() {
   chips.push(`<span class="workflow-studio-hero-chip">${stepCount} step${stepCount === 1 ? '' : 's'}</span>`);
   const activeCount = Number(state.workflowDetail?.operations?.instances?.active_count || 0);
   chips.push(`<span class="workflow-studio-hero-chip">${activeCount} active instance${activeCount === 1 ? '' : 's'}</span>`);
+  chips.push(`<span class="workflow-studio-hero-chip">${escapeHtml(cleanText(lifecycle.phase) || 'phase unknown')}</span>`);
+  if (cleanText(proposal.status || lifecycle.review_state)) {
+    chips.push(`<span class="workflow-studio-hero-chip ${proposal?.active ? 'muted' : 'success'}">${escapeHtml(cleanText(proposal.status || lifecycle.review_state))}</span>`);
+  }
   elements.summaryChips.innerHTML = chips.join('');
 }
 
@@ -589,6 +650,18 @@ function getDraftStep(stepId) {
   return state.draftSpec?.steps?.find((step) => cleanText(step.state_id) === cleanText(stepId)) || null;
 }
 
+function syncPolicyEditorsFromDraft() {
+  state.policyEditors = buildPolicyEditors(state.draftSpec);
+}
+
+function proposalTone(status) {
+  const cleaned = cleanText(status).toLowerCase();
+  if (cleaned === 'pending_review') return 'warning';
+  if (cleaned === 'approved') return 'success';
+  if (cleaned === 'rejected' || cleaned === 'rolled_back') return 'info';
+  return 'info';
+}
+
 function buildStepOptions(selectedValue = '') {
   const selected = cleanText(selectedValue);
   const options = ['<option value="">None</option>'];
@@ -610,11 +683,27 @@ function renderEditView() {
   }
   const draft = state.draftSpec;
   const currentStep = getDraftStep(state.selectedStepId) || draft.steps[0] || null;
+  const proposal = state.workflowDetail?.proposal || {};
+  const lifecycle = state.workflowDetail?.summary?.publication_lifecycle || {};
   const preview = state.preview?.preview || null;
+  const previewValidation = preview?.contract_validation || null;
+  const previewDiff = preview?.diff_summary || null;
+  const pendingPreview = proposal?.preview_summary || null;
+  const pendingCandidateValidation = proposal?.candidate_validation || null;
+  const reviewReason = state.proposalReviewReason || '';
+  const replacementWorkflowId = state.supersedeReplacementWorkflowId || '';
+  const submitButtonLabel = proposal?.active ? 'Update proposal' : 'Submit for review';
   return `
     <div class="workflow-studio-view-intro">
       <h3>Bounded authoring</h3>
-      <p>Edit workflow description, initial state, sequencing, and per-step action bindings. Publish is preview-first and Vontology-authoritative.</p>
+      <p>Edit workflow structure and policy metadata, preview the exact candidate, then submit it for review. Approval, rollback, demotion, and supersession are explicit lifecycle operations.</p>
+    </div>
+    <div class="workflow-studio-callout ${proposalTone(proposal?.status || lifecycle?.review_state)}">
+      <strong>Lifecycle</strong>
+      <span>Phase: ${escapeHtml(cleanText(lifecycle?.phase) || 'unknown')}</span>
+      <span>Review: ${escapeHtml(cleanText(proposal?.status || lifecycle?.review_state) || 'none')}</span>
+      <span>Routing eligible: ${escapeHtml(String(lifecycle?.routing_eligible ?? 'unspecified'))}</span>
+      <span>Draft source: ${escapeHtml(state.draftSourceLabel || 'authoritative definition')}</span>
     </div>
     <div class="workflow-studio-editor-grid">
       <section class="workflow-studio-card">
@@ -631,6 +720,52 @@ function renderEditView() {
           <button type="button" class="btn-mini" data-action="suggest-description">Suggest description</button>
           <button type="button" class="btn-mini" data-action="reset-draft">Reset draft</button>
         </div>
+      </section>
+      <section class="workflow-studio-card">
+        <div class="workflow-studio-card-title">Governance</div>
+        <div class="workflow-studio-key-value">
+          <span>Stored proposal</span>
+          <strong>${escapeHtml(cleanText(proposal?.status) || 'none')}</strong>
+        </div>
+        <div class="workflow-studio-key-value">
+          <span>Proposal ID</span>
+          <strong>${escapeHtml(cleanText(proposal?.proposal_id) || 'unavailable')}</strong>
+        </div>
+        <label class="workflow-studio-field">
+          <span>Review reason / note</span>
+          <textarea data-lifecycle-field="proposalReviewReason" rows="4">${escapeHtml(reviewReason)}</textarea>
+        </label>
+        <label class="workflow-studio-field">
+          <span>Replacement workflow ID for supersession</span>
+          <input type="text" data-lifecycle-field="supersedeReplacementWorkflowId" value="${escapeHtml(replacementWorkflowId)}" placeholder="#V#replacement_workflow" />
+        </label>
+      </section>
+      <section class="workflow-studio-card">
+        <div class="workflow-studio-card-title">Workflow policy metadata</div>
+        <label class="workflow-studio-field">
+          <span>Routing profile JSON</span>
+          <textarea data-policy-field="routing_profile" rows="6" placeholder='{"role":"authoring"}'>${escapeHtml(state.policyEditors.routing_profile || '')}</textarea>
+        </label>
+        <label class="workflow-studio-field">
+          <span>Discovery exemplars JSON</span>
+          <textarea data-policy-field="discovery_exemplars" rows="6" placeholder='{"keywords":["..."],"examples":["..."]}'>${escapeHtml(state.policyEditors.discovery_exemplars || '')}</textarea>
+        </label>
+        <label class="workflow-studio-field">
+          <span>Background launch policy JSON</span>
+          <textarea data-policy-field="background_launch_policy" rows="6" placeholder='{"enabled":true,"min_interval_seconds":300}'>${escapeHtml(state.policyEditors.background_launch_policy || '')}</textarea>
+        </label>
+        <label class="workflow-studio-field">
+          <span>Launch input contract JSON</span>
+          <textarea data-policy-field="launch_input_contract" rows="6" placeholder='{"required":["prompt"]}'>${escapeHtml(state.policyEditors.launch_input_contract || '')}</textarea>
+        </label>
+        <label class="workflow-studio-field">
+          <span>Event bindings JSON array</span>
+          <textarea data-policy-field="event_bindings" rows="6" placeholder='[{"event_type":"concept.created","input_mapping":{"concept_id":"event.concept_id"}}]'>${escapeHtml(state.policyEditors.event_bindings || '')}</textarea>
+        </label>
+        <label class="workflow-studio-field">
+          <span>Schedule specs JSON array</span>
+          <textarea data-policy-field="schedule_specs" rows="6" placeholder='[{"schedule_type":"interval","interval_seconds":300}]'>${escapeHtml(state.policyEditors.schedule_specs || '')}</textarea>
+        </label>
       </section>
       <section class="workflow-studio-card">
         <div class="workflow-studio-card-title">Steps</div>
@@ -696,15 +831,47 @@ function renderEditView() {
           </label>
         </section>
       ` : ''}
+      <section class="workflow-studio-card">
+        <div class="workflow-studio-card-title">Evidence</div>
+        ${preview ? `
+          <div class="workflow-studio-callout info">
+            <strong>Local preview ready</strong>
+            <span>${escapeHtml(summarisePreviewDiff(previewDiff))}</span>
+          </div>
+          <div class="workflow-studio-key-value">
+            <span>Contract validation</span>
+            <strong>${previewValidation?.valid ? 'Valid' : 'Issues present'}</strong>
+          </div>
+          <div class="workflow-studio-muted">${escapeHtml((previewValidation?.errors || []).join(', ') || 'No contract errors recorded.')}</div>
+        ` : `
+          <div class="workflow-studio-muted">Preview the current draft to inspect its exact diff and contract state before submitting it.</div>
+        `}
+        ${proposal?.available ? `
+          <div class="workflow-studio-section">
+            <h4>Stored proposal</h4>
+            <div class="workflow-studio-muted">Status: ${escapeHtml(cleanText(proposal.status) || 'unknown')}</div>
+            <div class="workflow-studio-muted">${escapeHtml(summarisePreviewDiff(pendingPreview?.diff_summary))}</div>
+            <div class="workflow-studio-muted">Candidate valid: ${escapeHtml(String(pendingCandidateValidation?.valid ?? 'unknown'))}</div>
+            <div class="workflow-studio-muted">Repair hints: ${escapeHtml(String(pendingCandidateValidation?.repair_hints?.length || 0))}</div>
+          </div>
+        ` : ''}
+      </section>
     </div>
     <div class="workflow-studio-button-row anchored">
       <button type="button" class="btn-mini" data-action="preview-authoring">Preview changes</button>
-      <button type="button" class="btn-mini primary" data-action="apply-authoring"${preview && state.previewSignature === serialiseDraftSpec(state.draftSpec) ? '' : ' disabled'}>Apply to Vontology</button>
+      <button type="button" class="btn-mini primary" data-action="submit-proposal"${preview && state.previewSignature === serialiseDraftSpec(state.draftSpec) ? '' : ' disabled'}>${escapeHtml(submitButtonLabel)}</button>
+      <button type="button" class="btn-mini" data-action="approve-proposal"${proposal?.active ? '' : ' disabled'}>Approve & publish</button>
+      <button type="button" class="btn-mini" data-action="reject-proposal"${proposal?.active ? '' : ' disabled'}>Reject proposal</button>
+      <button type="button" class="btn-mini" data-action="rollback-proposal"${proposal?.previous_authoring_spec_available ? '' : ' disabled'}>Roll back promotion</button>
+    </div>
+    <div class="workflow-studio-button-row anchored">
+      <button type="button" class="btn-mini" data-action="demote-routing">Demote routing</button>
+      <button type="button" class="btn-mini danger" data-action="supersede-publication">Supersede current workflow</button>
     </div>
     ${preview ? `
       <div class="workflow-studio-callout info">
         <strong>Preview ready.</strong>
-        <span>${escapeHtml(summarisePreviewDiff(preview.diff_summary))}</span>
+        <span>${escapeHtml(summarisePreviewDiff(previewDiff))}</span>
       </div>
     ` : ''}
   `;
@@ -712,7 +879,7 @@ function renderEditView() {
 
 function renderCanvas() {
   if (!elements.canvas) return;
-  let html = '';
+  let html;
   if (!state.workflowDetail) {
     html = `
       <div class="workflow-studio-empty">
@@ -748,6 +915,9 @@ function renderInspector() {
   const summary = state.workflowDetail.summary || {};
   const selectedStep = getSelectedStepSummary();
   const validation = state.workflowDetail.authoring?.validation || {};
+  const lifecycle = summary.publication_lifecycle || {};
+  const proposal = state.workflowDetail.proposal || {};
+  const policy = state.workflowDetail.authoring?.policy || {};
   elements.inspector.innerHTML = `
     <div class="workflow-studio-section">
       <h3>Authority</h3>
@@ -765,12 +935,42 @@ function renderInspector() {
       </div>
     </div>
     <div class="workflow-studio-section">
+      <h3>Lifecycle</h3>
+      <div class="workflow-studio-key-value">
+        <span>Phase</span>
+        <strong>${escapeHtml(cleanText(lifecycle.phase) || 'unknown')}</strong>
+      </div>
+      <div class="workflow-studio-key-value">
+        <span>Review state</span>
+        <strong>${escapeHtml(cleanText(proposal.status || lifecycle.review_state) || 'none')}</strong>
+      </div>
+      <div class="workflow-studio-key-value">
+        <span>Routing eligible</span>
+        <strong>${escapeHtml(String(lifecycle.routing_eligible ?? 'unspecified'))}</strong>
+      </div>
+    </div>
+    <div class="workflow-studio-section">
       <h3>Validation</h3>
       <div class="workflow-studio-key-value">
         <span>Current authoring contract</span>
         <strong>${validation.valid ? 'Valid' : 'Issues present'}</strong>
       </div>
       <div class="workflow-studio-muted">${escapeHtml((validation.errors || []).join(', ') || 'No validation errors recorded.')}</div>
+    </div>
+    <div class="workflow-studio-section">
+      <h3>Policy</h3>
+      <div class="workflow-studio-key-value">
+        <span>Routing profile</span>
+        <strong>${escapeHtml(cleanText(policy.routing_profile_source) || 'none')}</strong>
+      </div>
+      <div class="workflow-studio-key-value">
+        <span>Event bindings</span>
+        <strong>${escapeHtml(String((state.workflowDetail.operations?.bindings?.count) ?? 0))}</strong>
+      </div>
+      <div class="workflow-studio-key-value">
+        <span>Schedules</span>
+        <strong>${escapeHtml(String((state.workflowDetail.operations?.schedules?.count) ?? 0))}</strong>
+      </div>
     </div>
     <div class="workflow-studio-section">
       <h3>${selectedStep ? `Step ${escapeHtml(selectedStep.step_id)}` : 'Workflow selection'}</h3>
@@ -782,6 +982,14 @@ function renderInspector() {
         <div class="workflow-studio-muted">Select a step in the current view to inspect its metadata.</div>
       `}
     </div>
+    ${proposal?.available ? `
+      <div class="workflow-studio-section">
+        <h3>Proposal</h3>
+        <div class="workflow-studio-key-value"><span>Status</span><strong>${escapeHtml(cleanText(proposal.status) || 'unknown')}</strong></div>
+        <div class="workflow-studio-key-value"><span>Candidate valid</span><strong>${escapeHtml(String(proposal.candidate_validation?.valid ?? 'unknown'))}</strong></div>
+        <div class="workflow-studio-muted">${escapeHtml(summarisePreviewDiff(proposal.preview_summary?.diff_summary))}</div>
+      </div>
+    ` : ''}
     ${state.preview?.preview ? `
       <div class="workflow-studio-section">
         <h3>Pending preview</h3>
@@ -829,9 +1037,12 @@ async function loadWorkflowDetail(workflowId) {
   try {
     const data = await fetchJson(`/api/workflow-studio/workflows/${encodeURIComponent(workflowIdClean)}`);
     state.workflowDetail = data;
-    state.draftSpec = data.authoring?.available
-      ? normaliseAuthoringSpecForEditor(data.authoring.current_spec, workflowIdClean)
+    const draftSource = buildDraftSource(data);
+    state.draftSpec = data.authoring?.available && draftSource.spec
+      ? normaliseAuthoringSpecForEditor(draftSource.spec, workflowIdClean)
       : null;
+    state.draftSourceLabel = draftSource.label || '';
+    syncPolicyEditorsFromDraft();
     state.preview = null;
     state.previewSignature = '';
     ensureSelectedStep();
@@ -862,6 +1073,29 @@ function updateDraftWorkflowField(field, value) {
   if (!state.draftSpec) return;
   state.draftSpec[field] = field === 'description' ? String(value ?? '') : cleanText(value);
   markDraftChanged();
+}
+
+function updateDraftPolicyField(field, rawValue) {
+  if (!state.draftSpec) return false;
+  if (!state.draftSpec.workflow_metadata || typeof state.draftSpec.workflow_metadata !== 'object') {
+    state.draftSpec.workflow_metadata = {};
+  }
+  state.policyEditors[field] = String(rawValue ?? '');
+  const text = cleanText(rawValue);
+  if (!text) {
+    delete state.draftSpec.workflow_metadata[field];
+    markDraftChanged();
+    return true;
+  }
+  try {
+    const parsed = JSON.parse(text);
+    state.draftSpec.workflow_metadata[field] = parsed;
+    markDraftChanged();
+    return true;
+  } catch (_error) {
+    setStatusBanner(`${field} must be valid JSON before preview or submission.`, 'warning');
+    return false;
+  }
 }
 
 function clearReferencesToStep(stepId) {
@@ -987,16 +1221,16 @@ async function previewAuthoringDraft() {
   }
 }
 
-async function applyAuthoringDraft() {
+async function submitAuthoringProposal() {
   if (!state.selectedWorkflowId || !state.draftSpec) return;
   if (!state.preview || state.previewSignature !== serialiseDraftSpec(state.draftSpec)) {
-    setStatusBanner('Preview the current draft before applying it.', 'warning');
+    setStatusBanner('Preview the current draft before submitting it for review.', 'warning');
     return;
   }
-  setStatusBanner('Publishing workflow changes to Vontology...', 'info');
+  setStatusBanner('Submitting workflow proposal for review...', 'info');
   try {
-    await fetchJson(
-      `/api/workflow-studio/workflows/${encodeURIComponent(state.selectedWorkflowId)}/authoring/apply`,
+    const response = await fetchJson(
+      `/api/workflow-studio/workflows/${encodeURIComponent(state.selectedWorkflowId)}/proposals/authoring`,
       {
         method: 'POST',
         body: JSON.stringify({
@@ -1005,12 +1239,107 @@ async function applyAuthoringDraft() {
         })
       }
     );
-    setStatusBanner('Workflow changes published. Reloading authoritative detail...', 'success');
+    setStatusBanner(`Proposal ${cleanText(response?.proposal?.status) || 'submitted'} and awaiting explicit review. Reloading detail...`, 'success');
     await loadCatalogue();
     await loadWorkflowDetail(state.selectedWorkflowId);
   } catch (error) {
-    console.error('Workflow authoring apply failed:', error);
-    setStatusBanner(cleanText(error?.payload?.error) || cleanText(error.message) || 'Could not apply workflow authoring changes.', 'error');
+    console.error('Workflow authoring proposal submit failed:', error);
+    setStatusBanner(cleanText(error?.payload?.error) || cleanText(error.message) || 'Could not submit workflow authoring proposal.', 'error');
+  }
+}
+
+async function reviewAuthoringProposal(action) {
+  if (!state.selectedWorkflowId) return;
+  setStatusBanner(`${action === 'approve' ? 'Approving' : 'Rejecting'} workflow proposal...`, 'info');
+  try {
+    const response = await fetchJson(
+      `/api/workflow-studio/workflows/${encodeURIComponent(state.selectedWorkflowId)}/proposals/review`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          action,
+          review_reason: cleanText(state.proposalReviewReason) || null
+        })
+      }
+    );
+    setStatusBanner(`Proposal ${cleanText(response?.review_action) || action} completed. Reloading authoritative detail...`, 'success');
+    await loadCatalogue();
+    await loadWorkflowDetail(state.selectedWorkflowId);
+  } catch (error) {
+    console.error('Workflow authoring proposal review failed:', error);
+    setStatusBanner(cleanText(error?.payload?.error) || cleanText(error.message) || 'Could not review workflow authoring proposal.', 'error');
+  }
+}
+
+async function rollbackAuthoringProposal() {
+  if (!state.selectedWorkflowId) return;
+  setStatusBanner('Rolling back the latest approved proposal...', 'info');
+  try {
+    await fetchJson(
+      `/api/workflow-studio/workflows/${encodeURIComponent(state.selectedWorkflowId)}/proposals/rollback`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          review_reason: cleanText(state.proposalReviewReason) || null
+        })
+      }
+    );
+    setStatusBanner('Rollback applied. Reloading authoritative detail...', 'success');
+    await loadCatalogue();
+    await loadWorkflowDetail(state.selectedWorkflowId);
+  } catch (error) {
+    console.error('Workflow authoring proposal rollback failed:', error);
+    setStatusBanner(cleanText(error?.payload?.error) || cleanText(error.message) || 'Could not roll back the workflow promotion.', 'error');
+  }
+}
+
+async function demoteRoutingPublication() {
+  if (!state.selectedWorkflowId) return;
+  setStatusBanner('Demoting workflow routing eligibility...', 'info');
+  try {
+    await fetchJson(
+      `/api/workflow-studio/workflows/${encodeURIComponent(state.selectedWorkflowId)}/publication/demote`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          review_reason: cleanText(state.proposalReviewReason) || null
+        })
+      }
+    );
+    setStatusBanner('Workflow routing demoted. Reloading detail...', 'success');
+    await loadCatalogue();
+    await loadWorkflowDetail(state.selectedWorkflowId);
+  } catch (error) {
+    console.error('Workflow routing demotion failed:', error);
+    setStatusBanner(cleanText(error?.payload?.error) || cleanText(error.message) || 'Could not demote workflow routing.', 'error');
+  }
+}
+
+async function supersedePublication() {
+  if (!state.selectedWorkflowId) return;
+  const replacementWorkflowId = cleanText(state.supersedeReplacementWorkflowId);
+  if (!replacementWorkflowId) {
+    setStatusBanner('Provide a replacement workflow ID before superseding the current workflow.', 'warning');
+    return;
+  }
+  setStatusBanner('Superseding the current workflow publication...', 'info');
+  try {
+    await fetchJson(
+      `/api/workflow-studio/workflows/${encodeURIComponent(state.selectedWorkflowId)}/publication/supersede`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          replacement_workflow_id: replacementWorkflowId,
+          review_reason: cleanText(state.proposalReviewReason) || null
+        })
+      }
+    );
+    setStatusBanner('Workflow publication superseded. Reloading catalogue and detail...', 'success');
+    await loadCatalogue();
+    await loadWorkflowDetail(replacementWorkflowId);
+  } catch (error) {
+    console.error('Workflow publication supersession failed:', error);
+    setStatusBanner(cleanText(error?.payload?.error) || cleanText(error.message) || 'Could not supersede the workflow publication.', 'error');
   }
 }
 
@@ -1033,17 +1362,30 @@ function handleCanvasClick(event) {
   if (action === 'suggest-description') {
     void requestDescriptionProposal();
   } else if (action === 'reset-draft') {
-    state.draftSpec = state.workflowDetail?.authoring?.available
-      ? normaliseAuthoringSpecForEditor(state.workflowDetail.authoring.current_spec, state.selectedWorkflowId)
+    const draftSource = buildDraftSource(state.workflowDetail);
+    state.draftSpec = state.workflowDetail?.authoring?.available && draftSource.spec
+      ? normaliseAuthoringSpecForEditor(draftSource.spec, state.selectedWorkflowId)
       : null;
+    state.draftSourceLabel = draftSource.label || '';
+    syncPolicyEditorsFromDraft();
     state.preview = null;
     state.previewSignature = '';
     renderAll();
-    setStatusBanner('Draft reset to the currently loaded authoritative authoring spec.', 'info');
+    setStatusBanner(`Draft reset to the currently loaded ${state.draftSourceLabel || 'authoritative definition'}.`, 'info');
   } else if (action === 'preview-authoring') {
     void previewAuthoringDraft();
-  } else if (action === 'apply-authoring') {
-    void applyAuthoringDraft();
+  } else if (action === 'submit-proposal') {
+    void submitAuthoringProposal();
+  } else if (action === 'approve-proposal') {
+    void reviewAuthoringProposal('approve');
+  } else if (action === 'reject-proposal') {
+    void reviewAuthoringProposal('reject');
+  } else if (action === 'rollback-proposal') {
+    void rollbackAuthoringProposal();
+  } else if (action === 'demote-routing') {
+    void demoteRoutingPublication();
+  } else if (action === 'supersede-publication') {
+    void supersedePublication();
   } else if (action === 'add-step') {
     addDraftStep();
   } else if (action === 'remove-step') {
@@ -1052,6 +1394,16 @@ function handleCanvasClick(event) {
 }
 
 function handleCanvasInput(event) {
+  const lifecycleField = event.target.closest('[data-lifecycle-field]');
+  if (lifecycleField) {
+    const field = cleanText(lifecycleField.dataset.lifecycleField);
+    if (field === 'proposalReviewReason') {
+      state.proposalReviewReason = String(lifecycleField.value ?? '');
+    } else if (field === 'supersedeReplacementWorkflowId') {
+      state.supersedeReplacementWorkflowId = String(lifecycleField.value ?? '');
+    }
+    return;
+  }
   const workflowField = event.target.closest('[data-edit-field]');
   if (workflowField) {
     updateDraftWorkflowField(workflowField.dataset.editField, workflowField.value);
@@ -1063,6 +1415,15 @@ function handleCanvasInput(event) {
   const field = cleanText(stepField.dataset.stepField);
   const value = stepField.type === 'checkbox' ? stepField.checked : stepField.value;
   updateDraftStepField(stepId, field, value, stepField.type);
+}
+
+function handleCanvasChange(event) {
+  const policyField = event.target.closest('[data-policy-field]');
+  if (policyField) {
+    updateDraftPolicyField(cleanText(policyField.dataset.policyField), policyField.value);
+    return;
+  }
+  handleCanvasInput(event);
 }
 
 function bindEvents() {
@@ -1093,7 +1454,7 @@ function bindEvents() {
   });
   elements.canvas?.addEventListener('click', handleCanvasClick);
   elements.canvas?.addEventListener('input', handleCanvasInput);
-  elements.canvas?.addEventListener('change', handleCanvasInput);
+  elements.canvas?.addEventListener('change', handleCanvasChange);
   elements.canvas?.addEventListener('keydown', (event) => {
     const node = event.target.closest('[data-step-id]');
     if (!node) return;
@@ -1126,5 +1487,7 @@ if (typeof document !== 'undefined') {
 
 export {
   simplifyEdgeLabel,
+  buildDraftSource,
+  buildPolicyEditors,
   buildWorkflowStudioRequestHeaders
 };
