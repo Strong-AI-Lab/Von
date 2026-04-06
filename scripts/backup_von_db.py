@@ -23,7 +23,11 @@ import subprocess
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable, Mapping
+
+
+BACKUP_SUCCESS_RECEIPT_SCHEMA_VERSION = "backup_success_receipt.v1"
+BACKUP_RECEIPT_SIDECAR_SUFFIX = ".backup_receipt.json"
 
 
 def _env_truthy(value: str | None) -> bool:
@@ -47,6 +51,20 @@ class BackupPrelude:
     tag: str
     timestamp_utc: str
     mongo_uri_redacted: str
+
+
+@dataclass(frozen=True)
+class BackupSuccessReceipt:
+    schema_version: str
+    completed_at_utc: str
+    db_name: str
+    tag: str
+    out_root: str
+    backup_root: str
+    final_artifact_path: str
+    artifact_kind: str
+    compressed: bool
+    encrypted: bool
 
 
 def _utc_timestamp_compact() -> str:
@@ -115,6 +133,69 @@ def _artifact_size_bytes(path: Path) -> int:
     return total
 
 
+def _backup_receipt_sidecar_path(final_artifact: Path) -> Path:
+    return final_artifact.parent / f"{final_artifact.name}{BACKUP_RECEIPT_SIDECAR_SUFFIX}"
+
+
+def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
+    _ensure_dir(path.parent)
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        temp_path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        temp_path.replace(path)
+    finally:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _write_text_atomic(path: Path, content: str) -> None:
+    _ensure_dir(path.parent)
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        temp_path.write_text(content, encoding="utf-8")
+        temp_path.replace(path)
+    finally:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _delete_backup_artifact(path: Path) -> None:
+    sidecar_path = _backup_receipt_sidecar_path(path)
+    if path.is_dir():
+        import shutil
+
+        shutil.rmtree(path, ignore_errors=True)
+    else:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+    try:
+        sidecar_path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _artifact_kind(final_artifact: Path) -> str:
+    if final_artifact.is_dir():
+        return "directory"
+    name = final_artifact.name.lower()
+    if name.endswith(".zip.enc"):
+        return "zip_encrypted"
+    if name.endswith(".zip"):
+        return "zip"
+    return "file"
+
+
 def _compress_backup_dir_to_zip(backup_root: Path) -> Path:
     import zipfile
 
@@ -167,15 +248,7 @@ def _apply_retention_and_storage_limits(
             if p in protect_paths:
                 continue
             if _artifact_mtime_utc(p).timestamp() < cutoff:
-                if p.is_dir():
-                    import shutil
-
-                    shutil.rmtree(p, ignore_errors=True)
-                else:
-                    try:
-                        p.unlink()
-                    except FileNotFoundError:
-                        pass
+                _delete_backup_artifact(p)
 
     # Max storage policy (delete oldest first)
     if max_storage_mb >= 0:
@@ -191,15 +264,7 @@ def _apply_retention_and_storage_limits(
                 break
             if p in protect_paths:
                 continue
-            if p.is_dir():
-                import shutil
-
-                shutil.rmtree(p, ignore_errors=True)
-            else:
-                try:
-                    p.unlink()
-                except FileNotFoundError:
-                    pass
+            _delete_backup_artifact(p)
             total -= sizes.get(p, 0)
 
 
@@ -236,6 +301,18 @@ def main(argv: list[str] | None = None) -> int:
         type=str,
         default="manual",
         help="Tag suffix for the backup directory name (default: manual).",
+    )
+    parser.add_argument(
+        "--launcher-receipt-path",
+        type=str,
+        default="",
+        help="Optional authoritative launcher receipt path to update on validated success.",
+    )
+    parser.add_argument(
+        "--legacy-sentinel-path",
+        type=str,
+        default="",
+        help="Optional legacy ISO8601 UTC sentinel path to mirror from the success receipt.",
     )
 
     args = parser.parse_args(argv)
@@ -341,6 +418,41 @@ def main(argv: list[str] | None = None) -> int:
         max_storage_mb=max_storage_mb,
         protect_paths={final_artifact} if final_artifact.exists() else set(),
     )
+
+    receipt = BackupSuccessReceipt(
+        schema_version=BACKUP_SUCCESS_RECEIPT_SCHEMA_VERSION,
+        completed_at_utc=_utc_timestamp_iso(),
+        db_name=db_name,
+        tag=tag,
+        out_root=str(out_root),
+        backup_root=str(backup_root),
+        final_artifact_path=str(final_artifact),
+        artifact_kind=_artifact_kind(final_artifact),
+        compressed=bool(compression_enabled),
+        encrypted=bool(encryption_enabled),
+    )
+    receipt_payload = asdict(receipt)
+    sidecar_path = _backup_receipt_sidecar_path(final_artifact)
+    _write_json_atomic(sidecar_path, receipt_payload)
+    print(f"[backup] Receipt sidecar: {sidecar_path}")
+
+    launcher_receipt_path = (args.launcher_receipt_path or "").strip()
+    if launcher_receipt_path:
+        resolved_launcher_receipt = Path(launcher_receipt_path).expanduser().resolve()
+        _write_json_atomic(resolved_launcher_receipt, receipt_payload)
+        print(f"[backup] Launcher receipt: {resolved_launcher_receipt}")
+
+    legacy_sentinel_path = (args.legacy_sentinel_path or "").strip()
+    if legacy_sentinel_path:
+        try:
+            resolved_legacy_sentinel = Path(legacy_sentinel_path).expanduser().resolve()
+            _write_text_atomic(resolved_legacy_sentinel, receipt.completed_at_utc + "\n")
+            print(f"[backup] Legacy sentinel: {resolved_legacy_sentinel}")
+        except Exception as exc:
+            print(
+                "[backup] WARN: could not update legacy sentinel "
+                f"{legacy_sentinel_path}: {exc}"
+            )
 
     print(f"[backup] Completed: {final_artifact}")
     return 0

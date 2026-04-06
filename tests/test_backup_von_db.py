@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import os
 import time
 from pathlib import Path
 
 import pytest
 
+from scripts import backup_von_db
 from scripts.backup_von_db import _apply_retention_and_storage_limits
 
 
@@ -58,6 +60,136 @@ def test_max_storage_deletes_oldest_first(tmp_path: Path) -> None:
     assert new_zip.exists()
     # old must be deleted to try to satisfy storage cap
     assert not old_zip.exists()
+
+
+def test_retention_cleanup_removes_deleted_artifact_sidecar(tmp_path: Path) -> None:
+    out_root = tmp_path / "backups"
+    old_zip = out_root / "von_db_20000101_000000Z_auto-daily.zip"
+    old_sidecar = backup_von_db._backup_receipt_sidecar_path(old_zip)
+    new_zip = out_root / "von_db_20990101_000000Z_auto-daily.zip"
+    new_sidecar = backup_von_db._backup_receipt_sidecar_path(new_zip)
+
+    _touch(old_zip, age_seconds=60 * 60 * 24 * 10)
+    _touch(new_zip, age_seconds=60)
+    old_sidecar.write_text("{}", encoding="utf-8")
+    new_sidecar.write_text("{}", encoding="utf-8")
+
+    _apply_retention_and_storage_limits(
+        out_root=out_root,
+        retention_days=1,
+        max_storage_mb=-1,
+        protect_paths={new_zip},
+    )
+
+    assert not old_zip.exists()
+    assert not old_sidecar.exists()
+    assert new_zip.exists()
+    assert new_sidecar.exists()
+
+
+def test_apply_backup_writes_receipts_only_after_validated_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    out_root = tmp_path / "backups"
+    launcher_receipt = tmp_path / ".run" / "last_successful_backup_receipt.json"
+    legacy_sentinel = tmp_path / ".run" / "last_backup_utc.txt"
+
+    monkeypatch.setenv("VON_DB_NAME", "test_von_db")
+    monkeypatch.setattr(
+        backup_von_db, "_utc_timestamp_compact", lambda: "20260406_010203Z"
+    )
+    monkeypatch.setattr(
+        backup_von_db, "_utc_timestamp_iso", lambda: "2026-04-06T01:02:03Z"
+    )
+
+    def _fake_mongodump(*, mongo_uri: str, db_name: str, out_path: Path) -> None:
+        db_path = out_path / db_name
+        db_path.mkdir(parents=True, exist_ok=True)
+        (db_path / "collection.bson").write_bytes(b"demo")
+
+    monkeypatch.setattr(backup_von_db, "_run_mongodump", _fake_mongodump)
+
+    exit_code = backup_von_db.main(
+        [
+            "--apply",
+            "--out-dir",
+            str(out_root),
+            "--tag",
+            "auto-daily",
+            "--launcher-receipt-path",
+            str(launcher_receipt),
+            "--legacy-sentinel-path",
+            str(legacy_sentinel),
+        ]
+    )
+
+    artifact = out_root / "test_von_db_20260406_010203Z_auto-daily"
+    sidecar = backup_von_db._backup_receipt_sidecar_path(artifact)
+
+    assert exit_code == 0
+    assert artifact.exists()
+    assert launcher_receipt.exists()
+    assert legacy_sentinel.read_text(encoding="utf-8").strip() == "2026-04-06T01:02:03Z"
+
+    launcher_payload = json.loads(launcher_receipt.read_text(encoding="utf-8"))
+    sidecar_payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert launcher_payload == sidecar_payload
+    assert launcher_payload == {
+        "schema_version": "backup_success_receipt.v1",
+        "completed_at_utc": "2026-04-06T01:02:03Z",
+        "db_name": "test_von_db",
+        "tag": "auto-daily",
+        "out_root": str(out_root.resolve()),
+        "backup_root": str(artifact.resolve()),
+        "final_artifact_path": str(artifact.resolve()),
+        "artifact_kind": "directory",
+        "compressed": False,
+        "encrypted": False,
+    }
+
+
+def test_apply_backup_failure_does_not_write_receipts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    out_root = tmp_path / "backups"
+    launcher_receipt = tmp_path / ".run" / "last_successful_backup_receipt.json"
+    legacy_sentinel = tmp_path / ".run" / "last_backup_utc.txt"
+
+    monkeypatch.setenv("VON_DB_NAME", "test_von_db")
+    monkeypatch.setattr(
+        backup_von_db, "_utc_timestamp_compact", lambda: "20260406_040506Z"
+    )
+    monkeypatch.setattr(
+        backup_von_db, "_utc_timestamp_iso", lambda: "2026-04-06T04:05:06Z"
+    )
+
+    def _raise_failure(*, mongo_uri: str, db_name: str, out_path: Path) -> None:
+        raise RuntimeError("simulated mongodump failure")
+
+    monkeypatch.setattr(backup_von_db, "_run_mongodump", _raise_failure)
+
+    with pytest.raises(RuntimeError, match="simulated mongodump failure"):
+        backup_von_db.main(
+            [
+                "--apply",
+                "--out-dir",
+                str(out_root),
+                "--tag",
+                "auto-daily",
+                "--launcher-receipt-path",
+                str(launcher_receipt),
+                "--legacy-sentinel-path",
+                str(legacy_sentinel),
+            ]
+        )
+
+    artifact = out_root / "test_von_db_20260406_040506Z_auto-daily"
+    sidecar = backup_von_db._backup_receipt_sidecar_path(artifact)
+
+    assert artifact.exists()
+    assert not sidecar.exists()
+    assert not launcher_receipt.exists()
+    assert not legacy_sentinel.exists()
 
 
 @pytest.mark.parametrize(

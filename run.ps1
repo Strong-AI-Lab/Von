@@ -946,6 +946,196 @@ function Get-NextCronOccurrenceUtc {
     return $null
 }
 
+$script:DailyBackupLauncherReceiptFileName = 'last_successful_backup_receipt.json'
+$script:DailyBackupReceiptSidecarSuffix = '.backup_receipt.json'
+
+function Get-DailyBackupLauncherReceiptPath {
+    return Join-Path $RunDir $script:DailyBackupLauncherReceiptFileName
+}
+
+function Read-BackupSuccessReceipt {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Context,
+        [switch]$RequireExistingArtifact
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+
+    try {
+        $raw = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        Write-LauncherLog "[$Context] WARN: could not parse backup receipt '$Path': $($_.Exception.Message)"
+        return $null
+    }
+
+    $completedAtText = [string]$raw.completed_at_utc
+    if (-not $completedAtText) {
+        Write-LauncherLog "[$Context] WARN: backup receipt '$Path' is missing completed_at_utc."
+        return $null
+    }
+
+    try {
+        $completedAtUtc = [DateTime]::Parse($completedAtText).ToUniversalTime()
+    }
+    catch {
+        Write-LauncherLog "[$Context] WARN: backup receipt '$Path' has invalid completed_at_utc '$completedAtText'."
+        return $null
+    }
+
+    $artifactPath = [string]$raw.final_artifact_path
+    if (-not $artifactPath) {
+        Write-LauncherLog "[$Context] WARN: backup receipt '$Path' is missing final_artifact_path."
+        return $null
+    }
+
+    $artifactExists = $false
+    try { $artifactExists = [bool](Test-Path -LiteralPath $artifactPath) } catch { $artifactExists = $false }
+    if ($RequireExistingArtifact -and -not $artifactExists) {
+        return $null
+    }
+
+    return [pscustomobject]@{
+        Path = $Path
+        Raw = $raw
+        CompletedAtUtc = $completedAtUtc
+        CompletedAtText = $completedAtText
+        FinalArtifactPath = $artifactPath
+        ArtifactExists = $artifactExists
+        Tag = [string]$raw.tag
+        DbName = [string]$raw.db_name
+        ArtifactKind = [string]$raw.artifact_kind
+    }
+}
+
+function Set-LauncherBackupSuccessReceipt {
+    param(
+        [Parameter(Mandatory = $true)][string]$ReceiptPath,
+        [Parameter(Mandatory = $true)][object]$Receipt,
+        [string]$LegacySentinelPath,
+        [Parameter(Mandatory = $true)][string]$Context
+    )
+
+    $receiptDir = Split-Path -Parent $ReceiptPath
+    if ($receiptDir) {
+        New-Item -ItemType Directory -Force -Path $receiptDir | Out-Null
+    }
+
+    $Receipt | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $ReceiptPath -Encoding UTF8
+
+    if ($LegacySentinelPath) {
+        try {
+            [string]$Receipt.completed_at_utc | Set-Content -LiteralPath $LegacySentinelPath -Encoding ASCII
+        }
+        catch {
+            Write-LauncherLog "[$Context] WARN: could not mirror legacy sentinel '$LegacySentinelPath': $($_.Exception.Message)"
+        }
+    }
+}
+
+function Get-NewestValidatedDailyBackupArtifactReceipt {
+    param(
+        [Parameter(Mandatory = $true)][string]$BackupRoot,
+        [Parameter(Mandatory = $true)][string]$Context
+    )
+
+    if (-not $BackupRoot) { return $null }
+    try {
+        if (-not (Test-Path -LiteralPath $BackupRoot)) { return $null }
+    }
+    catch {
+        return $null
+    }
+
+    $sidecars = @()
+    try {
+        $sidecars = Get-ChildItem -LiteralPath $BackupRoot -File -ErrorAction Stop | Where-Object {
+            $_.Name.EndsWith($script:DailyBackupReceiptSidecarSuffix, [System.StringComparison]::OrdinalIgnoreCase)
+        }
+    }
+    catch {
+        Write-LauncherLog "[$Context] WARN: could not inspect backup artefact receipts under '$BackupRoot': $($_.Exception.Message)"
+        return $null
+    }
+
+    $validReceipts = @()
+    foreach ($sidecar in $sidecars) {
+        $receipt = Read-BackupSuccessReceipt -Path $sidecar.FullName -Context $Context -RequireExistingArtifact
+        if ($null -eq $receipt) { continue }
+        if ($receipt.Tag -ne 'auto-daily') { continue }
+        $validReceipts += $receipt
+    }
+
+    if (-not $validReceipts) { return $null }
+    return $validReceipts | Sort-Object -Property CompletedAtUtc -Descending | Select-Object -First 1
+}
+
+function Resolve-DailyBackupLastSuccessRecord {
+    param(
+        [Parameter(Mandatory = $true)][string]$LauncherReceiptPath,
+        [Parameter(Mandatory = $true)][string]$LegacySentinelPath,
+        [Parameter(Mandatory = $true)][string]$BackupRoot,
+        [Parameter(Mandatory = $true)][string]$Context
+    )
+
+    $launcherReceipt = Read-BackupSuccessReceipt -Path $LauncherReceiptPath -Context $Context
+    $newestArtifactReceipt = Get-NewestValidatedDailyBackupArtifactReceipt -BackupRoot $BackupRoot -Context $Context
+
+    if ($newestArtifactReceipt -and (
+            (-not $launcherReceipt) -or
+            ($newestArtifactReceipt.CompletedAtUtc -gt $launcherReceipt.CompletedAtUtc)
+        )) {
+        $launcherSummary = if ($launcherReceipt) {
+            "$($launcherReceipt.CompletedAtText) -> $($launcherReceipt.FinalArtifactPath)"
+        }
+        else {
+            'missing'
+        }
+        Write-LauncherLog "[$Context] WARN: authoritative launcher receipt is stale/missing ($launcherSummary); repairing from newest validated backup artefact receipt '$($newestArtifactReceipt.FinalArtifactPath)'."
+        Set-LauncherBackupSuccessReceipt -ReceiptPath $LauncherReceiptPath -Receipt $newestArtifactReceipt.Raw -LegacySentinelPath $LegacySentinelPath -Context $Context
+        return [pscustomobject]@{
+            CompletedAtUtc = $newestArtifactReceipt.CompletedAtUtc
+            CompletedAtText = $newestArtifactReceipt.CompletedAtText
+            Source = 'artifact_receipt_repaired'
+            FinalArtifactPath = $newestArtifactReceipt.FinalArtifactPath
+            ReceiptPath = $LauncherReceiptPath
+        }
+    }
+
+    if ($launcherReceipt) {
+        return [pscustomobject]@{
+            CompletedAtUtc = $launcherReceipt.CompletedAtUtc
+            CompletedAtText = $launcherReceipt.CompletedAtText
+            Source = 'launcher_receipt'
+            FinalArtifactPath = $launcherReceipt.FinalArtifactPath
+            ReceiptPath = $LauncherReceiptPath
+        }
+    }
+
+    if (Test-Path -LiteralPath $LegacySentinelPath) {
+        try {
+            $legacyText = (Get-Content -LiteralPath $LegacySentinelPath -Raw -ErrorAction Stop).Trim()
+            if ($legacyText) {
+                $legacyUtc = [DateTime]::Parse($legacyText).ToUniversalTime()
+                Write-LauncherLog "[$Context] WARN: falling back to legacy last_backup_utc.txt sentinel because the authoritative launcher receipt is unavailable."
+                return [pscustomobject]@{
+                    CompletedAtUtc = $legacyUtc
+                    CompletedAtText = $legacyUtc.ToString('o')
+                    Source = 'legacy_sentinel'
+                    FinalArtifactPath = $null
+                    ReceiptPath = $LegacySentinelPath
+                }
+            }
+        }
+        catch {
+            Write-LauncherLog "[$Context] WARN: could not parse legacy backup sentinel '$LegacySentinelPath': $($_.Exception.Message)"
+        }
+    }
+
+    return $null
+}
+
 function Invoke-DailyBackupIfDue {
     <#
         Performs a non-blocking (background job) backup of the remote DB
@@ -955,7 +1145,8 @@ function Invoke-DailyBackupIfDue {
         "<minute> <hour> <day-of-month> <month> <day-of-week>".
         Falls back to interval-based schedule via VON_BACKUP_INTERVAL_HOURS if the cron
         string is missing or unsupported.
-        Writes ISO8601 UTC timestamp to last_backup_utc.txt sentinel on success.
+        Uses a structured last-success launcher receipt as the authoritative state
+        source and mirrors the legacy ISO8601 UTC sentinel during migration.
         Logs are prefixed with [daily-backup].
     #>
     if ($env:VON_DISABLE_DAILY_BACKUP -and $env:VON_DISABLE_DAILY_BACKUP.ToString() -match '^(1|true|yes)$') {
@@ -969,13 +1160,16 @@ function Invoke-DailyBackupIfDue {
     $intervalHours = 24
     try { if ($env:VON_BACKUP_INTERVAL_HOURS) { $intervalHours = [int]$env:VON_BACKUP_INTERVAL_HOURS } } catch { }
     if ($intervalHours -lt 1) { $intervalHours = 24 }
+    $localFallback = Get-BackupFallbackDir
+    $effectiveBackupRoot = Resolve-BackupOutDir -OutDir $BackupRoot -FallbackDir $localFallback -Reason 'daily-backup'
+    $receiptPath = Get-DailyBackupLauncherReceiptPath
     $sentinel = Join-Path $RunDir 'last_backup_utc.txt'
-    $last = $null
-    if (Test-Path $sentinel) {
-        try { $last = [DateTime]::Parse((Get-Content $sentinel -Raw).Trim()).ToUniversalTime() } catch { $last = $null }
-    }
+    $lastRecord = Resolve-DailyBackupLastSuccessRecord -LauncherReceiptPath $receiptPath -LegacySentinelPath $sentinel -BackupRoot $effectiveBackupRoot -Context 'daily-backup'
+    $last = if ($lastRecord) { $lastRecord.CompletedAtUtc } else { $null }
     $nowUtc = (Get-Date).ToUniversalTime()
     $due = $true
+    $next = $null
+    $hours = $null
     if ($schedule) {
         try {
             $cron = ConvertFrom-CronSchedule -Schedule $schedule
@@ -994,30 +1188,49 @@ function Invoke-DailyBackupIfDue {
             if ($hours -lt $intervalHours) { $due = $false }
         }
     }
-    if (-not $due) { return }
+    if (-not $due) {
+        if ($schedule -and $lastRecord -and $next) {
+            Write-LauncherLog "[daily-backup] Skip: last-success=$($lastRecord.CompletedAtText) source=$($lastRecord.Source) next-due=$($next.ToString('o')) now=$($nowUtc.ToString('o'))."
+        }
+        elseif ($lastRecord -and $null -ne $hours) {
+            $roundedHours = [Math]::Round($hours, 2)
+            Write-LauncherLog "[daily-backup] Skip: last-success=$($lastRecord.CompletedAtText) source=$($lastRecord.Source) age_hours=$roundedHours interval_hours=$intervalHours."
+        }
+        else {
+            Write-LauncherLog '[daily-backup] Skip: backup not due.'
+        }
+        return
+    }
     # Avoid launching duplicate job
     $existingJob = Get-Job -Name 'von_daily_backup' -ErrorAction SilentlyContinue | Where-Object { $_.State -in 'Running', 'NotStarted' }
-    if ($existingJob) { return }
+    if ($existingJob) {
+        Write-LauncherLog '[daily-backup] Skip: background backup job is already running.'
+        return
+    }
     $backupScript = Join-Path $Root 'scripts/backup_von_db.py'
     if (-not (Test-Path $backupScript)) {
         Write-LauncherLog "[daily-backup] WARN: backup script missing: $backupScript (skipping)"
         return
     }
     $pdmExe = if (Test-Path (Join-Path $Root '.venv\Scripts\pdm.exe')) { Join-Path $Root '.venv\Scripts\pdm.exe' } else { 'pdm' }
-    $localFallback = Get-BackupFallbackDir
-    $effectiveBackupRoot = Resolve-BackupOutDir -OutDir $BackupRoot -FallbackDir $localFallback -Reason 'daily-backup'
     if (-not (Test-BackupOutputPathAllowed -Path $effectiveBackupRoot -Context 'daily-backup' -ApplyMode $true)) {
         Write-LauncherLog "[daily-backup] WARN: skipping scheduled backup until VON_BACKUP_ROOT points outside repo (or VON_ALLOW_BACKUP_IN_REPO=1)."
         return
     }
-    Write-LauncherLog "[daily-backup] Launching background backup (interval ${intervalHours}h)..."
+    $dueReason = if ($schedule) { "schedule=$schedule" } else { "interval=${intervalHours}h" }
+    $lastSuccessSummary = if ($lastRecord) { $lastRecord.CompletedAtText } else { 'none' }
+    $lastSuccessSource = if ($lastRecord) { $lastRecord.Source } else { 'none' }
+    Write-LauncherLog "[daily-backup] Launching background backup ($dueReason last-success=$lastSuccessSummary source=$lastSuccessSource out=$effectiveBackupRoot)."
     Start-Job -Name 'von_daily_backup' -ScriptBlock {
-        param($pdmExe, $root, $runDir, $sentinelPath, $backupRoot, $backupScript)
+        param($pdmExe, $root, $runDir, $receiptPath, $sentinelPath, $backupRoot, $backupScript)
         try {
             Set-Location $root
             # Force remote; disable local fallback for this backup invocation
             $env:MONGO_ALLOW_LOCAL_FALLBACK = '0'
-            & $pdmExe run python $backupScript --apply --out-dir $backupRoot --tag auto-daily 2>&1 | ForEach-Object { "[daily-backup] $_" }
+            $backupOutputPath = Join-Path $runDir 'daily_backup_last_output.log'
+            $backupOutput = & $pdmExe run python $backupScript --apply --out-dir $backupRoot --tag auto-daily --launcher-receipt-path $receiptPath --legacy-sentinel-path $sentinelPath 2>&1 | ForEach-Object { "[daily-backup] $_" }
+            try { $backupOutput | Out-File -FilePath $backupOutputPath -Encoding UTF8 } catch { }
+            $backupOutput | ForEach-Object { Write-Host $_ }
             if ($LASTEXITCODE -ne 0) { throw "backup script failed with exit code $LASTEXITCODE" }
             if (-not ($env:VON_DISABLE_CODE_MENTION_SCAN -and $env:VON_DISABLE_CODE_MENTION_SCAN.ToString() -match '^(1|true|yes)$')) {
                 $scanScript = Join-Path $root 'src/utilities/scan_code_concepts.py'
@@ -1045,13 +1258,12 @@ function Invoke-DailyBackupIfDue {
             else {
                 Write-Host "[code-predicate-sync] disabled via VON_DISABLE_CODE_PREDICATE_SYNC"
             }
-            (Get-Date).ToUniversalTime().ToString('o') | Set-Content $sentinelPath
             Write-Host '[daily-backup] Completed.'
         }
         catch {
             Write-Host ("[daily-backup] ERROR: {0}" -f $_.Exception.Message)
         }
-    } -ArgumentList $pdmExe, $Root, $RunDir, $sentinel, $effectiveBackupRoot, $backupScript | Out-Null
+    } -ArgumentList $pdmExe, $Root, $RunDir, $receiptPath, $sentinel, $effectiveBackupRoot, $backupScript | Out-Null
 }
 
 # Backward-compatible convenience: if called as ".\run.ps1 -BackupDryRun" (no explicit action)
