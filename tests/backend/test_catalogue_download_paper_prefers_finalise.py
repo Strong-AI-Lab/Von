@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Any, cast
 
 
@@ -505,6 +506,187 @@ def test_download_paper_registers_when_proxy_payload_omits_success_flag(
     assert registration["attempted"] is True
     assert registration["succeeded"] is True
     assert registration["status"] == "registered"
+
+
+def test_download_paper_rehydrates_from_durable_blob_without_calling_proxy(
+    monkeypatch, tmp_path
+):
+    cache_dir = tmp_path / "arxiv_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("ARXIV_CACHE_PATH", str(cache_dir))
+
+    blob_root = tmp_path / "blob_store"
+    monkeypatch.setenv("VON_BLOB_STORE_BACKEND", "local")
+    monkeypatch.setenv("VON_BLOB_STORE_LOCAL_ROOT", str(blob_root))
+
+    durable_pdf = blob_root / "arxiv" / "papers" / "2603.21702.pdf"
+    durable_pdf.parent.mkdir(parents=True, exist_ok=True)
+    durable_pdf.write_bytes(b"%PDF-1.4\n%durable\n")
+
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: None,
+    )
+
+    async def _boom():  # pragma: no cover
+        raise AssertionError(
+            "get_arxiv_proxy should not be called when durable blob exists"
+        )
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.arxiv_proxy_mcp.get_arxiv_proxy",
+        _boom,
+    )
+
+    from src.backend.integrations.internal_mcp import catalogue
+
+    result = catalogue._download_paper(
+        arxiv_id="2603.21702",
+        filename="strict-arxiv.pdf",
+        delete_local_cache=False,
+    )
+
+    assert result["success"] is True
+    assert result["acquisition_path"] == "rehydrate_from_durable_blob"
+    assert result["storage"]["key"] == "arxiv/papers/2603.21702.pdf"
+    assert Path(result["file_path"]).name == "strict-arxiv.pdf"
+    assert Path(result["file_path"]).exists() is True
+
+
+def test_download_paper_reuses_existing_file_copy_registration(
+    monkeypatch, tmp_path
+):
+    cache_dir = tmp_path / "arxiv_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("ARXIV_CACHE_PATH", str(cache_dir))
+
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: "#V#workflow_user",
+    )
+
+    from src.backend.integrations.internal_mcp import catalogue
+
+    pdf_path = cache_dir / "2603.21702.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%fake\n")
+
+    class _Proxy:
+        async def download_paper(self, *, arxiv_id: str, filename=None):
+            return {
+                "success": True,
+                "arxiv_id": arxiv_id,
+                "file_path": str(pdf_path),
+                "size_bytes": pdf_path.stat().st_size,
+                "sha256": "deadbeef",
+                "storage": {
+                    "backend": "local",
+                    "key": f"arxiv/papers/{arxiv_id}.pdf",
+                    "uri": f"local://arxiv/papers/{arxiv_id}.pdf",
+                },
+            }
+
+    async def _fake_get_proxy():
+        return _Proxy()
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.arxiv_proxy_mcp.get_arxiv_proxy",
+        _fake_get_proxy,
+    )
+
+    class _ExistingRecord:
+        concept_id = "#V#computer_file_copy_existing"
+        type_concept_id = "#V#arxiv_pdf_file"
+        uploaded_at = "2026-01-01T00:00:00+00:00"
+
+    monkeypatch.setattr(
+        "src.backend.services.computer_file_copy_service.find_existing_computer_file_copy_instance",
+        lambda **_kwargs: _ExistingRecord(),
+    )
+
+    created = {"count": 0}
+
+    def _fake_create_instance(**_kwargs):
+        created["count"] += 1
+        raise AssertionError(
+            "create_computer_file_copy_instance should not run when an existing record is reusable"
+        )
+
+    monkeypatch.setattr(
+        "src.backend.services.computer_file_copy_service.create_computer_file_copy_instance",
+        _fake_create_instance,
+    )
+
+    result = catalogue._download_paper(
+        arxiv_id="2603.21702",
+        namespace="#V#workflow_user@default",
+        delete_local_cache=False,
+    )
+
+    assert result["success"] is True
+    assert result["computer_file_copy_concept_id"] == "#V#computer_file_copy_existing"
+    registration = cast(dict[str, Any], result["computer_file_copy_registration"])
+    assert registration["status"] == "reused_existing"
+    assert registration["reused_existing"] is True
+    assert created["count"] == 0
+
+
+def test_finalise_cached_paper_rehydrates_from_durable_blob_and_reuses_existing_registration(
+    monkeypatch, tmp_path
+):
+    cache_dir = tmp_path / "arxiv_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("ARXIV_CACHE_PATH", str(cache_dir))
+
+    blob_root = tmp_path / "blob_store"
+    monkeypatch.setenv("VON_BLOB_STORE_BACKEND", "local")
+    monkeypatch.setenv("VON_BLOB_STORE_LOCAL_ROOT", str(blob_root))
+
+    durable_pdf = blob_root / "arxiv" / "papers" / "2603.21702.pdf"
+    durable_pdf.parent.mkdir(parents=True, exist_ok=True)
+    durable_pdf.write_bytes(b"%PDF-1.4\n%strict\n")
+
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: "#V#workflow_user",
+    )
+
+    from src.backend.integrations.internal_mcp import catalogue
+
+    class _ExistingRecord:
+        concept_id = "#V#computer_file_copy_existing"
+        type_concept_id = "#V#arxiv_pdf_file"
+        uploaded_at = "2026-01-01T00:00:00+00:00"
+
+    monkeypatch.setattr(
+        "src.backend.services.computer_file_copy_service.find_existing_computer_file_copy_instance",
+        lambda **_kwargs: _ExistingRecord(),
+    )
+
+    def _fail_put_bytes_durable(**_kwargs):
+        raise AssertionError(
+            "put_bytes_durable should not run when durable blob already exists"
+        )
+
+    monkeypatch.setattr(
+        "src.backend.services.blob_uploads.put_bytes_durable",
+        _fail_put_bytes_durable,
+    )
+
+    result = catalogue._finalise_cached_paper(
+        arxiv_id="2603.21702",
+        namespace="#V#workflow_user@default",
+        delete_local_cache=False,
+        include_markdown=False,
+        name="strict-finalise.pdf",
+    )
+
+    assert result["success"] is True
+    assert result["acquisition_path"] == "rehydrate_from_durable_blob"
+    assert result["computer_file_copy_concept_id"] == "#V#computer_file_copy_existing"
+    registration = cast(dict[str, Any], result["computer_file_copy_registration"])
+    assert registration["status"] == "reused_existing"
+    assert result["storage"]["key"] == "arxiv/papers/2603.21702.pdf"
+    assert Path(result["file_path"]).name == "strict-finalise.pdf"
 
 
 def test_finalise_cached_paper_uses_namespace_override_for_authenticated_registration(

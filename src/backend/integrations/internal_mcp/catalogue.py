@@ -518,6 +518,68 @@ def _best_effort_delete_cached_file(
     return False, None
 
 
+def _rehydrate_cached_arxiv_pdf_from_durable_blob(
+    *,
+    arxiv_id: str,
+    preferred_filename: str | None = None,
+) -> dict[str, Any] | None:
+    import hashlib
+
+    from src.backend.services.blob_store import get_blob_store_from_env
+
+    from .arxiv_proxy_mcp import (
+        _arxiv_pdf_blob_key,
+        _build_blob_uri,
+        _extract_arxiv_version,
+        _infer_blob_backend,
+        _normalise_arxiv_id,
+    )
+
+    stable_id = _normalise_arxiv_id(str(arxiv_id))
+    storage_key = _arxiv_pdf_blob_key(stable_id)
+
+    try:
+        blob_store = get_blob_store_from_env()
+        if not blob_store.exists(storage_key):
+            return None
+        payload = blob_store.get_bytes(storage_key)
+    except Exception:
+        return None
+
+    if not isinstance(payload, (bytes, bytearray)) or not bytes(payload):
+        return None
+
+    cache_root = _get_arxiv_cache_root()
+    cache_root.mkdir(parents=True, exist_ok=True)
+    filename = (
+        preferred_filename.strip()
+        if isinstance(preferred_filename, str) and preferred_filename.strip()
+        else f"{stable_id.replace('/', '_')}.pdf"
+    )
+    if not filename.lower().endswith(".pdf"):
+        filename = f"{filename}.pdf"
+    cached_path = cache_root / Path(filename).name
+    data = bytes(payload)
+    cached_path.write_bytes(data)
+
+    backend = _infer_blob_backend(blob_store)
+    return {
+        "success": True,
+        "arxiv_id": stable_id,
+        "file_path": str(cached_path),
+        "size_bytes": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "version": _extract_arxiv_version(stable_id),
+        "storage": {
+            "backend": backend,
+            "key": storage_key,
+            "uri": _build_blob_uri(blob_store, backend=backend, key=storage_key),
+        },
+        "acquisition_path": "rehydrate_from_durable_blob",
+        "durable_blob_rehydrated": True,
+    }
+
+
 def _register_arxiv_file_copy_instance(
     *,
     namespace: str | None,
@@ -565,6 +627,70 @@ def _register_arxiv_file_copy_instance(
             blob_uri=str(blob_uri),
             metadata=metadata,
         )
+
+
+def _ensure_arxiv_file_copy_registration(
+    *,
+    namespace: str | None,
+    user_concept_id: str,
+    arxiv_id: str,
+    type_concept_id: str,
+    name: str,
+    sha256: str,
+    size_bytes: int,
+    content_type: str,
+    blob_backend: str,
+    blob_key: str,
+    blob_uri: str,
+    original_path: str,
+    extra_metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    from ...services.computer_file_copy_service import (
+        find_existing_computer_file_copy_instance,
+    )
+
+    existing = find_existing_computer_file_copy_instance(
+        user_concept_id=str(user_concept_id),
+        blob_key=str(blob_key),
+        type_concept_id=str(type_concept_id),
+        sha256=str(sha256),
+    )
+    if existing is not None:
+        return {
+            "record": existing,
+            "registration": {
+                "attempted": True,
+                "succeeded": True,
+                "status": "reused_existing",
+                "computer_file_copy_concept_id": existing.concept_id,
+                "reused_existing": True,
+            },
+        }
+
+    record = _register_arxiv_file_copy_instance(
+        namespace=namespace,
+        user_concept_id=user_concept_id,
+        arxiv_id=arxiv_id,
+        type_concept_id=type_concept_id,
+        name=name,
+        sha256=sha256,
+        size_bytes=size_bytes,
+        content_type=content_type,
+        blob_backend=blob_backend,
+        blob_key=blob_key,
+        blob_uri=blob_uri,
+        original_path=original_path,
+        extra_metadata=extra_metadata,
+    )
+    return {
+        "record": record,
+        "registration": {
+            "attempted": True,
+            "succeeded": True,
+            "status": "registered",
+            "computer_file_copy_concept_id": record.concept_id,
+        },
+    }
 
 
 def _coerce_scholarly_materialisation_metadata(
@@ -2140,11 +2266,16 @@ def _download_paper(**kwargs):
 
     async def _async_download():
         try:
-            proxy = await get_arxiv_proxy()
-            stored = await proxy.download_paper(
-                arxiv_id=arxiv_id,
-                filename=kwargs.get("filename"),
+            stored: Any = _rehydrate_cached_arxiv_pdf_from_durable_blob(
+                arxiv_id=str(arxiv_id),
+                preferred_filename=kwargs.get("filename"),
             )
+            if not isinstance(stored, Mapping):
+                proxy = await get_arxiv_proxy()
+                stored = await proxy.download_paper(
+                    arxiv_id=arxiv_id,
+                    filename=kwargs.get("filename"),
+                )
             if isinstance(stored, Mapping):
                 stored = dict(stored)
                 if _download_result_is_materially_successful(stored):
@@ -2228,7 +2359,7 @@ def _download_paper(**kwargs):
                     storage = stored.get("storage")
                     if isinstance(storage, dict):
                         try:
-                            record = _register_arxiv_file_copy_instance(
+                            registration_result = _ensure_arxiv_file_copy_registration(
                                 namespace=namespace_override,
                                 user_concept_id=str(user_concept_id),
                                 arxiv_id=str(stored.get("arxiv_id") or arxiv_id),
@@ -2260,14 +2391,12 @@ def _download_paper(**kwargs):
                                 user_concept_id,
                             )
                         else:
+                            record = registration_result["record"]
                             stored["computer_file_copy_concept_id"] = record.concept_id
                             stored["uploaded_at"] = record.uploaded_at
-                            stored["computer_file_copy_registration"] = {
-                                "attempted": True,
-                                "succeeded": True,
-                                "status": "registered",
-                                "computer_file_copy_concept_id": record.concept_id,
-                            }
+                            stored["computer_file_copy_registration"] = dict(
+                                registration_result["registration"]
+                            )
                     else:
                         stored["computer_file_copy_registration"] = {
                             "attempted": False,
@@ -2379,18 +2508,35 @@ def _finalise_cached_paper(**kwargs):
         storage_path = _get_arxiv_cache_root()
 
         cached = _find_cached_pdf_for_arxiv_id(storage_path, str(arxiv_id))
+        durable_pdf_payload = None
         if cached is None:
-            message = f"No cached arXiv PDF found for {arxiv_id} under {storage_path}"
-            if cache_diagnostics.get("cache_state") == "markdown_only_partial_cache":
-                message = (
-                    f"No cached arXiv PDF found for {arxiv_id} under {storage_path}; "
-                    "Markdown exists without the reusable PDF, so the cache needs "
-                    "reacquisition before finalisation can succeed."
-                )
+            durable_pdf_payload = _rehydrate_cached_arxiv_pdf_from_durable_blob(
+                arxiv_id=str(arxiv_id),
+                preferred_filename=kwargs.get("name"),
+            )
+            if isinstance(durable_pdf_payload, Mapping):
+                cached = Path(str(durable_pdf_payload.get("file_path") or ""))
+            else:
+                message = f"No cached arXiv PDF found for {arxiv_id} under {storage_path}"
+                if cache_diagnostics.get("cache_state") == "markdown_only_partial_cache":
+                    message = (
+                        f"No cached arXiv PDF found for {arxiv_id} under {storage_path}; "
+                        "Markdown exists without the reusable PDF, so the cache needs "
+                        "reacquisition before finalisation can succeed."
+                    )
+                return {
+                    "success": False,
+                    "error": "cached_pdf_not_found",
+                    "message": message,
+                    "cache_diagnostics": cache_diagnostics,
+                    "cache_recovery_action": cache_recovery_action,
+                }
+
+        if not isinstance(cached, Path) or not cached.exists():
             return {
                 "success": False,
                 "error": "cached_pdf_not_found",
-                "message": message,
+                "message": f"Cached arXiv PDF became unavailable for {arxiv_id}",
                 "cache_diagnostics": cache_diagnostics,
                 "cache_recovery_action": cache_recovery_action,
             }
@@ -2400,23 +2546,32 @@ def _finalise_cached_paper(**kwargs):
         sha256 = hashlib.sha256(data).hexdigest()
         storage_key = _arxiv_pdf_blob_key(str(arxiv_id))
         stable_id = _normalise_arxiv_id(str(arxiv_id))
-
-        stored = put_bytes_durable(
-            key=storage_key,
-            data=data,
-            content_type="application/pdf",
-            sha256=sha256,
-            size_bytes=size_bytes,
-            metadata={
-                "source": "arxiv",
-                "arxiv_id": stable_id,
-                "original_path": str(cached),
-            },
+        storage_payload = (
+            durable_pdf_payload.get("storage")
+            if isinstance(durable_pdf_payload, Mapping)
+            else None
         )
+        if not isinstance(storage_payload, Mapping):
+            stored = put_bytes_durable(
+                key=storage_key,
+                data=data,
+                content_type="application/pdf",
+                sha256=sha256,
+                size_bytes=size_bytes,
+                metadata={
+                    "source": "arxiv",
+                    "arxiv_id": stable_id,
+                    "original_path": str(cached),
+                },
+            )
+            ref = stored.ref
+            storage_payload = {
+                "backend": ref.backend,
+                "key": ref.key,
+                "uri": ref.uri,
+            }
 
-        ref = stored.ref
-
-        record = _register_arxiv_file_copy_instance(
+        registration_result = _ensure_arxiv_file_copy_registration(
             namespace=namespace_override,
             user_concept_id=str(user_concept_id),
             arxiv_id=stable_id,
@@ -2425,11 +2580,12 @@ def _finalise_cached_paper(**kwargs):
             sha256=sha256,
             size_bytes=size_bytes,
             content_type="application/pdf",
-            blob_backend=str(ref.backend),
-            blob_key=str(ref.key),
-            blob_uri=str(ref.uri),
+            blob_backend=str(storage_payload.get("backend") or ""),
+            blob_key=str(storage_payload.get("key") or ""),
+            blob_uri=str(storage_payload.get("uri") or ""),
             original_path=str(cached),
         )
+        record = registration_result["record"]
 
         include_markdown = kwargs.get("include_markdown")
         if include_markdown is None:
@@ -2467,7 +2623,7 @@ def _finalise_cached_paper(**kwargs):
                     )
 
                     markdown_ref = markdown_stored.ref
-                    markdown_record = _register_arxiv_file_copy_instance(
+                    markdown_registration_result = _ensure_arxiv_file_copy_registration(
                         namespace=namespace_override,
                         user_concept_id=str(user_concept_id),
                         arxiv_id=stable_id,
@@ -2482,6 +2638,7 @@ def _finalise_cached_paper(**kwargs):
                         original_path=str(markdown_cached),
                         extra_metadata={"format": "markdown"},
                     )
+                    markdown_record = markdown_registration_result["record"]
 
                     markdown_payload = {
                         "status": "uploaded",
@@ -2533,23 +2690,25 @@ def _finalise_cached_paper(**kwargs):
             "size_bytes": size_bytes,
             "sha256": sha256,
             "storage": {
-                "backend": ref.backend,
-                "key": ref.key,
-                "uri": ref.uri,
+                "backend": str(storage_payload.get("backend") or ""),
+                "key": str(storage_payload.get("key") or ""),
+                "uri": str(storage_payload.get("uri") or ""),
             },
             "computer_file_copy_concept_id": record.concept_id,
-            "computer_file_copy_registration": {
-                "attempted": True,
-                "succeeded": True,
-                "status": "registered",
-                "computer_file_copy_concept_id": record.concept_id,
-            },
+            "computer_file_copy_registration": dict(
+                registration_result["registration"]
+            ),
             "uploaded_at": record.uploaded_at,
             "local_cache_deleted": local_deleted,
             "local_cache_delete_error": local_error,
             "markdown": markdown_payload,
             "cache_diagnostics": cache_diagnostics,
             "cache_recovery_action": cache_recovery_action,
+            "acquisition_path": (
+                "rehydrate_from_durable_blob"
+                if isinstance(durable_pdf_payload, Mapping)
+                else "finalise_cached_pdf"
+            ),
         }
     except BlobUploadError as exc:
         return make_error_response(

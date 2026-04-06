@@ -387,6 +387,74 @@ def create_computer_file_copy_instance(
     )
 
 
+def find_existing_computer_file_copy_instance(
+    *,
+    user_concept_id: str,
+    blob_key: str,
+    type_concept_id: str | None = None,
+    sha256: str | None = None,
+) -> ComputerFileCopyRecord | None:
+    """Resolve an existing user-scoped file-copy concept by durable blob identity."""
+
+    clean_user = user_concept_id.strip() if isinstance(user_concept_id, str) else ""
+    clean_blob_key = blob_key.strip() if isinstance(blob_key, str) else ""
+    clean_type = (
+        type_concept_id.strip() if isinstance(type_concept_id, str) else ""
+    )
+    clean_sha256 = sha256.strip() if isinstance(sha256, str) else ""
+    if not clean_user or not clean_blob_key:
+        return None
+
+    from ..db.repositories.concepts_repository import ConceptsRepository
+
+    query: dict[str, Any] = {
+        "relationships.specific_to_user": clean_user,
+        "attributes.blob_key": clean_blob_key,
+    }
+    if clean_type:
+        query["relationships.is_an_instance_of"] = clean_type
+    if clean_sha256:
+        query["attributes.sha256"] = clean_sha256
+
+    cursor = ConceptsRepository.find(
+        query,
+        {
+            "concept_id": 1,
+            "attributes.uploaded_at": 1,
+            "relationships.is_an_instance_of": 1,
+        },
+        sort=[("updated_at", -1), ("created_at", -1)],
+        limit=1,
+    )
+    for doc in cursor:
+        if not isinstance(doc, Mapping):
+            continue
+        concept_id = doc.get("concept_id")
+        if not isinstance(concept_id, str) or not concept_id.strip():
+            continue
+        attributes_raw = doc.get("attributes")
+        attributes: Mapping[str, Any] = (
+            attributes_raw if isinstance(attributes_raw, Mapping) else {}
+        )
+        relationships_raw = doc.get("relationships")
+        relationships: Mapping[str, Any] = (
+            relationships_raw if isinstance(relationships_raw, Mapping) else {}
+        )
+        uploaded_at = _first_text_value(
+            concept_id, "#V#has_upload_timestamp"
+        ) or _normalise_optional_text(attributes.get("uploaded_at"))
+        type_ids = _normalise_type_concept_ids(relationships)
+        resolved_type = clean_type or (
+            type_ids[0] if type_ids else "#V#computer_file_copy"
+        )
+        return ComputerFileCopyRecord(
+            concept_id=concept_id,
+            type_concept_id=resolved_type,
+            uploaded_at=uploaded_at or _now_utc_iso(),
+        )
+    return None
+
+
 def _first_text_value(concept_id: str, predicate: str) -> str | None:
     try:
         from .text_value_service import get_texts_for_concept
