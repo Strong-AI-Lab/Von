@@ -66,6 +66,8 @@ In Von, behaviour often ought to be authored in:
 - explicit KB artefacts with provenance;
 - typed relations and other inspectable structures.
 
+Treat those surfaces as first-class implementation surfaces for durable system behaviour, not as secondary configuration or commentary about logic that really lives in Python.
+
 Python should usually provide:
 
 - reusable execution surfaces;
@@ -75,6 +77,8 @@ Python should usually provide:
 - generic interfaces between models, workflows, and KB artefacts.
 
 If Python starts containing the actual task policy, Von usually becomes harder to inspect, evolve, and improve.
+
+A good default question is therefore not only "what Python should I write?" but also "can this change be cleanly authored in Vontology, workflow, prompt, or KB artefacts instead?"
 
 ### 3.3 A strong model is often better at semantics than brittle lexical code
 
@@ -121,6 +125,7 @@ Python is usually the wrong place for:
 - long-lived ranking logic encoded as weights and thresholds;
 - task-specific routing rules that VWL can express;
 - code-side prompt bodies for Vontology-governed features;
+- durable type, predicate, or workflow policy edits that could be represented directly in Vontology;
 - lists of ontology terms or relation IDs that should be resolved from Vontology.
 
 ### 4.2 Use workflows and prompts for behaviour policy
@@ -151,6 +156,8 @@ In Von they are part of the system's explicit cognitive architecture:
 - they provide a place for structured entities, relations, and constraints that should not remain hidden in latent model state.
 
 If a design can move a stable concept, relation, profile, or policy out of ad-hoc code and into explicit represented form, that is usually progress.
+
+For Von, this often means that changing a Vontology type, predicate, text relation, or VWL artefact is not "avoiding implementation work"; it is doing the implementation work at the correct authority layer.
 
 ## 5. Prompt Evolution, Model Improvement, and Robustness
 

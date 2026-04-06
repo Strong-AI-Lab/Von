@@ -58,13 +58,13 @@ similar operational lessons that do not belong in this constitutional guide.
 1. Use New Zealand English spelling by default.
 2. PowerShell is the default shell. Do not emit Bash-only syntax unless explicitly asked for Bash.
 3. Never clobber `.env`. Only touch it when explicitly required, and never print secrets.
-4. Vontology is the authoritative source of truth for persistent knowledge, prompts, workflow artefacts, and other enduring represented state unless an exception is explicitly justified.
+4. Vontology is a first-class engineered authority surface, and the authoritative source of truth for persistent knowledge, prompts, workflow artefacts, predicates, types, and other enduring represented state unless an exception is explicitly justified.
 5. Do not use direct DB access for Vontology-governed data. Use the Vontology API, MCP tools, or canonical service pathways.
 6. Branch first for substantial Jira work. Keep Jira status, comments, assignee, and links in sync with the real implementation state.
 7. Prefer MCP and existing repo control surfaces over ad-hoc scripts or handwritten workarounds.
-8. Workflow-first / KB-authoritative is the default doctrine: if behaviour can live in workflow, prompt, KB, or Vontology artefacts, do not hide it in Python.
+8. Workflow-first / KB-authoritative is the default doctrine: if a durable behaviour or policy change can live cleanly in workflow, prompt, KB, or Vontology artefacts, prefer changing it there rather than encoding the policy in Python.
 9. Decision-policy authority extends beyond routing. Ranking, recommendation, matching, classification, explanation, retrieval strategy, and planning count as authored behaviour.
-10. Python should usually provide reusable support surfaces: execution, validation, tool wrappers, rendering, telemetry, persistence, and safety checks.
+10. Python should usually provide reusable support surfaces: execution, validation, tool wrappers, rendering, telemetry, persistence, safety checks, integrations, and genuinely missing reusable primitives.
 11. Do not place Vontology-governed prompt bodies in Python. Prompts are operational policy and should live in Vontology text relations.
 12. If a required Vontology/workflow/prompt authority surface is unavailable, fail closed for that feature. Do not silently fall back to stale prompts or heuristic hacks.
 13. Do not relax workflow- or KB-authority requirements to justify a preferred implementation. Any genuine exception requires explicit human approval and a named missing reusable primitive or authority surface.
@@ -91,6 +91,7 @@ Before implementing behaviour, name the intended authoritative artefacts in Jira
 - KB assertions or other Vontology-native structures
 
 Also state what code will remain support-only.
+Treat those artefacts as implementation surfaces, not as commentary about an implementation whose real policy still lives elsewhere in Python.
 
 ### 4.2 What counts as a design error
 
@@ -112,7 +113,7 @@ Add only the missing reusable primitive or support surface in code:
 - persistence
 - tooling support
 
-Then keep the authored workflow or policy in Vontology where possible, and document the capability gap in Jira.
+Then keep the authored workflow or policy in Vontology where possible, and document the capability gap in Jira. Do not silently make Python the long-term home of a policy merely because the represented surface needs one more reusable primitive.
 
 ### 4.4 Before closing a workflow- or KB-authoritative task
 
