@@ -1112,21 +1112,27 @@ export async function handleSelectConceptByIdDetail(detail, deps) {
     // Normal click: open in background.
     // Shift-click: open and switch to it.
     const shouldActivate = !!modifierKeys.shiftKey;
-    const openConceptTab = (displayName) => {
+    const openConceptTab = (displayName, tabKind = null, { forceKindUpdate = false } = {}) => {
+        const openOptions = {};
+        if (tabKind) {
+            openOptions.kind = tabKind;
+        }
+        if (forceKindUpdate) {
+            openOptions.forceKindUpdate = true;
+        }
         if (detail?.promoteExistingTab) {
-            deps.createOrActivateConceptTab(id, displayName, shouldActivate, {
-                promoteExistingTab: true
-            });
+            openOptions.promoteExistingTab = true;
+            deps.createOrActivateConceptTab(id, displayName, shouldActivate, openOptions);
             return;
         }
-        deps.createOrActivateConceptTab(id, displayName, shouldActivate);
+        deps.createOrActivateConceptTab(id, displayName, shouldActivate, openOptions);
     };
 
     // Open the tab immediately (optimistic) so the UI responds even if the backend
     // is busy (e.g., single-threaded server while chat generation is in flight).
     // Metadata will be hydrated below when available.
     try {
-        openConceptTab('Loading…');
+        openConceptTab('Loading…', kind);
     } catch (_) {
         // Best-effort; keep going.
     }
@@ -1137,14 +1143,17 @@ export async function handleSelectConceptByIdDetail(detail, deps) {
     } catch (err) {
         console.warn('[selectConceptById] existence check failed', err);
         // Fall back to existing behaviour: ensure the tab exists.
-        openConceptTab('Loading…');
+        openConceptTab('Loading…', kind);
         return;
     }
 
     if (exists) {
         const metadata = await fetchConceptMetadata(id, fetchFn);
         updateCartouchesForConcept(id, metadata);
-        openConceptTab(metadata?.displayName || id);
+        const resolvedKind = metadata?.kind || kind || null;
+        openConceptTab(metadata?.displayName || id, resolvedKind, {
+            forceKindUpdate: !!resolvedKind
+        });
         return;
     }
 
@@ -1196,7 +1205,7 @@ export async function handleSelectConceptByIdDetail(detail, deps) {
 
     // Re-open a loading tab now that the user has confirmed creation.
     try {
-        openConceptTab('Loading…');
+        openConceptTab('Loading…', deriveKindFromCreateOptions(createOpts, kind));
     } catch (_) {
         // Best-effort; keep going.
     }
@@ -1216,7 +1225,10 @@ export async function handleSelectConceptByIdDetail(detail, deps) {
             if (existsAfterConfirmation) {
                 const existingMetadata = await fetchConceptMetadata(id, fetchFn);
                 updateCartouchesForConcept(id, existingMetadata);
-                openConceptTab(existingMetadata?.displayName || id);
+                const resolvedKind = existingMetadata?.kind || chosenKind || null;
+                openConceptTab(existingMetadata?.displayName || id, resolvedKind, {
+                    forceKindUpdate: !!resolvedKind
+                });
                 showToast('Concept already exists; opened existing concept.', 'info');
                 await emitCreateDecisionTelemetry(deps, buildCreateDecisionTelemetryPayload({
                     conceptId: id,
@@ -1242,7 +1254,10 @@ export async function handleSelectConceptByIdDetail(detail, deps) {
         await createConceptForId(id, createOpts, fetchFn);
         const metadata = await fetchConceptMetadata(id, fetchFn);
         updateCartouchesForConcept(id, metadata);
-        openConceptTab(metadata?.displayName || id);
+        const resolvedKind = metadata?.kind || chosenKind || null;
+        openConceptTab(metadata?.displayName || id, resolvedKind, {
+            forceKindUpdate: !!resolvedKind
+        });
         showToast('Concept created.', 'info');
         await emitCreateDecisionTelemetry(deps, buildCreateDecisionTelemetryPayload({
             conceptId: id,

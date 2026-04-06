@@ -1259,6 +1259,10 @@ export function createOrActivateConceptTab(conceptId, conceptName, activate = tr
     const existing = dynamicConceptTabs.get(conceptId);
     if (existing) {
         console.log(`[dynamicTabs] Tab already exists for ${conceptId}${activate ? ', activating it' : ', not activating (per flag)'}`);
+        const requestedKind = normaliseConceptTabKind(options?.kind);
+        if (options?.forceKindUpdate && requestedKind !== 'unknown' && requestedKind !== existing.kind) {
+            setDynamicConceptTabKind(conceptId, requestedKind);
+        }
         if (activate) {
             activateTab(existing.tabId);
         } else if (options?.promoteExistingTab) {
