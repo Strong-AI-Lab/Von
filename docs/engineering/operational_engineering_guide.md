@@ -230,6 +230,17 @@ run, for example:
 This keeps frontend validation file-local and avoids repository-wide parser
 failures unrelated to the changed JS module.
 
+### 7.5 Browser user-view validation
+
+For frontend tasks whose real acceptance depends on rendered UI state, do not
+stop at static tests alone. Use the browser validation guidance in:
+
+- `docs/engineering/frontend_browser_user_view_validation.md`
+
+In particular, prefer authenticated user-view validation over anonymous-mode
+checks when the important surface is Messages, saved conversations, invites, or
+other user-scoped UI.
+
 ## 8. Practical Refactoring and Consistency Habits
 
 - Search first before adding helpers or parallel pathways.

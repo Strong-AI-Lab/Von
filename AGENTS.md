@@ -40,6 +40,9 @@ Read the following before planning or implementing work in the matching area:
 - **Minimal-imposition, elicitation, or write-policy questions**  
   `docs/engineering/minimal_imposition_design_principle.md`
 
+- **Frontend/UI changes, browser acceptance, or authenticated user-view testing**
+  `docs/engineering/frontend_browser_user_view_validation.md`
+
 If the task crosses multiple areas, read all relevant documents.
 
 ### 2.4 Operational companion
@@ -52,6 +55,8 @@ debugging work, see:
 Use that document for environment handling, shell and host behaviour,
 credential-path issues, access/tooling defaults, pytest execution practice, and
 similar operational lessons that do not belong in this constitutional guide.
+For frontend/browser user-view validation practice, also see
+`docs/engineering/frontend_browser_user_view_validation.md`.
 
 ## 3. Core operating rules
 

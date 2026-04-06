@@ -1,0 +1,177 @@
+# Frontend Browser User-View Validation Guide
+
+**Status**: Living practical guidance  
+**Date**: 2026-04-06
+
+## 1. Purpose
+
+This document explains how to do reliable browser-level validation of Von's
+user-facing UI, especially when the important behaviour depends on authenticated
+state, realistic saved data, or rich user-scoped surfaces such as:
+
+- chat and conversation history
+- Messages
+- invites and shared-conversation affordances
+- user-scoped settings
+- other panes whose meaningful state only appears after login
+
+It exists because anonymous UI state is often too shallow for real acceptance
+work. For frontend tasks, browser checks against a realistic authenticated
+user-view can reveal layout, overflow, visibility, and state-propagation issues
+ that code inspection and unit tests will not catch.
+
+## 2. When to Read It
+
+Read this guide before planning or implementing work that involves:
+
+- frontend layout or responsiveness
+- user-visible acceptance that should be checked in a real browser
+- chat, Messages, conversation history, invites, or other authenticated UI
+  surfaces
+- browser automation or Chrome DevTools validation
+- test-fixture or pseudouser strategy for UI validation
+
+## 3. Core Principle
+
+For many Von UI tasks, the best acceptance evidence is not:
+
+- a nearby unit test alone;
+- a mocked DOM tree alone; or
+- an anonymous browser session alone.
+
+The best evidence is usually:
+
+1. targeted automated tests for the changed code path;
+2. a live browser check on the actual UI surface; and
+3. where relevant, an authenticated user-view with realistic data.
+
+If the bug report came from a specific pane, treat that pane as the primary
+acceptance path even if another nearby surface appears to share the same CSS or
+rendering logic.
+
+## 4. Why Authenticated User-View State Matters
+
+Anonymous mode is often not representative enough because it may hide or remove:
+
+- saved conversations;
+- Messages threads and real message bubbles;
+- per-user badges, counts, and stateful controls;
+- invite flows;
+- user-specific history and metadata;
+- richer content that exposes wrapping or clipping bugs.
+
+Ad-hoc mocking inside DevTools is still useful for diagnosis, but it is not a
+complete substitute for a dependable authenticated browser-testing path.
+
+## 5. Preferred Validation Ladder
+
+Use this order unless the task clearly needs something different:
+
+1. Run targeted impacted tests for the changed module(s).
+2. Run the frontend static JS lint gate on the changed browser-side files.
+3. Start Von locally and verify the real browser surface.
+4. If anonymous mode is insufficient, switch to a realistic authenticated
+   user-view state.
+5. Use targeted in-browser instrumentation only to fill gaps, not as the main
+   acceptance story.
+
+A good final acceptance note usually states:
+
+- what automated checks ran;
+- which exact browser surface was tested;
+- whether the check was anonymous, authenticated, or fixture-backed; and
+- what concrete evidence was observed.
+
+## 6. Authenticated Pseudouser Strategy
+
+Von should support a dependable pseudouser-based browser-testing path for rich
+frontend validation.
+
+Current practical direction:
+
+- use a dedicated Strong AI Lab pseudouser rather than a real human user's
+  account for routine acceptance checks;
+- keep credentials and recovery details out of the repository;
+- ensure the authenticated state has representative saved data;
+- make the setup repeatable enough that coding agents and developers can use it
+  routinely rather than only as a one-off manual exercise.
+
+Important:
+
+- do not commit credentials;
+- do not print secrets in logs, docs, or task notes;
+- document the workflow, not the secret material;
+- keep clear boundaries between test-fixture behaviour and production
+  behaviour.
+
+## 7. What a Good User-View Fixture Should Cover
+
+A strong authenticated browser-validation fixture should make it easy to inspect
+at least the following:
+
+- one or more saved chat conversations with realistic long-form assistant and
+  user content;
+- Messages threads containing long text and inline concept cartouches;
+- counts, badges, and stateful controls that only appear after login;
+- at least one narrow/mobile check and one desktop check;
+- enough persistent state that regressions are visible without manual data entry
+  every time.
+
+For layout tasks, include deliberately awkward content:
+
+- long titles;
+- long paragraphs;
+- long inline concept IDs or cartouches;
+- mixed controls and metadata in headers;
+- message lists with both sent and received content.
+
+## 8. Browser Testing Tactics
+
+When using Chrome DevTools or equivalent browser tooling:
+
+- measure actual rendered widths when width/overflow is in question;
+- check the exact pane that the bug report refers to;
+- inspect both desktop and narrow/mobile-sized viewports when wrapping matters;
+- capture at least one screenshot or concrete measurement when the visual change
+  is the acceptance target.
+
+Helpful evidence includes:
+
+- container widths;
+- message bubble widths;
+- explicit overflow measurements;
+- screenshots of the relevant pane;
+- confirmation that the issue is absent on both desktop and narrow layouts when
+  required by the task.
+
+## 9. When Mocking Is Still Appropriate
+
+In-browser mocking or synthetic DOM setup is appropriate when:
+
+- the live system lacks the necessary fixture data;
+- you need to isolate a rendering path quickly;
+- you are diagnosing whether the bug is CSS/layout versus data-loading/state.
+
+But if you stop there, say so explicitly. Mock-backed browser diagnosis is not
+the same as authenticated user-view acceptance.
+
+## 10. Documentation and Closure Expectations
+
+If a frontend task reveals a repeatable browser-validation lesson:
+
+- update this document or a related engineering guide;
+- add or update Jira follow-up work when the current fixture path is too fragile
+  or incomplete;
+- record whether authenticated user-view validation was achieved or whether the
+  result still depended on ad-hoc mocking.
+
+For major frontend or browser-validation improvements, consider whether
+`AGENTS.md` should point to the relevant document more explicitly.
+
+## 11. Current Follow-Up
+
+The current tracked follow-up for making authenticated browser/user-view testing
+reliable and comprehensive is:
+
+- `JVNAUTOSCI-1747` - create reliable authenticated pseudouser browser-testing
+  mode for comprehensive user-view UI validation.
