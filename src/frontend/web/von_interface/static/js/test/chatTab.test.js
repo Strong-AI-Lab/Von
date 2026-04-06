@@ -51,16 +51,20 @@ import {
     __testOnly_persistThinkingCardBodyHeightFromDom,
     __testOnly_syncThinkingCanonicalHistoriesFromProgress,
     __testOnly_resetChatConceptMetaCaches,
+    __testOnly_createChatSession,
     __testOnly_buildConversationLlmTelemetryLocatorPayload,
     __testOnly_buildConversationLlmTelemetryPayload,
     __testOnly_buildConversationTelemetryExportPayload,
     __testOnly_copyConversationLlmTelemetryToClipboard,
     __testOnly_clearLlmDebugData,
+    __testOnly_setSessionTabsCache,
     __testOnly_setTranscriptTurns,
     setLlmDebugDataForTurn,
     formatChatTimestamp,
-    sendMessage
+    sendMessage,
+    switchToChatSession
 } from '../chatTab.js';
+import { initializePromptCartoucheOverlay } from '../components/promptCartoucheOverlay.js';
 
 // Mock dependencies to avoid import errors
 jest.mock('../apiService.js', () => {
@@ -3472,6 +3476,160 @@ describe('chat abort behaviour', () => {
 
         // Ensure the sendMessage promise resolves without throwing
         await expect(sendPromise).resolves.toBeUndefined();
+    });
+});
+
+describe('chat session composer state', () => {
+    function renderSessionComposerDom() {
+        document.body.innerHTML = `
+            <div id="chatTab" class="tab-content active"></div>
+            <div id="chatSessionTabs"></div>
+            <div id="chatSessionCount"></div>
+            <div id="chatSessionMetadata"></div>
+            <div id="workflowStatusPanel"></div>
+            <div id="workflowStatusBody"></div>
+            <div id="historyBanner" class="hidden"></div>
+            <span id="historyBannerText"></span>
+            <button id="loadOlderHistoryBtn" type="button"></button>
+            <div id="scrollableField"></div>
+            <div class="thinking-card-wrapper" id="thinkingCardWrapper" aria-hidden="true">
+                <div class="thinking-card">
+                    <div id="loadingIndicator" data-thinking-role="header"></div>
+                    <div id="loadingIndicatorDetail" data-thinking-role="detail"></div>
+                </div>
+            </div>
+            <button id="sendButton" type="button"></button>
+            <button id="resetButton" type="button"></button>
+            <button id="abortButton" type="button" aria-hidden="true"></button>
+            <textarea id="promptInput" class="prompt-input"></textarea>
+        `;
+    }
+
+    beforeEach(() => {
+        renderSessionComposerDom();
+        __testOnly_setThinkingCardRequests(null, null);
+        __testOnly_setActiveChatSession(null, null);
+        __testOnly_setSessionTabsCache([]);
+
+        const { getUserContext } = require('../apiService.js');
+        getUserContext.mockReset();
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ',
+            gmail_profile: null
+        });
+    });
+
+    afterEach(() => {
+        __testOnly_setThinkingCardRequests(null, null);
+        __testOnly_setActiveChatSession(null, null);
+        __testOnly_setSessionTabsCache([]);
+        jest.restoreAllMocks();
+        delete global.fetch;
+    });
+
+    test('switching chat sessions does not restore the aborted prompt into an empty composer', async () => {
+        const promptInput = document.getElementById('promptInput');
+        initializePromptCartoucheOverlay(promptInput);
+
+        const overlayContent = promptInput.parentElement.querySelector('.prompt-input-overlay-content');
+        expect(overlayContent.textContent).toBe('');
+
+        const abortController = new AbortController();
+        const abortSpy = jest.spyOn(abortController, 'abort');
+
+        __testOnly_setActiveChatSession('session-1', 'Current');
+        __testOnly_setSessionTabsCache([
+            { session_id: 'session-1', session_name: 'Current', message_count: 1, last_message_at: '2026-04-06T06:00:00Z' },
+            { session_id: 'session-2', session_name: 'Target', message_count: 0, last_message_at: '2026-04-06T06:05:00Z' }
+        ]);
+        __testOnly_setThinkingCardRequests({
+            abortController,
+            promptRaw: 'https://arxiv.org/abs/2411.04983',
+            selectionStart: 31,
+            selectionEnd: 31,
+            activityHistory: [],
+            progressEvents: [],
+            phaseHistory: [],
+            stageDiagnostics: [],
+            latestProgress: null,
+            workflowStagePath: null,
+            thinkingCardDisplayState: null
+        }, null);
+
+        global.fetch = jest.fn((url) => {
+            if (typeof url === 'string' && url.startsWith('/von/api/session/set_chat_session')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ session_id: 'session-2', session_name: 'Target' })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/api/session/chat_session_links')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ session_links: {} })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history?')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        history: [],
+                        segments_returned: 1,
+                        total_segments: 0,
+                        total_messages: 0
+                    })
+                });
+            }
+            return Promise.resolve({ ok: true, json: async () => ({ sessions: [] }) });
+        });
+
+        await expect(switchToChatSession('session-2')).resolves.toEqual(
+            expect.objectContaining({ ok: true })
+        );
+
+        expect(abortSpy).toHaveBeenCalledTimes(1);
+        expect(promptInput.value).toBe('');
+        expect(overlayContent.textContent).toBe('');
+    });
+
+    test('creating a new chat session clears the composer overlay as well as the textarea value', async () => {
+        const promptInput = document.getElementById('promptInput');
+        initializePromptCartoucheOverlay(promptInput);
+
+        promptInput.value = 'Draft text to clear';
+        promptInput.dispatchEvent(new Event('input', { bubbles: true }));
+
+        const overlayContent = promptInput.parentElement.querySelector('.prompt-input-overlay-content');
+        expect(overlayContent.textContent).toContain('Draft text to clear');
+
+        global.fetch = jest.fn((url) => {
+            if (typeof url === 'string' && url.startsWith('/von/api/session/create_chat_session')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        session_id: 'session-new',
+                        session_name: 'New chat',
+                        history: []
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/api/session/chat_session_links')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ session_links: {} })
+                });
+            }
+            return Promise.resolve({ ok: true, json: async () => ({ sessions: [] }) });
+        });
+
+        await expect(__testOnly_createChatSession('New chat')).resolves.toEqual(
+            expect.objectContaining({ session_id: 'session-new' })
+        );
+
+        expect(promptInput.value).toBe('');
+        expect(overlayContent.textContent).toBe('');
     });
 });
 

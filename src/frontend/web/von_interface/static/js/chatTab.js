@@ -10219,7 +10219,7 @@ function extractBoldQuotedInstructionFromStrong(strongEl) {
 }
 
 function insertTextIntoChatPrompt(text) {
-    const promptInput = document.getElementById('promptInput');
+    const promptInput = getPromptInputElement();
     if (!promptInput) return;
 
     const insertRaw = String(text ?? '').trim();
@@ -10251,11 +10251,59 @@ function insertTextIntoChatPrompt(text) {
         promptInput.value = `${before}${insertText}${after}`;
     }
 
+    dispatchPromptComposerInputEvent(promptInput);
+}
+
+function getPromptInputElement() {
+    return document.getElementById('promptInput');
+}
+
+function dispatchPromptComposerInputEvent(promptInput = getPromptInputElement()) {
+    if (!promptInput) {
+        return;
+    }
     try {
         promptInput.dispatchEvent(new Event('input', { bubbles: true }));
     } catch (_) {
         // Ignore.
     }
+}
+
+function setPromptComposerValue(value, options = {}) {
+    const promptInput = options.promptInput || getPromptInputElement();
+    if (!promptInput) {
+        return null;
+    }
+
+    promptInput.value = typeof value === 'string' ? value : '';
+    dispatchPromptComposerInputEvent(promptInput);
+
+    const hasSelection =
+        Number.isInteger(options.selectionStart) || Number.isInteger(options.selectionEnd);
+
+    if (hasSelection) {
+        try {
+            const valueLength = promptInput.value.length;
+            const start = Number.isInteger(options.selectionStart) ? options.selectionStart : valueLength;
+            const end = Number.isInteger(options.selectionEnd) ? options.selectionEnd : start;
+            promptInput.setSelectionRange(
+                Math.min(start, valueLength),
+                Math.min(end, valueLength)
+            );
+        } catch (_) {
+            // Selection range is best-effort.
+        }
+    }
+
+    if (options.focus) {
+        try {
+            promptInput.focus();
+        } catch (_) {
+            // Ignore focus errors.
+        }
+    }
+
+    return promptInput;
 }
 
 function appendQuickReplyButtons(container, buttonifyMetaOrOptions) {
@@ -15392,7 +15440,7 @@ async function promptRenameChatSession(sessionId, currentName) {
 }
 
 async function createChatSession(sessionName) {
-    abortActiveChatRequest();
+    abortActiveChatRequest({ restorePrompt: false });
 
     const payload = {};
     if (typeof sessionName === 'string' && sessionName.trim()) {
@@ -15460,11 +15508,7 @@ async function createChatSession(sessionName) {
         });
     }
 
-    const promptInput = document.getElementById('promptInput');
-    if (promptInput) {
-        promptInput.value = '';
-        promptInput.focus();
-    }
+    setPromptComposerValue('', { focus: true });
 
     document.dispatchEvent(new CustomEvent('von:contextReset', {
         detail: { trigger: 'chat_new_session', session_id: effectiveSessionId, session_name: effectiveName || null }
@@ -15573,7 +15617,7 @@ async function switchToChatSession(sessionId) {
     void loadChatSessionLinks(sid, { force: false });
 
     abortActiveHistoryRequest();
-    abortActiveChatRequest();
+    abortActiveChatRequest({ restorePrompt: false });
     lastFinishedThinkingCard = null;
     setThinkingState(false, null);
 
@@ -15722,7 +15766,7 @@ async function switchToChatSession(sessionId) {
         // JVNAUTOSCI-1002: Ensure shared conversation streams are in sync
         syncSharedConversationStreams();
 
-        const promptInput = document.getElementById('promptInput');
+        const promptInput = getPromptInputElement();
         if (promptInput) {
             promptInput.focus();
         }
@@ -20137,12 +20181,14 @@ export function initializeChatTab() {
                                 .replace(/[ \t]+/g, ' ');
 
                             if (!dictatedText) {
-                                promptInput.value = baseText;
+                                setPromptComposerValue(baseText, { promptInput });
                             } else {
                                 const needsSpacer = baseText.length > 0 && !/[ \t\n]$/.test(baseText);
-                                promptInput.value = `${baseText}${needsSpacer ? ' ' : ''}${dictatedText}`;
+                                setPromptComposerValue(
+                                    `${baseText}${needsSpacer ? ' ' : ''}${dictatedText}`,
+                                    { promptInput }
+                                );
                             }
-                            promptInput.dispatchEvent(new Event('input', { bubbles: true }));
                         },
                         onError: (event) => {
                             console.warn('[chatTab] Dictation error:', event);
@@ -20316,27 +20362,23 @@ function setThinkingState(isThinking, request = activeChatRequest, options = {})
     }
 }
 
-function restorePromptEditingState(request) {
-    const promptInput = document.getElementById('promptInput');
+function restorePromptEditingState(request, options = {}) {
+    const promptInput = getPromptInputElement();
     if (!promptInput || !request) {
         return;
     }
 
     const currentValue = String(promptInput.value ?? '').trim();
-    if (!currentValue) {
-        promptInput.value = request.promptRaw || '';
-        promptInput.dispatchEvent(new Event('input', { bubbles: true }));
-    }
+    const shouldRestorePrompt = options.restorePrompt !== false;
 
-    try {
-        if (!currentValue) {
-            const valueLength = promptInput.value.length;
-            const start = Number.isInteger(request.selectionStart) ? request.selectionStart : valueLength;
-            const end = Number.isInteger(request.selectionEnd) ? request.selectionEnd : start;
-            promptInput.setSelectionRange(Math.min(start, valueLength), Math.min(end, valueLength));
-        }
-    } catch (_err) {
-        // Selection range is best-effort; some environments may not support it.
+    if (!currentValue && shouldRestorePrompt) {
+        setPromptComposerValue(request.promptRaw || '', {
+            promptInput,
+            selectionStart: Number.isInteger(request.selectionStart) ? request.selectionStart : null,
+            selectionEnd: Number.isInteger(request.selectionEnd) ? request.selectionEnd : null,
+            focus: true
+        });
+        return;
     }
 
     try {
@@ -20346,7 +20388,7 @@ function restorePromptEditingState(request) {
     }
 }
 
-function abortActiveChatRequest() {
+function abortActiveChatRequest(options = {}) {
     if (!activeChatRequest) {
         return;
     }
@@ -20365,7 +20407,7 @@ function abortActiveChatRequest() {
 
     setThinkingState(false, request);
     activeChatRequest = null;
-    restorePromptEditingState(request);
+    restorePromptEditingState(request, options);
 }
 
 function abortActiveHistoryRequest() {
@@ -20664,11 +20706,7 @@ function retryActiveChatRequest() {
     if (!prompt.trim()) {
         return;
     }
-    const promptInput = document.getElementById('promptInput');
-    if (promptInput) {
-        promptInput.value = prompt;
-        promptInput.dispatchEvent(new Event('input', { bubbles: true }));
-    }
+    setPromptComposerValue(prompt, { focus: true });
     setTimeout(() => {
         void handleSendPrompt();
     }, 0);
@@ -20782,7 +20820,7 @@ function createQueuedChatPromptId() {
 }
 
 function ensureChatTaskQueuePanel() {
-    const promptInput = document.getElementById('promptInput');
+    const promptInput = getPromptInputElement();
     if (!promptInput || !promptInput.parentElement) {
         return null;
     }
@@ -20948,7 +20986,7 @@ function scheduleQueuedChatPromptDrain() {
 }
 
 async function handleSendPrompt(options = {}) {
-    const promptInput = document.getElementById('promptInput');
+    const promptInput = getPromptInputElement();
     if (!promptInput) {
         return;
     }
@@ -20974,8 +21012,7 @@ async function handleSendPrompt(options = {}) {
             return;
         }
         queuePromptForLater(promptRaw);
-        promptInput.value = '';
-        promptInput.dispatchEvent(new Event('input', { bubbles: true }));
+        setPromptComposerValue('', { promptInput });
         return;
     }
 
@@ -21039,8 +21076,7 @@ async function handleSendPrompt(options = {}) {
 
     if (!fromQueue) {
         // Clear input only for direct sends; queued execution should preserve current draft text.
-        promptInput.value = '';
-        promptInput.dispatchEvent(new Event('input', { bubbles: true }));
+        setPromptComposerValue('', { promptInput });
     }
 
     try {
@@ -23425,6 +23461,9 @@ export function __testOnly_resetHistoryUiState() {
     historyMetricsState.retryable = false;
     historyMetricsState.detail = '';
     historyMetricsState.lastHealthy = null;
+}
+export async function __testOnly_createChatSession(sessionName = '') {
+    return createChatSession(sessionName);
 }
 export function __testOnly_setSessionTabsCache(sessions = []) {
     sessionTabsCache = normaliseConversationSessionViewModels(
