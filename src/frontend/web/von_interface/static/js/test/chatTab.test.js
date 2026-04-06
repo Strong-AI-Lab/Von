@@ -5217,7 +5217,7 @@ describe('conversation LLM telemetry clipboard export', () => {
 
     test('keeps the full telemetry export payload unchanged for file save', () => {
         const timestampMs = 1743760800000;
-        jest.useFakeTimers().setSystemTime(new Date('2026-04-04T19:03:45.963Z'));
+        jest.useFakeTimers().setSystemTime(Date.parse('2026-04-04T19:03:45.963Z'));
 
         try {
             setLlmDebugDataForTurn('assistant-1743760800000', {
