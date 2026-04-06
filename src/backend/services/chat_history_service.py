@@ -1342,6 +1342,7 @@ def add_message_to_history(
     namespace: Optional[str] = None,
     organisation_concept_id: Optional[str] = None,
     role_in_org: Optional[str] = None,
+    skip_rag_indexing: bool = False,
 ) -> None:
     """
     Adds a message to the chat history for a specific user and session.
@@ -1354,6 +1355,9 @@ def add_message_to_history(
         broadcast_to_shared: If True, broadcast the turn to SSE subscribers.
             If None (default), auto-detect based on whether the session has subscribers.
         exclude_user_from_broadcast: User ID to exclude from broadcast (typically the author)
+        skip_rag_indexing: When True, persist the turn without enqueuing best-effort
+            chat-history RAG indexing. Useful for deterministic fixture seeding and
+            other fast-path writes that should not wait on embeddings.
     """
     if not user_id or not session_id:
         raise ChatHistoryServiceError("user_id and session_id are required.")
@@ -1464,7 +1468,7 @@ def add_message_to_history(
         )
 
         # Index to RAG (Best effort)
-        if get_rag_service:
+        if get_rag_service and not skip_rag_indexing:
             try:
                 rag = get_rag_service()
                 content = message.get("content", "")
@@ -2188,13 +2192,6 @@ def get_chat_history_session_summary(
 
     mode = summary_mode.strip().lower() if isinstance(summary_mode, str) else "full"
     light_mode = mode in ("light", "minimal", "summary")
-
-    query = build_chat_history_query(
-        user_id=user_id,
-        session_id=session_id,
-        namespace=namespace,
-        include_legacy=include_legacy,
-    )
 
     metadata_projection: Dict[str, Any] = {
         "session_id": 1,

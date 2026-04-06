@@ -182,26 +182,45 @@ function readOptionText(option) {
   return text || null;
 }
 
+function readOptionIdentity(option) {
+  if (!option) return { id: null, conceptId: null };
+
+  let id = option.dataset?.id || null;
+  let conceptId = option.dataset?.conceptId || null;
+  const rawValue = String(option.value || '').trim();
+
+  if (!id && !conceptId && rawValue) {
+    if (rawValue.startsWith('{')) {
+      try {
+        const parsed = JSON.parse(rawValue);
+        id = parsed?.id || null;
+        conceptId = parsed?.concept_id || null;
+      } catch {
+        // Ignore malformed legacy values and fall back below.
+      }
+    } else if (rawValue.startsWith('#V#')) {
+      conceptId = rawValue;
+    }
+  }
+
+  return { id, conceptId };
+}
+
 function buildStoredUserContextFromOption(option) {
-  if (!option) return null;
+  const { id, conceptId } = readOptionIdentity(option);
+  if (!id && !conceptId) return null;
   return {
-    id: option.dataset?.id || null,
-    concept_id: option.dataset?.conceptId || null,
+    id,
+    concept_id: conceptId,
     name: readOptionText(option),
   };
 }
 
 function buildStoredOrganisationContextFromOption(option) {
-  let conceptId = option?.dataset?.conceptId || null;
-  if (!conceptId) {
-    const rawValue = String(option?.value || '').trim();
-    if (rawValue.startsWith('#V#')) {
-      conceptId = rawValue;
-    }
-  }
-  if (!option || (!option.dataset?.id && !conceptId)) return null;
+  const { id, conceptId } = readOptionIdentity(option);
+  if (!id && !conceptId) return null;
   return {
-    id: option.dataset?.id || null,
+    id,
     concept_id: conceptId,
     name: normaliseOrganisationDisplayName(option.textContent) || readOptionText(option),
   };
@@ -258,7 +277,7 @@ async function syncInitialScopedSelections({
   switchOrganisationFn = switchOrganisation,
   refreshRagStatus = () => loadRagStatus(null),
 } = {}) {
-  const userData = getSelectedUserContextFromUi();
+  const userData = getSelectedUserContextFromUi() || getStoredJson(LS_USER_KEY);
   setStoredJson(LS_USER_KEY, userData);
 
   let fallbackNamespace = '';
@@ -777,12 +796,11 @@ function getCartoucheKindAsBackgroundSetting() {
 function enforceCartoucheAppearanceConstraints(toggles = {}) {
   const { showNameToggle, showIdToggle, showKindToggle, kindBgToggle } = toggles;
   const showName = showNameToggle ? !!showNameToggle.checked : getCartoucheShowNameSetting();
-  let showId = showIdToggle ? !!showIdToggle.checked : getCartoucheShowIdSetting();
-  let showKind = showKindToggle ? !!showKindToggle.checked : getCartoucheShowKindSetting();
+  const showId = showIdToggle ? !!showIdToggle.checked : getCartoucheShowIdSetting();
+  const showKind = showKindToggle ? !!showKindToggle.checked : getCartoucheShowKindSetting();
   const kindAsBg = kindBgToggle ? !!kindBgToggle.checked : getCartoucheKindAsBackgroundSetting();
 
   if (!showName && !showId) {
-    showId = true;
     if (showIdToggle) {
       showIdToggle.checked = true;
     }
@@ -790,7 +808,6 @@ function enforceCartoucheAppearanceConstraints(toggles = {}) {
   }
 
   if (kindAsBg && showKind) {
-    showKind = false;
     if (showKindToggle) {
       showKindToggle.checked = false;
     }
@@ -1397,6 +1414,16 @@ export function __testOnly_resolveDisplayedProviderModels(settings) {
 }
 
 // Export for testing
+export function __testOnly_buildStoredUserContextFromOption(option) {
+  return buildStoredUserContextFromOption(option);
+}
+
+// Export for testing
+export function __testOnly_applyStoredSelection(selectId, stored, fallbackSelected = true) {
+  return applyStoredSelection(selectId, stored, fallbackSelected);
+}
+
+// Export for testing
 export async function __testOnly_syncInitialScopedSelections(overrides = {}) {
   await syncInitialScopedSelections(overrides);
 }
@@ -1563,21 +1590,53 @@ function resolveOrgNameFromSelect(orgConceptId) {
   return null;
 }
 
+function optionMatchesStoredContext(option, stored) {
+  if (!option || !stored) return false;
+  const { id, conceptId } = readOptionIdentity(option);
+  return Boolean(
+    (stored.id && id && String(stored.id) === String(id))
+    || (stored.concept_id && conceptId && stored.concept_id === conceptId)
+  );
+}
+
+function ensureStoredSelectionOption(selectId, stored) {
+  const sel = document.getElementById(selectId);
+  if (!sel || !stored || (!stored.id && !stored.concept_id)) return false;
+
+  for (const opt of sel.options) {
+    if (optionMatchesStoredContext(opt, stored)) {
+      return true;
+    }
+  }
+
+  const option = document.createElement('option');
+  option.value = stored.concept_id || stored.id || '';
+  if (stored.id) {
+    option.dataset.id = String(stored.id);
+  }
+  if (stored.concept_id) {
+    option.dataset.conceptId = stored.concept_id;
+  }
+  option.textContent = stored.name || stored.email || stored.concept_id || String(stored.id);
+  sel.appendChild(option);
+  return true;
+}
+
 function applyStoredSelection(selectId, stored, fallbackSelected = true) {
   const sel = document.getElementById(selectId);
   if (!sel) return null;
   if (stored && (stored.id || stored.concept_id)) {
+    ensureStoredSelectionOption(selectId, stored);
     for (const opt of sel.options) {
-      if (opt.dataset) {
-        if ((stored.id && opt.dataset.id === String(stored.id)) || (stored.concept_id && opt.dataset.conceptId === stored.concept_id)) {
-          opt.selected = true;
-          // Backfill concept_id if missing (required for per-user model saves)
-          if (!stored.concept_id && opt.dataset.conceptId) {
-            stored.concept_id = opt.dataset.conceptId;
-            setStoredJson(selectId === 'currentUserSelect' ? LS_USER_KEY : LS_ORG_KEY, stored);
-          }
-          return stored;
+      if (optionMatchesStoredContext(opt, stored)) {
+        opt.selected = true;
+        const { conceptId } = readOptionIdentity(opt);
+        // Backfill concept_id if missing (required for per-user model saves)
+        if (!stored.concept_id && conceptId) {
+          stored.concept_id = conceptId;
+          setStoredJson(selectId === 'currentUserSelect' ? LS_USER_KEY : LS_ORG_KEY, stored);
         }
+        return stored;
       }
     }
   }

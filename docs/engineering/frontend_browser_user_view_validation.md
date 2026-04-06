@@ -104,6 +104,52 @@ Important:
 - keep clear boundaries between test-fixture behaviour and production
   behaviour.
 
+### 6.1 Implemented local browser-test mode
+
+`JVNAUTOSCI-1747` now provides a concrete local-development path for this:
+
+- enable `VON_BROWSER_TEST_AUTH_ENABLED=1` in your local environment;
+- optionally set:
+  - `VON_BROWSER_TEST_PSEUDOUSER_NAME`
+  - `VON_BROWSER_TEST_PSEUDOUSER_EMAIL`
+  - `VON_BROWSER_TEST_PSEUDOUSER_CONCEPT_ID`
+  - `VON_BROWSER_TEST_ORGANISATION_CONCEPT_ID`
+- restart Von so the launcher picks the values up from `.env`;
+- open the Settings tab in a browser served directly from `localhost` or
+  `127.0.0.1`;
+- use the `Browser Test Login` control in the authentication area.
+
+This route is intentionally:
+
+- disabled by default;
+- localhost-only;
+- intended for local development and browser acceptance work, not for
+  production access.
+
+When invoked successfully it establishes a real Flask session for the configured
+pseudouser and seeds representative user-view fixture data, currently including:
+
+- saved organisation-scoped chat sessions;
+- representative Messages threads;
+- unread incoming messages;
+- long content intended to exercise wrapping, clipping, and dense header/meta
+  layouts.
+
+The current default pseudouser for this local mode is the Strong AI Lab
+pseudouser:
+
+- `Zhan von Witbrock <zhanvonwitbrock@gmail.com>`
+
+Repeated use is designed to be stable rather than destructive:
+
+- fixture users and memberships are reused rather than recreated blindly;
+- saved chat sessions are deterministic and only missing fixture turns are
+  added;
+- seeded Messages are reused by fixture key rather than duplicated on every
+  refresh;
+- unread fixture messages are reset to unread so the Messages pane remains
+  useful for acceptance checks.
+
 ## 7. What a Good User-View Fixture Should Cover
 
 A strong authenticated browser-validation fixture should make it easy to inspect
@@ -170,8 +216,10 @@ For major frontend or browser-validation improvements, consider whether
 
 ## 11. Current Follow-Up
 
-The current tracked follow-up for making authenticated browser/user-view testing
-reliable and comprehensive is:
+The first practical authenticated pseudouser path now exists via
+`JVNAUTOSCI-1747`, but the broader testing strategy should still evolve toward:
 
-- `JVNAUTOSCI-1747` - create reliable authenticated pseudouser browser-testing
-  mode for comprehensive user-view UI validation.
+- richer fixture coverage for invites and shared-conversation surfaces;
+- stronger browser-level regression scripts for common acceptance paths;
+- convenient fixture refresh/reseed pathways that remain explicitly local-only
+  and safe by default.

@@ -780,10 +780,150 @@
             }
         }
 
+        function getBrowserTestWindowSessionId() {
+            try {
+                const hostWindow = getSettingsHostWindow();
+                const hostSessionStorage = hostWindow?.sessionStorage || sessionStorage;
+                const key = 'von_window_session_id';
+                const existing = hostSessionStorage.getItem(key);
+                if (existing) return existing;
+                const generated = (
+                    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+                )
+                    ? `ws_${crypto.randomUUID().replace(/-/g, '')}`
+                    : `ws_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+                hostSessionStorage.setItem(key, generated);
+                return generated;
+            } catch {
+                return '';
+            }
+        }
+
+        function getSettingsHostWindow() {
+            try {
+                if (window.parent && window.parent !== window) {
+                    return window.parent;
+                }
+            } catch { }
+            return window;
+        }
+
+        function getSettingsHostDocument() {
+            try {
+                return getSettingsHostWindow().document || document;
+            } catch {
+                return document;
+            }
+        }
+
+        async function refreshBrowserTestHostUi() {
+            const hostWindow = getSettingsHostWindow();
+
+            if (hostWindow.updateModelInfoFooterDisplay) {
+                try { await hostWindow.updateModelInfoFooterDisplay(); } catch (e) { console.warn('Footer refresh failed', e); }
+            }
+            if (hostWindow.updateHistoryLength) {
+                try { await hostWindow.updateHistoryLength(); } catch (e) { console.warn('History refresh failed', e); }
+            }
+        }
+
+        function upsertSelectOption(selectId, item) {
+            if (!item?.concept_id) return;
+            const select = document.getElementById(selectId);
+            if (!select) return;
+
+            let target = null;
+            for (const option of select.options) {
+                if (option.dataset?.conceptId === item.concept_id || option.value === item.concept_id) {
+                    target = option;
+                    break;
+                }
+            }
+
+            if (!target) {
+                target = document.createElement('option');
+                target.value = item.concept_id;
+                target.dataset.conceptId = item.concept_id;
+                select.appendChild(target);
+            }
+
+            target.textContent = item.name || item.email || item.concept_id;
+            target.selected = true;
+        }
+
+        function syncBrowserTestSelections(payload) {
+            const user = payload && payload.user_concept_id
+                ? {
+                    concept_id: payload.user_concept_id,
+                    name: payload.name || payload.email || payload.user_concept_id,
+                    email: payload.email || null,
+                }
+                : null;
+            const organisation = payload?.organisation || null;
+            const namespace = payload?.namespace || null;
+
+            try {
+                if (user?.concept_id) {
+                    const storedUser = {
+                        id: null,
+                        concept_id: user.concept_id,
+                        name: user.name,
+                    };
+                    const hostWindow = getSettingsHostWindow();
+                    const hostSessionStorage = hostWindow?.sessionStorage || sessionStorage;
+                    const hostLocalStorage = hostWindow?.localStorage || localStorage;
+
+                    sessionStorage.setItem('von_current_user', JSON.stringify(storedUser));
+                    localStorage.setItem('von_current_user', JSON.stringify(storedUser));
+                    hostSessionStorage.setItem('von_current_user', JSON.stringify(storedUser));
+                    hostLocalStorage.setItem('von_current_user', JSON.stringify(storedUser));
+                    upsertSelectOption('currentUserSelect', user);
+                }
+
+                if (organisation?.concept_id) {
+                    const storedOrg = {
+                        id: null,
+                        concept_id: organisation.concept_id,
+                        name: organisation.name || organisation.concept_id,
+                    };
+                    const hostWindow = getSettingsHostWindow();
+                    const hostSessionStorage = hostWindow?.sessionStorage || sessionStorage;
+                    const hostLocalStorage = hostWindow?.localStorage || localStorage;
+
+                    sessionStorage.setItem('von_current_org', JSON.stringify(storedOrg));
+                    localStorage.setItem('von_current_org', JSON.stringify(storedOrg));
+                    hostSessionStorage.setItem('von_current_org', JSON.stringify(storedOrg));
+                    hostLocalStorage.setItem('von_current_org', JSON.stringify(storedOrg));
+                    upsertSelectOption('currentOrganisationSelect', organisation);
+                }
+
+                if (namespace) {
+                    const hostWindow = getSettingsHostWindow();
+                    const hostSessionStorage = hostWindow?.sessionStorage || sessionStorage;
+                    const hostLocalStorage = hostWindow?.localStorage || localStorage;
+
+                    sessionStorage.setItem('current_user_namespace', namespace);
+                    localStorage.setItem('current_user_namespace', namespace);
+                    hostSessionStorage.setItem('current_user_namespace', namespace);
+                    hostLocalStorage.setItem('current_user_namespace', namespace);
+                }
+            } catch (error) {
+                console.warn('Failed to sync browser-test selections', error);
+            }
+        }
+
         // Update authentication display based on status
         async function updateAuthenticationDisplay(authStatus) {
             const authContainer = document.getElementById('authenticationStatus');
             console.log('Updating authentication display. Container found:', !!authContainer, 'Status:', authStatus);
+            const browserTestMode = authStatus?.browser_test_mode || {};
+            const browserTestAvailable = !!browserTestMode.available;
+            const browserTestButtonLabel = authStatus?.auth_provider === 'browser_test_fixture'
+                ? 'Refresh Browser Fixture'
+                : 'Browser Test Login';
+            const browserTestButtonHtml = browserTestAvailable
+                ? `<button onclick="loginWithBrowserTestUser()" class="btn-secondary ml-2">${browserTestButtonLabel}</button>`
+                : '';
 
             if (authStatus.authenticated) {
                 // User is logged in - show status and logout button
@@ -791,14 +931,18 @@
                 authContainer.innerHTML = `
                     <div class="auth-status">
                         <span class="auth-info">Logged in as: <strong>${authStatus.email}</strong></span>
+                        ${authStatus.auth_provider === 'browser_test_fixture'
+                            ? '<span class="settings-note ml-2">Browser test fixture active</span>'
+                            : ''}
                         <button onclick="logoutUser()" class="btn-secondary ml-2">Logout</button>
+                        ${browserTestButtonHtml}
                     </div>
                 `;
 
                 // Do not overwrite current user selection with auth email; keep user selection independent of Gmail auth
 
                 // Immediately add authentication highlighting to footer
-                const userSegments = [...document.querySelectorAll('.footer-segment')]
+                const userSegments = [...getSettingsHostDocument().querySelectorAll('.footer-segment')]
                     .filter(seg => seg.querySelector('.footer-label-inline')?.textContent?.trim().startsWith('User:'));
                 userSegments.forEach(seg => {
                     const btn = seg.querySelector('.concept-footer-button');
@@ -809,22 +953,7 @@
                 });
 
                 // Also refresh the full footer to ensure consistency
-                if (window.updateModelInfoFooterDisplay) {
-                    try {
-                        await window.updateModelInfoFooterDisplay();
-                    } catch (error) {
-                        console.warn('Failed to update footer after login:', error);
-                    }
-                }
-
-                // Update history length display to show authenticated status
-                if (window.updateHistoryLength) {
-                    try {
-                        await window.updateHistoryLength();
-                    } catch (error) {
-                        console.warn('Failed to update history length after login:', error);
-                    }
-                }
+                await refreshBrowserTestHostUi();
 
                 // Re-render organisation selector now that we have an authenticated session
                 if (window.refreshOrgSelector) {
@@ -835,6 +964,7 @@
                 console.log('Showing unauthenticated state - login button');
                 authContainer.innerHTML = `
                     <button onclick="loginWithGoogle()" class="btn-primary">Login with Google</button>
+                    ${browserTestButtonHtml}
                 `;
             }
 
@@ -950,29 +1080,14 @@
                     await updateAuthenticationDisplay({ authenticated: false });
 
                     // Immediately remove authentication highlighting from footer
-                    const userButtons = document.querySelectorAll('.concept-footer-button.user-auth-active');
+                    const userButtons = getSettingsHostDocument().querySelectorAll('.concept-footer-button.user-auth-active');
                     userButtons.forEach(btn => {
                         btn.classList.remove('user-auth-active');
                         btn.title = 'Not logged in';
                     });
 
                     // Also refresh the full footer to ensure consistency
-                    if (window.updateModelInfoFooterDisplay) {
-                        try {
-                            await window.updateModelInfoFooterDisplay();
-                        } catch (error) {
-                            console.warn('Failed to update footer after logout:', error);
-                        }
-                    }
-
-                    // Update history length display to show unauthenticated status
-                    if (window.updateHistoryLength) {
-                        try {
-                            await window.updateHistoryLength();
-                        } catch (error) {
-                            console.warn('Failed to update history length after logout:', error);
-                        }
-                    }
+                    await refreshBrowserTestHostUi();
                 } else {
                     console.error('Logout failed:', response.statusText);
                     alert('Logout failed. Please try again.');
@@ -980,6 +1095,36 @@
             } catch (error) {
                 console.error('Error during logout:', error);
                 alert('Logout failed. Please try again.');
+            }
+        }
+
+        async function loginWithBrowserTestUser() {
+            try {
+                const windowSessionId = getBrowserTestWindowSessionId();
+                const response = await fetch('/von/api/auth/browser-test-login', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Von-Window-Session': windowSessionId,
+                    },
+                    body: JSON.stringify({ window_session_id: windowSessionId }),
+                });
+                const payload = await response.json();
+                if (!response.ok || !payload?.success) {
+                    const message = payload?.error || `Browser test login failed (${response.status})`;
+                    throw new Error(message);
+                }
+
+                syncBrowserTestSelections(payload);
+                await updateAuthenticationDisplay(payload);
+
+                if (window.refreshOrgSelector) {
+                    try { await window.refreshOrgSelector(); } catch (e) { console.warn('Org selector refresh failed', e); }
+                }
+                await refreshBrowserTestHostUi();
+            } catch (error) {
+                console.error('Browser test login failed:', error);
+                alert(error?.message || 'Browser test login failed.');
             }
         }
 

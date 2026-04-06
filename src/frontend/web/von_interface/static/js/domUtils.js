@@ -321,7 +321,7 @@ function readSessionScopedJson(key) {
 }
 async function getCurrentUserInfo(settingsOverride = null) {
   const stored = readStoredJson('von_current_user');
-  if (stored) {
+  if (stored?.id || stored?.concept_id) {
     return { id: stored.id || null, conceptId: stored.concept_id || null, name: stored.name || null };
   }
   const settings = settingsOverride || await getSettings();
