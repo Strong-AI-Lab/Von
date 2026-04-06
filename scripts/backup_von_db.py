@@ -65,6 +65,8 @@ class BackupSuccessReceipt:
     artifact_kind: str
     compressed: bool
     encrypted: bool
+    artifact_size_bytes: int
+    collection_count: int
 
 
 def _utc_timestamp_compact() -> str:
@@ -419,6 +421,11 @@ def main(argv: list[str] | None = None) -> int:
         protect_paths={final_artifact} if final_artifact.exists() else set(),
     )
 
+    collection_count = sum(
+        1 for item in db_dir.iterdir() if item.is_file() and item.name.endswith(".bson")
+    )
+    artifact_size_bytes = _artifact_size_bytes(final_artifact)
+
     receipt = BackupSuccessReceipt(
         schema_version=BACKUP_SUCCESS_RECEIPT_SCHEMA_VERSION,
         completed_at_utc=_utc_timestamp_iso(),
@@ -430,6 +437,8 @@ def main(argv: list[str] | None = None) -> int:
         artifact_kind=_artifact_kind(final_artifact),
         compressed=bool(compression_enabled),
         encrypted=bool(encryption_enabled),
+        artifact_size_bytes=int(artifact_size_bytes),
+        collection_count=int(collection_count),
     )
     receipt_payload = asdict(receipt)
     sidecar_path = _backup_receipt_sidecar_path(final_artifact)
@@ -454,6 +463,12 @@ def main(argv: list[str] | None = None) -> int:
                 f"{legacy_sentinel_path}: {exc}"
             )
 
+    print(
+        "[backup] Summary: "
+        f"db={db_name} source={prelude.mongo_uri_redacted} "
+        f"collections={collection_count} artifact_kind={receipt.artifact_kind} "
+        f"artifact_size_bytes={artifact_size_bytes}"
+    )
     print(f"[backup] Completed: {final_artifact}")
     return 0
 

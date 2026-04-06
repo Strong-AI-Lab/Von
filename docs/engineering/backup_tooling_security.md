@@ -45,6 +45,7 @@ $env:VON_ENABLE_BACKUP_ACTION = '1'
 ## Notes
 
 - `scripts/backup_von_db.py` still supports dry-run and policy controls (retention, compression, encryption).
+- For the canonical local operator restore path and restore-drill procedure, see `docs/engineering/local_backup_restore_runbook.md`.
 - Encryption at rest remains optional and controlled by:
   - `VON_BACKUP_ENCRYPTION_ENABLED`
   - `VON_BACKUP_ENCRYPTION_KEY`

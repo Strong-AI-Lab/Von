@@ -6,8 +6,10 @@
         stop         Gracefully stop via /admin/shutdown (fallback force)
         status       Report running/stopped + health
         restart      Stop then start
-    logs         Show/tail current log (use -Tail/-Follow)
-    check        Quick health check (exit codes: 0/healthy,2/unhealthy,3/not running)
+        logs         Show/tail current log (use -Tail/-Follow)
+        check        Quick health check (exit codes: 0/healthy,2/unhealthy,3/not running)
+        backup       Run manual backup
+        restore-backup Dry-run/apply restore from a backup artefact or receipt
         help         Show help
 
     Flags:
@@ -46,6 +48,11 @@ param(
     [switch]$BackupDryRun,
     [string]$BackupTag = 'manual',
     [string]$BackupOutDir,
+    # Restore backups
+    [string]$RestoreBackupPath,
+    [string]$RestoreTargetDbName,
+    [switch]$RestoreApply,
+    [switch]$RestoreDropTarget,
     # Auto-update (continuous self-updating runner)
     [int]$UpdateIntervalMinutes = 60,
     [string]$UpdateBranch = 'main',
@@ -228,6 +235,53 @@ function Get-BackupFallbackDir {
     return (Join-Path $Root 'backups')
 }
 
+function Get-BackupArtifactSizeBytes {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    try {
+        $item = Get-Item -LiteralPath $Path -ErrorAction Stop
+    }
+    catch {
+        return [int64]0
+    }
+
+    if (-not $item.PSIsContainer) {
+        return [int64]$item.Length
+    }
+
+    $total = [int64]0
+    try {
+        Get-ChildItem -LiteralPath $item.FullName -Recurse -File -ErrorAction Stop | ForEach-Object {
+            $total += [int64]$_.Length
+        }
+    }
+    catch {
+        return [int64]0
+    }
+    return $total
+}
+
+function Test-BackupArtifactPresentAndNonEmpty {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $exists = $false
+    try { $exists = [bool](Test-Path -LiteralPath $Path) } catch { $exists = $false }
+    if (-not $exists) {
+        return [pscustomobject]@{
+            Present = $false
+            SizeBytes = [int64]0
+            Verified = $false
+        }
+    }
+
+    $sizeBytes = Get-BackupArtifactSizeBytes -Path $Path
+    return [pscustomobject]@{
+        Present = $true
+        SizeBytes = [int64]$sizeBytes
+        Verified = ($sizeBytes -gt 0)
+    }
+}
+
 $localAppDataRoot = if ($env:LOCALAPPDATA -and $env:LOCALAPPDATA.ToString().Trim()) {
     $env:LOCALAPPDATA.ToString().Trim()
 }
@@ -332,6 +386,13 @@ function Invoke-MigrateLocalBackupsToWDrive {
                 Write-LauncherLog "[backup-migrate] Moving $($item.Name) -> $destRoot"
                 Move-Item -Path $item.FullName -Destination $dest -Force -ErrorAction Stop
                 $moved++
+                $verification = Test-BackupArtifactPresentAndNonEmpty -Path $dest
+                if ($verification.Verified) {
+                    Write-LauncherLog "[backup-migrate] Verified offsite artefact $dest size_bytes=$($verification.SizeBytes)"
+                }
+                else {
+                    Write-LauncherLog "[backup-migrate] WARN offsite verification failed after move: $dest"
+                }
             }
             catch {
                 Write-LauncherLog "[backup-migrate] WARN move failed $($item.Name): $($_.Exception.Message)"
@@ -348,6 +409,14 @@ function Invoke-MigrateLocalBackupsToWDrive {
                 Copy-Item -Path $newest.FullName -Destination (Join-Path $destRoot $newest.Name) -Force -ErrorAction Stop
             }
             $copied++
+            $copiedDest = Join-Path $destRoot $newest.Name
+            $verification = Test-BackupArtifactPresentAndNonEmpty -Path $copiedDest
+            if ($verification.Verified) {
+                Write-LauncherLog "[backup-migrate] Verified offsite artefact $copiedDest size_bytes=$($verification.SizeBytes)"
+            }
+            else {
+                Write-LauncherLog "[backup-migrate] WARN offsite verification failed after copy: $copiedDest"
+            }
         }
         catch {
             Write-LauncherLog "[backup-migrate] WARN copy newest failed $($newest.Name): $($_.Exception.Message)"
@@ -2937,7 +3006,7 @@ function Show-Help {
     @'
 Von Launcher Help
     Usage: .\run.ps1 [action] [options]
-    Actions: start | foreground | stop | status | restart | logs | check | backup | autoupdate | rag-worker | help
+    Actions: start | foreground | stop | status | restart | logs | check | backup | restore-backup | autoupdate | rag-worker | help
     Options:
         -Port <int>            (reserved future multi-instance)
     -NoBrowser             Do not auto open browser
@@ -2957,10 +3026,15 @@ Von Launcher Help
         -BackupDryRun           For backup action: do not run mongodump (prints what would happen)
         -BackupTag <tag>        For backup action: tag suffix for backup dir (default manual)
         -BackupOutDir <path>    For backup action: output root dir (default resolved backup root)
+        -RestoreBackupPath <p>  For restore-backup: backup artefact or receipt path
+        -RestoreTargetDbName <n> For restore-backup: target DB (default source_db_restore_probe)
+        -RestoreApply            For restore-backup: actually run mongorestore (default dry-run)
+        -RestoreDropTarget       For restore-backup: drop target collections before restore
     Backup safety environment variables:
         VON_ENABLE_BACKUP_ACTION=1   Required to run on-demand ".\run.ps1 backup"
         VON_BACKUP_ROOT=<path>       Recommended explicit backup root outside this repo
         VON_ALLOW_BACKUP_IN_REPO=1   Override safety block for in-repo backup apply mode
+        VON_ENABLE_RESTORE_ACTION=1  Required to run ".\run.ps1 restore-backup"
     AI chat-session sync environment variables:
         VON_ENABLE_AI_CHAT_SESSION_SYNC=1
         VON_AI_CHAT_SESSION_SYNC_INTERVAL_HOURS=<int>
@@ -2982,6 +3056,8 @@ Von Launcher Help
         .\run.ps1 backup -BackupDryRun
         .\run.ps1 backup -BackupTag manual
         .\run.ps1 backup -BackupTag pre-change -BackupOutDir C:\von_backups
+        .\run.ps1 restore-backup -RestoreBackupPath C:\von_backups\last_successful_backup_receipt.json
+        .\run.ps1 restore-backup -RestoreBackupPath C:\von_backups\von_db_20260406_010203Z_auto-daily.zip -RestoreTargetDbName von_db_restore_probe -RestoreApply -RestoreDropTarget
         .\run.ps1 stop
     .\run.ps1 stop 12345        # kill specific PID directly
     .\run.ps1 stop force        # detect by port, verify command line, then kill
@@ -3101,6 +3177,52 @@ function Invoke-BackupNow {
     }
 }
 
+function Invoke-RestoreBackupNow {
+    <#
+        Run a local operator restore from a backup artefact or receipt.
+        Defaults to dry-run and requires explicit opt-in via VON_ENABLE_RESTORE_ACTION.
+    #>
+    if (-not (Test-TruthySetting $env:VON_ENABLE_RESTORE_ACTION)) {
+        Write-LauncherLog "[restore-backup] ERROR: restore action is disabled by default. Set VON_ENABLE_RESTORE_ACTION=1 to acknowledge destructive restore risk and enable this action."
+        return
+    }
+    if (-not $RestoreBackupPath) {
+        Write-LauncherLog "[restore-backup] ERROR: specify -RestoreBackupPath with a backup artefact or receipt path."
+        return
+    }
+
+    $restoreScript = Join-Path $Root 'scripts/restore_von_db.py'
+    if (-not (Test-Path $restoreScript)) {
+        Write-LauncherLog "[restore-backup] ERROR: restore script missing: $restoreScript"
+        return
+    }
+
+    $pdm = if (Test-Path (Join-Path $Root '.venv\Scripts\pdm.exe')) { Join-Path $Root '.venv\Scripts\pdm.exe' } else { 'pdm' }
+    $args = @('run', 'python', $restoreScript, '--backup-path', $RestoreBackupPath)
+    if ($RestoreTargetDbName) {
+        $args += @('--target-db-name', $RestoreTargetDbName)
+    }
+    if ($RestoreDropTarget) {
+        $args += '--drop-target'
+    }
+    if ($RestoreApply) {
+        $args += '--apply'
+    }
+
+    $mode = if ($RestoreApply) { 'apply' } else { 'dry-run' }
+    $drop = if ($RestoreDropTarget) { 'true' } else { 'false' }
+    $targetSummary = if ($RestoreTargetDbName) { $RestoreTargetDbName } else { '<auto restore probe>' }
+    Write-LauncherLog "[restore-backup] Starting restore (mode=$mode backup=$RestoreBackupPath target_db=$targetSummary drop_target=$drop)"
+    & $pdm @args
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -eq 0) {
+        Write-LauncherLog "[restore-backup] OK"
+    }
+    else {
+        Write-LauncherLog "[restore-backup] ERROR exit=$exitCode"
+    }
+}
+
 switch ($Action) {
     'start' { Start-VonServer }
     'foreground' {
@@ -3174,6 +3296,7 @@ switch ($Action) {
         }
     }
     'backup' { Invoke-BackupNow }
+    'restore-backup' { Invoke-RestoreBackupNow }
     'autoupdate' {
         Write-LauncherLog "Starting auto-update loop (branch=$UpdateBranch interval=${UpdateIntervalMinutes}m)... Press Ctrl+C to stop."
         # Ensure git is available

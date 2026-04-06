@@ -134,18 +134,18 @@ def test_apply_backup_writes_receipts_only_after_validated_success(
     launcher_payload = json.loads(launcher_receipt.read_text(encoding="utf-8"))
     sidecar_payload = json.loads(sidecar.read_text(encoding="utf-8"))
     assert launcher_payload == sidecar_payload
-    assert launcher_payload == {
-        "schema_version": "backup_success_receipt.v1",
-        "completed_at_utc": "2026-04-06T01:02:03Z",
-        "db_name": "test_von_db",
-        "tag": "auto-daily",
-        "out_root": str(out_root.resolve()),
-        "backup_root": str(artifact.resolve()),
-        "final_artifact_path": str(artifact.resolve()),
-        "artifact_kind": "directory",
-        "compressed": False,
-        "encrypted": False,
-    }
+    assert launcher_payload["schema_version"] == "backup_success_receipt.v1"
+    assert launcher_payload["completed_at_utc"] == "2026-04-06T01:02:03Z"
+    assert launcher_payload["db_name"] == "test_von_db"
+    assert launcher_payload["tag"] == "auto-daily"
+    assert launcher_payload["out_root"] == str(out_root.resolve())
+    assert launcher_payload["backup_root"] == str(artifact.resolve())
+    assert launcher_payload["final_artifact_path"] == str(artifact.resolve())
+    assert launcher_payload["artifact_kind"] == "directory"
+    assert launcher_payload["compressed"] is False
+    assert launcher_payload["encrypted"] is False
+    assert launcher_payload["collection_count"] == 1
+    assert launcher_payload["artifact_size_bytes"] > 0
 
 
 def test_apply_backup_failure_does_not_write_receipts(
