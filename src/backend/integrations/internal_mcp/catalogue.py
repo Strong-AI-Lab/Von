@@ -1388,6 +1388,20 @@ def _concept_exists(**kwargs):
         )
 
     try:
+        collection = ConceptsRepository.collection()
+        if collection is None:
+            return make_error_response(
+                "db_unavailable",
+                "Database connection unavailable",
+                details={
+                    "collection": "concepts",
+                    "reason": "concepts_collection_unavailable",
+                },
+                suggestions=[
+                    "Retry once the MongoDB connection is healthy",
+                    "Check Mongo DNS/direct-host fallback configuration if this persists",
+                ],
+            )
         doc = ConceptsRepository.find_one({"concept_id": concept_id}, {"_id": 1})
         exists = bool(doc) or is_code_concept_id(concept_id)
         accessible = can_access_concept(concept_id)

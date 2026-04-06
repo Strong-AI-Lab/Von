@@ -181,6 +181,25 @@ def _mongo_socket_timeout_ms() -> int:
     return _get_positive_int_env("MONGO_SOCKET_TIMEOUT_MS", 5000)
 
 
+def _resolve_connection_fallback_target(
+    *,
+    prefer_dns: bool,
+) -> tuple[str, str] | None:
+    """Return the best configured fallback URI for Mongo recovery.
+
+    Hosted guidance uses ``MONGO_ALLOW_LOCAL_FALLBACK=0`` to block a silent
+    downgrade to localhost. That flag should not suppress a separately
+    configured direct-host Atlas fallback URI because that remains a
+    non-local recovery path.
+    """
+
+    if prefer_dns and MONGO_DNS_FALLBACK_URI:
+        return (MONGO_DNS_FALLBACK_URI, "dns fallback")
+    if MONGO_ALLOW_LOCAL_FALLBACK:
+        return (MONGO_LOCAL_URI, "local fallback")
+    return None
+
+
 def _is_running_under_pytest() -> bool:
     # PYTEST_CURRENT_TEST is the most reliable indicator.
     if os.getenv("PYTEST_CURRENT_TEST"):
@@ -299,7 +318,9 @@ def _collection_indexes_are_ready(db: Database, collection_name: str) -> bool:
     return _collection_index_ready_key(db, collection_name) in _COLLECTION_INDEXES_READY
 
 
-def _new_mongo_client(uri: str, server_selection_timeout_ms: int | None = None) -> MongoClient:
+def _new_mongo_client(
+    uri: str, server_selection_timeout_ms: int | None = None
+) -> MongoClient:
     """Create a MongoClient with explicit timeout defaults for faster failure/recovery."""
     return MongoClient(
         uri,
@@ -317,7 +338,9 @@ def _should_run_auto_recovery_check() -> bool:
     if not _mongo_auto_recovery_enabled():
         return False
     now = time.monotonic()
-    if (now - _last_auto_recovery_check_at) < _mongo_auto_recovery_check_interval_seconds():
+    if (
+        now - _last_auto_recovery_check_at
+    ) < _mongo_auto_recovery_check_interval_seconds():
         return False
     _last_auto_recovery_check_at = now
     return True
@@ -421,40 +444,44 @@ def get_db() -> Database | None:
                     MONGO_URI.startswith("mongodb+srv://"),
                 )
 
-            # Attempt local fallback for SRV/DNS issues OR SSL blocks if allowed
-            # We relax the srv check if explicit fallback is enabled and we have an SSL error
-            should_try_fallback = MONGO_ALLOW_LOCAL_FALLBACK and (
-                MONGO_URI.strip("\"'").startswith("mongodb+srv://") or is_ssl_error
-            )
+            # Prefer a dedicated direct-host Atlas fallback when configured;
+            # only use localhost fallback when it is explicitly allowed.
+            fallback_target = None
+            if MONGO_URI.strip("\"'").startswith("mongodb+srv://") or is_ssl_error:
+                fallback_target = _resolve_connection_fallback_target(prefer_dns=True)
 
-            if should_try_fallback:
+            if fallback_target is not None:
                 try:
+                    fallback_uri, fallback_label = fallback_target
                     logger.warning(
-                        "[mongo_fallback] Attempting local MongoDB fallback due to connection failure."
+                        "[mongo_fallback] Attempting %s MongoDB fallback due to connection failure.",
+                        fallback_label,
                     )
                     _mongo_client_real = _new_mongo_client(
-                        MONGO_LOCAL_URI, server_selection_timeout_ms=3000
+                        fallback_uri, server_selection_timeout_ms=3000
                     )
                     _mongo_client_real.admin.command("ismaster")
-                    _effective_uri_real = MONGO_LOCAL_URI
+                    _effective_uri_real = fallback_uri
                     _using_fallback_real = True
                     _last_auto_recovery_check_at = time.monotonic()
                     try:
                         logger.warning(
-                            "[mongo_fallback] Using local fallback Mongo URI instead of primary (connection failure)."
+                            "[mongo_fallback] Using %s Mongo URI instead of primary (connection failure).",
+                            fallback_label,
                         )
                     except Exception:
                         pass
                     if _debug_mongo_enabled():
                         try:
                             logger.debug(
-                                "[MongoConnect] Local fallback host: %s",
-                                _host_display_from_uri(MONGO_LOCAL_URI),
+                                "[MongoConnect] %s host: %s",
+                                fallback_label,
+                                _host_display_from_uri(fallback_uri),
                             )
                         except Exception:
                             pass
                 except Exception as fe:
-                    logger.warning("Local fallback connection failed: %s", fe)
+                    logger.warning("%s connection failed: %s", fallback_label, fe)
                     _mongo_client_real = None
                     return None
             else:
@@ -464,17 +491,19 @@ def get_db() -> Database | None:
                 "An unexpected error occurred during MongoDB client initialisation: %s",
                 e,
             )
-            # Attempt fallback for DNS resolution errors (common with SRV)
-            if MONGO_ALLOW_LOCAL_FALLBACK and (
+            # Attempt direct-host DNS fallback first; only use localhost when
+            # it is explicitly allowed.
+            fallback_target = None
+            if (
                 "resolution" in str(e).lower()
                 or "dns" in str(e).lower()
                 or MONGO_URI.startswith("mongodb+srv://")
             ):
+                fallback_target = _resolve_connection_fallback_target(prefer_dns=True)
+
+            if fallback_target is not None:
                 try:
-                    fallback_uri = MONGO_DNS_FALLBACK_URI or MONGO_LOCAL_URI
-                    fallback_label = (
-                        "dns fallback" if MONGO_DNS_FALLBACK_URI else "local fallback"
-                    )
+                    fallback_uri, fallback_label = fallback_target
                     logger.warning(
                         "[mongo_fallback] Attempting %s MongoDB fallback due to DNS/SRV error.",
                         fallback_label,
@@ -617,7 +646,9 @@ def _ensure_collection_indexes_once(
         try:
             ensure_indexes(coll)
         except OperationFailure as e:
-            logger.warning("Could not create some indexes for %s: %s", collection_name, e)
+            logger.warning(
+                "Could not create some indexes for %s: %s", collection_name, e
+            )
         except Exception as e:
             logger.warning("Index creation skipped for %s: %s", collection_name, e)
         _mark_collection_indexes_ready(db, collection_name)

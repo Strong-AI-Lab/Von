@@ -66,6 +66,25 @@ def test_fetch_concept_stdio_not_found_shape_stable(monkeypatch):
     assert "relative import" not in str(payload.get("error", "")).lower()
 
 
+def test_concept_exists_stdio_returns_db_unavailable_when_collection_missing(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        mcp_stdio_server.ConceptsRepository,
+        "collection",
+        staticmethod(lambda: None),
+    )
+
+    payload = _call_tool("concept_exists", {"concept_id": "#V#thing"})
+
+    assert payload.get("success") is False
+    assert payload.get("error_code") == "db_unavailable"
+    assert (
+        payload.get("error_details", {}).get("reason")
+        == "concepts_collection_unavailable"
+    )
+
+
 @pytest.mark.parametrize(
     "relative_path",
     [

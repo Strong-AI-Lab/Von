@@ -2052,6 +2052,22 @@ async def _handle_concept_exists(arguments: dict[str, Any]) -> list[TextContent]
         ]
 
     try:
+        collection = ConceptsRepository.collection()
+        if collection is None:
+            return [
+                _json_error(
+                    "Database connection unavailable",
+                    error_code="db_unavailable",
+                    details={
+                        "collection": "concepts",
+                        "reason": "concepts_collection_unavailable",
+                    },
+                    suggestions=[
+                        "Retry once the MongoDB connection is healthy",
+                        "Check Mongo DNS/direct-host fallback configuration if this persists",
+                    ],
+                )
+            ]
         doc = ConceptsRepository.find_one({"concept_id": concept_id}, {"_id": 1})
         payload = {
             "success": True,

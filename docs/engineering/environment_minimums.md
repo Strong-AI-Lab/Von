@@ -81,6 +81,8 @@ Why these matter:
 
 - `MONGO_ALLOW_LOCAL_FALLBACK=0` prevents Atlas failures from silently falling
   back to localhost
+- `MONGO_DNS_FALLBACK_URI=<direct-host Atlas URI>` can still be used as a
+  non-local recovery path when SRV/DNS resolution is flaky
 - `VON_SKIP_BROWSER_LAUNCH=1` avoids remote hosts trying to open a local browser
 - `FLASK_SECRET_KEY` is required for sane hosted session handling and is
   mandatory when strict hosted OAuth startup is enabled
