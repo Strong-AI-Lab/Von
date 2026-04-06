@@ -12733,6 +12733,20 @@ def _workflow_materialisation_diagnostics(**kwargs):
         )
 
 
+def _coding_agent_mcp_access_profile(**kwargs):
+    from ...services.coding_agent_mcp_access_profile_service import (
+        build_coding_agent_mcp_access_profile,
+    )
+
+    try:
+        return build_coding_agent_mcp_access_profile()
+    except Exception as exc:
+        return make_error_response(
+            "coding_agent_mcp_access_profile_failed",
+            f"Failed to build coding-agent MCP access profile: {exc}",
+        )
+
+
 def _workflow_bind_event(**kwargs):
     """Create or update an event -> workflow binding."""
 
@@ -19981,6 +19995,18 @@ def _chat_introspect(
         "jira_execute_mode_enabled": jira_execute_mode_enabled,
     }
 
+    try:
+        from ...services.coding_agent_mcp_access_profile_service import (
+            build_coding_agent_mcp_access_profile,
+        )
+
+        coding_agent_access_profile = build_coding_agent_mcp_access_profile()
+    except Exception as exc:
+        coding_agent_access_profile = {
+            "success": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
     # Tool-guidance fingerprint (stable-ish) without dumping full text by default
     tool_guidance_text = ""
     tool_guidance_hash = None
@@ -20052,6 +20078,7 @@ def _chat_introspect(
         "orchestrator_tool_batch_cap": orchestrator_tool_batch_cap,
         "orchestrator_missing_tool_call_retry_cap": orchestrator_missing_tool_call_retry_cap,
         "workflow_mode": workflow_mode,
+        "coding_agent_access_profile": coding_agent_access_profile,
         "configured_openai_api_key_env_var": configured_openai_api_key_env_var,
         "configured_openai_api_key_env_var_present": (
             bool(
@@ -22876,6 +22903,41 @@ def build_default_catalogue() -> MethodCatalogue:
             description=(
                 "Introspect chat context influences for a user: model configuration, Vontology prompt concepts, "
                 "and tool-guidance fingerprint. Useful for debugging and transparency."
+            ),
+        ),
+        MethodDefinition(
+            name="coding_agent_mcp_access_profile",
+            handler=_coding_agent_mcp_access_profile,
+            input_schema=Schema(
+                required={},
+                optional={},
+                allow_unknown=True,
+                description="Return the effective coding-agent MCP access profile for this process.",
+            ),
+            output_schema=Schema(
+                required={"success": bool, "profile_id": str, "environment": dict},
+                optional={
+                    "profile_version": str,
+                    "generated_at_utc": str,
+                    "shared_authority_read_policy": dict,
+                    "shared_authority_write_policy": dict,
+                    "user_scoped_data_policy": dict,
+                    "testing_workflow_policy": dict,
+                    "destructive_write_policy": dict,
+                    "von_chat_run_policy": dict,
+                    "error": str,
+                    "error_code": str,
+                },
+                allow_unknown=True,
+                description=(
+                    "Coding-agent MCP access profile with authority-state, write-mode, "
+                    "and namespace/testing guardrail diagnostics."
+                ),
+            ),
+            category="read",
+            description=(
+                "Report the effective coding-agent Vontology MCP access profile, including "
+                "dev/test/prod-like authority state, write defaults, and safety boundaries."
             ),
         ),
         MethodDefinition(

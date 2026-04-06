@@ -44,6 +44,7 @@ VONTOLOGY_STDIO_EXPOSED_TOOL_NAMES: tuple[str, ...] = (
     "add_relationship",
     "assign_task",
     "audit_concept_text_relations",
+    "coding_agent_mcp_access_profile",
     "concept_exists",
     "context_search",
     "create_concepts",
@@ -300,6 +301,8 @@ def _infer_tool_family(tool_name: str) -> str:
         "assign_task",
     }:
         return "task"
+    if tool_name.startswith("coding_agent_"):
+        return "internal"
     if tool_name.startswith("chat_") or tool_name.startswith("settings_"):
         return "internal"
     if tool_name in {"list_recent_screenshots"}:
@@ -434,8 +437,10 @@ def _supplemental_surface_only_contracts() -> dict[str, CanonicalMCPToolContract
             "category": "write",
             "description": (
                 "Run the Von chat orchestrator (LLM + internal MCP tools) and return a redacted trace. "
-                "By default, this runs in dry-run mode (read-only tools only). To allow write tools, set "
-                "VON_INTERNAL_MCP_ENABLE=1 and VON_MCP_ALLOW_WRITES=1 and pass allow_writes=true."
+                "Dry-run/read-only behaviour remains the default on canonical primary authority unless "
+                "the coding-agent access profile allows write-category tools. In test-isolated or clearly "
+                "non-primary local engineering modes, write-category tools may be enabled by default. "
+                "Canonical-primary writes still require explicit approval via VON_MCP_ALLOW_WRITES=1."
             ),
             "input_schema": {
                 "type": "object",
@@ -485,7 +490,7 @@ def _supplemental_surface_only_contracts() -> dict[str, CanonicalMCPToolContract
                     "allow_writes": {
                         "type": "boolean",
                         "default": False,
-                        "description": "If true, allow write-category tools (requires VON_MCP_ALLOW_WRITES=1)",
+                        "description": "Optional explicit override for write-category tools. Canonical-primary writes still require VON_MCP_ALLOW_WRITES=1.",
                     },
                     "timeout_seconds": {
                         "type": "number",

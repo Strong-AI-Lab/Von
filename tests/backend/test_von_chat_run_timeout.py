@@ -97,3 +97,76 @@ def test_handle_von_chat_run_derives_identity_components_from_namespace(
     assert captured["user_namespace"] == "#V#user_alpha@org_beta"
     assert captured["user_concept_id"] == "#V#user_alpha"
     assert captured["org_concept_id"] == "#V#org_beta"
+
+
+def test_handle_von_chat_run_defaults_to_write_enabled_on_noncanonical_local_db(
+    monkeypatch,
+):
+    from src.backend.mcp_server import mcp_stdio_server as mod
+
+    class _StubGateway:
+        enabled = True
+
+        def describe_methods(self):
+            return {}
+
+        def invoke(self, method_name, payload=None):
+            raise AssertionError(f"Unexpected tool invocation: {method_name}")
+
+    class _StubOrchestrator:
+        def __init__(self, **_kwargs):
+            pass
+
+        def run(self, **_kwargs):
+            return SimpleNamespace(
+                response_text="ok",
+                tool_invocations=[],
+                extra_messages=[],
+                aux_llm_calls=[],
+            )
+
+    async def _run_blocking(func, *, timeout_seconds):
+        assert timeout_seconds == 90.0
+        return func()
+
+    async def _runner():
+        payload = await mod._handle_von_chat_run({"prompt": "Hello"})
+        return json.loads(payload[0].text)
+
+    monkeypatch.setenv("VON_INTERNAL_MCP_ENABLE", "1")
+    monkeypatch.delenv("VON_MCP_ALLOW_WRITES", raising=False)
+    monkeypatch.setattr(
+        "src.backend.db.mongo_client._is_running_under_pytest",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        "src.backend.db.mongo_client.get_configured_database_name",
+        lambda: "dev_von_db",
+    )
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.orchestrator.InternalMCPChatOrchestrator",
+        _StubOrchestrator,
+    )
+    monkeypatch.setattr(
+        "src.backend.languagemodels.llm_interface.get_active_model_name",
+        lambda: "test-model",
+    )
+    monkeypatch.setattr(
+        "src.backend.languagemodels.llm_interface.get_llm_client",
+        lambda: object(),
+    )
+    monkeypatch.setattr(mod, "build_default_catalogue", lambda: object())
+    monkeypatch.setattr(mod, "InternalMCPTransport", lambda: object())
+    monkeypatch.setattr(
+        mod,
+        "InternalMCPGateway",
+        lambda **_kwargs: _StubGateway(),
+    )
+    monkeypatch.setattr(mod, "_run_blocking_with_timeout", _run_blocking)
+
+    response_payload = asyncio.run(_runner())
+
+    assert response_payload["success"] is True
+    assert response_payload["allow_writes"] is True
+    assert response_payload["dry_run"] is False
+    assert response_payload["access_profile"]["authority_state"] == "local_noncanonical"

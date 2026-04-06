@@ -146,6 +146,17 @@
             }
         },
         {
+            "name": "coding_agent_mcp_access_profile",
+            "description": "Report the effective coding-agent Vontology MCP access profile, including dev/test/prod-like authority state, write defaults, and safety boundaries.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": true,
+                "description": "Return the effective coding-agent MCP access profile for this process."
+            }
+        },
+        {
             "name": "concept_exists",
             "description": "Minimal existence/accessibility check for a concept_id. Use before expensive fetch operations or when you need to validate user input.",
             "inputSchema": {
@@ -4806,7 +4817,7 @@
         },
         {
             "name": "von_chat_run",
-            "description": "Run the Von chat orchestrator (LLM + internal MCP tools) and return a redacted trace. By default, this runs in dry-run mode (read-only tools only). To allow write tools, set VON_INTERNAL_MCP_ENABLE=1 and VON_MCP_ALLOW_WRITES=1 and pass allow_writes=true.",
+            "description": "Run the Von chat orchestrator (LLM + internal MCP tools) and return a redacted trace. Dry-run/read-only behaviour remains the default on canonical primary authority unless the coding-agent access profile allows write-category tools. In test-isolated or clearly non-primary local engineering modes, write-category tools may be enabled by default. Canonical-primary writes still require explicit approval via VON_MCP_ALLOW_WRITES=1.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -4863,7 +4874,7 @@
                     "allow_writes": {
                         "type": "boolean",
                         "default": false,
-                        "description": "If true, allow write-category tools (requires VON_MCP_ALLOW_WRITES=1)"
+                        "description": "Optional explicit override for write-category tools. Canonical-primary writes still require VON_MCP_ALLOW_WRITES=1."
                     },
                     "timeout_seconds": {
                         "type": "number",

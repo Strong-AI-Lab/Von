@@ -134,6 +134,7 @@ if TYPE_CHECKING:
         _turn_execution_namespace_coverage_report,
         _turn_execution_search_failures,
         _undo_relationship_removal,
+        _coding_agent_mcp_access_profile,
         _upsert_renderer_profile,
         _workflow_bind_event,
         _workflow_build_prediction_envelope,
@@ -384,6 +385,7 @@ _bind_imports(
         "_turn_execution_list",
         "_turn_execution_search_failures",
         "_turn_execution_namespace_coverage_report",
+        "_coding_agent_mcp_access_profile",
         "_renderer_resolve_applicability",
         "_upsert_renderer_profile",
         "_workflow_bind_event",
@@ -458,6 +460,7 @@ _TOOL_MANIFEST_PATH = (
     Path(project_root) / "src" / "backend" / "mcp_server" / "vontology_mcp.json"
 )
 _tool_cache_dependency_paths: list[Path] = [Path(__file__).resolve()]
+_INTERNAL_METHOD_DEFINITION_CACHE: dict[str, Any] | None = None
 for _dependency_module in (
     tool_contract_registry_module,
     internal_mcp_catalogue_module,
@@ -628,6 +631,115 @@ def _truthy_env(var_name: str) -> bool:
     return os.getenv(var_name, "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _coerce_bool_argument(value: Any, *, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _get_internal_method_definition(tool_name: str) -> Any | None:
+    global _INTERNAL_METHOD_DEFINITION_CACHE
+
+    if _INTERNAL_METHOD_DEFINITION_CACHE is None:
+        try:
+            catalogue = build_default_catalogue()
+            _INTERNAL_METHOD_DEFINITION_CACHE = {
+                name: catalogue.get(name) for name in catalogue.list_methods()
+            }
+        except Exception:
+            _INTERNAL_METHOD_DEFINITION_CACHE = {}
+
+    return (_INTERNAL_METHOD_DEFINITION_CACHE or {}).get(tool_name)
+
+
+def _get_stdio_tool_category(tool_name: str) -> str | None:
+    try:
+        registry = tool_contract_registry_module.get_canonical_tool_registry()
+        contract = registry.get(tool_name)
+    except Exception:
+        contract = None
+    if contract is None:
+        return None
+    category = getattr(contract, "category", None)
+    if not isinstance(category, str):
+        return None
+    category = category.strip()
+    return category or None
+
+
+def _preview_safe_write_call_requested(
+    tool_name: str,
+    arguments: dict[str, Any],
+) -> bool:
+    if tool_name == "von_chat_run":
+        return _coerce_bool_argument(arguments.get("dry_run"), default=True)
+
+    definition = _get_internal_method_definition(tool_name)
+    write_guardrail = getattr(definition, "write_guardrail", None)
+    if not isinstance(write_guardrail, dict):
+        return False
+
+    preview_param = str(write_guardrail.get("preview_safe_dry_run_param") or "").strip()
+    if not preview_param:
+        return False
+
+    preview_default = _coerce_bool_argument(
+        write_guardrail.get("preview_safe_dry_run_default"),
+        default=False,
+    )
+    return _coerce_bool_argument(arguments.get(preview_param), default=preview_default)
+
+
+def _build_access_profile_summary(profile: dict[str, Any]) -> dict[str, Any]:
+    environment = profile.get("environment")
+    write_policy = profile.get("shared_authority_write_policy")
+    von_chat_run_policy = profile.get("von_chat_run_policy")
+    environment = environment if isinstance(environment, dict) else {}
+    write_policy = write_policy if isinstance(write_policy, dict) else {}
+    von_chat_run_policy = (
+        von_chat_run_policy if isinstance(von_chat_run_policy, dict) else {}
+    )
+    return {
+        "profile_id": profile.get("profile_id"),
+        "authority_state": environment.get("authority_state"),
+        "authority_kind": environment.get("authority_kind"),
+        "configured_database_name": environment.get("configured_database_name"),
+        "write_mode": write_policy.get("mode"),
+        "write_category_tools_allowed": write_policy.get(
+            "write_category_tools_allowed"
+        ),
+        "von_chat_run_default_allow_writes": von_chat_run_policy.get(
+            "default_allow_writes"
+        ),
+    }
+
+
+def _evaluate_stdio_write_access(
+    tool_name: str,
+    arguments: dict[str, Any],
+) -> tuple[bool, dict[str, Any], dict[str, Any]]:
+    from src.backend.services.coding_agent_mcp_access_profile_service import (
+        build_coding_agent_mcp_access_profile,
+    )
+
+    profile = build_coding_agent_mcp_access_profile()
+    write_policy = profile.get("shared_authority_write_policy")
+    write_policy = write_policy if isinstance(write_policy, dict) else {}
+    allowed = bool(write_policy.get("write_category_tools_allowed"))
+    if allowed or _preview_safe_write_call_requested(tool_name, arguments):
+        return True, profile, write_policy
+    return False, profile, write_policy
+
+
 _SENSITIVE_KEY_FRAGMENTS = (
     "api_key",
     "apikey",
@@ -783,6 +895,7 @@ async def list_tools() -> list[Tool]:
 async def call_tool(name: str, arguments: Any) -> list[TextContent]:  # type: ignore[misc]
     """Handle tool calls by delegating to specific handlers."""
 
+    parsed_arguments = arguments if isinstance(arguments, dict) else {}
     handler = _TOOL_HANDLERS.get(name)
     if not handler:
         surface_diagnostic = classify_stdio_missing_tool(name)
@@ -806,8 +919,44 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:  # type: ig
             )
         ]
 
+    if _get_stdio_tool_category(name) == "write":
+        write_allowed, access_profile, write_policy = _evaluate_stdio_write_access(
+            name,
+            parsed_arguments,
+        )
+        if not write_allowed:
+            raw_reason_codes = write_policy.get("reason_codes")
+            reason_codes = (
+                raw_reason_codes if isinstance(raw_reason_codes, list) else []
+            )
+            details = {
+                "tool": name,
+                "access_profile": _build_access_profile_summary(access_profile),
+                "write_reason_codes": list(reason_codes),
+            }
+            suggestions = [
+                "Use coding_agent_mcp_access_profile to inspect the current authority state and write mode.",
+                "If this targets the canonical primary DB, set VON_MCP_ALLOW_WRITES=1 only when that write path is explicitly approved.",
+            ]
+            if _preview_safe_write_call_requested(name, {}):
+                suggestions.insert(
+                    0,
+                    "Use the preview-safe dry-run mode for this tool if you only need inspection or planning output.",
+                )
+            return [
+                _json_error(
+                    (
+                        f"Write-category tool '{name}' is blocked by the current "
+                        "coding-agent MCP access profile."
+                    ),
+                    error_code="coding_agent_write_blocked",
+                    details=details,
+                    suggestions=suggestions,
+                )
+            ]
+
     try:
-        return await handler(arguments or {})
+        return await handler(parsed_arguments)
     except Exception as exc:  # Defensive: avoid crashing the stdio server
         return [
             _json_error(
@@ -1033,18 +1182,39 @@ async def _handle_von_chat_run(arguments: dict[str, Any]) -> list[TextContent]:
         min(INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MAX, max_tool_invocations),
     )
 
-    dry_run = bool(arguments.get("dry_run", True))
-    allow_writes = bool(arguments.get("allow_writes", False))
-    if allow_writes and not _truthy_env("VON_MCP_ALLOW_WRITES"):
+    write_access_allowed, access_profile, _write_policy = _evaluate_stdio_write_access(
+        "von_chat_run",
+        arguments,
+    )
+    access_profile_summary = _build_access_profile_summary(access_profile)
+
+    raw_allow_writes = arguments.get("allow_writes")
+    allow_writes_requested = (
+        _coerce_bool_argument(raw_allow_writes, default=write_access_allowed)
+        if raw_allow_writes is not None
+        else write_access_allowed
+    )
+    raw_dry_run = arguments.get("dry_run")
+    dry_run = (
+        _coerce_bool_argument(raw_dry_run, default=not allow_writes_requested)
+        if raw_dry_run is not None
+        else not allow_writes_requested
+    )
+
+    if allow_writes_requested and not write_access_allowed and not dry_run:
         return [
             _json_text(
                 {
                     "success": False,
-                    "error": "Write tools are not enabled. Set VON_MCP_ALLOW_WRITES=1 (and ensure VON_INTERNAL_MCP_ENABLE=1) to use allow_writes=true.",
+                    "error": (
+                        "Write-category tools are blocked by the current coding-agent "
+                        "MCP access profile."
+                    ),
+                    "access_profile": access_profile_summary,
                 }
             )
         ]
-    effective_allow_writes = allow_writes and not dry_run
+    effective_allow_writes = allow_writes_requested and not dry_run
 
     try:
         max_string_chars = int(arguments.get("max_string_chars", 8000))
@@ -1126,6 +1296,7 @@ async def _handle_von_chat_run(arguments: dict[str, Any]) -> list[TextContent]:
             "model": model_name,
             "dry_run": dry_run,
             "allow_writes": effective_allow_writes,
+            "access_profile": access_profile_summary,
             "timeout_seconds": timeout_seconds,
             "response_text": _truncate_string(
                 orchestrator_result.response_text, max_chars=max_string_chars
@@ -1145,6 +1316,7 @@ async def _handle_von_chat_run(arguments: dict[str, Any]) -> list[TextContent]:
             "model": model_name,
             "dry_run": dry_run,
             "allow_writes": effective_allow_writes,
+            "access_profile": access_profile_summary,
             "timeout_seconds": timeout_seconds,
             "error": str(exc),
             "timeout_debug": {
@@ -1159,6 +1331,7 @@ async def _handle_von_chat_run(arguments: dict[str, Any]) -> list[TextContent]:
             "model": model_name,
             "dry_run": dry_run,
             "allow_writes": effective_allow_writes,
+            "access_profile": access_profile_summary,
             "timeout_seconds": timeout_seconds,
             "error": f"Tool call parsing error: {exc}",
         }
@@ -1168,6 +1341,7 @@ async def _handle_von_chat_run(arguments: dict[str, Any]) -> list[TextContent]:
             "model": model_name,
             "dry_run": dry_run,
             "allow_writes": effective_allow_writes,
+            "access_profile": access_profile_summary,
             "timeout_seconds": timeout_seconds,
             "error": str(exc),
         }
@@ -3037,6 +3211,16 @@ async def _handle_workflow_mcp_health_check(
     )
 
 
+async def _handle_coding_agent_mcp_access_profile(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _coding_agent_mcp_access_profile,
+        arguments,
+        tool_family_label="Internal",
+    )
+
+
 async def _handle_workflow_materialisation_diagnostics(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
@@ -3946,6 +4130,7 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "workflow_set_event_binding_enabled": _handle_workflow_set_event_binding_enabled,
     "workflow_delete_event_binding": _handle_workflow_delete_event_binding,
     "workflow_mcp_health_check": _handle_workflow_mcp_health_check,
+    "coding_agent_mcp_access_profile": _handle_coding_agent_mcp_access_profile,
     "workflow_materialisation_diagnostics": _handle_workflow_materialisation_diagnostics,
     "workflow_create_instance": _handle_workflow_create_instance,
     "workflow_execute": _handle_workflow_execute,

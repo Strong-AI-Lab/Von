@@ -5,6 +5,9 @@ from ...services.mongo_startup_config import run_mongo_startup_probe
 from ...services.workflow_materialisation_diagnostics_service import (
     build_workflow_materialisation_diagnostics,
 )
+from ...services.coding_agent_mcp_access_profile_service import (
+    build_coding_agent_mcp_access_profile,
+)
 
 admin_bp = Blueprint("admin_routes", __name__, url_prefix="/admin")
 
@@ -63,3 +66,8 @@ def workflow_materialisation_diagnostics():
         workflow_components=current_app.config.get("DURABLE_WORKFLOW_COMPONENTS"),
     )
     return jsonify(payload)
+
+
+@admin_bp.route("/coding_agent_mcp_access_profile", methods=["GET"])
+def coding_agent_mcp_access_profile():
+    return jsonify(build_coding_agent_mcp_access_profile())
