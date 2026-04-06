@@ -50,8 +50,12 @@ from .testing_workflow_contracts import (
     TESTS_WORKFLOW_PREDICATE_ID,
 )
 from .text_value_service import upsert_singleton_text_relation, upsert_text_for_concept
+from .workflow_prediction_service import build_workflow_prediction_envelope
 from .workflow_selection_experience import finalise_selection_experience
 from .workflow_vontology_materialisation_helpers import stable_named_instance_concept_id
+from ..workflows.workflow_concept_authority_service import (
+    upsert_workflow_publication_lifecycle,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -219,6 +223,130 @@ def _coerce_int(
     if minimum is not None:
         parsed = max(minimum, parsed)
     return parsed
+
+
+def _coerce_float(
+    value: Any,
+    *,
+    default: float = 0.0,
+    minimum: float | None = None,
+) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = default
+    if minimum is not None:
+        parsed = max(minimum, parsed)
+    return parsed
+
+
+def _normalise_assertion_classes(value: Any) -> list[str]:
+    return _normalise_strings(value)
+
+
+def _extend_unique_mapping_sequence(
+    items: list[dict[str, Any]],
+    values: Sequence[Any],
+) -> list[dict[str, Any]]:
+    existing_keys = {
+        repr(sorted(item.items())) for item in items if isinstance(item, Mapping)
+    }
+    for value in values:
+        if not isinstance(value, Mapping):
+            continue
+        payload = {str(key): copy.deepcopy(item) for key, item in value.items()}
+        payload_key = repr(sorted(payload.items()))
+        if payload_key in existing_keys:
+            continue
+        existing_keys.add(payload_key)
+        items.append(payload)
+    return items
+
+
+def _append_unique_hints(
+    items: list[dict[str, Any]],
+    hints: Sequence[Any],
+) -> list[dict[str, Any]]:
+    seen = {
+        (
+            _safe_str(item.get("scope")),
+            _safe_str(item.get("reason_code")),
+            _safe_str(item.get("state_id")),
+        )
+        for item in items
+        if isinstance(item, Mapping)
+    }
+    for value in hints:
+        if not isinstance(value, Mapping):
+            continue
+        payload = {str(key): copy.deepcopy(item) for key, item in value.items()}
+        key = (
+            _safe_str(payload.get("scope")),
+            _safe_str(payload.get("reason_code")),
+            _safe_str(payload.get("state_id")),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append(payload)
+    return items
+
+
+def _extract_numeric_summary_value(summary: Any, field: str) -> float | None:
+    if not isinstance(summary, Mapping):
+        return None
+    value = summary.get(field)
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _summarise_prediction_envelope(result: Mapping[str, Any] | None) -> dict[str, Any]:
+    envelope = (
+        result.get("prediction_envelope")
+        if isinstance(result, Mapping)
+        and isinstance(result.get("prediction_envelope"), Mapping)
+        else {}
+    )
+    envelope_mapping = envelope if isinstance(envelope, Mapping) else {}
+    duration = envelope.get("duration_ms") if isinstance(envelope, Mapping) else {}
+    llm_usage = envelope.get("llm_usage") if isinstance(envelope, Mapping) else {}
+    total_tokens = (
+        llm_usage.get("total_tokens")
+        if isinstance(llm_usage, Mapping) and isinstance(llm_usage.get("total_tokens"), Mapping)
+        else {}
+    )
+    sample_window = result.get("sample_window") if isinstance(result, Mapping) else {}
+    data_sufficiency = (
+        envelope.get("data_sufficiency")
+        if isinstance(envelope, Mapping) and isinstance(envelope.get("data_sufficiency"), Mapping)
+        else {}
+    )
+    return {
+        "candidate_trace_count": _coerce_int(
+            (sample_window or {}).get("candidate_trace_count"),
+            minimum=0,
+        ),
+        "matched_trace_count": _coerce_int(
+            (sample_window or {}).get("matched_trace_count"),
+            minimum=0,
+        ),
+        "completion_rate": _coerce_float(
+            (envelope or {}).get("completion_rate"),
+            default=0.0,
+            minimum=0.0,
+        ),
+        "failure_rate": _coerce_float(
+            (envelope or {}).get("failure_rate"),
+            default=0.0,
+            minimum=0.0,
+        ),
+        "duration_p50_ms": _extract_numeric_summary_value(duration, "p50"),
+        "duration_p90_ms": _extract_numeric_summary_value(duration, "p90"),
+        "total_tokens_p50": _extract_numeric_summary_value(total_tokens, "p50"),
+        "quality_proxy": _clone_mapping(envelope_mapping.get("quality_proxy")),
+        "data_sufficiency": _clone_mapping(data_sufficiency),
+    }
 
 
 def _normalise_verdict(value: Any) -> str | None:
@@ -514,6 +642,7 @@ def _normalise_spec_state(
     payload["candidate_workflow_ids"] = _normalise_strings(
         payload.get("candidate_workflow_ids")
     )
+    payload["baseline_workflow_id"] = _safe_str(payload.get("baseline_workflow_id")) or None
     payload["expected_outcomes"] = _clone_sequence(payload.get("expected_outcomes"))
     payload["allowed_side_effects"] = _clone_sequence(payload.get("allowed_side_effects"))
     payload["forbidden_side_effects"] = _clone_sequence(
@@ -578,11 +707,18 @@ def _normalise_observation(
         "expected_outcome": expected_outcome,
         "observed_outcome": observed_outcome,
         "matched_expected_outcome": matched_expected,
+        "assertion_classes": _normalise_assertion_classes(raw.get("assertion_classes")),
         "evidence": _clone_mapping(raw.get("evidence")),
         "metrics": _clone_mapping(raw.get("metrics")),
         "policy_decisions": _clone_sequence(raw.get("policy_decisions")),
         "tool_invocations": _clone_sequence(raw.get("tool_invocations")),
         "workflow_execution": _clone_mapping(raw.get("workflow_execution")),
+        "candidate_validation": _clone_mapping(raw.get("candidate_validation")),
+        "trace_summary": _clone_mapping(raw.get("trace_summary")),
+        "side_effect_audit": _clone_mapping(raw.get("side_effect_audit")),
+        "repair_hints": _clone_sequence(raw.get("repair_hints")),
+        "quality_signals": _clone_mapping(raw.get("quality_signals")),
+        "degradation_assessment": _clone_mapping(raw.get("degradation_assessment")),
         "turn_execution_request_ids": _normalise_strings(
             raw.get("turn_execution_request_ids")
         ),
@@ -623,6 +759,7 @@ def _normalise_run_state(
         payload.get("candidate_workflow_ids")
     )
     payload["target_workflow_ids"] = _normalise_strings(payload.get("target_workflow_ids"))
+    payload["baseline_workflow_id"] = _safe_str(payload.get("baseline_workflow_id")) or None
     payload["turn_execution_request_ids"] = _normalise_strings(
         payload.get("turn_execution_request_ids")
     )
@@ -634,6 +771,9 @@ def _normalise_run_state(
     payload["metrics"] = _clone_mapping(payload.get("metrics"))
     payload["evidence"] = _clone_mapping(payload.get("evidence"))
     payload["verdict_summary"] = _clone_mapping(payload.get("verdict_summary"))
+    payload["degradation_assessment"] = _clone_mapping(
+        payload.get("degradation_assessment")
+    )
     payload["promotion_recommendation"] = _clone_mapping(
         payload.get("promotion_recommendation")
     )
@@ -914,6 +1054,7 @@ def create_experiment_spec(
     target_workflow_ids: Sequence[str] = (),
     target_capability_ids: Sequence[str] = (),
     candidate_workflow_ids: Sequence[str] = (),
+    baseline_workflow_id: str | None = None,
     theory_id: str | None = None,
     experiment_suite_id: str | None = None,
     fixture_payload: Mapping[str, Any] | None = None,
@@ -926,6 +1067,15 @@ def create_experiment_spec(
     promotion_policy: Mapping[str, Any] | None = None,
     metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    try:
+        from .testing_workflow_vontology_service import (
+            ensure_testing_type_concept_support,
+        )
+
+        ensure_testing_type_concept_support()
+    except Exception:
+        pass
+
     resolved_namespace, resolved_user_id, resolved_org_id = _coerce_namespace_context(
         namespace=namespace,
         user_id=user_id,
@@ -961,6 +1111,7 @@ def create_experiment_spec(
         "target_workflow_ids": _normalise_strings(target_workflow_ids),
         "target_capability_ids": _normalise_strings(target_capability_ids),
         "candidate_workflow_ids": _normalise_strings(candidate_workflow_ids),
+        "baseline_workflow_id": _safe_str(baseline_workflow_id) or None,
         "fixture_payload": _clone_mapping(fixture_payload),
         "theory_setup": _clone_mapping(theory_setup),
         "expected_outcomes": _clone_sequence(expected_outcomes),
@@ -1037,12 +1188,22 @@ def start_experiment_run(
     org_id: str | None = None,
     target_workflow_ids: Sequence[str] = (),
     candidate_workflow_ids: Sequence[str] = (),
+    baseline_workflow_id: str | None = None,
     benchmark_tier: str | None = None,
     benchmark_world_id: str | None = None,
     selection_experience_id: str | None = None,
     turn_execution_request_ids: Sequence[str] = (),
     metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    try:
+        from .testing_workflow_vontology_service import (
+            ensure_testing_type_concept_support,
+        )
+
+        ensure_testing_type_concept_support()
+    except Exception:
+        pass
+
     resolved_spec_id = _safe_str(experiment_spec_id)
     if not resolved_spec_id:
         return {"success": False, "error": "experiment_spec_id_required"}
@@ -1088,6 +1249,9 @@ def start_experiment_run(
         "candidate_workflow_ids": _normalise_strings(
             candidate_workflow_ids or spec_state.get("candidate_workflow_ids") or []
         ),
+        "baseline_workflow_id": _safe_str(baseline_workflow_id)
+        or _safe_str(spec_state.get("baseline_workflow_id"))
+        or None,
         "expected_outcomes": _clone_sequence(spec_state.get("expected_outcomes")),
         "turn_execution_request_ids": _normalise_strings(turn_execution_request_ids),
         "selection_experience_id": _safe_str(selection_experience_id)
@@ -1099,6 +1263,12 @@ def start_experiment_run(
             "tool_invocations": [],
             "workflow_execution": [],
             "policy_decisions": [],
+            "candidate_validation_results": [],
+            "trace_summaries": [],
+            "side_effect_audits": [],
+            "repair_hints": [],
+            "quality_signals": [],
+            "assertion_classes": [],
             "suite_runs": [],
         },
         "metadata": _clone_mapping(metadata),
@@ -1178,6 +1348,32 @@ def record_experiment_observation(
     policy_decisions: list[Any] = list(
         cast(Sequence[Any], evidence.get("policy_decisions") or [])
     )
+    candidate_validation_results: list[dict[str, Any]] = [
+        copy.deepcopy(dict(item))
+        for item in cast(Sequence[Any], evidence.get("candidate_validation_results") or [])
+        if isinstance(item, Mapping)
+    ]
+    trace_summaries: list[dict[str, Any]] = [
+        copy.deepcopy(dict(item))
+        for item in cast(Sequence[Any], evidence.get("trace_summaries") or [])
+        if isinstance(item, Mapping)
+    ]
+    side_effect_audits: list[dict[str, Any]] = [
+        copy.deepcopy(dict(item))
+        for item in cast(Sequence[Any], evidence.get("side_effect_audits") or [])
+        if isinstance(item, Mapping)
+    ]
+    repair_hints: list[dict[str, Any]] = [
+        copy.deepcopy(dict(item))
+        for item in cast(Sequence[Any], evidence.get("repair_hints") or [])
+        if isinstance(item, Mapping)
+    ]
+    quality_signals: list[dict[str, Any]] = [
+        copy.deepcopy(dict(item))
+        for item in cast(Sequence[Any], evidence.get("quality_signals") or [])
+        if isinstance(item, Mapping)
+    ]
+    assertion_classes = _normalise_assertion_classes(evidence.get("assertion_classes"))
     turn_ids = _normalise_strings(
         [
             *state.get("turn_execution_request_ids", []),
@@ -1199,6 +1395,37 @@ def record_experiment_observation(
         if isinstance(workflow_payload, Mapping) and workflow_payload:
             workflow_execution.append(copy.deepcopy(dict(workflow_payload)))
         policy_decisions.extend(_clone_sequence(item.get("policy_decisions")))
+        candidate_validation = item.get("candidate_validation")
+        if isinstance(candidate_validation, Mapping) and candidate_validation:
+            candidate_validation_results = _extend_unique_mapping_sequence(
+                candidate_validation_results,
+                [candidate_validation],
+            )
+        trace_summary = item.get("trace_summary")
+        if isinstance(trace_summary, Mapping) and trace_summary:
+            trace_summaries = _extend_unique_mapping_sequence(
+                trace_summaries,
+                [trace_summary],
+            )
+        side_effect_audit = item.get("side_effect_audit")
+        if isinstance(side_effect_audit, Mapping) and side_effect_audit:
+            side_effect_audits = _extend_unique_mapping_sequence(
+                side_effect_audits,
+                [side_effect_audit],
+            )
+        repair_hints = _append_unique_hints(
+            repair_hints,
+            _clone_sequence(item.get("repair_hints")),
+        )
+        quality_signal = item.get("quality_signals")
+        if isinstance(quality_signal, Mapping) and quality_signal:
+            quality_signals = _extend_unique_mapping_sequence(
+                quality_signals,
+                [quality_signal],
+            )
+        assertion_classes = _normalise_assertion_classes(
+            [*assertion_classes, *(item.get("assertion_classes") or [])]
+        )
 
     state["observations"] = [*(state.get("observations") or []), *appended]
     state["turn_execution_request_ids"] = turn_ids
@@ -1207,6 +1434,12 @@ def record_experiment_observation(
         "tool_invocations": tool_invocations,
         "workflow_execution": workflow_execution,
         "policy_decisions": policy_decisions,
+        "candidate_validation_results": candidate_validation_results,
+        "trace_summaries": trace_summaries,
+        "side_effect_audits": side_effect_audits,
+        "repair_hints": repair_hints,
+        "quality_signals": quality_signals,
+        "assertion_classes": assertion_classes,
     }
     state["updated_at_utc"] = now_iso
     persisted = _persist_experiment_run_state(run_id=resolved_run_id, state=state)
@@ -1279,6 +1512,179 @@ def _has_forbidden_side_effect(
     return False
 
 
+def _count_policy_violation_events(observations: Sequence[Mapping[str, Any]]) -> int:
+    violations = 0
+    for observation in observations:
+        side_effect_audit = observation.get("side_effect_audit")
+        if isinstance(side_effect_audit, Mapping):
+            violations += _coerce_int(
+                side_effect_audit.get("blocked_event_count"),
+                minimum=0,
+            )
+        candidate_validation = observation.get("candidate_validation")
+        if isinstance(candidate_validation, Mapping) and candidate_validation.get("valid") is False:
+            violations += 1
+    return violations
+
+
+def _build_degradation_assessment(
+    *,
+    spec_state: Mapping[str, Any],
+    run_state: Mapping[str, Any],
+    observations: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    candidate_workflow_id = _safe_str(
+        next(iter(run_state.get("target_workflow_ids") or []), None)
+    ) or _safe_str(next(iter(run_state.get("candidate_workflow_ids") or []), None))
+    baseline_workflow_id = _safe_str(run_state.get("baseline_workflow_id")) or _safe_str(
+        spec_state.get("baseline_workflow_id")
+    )
+    namespace = _safe_str(run_state.get("namespace")) or None
+    policy = _clone_mapping(
+        (_clone_mapping(spec_state.get("promotion_policy"))).get("degradation_policy")
+    ) or _clone_mapping((_clone_mapping(spec_state.get("verdict_rules"))).get("degradation_policy"))
+    thresholds = {
+        "minimum_baseline_runs": _coerce_int(
+            policy.get("minimum_baseline_runs"),
+            default=3,
+            minimum=1,
+        ),
+        "max_completion_rate_drop": _coerce_float(
+            policy.get("max_completion_rate_drop"),
+            default=0.10,
+            minimum=0.0,
+        ),
+        "max_failure_rate_increase": _coerce_float(
+            policy.get("max_failure_rate_increase"),
+            default=0.10,
+            minimum=0.0,
+        ),
+        "max_p50_duration_ratio": _coerce_float(
+            policy.get("max_p50_duration_ratio"),
+            default=1.5,
+            minimum=1.0,
+        ),
+        "max_total_token_ratio": _coerce_float(
+            policy.get("max_total_token_ratio"),
+            default=1.5,
+            minimum=1.0,
+        ),
+        "max_policy_violation_count": _coerce_int(
+            policy.get("max_policy_violation_count"),
+            default=0,
+            minimum=0,
+        ),
+    }
+    assessment: dict[str, Any] = {
+        "evaluated": False,
+        "degraded": False,
+        "candidate_workflow_id": candidate_workflow_id or None,
+        "baseline_workflow_id": baseline_workflow_id or None,
+        "thresholds": thresholds,
+        "reasons": [],
+        "policy_violation_count": _count_policy_violation_events(observations),
+    }
+    if not candidate_workflow_id or not baseline_workflow_id:
+        assessment["reason"] = "baseline_or_candidate_workflow_missing"
+        return assessment
+
+    try:
+        candidate_envelope = build_workflow_prediction_envelope(
+            workflow_id=candidate_workflow_id,
+            namespace=namespace,
+        )
+        baseline_envelope = build_workflow_prediction_envelope(
+            workflow_id=baseline_workflow_id,
+            namespace=namespace,
+        )
+    except Exception as exc:
+        logger.warning(
+            "[experiment_run] could not compute degradation envelopes for %s vs %s: %s",
+            candidate_workflow_id,
+            baseline_workflow_id,
+            exc,
+        )
+        assessment["reason"] = "prediction_envelope_lookup_failed"
+        assessment["error"] = f"{type(exc).__name__}: {exc}"
+        return assessment
+
+    candidate_summary = _summarise_prediction_envelope(candidate_envelope)
+    baseline_summary = _summarise_prediction_envelope(baseline_envelope)
+    assessment["candidate_envelope"] = candidate_summary
+    assessment["baseline_envelope"] = baseline_summary
+
+    baseline_runs = _coerce_int(baseline_summary.get("matched_trace_count"), minimum=0)
+    if baseline_runs < thresholds["minimum_baseline_runs"]:
+        assessment["reason"] = "insufficient_baseline_history"
+        return assessment
+
+    reasons: list[str] = []
+    completion_drop = _coerce_float(
+        baseline_summary.get("completion_rate"),
+        default=0.0,
+        minimum=0.0,
+    ) - _coerce_float(candidate_summary.get("completion_rate"), default=0.0, minimum=0.0)
+    failure_increase = _coerce_float(
+        candidate_summary.get("failure_rate"),
+        default=0.0,
+        minimum=0.0,
+    ) - _coerce_float(baseline_summary.get("failure_rate"), default=0.0, minimum=0.0)
+    candidate_p50 = candidate_summary.get("duration_p50_ms")
+    baseline_p50 = baseline_summary.get("duration_p50_ms")
+    duration_ratio = None
+    if isinstance(candidate_p50, (int, float)) and isinstance(baseline_p50, (int, float)) and baseline_p50 > 0:
+        duration_ratio = round(float(candidate_p50) / float(baseline_p50), 4)
+    candidate_tokens = candidate_summary.get("total_tokens_p50")
+    baseline_tokens = baseline_summary.get("total_tokens_p50")
+    token_ratio = None
+    if isinstance(candidate_tokens, (int, float)) and isinstance(baseline_tokens, (int, float)) and baseline_tokens > 0:
+        token_ratio = round(float(candidate_tokens) / float(baseline_tokens), 4)
+
+    if completion_drop > thresholds["max_completion_rate_drop"]:
+        reasons.append("completion_rate_regressed")
+    if failure_increase > thresholds["max_failure_rate_increase"]:
+        reasons.append("failure_rate_regressed")
+    if duration_ratio is not None and duration_ratio > thresholds["max_p50_duration_ratio"]:
+        reasons.append("duration_regressed")
+    if token_ratio is not None and token_ratio > thresholds["max_total_token_ratio"]:
+        reasons.append("cost_regressed")
+    if assessment["policy_violation_count"] > thresholds["max_policy_violation_count"]:
+        reasons.append("policy_violation_budget_exceeded")
+
+    assessment["evaluated"] = True
+    assessment["degraded"] = bool(reasons)
+    assessment["reasons"] = reasons
+    assessment["metrics"] = {
+        "completion_rate_drop": round(completion_drop, 4),
+        "failure_rate_increase": round(failure_increase, 4),
+        "duration_ratio": duration_ratio,
+        "token_ratio": token_ratio,
+    }
+    if reasons:
+        try:
+            lifecycle = upsert_workflow_publication_lifecycle(
+                workflow_id=candidate_workflow_id,
+                phase="demoted_due_to_degradation",
+                published=False,
+                validation_passed=False,
+                postconditions_verified=False,
+                last_error=";".join(reasons),
+            )
+        except Exception as exc:
+            logger.warning(
+                "[experiment_run] could not demote degraded workflow %s: %s",
+                candidate_workflow_id,
+                exc,
+            )
+            assessment["demotion"] = {
+                "applied": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        else:
+            assessment["demotion"] = {"applied": True, "lifecycle": lifecycle}
+    return assessment
+
+
 def compute_experiment_verdict(
     *,
     run_id: str,
@@ -1318,6 +1724,11 @@ def compute_experiment_verdict(
         spec_state=spec_state,
         observations=observations,
     )
+    degradation_assessment = _build_degradation_assessment(
+        spec_state=spec_state,
+        run_state=state,
+        observations=observations,
+    )
 
     if total == 0:
         verdict = EXPERIMENT_VERDICT_INCONCLUSIVE
@@ -1325,6 +1736,9 @@ def compute_experiment_verdict(
     elif has_forbidden_side_effect:
         verdict = EXPERIMENT_VERDICT_FAIL
         reason = "forbidden_side_effect_observed"
+    elif degradation_assessment.get("degraded") is True:
+        verdict = EXPERIMENT_VERDICT_FAIL
+        reason = "degraded_against_baseline"
     elif fail_count == 0 and partial_count == 0 and inconclusive_count == 0:
         if require_all_expected and expected_outcome_count > 0 and pass_count < expected_outcome_count:
             verdict = EXPERIMENT_VERDICT_INCONCLUSIVE
@@ -1368,14 +1782,21 @@ def compute_experiment_verdict(
         "observation_total": total,
         "expected_outcome_count": expected_outcome_count,
         "has_forbidden_side_effect": has_forbidden_side_effect,
+        "degradation_assessment": degradation_assessment,
     }
     promotion_recommendation = {
-        "recommended": verdict == EXPERIMENT_VERDICT_PASS,
+        "recommended": verdict == EXPERIMENT_VERDICT_PASS
+        and degradation_assessment.get("degraded") is not True,
         "requires_promotion_gate": True,
         "theory_id": theory_id or None,
+        "baseline_workflow_id": _safe_str(state.get("baseline_workflow_id"))
+        or _safe_str(spec_state.get("baseline_workflow_id"))
+        or None,
         "promotion_ready_assertion_ids": promotion_ready_assertion_ids,
         "reason": (
-            "pass_with_promotable_theory_assertions"
+            "degraded_against_baseline"
+            if degradation_assessment.get("degraded") is True
+            else "pass_with_promotable_theory_assertions"
             if verdict == EXPERIMENT_VERDICT_PASS and promotion_ready_assertion_ids
             else "explicit_promotion_gate_required"
         ),
@@ -1384,6 +1805,7 @@ def compute_experiment_verdict(
 
     state["verdict"] = verdict
     state["verdict_summary"] = summary
+    state["degradation_assessment"] = degradation_assessment
     state["promotion_recommendation"] = promotion_recommendation
     state["status"] = (
         EXPERIMENT_RUN_STATUS_COMPLETED
@@ -1405,7 +1827,21 @@ def compute_experiment_verdict(
         "partial_count": partial_count,
         "inconclusive_count": inconclusive_count,
         "expected_outcome_count": expected_outcome_count,
+        "policy_violation_count": _coerce_int(
+            degradation_assessment.get("policy_violation_count"),
+            minimum=0,
+        ),
     }
+    if isinstance(degradation_assessment.get("metrics"), Mapping):
+        for key, value in cast(Mapping[str, Any], degradation_assessment.get("metrics")).items():
+            state["metrics"][str(key)] = value
+    evidence: dict[str, Any] = (
+        dict(cast(Mapping[str, Any], state.get("evidence")))
+        if isinstance(state.get("evidence"), Mapping)
+        else {}
+    )
+    evidence["degradation_assessment"] = copy.deepcopy(degradation_assessment)
+    state["evidence"] = evidence
 
     persisted = _persist_experiment_run_state(run_id=resolved_run_id, state=state)
     projection = upsert_experiment_run_projection(
@@ -1435,6 +1871,7 @@ def compute_experiment_verdict(
         "run_id": resolved_run_id,
         "verdict": verdict,
         "verdict_summary": summary,
+        "degradation_assessment": degradation_assessment,
         "promotion_recommendation": promotion_recommendation,
         "observations": _clone_sequence(persisted.get("observations")),
         "experiment_run": persisted,
@@ -1508,8 +1945,11 @@ def emit_experiment_learning_signal(
     expected_id = _safe_str(expected_workflow_id) or _safe_str(
         next(iter(state.get("target_workflow_ids") or []), None)
     )
-    baseline_id = _safe_str(baseline_workflow_id) or (
-        candidate_workflow_ids[0] if candidate_workflow_ids else expected_id
+    baseline_id = (
+        _safe_str(baseline_workflow_id)
+        or _safe_str(state.get("baseline_workflow_id"))
+        or _safe_str(spec_state.get("baseline_workflow_id"))
+        or (candidate_workflow_ids[0] if candidate_workflow_ids else expected_id)
     )
     spec_fixture: dict[str, Any] = (
         dict(cast(Mapping[str, Any], spec_state.get("fixture_payload")))
@@ -1656,6 +2096,9 @@ def prepare_experiment_spec_from_template(
     target_workflow_ids = _normalise_strings(
         resolved_template.get("target_workflow_ids")
     ) or candidate_workflow_ids[:1]
+    baseline_workflow_id = _safe_str(
+        resolved_template.get("baseline_workflow_id")
+    ) or _safe_str((template_inputs or {}).get("baseline_workflow_id"))
 
     result = create_experiment_spec(
         name=spec_name,
@@ -1669,6 +2112,7 @@ def prepare_experiment_spec_from_template(
             resolved_template.get("target_capability_ids")
         ),
         candidate_workflow_ids=candidate_workflow_ids,
+        baseline_workflow_id=baseline_workflow_id or None,
         theory_id=_safe_str(resolved_template.get("theory_id")) or None,
         experiment_suite_id=_safe_str(resolved_template.get("experiment_suite_id"))
         or None,

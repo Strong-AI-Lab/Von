@@ -35,6 +35,10 @@ MUTATION_AUTHORITY_LEVEL_EXTERNAL_SYSTEM_GUARDED = "external_system_guarded"
 WORKFLOW_STEP_MUTATION_AUTHORITY_SCHEMA_VERSION = (
     "workflow_step_mutation_authority.v1"
 )
+WORKFLOW_EXECUTION_SIDE_EFFECT_POLICY_SCHEMA_VERSION = (
+    "workflow_execution_side_effect_policy.v1"
+)
+WORKFLOW_EXECUTION_SIDE_EFFECT_MODE_THEORY_BOUNDED = "theory_bounded"
 
 MUTATION_GUARDRAIL_DECISION_ALLOWED = "allowed"
 MUTATION_GUARDRAIL_DECISION_BLOCKED = "blocked"
@@ -45,6 +49,16 @@ REASON_NO_REQUESTED_WRITE_TOOLS = "no_requested_write_tools"
 REASON_MUTATION_AUTHORITY_DEFAULT = "mutation_authority_default"
 REASON_INSUFFICIENT_MUTATION_AUTHORITY = "insufficient_mutation_authority"
 REASON_WORKFLOW_MUTATION_AUTHORITY_INVALID = "workflow_mutation_authority_invalid"
+REASON_WORKFLOW_EXECUTION_WRITE_ALLOWED = "workflow_execution_write_allowed"
+REASON_WORKFLOW_EXECUTION_POLICY_ALLOWLIST = (
+    "workflow_execution_side_effect_policy_allowlist"
+)
+REASON_WORKFLOW_EXECUTION_POLICY_DENYLIST = (
+    "workflow_execution_side_effect_policy_denylist"
+)
+REASON_WORKFLOW_EXECUTION_POLICY_BLOCKED = (
+    "workflow_execution_side_effect_policy_blocked"
+)
 
 WRITE_RISK_ADDITIVE_LOW_RISK = "additive_low_risk"
 WRITE_RISK_MUTATIVE_NON_DESTRUCTIVE = "mutative_non_destructive"
@@ -335,6 +349,100 @@ def normalise_workflow_step_mutation_authority_spec(
     return normalised
 
 
+def normalise_workflow_execution_side_effect_policy(
+    value: Any,
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        return None
+
+    schema_version = str(value.get("schema_version") or "").strip()
+    if (
+        schema_version
+        and schema_version != WORKFLOW_EXECUTION_SIDE_EFFECT_POLICY_SCHEMA_VERSION
+    ):
+        return None
+
+    mode = str(value.get("mode") or value.get("scope_mode") or "").strip().lower()
+    if not mode:
+        return None
+    if mode != WORKFLOW_EXECUTION_SIDE_EFFECT_MODE_THEORY_BOUNDED:
+        return None
+
+    def _normalise_tool_list(raw: Any) -> list[str]:
+        if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+            return []
+        resolved: list[str] = []
+        seen: set[str] = set()
+        for item in raw:
+            cleaned = str(item or "").strip()
+            if not cleaned:
+                continue
+            lowered = cleaned.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            resolved.append(cleaned)
+        return resolved
+
+    theory_id = str(
+        value.get("theory_id") or value.get("testing_theory_id") or ""
+    ).strip()
+    default_write_decision = str(
+        value.get("default_write_decision") or "block"
+    ).strip().lower()
+    if default_write_decision not in {"block", "allow"}:
+        default_write_decision = "block"
+
+    return {
+        "schema_version": WORKFLOW_EXECUTION_SIDE_EFFECT_POLICY_SCHEMA_VERSION,
+        "mode": mode,
+        "theory_id": theory_id or None,
+        "default_write_decision": default_write_decision,
+        "allowed_write_tools": _normalise_tool_list(
+            value.get("allowed_write_tools")
+            or value.get("allow_write_tools")
+            or value.get("write_allowlist")
+        ),
+        "blocked_write_tools": _normalise_tool_list(
+            value.get("blocked_write_tools")
+            or value.get("deny_write_tools")
+            or value.get("write_denylist")
+        ),
+        "audit_label": str(value.get("audit_label") or "").strip() or None,
+    }
+
+
+def resolve_workflow_execution_side_effect_policy(
+    *,
+    workflow_context: Mapping[str, Any] | None = None,
+    workflow_state_metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    candidates: list[Any] = []
+    if isinstance(workflow_state_metadata, Mapping):
+        candidates.extend(
+            (
+                workflow_state_metadata.get("workflow_execution_side_effect_policy"),
+                workflow_state_metadata.get("side_effect_policy"),
+                workflow_state_metadata.get("sandbox_policy"),
+            )
+        )
+    if isinstance(workflow_context, Mapping):
+        candidates.extend(
+            (
+                workflow_context.get("workflow_execution_side_effect_policy"),
+                workflow_context.get("side_effect_policy"),
+                workflow_context.get("sandbox_policy"),
+            )
+        )
+    for candidate in candidates:
+        normalised = normalise_workflow_execution_side_effect_policy(candidate)
+        if normalised is not None:
+            return normalised
+    return None
+
+
 def classify_write_tool_risk(tool_name: str) -> str:
     """Return the central write-risk class for a tool name."""
 
@@ -551,6 +659,109 @@ def compute_allowed_write_tools(
         tool_decisions=tuple(decisions),
         profile_concept_id=_safe_profile_concept_id(resolved_runtime_profile),
         profile_diagnostics=resolved_runtime_profile_diagnostics,
+    )
+
+
+def compute_workflow_execution_write_policy(
+    *,
+    requested_tools: list[str],
+    user_mutation_authority: str | None = None,
+    workflow_mutation_authority: Mapping[str, Any] | str | None = None,
+    global_mutation_authority: str | None = None,
+    environment_mutation_authority: str | None = None,
+    execution_side_effect_policy: Mapping[str, Any] | None = None,
+) -> WriteToolPolicyDecision:
+    requested = _normalise_tool_names(requested_tools)
+    workflow_mutation_authority_spec = normalise_workflow_step_mutation_authority_spec(
+        workflow_mutation_authority
+    )
+    workflow_authority_invalid = (
+        workflow_mutation_authority is not None
+        and workflow_mutation_authority_spec is None
+    )
+    side_effect_policy = normalise_workflow_execution_side_effect_policy(
+        execution_side_effect_policy
+    )
+    authority_sources = {
+        "user": normalise_mutation_authority_level(user_mutation_authority),
+        "workflow": (
+            str(workflow_mutation_authority_spec.get("maximum_level") or "").strip()
+            if isinstance(workflow_mutation_authority_spec, Mapping)
+            else (
+                MUTATION_AUTHORITY_LEVEL_READ_ONLY
+                if workflow_authority_invalid
+                else MUTATION_AUTHORITY_LEVEL_EXTERNAL_SYSTEM_GUARDED
+            )
+        ),
+        "global": normalise_mutation_authority_level(global_mutation_authority),
+        "environment": normalise_mutation_authority_level(
+            environment_mutation_authority
+        ),
+    }
+    if isinstance(side_effect_policy, Mapping):
+        authority_sources["execution_scope"] = str(
+            side_effect_policy.get("mode") or ""
+        ).strip()
+    effective_mutation_authority = intersect_mutation_authority_levels(
+        authority_sources["user"],
+        authority_sources["workflow"],
+        authority_sources["global"],
+        authority_sources["environment"],
+    )
+
+    if not requested:
+        return WriteToolPolicyDecision(
+            allowed_tools=frozenset(),
+            reason=REASON_NO_REQUESTED_WRITE_TOOLS,
+            decision_basis=REASON_NO_REQUESTED_WRITE_TOOLS,
+            outcome=MUTATION_GUARDRAIL_DECISION_ALLOWED,
+            effective_mutation_authority=effective_mutation_authority,
+            authority_sources=authority_sources,
+            user_denial_detected=False,
+            tool_decisions=(),
+        )
+
+    decisions: list[WriteToolDecision] = []
+    allowed_tools: set[str] = set()
+    overall_reason = ""
+    for tool_name in requested:
+        decision = _decide_single_workflow_execution_tool(
+            tool_name=tool_name,
+            effective_mutation_authority=effective_mutation_authority,
+            authority_sources=authority_sources,
+            workflow_authority_invalid=workflow_authority_invalid,
+            execution_side_effect_policy=side_effect_policy,
+        )
+        decisions.append(decision)
+        if decision.allowed:
+            allowed_tools.add(tool_name)
+        if (
+            not overall_reason
+            or decision.outcome != MUTATION_GUARDRAIL_DECISION_ALLOWED
+        ):
+            overall_reason = decision.blocked_reason or decision.decision_basis
+
+    if not overall_reason and decisions:
+        overall_reason = decisions[0].decision_basis
+
+    overall_decision = min(
+        decisions,
+        key=lambda item: {
+            MUTATION_GUARDRAIL_DECISION_BLOCKED: 0,
+            MUTATION_GUARDRAIL_DECISION_APPROVAL_REQUIRED: 1,
+            MUTATION_GUARDRAIL_DECISION_DEFERRED: 2,
+            MUTATION_GUARDRAIL_DECISION_ALLOWED: 3,
+        }.get(item.outcome, 99),
+    )
+    return WriteToolPolicyDecision(
+        allowed_tools=frozenset(allowed_tools),
+        reason=overall_reason or REASON_WORKFLOW_EXECUTION_WRITE_ALLOWED,
+        decision_basis=overall_reason or REASON_WORKFLOW_EXECUTION_WRITE_ALLOWED,
+        outcome=overall_decision.outcome,
+        effective_mutation_authority=effective_mutation_authority,
+        authority_sources=authority_sources,
+        user_denial_detected=False,
+        tool_decisions=tuple(decisions),
     )
 
 
@@ -1251,6 +1462,191 @@ def _decide_single_tool(
         risk_features=risk_features,
         unresolved_risk_factors=unresolved_risk_factors,
     )
+
+
+def _decide_single_workflow_execution_tool(
+    *,
+    tool_name: str,
+    effective_mutation_authority: str,
+    authority_sources: Mapping[str, str],
+    workflow_authority_invalid: bool,
+    execution_side_effect_policy: Mapping[str, Any] | None,
+) -> WriteToolDecision:
+    risk_class = classify_write_tool_risk(tool_name)
+    required_mutation_authority = required_mutation_authority_level_for_risk(risk_class)
+    authority_block_source = _resolve_authority_block_source(
+        required_mutation_authority=required_mutation_authority,
+        authority_sources=authority_sources,
+    )
+    if workflow_authority_invalid:
+        authority_block_source = "workflow"
+
+    risk_features = {
+        "action_kind": {
+            WRITE_RISK_ADDITIVE_LOW_RISK: "additive_internal",
+            WRITE_RISK_MUTATIVE_NON_DESTRUCTIVE: "recoverable_internal_mutation",
+            WRITE_RISK_DESTRUCTIVE: "destructive_internal_mutation",
+        }.get(risk_class, "external_side_effect"),
+        "external_side_effects": risk_class == WRITE_RISK_EXTERNAL_NON_VONTOLOGY,
+        "process_sensitive": _is_process_sensitive_tool(
+            tool_name=tool_name,
+            risk_class=risk_class,
+        ),
+        "workflow_execution_mode": "authoritative_workflow",
+        "uncertainty_state": CONFIDENCE_EXPLICIT_REQUEST,
+        "user_request_evidence": "authoritative_workflow_step",
+    }
+
+    if (
+        mutation_authority_level_rank(effective_mutation_authority)
+        < mutation_authority_level_rank(required_mutation_authority)
+    ):
+        blocked_reason = (
+            REASON_WORKFLOW_MUTATION_AUTHORITY_INVALID
+            if workflow_authority_invalid
+            else REASON_INSUFFICIENT_MUTATION_AUTHORITY
+        )
+        unresolved_risk_factors = _build_unresolved_risk_factors(
+            risk_class=risk_class,
+            risk_features=risk_features,
+            blocked_reason=blocked_reason,
+        )
+        return WriteToolDecision(
+            tool_name=tool_name,
+            risk_class=risk_class,
+            required_mutation_authority=required_mutation_authority,
+            effective_mutation_authority=effective_mutation_authority,
+            authority_sources=authority_sources,
+            allowed=False,
+            outcome=MUTATION_GUARDRAIL_DECISION_BLOCKED,
+            decision_basis=blocked_reason,
+            blocked_reason=blocked_reason,
+            authority_block_source=authority_block_source,
+            scenario_id=_scenario_id_for_risk(
+                tool_name=tool_name,
+                risk_class=risk_class,
+                risk_features=risk_features,
+            ),
+            confidence_state=CONFIDENCE_LOW,
+            intervention_kind=INTERVENTION_DEFER_HIGH_RISK,
+            risk_features=risk_features,
+            unresolved_risk_factors=unresolved_risk_factors,
+        )
+
+    execution_policy_reason = _workflow_execution_side_effect_policy_reason(
+        tool_name=tool_name,
+        policy=execution_side_effect_policy,
+    )
+    if execution_policy_reason == REASON_WORKFLOW_EXECUTION_POLICY_ALLOWLIST:
+        allowlist_features = dict(risk_features)
+        allowlist_features["execution_side_effect_policy"] = dict(
+            execution_side_effect_policy or {}
+        )
+        allowlist_features["execution_side_effect_allowlist_hit"] = True
+        return WriteToolDecision(
+            tool_name=tool_name,
+            risk_class=risk_class,
+            required_mutation_authority=required_mutation_authority,
+            effective_mutation_authority=effective_mutation_authority,
+            authority_sources=authority_sources,
+            allowed=True,
+            outcome=MUTATION_GUARDRAIL_DECISION_ALLOWED,
+            decision_basis=execution_policy_reason,
+            scenario_id=_scenario_id_for_risk(
+                tool_name=tool_name,
+                risk_class=risk_class,
+                risk_features=allowlist_features,
+            ),
+            confidence_state=CONFIDENCE_EXPLICIT_REQUEST,
+            intervention_kind=INTERVENTION_AUTO_ALLOW,
+            risk_features=allowlist_features,
+        )
+
+    if execution_policy_reason in {
+        REASON_WORKFLOW_EXECUTION_POLICY_DENYLIST,
+        REASON_WORKFLOW_EXECUTION_POLICY_BLOCKED,
+    }:
+        blocked_features = dict(risk_features)
+        blocked_features["execution_side_effect_policy"] = dict(
+            execution_side_effect_policy or {}
+        )
+        unresolved_risk_factors = _build_unresolved_risk_factors(
+            risk_class=risk_class,
+            risk_features=blocked_features,
+            blocked_reason=execution_policy_reason,
+        ) + ("theory_bounded_side_effect_policy",)
+        return WriteToolDecision(
+            tool_name=tool_name,
+            risk_class=risk_class,
+            required_mutation_authority=required_mutation_authority,
+            effective_mutation_authority=effective_mutation_authority,
+            authority_sources=authority_sources,
+            allowed=False,
+            outcome=MUTATION_GUARDRAIL_DECISION_BLOCKED,
+            decision_basis=execution_policy_reason,
+            blocked_reason=execution_policy_reason,
+            authority_block_source="execution_scope",
+            scenario_id=_scenario_id_for_risk(
+                tool_name=tool_name,
+                risk_class=risk_class,
+                risk_features=blocked_features,
+            ),
+            confidence_state=CONFIDENCE_LOW,
+            intervention_kind=INTERVENTION_DEFER_HIGH_RISK,
+            risk_features=blocked_features,
+            unresolved_risk_factors=unresolved_risk_factors,
+        )
+
+    return WriteToolDecision(
+        tool_name=tool_name,
+        risk_class=risk_class,
+        required_mutation_authority=required_mutation_authority,
+        effective_mutation_authority=effective_mutation_authority,
+        authority_sources=authority_sources,
+        allowed=True,
+        outcome=MUTATION_GUARDRAIL_DECISION_ALLOWED,
+        decision_basis=REASON_WORKFLOW_EXECUTION_WRITE_ALLOWED,
+        scenario_id=_scenario_id_for_risk(
+            tool_name=tool_name,
+            risk_class=risk_class,
+            risk_features=risk_features,
+        ),
+        confidence_state=CONFIDENCE_EXPLICIT_REQUEST,
+        intervention_kind=INTERVENTION_AUTO_ALLOW,
+        risk_features=risk_features,
+    )
+
+
+def _workflow_execution_side_effect_policy_reason(
+    *,
+    tool_name: str,
+    policy: Mapping[str, Any] | None,
+) -> str | None:
+    if not isinstance(policy, Mapping):
+        return None
+    allowed_tools = {
+        str(item).strip().lower()
+        for item in policy.get("allowed_write_tools") or []
+        if str(item).strip()
+    }
+    blocked_tools = {
+        str(item).strip().lower()
+        for item in policy.get("blocked_write_tools") or []
+        if str(item).strip()
+    }
+    lowered_tool_name = str(tool_name or "").strip().lower()
+    if lowered_tool_name in blocked_tools:
+        return REASON_WORKFLOW_EXECUTION_POLICY_DENYLIST
+    if lowered_tool_name in allowed_tools:
+        return REASON_WORKFLOW_EXECUTION_POLICY_ALLOWLIST
+    if (
+        str(policy.get("mode") or "").strip().lower()
+        == WORKFLOW_EXECUTION_SIDE_EFFECT_MODE_THEORY_BOUNDED
+        and str(policy.get("default_write_decision") or "block").strip().lower()
+        != "allow"
+    ):
+        return REASON_WORKFLOW_EXECUTION_POLICY_BLOCKED
+    return None
 
 
 def _runtime_decision_policy(runtime_profile: Mapping[str, Any] | None) -> Mapping[str, Any]:

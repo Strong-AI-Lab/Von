@@ -208,6 +208,8 @@ class DurableWorkflowExecutor:
                 org_concept_id=instance.org_id,
             ),
             user_namespace=instance.namespace,
+            user_concept_id=instance.user_id,
+            org_concept_id=instance.org_id,
         )
 
         # Create trace for observability

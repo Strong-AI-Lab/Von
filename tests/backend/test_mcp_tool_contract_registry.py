@@ -118,6 +118,7 @@ def test_testing_and_turn_execution_tools_are_exposed_on_vontology_stdio_surface
         "turn_execution_backfill_from_chat_history",
         "turn_execution_namespace_coverage_report",
         "workflow_build_prediction_envelope",
+        "workflow_validate_candidate",
         "testing_theory_create_slice",
         "testing_theory_import_canonical_context",
         "testing_theory_assert_local_claims",

@@ -286,3 +286,55 @@ def test_build_mutation_guardrail_events_includes_authority_context():
     assert event["workflow_step_id"] == "respond"
     assert event["conversation_session_id"] == "sess-1"
 
+
+def test_workflow_execution_policy_blocks_write_not_allowlisted_in_theory_scope():
+    from src.backend.workflows.write_tool_policy import (
+        REASON_WORKFLOW_EXECUTION_POLICY_BLOCKED,
+        WORKFLOW_EXECUTION_SIDE_EFFECT_POLICY_SCHEMA_VERSION,
+        compute_workflow_execution_write_policy,
+    )
+
+    decision = compute_workflow_execution_write_policy(
+        requested_tools=["workflow_create_schedule"],
+        workflow_mutation_authority={
+            "schema_version": "workflow_step_mutation_authority.v1",
+            "maximum_level": "external_system_guarded",
+        },
+        execution_side_effect_policy={
+            "schema_version": WORKFLOW_EXECUTION_SIDE_EFFECT_POLICY_SCHEMA_VERSION,
+            "mode": "theory_bounded",
+            "testing_theory_id": "#V#theory_capability_test",
+        },
+    )
+
+    assert "workflow_create_schedule" not in decision.allowed_tools
+    assert decision.reason == REASON_WORKFLOW_EXECUTION_POLICY_BLOCKED
+    tool_decision = decision.decision_for_tool("workflow_create_schedule")
+    assert tool_decision is not None
+    assert tool_decision.authority_block_source == "execution_scope"
+
+
+def test_workflow_execution_policy_allows_allowlisted_write_in_theory_scope():
+    from src.backend.workflows.write_tool_policy import (
+        REASON_WORKFLOW_EXECUTION_POLICY_ALLOWLIST,
+        WORKFLOW_EXECUTION_SIDE_EFFECT_POLICY_SCHEMA_VERSION,
+        compute_workflow_execution_write_policy,
+    )
+
+    decision = compute_workflow_execution_write_policy(
+        requested_tools=["add_relationship"],
+        workflow_mutation_authority={
+            "schema_version": "workflow_step_mutation_authority.v1",
+            "maximum_level": "additive_vontology",
+        },
+        execution_side_effect_policy={
+            "schema_version": WORKFLOW_EXECUTION_SIDE_EFFECT_POLICY_SCHEMA_VERSION,
+            "mode": "theory_bounded",
+            "testing_theory_id": "#V#theory_capability_test",
+            "allowed_write_tools": ["add_relationship"],
+        },
+    )
+
+    assert "add_relationship" in decision.allowed_tools
+    assert decision.reason == REASON_WORKFLOW_EXECUTION_POLICY_ALLOWLIST
+

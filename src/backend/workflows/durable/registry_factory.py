@@ -27,6 +27,7 @@ from ..mcp_tool_bridge import (
     resolve_internal_mcp_tool_name,
     workflow_action_result_from_mcp_payload,
 )
+from ..workflow_side_effect_guardrails import enforce_workflow_mcp_write_guardrails
 from ..vontology_loader import (
     build_workflow_process_graph,
     discover_workflow_ids,
@@ -304,6 +305,14 @@ def _durable_mcp_fallback_action(request: Any) -> WorkflowActionResult:
             )
             or tool_name
         )
+        method_definition = gateway.get_method_definition(resolved_tool_name)
+        blocked_result = enforce_workflow_mcp_write_guardrails(
+            request=request,
+            resolved_tool_name=resolved_tool_name,
+            method_definition=method_definition,
+        )
+        if blocked_result is not None:
+            return blocked_result
         result = gateway.invoke(resolved_tool_name, payload)
         try:
             from ..workflow_baseline_telemetry import (

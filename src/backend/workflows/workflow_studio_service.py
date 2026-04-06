@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from ..db.transient_errors import is_transient_mongo_error
@@ -57,6 +57,8 @@ logger = logging.getLogger(__name__)
 
 _TRANSIENT_INSTANCE_ERROR_MARKERS = ("temporarily unavailable",)
 _WORKFLOW_STUDIO_AI_PROPOSAL_MIN_LENGTH = 20
+_WORKFLOW_CANDIDATE_VALIDATION_PROFILE_CONTRACT_ONLY = "contract_only"
+_WORKFLOW_CANDIDATE_VALIDATION_PROFILE_GENERATION_SAFE = "generation_safe"
 
 
 class WorkflowStudioConflictError(RuntimeError):
@@ -662,6 +664,243 @@ def _ensure_current_hash_matches(
         raise WorkflowStudioConflictError("workflow_definition_hash_conflict")
 
 
+def _normalise_candidate_validation_profile(value: Any) -> str:
+    profile = _clean_text(value).lower()
+    if profile == _WORKFLOW_CANDIDATE_VALIDATION_PROFILE_CONTRACT_ONLY:
+        return profile
+    return _WORKFLOW_CANDIDATE_VALIDATION_PROFILE_GENERATION_SAFE
+
+
+def _build_generation_safe_validation(
+    *,
+    authoring_spec: Mapping[str, Any],
+    contract_validation: Mapping[str, Any],
+) -> dict[str, Any]:
+    errors: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+
+    publication_spec = _as_mapping(authoring_spec.get("publication_spec"))
+    steps = publication_spec.get("steps")
+    if not isinstance(steps, Sequence) or isinstance(steps, (str, bytes, bytearray)):
+        steps = []
+
+    executable_step_count = 0
+    llm_step_count = 0
+    for raw_step in steps:
+        if not isinstance(raw_step, Mapping):
+            continue
+        step = dict(raw_step)
+        state_id = _clean_text(step.get("state_id")) or None
+        action_id = _clean_text(step.get("action_id"))
+        invoked_workflow_id = _clean_text(step.get("invoked_workflow_id"))
+        execution_mode = _clean_text(step.get("execution_mode")).lower()
+        conditional_transitions = step.get("conditional_transitions")
+        has_conditional_transitions = isinstance(conditional_transitions, list) and bool(
+            conditional_transitions
+        )
+        has_failure_path = bool(_clean_text(step.get("on_failure_state"))) or has_conditional_transitions
+        is_executable = bool(action_id or invoked_workflow_id)
+        if not is_executable:
+            continue
+        executable_step_count += 1
+
+        if not has_failure_path:
+            errors.append(
+                {
+                    "state_id": state_id,
+                    "reason_code": "executable_step_missing_failure_path",
+                    "severity": "error",
+                }
+            )
+
+        if action_id == "llm.action" or execution_mode == "llm":
+            llm_step_count += 1
+            if not isinstance(step.get("validation_policy"), Mapping):
+                errors.append(
+                    {
+                        "state_id": state_id,
+                        "reason_code": "llm_step_missing_validation_policy",
+                        "severity": "error",
+                    }
+                )
+            writes_context_keys = step.get("writes_context_keys")
+            tool_output_mapping_specs = step.get("tool_output_mapping_specs")
+            if (
+                isinstance(writes_context_keys, list)
+                and writes_context_keys
+                and (not isinstance(tool_output_mapping_specs, list) or not tool_output_mapping_specs)
+            ):
+                warnings.append(
+                    {
+                        "state_id": state_id,
+                        "reason_code": "llm_step_writes_context_without_output_mapping",
+                        "severity": "warning",
+                    }
+                )
+
+    if executable_step_count == 0:
+        errors.append(
+            {
+                "state_id": None,
+                "reason_code": "workflow_has_no_executable_steps",
+                "severity": "error",
+            }
+        )
+
+    contract_errors = contract_validation.get("errors")
+    if isinstance(contract_errors, list) and contract_errors:
+        warnings.append(
+            {
+                "state_id": None,
+                "reason_code": "contract_validation_errors_present",
+                "severity": "warning",
+            }
+        )
+
+    return {
+        "profile": _WORKFLOW_CANDIDATE_VALIDATION_PROFILE_GENERATION_SAFE,
+        "valid": not errors,
+        "errors": errors,
+        "warnings": warnings,
+        "metrics": {
+            "executable_step_count": executable_step_count,
+            "llm_step_count": llm_step_count,
+        },
+    }
+
+
+def _build_candidate_repair_hints(
+    *,
+    contract_validation: Mapping[str, Any],
+    generation_safe_validation: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    hints: list[dict[str, Any]] = []
+
+    contract_errors = contract_validation.get("errors")
+    if isinstance(contract_errors, list):
+        for reason_code in contract_errors:
+            code = _clean_text(reason_code)
+            if not code:
+                continue
+            hints.append(
+                {
+                    "reason_code": code,
+                    "repair_hint": (
+                        "Fix the candidate authoring spec so the workflow contract validates "
+                        "cleanly before publication or bounded execution."
+                    ),
+                    "scope": "workflow_contract",
+                }
+            )
+
+    generation_safe_errors = generation_safe_validation.get("errors")
+    if isinstance(generation_safe_errors, list):
+        for item in generation_safe_errors:
+            issue = dict(item) if isinstance(item, Mapping) else {}
+            code = _clean_text(issue.get("reason_code"))
+            if not code:
+                continue
+            repair_hint = "Repair the candidate workflow so it is safe to execute on the generation path."
+            if code == "llm_step_missing_validation_policy":
+                repair_hint = "Add a validation policy to every LLM execution step."
+            elif code == "executable_step_missing_failure_path":
+                repair_hint = "Add an explicit failure path for every executable step."
+            elif code == "workflow_has_no_executable_steps":
+                repair_hint = "Add at least one executable workflow step before publication."
+            hints.append(
+                {
+                    "reason_code": code,
+                    "repair_hint": repair_hint,
+                    "scope": "generation_safety",
+                    "state_id": issue.get("state_id"),
+                }
+            )
+
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for hint in hints:
+        key = (
+            _clean_text(hint.get("scope")),
+            _clean_text(hint.get("reason_code")),
+            _clean_text(hint.get("state_id")),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(hint)
+    return deduped
+
+
+def validate_workflow_candidate(
+    workflow_id: str,
+    *,
+    authoring_spec: Mapping[str, Any],
+    base_definition_hash: str | None = None,
+    validation_profile: str | None = None,
+    include_preview: bool = False,
+) -> dict[str, Any]:
+    preview_payload = preview_workflow_authoring_spec(
+        workflow_id,
+        authoring_spec=authoring_spec,
+        base_definition_hash=base_definition_hash,
+    )
+    preview = _as_mapping(preview_payload.get("preview"))
+    contract_validation = _as_mapping(preview.get("contract_validation"))
+    resolved_profile = _normalise_candidate_validation_profile(validation_profile)
+    generation_safe_validation = _build_generation_safe_validation(
+        authoring_spec=authoring_spec,
+        contract_validation=contract_validation,
+    )
+
+    contract_valid = bool(contract_validation.get("valid"))
+    generation_safe_valid = bool(generation_safe_validation.get("valid"))
+    valid = contract_valid
+    if resolved_profile == _WORKFLOW_CANDIDATE_VALIDATION_PROFILE_GENERATION_SAFE:
+        valid = contract_valid and generation_safe_valid
+
+    definition_identity = _as_mapping(preview.get("definition_identity"))
+    diff_summary = _as_mapping(preview.get("diff_summary"))
+    repair_hints = _build_candidate_repair_hints(
+        contract_validation=contract_validation,
+        generation_safe_validation=generation_safe_validation,
+    )
+    assertion_classes = ["workflow_candidate_validation"]
+    if not contract_valid:
+        assertion_classes.append("workflow_contract_validation_failure")
+    if not generation_safe_valid:
+        assertion_classes.append("workflow_generation_safety_failure")
+
+    candidate_validation = {
+        "workflow_id": _clean_text(workflow_id),
+        "validation_profile": resolved_profile,
+        "valid": valid,
+        "contract_validation": contract_validation,
+        "generation_safe_validation": generation_safe_validation,
+        "definition_identity": definition_identity,
+        "diff_summary": diff_summary,
+        "repair_hints": repair_hints,
+        "assertion_classes": assertion_classes,
+        "quality_signals": {
+            "contract_valid": contract_valid,
+            "generation_safe_valid": generation_safe_valid,
+            "repair_hint_count": len(repair_hints),
+        },
+    }
+    result = {
+        "success": True,
+        "workflow_id": _clean_text(workflow_id),
+        "candidate_validation": candidate_validation,
+        "guardrails": {
+            "preview_required": True,
+            "validation_profile": resolved_profile,
+            "publishes_to_vontology": False,
+        },
+    }
+    if include_preview:
+        result["preview"] = preview
+    return result
+
+
 def preview_workflow_authoring_spec(
     workflow_id: str,
     *,
@@ -859,4 +1098,5 @@ __all__ = [
     "build_workflow_description_proposal",
     "build_workflow_studio_detail_payload",
     "preview_workflow_authoring_spec",
+    "validate_workflow_candidate",
 ]

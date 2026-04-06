@@ -148,6 +148,7 @@ if TYPE_CHECKING:
         _workflow_get_instance,
         _workflow_get_schedule,
         _workflow_list_definitions,
+        _workflow_validate_candidate,
         _workflow_list_event_bindings,
         _workflow_list_execution_traces,
         _workflow_list_instances,
@@ -400,6 +401,7 @@ _bind_imports(
         "_workflow_get_instance",
         "_workflow_get_schedule",
         "_workflow_list_definitions",
+        "_workflow_validate_candidate",
         "_workflow_list_event_bindings",
         "_workflow_list_execution_traces",
         "_workflow_list_instances",
@@ -3149,6 +3151,16 @@ async def _handle_workflow_list_definitions(
     )
 
 
+async def _handle_workflow_validate_candidate(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _workflow_validate_candidate,
+        arguments,
+        tool_family_label="Workflow",
+    )
+
+
 async def _handle_workflow_list_use_episodes(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
@@ -4140,6 +4152,7 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "renderer_resolve_applicability": _handle_renderer_resolve_applicability,
     "upsert_renderer_profile": _handle_upsert_renderer_profile,
     "workflow_list_definitions": _handle_workflow_list_definitions,
+    "workflow_validate_candidate": _handle_workflow_validate_candidate,
     "workflow_list_use_episodes": _handle_workflow_list_use_episodes,
     "workflow_bind_event": _handle_workflow_bind_event,
     "workflow_list_event_bindings": _handle_workflow_list_event_bindings,

@@ -16,6 +16,7 @@ from src.backend.services.testing_workflow_contracts import (
     TESTING_PREPARE_ARXIV_PAPER_INGESTION_FIXTURE_ACTION_ID,
     TESTING_PREPARE_EXPERIMENT_SPEC_ACTION_ID,
     TESTING_PREPARE_MEETING_INVITATION_SPEC_ACTION_ID,
+    TESTING_VALIDATE_CANDIDATE_WORKFLOW_ACTION_ID,
     TESTING_VERIFY_ARXIV_PAPER_INGESTION_RESULT_ACTION_ID,
     THEORY_ASSERT_LOCAL_CLAIM_ACTION_ID,
     THEORY_COMPUTE_DIFF_ACTION_ID,
@@ -113,6 +114,7 @@ class _StubWorkflowInstance:
     workflow_data: dict[str, Any] | None = None
     error: str | None = None
     error_step: str | None = None
+    execution_trace_id: str | None = None
     user_id: str = "#V#user"
     org_id: str = "#V#org"
     namespace: str = "#V#user@org"
@@ -125,6 +127,7 @@ class _StubWorkflowInstance:
             "current_state": self.current_state,
             "error": self.error,
             "error_step": self.error_step,
+            "execution_trace_id": self.execution_trace_id,
         }
 
 
@@ -147,6 +150,7 @@ def test_register_testing_workflow_actions_exposes_all_expected_action_ids():
         EXPERIMENT_EMIT_LEARNING_SIGNAL_ACTION_ID,
         EXPERIMENT_EXECUTE_TARGET_WORKFLOW_ACTION_ID,
         EXPERIMENT_EXECUTE_REGRESSION_SUITE_ACTION_ID,
+        TESTING_VALIDATE_CANDIDATE_WORKFLOW_ACTION_ID,
         TESTING_PREPARE_EXPERIMENT_SPEC_ACTION_ID,
         TESTING_PREPARE_MEETING_INVITATION_SPEC_ACTION_ID,
         TESTING_PREPARE_ARXIV_PAPER_INGESTION_FIXTURE_ACTION_ID,
@@ -234,6 +238,12 @@ def test_execute_target_workflow_action_launches_durable_instance(monkeypatch):
             "fixture_id": "fixture-1",
             "experiment_run_id": "#V#run_1",
             "testing_theory_id": "#V#theory_1",
+            "workflow_execution_side_effect_policy": {
+                "schema_version": "workflow_execution_side_effect_policy.v1",
+                "mode": "theory_bounded",
+                "testing_theory_id": "#V#theory_1",
+                "audit_label": "experiment.execute_target_workflow",
+            },
         },
         "max_retries": 2,
     }
@@ -311,6 +321,55 @@ def test_prepare_experiment_spec_action_resolves_actor_context(monkeypatch):
     assert captured["template_inputs"] == {
         "invitation_text": "Meet tomorrow",
         "candidate_workflow_ids": ["#V#wf_candidate"],
+    }
+
+
+def test_validate_candidate_workflow_action_forwards_validation_controls(monkeypatch):
+    from src.backend.workflows.durable import testing_workflow_actions as mod
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        mod,
+        "validate_workflow_candidate",
+        lambda workflow_id, **kwargs: (
+            captured.update({"workflow_id": workflow_id, **kwargs})
+            or {
+                "success": True,
+                "workflow_id": workflow_id,
+                "candidate_validation": {"valid": True},
+                "preview": {"definition_identity": {"hash": "candidate-hash"}},
+            }
+        ),
+    )
+
+    registry = ActionRegistry()
+    register_testing_workflow_actions(registry)
+    spec = registry.get(TESTING_VALIDATE_CANDIDATE_WORKFLOW_ACTION_ID)
+    assert spec is not None
+
+    result = spec.handler(
+        WorkflowActionRequest(
+            action_id=TESTING_VALIDATE_CANDIDATE_WORKFLOW_ACTION_ID,
+            inputs={
+                "workflow_id": "#V#candidate_workflow",
+                "authoring_spec": {"workflow_id": "#V#candidate_workflow"},
+                "base_definition_hash": "current-hash",
+                "validation_profile": "contract_only",
+                "include_preview": True,
+            },
+            environment=WorkflowEnvironment(llm_client=None),
+            data={},
+        )
+    )
+
+    assert result.ok is True
+    assert result.outputs["workflow_id"] == "#V#candidate_workflow"
+    assert captured == {
+        "workflow_id": "#V#candidate_workflow",
+        "authoring_spec": {"workflow_id": "#V#candidate_workflow"},
+        "base_definition_hash": "current-hash",
+        "validation_profile": "contract_only",
+        "include_preview": True,
     }
 
 
@@ -580,11 +639,19 @@ def test_execute_target_workflow_action_can_await_terminal_and_record_observatio
                 instance_id="#V#wf_instance_testing",
                 workflow_id="#V#meeting_invitation_testing_workflow",
                 status=WorkflowInstanceStatus.COMPLETED,
+                execution_trace_id="#V#trace_1",
                 outputs={
                     "meeting_type": "project_meeting",
                     "nested_payload": {"detail": "should be omitted"},
                 },
                 workflow_data={
+                    "mutation_guardrail_events": [
+                        {
+                            "tool_name": "workflow_create_instance",
+                            "decision": "allow",
+                            "requires_confirmation": False,
+                        }
+                    ],
                     "workflow_step_result_envelopes": [
                         {"step_id": "prepare", "ok": True, "payload": {"detail": "x" * 1024}}
                     ],
@@ -623,6 +690,23 @@ def test_execute_target_workflow_action_can_await_terminal_and_record_observatio
             "projection": {"large_payload": "y" * 4096},
         },
     )
+    monkeypatch.setattr(
+        mod,
+        "get_workflow_execution_trace",
+        lambda execution_trace_id: {
+            "execution_trace_id": execution_trace_id,
+            "workflow_id": "#V#meeting_invitation_testing_workflow",
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "build_workflow_execution_trace_summary",
+        lambda trace_doc: {
+            "execution_trace_id": trace_doc["execution_trace_id"],
+            "failed_step_count": 0,
+            "completed_step_count": 2,
+        },
+    )
 
     registry = ActionRegistry()
     register_testing_workflow_actions(registry)
@@ -636,6 +720,16 @@ def test_execute_target_workflow_action_can_await_terminal_and_record_observatio
                 "workflow_id": "#V#meeting_invitation_testing_workflow",
                 "workflow_inputs": {"fixture_id": "fixture-1"},
                 "run_id": "#V#run_1",
+                "candidate_validation": {
+                    "valid": True,
+                    "assertion_classes": ["workflow_candidate_validation"],
+                    "repair_hints": [
+                        {
+                            "scope": "workflow_contract",
+                            "reason_code": "contract_validated",
+                        }
+                    ],
+                },
                 "await_terminal": True,
                 "timeout_seconds": 5,
                 "poll_interval_seconds": 0,
@@ -655,6 +749,34 @@ def test_execute_target_workflow_action_can_await_terminal_and_record_observatio
         "meeting_type": "project_meeting",
         "omitted_output_keys": ["nested_payload"],
     }
+    assert result.outputs["candidate_validation"]["valid"] is True
+    assert result.outputs["trace_summary"] == {
+        "execution_trace_id": "#V#trace_1",
+        "failed_step_count": 0,
+        "completed_step_count": 2,
+    }
+    assert result.outputs["side_effect_audit"] == {
+        "event_count": 1,
+        "blocked_event_count": 0,
+        "requires_confirmation_count": 0,
+        "decision_counts": {"allow": 1},
+        "allowed_side_effects": [],
+        "forbidden_side_effects": [],
+    }
+    assert result.outputs["repair_hints"] == [
+        {
+            "scope": "workflow_contract",
+            "reason_code": "contract_validated",
+        }
+    ]
+    assert result.outputs["quality_signals"] == {
+        "timed_out": False,
+        "candidate_validation_valid": True,
+        "metadata_validation_failed_count": 0,
+        "metadata_validation_enforced_failed_count": 0,
+        "mutation_guardrail_blocked_count": 0,
+        "requires_follow_up": False,
+    }
     assert "step_result_envelopes" not in result.outputs["workflow_execution"]
     assert "workflow_instance" not in result.outputs
     assert result.outputs["observation_recording"]["success"] is True
@@ -670,3 +792,68 @@ def test_execute_target_workflow_action_can_await_terminal_and_record_observatio
     assert observation["observed_outcome"] == "completed"
     assert observation["workflow_execution"]["final_status"] == "completed"
     assert "step_result_envelopes" not in observation["workflow_execution"]
+    assert observation["candidate_validation"]["valid"] is True
+    assert observation["trace_summary"]["completed_step_count"] == 2
+    assert observation["side_effect_audit"]["decision_counts"] == {"allow": 1}
+    assert observation["quality_signals"]["requires_follow_up"] is False
+
+
+def test_execute_target_workflow_action_fail_closes_invalid_candidate_and_records_observation(
+    monkeypatch,
+):
+    from src.backend.workflows.durable import testing_workflow_actions as mod
+
+    recorded: dict[str, Any] = {}
+    monkeypatch.setattr(
+        mod,
+        "record_experiment_observation",
+        lambda **kwargs: recorded.update(kwargs)
+        or {
+            "success": True,
+            "run_id": kwargs["run_id"],
+            "recorded_observations": list(kwargs["observations"]),
+            "experiment_run": {"large_payload": "x" * 4096},
+        },
+    )
+
+    registry = ActionRegistry()
+    register_testing_workflow_actions(registry)
+    spec = registry.get(EXPERIMENT_EXECUTE_TARGET_WORKFLOW_ACTION_ID)
+    assert spec is not None
+
+    result = spec.handler(
+        WorkflowActionRequest(
+            action_id=EXPERIMENT_EXECUTE_TARGET_WORKFLOW_ACTION_ID,
+            inputs={
+                "workflow_id": "#V#candidate_workflow",
+                "run_id": "#V#run_invalid_candidate",
+                "record_observation": True,
+                "candidate_validation": {
+                    "valid": False,
+                    "assertion_classes": ["workflow_generation_safety_failure"],
+                    "repair_hints": [
+                        {
+                            "scope": "generation_safety",
+                            "reason_code": "llm_step_missing_validation_policy",
+                        }
+                    ],
+                },
+            },
+            environment=WorkflowEnvironment(llm_client=None),
+            data={},
+        )
+    )
+
+    assert result.ok is False
+    assert result.error == "candidate_validation_failed"
+    assert result.outputs["candidate_validation"]["valid"] is False
+    assert result.outputs["observation_recording"]["recorded_observation_count"] == 1
+    observation = recorded["observations"][0]
+    assert observation["label"] == "target_workflow_execution"
+    assert observation["verdict"] == "fail"
+    assert observation["observed_outcome"] == "candidate_validation_failed"
+    assert observation["assertion_classes"] == [
+        "workflow_candidate_validation",
+        "workflow_generation_safety_failure",
+    ]
+    assert observation["quality_signals"]["requires_follow_up"] is True

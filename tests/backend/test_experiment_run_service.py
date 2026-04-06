@@ -197,6 +197,7 @@ def test_experiment_run_service_full_lifecycle_emits_learning_signal(monkeypatch
         theory_id="#V#theory_meeting",
         target_workflow_ids=["#V#wf_meeting"],
         candidate_workflow_ids=["#V#wf_meeting", "#V#wf_backup"],
+        baseline_workflow_id="#V#wf_backup",
         expected_outcomes=["structured_fields", "promotion_gate_kept_closed"],
         verdict_rules={"minimum_pass_count": 2},
         replay_policy={"retain_failing_cases": True},
@@ -205,7 +206,9 @@ def test_experiment_run_service_full_lifecycle_emits_learning_signal(monkeypatch
 
     assert created["success"] is True
     assert created["experiment_spec_id"] == "#V#spec_meeting_test"
-    assert store.docs["#V#spec_meeting_test"]["concept_data"]["experiment_spec"]["theory_id"] == "#V#theory_meeting"
+    spec_state = store.docs["#V#spec_meeting_test"]["concept_data"]["experiment_spec"]
+    assert spec_state["theory_id"] == "#V#theory_meeting"
+    assert spec_state["baseline_workflow_id"] == "#V#wf_backup"
     expected_outcome_writes = [
         row for row in text_writes if row["predicate"] == "#V#has_expected_outcome"
     ]
@@ -242,6 +245,23 @@ def test_experiment_run_service_full_lifecycle_emits_learning_signal(monkeypatch
                 "verdict": "pass",
                 "observed_outcome": "structured_fields",
                 "workflow_execution": {"workflow_id": "#V#wf_meeting"},
+                "candidate_validation": {
+                    "valid": True,
+                    "definition_identity": {"hash": "candidate-hash"},
+                },
+                "trace_summary": {"completed_step_count": 3},
+                "side_effect_audit": {"blocked_event_count": 0},
+                "repair_hints": [
+                    {
+                        "scope": "workflow_contract",
+                        "reason_code": "candidate_validated",
+                    }
+                ],
+                "quality_signals": {"requires_follow_up": False},
+                "assertion_classes": [
+                    "workflow_candidate_validation",
+                    "workflow_execution",
+                ],
                 "tool_invocations": [{"tool_name": "workflow_create_instance"}],
                 "turn_execution_request_ids": ["req-1"],
             },
@@ -261,8 +281,30 @@ def test_experiment_run_service_full_lifecycle_emits_learning_signal(monkeypatch
     ]
     assert len(observed_outcome_writes) == 2
     stored_run = store.docs["#V#run_meeting_test"]["concept_data"]["experiment_run"]
+    assert stored_run["baseline_workflow_id"] == "#V#wf_backup"
     assert stored_run["turn_execution_request_ids"] == ["req-2", "req-1"]
     assert len(stored_run["evidence"]["workflow_execution"]) == 1
+    assert stored_run["evidence"]["candidate_validation_results"] == [
+        {
+            "valid": True,
+            "definition_identity": {"hash": "candidate-hash"},
+        }
+    ]
+    assert stored_run["evidence"]["trace_summaries"] == [{"completed_step_count": 3}]
+    assert stored_run["evidence"]["side_effect_audits"] == [
+        {"blocked_event_count": 0}
+    ]
+    assert stored_run["evidence"]["repair_hints"] == [
+        {
+            "scope": "workflow_contract",
+            "reason_code": "candidate_validated",
+        }
+    ]
+    assert stored_run["evidence"]["quality_signals"] == [{"requires_follow_up": False}]
+    assert stored_run["evidence"]["assertion_classes"] == [
+        "workflow_candidate_validation",
+        "workflow_execution",
+    ]
 
     verdict = mod.compute_experiment_verdict(run_id="#V#run_meeting_test")
 
@@ -279,7 +321,6 @@ def test_experiment_run_service_full_lifecycle_emits_learning_signal(monkeypatch
     learning = mod.emit_experiment_learning_signal(
         run_id="#V#run_meeting_test",
         expected_workflow_id="#V#wf_meeting",
-        baseline_workflow_id="#V#wf_backup",
     )
 
     assert learning["success"] is True
@@ -289,6 +330,113 @@ def test_experiment_run_service_full_lifecycle_emits_learning_signal(monkeypatch
     assert replay_case["expected_workflow_id"] == "#V#wf_meeting"
     assert replay_case["baseline_workflow_id"] == "#V#wf_backup"
     assert replay_case["evidence"]["observation_total"] == 2
+
+
+def test_compute_experiment_verdict_demotes_degraded_candidate_against_baseline(
+    monkeypatch,
+):
+    mod, _store, _run_collection, _relations, _text_writes, _singleton_writes = (
+        _patch_runtime(monkeypatch)
+    )
+    demotion_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        mod,
+        "build_workflow_prediction_envelope",
+        lambda *, workflow_id, **_kwargs: {
+            "success": True,
+            "prediction_envelope": {
+                "completion_rate": 0.55 if workflow_id == "#V#wf_candidate" else 0.95,
+                "failure_rate": 0.35 if workflow_id == "#V#wf_candidate" else 0.05,
+                "duration_ms": {"p50": 1500 if workflow_id == "#V#wf_candidate" else 500},
+                "llm_usage": {
+                    "total_tokens": {
+                        "p50": 240 if workflow_id == "#V#wf_candidate" else 120
+                    }
+                },
+                "quality_proxy": {},
+                "data_sufficiency": {"sufficient_for_prediction": True},
+            },
+            "sample_window": {"candidate_trace_count": 5, "matched_trace_count": 5},
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "upsert_workflow_publication_lifecycle",
+        lambda **kwargs: demotion_calls.append(kwargs)
+        or {
+            "workflow_id": kwargs["workflow_id"],
+            "phase": kwargs["phase"],
+            "published": kwargs["published"],
+        },
+    )
+
+    mod.create_experiment_spec(
+        name="Capability degradation check",
+        experiment_spec_id="#V#spec_degradation",
+        namespace="#V#user@org",
+        target_workflow_ids=["#V#wf_candidate"],
+        candidate_workflow_ids=["#V#wf_candidate"],
+        baseline_workflow_id="#V#wf_baseline",
+        expected_outcomes=["target_workflow_execution"],
+        promotion_policy={
+            "requires_manual_gate": True,
+            "degradation_policy": {
+                "minimum_baseline_runs": 3,
+                "max_completion_rate_drop": 0.1,
+                "max_failure_rate_increase": 0.1,
+                "max_p50_duration_ratio": 1.2,
+                "max_total_token_ratio": 1.5,
+                "max_policy_violation_count": 0,
+            },
+        },
+    )
+    mod.start_experiment_run(
+        experiment_spec_id="#V#spec_degradation",
+        run_id="#V#run_degradation",
+    )
+    mod.record_experiment_observation(
+        run_id="#V#run_degradation",
+        observations=[
+            {
+                "label": "target_workflow_execution",
+                "verdict": "pass",
+                "observed_outcome": "completed",
+                "side_effect_audit": {"blocked_event_count": 0},
+            }
+        ],
+    )
+
+    verdict = mod.compute_experiment_verdict(run_id="#V#run_degradation")
+
+    assert verdict["success"] is True
+    assert verdict["verdict"] == "fail"
+    assert verdict["verdict_summary"]["reason"] == "degraded_against_baseline"
+    assert verdict["promotion_recommendation"]["recommended"] is False
+    assert verdict["promotion_recommendation"]["baseline_workflow_id"] == (
+        "#V#wf_baseline"
+    )
+    assessment = verdict["degradation_assessment"]
+    assert assessment["evaluated"] is True
+    assert assessment["degraded"] is True
+    assert assessment["candidate_workflow_id"] == "#V#wf_candidate"
+    assert assessment["baseline_workflow_id"] == "#V#wf_baseline"
+    assert assessment["demotion"] == {
+        "applied": True,
+        "lifecycle": {
+            "workflow_id": "#V#wf_candidate",
+            "phase": "demoted_due_to_degradation",
+            "published": False,
+        },
+    }
+    assert "completion_rate_regressed" in assessment["reasons"]
+    assert "failure_rate_regressed" in assessment["reasons"]
+    assert len(demotion_calls) == 1
+    assert demotion_calls[0]["workflow_id"] == "#V#wf_candidate"
+    assert demotion_calls[0]["phase"] == "demoted_due_to_degradation"
+    assert demotion_calls[0]["published"] is False
+    assert demotion_calls[0]["validation_passed"] is False
+    assert demotion_calls[0]["postconditions_verified"] is False
+    assert "completion_rate_regressed" in demotion_calls[0]["last_error"]
 
 
 def test_compute_experiment_verdict_fails_on_forbidden_side_effect(monkeypatch):

@@ -718,6 +718,79 @@ def test_workflow_list_definitions_gateway_invoke_success_path():
     assert "capability_matrix" in payload
 
 
+def test_workflow_validate_candidate_exists_and_returns_data(monkeypatch):
+    monkeypatch.setattr(
+        "src.backend.workflows.workflow_studio_service.validate_workflow_candidate",
+        lambda workflow_id, **kwargs: {
+            "success": True,
+            "workflow_id": workflow_id,
+            "candidate_validation": {
+                "valid": True,
+                "validation_profile": kwargs.get("validation_profile")
+                or "generation_safe",
+            },
+        },
+    )
+
+    catalogue = build_default_catalogue()
+    methods = catalogue.list_methods()
+    assert "workflow_validate_candidate" in methods
+
+    handler = catalogue.get("workflow_validate_candidate").handler
+    result = handler(
+        workflow_id="#V#candidate_workflow",
+        authoring_spec={"workflow_id": "#V#candidate_workflow"},
+        validation_profile="contract_only",
+    )
+
+    assert result == {
+        "success": True,
+        "workflow_id": "#V#candidate_workflow",
+        "candidate_validation": {
+            "valid": True,
+            "validation_profile": "contract_only",
+        },
+    }
+
+
+def test_workflow_validate_candidate_gateway_invoke_success_path(monkeypatch):
+    monkeypatch.setattr(
+        "src.backend.workflows.workflow_studio_service.validate_workflow_candidate",
+        lambda workflow_id, **kwargs: {
+            "success": True,
+            "workflow_id": workflow_id,
+            "candidate_validation": {
+                "valid": True,
+                "validation_profile": kwargs.get("validation_profile")
+                or "generation_safe",
+            },
+            "preview": {"definition_identity": {"hash": "candidate-hash"}},
+        },
+    )
+
+    gateway = _build_gateway()
+    result = gateway.invoke(
+        "workflow_validate_candidate",
+        {
+            "workflow_id": "#V#candidate_workflow",
+            "authoring_spec": {"workflow_id": "#V#candidate_workflow"},
+            "validation_profile": "contract_only",
+            "include_preview": True,
+        },
+    )
+    payload = result.payload
+
+    assert payload.get("success") is True
+    assert payload.get("workflow_id") == "#V#candidate_workflow"
+    assert payload.get("candidate_validation", {}).get("valid") is True
+    assert payload.get("candidate_validation", {}).get("validation_profile") == (
+        "contract_only"
+    )
+    assert payload.get("preview", {}).get("definition_identity", {}).get("hash") == (
+        "candidate-hash"
+    )
+
+
 def test_workflow_list_definitions_skips_bootstrap_writes():
     with patch(
         "src.backend.workflows.workflow_concept_authority_service.bootstrap_workflow_concepts",

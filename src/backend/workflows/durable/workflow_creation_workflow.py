@@ -23,6 +23,7 @@ from ..action_registry import (
     WorkflowActionResult,
 )
 from ..engine import WorkflowEnvironment, WorkflowExecutor
+from ..mcp_tool_bridge import resolve_internal_mcp_tool_name
 from ..vontology_loader import discover_workflow_ids, load_workflow_definition_from_vontology
 from ..workflow_creation_contracts import (
     WORKFLOW_AUTHORING_ACTION_DECIDE_REPAIR_OR_CREATE,
@@ -59,6 +60,7 @@ from ..workflow_definition_identity_service import (
     collect_workflow_action_ids,
     validate_workflow_definition_contract,
 )
+from ..workflow_side_effect_guardrails import enforce_workflow_mcp_write_guardrails
 from ..workflow_authoring_service import (
     build_workflow_definition_from_authoring_spec,
     serialise_workflow_definition_to_authoring_spec,
@@ -1663,11 +1665,27 @@ def _gateway_fallback_action(request: WorkflowActionRequest) -> WorkflowActionRe
     if user_namespace:
         payload.setdefault("namespace", user_namespace)
     try:
-        result = gateway.invoke(tool_name, payload)
+        available_tool_names = tuple(gateway.describe_methods().keys())
+        resolved_tool_name = (
+            resolve_internal_mcp_tool_name(
+                tool_name,
+                available_tool_names=available_tool_names,
+            )
+            or tool_name
+        )
+        method_definition = gateway.get_method_definition(resolved_tool_name)
+        blocked_result = enforce_workflow_mcp_write_guardrails(
+            request=request,
+            resolved_tool_name=resolved_tool_name,
+            method_definition=method_definition,
+        )
+        if blocked_result is not None:
+            return blocked_result
+        result = gateway.invoke(resolved_tool_name, payload)
         return WorkflowActionResult(
             status="success",
             outputs={
-                "mcp_tool": tool_name,
+                "mcp_tool": resolved_tool_name,
                 "mcp_result": result.payload,
                 "mcp_duration_ms": getattr(result, "duration_ms", None),
                 "result": result.payload,

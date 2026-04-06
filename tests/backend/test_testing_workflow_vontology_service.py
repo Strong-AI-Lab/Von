@@ -10,6 +10,7 @@ from src.backend.services import concept_service
 from src.backend.services.concept_service import ConceptNotFoundError
 from src.backend.services.testing_workflow_vontology_service import (
     ARXIV_PAPER_INGESTION_TESTING_WORKFLOW_ID,
+    CAPABILITY_TEST_EXECUTION_WORKFLOW_ID,
     CANONICAL_TESTING_WORKFLOW_IDS,
     EPHEMERAL_THEORY_GC_WORKFLOW_ID,
     MEETING_INVITATION_CANDIDATE_WORKFLOW_ID,
@@ -17,6 +18,7 @@ from src.backend.services.testing_workflow_vontology_service import (
     PROMOTION_GATE_WORKFLOW_ID,
     SYNTHETIC_WORKFLOW_REGRESSION_SUITE_WORKFLOW_ID,
     bootstrap_canonical_testing_workflows,
+    ensure_testing_type_concept_support,
 )
 from src.backend.services.text_value_service import (
     get_texts_for_concept,
@@ -109,11 +111,15 @@ def test_bootstrap_materialises_testing_workflow_family(
 
     publication = report.get("publication") or {}
     counts = publication.get("counts") or {}
-    assert counts.get("workflows_published") == 6
+    assert counts.get("workflows_published") == 7
     assert counts.get("errors") == 0
     prompt_support = report.get("prompt_support") or {}
     assert prompt_support.get("success") is True
     assert prompt_support.get("counts", {}).get("validated_prompts") == 2
+    type_support = report.get("type_support") or {}
+    assert type_support.get("success") is True
+    assert type_support.get("counts", {}).get("errors") == 0
+    assert type_support.get("counts", {}).get("description_upserts") == 8
 
     for workflow_id in CANONICAL_TESTING_WORKFLOW_IDS:
         definition = load_workflow_definition_from_vontology(workflow_id)
@@ -267,6 +273,46 @@ def test_bootstrap_materialises_testing_workflow_family(
         SYNTHETIC_WORKFLOW_REGRESSION_SUITE_WORKFLOW_ID
     )
     assert synthetic_definition is not None
+
+    capability_definition = load_workflow_definition_from_vontology(
+        CAPABILITY_TEST_EXECUTION_WORKFLOW_ID
+    )
+    assert capability_definition is not None
+    capability_concept = concept_service.get_concept_by_concept_id(
+        CAPABILITY_TEST_EXECUTION_WORKFLOW_ID
+    )
+    assert capability_concept is not None
+    capability_types = _relationship_targets(
+        capability_concept,
+        "is_an_instance_of",
+    )
+    assert "#V#testing_workflow" in capability_types
+    assert "#V#theory_slice_test_workflow" in capability_types
+    capability_validate_step_id = authority_service._step_concept_id(
+        workflow_id=CAPABILITY_TEST_EXECUTION_WORKFLOW_ID,
+        state_id="validate_candidate_workflow",
+    )
+    capability_validate_step = capability_definition.states[capability_validate_step_id]
+    assert capability_validate_step.actions[0].action_id == (
+        "testing.validate_candidate_workflow"
+    )
+    capability_execute_step_id = authority_service._step_concept_id(
+        workflow_id=CAPABILITY_TEST_EXECUTION_WORKFLOW_ID,
+        state_id="execute_target_workflow",
+    )
+    capability_execute_step = capability_definition.states[capability_execute_step_id]
+    assert capability_execute_step.actions[0].action_id == (
+        "experiment.execute_target_workflow"
+    )
+    assert any(
+        transition.reason == "on_failure"
+        and transition.to_state
+        == authority_service._step_concept_id(
+            workflow_id=CAPABILITY_TEST_EXECUTION_WORKFLOW_ID,
+            state_id="compute_experiment_verdict",
+        )
+        for transition in capability_execute_step.transitions
+    )
 
     promotion_concept = concept_service.get_concept_by_concept_id(
         PROMOTION_GATE_WORKFLOW_ID
@@ -440,7 +486,7 @@ def test_bootstrap_skips_republication_when_testing_workflow_family_is_current(
     _seed_meeting_invitation_prompt_content()
     first_report = bootstrap_canonical_testing_workflows()
     first_counts = (first_report.get("publication") or {}).get("counts") or {}
-    assert first_counts.get("workflows_published") == 6
+    assert first_counts.get("workflows_published") == 7
 
     second_report = bootstrap_canonical_testing_workflows()
     second_publication = second_report.get("publication") or {}
@@ -466,7 +512,7 @@ def test_bootstrap_can_force_republish_when_testing_workflow_family_is_current(
 
     assert publication.get("skipped") is not True
     assert publication.get("forced_republish") is True
-    assert counts.get("workflows_published") == 6
+    assert counts.get("workflows_published") == 7
     assert counts.get("errors") == 0
 
 
@@ -885,3 +931,41 @@ def test_arxiv_paper_ingestion_testing_workflow_executes_end_to_end_via_vontolog
     assert result.data["metadata_verification"]["publication_date_matched"] is True
     assert result.data["cleanup_summary"]["cleanup_passed"] is True
     assert len(result.data["observations"]) == 5
+
+
+def test_ensure_testing_type_concept_support_materialises_testing_types(
+    _reset_mock_db: Any,
+) -> None:
+    concept_service.create_concept(
+        name="Thing",
+        concept_id="#V#thing",
+        description="Minimal root type for testing bootstrap.",
+        parent_concept_ids=[],
+        create_as_instance=False,
+        visibility_scope_mode="global_general",
+    )
+    concept_service.create_concept(
+        name="Information",
+        concept_id="#V#information",
+        description="Minimal information type for testing bootstrap.",
+        parent_concept_ids=["#V#thing"],
+        create_as_instance=False,
+        visibility_scope_mode="global_general",
+    )
+    concept_service.create_concept(
+        name="Event",
+        concept_id="#V#event",
+        description="Minimal event type for testing bootstrap.",
+        parent_concept_ids=["#V#thing"],
+        create_as_instance=False,
+        visibility_scope_mode="global_general",
+    )
+
+    report = ensure_testing_type_concept_support()
+
+    assert report["success"] is True
+    assert report["counts"]["created"] == 8
+    for concept_id in report["type_concept_ids"]:
+        concept = concept_service.get_concept_by_concept_id(concept_id)
+        assert concept is not None
+        assert concept.get("concept_id") == concept_id

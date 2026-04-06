@@ -30,6 +30,11 @@ from ...services.testing_theory_service import (
     promote_testing_theory_validated_claims,
     rollback_testing_theory_local_writes,
 )
+from ...workflows.trace_store import get_workflow_execution_trace
+from ...workflows.workflow_studio_service import (
+    WorkflowStudioConflictError,
+    validate_workflow_candidate,
+)
 from ...services.testing_workflow_contracts import (
     EXPERIMENT_COMPUTE_VERDICT_ACTION_ID,
     EXPERIMENT_CREATE_SPEC_ACTION_ID,
@@ -42,6 +47,7 @@ from ...services.testing_workflow_contracts import (
     TESTING_PREPARE_ARXIV_PAPER_INGESTION_FIXTURE_ACTION_ID,
     TESTING_PREPARE_EXPERIMENT_SPEC_ACTION_ID,
     TESTING_PREPARE_MEETING_INVITATION_SPEC_ACTION_ID,
+    TESTING_VALIDATE_CANDIDATE_WORKFLOW_ACTION_ID,
     TESTING_VERIFY_ARXIV_PAPER_INGESTION_RESULT_ACTION_ID,
     THEORY_ASSERT_LOCAL_CLAIM_ACTION_ID,
     THEORY_COMPUTE_DIFF_ACTION_ID,
@@ -57,8 +63,13 @@ from ..action_registry import (
     WorkflowActionRequest,
     WorkflowActionResult,
 )
+from ..write_tool_policy import (
+    WORKFLOW_EXECUTION_SIDE_EFFECT_MODE_THEORY_BOUNDED,
+    WORKFLOW_EXECUTION_SIDE_EFFECT_POLICY_SCHEMA_VERSION,
+)
 from .execution_observability import (
     await_workflow_terminal_state,
+    build_workflow_execution_trace_summary,
     build_workflow_execution_response,
 )
 
@@ -96,6 +107,16 @@ def _coerce_float(
     except (TypeError, ValueError):
         parsed = default
     return max(minimum, parsed)
+
+
+def _clone_mapping(value: Any) -> dict[str, Any]:
+    return {str(key): value for key, value in dict(value).items()} if isinstance(value, Mapping) else {}
+
+
+def _clone_sequence(value: Any) -> list[Any]:
+    if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, Sequence):
+        return []
+    return list(value)
 
 
 def _context_mapping(request: WorkflowActionRequest) -> dict[str, Any]:
@@ -207,6 +228,144 @@ def _compact_workflow_execution_payload(
             compact["metadata_validation"] = compact_metadata
 
     return compact
+
+
+def _build_trace_summary(execution_trace_id: Any) -> dict[str, Any]:
+    trace_id = _safe_str(execution_trace_id)
+    if not trace_id:
+        return {}
+    trace_doc = get_workflow_execution_trace(trace_id)
+    if not isinstance(trace_doc, Mapping):
+        return {}
+    return build_workflow_execution_trace_summary(trace_doc)
+
+
+def _build_side_effect_audit(
+    *,
+    instance: Any | None,
+    allowed_side_effects: Sequence[Any],
+    forbidden_side_effects: Sequence[Any],
+) -> dict[str, Any]:
+    workflow_data = getattr(instance, "workflow_data", None)
+    workflow_context = dict(workflow_data) if isinstance(workflow_data, Mapping) else {}
+    raw_events = workflow_context.get("mutation_guardrail_events")
+    events = [
+        {str(key): value for key, value in item.items()}
+        for item in list(raw_events)
+        if isinstance(item, Mapping)
+    ] if isinstance(raw_events, Sequence) and not isinstance(raw_events, (str, bytes, bytearray)) else []
+
+    blocked_event_count = 0
+    required_confirmation_count = 0
+    decision_counts: dict[str, int] = {}
+    for event in events:
+        decision = _safe_str(event.get("decision")).lower() or "unknown"
+        decision_counts[decision] = decision_counts.get(decision, 0) + 1
+        if decision not in {"allow", "allowed"}:
+            blocked_event_count += 1
+        if _coerce_bool(event.get("requires_confirmation"), default=False):
+            required_confirmation_count += 1
+
+    return {
+        "event_count": len(events),
+        "blocked_event_count": blocked_event_count,
+        "requires_confirmation_count": required_confirmation_count,
+        "decision_counts": decision_counts,
+        "allowed_side_effects": [_safe_str(item) for item in allowed_side_effects if _safe_str(item)],
+        "forbidden_side_effects": [_safe_str(item) for item in forbidden_side_effects if _safe_str(item)],
+    }
+
+
+def _build_execution_repair_hints(
+    *,
+    candidate_validation: Mapping[str, Any] | None,
+    trace_summary: Mapping[str, Any] | None,
+    side_effect_audit: Mapping[str, Any] | None,
+    workflow_execution: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    hints: list[dict[str, Any]] = []
+    validation_payload = dict(candidate_validation) if isinstance(candidate_validation, Mapping) else {}
+    for item in _clone_sequence(validation_payload.get("repair_hints")):
+        if isinstance(item, Mapping):
+            hints.append({str(key): value for key, value in item.items()})
+    if isinstance(trace_summary, Mapping) and _safe_str(trace_summary.get("last_error")):
+        hints.append(
+            {
+                "scope": "workflow_execution",
+                "reason_code": "workflow_execution_failed",
+                "repair_hint": "Inspect the failed step and trace summary before rerunning the candidate workflow.",
+            }
+        )
+    if isinstance(side_effect_audit, Mapping) and int(side_effect_audit.get("blocked_event_count") or 0) > 0:
+        hints.append(
+            {
+                "scope": "side_effect_policy",
+                "reason_code": "mutation_guardrail_blocked",
+                "repair_hint": "Reduce write-capable actions or tighten the candidate workflow's mutation profile.",
+            }
+        )
+    metadata_validation = workflow_execution.get("metadata_validation")
+    metadata_summary = (
+        _clone_mapping(metadata_validation.get("summary"))
+        if isinstance(metadata_validation, Mapping)
+        else {}
+    )
+    if int(metadata_summary.get("failed_count") or 0) > 0:
+        hints.append(
+            {
+                "scope": "metadata_validation",
+                "reason_code": "metadata_validation_failed",
+                "repair_hint": "Repair metadata validation failures before promoting or rerunning the workflow.",
+            }
+        )
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for hint in hints:
+        key = (_safe_str(hint.get("scope")), _safe_str(hint.get("reason_code")))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(hint)
+    return deduped
+
+
+def _build_execution_quality_signals(
+    *,
+    workflow_execution: Mapping[str, Any],
+    candidate_validation: Mapping[str, Any] | None,
+    side_effect_audit: Mapping[str, Any] | None,
+    timed_out: bool,
+) -> dict[str, Any]:
+    metadata_validation = workflow_execution.get("metadata_validation")
+    metadata_summary = (
+        _clone_mapping(metadata_validation.get("summary"))
+        if isinstance(metadata_validation, Mapping)
+        else {}
+    )
+    quality_signals = {
+        "timed_out": bool(timed_out),
+        "candidate_validation_valid": (
+            candidate_validation.get("valid")
+            if isinstance(candidate_validation, Mapping)
+            else None
+        ),
+        "metadata_validation_failed_count": int(metadata_summary.get("failed_count") or 0),
+        "metadata_validation_enforced_failed_count": int(
+            metadata_summary.get("enforced_failed_count") or 0
+        ),
+        "mutation_guardrail_blocked_count": int(
+            (side_effect_audit or {}).get("blocked_event_count") or 0
+        )
+        if isinstance(side_effect_audit, Mapping)
+        else 0,
+    }
+    quality_signals["requires_follow_up"] = bool(
+        quality_signals["timed_out"]
+        or quality_signals["candidate_validation_valid"] is False
+        or quality_signals["metadata_validation_failed_count"] > 0
+        or quality_signals["mutation_guardrail_blocked_count"] > 0
+    )
+    return quality_signals
 
 
 _OMIT_WORKFLOW_OUTPUT_VALUE = object()
@@ -500,6 +659,7 @@ def _handle_experiment_create_spec(request: WorkflowActionRequest) -> WorkflowAc
         target_workflow_ids=inputs.get("target_workflow_ids") or [],
         target_capability_ids=inputs.get("target_capability_ids") or [],
         candidate_workflow_ids=inputs.get("candidate_workflow_ids") or [],
+        baseline_workflow_id=_safe_str(inputs.get("baseline_workflow_id")) or None,
         theory_id=_safe_str(inputs.get("theory_id")) or None,
         experiment_suite_id=_safe_str(inputs.get("experiment_suite_id")) or None,
         fixture_payload=inputs.get("fixture_payload"),
@@ -527,6 +687,7 @@ def _handle_experiment_start_run(request: WorkflowActionRequest) -> WorkflowActi
         org_id=actor["org_id"],
         target_workflow_ids=inputs.get("target_workflow_ids") or [],
         candidate_workflow_ids=inputs.get("candidate_workflow_ids") or [],
+        baseline_workflow_id=_safe_str(inputs.get("baseline_workflow_id")) or None,
         benchmark_tier=_safe_str(inputs.get("benchmark_tier")) or None,
         benchmark_world_id=_safe_str(inputs.get("benchmark_world_id")) or None,
         selection_experience_id=_safe_str(inputs.get("selection_experience_id")) or None,
@@ -608,6 +769,13 @@ def _handle_experiment_execute_target_workflow(
     )
     run_id = _safe_str(inputs.get("run_id")) or None
     theory_id = _safe_str(inputs.get("theory_id")) or None
+    candidate_validation = _clone_mapping(inputs.get("candidate_validation"))
+    fail_on_invalid_candidate = _coerce_bool(
+        inputs.get("fail_on_invalid_candidate"),
+        default=True,
+    )
+    allowed_side_effects = _clone_sequence(inputs.get("allowed_side_effects"))
+    forbidden_side_effects = _clone_sequence(inputs.get("forbidden_side_effects"))
     await_terminal = _coerce_bool(inputs.get("await_terminal"), default=False)
     timeout_seconds = _coerce_float(
         inputs.get("timeout_seconds"),
@@ -635,6 +803,66 @@ def _handle_experiment_execute_target_workflow(
         workflow_inputs.setdefault("experiment_run_id", run_id)
     if theory_id:
         workflow_inputs.setdefault("testing_theory_id", theory_id)
+        workflow_inputs.setdefault(
+            "workflow_execution_side_effect_policy",
+            {
+                "schema_version": WORKFLOW_EXECUTION_SIDE_EFFECT_POLICY_SCHEMA_VERSION,
+                "mode": WORKFLOW_EXECUTION_SIDE_EFFECT_MODE_THEORY_BOUNDED,
+                "testing_theory_id": theory_id,
+                "audit_label": EXPERIMENT_EXECUTE_TARGET_WORKFLOW_ACTION_ID,
+            },
+        )
+
+    if (
+        fail_on_invalid_candidate
+        and candidate_validation
+        and candidate_validation.get("valid") is False
+    ):
+        candidate_assertion_classes = (
+            _clone_sequence(candidate_validation.get("assertion_classes"))
+            if isinstance(candidate_validation, Mapping)
+            else []
+        )
+        payload: dict[str, Any] = {
+            "success": False,
+            "error": "candidate_validation_failed",
+            "workflow_id": workflow_id,
+            "candidate_validation": candidate_validation,
+        }
+        if record_observation and run_id:
+            observation_payload = record_experiment_observation(
+                run_id=run_id,
+                observations=[
+                    {
+                        "label": observation_label,
+                        "verdict": "fail",
+                        "expected_outcome": expected_final_status,
+                        "observed_outcome": "candidate_validation_failed",
+                        "matched_expected_outcome": False,
+                        "assertion_classes": [
+                            "workflow_candidate_validation",
+                            *candidate_assertion_classes,
+                        ],
+                        "candidate_validation": candidate_validation,
+                        "repair_hints": _clone_sequence(
+                            candidate_validation.get("repair_hints")
+                        ),
+                        "quality_signals": {
+                            "candidate_validation_valid": False,
+                            "requires_follow_up": True,
+                            "timed_out": False,
+                        },
+                    }
+                ],
+            )
+            payload["observation_recording"] = _summarise_observation_recording_payload(
+                observation_payload
+            )
+        return WorkflowActionResult(
+            status="failed",
+            error="candidate_validation_failed",
+            outputs=payload,
+        )
 
     manager = WorkflowInstanceManager()
     submission = submit_verified_workflow_instance(
@@ -652,6 +880,42 @@ def _handle_experiment_execute_target_workflow(
     )
     instance_id = _safe_str(payload.get("instance_id"))
     if not submission.success or not instance_id:
+        payload["candidate_validation"] = candidate_validation or None
+        if record_observation and run_id:
+            observation_payload = record_experiment_observation(
+                run_id=run_id,
+                observations=[
+                    {
+                        "label": observation_label,
+                        "verdict": "fail",
+                        "expected_outcome": expected_final_status,
+                        "observed_outcome": "workflow_submission_failed",
+                        "matched_expected_outcome": False,
+                        "assertion_classes": ["workflow_submission_failure"],
+                        "candidate_validation": candidate_validation,
+                        "repair_hints": _clone_sequence(
+                            candidate_validation.get("repair_hints")
+                        )
+                        if isinstance(candidate_validation, Mapping)
+                        else [],
+                        "quality_signals": {
+                            "candidate_validation_valid": (
+                                candidate_validation.get("valid")
+                                if isinstance(candidate_validation, Mapping)
+                                else None
+                            ),
+                            "requires_follow_up": True,
+                            "timed_out": False,
+                        },
+                        "workflow_execution": _compact_workflow_execution_payload(
+                            payload.get("workflow_execution")
+                        ),
+                    }
+                ],
+            )
+            payload["observation_recording"] = _summarise_observation_recording_payload(
+                observation_payload
+            )
         return WorkflowActionResult(
             status="failed",
             error=_safe_str(payload.get("error")) or "workflow_submission_failed",
@@ -682,6 +946,29 @@ def _handle_experiment_execute_target_workflow(
     )
     payload["workflow_execution"] = workflow_execution
     payload.pop("workflow_instance", None)
+    trace_summary = _build_trace_summary(workflow_execution.get("execution_trace_id"))
+    side_effect_audit = _build_side_effect_audit(
+        instance=wait_result.instance,
+        allowed_side_effects=allowed_side_effects,
+        forbidden_side_effects=forbidden_side_effects,
+    )
+    repair_hints = _build_execution_repair_hints(
+        candidate_validation=candidate_validation,
+        trace_summary=trace_summary,
+        side_effect_audit=side_effect_audit,
+        workflow_execution=workflow_execution,
+    )
+    quality_signals = _build_execution_quality_signals(
+        workflow_execution=workflow_execution,
+        candidate_validation=candidate_validation,
+        side_effect_audit=side_effect_audit,
+        timed_out=bool(payload.get("timed_out")),
+    )
+    payload["candidate_validation"] = candidate_validation or None
+    payload["trace_summary"] = trace_summary or None
+    payload["side_effect_audit"] = side_effect_audit
+    payload["repair_hints"] = repair_hints
+    payload["quality_signals"] = quality_signals
     final_status = _safe_str(payload.get("final_status"))
     timed_out = bool(payload.get("timed_out"))
     poll_count = int(workflow_execution.get("poll_count") or 0)
@@ -691,6 +978,27 @@ def _handle_experiment_execute_target_workflow(
             final_status=final_status,
             timed_out=timed_out,
         )
+        if candidate_validation and candidate_validation.get("valid") is False:
+            verdict = "fail"
+        if int(side_effect_audit.get("blocked_event_count") or 0) > 0:
+            verdict = "fail"
+        metadata_validation_summary = (
+            dict(workflow_execution.get("metadata_validation", {}).get("summary"))
+            if isinstance(workflow_execution.get("metadata_validation"), Mapping)
+            and isinstance(workflow_execution.get("metadata_validation", {}).get("summary"), Mapping)
+            else {}
+        )
+        if int(metadata_validation_summary.get("enforced_failed_count") or 0) > 0:
+            verdict = "fail"
+        assertion_classes = ["workflow_execution"]
+        if isinstance(candidate_validation, Mapping):
+            assertion_classes.extend(
+                _clone_sequence(candidate_validation.get("assertion_classes"))
+            )
+        if int(side_effect_audit.get("blocked_event_count") or 0) > 0:
+            assertion_classes.append("mutation_guardrail")
+        if int(trace_summary.get("failed_step_count") or 0) > 0:
+            assertion_classes.append("workflow_execution_failure")
         observation_payload = record_experiment_observation(
             run_id=run_id,
             observations=[
@@ -704,7 +1012,13 @@ def _handle_experiment_execute_target_workflow(
                         if expected_final_status
                         else None
                     ),
+                    "assertion_classes": assertion_classes,
                     "workflow_execution": workflow_execution,
+                    "candidate_validation": candidate_validation,
+                    "trace_summary": trace_summary,
+                    "side_effect_audit": side_effect_audit,
+                    "repair_hints": repair_hints,
+                    "quality_signals": quality_signals,
                     "metrics": {
                         "await_terminal": True,
                         "timeout_seconds": timeout_seconds,
@@ -741,6 +1055,55 @@ def _handle_experiment_execute_regression_suite(
         run_id=_safe_str(inputs.get("run_id")) or None,
         suite_policy=inputs.get("suite_policy"),
     )
+    return _result_from_payload(result)
+
+
+def _handle_testing_validate_candidate_workflow(
+    request: WorkflowActionRequest,
+) -> WorkflowActionResult:
+    inputs = dict(request.inputs or {})
+    workflow_id = _safe_str(inputs.get("workflow_id"))
+    authoring_spec = inputs.get("authoring_spec")
+    if not workflow_id:
+        return WorkflowActionResult(
+            status="failed",
+            error="workflow_id_required",
+            outputs={"success": False, "error": "workflow_id_required"},
+        )
+    if not isinstance(authoring_spec, Mapping):
+        return WorkflowActionResult(
+            status="failed",
+            error="authoring_spec_required",
+            outputs={"success": False, "error": "authoring_spec_required"},
+        )
+    try:
+        result = validate_workflow_candidate(
+            workflow_id,
+            authoring_spec=authoring_spec,
+            base_definition_hash=_safe_str(inputs.get("base_definition_hash")) or None,
+            validation_profile=_safe_str(inputs.get("validation_profile")) or None,
+            include_preview=_coerce_bool(inputs.get("include_preview"), default=False),
+        )
+    except WorkflowStudioConflictError as exc:
+        return WorkflowActionResult(
+            status="failed",
+            error=str(exc),
+            outputs={
+                "success": False,
+                "error": str(exc),
+                "workflow_id": workflow_id,
+            },
+        )
+    except ValueError as exc:
+        return WorkflowActionResult(
+            status="failed",
+            error=str(exc),
+            outputs={
+                "success": False,
+                "error": str(exc),
+                "workflow_id": workflow_id,
+            },
+        )
     return _result_from_payload(result)
 
 
@@ -931,6 +1294,12 @@ def register_testing_workflow_actions(registry: ActionRegistry) -> None:
         ActionSpec(
             action_id=EXPERIMENT_EXECUTE_REGRESSION_SUITE_ACTION_ID,
             handler=_handle_experiment_execute_regression_suite,
+        )
+    )
+    registry.register_if_absent(
+        ActionSpec(
+            action_id=TESTING_VALIDATE_CANDIDATE_WORKFLOW_ACTION_ID,
+            handler=_handle_testing_validate_candidate_workflow,
         )
     )
     registry.register_if_absent(

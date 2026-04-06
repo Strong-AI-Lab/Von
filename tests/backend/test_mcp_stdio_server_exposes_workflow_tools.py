@@ -3,6 +3,7 @@ from pathlib import Path
 
 WORKFLOW_TOOL_NAMES = {
     "workflow_list_definitions",
+    "workflow_validate_candidate",
     "workflow_bind_event",
     "workflow_list_event_bindings",
     "workflow_set_event_binding_enabled",

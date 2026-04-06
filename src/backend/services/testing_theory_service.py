@@ -296,6 +296,15 @@ def create_testing_theory_slice(
     ttl_seconds: int | None = None,
     description: str | None = None,
 ) -> dict[str, Any]:
+    try:
+        from .testing_workflow_vontology_service import (
+            ensure_testing_type_concept_support,
+        )
+
+        ensure_testing_type_concept_support()
+    except Exception:
+        pass
+
     theory_name = _safe_str(name, limit=200) or "Ephemeral testing theory"
     resolved_theory_id = _safe_str(theory_id) or stable_named_instance_concept_id(
         theory_name,
@@ -755,12 +764,14 @@ def garbage_collect_expired_testing_theories(
     )
     expired_theory_ids: list[str] = []
     retained_theory_ids: list[str] = []
+    seen_theory_ids: set[str] = set()
     for item in search_result.get("results") or []:
         if not isinstance(item, Mapping):
             continue
         theory_id = _safe_str(item.get("concept_id"))
-        if not theory_id:
+        if not theory_id or theory_id in seen_theory_ids:
             continue
+        seen_theory_ids.add(theory_id)
         state = get_testing_theory_state(theory_id)
         if state is None:
             continue

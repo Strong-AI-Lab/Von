@@ -5646,6 +5646,49 @@
                 "additionalProperties": true,
                 "description": "Manually trigger a schedule."
             }
+        },
+        {
+            "name": "workflow_validate_candidate",
+            "description": "Validate a workflow authoring candidate without publishing it, including contract and generation-safety checks.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "workflow_id": {
+                        "type": "string"
+                    },
+                    "authoring_spec": {
+                        "type": "object",
+                        "additionalProperties": true
+                    },
+                    "base_definition_hash": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "validation_profile": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "include_preview": {
+                        "type": "boolean"
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "workflow_id",
+                    "authoring_spec"
+                ],
+                "additionalProperties": true,
+                "description": "Validate a workflow authoring-spec candidate without publishing it. Accepts namespace for surface consistency but does not require it."
+            }
         }
     ]
 }

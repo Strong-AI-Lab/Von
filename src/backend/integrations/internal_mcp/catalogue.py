@@ -12579,6 +12579,43 @@ def _workflow_list_definitions(**kwargs):
         )
 
 
+def _workflow_validate_candidate(**kwargs):
+    """Validate a candidate workflow authoring spec without publishing it."""
+    from ...workflows.workflow_studio_service import validate_workflow_candidate
+
+    workflow_id = _clean_optional_string(kwargs.get("workflow_id"))
+    if not workflow_id:
+        return make_error_response(
+            "workflow_id_required",
+            "workflow_id is required for candidate validation.",
+        )
+    authoring_spec = kwargs.get("authoring_spec")
+    if not isinstance(authoring_spec, Mapping):
+        return make_error_response(
+            "authoring_spec_required",
+            "authoring_spec must be provided as an object for candidate validation.",
+        )
+
+    try:
+        return validate_workflow_candidate(
+            workflow_id,
+            authoring_spec=authoring_spec,
+            base_definition_hash=_clean_optional_string(
+                kwargs.get("base_definition_hash")
+            ),
+            validation_profile=_clean_optional_string(
+                kwargs.get("validation_profile")
+            ),
+            include_preview=bool(kwargs.get("include_preview", False)),
+        )
+    except Exception as exc:
+        return make_error_response(
+            "workflow_candidate_validation_failed",
+            f"Failed to validate workflow candidate: {exc}",
+            details={"workflow_id": workflow_id},
+        )
+
+
 def _workflow_list_use_episodes(**kwargs):
     from ...services.workflow_episode_service import (
         count_workflow_use_episodes,
@@ -26086,6 +26123,50 @@ def build_default_catalogue() -> MethodCatalogue:
             ),
             category="read",
             description="List available workflow definitions (IDs, descriptions) that can be instantiated.",
+        ),
+        MethodDefinition(
+            name="workflow_validate_candidate",
+            handler=_workflow_validate_candidate,
+            input_schema=Schema(
+                required={"workflow_id": str, "authoring_spec": dict},
+                optional={
+                    "base_definition_hash": (str, type(None)),
+                    "validation_profile": (str, type(None)),
+                    "include_preview": bool,
+                    "namespace": (str, type(None)),
+                },
+                allow_unknown=True,
+                description=(
+                    "Validate a workflow authoring-spec candidate without "
+                    "publishing it. Accepts namespace for surface consistency "
+                    "but does not require it."
+                ),
+            ),
+            output_schema=Schema(
+                required={
+                    "success": bool,
+                    "workflow_id": str,
+                    "candidate_validation": dict,
+                },
+                optional={
+                    "guardrails": dict,
+                    "preview": dict,
+                    "error": str,
+                    "error_code": str,
+                    "details": dict,
+                    "suggestions": list,
+                },
+                allow_unknown=True,
+                description=(
+                    "Standalone workflow candidate validation result with "
+                    "contract, generation-safety, and repair guidance."
+                ),
+            ),
+            category="read",
+            description=(
+                "Validate a workflow authoring candidate without publishing it, "
+                "including contract and generation-safety checks."
+            ),
         ),
         MethodDefinition(
             name="workflow_list_use_episodes",
