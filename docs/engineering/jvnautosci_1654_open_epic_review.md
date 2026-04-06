@@ -1,6 +1,7 @@
 # JVNAUTOSCI-1654 Open Epic Review
 
-Date: 2026-04-03
+Initial review: 2026-04-03
+Refreshed: 2026-04-07
 
 ## Objective
 
@@ -20,93 +21,142 @@ An epic scores highly if it materially improves one or more of these:
 4. We can measure failures directly and regress them reliably.
 5. Behaviour remains KB-authoritative and workflow-first rather than drifting back into Python-side special cases.
 
-## Recommended next tranche
+## Portfolio status as of 2026-04-07
 
-### 1. Make intent completion measurable and hard to fake
+### Completed epics (closed since initial review)
+
+| Key | Summary | Completed |
+|-----|---------|-----------|
+| JVNAUTOSCI-833 | Agentic Behaviours in Von | 2026-04-07 |
+| JVNAUTOSCI-964 | Von Experimental Evaluation and Measurement | 2026-04-06 |
+| JVNAUTOSCI-1553 | Paper Recommender | 2026-04-05 |
+| JVNAUTOSCI-1586 | Workflow Studio | 2026-04-06 |
+
+These completions shift the portfolio balance. The agentic-behaviour umbrella and the evaluation infrastructure are now closed. Paper recommendation has a completed vertical slice. Workflow Studio delivered independent workflow listing, visualisation, and AI-assisted editing. The question is now: what should follow?
+
+### New epics (added since initial review)
+
+| Key | Summary | Status | Impact on intent execution |
+|-----|---------|--------|---------------------------|
+| JVNAUTOSCI-1667 | Von Coding Agent VS Code Extension Plugin | To Do | Low — new interaction surface, not an intent-execution bottleneck |
+| JVNAUTOSCI-1714 | Paper recommendation workflow extensions | To Do | Medium — extends the completed paper-recommender vertical slice |
+| JVNAUTOSCI-1752 | Type-specific instance renderers for concept pages | To Do | High — KB-driven presentation that directly improves how users recognise, orient, and act on represented knowledge |
+
+### Open epic inventory (27 epics, excluding SUPERSEDED-933)
+
+**In Progress (4):**
+- JVNAUTOSCI-144 — Document Representation and Handling
+- JVNAUTOSCI-167 — Continuously Running, Self-Updating Von Prototype
+- JVNAUTOSCI-537 — Von Frontend UI/UX & Interaction Improvements
+- JVNAUTOSCI-932 — Memory and knowledge retention
+- JVNAUTOSCI-936 — Representationally rich Vontology + inference engine
+
+**To Do (19):**
+- JVNAUTOSCI-535 — Data Model & Normalisation
+- JVNAUTOSCI-536 — Observability & Performance
+- JVNAUTOSCI-538 — Knowledge Discovery & Recommendation
+- JVNAUTOSCI-539 — Access & Governance
+- JVNAUTOSCI-541 — Onboarding & Lab Operations
+- JVNAUTOSCI-710 — Project Codebase Refactoring for Public Release
+- JVNAUTOSCI-739 — Codebase transition (private to Von)
+- JVNAUTOSCI-766 — Vontology-based Tool Usage Heuristics
+- JVNAUTOSCI-857 — Production hardening
+- JVNAUTOSCI-866 — Beautiful, flexible UX
+- JVNAUTOSCI-885 — Multimodal/sensory I/O enablement
+- JVNAUTOSCI-934 — Project admin/coordination
+- JVNAUTOSCI-977 — External communications channels (Gmail, Slack)
+- JVNAUTOSCI-1116 — Architectural De-bloating & Modularisation
+- JVNAUTOSCI-1117 — UI/UX Modernisation & Onboarding
+- JVNAUTOSCI-1119 — System Reliability & Type Safety
+- JVNAUTOSCI-1460 — External interaction surfaces (channels, voice, devices)
+- JVNAUTOSCI-1667 — Von Coding Agent VS Code Extension
+- JVNAUTOSCI-1714 — Paper recommendation workflow extensions
+- JVNAUTOSCI-1752 — Type-specific instance renderers for concept pages
+
+**Backlog (1):**
+- JVNAUTOSCI-540 — Developer Platform & Infrastructure
+
+## Recommended next tranche (refreshed)
+
+With 833 and 964 now closed, the evaluation and agentic-behaviour foundations are in place. The priority shifts from "build the ability to measure" to "use measurement to drive KB substrate, recommendation quality, and hardening".
+
+### 1. Finish the KB substrate Von needs to act intelligently
 
 Primary epics:
 
-- `JVNAUTOSCI-833` Agentic Behaviours in Von
-- `JVNAUTOSCI-964` Von Experimental Evaluation and Measurement
+- `JVNAUTOSCI-932` Memory and knowledge retention *(In Progress)*
+- `JVNAUTOSCI-936` Representationally rich Vontology + inference engine *(In Progress)*
+
+Why this is now first:
+
+- With evaluation infrastructure delivered (964 Done), the main bottleneck is the quality and completeness of the context available to workflows at execution time.
+- Context bundles/dossiers (JVNAUTOSCI-254) remain the most directly useful in-progress work. Finishing them means workflows operate on bounded, provenance-bearing representations instead of ad hoc lookups.
+- Episodic memory and artefact tasks (972, 969, 970, 971, 973) directly improve whether Von retains the right information across multi-step interactions.
+
+Recommended output:
+
+- Context bundle/dossier substrate completed and integrated into workflow execution paths.
+- Episodic/artefact memory tasks landed with real call-path validation.
+- Older low-leverage tasks under these epics reinterpreted or deferred.
+
+### 2. Extend the paper recommendation vertical slice into a full KB-aggregation proving ground
+
+Primary epics:
+
+- `JVNAUTOSCI-1714` Paper recommendation workflow extensions *(new, To Do)*
+- `JVNAUTOSCI-538` Knowledge Discovery & Recommendation
+- `JVNAUTOSCI-144` Document Representation and Handling *(In Progress)*
+
+Why this moves up:
+
+- Paper recommendation (1553) is now Done as a vertical slice. The follow-on epic (1714) extends it into researcher reading flows, explanation quality, and feedback loops.
+- This is a natural proving ground for the KB substrate work above — it exercises retrieval, aggregation, explanation, provenance, and user feedback end-to-end.
+- 538 provides the broader capability umbrella; 144 provides the document-representation backing.
+
+Recommended output:
+
+- Paper recommendation extended with workflow-first researcher reading flows.
+- Explanation and provenance affordances surfaced alongside recommendations.
+- Feedback loops that improve recommendation quality over time.
+- Lessons from this slice generalised to other knowledge-discovery domains.
+
+### 3. Observability and performance as a continuous discipline
+
+Primary epic:
+
 - `JVNAUTOSCI-536` Observability & Performance
 
-Why this comes first:
+Why this stays high:
 
-- The main current risk is not missing capability in the abstract; it is incomplete or misrouted execution being surfaced as if the user's intent had been handled.
-- Existing evaluation tasks under `JVNAUTOSCI-964` are still generic (`JVNAUTOSCI-965`, `JVNAUTOSCI-966`, `JVNAUTOSCI-967`) and do not yet form a strong operational gate on real intent completion.
-- `JVNAUTOSCI-833` is the right umbrella, but its remaining open tasks are sparse and under-represent workflow repair, completion validation, and workflow generation/repair.
+- With 964 (evaluation) closed, 536 inherits the operational measurement responsibility. Intent-execution improvement requires ongoing measurement of where Von succeeds and fails.
+- JVNAUTOSCI-1429 (dispatch latency/visibility) should be pulled forward as a concrete deliverable.
+- Selector evaluation benchmarks should be established as an ongoing regression tool, not a one-off.
 
-Recommended output of this tranche:
+Recommended output:
 
-- A turn-level benchmark for user-intent success/failure using `turn_execution_*` and related critic/evaluation artefacts.
-- Dashboards and regression views that separate:
-  - successful completion
-  - false success
-  - unresolved follow-up needed
-  - tool/workflow misrouting
-- A small set of acceptance scenarios that are close to real user requests and run repeatedly.
-
-### 2. Finish the KB substrate Von needs in order to act intelligently
-
-Primary epics:
-
-- `JVNAUTOSCI-932` Memory and knowledge retention
-- `JVNAUTOSCI-936` Representationally rich Vontology + inference engine
-
-Why this comes second:
-
-- Reliable action selection needs durable context bundles, memory/event structure, and better query/aggregation surfaces.
-- `JVNAUTOSCI-936` already has the most directly useful current task in progress: `JVNAUTOSCI-254` (`Vontology-first context bundles and reconstructed dossiers for concepts and workflows`).
-- `JVNAUTOSCI-932` contains the work needed to stop relying on stale mixed representations and weak artefact handling.
-
-Recommended output of this tranche:
-
-- Finish context bundles/dossiers so workflows can operate on a bounded, reconstructed, provenance-bearing representation instead of scattered ad hoc lookups.
-- Prioritise memory/event and artefact tasks that directly improve current behaviour:
-  - `JVNAUTOSCI-972`
-  - `JVNAUTOSCI-969`
-  - `JVNAUTOSCI-970`
-  - `JVNAUTOSCI-971`
-  - `JVNAUTOSCI-973`
-- Reinterpret or defer older low-leverage tasks under these epics unless they clearly unblock the current architecture.
-
-### 3. Build one strong vertical slice for KB aggregation and recommendation
-
-Primary epics:
-
-- `JVNAUTOSCI-538` Knowledge Discovery & Recommendation
-- `JVNAUTOSCI-144` Von - Document Representation and Handling
-- `JVNAUTOSCI-1553` Paper Recommender
-
-Why this is third rather than first:
-
-- Recommendation quality will not be robust until the execution/evaluation substrate and KB query/aggregation substrate are stronger.
-- Once those are in place, paper recommendation is a strong proving ground because it exercises:
-  - document ingestion and representation
-  - retrieval and aggregation
-  - explanation and provenance
-  - user feedback loops
-
-Important portfolio note:
-
-- `JVNAUTOSCI-1553` already contains `JVNAUTOSCI-1554`, which explicitly re-scopes paper recommendation as a workflow-first capability and supersedes legacy subtasks.
-- That is the right direction.
-- Treat `JVNAUTOSCI-1553` as a vertical slice inside the broader goals of `JVNAUTOSCI-538` and `JVNAUTOSCI-144`, not as an independent strategy epic.
+- Dashboards and SLIs for intent-completion success/failure/false-success rates.
+- Dispatch-latency and visibility fixes (1429).
+- Selector evaluation benchmark running as repeatable regression.
 
 ### 4. Expose KB-driven presentation, not generic UI polish
 
 Primary epics:
 
+- `JVNAUTOSCI-1752` Type-specific instance renderers for concept pages *(new, To Do)*
 - `JVNAUTOSCI-866` Beautiful, flexible UX for a knowledge-using and -creating AI system
-- `JVNAUTOSCI-537` Von Frontend UI / UX & Interaction Improvements
+- `JVNAUTOSCI-537` Von Frontend UI/UX & Interaction Improvements *(In Progress)*
 
 Why this is fourth:
 
 - UI work matters, but most current open UI tasks are polish/convenience oriented rather than directly improving whether intent is carried out correctly.
 - The high-value UI work is the part that makes KB-driven, provenance-bearing, workflow-produced results understandable and actionable.
+- Users need inspectable views of what Von knows, why it believes it, and what provenance supports the current output.
+- `JVNAUTOSCI-1752` is the most concrete and immediately product-facing epic in this area. It defines type-specific summary renderers (papers, people, tasks, memories, rooms, events) driven by Vontology applicability metadata — not scattered frontend hard-coding. This is directly aligned with the intent-execution lens: users recognise, orient on, and act from what they see.
 
-Recommended output of this tranche:
+Recommended output:
 
+- Type-specific instance renderers for at least several core concept families (papers, people, tasks, events, episodic memories) with furled/unfurled views.
+- Renderer selection driven by Vontology type/applicability, not frontend special-cases.
 - KB-defined views for high-value concept/workflow/document contexts.
 - Explanation/provenance affordances for aggregated results and recommendations.
 - Minimal but strong interaction loops around accepting, editing, rejecting, and refining generated/aggregated outputs.
@@ -120,100 +170,119 @@ Primary epics:
 
 Why this should run in parallel where feasible:
 
-- As soon as Von becomes better at carrying out intent, the cost of unsafe or non-deterministic behaviour rises.
-- Some of the open tasks here are directly relevant to current operational safety and should not wait:
-  - `JVNAUTOSCI-1438` Add authentication to admin endpoints
-  - `JVNAUTOSCI-1437` Implement rate limiting on Flask API endpoints
-  - permission/visibility work such as `JVNAUTOSCI-871`, `JVNAUTOSCI-638`, `JVNAUTOSCI-627`
+- As Von becomes better at carrying out intent, the cost of unsafe or non-deterministic behaviour rises.
+- Auth, namespace, rate-limit, and other fail-closed protections should advance in parallel with stronger execution.
+- Triage 857 into reliability-critical fail-closed work versus later hardening, so it does not remain a large undifferentiated backlog.
+- Key tasks to prioritise now:
+  - JVNAUTOSCI-1438 — Add authentication to admin endpoints
+  - JVNAUTOSCI-1437 — Implement rate limiting on Flask API endpoints
+  - Permission/visibility work: JVNAUTOSCI-871, JVNAUTOSCI-638, JVNAUTOSCI-627
 
 ## Epic-by-epic disposition
 
-### Advance now
+### Advance now (highest priority)
 
-- `JVNAUTOSCI-833` Agentic Behaviours in Von
-  - Core umbrella for workflow-first execution, repair, planning, tool use, and Vontology extension.
-  - Needs stronger child-task focus on completion correctness, workflow generation, and repair.
-
-- `JVNAUTOSCI-964` Von Experimental Evaluation and Measurement
-  - Should become the operational measurement epic for user-intent success, not just general experimentation documentation.
-
-- `JVNAUTOSCI-932` Memory and knowledge retention
+- `JVNAUTOSCI-932` Memory and knowledge retention *(In Progress)*
   - High leverage because context continuity and artefact retention directly affect whether Von can complete multi-step intent reliably.
 
-- `JVNAUTOSCI-936` Representationally rich Vontology + inference engine
+- `JVNAUTOSCI-936` Representationally rich Vontology + inference engine *(In Progress)*
   - High leverage because better query/aggregation/dossier surfaces feed both routing and execution.
 
 - `JVNAUTOSCI-536` Observability & Performance
   - Necessary to see failure modes and latency bottlenecks in real call paths.
-  - Currently under-scoped relative to its importance.
+  - Now also inherits ongoing evaluation/measurement responsibility from the closed 964 epic.
 
 - `JVNAUTOSCI-857` Production hardening
   - Advance the fail-closed and admin/auth safety tasks that protect current behaviour.
 
-### Advance as a vertical slice after the foundations above
+### Advance as a vertical slice (second priority)
+
+- `JVNAUTOSCI-1714` Paper recommendation workflow extensions *(new)*
+  - Follow-on from the completed paper-recommender slice. Extends into researcher reading flows and feedback loops.
 
 - `JVNAUTOSCI-538` Knowledge Discovery & Recommendation
-  - Worth doing, but only after the execution and KB substrates are stronger.
+  - Broad capability umbrella. Paper recommendation is the first proving ground; generalise from there.
 
-- `JVNAUTOSCI-144` Document Representation and Handling
-  - Important as part of the document/paper vertical slice.
+- `JVNAUTOSCI-144` Document Representation and Handling *(In Progress)*
+  - Important as the document/paper representation substrate.
   - Many open tasks are old and need sceptical reinterpretation.
 
-- `JVNAUTOSCI-1553` Paper Recommender
-  - Good proving ground, but should be subordinate to the broader recommendation/document foundations.
+### Supporting epics; advance only where they unblock work above
 
-### Supporting epics; advance only where they unblock the work above
-
-- `JVNAUTOSCI-535` Data Model & Normalization
-  - Useful only insofar as it removes mixed/legacy representation pain for `JVNAUTOSCI-932` and `JVNAUTOSCI-936`.
+- `JVNAUTOSCI-535` Data Model & Normalisation
+  - Useful only insofar as it removes mixed/legacy representation pain for 932 and 936.
 
 - `JVNAUTOSCI-539` Access & Governance
-  - Important supporting safety epic; coordinate with `JVNAUTOSCI-857` rather than driving an independent strategy.
+  - Important supporting safety epic; coordinate with 857 rather than driving an independent strategy.
 
-- `JVNAUTOSCI-1116` Architectural De-bloating & Modularization
-  - Worth doing when a hotspot blocks progress, but not as a primary prioritisation axis for user-intent success.
+- `JVNAUTOSCI-1116` Architectural De-bloating & Modularisation
+  - Worth doing when a hotspot blocks progress, but not a primary priority axis.
+
+- `JVNAUTOSCI-1119` System Reliability & Type Safety
+  - Supports robustness. Advance as it intersects with active work.
+
+- `JVNAUTOSCI-167` Continuously Running, Self-Updating Von Prototype *(In Progress)*
+  - Background enrichment improves data quality over time. Advance where it intersects with 932/936.
+
+### Advance as KB-driven presentation (third–fourth priority)
+
+- `JVNAUTOSCI-1752` Type-specific instance renderers for concept pages *(new)*
+  - The most concrete KB-driven presentation epic. Defines type-specific summary renderers backed by Vontology applicability metadata.
+  - Directly improves user recognition, orientation, and actionability on concept pages.
+  - Coordinates with 866 (vision) and 537 (execution) but is more focused and deliverable.
+  - Subsumes the intent of 1750 and 1751, which are early local manifestations of the same idea.
 
 ### Defer for now
 
-- `JVNAUTOSCI-537` Von Frontend UI / UX & Interaction Improvements
+- `JVNAUTOSCI-537` Von Frontend UI/UX & Interaction Improvements
   - Defer the polish-heavy items; keep only the tasks that directly help users understand or steer KB/workflow outcomes.
 
-- `JVNAUTOSCI-866` Beautiful, flexible UX for a knowledge-using and -creating AI system
+- `JVNAUTOSCI-866` Beautiful, flexible UX
   - Keep as the long-term design north star, but do not treat generic beauty/flexibility as the next bottleneck.
 
-- `JVNAUTOSCI-1117` UI/UX Modernization & Onboarding
-  - Broad overlap with `JVNAUTOSCI-537` and `JVNAUTOSCI-866`.
+- `JVNAUTOSCI-1117` UI/UX Modernisation & Onboarding
+  - Broad overlap with 537 and 866.
 
-- `JVNAUTOSCI-885` Multimodal / sensory input-output enablement
+- `JVNAUTOSCI-885` Multimodal/sensory I/O enablement
   - Broadens channels without fixing core intent completion.
 
-- `JVNAUTOSCI-1460` External interaction surfaces and gateway runtime
-  - Same reason as `JVNAUTOSCI-885`; defer until core execution is stronger.
+- `JVNAUTOSCI-1460` External interaction surfaces (channels, voice, devices)
+  - Same reason as 885; defer until core execution is stronger.
+
+- `JVNAUTOSCI-977` External communications channels (Gmail, Slack)
+  - New interaction surfaces, not an intent-execution bottleneck.
 
 - `JVNAUTOSCI-541` Onboarding & Lab Operations
-  - Useful, but not on the critical path for the behaviour in question.
+  - Useful, but not on the critical path.
+
+- `JVNAUTOSCI-1667` Von Coding Agent VS Code Extension *(new)*
+  - Interesting new direction, but a separate interaction surface. Does not address the core intent-execution problem.
+
+- `JVNAUTOSCI-540` Developer Platform & Infrastructure *(Backlog)*
+  - Enables faster development but not user-facing.
 
 ### Consolidate / reinterpret
 
 - `JVNAUTOSCI-766` Vontology-based Tool Usage Heuristics System
-  - The goal is still valid, but the framing is now too separate from workflow-first execution.
-  - Reinterpret as KB-authored routing/workflow metadata under `JVNAUTOSCI-833`, not as a separate cached heuristics subsystem.
+  - The goal is valid, but the framing is now too separate from workflow-first execution.
+  - With 833 closed, the routing/selector work that 766 describes should be reinterpreted under the active KB substrate epics (932, 936) or a successor agentic-behaviour epic.
+  - Recommend: supersede or fold into 936 with an explicit KB-routing sub-scope.
 
-- `JVNAUTOSCI-1117` UI/UX Modernization & Onboarding
-  - Likely better folded into `JVNAUTOSCI-537` and `JVNAUTOSCI-866`.
-
-- `JVNAUTOSCI-1553` Paper Recommender
-  - Keep only as a vertical slice epic if it helps coordination; otherwise its scope belongs under recommendation/document foundations.
+- `JVNAUTOSCI-1117` UI/UX Modernisation & Onboarding
+  - Likely better folded into 537 and 866.
 
 ### Retire or explicitly supersede after quick confirmation
 
-- `JVNAUTOSCI-710` Project Codebase Refactoring and Documentation for Public Release
-  - The description explicitly says the epic is no longer used and points to `JVNAUTOSCI-739`.
-  - It should not remain open in its current state.
+- `JVNAUTOSCI-710` Project Codebase Refactoring for Public Release
+  - Description says the epic is no longer used and points to 739.
+  - Should not remain open.
 
-- `JVNAUTOSCI-739` Codebase transition - private repo to Von
-  - Review whether any open children still matter.
-  - If not, close or supersede it so it stops competing for attention.
+- `JVNAUTOSCI-739` Codebase transition (private to Von)
+  - The repo IS "Von" now. Review whether any open children still matter.
+  - If not, close or supersede so it stops competing for attention.
+
+- `JVNAUTOSCI-933` Project admin/coordination *(already SUPERSEDED)*
+  - Confirm fully closed in Jira.
 
 ### Coordination only
 
@@ -222,31 +291,40 @@ Why this should run in parallel where feasible:
 
 ## Most important overlaps to clean up
 
-### 1. Execution / routing overlap
+### 1. Routing / tool-selection overlap (766 → now orphaned from closed 833)
 
-- `JVNAUTOSCI-833` and `JVNAUTOSCI-766` overlap heavily.
-- The present architecture direction should favour workflow metadata, selector metadata, executable-completeness checks, and KB-authored routing surfaces under `JVNAUTOSCI-833`.
+- `JVNAUTOSCI-766` heavily overlapped with the now-closed `JVNAUTOSCI-833`.
+- The present architecture direction should fold this into KB-authored routing metadata under `JVNAUTOSCI-936` or create a focused successor.
+- **Action:** Supersede 766 by explicitly capturing its useful scope under 936.
 
-### 2. Recommendation overlap
+### 2. Recommendation overlap (538, 144, 1714)
 
-- `JVNAUTOSCI-538`, `JVNAUTOSCI-144`, and `JVNAUTOSCI-1553` overlap.
+- `JVNAUTOSCI-538`, `JVNAUTOSCI-144`, and `JVNAUTOSCI-1714` overlap.
+- With 1553 (Paper Recommender) now Done, 1714 is the natural follow-on.
 - Suggested framing:
-  - `JVNAUTOSCI-538` = the broad capability
-  - `JVNAUTOSCI-144` = document/paper representation substrate
-  - `JVNAUTOSCI-1553` = one vertical slice or milestone, not a separate strategy
+  - 538 = the broad capability
+  - 144 = document/paper representation substrate
+  - 1714 = active vertical-slice extension (reading flows, feedback, explanation)
 
-### 3. UX overlap
+### 3. UX overlap (537, 866, 1117, 1752)
 
-- `JVNAUTOSCI-537`, `JVNAUTOSCI-866`, and `JVNAUTOSCI-1117` overlap.
+- Four UX/UI epics, now including 1752 (type-specific instance renderers).
+- 1752 is the most concrete and KB-aligned of the four. It defines what needs to exist on concept pages — type-specific summary renderers backed by Vontology applicability.
 - Suggested framing:
-  - `JVNAUTOSCI-866` = long-term KB-defined UI vision
-  - `JVNAUTOSCI-537` = concrete frontend execution work
-  - `JVNAUTOSCI-1117` = likely unnecessary as a separate open epic
+  - 1752 = the actionable KB-driven presentation epic (advance now)
+  - 866 = long-term KB-defined UI vision (keep as north star)
+  - 537 = concrete frontend execution work (advance where it serves 1752 or other active work)
+  - 1117 = likely unnecessary as a separate open epic; fold into 537
 
-### 4. Safety / governance overlap
+### 4. Safety / governance overlap (857, 539)
 
-- `JVNAUTOSCI-857` and `JVNAUTOSCI-539` are closely related.
-- Keep both only if one stays focused on operational hardening and the other on permission/governance semantics. Otherwise, use links and comments to prevent duplicate work.
+- Closely related. Keep both only if 857 stays focused on operational hardening and 539 on permission/governance semantics. Otherwise, use links and comments to prevent duplicate work.
+
+### 5. Interaction surface overlap (885, 1460, 977, 1667)
+
+- Four epics that expand how users interact with Von (multimodal, external channels, VS Code, devices).
+- None address the core intent-execution problem. All should be deferred until the execution substrate is strong.
+- Caution against fragmenting effort across multiple new surfaces before the core is reliable.
 
 ## KB-authoritative surfaces to prioritise
 
@@ -268,66 +346,61 @@ Supporting code surfaces should remain limited to:
 - telemetry collection
 - deterministic rendering / safety envelopes
 
-## Concrete suggested next tasks
+## Concrete suggested next tasks (refreshed)
 
-These are the work items I would tackle next, in order, whether by reinterpreting existing tasks or by creating fresh ones if the current task inventory does not fit cleanly.
+These are the work items to tackle next, in order, whether by reinterpreting existing tasks or by creating fresh ones.
 
-1. Intent-completion benchmark and false-success dashboard
-   - Epic home: `JVNAUTOSCI-964` linked to `JVNAUTOSCI-833` and `JVNAUTOSCI-536`
-   - Measure real end-to-end intent success, not just tool counts.
-
-2. Workflow generation and repair surface
-   - Epic home: `JVNAUTOSCI-833`
-   - Add KB-authored workflow templates/metadata plus executable validation and repair pathways.
-
-3. Context bundles/dossiers plus episodic/artefact completion
+1. **Context bundles/dossiers plus episodic/artefact completion**
    - Epic home: `JVNAUTOSCI-936` and `JVNAUTOSCI-932`
    - Finish the bounded, provenance-rich context substrate Von needs before acting.
+   - This was tranche 2 in the initial review; promoted to first now that 833/964 are closed.
 
-4. Paper recommendation vertical slice
-   - Epic home: `JVNAUTOSCI-538` / `JVNAUTOSCI-144` / `JVNAUTOSCI-1553`
-   - Use it as a proving ground for retrieval, aggregation, explanation, and user feedback.
+2. **Paper recommendation extension and researcher reading flows**
+   - Epic home: `JVNAUTOSCI-1714` / `JVNAUTOSCI-538` / `JVNAUTOSCI-144`
+   - Build on the completed 1553 vertical slice with workflow-first reading flows, explanation, and feedback.
 
-5. Admin/auth/namespace hardening
+3. **Observability SLIs and selector regression benchmarks**
+   - Epic home: `JVNAUTOSCI-536`
+   - Establish intent-completion dashboards, dispatch-latency fixes (1429), and repeatable selector benchmarks.
+
+4. **KB-driven presentation and type-specific instance renderers**
+   - Epic home: `JVNAUTOSCI-1752` / `JVNAUTOSCI-866` / `JVNAUTOSCI-537`
+   - Build type-specific summary renderers for concept pages (papers, people, tasks, events, rooms) driven by Vontology applicability.
+   - Build inspectable views of what Von knows and why it believes it.
+
+5. **Admin/auth/namespace hardening**
    - Epic home: `JVNAUTOSCI-857` with `JVNAUTOSCI-539`
    - Prioritise fail-closed pathways and remove silent privileged gaps.
 
-## Merge guidance from `JVNAUTOSCI-1655`
+## Merge guidance from JVNAUTOSCI-1655
 
-`JVNAUTOSCI-1655` surfaced several useful concrete refinements. For a later unified planning item, I would keep this note (`JVNAUTOSCI-1654`) as the backbone and selectively import the strongest operational ideas from `JVNAUTOSCI-1655`.
+JVNAUTOSCI-1655 surfaced several useful concrete refinements. The strongest ideas have been integrated into this refreshed review:
 
-### Points to import into the later unified plan
+### Integrated into this review
 
-- Make a `selector evaluation benchmark` an explicit named deliverable inside the top-priority execution-correctness tranche.
-- Pull `JVNAUTOSCI-1429` forward explicitly as a concrete dispatch-latency and visibility problem, not just a generic observability concern.
-- State the `KB aggregation and presentation gap` more directly: users need inspectable views of what Von knows, why it believes it, and what provenance supports the current output.
-- Make `workflow generation from intent` an explicit planning gap under `JVNAUTOSCI-833`, even if it does not become a separate epic.
-- Triage `JVNAUTOSCI-857` into reliability-critical fail-closed work versus later hardening work, so it does not remain a large undifferentiated backlog.
+- Selector evaluation benchmark — captured as an explicit deliverable in tranche 3.
+- JVNAUTOSCI-1429 dispatch-latency — pulled forward in tranche 3.
+- KB aggregation and presentation gap — stated directly in tranche 4.
+- Workflow generation from intent — noted as a gap; 833 is now closed so a successor home is needed.
+- JVNAUTOSCI-857 triage — reflected in the hardening recommendations under tranche 5.
 
-### Points to reject or reframe when merging
+### Points rejected or reframed
 
-- Do not keep `JVNAUTOSCI-766` as a separate top-priority track. Reinterpret its useful content under `JVNAUTOSCI-833` as KB-authored routing, selector, and workflow metadata work.
-- Do not treat `JVNAUTOSCI-964` and `JVNAUTOSCI-536` as largely separate concerns. For this purpose, measurement and observability should be planned as one coupled workstream.
-- Do not pull memory-injection style tasks ahead of dossier/context/provenance substrate work. The substrate should come first, otherwise the likely result is heuristic context stuffing rather than durable improvement.
-- Do not treat production hardening as mostly late strategic work. Auth, namespace, rate-limit, and other fail-closed protections should advance in parallel with stronger execution capabilities.
-- Do not create a separate new epic for workflow generation unless `JVNAUTOSCI-833` genuinely cannot hold that scope cleanly.
-
-### Practical merge rule
-
-If `JVNAUTOSCI-1654` and `JVNAUTOSCI-1655` are later merged into one unified planning item, the right synthesis is:
-
-1. Keep `JVNAUTOSCI-1654` as the main prioritisation and portfolio-cleanup structure.
-2. Import from `JVNAUTOSCI-1655` the selector benchmark, explicit dispatch-gap work, explicit KB-inspectability gap, workflow-generation-from-intent gap, and `JVNAUTOSCI-857` triage.
-3. Exclude or reframe the parts of `JVNAUTOSCI-1655` that would split routing work away from `JVNAUTOSCI-833`, over-separate measurement from observability, or prioritise heuristic memory injection ahead of the substrate.
+- Do not keep JVNAUTOSCI-766 as a separate top-priority track. Reinterpret under 936.
+- Do not over-separate measurement (536) from evaluation (now 964 is closed, 536 holds both).
+- Do not pull memory-injection tasks ahead of dossier/context substrate work.
+- Do not treat production hardening as mostly late work. Auth and fail-closed protections advance in parallel.
 
 ## Short conclusion
 
-If the criterion is "make Von more likely to carry out user intent successfully", the next portfolio centre of gravity should be:
+With the agentic-behaviour (833), evaluation (964), paper-recommender (1553), and workflow-studio (1586) epics now closed, Von has its foundational execution, measurement, and authoring infrastructure in place.
 
-1. measurable execution correctness
-2. KB query/aggregation/context substrate
-3. one strong recommendation/document vertical slice
-4. explanation/provenance-driven presentation
-5. fail-closed hardening
+The next portfolio centre of gravity should be:
 
-The biggest planning mistake to avoid is spending the next tranche on generic UX modernisation, multimodal expansion, or architectural tidying before the system can reliably complete and verify the intents it already nominally supports.
+1. **KB substrate completion** — context bundles, episodic memory, dossiers (932, 936)
+2. **Recommendation/document vertical extension** — build on paper-recommender with reading flows, explanation, feedback (1714, 538, 144)
+3. **Observability as continuous discipline** — intent-completion SLIs, selector benchmarks, dispatch latency (536)
+4. **KB-driven presentation** — type-specific instance renderers and inspectable, provenance-bearing views (1752, 866, 537)
+5. **Fail-closed hardening** — auth, namespace, rate-limit protections (857, 539)
+
+The biggest planning mistake to avoid is fragmenting effort across new interaction surfaces (VS Code extension, multimodal, external channels) or generic UX modernisation before Von can reliably complete, verify, and explain the intents it already supports.
