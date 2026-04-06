@@ -11141,6 +11141,9 @@ def _conversation_telemetry_get_locator(**kwargs):
             user_id=str(access["read_user_id"]),
             session_id=str(access["session_id"]),
             namespace=_clean_optional_string(access.get("read_namespace")),
+            organisation_concept_id=_normalise_optional_concept_id(
+                access.get("organisation_concept_id")
+            ),
             include_legacy=bool(kwargs.get("include_legacy", True)),
         )
     except Exception as exc:

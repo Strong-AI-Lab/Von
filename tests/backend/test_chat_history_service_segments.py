@@ -416,3 +416,88 @@ def test_get_chat_history_debug_entry_returns_payload(monkeypatch):
     )
 
     assert debug_data == {"model": "demo"}
+
+
+def test_get_chat_history_prefers_exact_namespace_document_over_legacy_fallback(
+    monkeypatch,
+):
+    from src.backend.services import chat_history_service
+
+    docs = [
+        {
+            "_id": "legacy",
+            "user_id": "#V#u",
+            "session_id": "s1",
+            "history": [{"role": "assistant", "content": "legacy"}],
+        },
+        {
+            "_id": "exact",
+            "user_id": "#V#u",
+            "session_id": "s1",
+            "namespace": "#V#u@org",
+            "history": [{"role": "assistant", "content": "exact"}],
+        },
+    ]
+
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_collection_service",
+        lambda **kwargs: _FakeCollection(docs),
+    )
+
+    history = chat_history_service.get_chat_history(
+        "#V#u",
+        "s1",
+        namespace="#V#u@org",
+    )
+
+    assert [entry["content"] for entry in history] == ["exact"]
+
+
+def test_get_chat_history_debug_entry_prefers_exact_namespace_document_over_legacy_fallback(
+    monkeypatch,
+):
+    from src.backend.services import chat_history_service
+
+    docs = [
+        {
+            "_id": "legacy",
+            "user_id": "#V#u",
+            "session_id": "s1",
+            "history": [
+                {
+                    "role": "assistant",
+                    "content": "legacy",
+                    "llm_debug_data": {"model": "legacy-model"},
+                }
+            ],
+        },
+        {
+            "_id": "exact",
+            "user_id": "#V#u",
+            "session_id": "s1",
+            "namespace": "#V#u@org",
+            "history": [
+                {
+                    "role": "assistant",
+                    "content": "exact",
+                    "llm_debug_data": {"model": "exact-model"},
+                }
+            ],
+        },
+    ]
+
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_collection_service",
+        lambda **kwargs: _FakeCollection(docs),
+    )
+
+    debug_data = chat_history_service.get_chat_history_debug_entry(
+        user_id="#V#u",
+        session_id="s1",
+        history_index=0,
+        namespace="#V#u@org",
+    )
+
+    assert debug_data == {"model": "exact-model"}
