@@ -508,16 +508,55 @@ def build_chat_history_query(
     if isinstance(namespace, str) and namespace.strip():
         ns = namespace.strip()
         if include_legacy:
-            query["$or"] = [
-                {"namespace": ns},
-                {"namespace": {"$exists": False}},
-                {"namespace": {"$eq": None}},
-                {"namespace": {"$in": ["", " "]}},
-            ]
+            query["$or"] = _legacy_namespace_match_clauses(ns)
         else:
             query["namespace"] = ns
 
     return query
+
+
+def _legacy_namespace_match_clauses(namespace: str) -> List[Dict[str, Any]]:
+    return [
+        {"namespace": namespace},
+        {"namespace": {"$exists": False}},
+        {"namespace": {"$eq": None}},
+        {"namespace": {"$in": ["", " "]}},
+    ]
+
+
+def _build_chat_history_session_read_queries(
+    *,
+    user_id: str,
+    session_id: str,
+    namespace: Optional[str] = None,
+    include_legacy: bool = True,
+) -> List[Dict[str, Any]]:
+    session_id_value = _safe_str(session_id)
+    if not session_id_value:
+        raise ChatHistoryServiceError("session_id is required.")
+
+    namespace_value = _safe_str(namespace)
+    base_query: Dict[str, Any] = {
+        "user_id": user_id,
+        "session_id": session_id_value,
+    }
+    if not namespace_value:
+        return [base_query]
+
+    queries: List[Dict[str, Any]] = [
+        {
+            **base_query,
+            "namespace": namespace_value,
+        }
+    ]
+    if include_legacy:
+        queries.append(
+            {
+                **base_query,
+                "$or": _legacy_namespace_match_clauses(namespace_value),
+            }
+        )
+    return queries
 
 
 class ChatHistoryServiceError(Exception):
@@ -793,7 +832,13 @@ def _chunk_history_segments(
     return chunked
 
 
-def get_chat_history(user_id: str, session_id: str) -> List[Dict[str, Any]]:
+def get_chat_history(
+    user_id: str,
+    session_id: str,
+    *,
+    namespace: Optional[str] = None,
+    include_legacy: bool = True,
+) -> List[Dict[str, Any]]:
     """
     Retrieves the chat history for a specific user and session.
 
@@ -814,9 +859,16 @@ def get_chat_history(user_id: str, session_id: str) -> List[Dict[str, Any]]:
     _guard_chat_history_read("get_chat_history")
 
     try:
-        doc = _read_find_one(
-            chat_history_coll, {"user_id": user_id, "session_id": session_id}
-        )
+        doc = None
+        for query in _build_chat_history_session_read_queries(
+            user_id=user_id,
+            session_id=session_id,
+            namespace=namespace,
+            include_legacy=include_legacy,
+        ):
+            doc = _read_find_one(chat_history_coll, query)
+            if doc is not None:
+                break
         _record_chat_history_read_success()
 
         if doc:
@@ -858,50 +910,53 @@ def get_chat_history_segments(
     _guard_chat_history_read("get_chat_history_segments")
 
     try:
-        query = build_chat_history_query(
+        history_offset = 0
+        history_length = None
+        doc = None
+        projection = None
+        read_queries = _build_chat_history_session_read_queries(
             user_id=user_id,
             session_id=session_id,
             namespace=namespace,
             include_legacy=include_legacy,
         )
-        history_offset = 0
-        history_length = None
-        doc = None
-        projection = None
-        if isinstance(history_tail_limit, int) and history_tail_limit > 0:
-            if hasattr(chat_history_coll, "aggregate") and callable(
-                getattr(chat_history_coll, "aggregate")
-            ):
-                pipeline = [
-                    {"$match": query},
-                    {
-                        "$project": {
-                            "history": {
-                                "$slice": [
-                                    _history_array_expr(),
-                                    -history_tail_limit,
-                                ]
-                            },
-                            "history_length": {"$size": _history_array_expr()},
-                        }
-                    },
-                ]
-                try:
-                    doc = next(_read_aggregate(chat_history_coll, pipeline), None)
-                except PyMongoError:
-                    raise
-                except Exception:
-                    doc = None
-            if doc is None:
+        for query in read_queries:
+            if isinstance(history_tail_limit, int) and history_tail_limit > 0:
+                if hasattr(chat_history_coll, "aggregate") and callable(
+                    getattr(chat_history_coll, "aggregate")
+                ):
+                    pipeline = [
+                        {"$match": query},
+                        {
+                            "$project": {
+                                "history": {
+                                    "$slice": [
+                                        _history_array_expr(),
+                                        -history_tail_limit,
+                                    ]
+                                },
+                                "history_length": {"$size": _history_array_expr()},
+                            }
+                        },
+                    ]
+                    try:
+                        doc = next(_read_aggregate(chat_history_coll, pipeline), None)
+                    except PyMongoError:
+                        raise
+                    except Exception:
+                        doc = None
+                if doc is None:
+                    doc = _read_find_one(chat_history_coll, query, projection)
+                    if doc is not None:
+                        full_history = doc.get("history") or []
+                        if isinstance(full_history, list):
+                            history_length = len(full_history)
+                            doc = dict(doc)
+                            doc["history"] = full_history[-history_tail_limit:]
+            else:
                 doc = _read_find_one(chat_history_coll, query, projection)
-                if doc is not None:
-                    full_history = doc.get("history") or []
-                    if isinstance(full_history, list):
-                        history_length = len(full_history)
-                        doc = dict(doc)
-                        doc["history"] = full_history[-history_tail_limit:]
-        else:
-            doc = _read_find_one(chat_history_coll, query, projection)
+            if doc is not None:
+                break
         if not doc:
             _record_chat_history_read_success()
             return ([], {"history_truncated": False}) if return_meta else []
@@ -986,14 +1041,17 @@ def get_chat_history_debug_entry(
     _guard_chat_history_read("get_chat_history_debug_entry")
 
     try:
-        query = build_chat_history_query(
+        projection = {"history": {"$slice": [history_index, 1]}}
+        doc = None
+        for query in _build_chat_history_session_read_queries(
             user_id=user_id,
             session_id=session_id,
             namespace=namespace,
             include_legacy=include_legacy,
-        )
-        projection = {"history": {"$slice": [history_index, 1]}}
-        doc = _read_find_one(chat_history_coll, query, projection)
+        ):
+            doc = _read_find_one(chat_history_coll, query, projection)
+            if doc is not None:
+                break
         if not doc:
             _record_chat_history_read_success()
             return None
@@ -1873,6 +1931,7 @@ def _build_session_summary_from_metadata(
         "completed_at": None,
         "created_at": created_ts.isoformat() if created_ts else None,
         "namespace": doc.get("namespace"),
+        "organisation_concept_id": doc.get("organisation_concept_id"),
         "preview": None,
     }
 
@@ -1889,6 +1948,7 @@ def _get_chat_history_session_summaries_metadata_only(
         "created_at": 1,
         "updated_at": 1,
         "namespace": 1,
+        "organisation_concept_id": 1,
     }
     docs = list(_read_find(chat_history_coll, query, projection))
 
@@ -1968,6 +2028,7 @@ def get_chat_history_session_summaries(
             "created_at": 1,
             "updated_at": 1,
             "namespace": 1,
+            "organisation_concept_id": 1,
             "session_name": 1,
         }
         docs = list(_read_find(chat_history_coll, query, projection))
@@ -2055,6 +2116,7 @@ def get_chat_history_session_summaries(
                     ),
                     "created_at": created_ts.isoformat() if created_ts else None,
                     "namespace": doc.get("namespace"),
+                    "organisation_concept_id": doc.get("organisation_concept_id"),
                     "preview": preview,
                 }
             )
@@ -2140,10 +2202,22 @@ def get_chat_history_session_summary(
         "created_at": 1,
         "updated_at": 1,
         "namespace": 1,
+        "organisation_concept_id": 1,
     }
     if light_mode:
         try:
-            metadata_doc = _read_find_one(chat_history_coll, query, metadata_projection)
+            metadata_doc = None
+            for session_query in _build_chat_history_session_read_queries(
+                user_id=user_id,
+                session_id=session_id,
+                namespace=namespace,
+                include_legacy=include_legacy,
+            ):
+                metadata_doc = _read_find_one(
+                    chat_history_coll, session_query, metadata_projection
+                )
+                if metadata_doc is not None:
+                    break
         except PyMongoError as e:
             _record_chat_history_read_failure("get_chat_history_session_summary", e)
             logger.error(
@@ -2169,10 +2243,20 @@ def get_chat_history_session_summary(
         "created_at": 1,
         "updated_at": 1,
         "namespace": 1,
+        "organisation_concept_id": 1,
         "session_name": 1,
     }
     try:
-        doc = _read_find_one(chat_history_coll, query, projection)
+        doc = None
+        for session_query in _build_chat_history_session_read_queries(
+            user_id=user_id,
+            session_id=session_id,
+            namespace=namespace,
+            include_legacy=include_legacy,
+        ):
+            doc = _read_find_one(chat_history_coll, session_query, projection)
+            if doc is not None:
+                break
     except PyMongoError as e:
         _record_chat_history_read_failure("get_chat_history_session_summary", e)
         logger.warning(
@@ -2181,7 +2265,18 @@ def get_chat_history_session_summary(
             exc_info=True,
         )
         try:
-            metadata_doc = _read_find_one(chat_history_coll, query, metadata_projection)
+            metadata_doc = None
+            for session_query in _build_chat_history_session_read_queries(
+                user_id=user_id,
+                session_id=session_id,
+                namespace=namespace,
+                include_legacy=include_legacy,
+            ):
+                metadata_doc = _read_find_one(
+                    chat_history_coll, session_query, metadata_projection
+                )
+                if metadata_doc is not None:
+                    break
         except PyMongoError as fallback_error:
             _record_chat_history_read_failure(
                 "get_chat_history_session_summary", fallback_error
@@ -2253,6 +2348,7 @@ def get_chat_history_session_summary(
         "completed_at": completed_at_dt.isoformat() if completed_at_dt else None,
         "created_at": created_ts.isoformat() if created_ts else None,
         "namespace": doc.get("namespace"),
+        "organisation_concept_id": doc.get("organisation_concept_id"),
         "preview": preview,
     }
     _record_chat_history_read_success()

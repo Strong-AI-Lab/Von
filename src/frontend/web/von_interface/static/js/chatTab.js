@@ -2535,7 +2535,7 @@ function buildThinkingActivityLabelAndDetail(entry) {
     const modelText = [model, provider].filter(Boolean).join(' · ');
     const detailParts = [];
     const detailHtmlParts = [];
-    let label = '';
+    let label;
     const pushDetail = (text, html = null) => {
         const cleanText = normaliseThinkingActivityString(text);
         const cleanHtml = normaliseThinkingActivityString(html);
@@ -5032,15 +5032,12 @@ function compareTableCells(leftCell, rightCell, direction) {
     const left = parseTableCellComparableValue(leftCell);
     const right = parseTableCellComparableValue(rightCell);
 
-    let compareResult = 0;
-    if (left.kind === right.kind && left.kind !== 'text') {
-        compareResult = Number(left.value) - Number(right.value);
-    } else {
-        compareResult = String(left.value).localeCompare(String(right.value), undefined, {
+    const compareResult = (left.kind === right.kind && left.kind !== 'text')
+        ? Number(left.value) - Number(right.value)
+        : String(left.value).localeCompare(String(right.value), undefined, {
             numeric: true,
             sensitivity: 'base'
         });
-    }
 
     return compareResult * multiplier;
 }
@@ -10535,7 +10532,7 @@ async function uploadSingleFileToVon(file) {
         body: formData
     });
 
-    let data = null;
+    let data;
     try {
         data = await response.json();
     } catch (_) {
@@ -12953,7 +12950,7 @@ function toggleSpeakTurn(turnId, text, button) {
     button.textContent = 'Stop';
     button.title = 'Stop speaking';
 
-    let utterance = null;
+    let utterance;
     try {
         const settings = getChatSpeechSettings();
         const debugData = llmDebugData.get(turnId);
@@ -15819,7 +15816,7 @@ async function copyJsonPayloadToClipboard(payload, button = null, fallbackLabel 
     if (!payload || typeof payload !== 'object') {
         return false;
     }
-    let jsonString = '';
+    let jsonString;
     try {
         jsonString = JSON.stringify(payload, null, 2);
     } catch (_) {
@@ -22109,9 +22106,16 @@ async function loadLlmDebugDataForTurn(turnId, options = {}) {
 
     const fetchPromise = (async () => {
         try {
-            const params = new URLSearchParams({
-                session_id: historyLocation.session_id,
-                history_index: String(historyLocation.history_index)
+            const historyAccessArgs = buildChatHistoryAccessArgs({
+                sessionId: historyLocation.session_id,
+                historyIndex: historyLocation.history_index
+            });
+            const params = new URLSearchParams();
+            Object.entries(historyAccessArgs).forEach(([key, value]) => {
+                if (value === undefined || value === null || value === '') {
+                    return;
+                }
+                params.set(key, String(value));
             });
             console.log('[chatTab] loadLlmDebugDataForTurn request:', { turnId, session_id: historyLocation.session_id, history_index: historyLocation.history_index });
             const response = await fetch(`/von/history/debug?${params.toString()}`, {
@@ -22861,8 +22865,19 @@ async function fetchConversationTelemetryLocatorPayload(sessionId) {
     }
 
     try {
+        const namespaceContext = buildConversationTelemetryNamespaceContext();
+        const params = new URLSearchParams({ session_id: cleanSessionId });
+        if (namespaceContext.namespace) {
+            params.set('namespace', namespaceContext.namespace);
+        }
+        if (namespaceContext.user_id) {
+            params.set('user_concept_id', namespaceContext.user_id);
+        }
+        if (namespaceContext.org_id) {
+            params.set('organisation_concept_id', namespaceContext.org_id);
+        }
         const response = await fetch(
-            `/von/history/telemetry_locator?session_id=${encodeURIComponent(cleanSessionId)}`,
+            `/von/history/telemetry_locator?${params.toString()}`,
             {
                 headers: buildChatFetchHeaders()
             }
@@ -23180,7 +23195,7 @@ async function copyConversationLlmTelemetryToClipboard(button = null) {
         return false;
     }
 
-    let jsonText = '';
+    let jsonText;
     try {
         jsonText = JSON.stringify(payload, null, 2);
     } catch (err) {

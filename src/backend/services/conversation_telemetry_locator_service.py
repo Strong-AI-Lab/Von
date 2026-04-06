@@ -104,6 +104,7 @@ def build_conversation_llm_telemetry_locator(
     user_id: str,
     session_id: str,
     namespace: str | None = None,
+    organisation_concept_id: str | None = None,
     include_legacy: bool = True,
 ) -> dict[str, Any]:
     """Return a compact MCP-oriented locator for one conversation's turn telemetry."""
@@ -122,8 +123,17 @@ def build_conversation_llm_telemetry_locator(
         include_legacy=include_legacy,
         summary_mode="light",
     ) or {}
+    resolved_namespace = _safe_str(namespace) or _safe_str(session_summary.get("namespace"))
+    resolved_org_id = _safe_str(organisation_concept_id) or _safe_str(
+        session_summary.get("organisation_concept_id")
+    )
 
-    history = chat_history_service.get_chat_history(user_id_value, session_id_value)
+    history = chat_history_service.get_chat_history(
+        user_id_value,
+        session_id_value,
+        namespace=resolved_namespace,
+        include_legacy=include_legacy,
+    )
     if not isinstance(history, list):
         history = []
 
@@ -182,7 +192,9 @@ def build_conversation_llm_telemetry_locator(
                     {
                         "session_id": session_id_value,
                         "history_index": history_index,
-                        "namespace": namespace,
+                        "namespace": resolved_namespace,
+                        "user_concept_id": user_id_value,
+                        "organisation_concept_id": resolved_org_id,
                     },
                     purpose="Fetch the exact stored llm_debug_data for this history entry.",
                 )
@@ -195,7 +207,7 @@ def build_conversation_llm_telemetry_locator(
                 "turn_execution_get_diagnostics",
                 {
                     "request_id": request_id,
-                    "namespace": namespace,
+                    "namespace": resolved_namespace,
                 },
                 purpose=(
                     "Fetch the persisted full turn-execution diagnostics payload for this assistant turn."
@@ -227,11 +239,9 @@ def build_conversation_llm_telemetry_locator(
     }
 
     namespace_context = _build_namespace_context(
-        namespace=namespace,
+        namespace=resolved_namespace,
         user_id=user_id_value,
-        organisation_concept_id=_safe_str(
-            session_summary.get("organisation_concept_id")
-        ),
+        organisation_concept_id=resolved_org_id,
     )
 
     return {
@@ -246,7 +256,9 @@ def build_conversation_llm_telemetry_locator(
                 "conversation_telemetry_get_locator",
                 {
                     "session_id": session_id_value,
-                    "namespace": namespace,
+                    "namespace": resolved_namespace,
+                    "user_concept_id": user_id_value,
+                    "organisation_concept_id": resolved_org_id,
                 },
                 purpose=(
                     "Rebuild this compact conversation-turn locator from stored chat history."
@@ -256,7 +268,9 @@ def build_conversation_llm_telemetry_locator(
                 "chat_history_get_segments",
                 {
                     "session_id": session_id_value,
-                    "namespace": namespace,
+                    "namespace": resolved_namespace,
+                    "user_concept_id": user_id_value,
+                    "organisation_concept_id": resolved_org_id,
                     "include_debug": True,
                 },
                 purpose="Fetch the stored conversation transcript segments and embedded debug payloads.",
@@ -265,7 +279,7 @@ def build_conversation_llm_telemetry_locator(
                 "turn_execution_list",
                 {
                     "session_id": session_id_value,
-                    "namespace": namespace,
+                    "namespace": resolved_namespace,
                 },
                 purpose="List turn-execution projections for this conversation.",
             ),

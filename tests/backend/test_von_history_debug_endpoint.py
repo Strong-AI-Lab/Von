@@ -80,3 +80,59 @@ def test_history_debug_returns_stored_turn_execution_diagnostics(monkeypatch):
         "history_index": 3,
         "namespace": "#V#test_user",
     }
+
+
+def test_history_debug_uses_org_hint_to_upgrade_bare_namespace(monkeypatch):
+    from src.backend.server.routes.von_routes import von_bp
+
+    calls: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: "#V#test_user",
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.get_effective_context",
+        lambda *_args, **_kwargs: {"namespace": "#V#test_user"},
+    )
+
+    def _has_chat_history_session(user_id, session_id, namespace=None, **_kwargs):
+        calls["checked_namespace"] = namespace
+        return namespace == "#V#test_user@org"
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.chat_history_service.has_chat_history_session",
+        _has_chat_history_session,
+    )
+
+    def _get_debug_entry(*, user_id, session_id, history_index, namespace):
+        calls["user_id"] = user_id
+        calls["session_id"] = session_id
+        calls["history_index"] = history_index
+        calls["namespace"] = namespace
+        return {"request_id": "req-org-1"}
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.chat_history_service.get_chat_history_debug_entry",
+        _get_debug_entry,
+    )
+
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+    app.register_blueprint(von_bp, url_prefix="/von")
+
+    client = app.test_client()
+    response = client.get(
+        "/von/history/debug",
+        query_string={
+            "session_id": "session-1",
+            "history_index": 3,
+            "organisation_concept_id": "#V#org",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["success"] is True
+    assert calls["checked_namespace"] == "#V#test_user@org"
+    assert calls["namespace"] == "#V#test_user@org"

@@ -10704,9 +10704,10 @@ def history_debug():
         effective = get_effective_context(
             window_session_id, dict(session), user_concept_id
         )
-        namespace = effective.get(
-            "namespace"
-        ) or chat_history_service.resolve_chat_history_namespace(user_concept_id)
+        namespace, organisation_concept_id = _resolve_history_request_scope_hints(
+            user_concept_id=user_concept_id,
+            effective_context=effective,
+        )
         owner_user_id = user_concept_id
         shared_invite = None
 
@@ -10725,8 +10726,12 @@ def history_debug():
 
         owner_namespace = _derive_namespace_for_user_org(
             owner_user_id,
-            shared_invite.get("organisation_concept_id") if shared_invite else None,
-        ) or chat_history_service.resolve_chat_history_namespace(owner_user_id)
+            (
+                shared_invite.get("organisation_concept_id")
+                if shared_invite
+                else organisation_concept_id
+            ),
+        ) or namespace or chat_history_service.resolve_chat_history_namespace(owner_user_id)
         print(
             f"[history/debug] owner_user_id={owner_user_id}, owner_namespace={owner_namespace}"
         )
@@ -10829,9 +10834,10 @@ def history_telemetry_locator():
         effective = get_effective_context(
             window_session_id, dict(session), user_concept_id
         )
-        namespace = effective.get(
-            "namespace"
-        ) or chat_history_service.resolve_chat_history_namespace(user_concept_id)
+        namespace, organisation_concept_id = _resolve_history_request_scope_hints(
+            user_concept_id=user_concept_id,
+            effective_context=effective,
+        )
 
         owner_user_id, shared_invite = _resolve_shared_conversation_owner(
             user_concept_id=user_concept_id,
@@ -10852,7 +10858,11 @@ def history_telemetry_locator():
 
         owner_namespace = _derive_namespace_for_user_org(
             owner_user_id,
-            shared_invite.get("organisation_concept_id") if shared_invite else None,
+            (
+                shared_invite.get("organisation_concept_id")
+                if shared_invite
+                else organisation_concept_id
+            ),
         ) or namespace
         if not owner_namespace:
             owner_namespace = chat_history_service.resolve_chat_history_namespace(
@@ -10863,6 +10873,11 @@ def history_telemetry_locator():
             user_id=owner_user_id,
             session_id=session_id,
             namespace=owner_namespace,
+            organisation_concept_id=(
+                _normalise_concept_id(shared_invite.get("organisation_concept_id"))
+                if shared_invite
+                else organisation_concept_id
+            ),
             include_legacy=True,
         )
         locator["history_owner_user_id"] = owner_user_id
@@ -13121,6 +13136,54 @@ def _derive_namespace_for_user_org(
         )
     except Exception:
         return None
+
+
+def _clean_optional_text(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _resolve_history_request_scope_hints(
+    *, user_concept_id: str, effective_context: Mapping[str, Any]
+) -> tuple[str | None, str | None]:
+    requested_namespace = _clean_optional_text(request.args.get("namespace"))
+    requested_org = _normalise_concept_id(request.args.get("organisation_concept_id"))
+    effective_namespace = requested_namespace or _clean_optional_text(
+        effective_context.get("namespace")
+    )
+    effective_org = (
+        requested_org
+        or _normalise_concept_id(effective_context.get("organisation_id"))
+        or _normalise_concept_id(session.get("organisation_concept_id"))
+    )
+
+    if not effective_org:
+        for namespace_candidate in (
+            requested_namespace,
+            effective_context.get("namespace"),
+            session.get("namespace"),
+        ):
+            cleaned_candidate = _clean_optional_text(namespace_candidate)
+            if not cleaned_candidate or "@" not in cleaned_candidate:
+                continue
+            effective_org = _normalise_concept_id(cleaned_candidate.split("@", 1)[-1])
+            if effective_org:
+                break
+
+    derived_namespace = _derive_namespace_for_user_org(user_concept_id, effective_org)
+    if derived_namespace and (
+        not effective_namespace or "@" not in effective_namespace
+    ):
+        effective_namespace = derived_namespace
+
+    if not effective_namespace:
+        effective_namespace = chat_history_service.resolve_chat_history_namespace(
+            user_concept_id
+        )
+
+    return effective_namespace, effective_org
 
 
 def _resolve_shared_conversation_owner(

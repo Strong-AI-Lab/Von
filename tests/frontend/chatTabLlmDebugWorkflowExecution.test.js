@@ -133,7 +133,11 @@ describe('LLM debug popup workflow execution hook', () => {
             setLlmDebugDataForTurn,
             showLlmDebugPopup
         } = require(chatTabModulePath);
+        const { getCurrentUserConceptId } = require('../../src/frontend/web/von_interface/static/js/domUtils.js');
 
+        getCurrentUserConceptId.mockReturnValue('#V#test_user');
+        localStorage.setItem('von_current_user', JSON.stringify({ concept_id: '#V#test_user' }));
+        sessionStorage.setItem('von_current_org', JSON.stringify({ concept_id: '#V#org' }));
         __testOnly_setActiveChatSession('session-1718', 'Session 1718');
         global.fetch = jest.fn().mockResolvedValue({
             ok: true,
@@ -168,10 +172,13 @@ describe('LLM debug popup workflow execution hook', () => {
         const popup = document.getElementById('chatLlmDebugPopup');
         const payload = JSON.parse(popup.dataset.currentDebugData || '{}');
 
-        expect(global.fetch).toHaveBeenCalledWith(
-            '/von/history/telemetry_locator?session_id=session-1718',
-            expect.any(Object)
-        );
+        const [calledUrl] = global.fetch.mock.calls[0];
+        const parsedUrl = new URL(calledUrl, 'https://example.test');
+        expect(parsedUrl.pathname).toBe('/von/history/telemetry_locator');
+        expect(parsedUrl.searchParams.get('session_id')).toBe('session-1718');
+        expect(parsedUrl.searchParams.get('namespace')).toBe('#V#test_user@org');
+        expect(parsedUrl.searchParams.get('user_concept_id')).toBe('#V#test_user');
+        expect(parsedUrl.searchParams.get('organisation_concept_id')).toBe('#V#org');
         expect(payload.history_location).toEqual({
             session_id: 'session-1718',
             history_index: 17
