@@ -55,7 +55,7 @@ import {
     __testOnly_buildConversationLlmTelemetryLocatorPayload,
     __testOnly_buildConversationLlmTelemetryPayload,
     __testOnly_buildConversationTelemetryExportPayload,
-    __testOnly_copyConversationLlmTelemetryToClipboard,
+    __testOnly_copyConversationInfoToClipboard,
     __testOnly_clearLlmDebugData,
     __testOnly_setSessionTabsCache,
     __testOnly_setTranscriptTurns,
@@ -5373,11 +5373,12 @@ describe('conversation LLM telemetry clipboard export', () => {
         });
     });
 
-    test('keeps the full telemetry export payload unchanged for file save', () => {
+    test('wraps file-save export in a conversation info envelope', () => {
         const timestampMs = 1743760800000;
         jest.useFakeTimers().setSystemTime(Date.parse('2026-04-04T19:03:45.963Z'));
 
         try {
+            __testOnly_setActiveChatSession('session-1684', 'Session 1684');
             setLlmDebugDataForTurn('assistant-1743760800000', {
                 timestamp: timestampMs,
                 request_id: 'req-1684-full',
@@ -5395,7 +5396,12 @@ describe('conversation LLM telemetry clipboard export', () => {
             const exportPayload = __testOnly_buildConversationTelemetryExportPayload();
             const locatorPayload = __testOnly_buildConversationLlmTelemetryLocatorPayload();
 
-            expect(exportPayload).toEqual(fullPayload);
+            expect(exportPayload.schema_version).toBe('conversation_info_export.v1');
+            expect(exportPayload.session_id).toBe('session-1684');
+            expect(exportPayload.session_name).toBe('Session 1684');
+            expect(exportPayload.conversation_locator).toEqual(locatorPayload);
+            expect(exportPayload.detailed_turn_telemetry).toEqual(fullPayload);
+            expect(exportPayload.transcript_snapshot).toBeTruthy();
             expect(fullPayload.schema_version).toBe('conversation_llm_telemetry.v1');
             expect(fullPayload.turns[0].debug_data).toBeTruthy();
             expect(fullPayload.turns[0].debug_data.model).toBe('gpt-5');
@@ -5442,6 +5448,7 @@ describe('conversation LLM telemetry clipboard export', () => {
         __testOnly_setTranscriptTurns([
             { sender: 'assistant', message: 'Hydrate me' }
         ]);
+        __testOnly_setActiveChatSession('session-1684', 'Session 1684');
         setLlmDebugDataForTurn('history-assistant-12', {
             history_location: {
                 session_id: 'session-1684',
@@ -5449,7 +5456,7 @@ describe('conversation LLM telemetry clipboard export', () => {
             }
         });
 
-        const copied = await __testOnly_copyConversationLlmTelemetryToClipboard();
+        const copied = await __testOnly_copyConversationInfoToClipboard();
         const copiedPayload = JSON.parse(writeText.mock.calls[0][0]);
 
         expect(copied).toBe(true);
@@ -5492,7 +5499,9 @@ describe('conversation LLM telemetry clipboard export', () => {
             ]
         });
 
-        const copied = await __testOnly_copyConversationLlmTelemetryToClipboard();
+        __testOnly_setActiveChatSession('session-1684', 'Session 1684');
+
+        const copied = await __testOnly_copyConversationInfoToClipboard();
         const copiedPayload = JSON.parse(writeText.mock.calls[0][0]);
         const fullPayload = __testOnly_buildConversationTelemetryExportPayload();
 
@@ -5505,18 +5514,22 @@ describe('conversation LLM telemetry clipboard export', () => {
             history_index: 9
         });
         expect(copiedPayload.turns[0].debug_data).toBeUndefined();
-        expect(fullPayload.turns[0].debug_data).toBeTruthy();
-        expect(fullPayload.turns[0].debug_data.tool_invocations).toBeTruthy();
+        expect(fullPayload.conversation_locator.turns[0].debug_data).toBeUndefined();
+        expect(fullPayload.detailed_turn_telemetry.turns[0].debug_data).toBeTruthy();
+        expect(fullPayload.detailed_turn_telemetry.turns[0].debug_data.tool_invocations).toBeTruthy();
     });
 
-    test('fails gracefully when no conversation telemetry is available', async () => {
+    test('fails gracefully when no conversation info is available', async () => {
         const writeText = jest.fn().mockResolvedValue(undefined);
         Object.assign(navigator, {
             clipboard: { writeText }
         });
 
+        __testOnly_setActiveChatSession(null, null);
+        __testOnly_setTranscriptTurns([]);
+        __testOnly_clearLlmDebugData();
         const payload = __testOnly_buildConversationLlmTelemetryLocatorPayload();
-        const copied = await __testOnly_copyConversationLlmTelemetryToClipboard();
+        const copied = await __testOnly_copyConversationInfoToClipboard();
 
         expect(payload).toBeNull();
         expect(copied).toBe(false);

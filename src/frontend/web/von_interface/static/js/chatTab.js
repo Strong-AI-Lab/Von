@@ -70,10 +70,11 @@ function buildChatFetchHeaders(extraHeaders = {}) {
 // Store LLM debug data for each turn
 const llmDebugData = new Map();
 const llmDebugFetchInFlight = new Map();
-const CONVERSATION_LLM_COPY_BUTTON_ID = 'copyConversationLlmDebugJsonBtn';
-const CONVERSATION_LLM_COPY_BUTTON_LABEL = 'LLM ℹ';
-const CONVERSATION_LLM_COPY_BUTTON_TITLE_READY = 'Copy compact conversation telemetry locator JSON';
-const CONVERSATION_LLM_COPY_BUTTON_TITLE_DISABLED = 'Conversation telemetry handles are not available yet';
+const CONVERSATION_INFO_COPY_BUTTON_ID = 'copyConversationInfoJsonBtn';
+const CONVERSATION_INFO_COPY_BUTTON_LABEL = 'ℹ';
+const CONVERSATION_INFO_COPY_BUTTON_TITLE_READY = 'Copy conversation info as JSON';
+const CONVERSATION_INFO_COPY_BUTTON_TITLE_DISABLED = 'Conversation info is not available yet';
+const CONVERSATION_INFO_EXPORT_SCHEMA_VERSION = 'conversation_info_export.v1';
 const CONVERSATION_LLM_TELEMETRY_SCHEMA_VERSION = 'conversation_llm_telemetry.v1';
 const CONVERSATION_LLM_TELEMETRY_LOCATOR_SCHEMA_VERSION = 'conversation_llm_telemetry_locator.v1';
 const TURN_TELEMETRY_LOCATOR_SCHEMA_VERSION = 'turn_telemetry_locator.v1';
@@ -241,12 +242,12 @@ function setLlmDebugDataEntry(turnId, debugData) {
         return;
     }
     llmDebugData.set(turnId, debugData);
-    refreshConversationLlmCopyButtonState();
+    refreshConversationInfoCopyButtonState();
 }
 
 function clearLlmDebugDataEntries() {
     llmDebugData.clear();
-    refreshConversationLlmCopyButtonState();
+    refreshConversationInfoCopyButtonState();
 }
 
 function isDocumentVisibleForRealtimeConnections() {
@@ -631,8 +632,7 @@ async function deleteConversation(sessionId) {
             if (nextSession) {
                 await switchToChatSession(nextSession.session_id);
             } else {
-                activeChatSessionId = null;
-                activeChatSessionName = null;
+                setActiveChatSession(null, null);
             }
         }
         renderChatSessionTabs(sessionTabsCache, activeChatSessionId);
@@ -13176,6 +13176,8 @@ function setActiveChatSession(sessionId, sessionName) {
             disabled: activeChatSessionLinks?.disabled
         });
     }
+
+    refreshConversationInfoCopyButtonState();
 }
 
 function getChatSessionTabsContainer() {
@@ -13463,8 +13465,7 @@ async function promptMoveToOrganisation(sessionId) {
                 if (nextSession) {
                     await switchToChatSession(nextSession.session_id);
                 } else {
-                    activeChatSessionId = null;
-                    activeChatSessionName = null;
+                    setActiveChatSession(null, null);
                     _clearChatSessionMetadata();
                 }
             }
@@ -19684,9 +19685,7 @@ async function handleOrgSwitchForChatTab(_detail) {
     // JVNAUTOSCI-1011: Clear the active session and chat display on org switch
     // to prevent showing data from the previous org
     const previousSessionId = activeChatSessionId;
-    activeChatSessionId = null;
-    activeChatSessionName = null;
-    activeChatSessionOwnerId = null;
+    setActiveChatSession(null, null);
     displayedHistorySessionId = null;
     clearHistoryLoadState();
 
@@ -19853,7 +19852,7 @@ export function initializeChatTab() {
     const dictateButton = document.getElementById('dictateButton');
     const ttsToggle = document.getElementById('ttsToggle');
     const exportConversationJsonBtn = document.getElementById('exportConversationJsonBtn');
-    const copyConversationLlmDebugJsonBtn = document.getElementById(CONVERSATION_LLM_COPY_BUTTON_ID);
+    const copyConversationInfoJsonBtn = document.getElementById(CONVERSATION_INFO_COPY_BUTTON_ID);
     const exportConversationMarkdownBtn = document.getElementById('exportConversationMarkdownBtn');
     const uploadFileButton = document.getElementById('uploadFileButton');
     const uploadFileInput = document.getElementById('uploadFileInput');
@@ -20027,15 +20026,15 @@ export function initializeChatTab() {
     if (exportConversationJsonBtn) {
         exportConversationJsonBtn.addEventListener('click', handleExportConversationJson);
     }
-    if (copyConversationLlmDebugJsonBtn) {
-        copyConversationLlmDebugJsonBtn.addEventListener('click', () => {
-            void handleCopyConversationLlmTelemetryJson();
+    if (copyConversationInfoJsonBtn) {
+        copyConversationInfoJsonBtn.addEventListener('click', () => {
+            void handleCopyConversationInfoJson();
         });
     }
     if (exportConversationMarkdownBtn) {
         exportConversationMarkdownBtn.addEventListener('click', handleExportConversationMarkdown);
     }
-    refreshConversationLlmCopyButtonState();
+    refreshConversationInfoCopyButtonState();
 
     if (inviteButton) {
         inviteButton.addEventListener('click', openInvitePopup);
@@ -22423,10 +22422,10 @@ async function showLlmDebugPopup(turnId, options = {}) {
     }
 }
 
-// Handle export full conversation JSON
-function buildConversationTelemetryExportFilename() {
+// Handle export conversation info JSON
+function buildConversationInfoExportFilename() {
     const timestamp = new Date().toISOString().replace(/:/g, '-').replace(/\.\d{3}Z$/, 'Z');
-    return `von_conversation_telemetry_${timestamp}.json`;
+    return `von_conversation_info_${timestamp}.json`;
 }
 
 function parseTurnTimestampMs(value) {
@@ -22865,6 +22864,19 @@ function countAssistantTranscriptTurns() {
     }).length;
 }
 
+function hasConversationInfoContext() {
+    if (typeof activeChatSessionId === 'string' && activeChatSessionId.trim()) {
+        return true;
+    }
+    if (typeof activeChatSessionName === 'string' && activeChatSessionName.trim()) {
+        return true;
+    }
+    if (llmDebugData.size > 0) {
+        return true;
+    }
+    return Array.isArray(transcriptTurns) && transcriptTurns.length > 0;
+}
+
 async function hydrateConversationTelemetryLocatorEntries() {
     const hydrationPromises = [];
 
@@ -23008,7 +23020,7 @@ async function hydrateTurnHistoryLocationFromConversationLocator(turnId, debugDa
 }
 
 function buildConversationLlmTelemetryLocatorPayload() {
-    if (llmDebugData.size === 0) {
+    if (!hasConversationInfoContext()) {
         return null;
     }
 
@@ -23016,6 +23028,10 @@ function buildConversationLlmTelemetryLocatorPayload() {
     const transcriptTurnCount = Array.isArray(transcriptTurns) ? transcriptTurns.length : 0;
     const assistantTranscriptTurnCount = countAssistantTranscriptTurns();
     const missingAssistantTurnTelemetryCount = Math.max(0, assistantTranscriptTurnCount - sortedEntries.length);
+    const sessionId = typeof activeChatSessionId === 'string' && activeChatSessionId.trim()
+        ? activeChatSessionId.trim()
+        : null;
+    const namespaceContext = buildConversationTelemetryNamespaceContext();
 
     let turnsWithHistoryLocationCount = 0;
     let turnsWithRequestIdCount = 0;
@@ -23079,12 +23095,45 @@ function buildConversationLlmTelemetryLocatorPayload() {
         return turnPayload;
     });
 
+    const mcpAccess = {};
+    if (sessionId) {
+        mcpAccess.conversation_telemetry_get_locator = buildMcpToolAccess(
+            'conversation_telemetry_get_locator',
+            {
+                session_id: sessionId,
+                namespace: namespaceContext.namespace || null,
+                user_concept_id: namespaceContext.user_id || null,
+                organisation_concept_id: namespaceContext.org_id || null
+            },
+            'Fetch the authoritative server-side conversation telemetry locator.'
+        );
+        mcpAccess.chat_history_get_segments = buildMcpToolAccess(
+            'chat_history_get_segments',
+            {
+                session_id: sessionId,
+                namespace: namespaceContext.namespace || null,
+                user_concept_id: namespaceContext.user_id || null,
+                organisation_concept_id: namespaceContext.org_id || null,
+                include_debug: true
+            },
+            'Fetch the stored transcript segments and embedded debug payloads for this session.'
+        );
+        mcpAccess.turn_execution_list = buildMcpToolAccess(
+            'turn_execution_list',
+            {
+                session_id: sessionId,
+                namespace: namespaceContext.namespace || null
+            },
+            'List turn-execution records for this conversation.'
+        );
+    }
+
     return {
         schema_version: CONVERSATION_LLM_TELEMETRY_LOCATOR_SCHEMA_VERSION,
         generated_at_utc: new Date().toISOString(),
-        session_id: activeChatSessionId || null,
+        session_id: sessionId,
         session_name: activeChatSessionName || null,
-        namespace_context: buildConversationTelemetryNamespaceContext(),
+        namespace_context: namespaceContext,
         metadata: {
             total_turns: turns.length,
             llm_debug_turn_count: llmDebugData.size,
@@ -23097,37 +23146,7 @@ function buildConversationLlmTelemetryLocatorPayload() {
             turns_with_unavailable_locator_fields_count: turnsWithUnavailableLocatorFieldsCount,
             ordering: 'timestamp_then_turn_id'
         },
-        mcp_access: {
-            conversation_telemetry_get_locator: buildMcpToolAccess(
-                'conversation_telemetry_get_locator',
-                {
-                    session_id: activeChatSessionId || null,
-                    namespace: buildConversationTelemetryNamespaceContext().namespace || null,
-                    user_concept_id: buildConversationTelemetryNamespaceContext().user_id || null,
-                    organisation_concept_id: buildConversationTelemetryNamespaceContext().org_id || null
-                },
-                'Fetch the authoritative server-side conversation telemetry locator.'
-            ),
-            chat_history_get_segments: buildMcpToolAccess(
-                'chat_history_get_segments',
-                {
-                    session_id: activeChatSessionId || null,
-                    namespace: buildConversationTelemetryNamespaceContext().namespace || null,
-                    user_concept_id: buildConversationTelemetryNamespaceContext().user_id || null,
-                    organisation_concept_id: buildConversationTelemetryNamespaceContext().org_id || null,
-                    include_debug: true
-                },
-                'Fetch the stored transcript segments and embedded debug payloads for this session.'
-            ),
-            turn_execution_list: buildMcpToolAccess(
-                'turn_execution_list',
-                {
-                    session_id: activeChatSessionId || null,
-                    namespace: buildConversationTelemetryNamespaceContext().namespace || null
-                },
-                'List turn-execution records for this conversation.'
-            )
-        },
+        mcp_access: mcpAccess,
         turns
     };
 }
@@ -23197,37 +23216,62 @@ function buildConversationTranscriptFallbackPayload() {
 }
 
 function buildConversationTelemetryExportPayload() {
-    return buildConversationLlmTelemetryPayload() || buildConversationTranscriptFallbackPayload();
+    const locatorPayload = buildConversationLlmTelemetryLocatorPayload();
+    const detailedTelemetry = buildConversationLlmTelemetryPayload();
+    const transcriptSnapshot = buildConversationTranscriptFallbackPayload();
+
+    if (!locatorPayload) {
+        return detailedTelemetry || transcriptSnapshot;
+    }
+
+    return {
+        schema_version: CONVERSATION_INFO_EXPORT_SCHEMA_VERSION,
+        generated_at_utc: new Date().toISOString(),
+        session_id: locatorPayload.session_id || null,
+        session_name: locatorPayload.session_name || null,
+        namespace_context: locatorPayload.namespace_context || buildConversationTelemetryNamespaceContext(),
+        metadata: {
+            ...(locatorPayload.metadata || {}),
+            locator_schema_version: locatorPayload.schema_version || null,
+            locator_generated_at_utc: locatorPayload.generated_at_utc || null,
+            includes_detailed_turn_telemetry: !!detailedTelemetry,
+            includes_transcript_snapshot: !!transcriptSnapshot
+        },
+        conversation_locator: locatorPayload,
+        detailed_turn_telemetry: detailedTelemetry,
+        transcript_snapshot: transcriptSnapshot
+    };
 }
 
-function refreshConversationLlmCopyButtonState() {
-    const button = document.getElementById(CONVERSATION_LLM_COPY_BUTTON_ID);
+function refreshConversationInfoCopyButtonState() {
+    const button = document.getElementById(CONVERSATION_INFO_COPY_BUTTON_ID);
     if (!(button instanceof HTMLButtonElement)) {
         return;
     }
 
-    const hasTelemetry = llmDebugData.size > 0;
-    button.disabled = !hasTelemetry;
-    button.setAttribute('aria-disabled', hasTelemetry ? 'false' : 'true');
+    const hasConversationInfo = hasConversationInfoContext();
+    button.disabled = !hasConversationInfo;
+    button.setAttribute('aria-disabled', hasConversationInfo ? 'false' : 'true');
     button.setAttribute(
         'title',
-        hasTelemetry ? CONVERSATION_LLM_COPY_BUTTON_TITLE_READY : CONVERSATION_LLM_COPY_BUTTON_TITLE_DISABLED
+        hasConversationInfo ? CONVERSATION_INFO_COPY_BUTTON_TITLE_READY : CONVERSATION_INFO_COPY_BUTTON_TITLE_DISABLED
     );
+    button.setAttribute('aria-label', CONVERSATION_INFO_COPY_BUTTON_TITLE_READY);
 
-    if (hasTelemetry) {
+    if (hasConversationInfo) {
         resetCopyJsonButtonPreCopyState(button);
     }
 }
 
-async function copyConversationLlmTelemetryToClipboard(button = null) {
+async function copyConversationInfoToClipboard(button = null) {
     let payload = await fetchConversationTelemetryLocatorPayload(activeChatSessionId);
     if (!payload) {
         await hydrateConversationTelemetryLocatorEntries();
         payload = buildConversationLlmTelemetryLocatorPayload();
     }
     if (!payload) {
-        showToast('No conversation-level LLM telemetry is available yet.', 'info');
-        refreshConversationLlmCopyButtonState();
+        showToast('No conversation info is available yet.', 'info');
+        refreshConversationInfoCopyButtonState();
         return false;
     }
 
@@ -23235,33 +23279,33 @@ async function copyConversationLlmTelemetryToClipboard(button = null) {
     try {
         jsonText = JSON.stringify(payload, null, 2);
     } catch (err) {
-        console.error('[chatTab] Failed to serialize conversation LLM telemetry:', err);
-        showToast('Failed to prepare conversation telemetry locator JSON.', 'error');
+        console.error('[chatTab] Failed to serialize conversation info:', err);
+        showToast('Failed to prepare conversation info JSON.', 'error');
         return false;
     }
 
     const copied = (button instanceof HTMLButtonElement)
         ? await copyJsonTextWithButtonFeedback(button, jsonText, {
-            fallbackLabel: CONVERSATION_LLM_COPY_BUTTON_LABEL
+            fallbackLabel: CONVERSATION_INFO_COPY_BUTTON_LABEL
         })
         : await copyTextToClipboard(jsonText);
 
     if (!copied) {
-        showToast('Failed to copy conversation telemetry locator JSON.', 'error');
+        showToast('Failed to copy conversation info JSON.', 'error');
         return false;
     }
 
     if (payload.metadata?.has_partial_telemetry) {
-        showToast('Copied conversation telemetry locator JSON (partial coverage).', 'info');
+        showToast('Copied conversation info JSON (partial telemetry coverage).', 'info');
     } else {
-        showToast('Copied conversation telemetry locator JSON.', 'success');
+        showToast('Copied conversation info JSON.', 'success');
     }
     return true;
 }
 
-async function handleCopyConversationLlmTelemetryJson() {
-    const button = document.getElementById(CONVERSATION_LLM_COPY_BUTTON_ID);
-    return copyConversationLlmTelemetryToClipboard(button);
+async function handleCopyConversationInfoJson() {
+    const button = document.getElementById(CONVERSATION_INFO_COPY_BUTTON_ID);
+    return copyConversationInfoToClipboard(button);
 }
 
 async function handleExportConversationJson() {
@@ -23275,12 +23319,14 @@ async function handleExportConversationJson() {
 
     try {
         const result = await saveJsonTextViaDialog(jsonString, {
-            suggestedName: buildConversationTelemetryExportFilename()
+            suggestedName: buildConversationInfoExportFilename()
         });
 
         if (result?.saved) {
-            console.log('[chatTab] Saved conversation telemetry JSON:', {
-                turns: conversationData.turns.length,
+            console.log('[chatTab] Saved conversation info JSON:', {
+                turns: Array.isArray(conversationData?.conversation_locator?.turns)
+                    ? conversationData.conversation_locator.turns.length
+                    : (Array.isArray(conversationData?.turns) ? conversationData.turns.length : 0),
                 method: result.method,
                 filename: result.filename
             });
@@ -23292,10 +23338,10 @@ async function handleExportConversationJson() {
             return;
         }
 
-        console.error('[chatTab] Failed to save conversation telemetry JSON:', result?.error);
+        console.error('[chatTab] Failed to save conversation info JSON:', result?.error);
         indicateClipboardResult(button, originalContent, false);
     } catch (error) {
-        console.error('[chatTab] Unexpected error while saving conversation telemetry JSON:', error);
+        console.error('[chatTab] Unexpected error while saving conversation info JSON:', error);
         indicateClipboardResult(button, originalContent, false);
     }
 }
@@ -23543,11 +23589,11 @@ export function __testOnly_buildConversationLlmTelemetryLocatorPayload() {
 export function __testOnly_buildConversationTelemetryExportPayload() {
     return buildConversationTelemetryExportPayload();
 }
-export function __testOnly_refreshConversationLlmCopyButtonState() {
-    refreshConversationLlmCopyButtonState();
+export function __testOnly_refreshConversationInfoCopyButtonState() {
+    refreshConversationInfoCopyButtonState();
 }
-export async function __testOnly_copyConversationLlmTelemetryToClipboard(button = null) {
-    return copyConversationLlmTelemetryToClipboard(button);
+export async function __testOnly_copyConversationInfoToClipboard(button = null) {
+    return copyConversationInfoToClipboard(button);
 }
 export function __testOnly_clearLlmDebugData() {
     clearLlmDebugDataEntries();

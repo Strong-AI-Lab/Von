@@ -6,6 +6,7 @@ const COPY_JSON_BOUND_ATTR = 'data-copy-json-bound';
 const COPY_JSON_ROLE_ATTR = 'data-copy-json-role';
 const COPY_JSON_ORIGINAL_LABEL_ATTR = 'data-copy-json-original-label';
 const COPY_JSON_ORIGINAL_TITLE_ATTR = 'data-copy-json-original-title';
+const COPY_JSON_ORIGINAL_ARIA_LABEL_ATTR = 'data-copy-json-original-aria-label';
 const COPY_JSON_DEFAULT_LABEL = 'Copy JSON';
 
 let copyJsonObserver = null;
@@ -40,6 +41,12 @@ function rememberCopyJsonButtonOriginals(button) {
         const title = String(button.getAttribute('title') || '').trim();
         if (title) {
             button.setAttribute(COPY_JSON_ORIGINAL_TITLE_ATTR, title);
+        }
+    }
+    if (!button.getAttribute(COPY_JSON_ORIGINAL_ARIA_LABEL_ATTR)) {
+        const ariaLabel = String(button.getAttribute('aria-label') || '').trim();
+        if (ariaLabel) {
+            button.setAttribute(COPY_JSON_ORIGINAL_ARIA_LABEL_ATTR, ariaLabel);
         }
     }
 }
@@ -79,7 +86,12 @@ function restoreCopyJsonButtonVisuals(button, fallbackLabel = COPY_JSON_DEFAULT_
     } else {
         button.setAttribute('title', originalLabel);
     }
-    button.setAttribute('aria-label', originalLabel);
+    const originalAriaLabel = button.getAttribute(COPY_JSON_ORIGINAL_ARIA_LABEL_ATTR);
+    if (originalAriaLabel && originalAriaLabel.trim()) {
+        button.setAttribute('aria-label', originalAriaLabel.trim());
+    } else {
+        button.setAttribute('aria-label', originalLabel);
+    }
 }
 
 function markCopyJsonButtonPending(button) {
