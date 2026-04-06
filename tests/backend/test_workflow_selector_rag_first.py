@@ -261,6 +261,38 @@ class TestRagFirstPrompt:
         assert "executable" in prompt.candidate_list_text
         assert "policy safe" in prompt.candidate_list_text
 
+    def test_prompt_carries_routing_role_and_workflow_context_requirement(self):
+        selector = _build_selector()
+        prompt = selector.prepare_selection_prompt(
+            turn_text="Run the workflow test on this arXiv URL",
+            discovered_workflows=[
+                {
+                    "concept_id": "#V#arxiv_paper_ingestion_testing_workflow",
+                    "name": "Arxiv Paper Ingestion Testing Workflow",
+                    "description": "Run the canonical arXiv ingestion workflow as a test.",
+                    "candidate_source": "workflow_discovery",
+                    "routing_profile_role": "maintenance",
+                    "routing_policy_flags": {
+                        "authoring_intent_required": False,
+                        "explicit_workflow_context_required": True,
+                        "prefer_existing_capability": False,
+                    },
+                    "routing_eligible": True,
+                    "is_executable": True,
+                }
+            ],
+        )
+
+        assert prompt.candidate_list_text is not None
+        assert "routing role maintenance" in prompt.candidate_list_text
+        assert "requires workflow context" in prompt.candidate_list_text
+        assert prompt.candidate_entries[0]["routing_profile_role"] == "maintenance"
+        assert prompt.candidate_entries[0]["routing_policy_flags"] == {
+            "authoring_intent_required": False,
+            "explicit_workflow_context_required": True,
+            "prefer_existing_capability": False,
+        }
+
     def test_prompt_includes_turn_text(self):
         selector = _build_selector()
         prompt = selector.prepare_selection_prompt(

@@ -159,6 +159,12 @@ class WorkflowSelector:
         if confidence:
             evidence_items.append(f"confidence {confidence}")
 
+        routing_role = cls._humanise_candidate_signal(
+            entry_row.get("routing_profile_role")
+        )
+        if routing_role:
+            evidence_items.append(f"routing role {routing_role}")
+
         if entry_row.get("routing_eligible") is True:
             evidence_items.append("routing eligible")
         elif entry_row.get("routing_eligible") is False:
@@ -185,6 +191,15 @@ class WorkflowSelector:
             evidence_items.append("policy safe")
         elif entry_row.get("is_policy_safe") is False:
             evidence_items.append("policy unsafe")
+
+        policy_flags = entry_row.get("routing_policy_flags")
+        if isinstance(policy_flags, Mapping):
+            if bool(policy_flags.get("authoring_intent_required")):
+                evidence_items.append("requires authoring intent")
+            if bool(policy_flags.get("explicit_workflow_context_required")):
+                evidence_items.append("requires workflow context")
+            if bool(policy_flags.get("prefer_existing_capability")):
+                evidence_items.append("prefer existing capability")
 
         if policy_score is not None and policy_active:
             evidence_items.extend(
@@ -483,6 +498,8 @@ class WorkflowSelector:
                     "executability_reason",
                     "executability_detail",
                     "routing_exclusion_reason",
+                    "routing_profile_role",
+                    "routing_profile_role_source",
                     "candidate_source",
                     "candidate_reason",
                 ):
@@ -509,6 +526,18 @@ class WorkflowSelector:
                     value = wf.get(field_name)
                     if isinstance(value, bool):
                         entry[field_name] = value
+                for field_name in (
+                    "routing_profile",
+                    "routing_policy_flags",
+                    "routing_policy_lexical_signals",
+                ):
+                    value = wf.get(field_name)
+                    if isinstance(value, Mapping):
+                        entry[field_name] = {
+                            str(key): nested_value
+                            for key, nested_value in value.items()
+                            if isinstance(key, str)
+                        }
                 candidate_entries.append(entry)
 
         policy_recommendation = self._normalise_policy_recommendation(

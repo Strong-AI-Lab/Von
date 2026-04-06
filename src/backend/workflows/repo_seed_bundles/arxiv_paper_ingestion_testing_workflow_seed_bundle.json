@@ -46,7 +46,7 @@
       "text_relations": [
         {
           "predicate": "#V#hasWorkflowRoutingProfileJson",
-          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"testing\",\"authoring_intent_required\":false,\"prefer_existing_capability\":false}",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"testing\",\"authoring_intent_required\":false,\"explicit_workflow_context_required\":true,\"prefer_existing_capability\":false}",
           "lang": "en-NZ"
         },
         {

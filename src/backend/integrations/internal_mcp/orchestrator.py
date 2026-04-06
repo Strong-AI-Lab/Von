@@ -20449,17 +20449,13 @@ class InternalMCPChatOrchestrator:
                 item["routing_exclusion_reason"] = "policy_unsafe_not_registered"
                 excluded.append(item)
                 continue
-            if (
-                item.get("routing_profile_role") == "authoring"
-                and not bool(policy_assessment.get("suitable", True))
-                and str(policy_assessment.get("suitability_reason") or "").strip()
-                == "authoring_intent_required_by_workflow_profile"
-            ):
+            suitability_reason = str(
+                policy_assessment.get("suitability_reason") or ""
+            ).strip()
+            if not bool(policy_assessment.get("suitable", True)) and suitability_reason:
                 item["routing_eligible"] = False
                 item["candidate_reason"] = "discovered_workflow_excluded"
-                item["routing_exclusion_reason"] = (
-                    "authoring_intent_required_by_workflow_profile"
-                )
+                item["routing_exclusion_reason"] = suitability_reason
                 excluded.append(item)
                 continue
 
