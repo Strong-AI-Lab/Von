@@ -36,6 +36,7 @@ import {
     __testOnly_scrollConversationToEnd,
     __testOnly_setLatestUnreadBoundary,
     __testOnly_showNewSharedMessagesIndicator,
+    __testOnly_appendMessage,
     __testOnly_updateScrollToEndButtonVisibility,
     __testOnly_reduceThinkingCardDisplayState,
     __testOnly_copyActiveThinkingDiagnostics,
@@ -3696,6 +3697,47 @@ describe('chat cartouche hydration retries', () => {
         await flushMicrotasks();
 
         expect(nameEl.textContent).toBe('Literary Work');
+    });
+});
+
+describe('chat message layout hooks', () => {
+    beforeEach(() => {
+        document.body.innerHTML = `
+            <div id="chatTab">
+                <div class="content-wrapper">
+                    <div id="scrollableField"></div>
+                </div>
+            </div>
+        `;
+        __testOnly_clearLlmDebugData();
+    });
+
+    test('renders assistant turns with chat layout classes for wide wrapping', () => {
+        __testOnly_appendMessage(
+            'Von',
+            'A recommendation with a very long title and a long explanation body.',
+            'turn-assistant-layout'
+        );
+
+        const messageContainer = document.querySelector('.message-container.assistant-turn');
+        expect(messageContainer).toBeTruthy();
+        expect(messageContainer.querySelector('.message-body')).toBeTruthy();
+        expect(messageContainer.querySelector('.message-header')).toBeTruthy();
+        expect(messageContainer.querySelector('.chat-message-controls')).toBeTruthy();
+        expect(messageContainer.querySelector('.chat-message-text')).toBeTruthy();
+    });
+
+    test('renders user turns with the shared message header/text layout hooks', () => {
+        __testOnly_appendMessage(
+            'User',
+            'A user prompt containing a long inline concept reference.',
+            'turn-user-layout'
+        );
+
+        const messageContainer = document.querySelector('.message-container.user-turn');
+        expect(messageContainer).toBeTruthy();
+        expect(messageContainer.querySelector('.message-header')).toBeTruthy();
+        expect(messageContainer.querySelector('.chat-message-text')).toBeTruthy();
     });
 });
 

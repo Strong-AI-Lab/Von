@@ -21341,6 +21341,7 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             const messageContainer = document.createElement('div');
             messageContainer.style.cssText = 'display: flex; align-items: flex-start; margin-bottom: 15px; padding: 10px; background-color: #f8f9fa; border-radius: 8px; border-left: 4px solid #007bff;';
             messageContainer.className = 'message-container';
+            messageContainer.classList.add('assistant-turn');
             // Add Von's image
             const vonImage = document.createElement('img');
             vonImage.src = '/static/VonImageBig.png';
@@ -21349,10 +21350,11 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
 
             // Add message content
             const messageContent = document.createElement('div');
+            messageContent.className = 'message-body';
             // IMPORTANT: in a flex row, children default to min-width:auto, which can
             // force horizontal overflow and clip the header control buttons when the
             // left header text is long. min-width:0 allows proper wrapping/shrinking.
-            messageContent.style.cssText = 'flex: 1; min-width: 0; line-height: 1.5;';
+            messageContent.style.cssText = 'flex: 1 1 auto; min-width: 0; line-height: 1.5;';
 
             const rawText = String(message ?? '');
 
@@ -21437,7 +21439,8 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             }
 
             const messageHeader = document.createElement('div');
-            messageHeader.style.cssText = 'font-weight: bold; color: #007bff; margin-bottom: 5px; font-size: 0.9em; display: flex; flex-wrap: wrap; align-items: center; gap: 8px;';
+            messageHeader.className = 'message-header';
+            messageHeader.style.cssText = 'font-weight: bold; color: #007bff; margin-bottom: 5px; font-size: 0.9em; display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; min-width: 0;';
 
             const headerText = document.createElement('span');
             headerText.textContent = `Von • ${displayTimestamp}${historySuffix}`;
@@ -21565,7 +21568,7 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
 
             const rightControls = document.createElement('span');
             rightControls.className = 'chat-message-controls';
-            rightControls.style.cssText = 'margin-left: auto; display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto;';
+            rightControls.style.cssText = 'margin-left: auto; display: inline-flex; align-items: center; gap: 6px; flex: 0 1 auto; flex-wrap: wrap; justify-content: flex-end; max-width: 100%;';
 
             const showTtsNotice = (text, options = {}) => {
                 const msg = String(text ?? '').trim();
@@ -21692,7 +21695,8 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             rightControls.appendChild(speakButton);
 
             const messageText = document.createElement('div');
-            messageText.style.cssText = 'color: #333; white-space: pre-wrap; text-align: left; font-weight: 400; overflow-wrap: anywhere; word-break: break-word;';
+            messageText.className = 'chat-message-text';
+            messageText.style.cssText = 'color: #333; white-space: pre-wrap; text-align: left; font-weight: 400; overflow-wrap: anywhere; word-break: break-word; min-width: 0;';
             try {
                 const debugData = turnId ? llmDebugData.get(turnId) : null;
                 const canRenderMarkdown = shouldRenderMarkdownForAssistant(rawText, debugData);
@@ -21789,6 +21793,7 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             const messageContainer = document.createElement('div');
             messageContainer.style.cssText = 'margin-bottom: 15px; padding: 10px; background-color: #fff; border-radius: 8px; border-left: 4px solid #28a745;';
             messageContainer.className = 'message-container';
+            messageContainer.classList.add(sender === 'Error' ? 'error-turn' : 'user-turn');
 
             if (sender === 'Error') {
                 messageContainer.style.borderLeftColor = '#dc3545';
@@ -21796,7 +21801,8 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             }
 
             const messageHeader = document.createElement('div');
-            messageHeader.style.cssText = 'font-weight: bold; margin-bottom: 5px; font-size: 0.9em; display: flex; align-items: center; gap: 8px;';
+            messageHeader.className = 'message-header';
+            messageHeader.style.cssText = 'font-weight: bold; margin-bottom: 5px; font-size: 0.9em; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0;';
             messageHeader.style.color = sender === 'Error' ? '#dc3545' : '#28a745';
 
             const headerText = document.createElement('span');
@@ -21859,7 +21865,8 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             }
 
             const messageText = document.createElement('div');
-            messageText.style.cssText = 'color: #333; white-space: pre-wrap; text-align: left; font-weight: 400;';
+            messageText.className = 'chat-message-text';
+            messageText.style.cssText = 'color: #333; white-space: pre-wrap; text-align: left; font-weight: 400; overflow-wrap: anywhere; word-break: break-word; min-width: 0;';
             const userText = String(message ?? '');
             const shouldRenderUserMarkdown = sender === 'User' && detectMarkdown(userText);
             if (shouldRenderUserMarkdown) {
@@ -23546,6 +23553,9 @@ export function __testOnly_updateScrollToEndButtonVisibility(scrollableField = n
 }
 export function __testOnly_scrollConversationToEnd(scrollableField, options = {}) {
     return scrollConversationToEnd(scrollableField, options);
+}
+export function __testOnly_appendMessage(...args) {
+    return appendMessage(...args);
 }
 
 // Export for testing.
