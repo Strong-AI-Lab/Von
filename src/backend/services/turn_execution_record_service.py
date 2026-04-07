@@ -4230,7 +4230,7 @@ def build_turn_execution_record(
     selected_workflow_trace: Mapping[str, Any] | None = None,
     critic_verdict: Mapping[str, Any] | None = None,
     completion_gate_verdict: Mapping[str, Any] | None = None,
-    arxiv_completion_report: Mapping[str, Any] | None = None,
+    completion_report: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     resolved_actor_concept_id, actor_identity_source = _resolve_actor_concept_identity(
         actor_concept_id=actor_concept_id,
@@ -4480,7 +4480,7 @@ def build_turn_execution_record(
         },
         "completion_gate": completion_gate,
         "completion_gate_verdict": completion_gate_verdict,
-        "arxiv_completion_report": arxiv_completion_report,
+        "completion_report": completion_report,
         "final_response": {
             "response_sha256": _hash_text(response_text),
             "completion_claim_detected": bool(completion_claim["detected"]),

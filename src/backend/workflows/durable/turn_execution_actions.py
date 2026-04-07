@@ -25,7 +25,6 @@ logger = logging.getLogger(__name__)
 
 TURN_EXECUTION_ROUTE_ACTION_ID = "turn_execution.route"
 TURN_EXECUTION_EXECUTE_SELECTED_ACTION_ID = "turn_execution.execute_selected"
-TURN_EXECUTION_NARRATE_ACTION_ID = "turn_execution.narrate"
 TURN_EXECUTION_CRITIC_ACTION_ID = "turn_execution.critic"
 TURN_EXECUTION_COMPLETION_GATE_ACTION_ID = "turn_execution.completion_gate"
 
@@ -33,25 +32,31 @@ TURN_EXECUTION_COMPLETION_GATE_ACTION_ID = "turn_execution.completion_gate"
 def _build_turn_execution_route_handler() -> Any:
     def _handle(request: WorkflowActionRequest) -> WorkflowActionResult:
         """Resolve the workflow routing for the current turn."""
-        from ...integrations.internal_mcp.orchestrator import (
-            WorkflowRoutingInfo,
-        )
-        from ...server.routes.von_routes import (
-            assess_workflow_routing_candidate_policy,
+        from ...services.workflow_discovery_service import (
+            discover_workflows_for_turn,
         )
 
         # 1. Use existing discovery results if provided, else perform discovery
         discovery = request.data.get("workflow_discovery")
         prompt = request.data.get("user_prompt")
         
-        # TODO: Implement real discovery/selection logic here if not already done.
-        # For Phase B, we trust the discovery passed in from the route.
+        if not discovery or not discovery.get("selected_workflow_id"):
+            discovery_result = discover_workflows_for_turn(
+                prompt,
+                namespace=request.environment.user_namespace,
+            )
+            discovery = discovery_result or {}
+
         selected_workflow_id = discovery.get("selected_workflow_id")
+        
+        # If still no workflow, we might want to default to a generic one
+        # but for now we follow the existing logic.
         
         return WorkflowActionResult(
             status="success",
             outputs={
                 "selected_workflow_id": selected_workflow_id,
+                "workflow_discovery": discovery,
                 "is_arxiv": selected_workflow_id == "#V#arxiv_paper_representation_workflow"
             }
         )
@@ -96,58 +101,6 @@ def _build_turn_execution_execute_selected_handler() -> Any:
     return _handle
 
 
-def _build_turn_execution_narrate_handler() -> Any:
-    def _handle(request: WorkflowActionRequest) -> WorkflowActionResult:
-        """Generate the final assistant narration based on workflow outcomes."""
-        # This closes the 'communicative gap' by looking at completion reports.
-        completion_report = request.data.get("completion_report")
-        prompt = request.data.get("user_prompt")
-        
-        if not completion_report:
-            # Fallback to standard narration if no structured report exists.
-            return WorkflowActionResult(status="success")
-        
-        # Phase C: Use the LLM to narrate the structured completion report.
-        # We provide the report and the user's original prompt.
-        report_json = str(completion_report)
-        
-        system_prompt = (
-            "You are a helpful assistant. Your task is to narrate the results of a workflow "
-            "execution based on a structured completion report. Be specific about what "
-            "was actually done (e.g. concepts created, files reused). Be operationally truthful."
-        )
-        
-        user_msg = (
-            f"User asked: {prompt}\n\n"
-            f"Workflow Completion Report: {report_json}\n\n"
-            "Please provide a concise, truthful summary of what was accomplished."
-        )
-        
-        try:
-            response = request.environment.llm_client.generate(
-                model=None,  # Use default
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_msg},
-                ],
-            )
-            narrated_text = response.text
-        except Exception as exc:
-            logger.warning("Narration failed: %s", exc)
-            # Fallback
-            status = completion_report.get("verification_status", "unknown")
-            narrated_text = f"Ingestion completed with status: {status}."
-
-        return WorkflowActionResult(
-            status="success",
-            outputs={
-                "response_text": narrated_text,
-                "narration_prepared": True
-            }
-        )
-    return _handle
-
-
 def register_turn_execution_actions(registry: ActionRegistry) -> None:
     """Register all master-turn control plane actions."""
     
@@ -164,14 +117,6 @@ def register_turn_execution_actions(registry: ActionRegistry) -> None:
             action_id=TURN_EXECUTION_EXECUTE_SELECTED_ACTION_ID,
             handler=_build_turn_execution_execute_selected_handler(),
             description="Execute the selected capability workflow with supervision.",
-        )
-    )
-    
-    registry.register_if_absent(
-        ActionSpec(
-            action_id=TURN_EXECUTION_NARRATE_ACTION_ID,
-            handler=_build_turn_execution_narrate_handler(),
-            description="Generate final assistant narration from workflow outcomes.",
         )
     )
 

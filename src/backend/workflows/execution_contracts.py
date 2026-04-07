@@ -383,10 +383,6 @@ def build_arxiv_ingestion_completion_report(
     verification_failures: list[str] | None = None,
     follow_up_required: bool = False,
     user_safe_operational_summary: str | None = None,
-    # Legacy fields for backward compatibility
-    created_ids: list[str] | None = None,
-    reused_ids: list[str] | None = None,
-    decisions_taken: list[str] | None = None,
 ) -> dict[str, Any]:
     """Return a structured completion report for arXiv ingestion workflows."""
     return {
@@ -403,9 +399,8 @@ def build_arxiv_ingestion_completion_report(
         "paper_concept_id": paper_concept_id,
         "author_concept_ids": list(author_concept_ids or []),
         "topic_concept_ids": list(topic_concept_ids or []),
-        "decisions": list(decisions or decisions_taken or []),
-        "done": list(done or created_ids or []),
-        "reused_ids": list(reused_ids or []),  # Kept for legacy
+        "decisions": list(decisions or []),
+        "done": list(done or []),
         "not_done": list(not_done or []),
         "verification_status": str(verification_status or "unknown"),
         "verification_failures": list(verification_failures or []),

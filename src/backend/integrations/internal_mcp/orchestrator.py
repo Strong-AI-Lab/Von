@@ -186,6 +186,12 @@ class OrchestratorResult:
     # Present only when renderer applicability routing is enabled and evaluated.
     render_plan: Mapping[str, Any] | None = None
 
+    # JVNAUTOSCI-1768: Supervised workflow telemetry
+    selected_workflow_trace: Mapping[str, Any] | None = None
+    critic_verdict: Mapping[str, Any] | None = None
+    completion_gate_verdict: Mapping[str, Any] | None = None
+    completion_report: Mapping[str, Any] | None = None
+
 
 class _ToolCallRequest(TypedDict):
     action: Required[str]
@@ -6745,6 +6751,10 @@ class InternalMCPChatOrchestrator:
             tool_invocations=tool_invocations,
             turn_execution_diagnostics=data.get("turn_execution_diagnostics"),
             aux_llm_calls=aux_calls,
+            selected_workflow_trace=data.get("selected_workflow_trace"),
+            critic_verdict=data.get("critic_verdict"),
+            completion_gate_verdict=data.get("completion_gate_verdict"),
+            completion_report=data.get("completion_report"),
         )
 
         completion_gate = turn_execution_record.get("completion_gate")
@@ -18196,42 +18206,6 @@ class InternalMCPChatOrchestrator:
         )
 
     @staticmethod
-    def _extract_arxiv_id_from_text(text: str) -> str | None:
-        if not isinstance(text, str):
-            return None
-
-        import re
-
-        raw = text.strip()
-        if not raw:
-            return None
-
-        lowered = raw.lower()
-
-        url_match = re.search(
-            r"arxiv\.org/(?:abs|pdf)/(?P<id>(?:[a-z\-]+/\d{7})|(?:\d{4}\.\d{4,5}))(?:v\d+)?",
-            lowered,
-        )
-        if url_match:
-            return url_match.group("id")
-
-        prefix_match = re.search(
-            r"\barxiv:\s*(?P<id>(?:[a-z\-]+/\d{7})|(?:\d{4}\.\d{4,5}))(?:v\d+)?\b",
-            lowered,
-        )
-        if prefix_match:
-            return prefix_match.group("id")
-
-        bare_match = re.search(
-            r"\b(?P<id>(?:[a-z\-]+/\d{7})|(?:\d{4}\.\d{4,5}))(?:v\d+)?\b",
-            lowered,
-        )
-        if bare_match:
-            return bare_match.group("id")
-
-        return None
-
-    @staticmethod
     def _normalise_preflight_display_name(value: str | None) -> str | None:
         """Normalise display names by stripping control characters.
 
@@ -18413,19 +18387,6 @@ class InternalMCPChatOrchestrator:
                             "payload": {"concept_id": concept_id},
                         }
                     )
-                continue
-
-            if name in {"download_paper", "finalise_cached_paper"}:
-                arxiv_id = self._extract_arxiv_id_from_text(user_text)
-                if not arxiv_id:
-                    continue
-                forced_calls.append(
-                    {
-                        "action": "call_tool",
-                        "tool": name,
-                        "payload": {"arxiv_id": arxiv_id},
-                    }
-                )
                 continue
 
             if name == "materialise_scholarly_representation_for_file_copy":
@@ -20535,7 +20496,25 @@ class InternalMCPChatOrchestrator:
         
         definition = registry.get(CONVERSATION_TURN_EXECUTION_WORKFLOW_ID)
         if not definition:
-            raise ValueError(f"Master turn workflow not found: {CONVERSATION_TURN_EXECUTION_WORKFLOW_ID}")
+            # Fallback to standard run if master workflow is missing (should not happen in prod)
+            return self.run(
+                prompt=prompt,
+                context=context,
+                llm_client=llm_client,
+                model=model,
+                user_namespace=user_namespace,
+                gmail_profile=gmail_profile,
+                auxiliary_system_prompt=auxiliary_system_prompt,
+                preferred_language=preferred_language,
+                progress_tracker=progress_tracker,
+                conversation_session_id=conversation_session_id,
+                turn_id=turn_id,
+                workflow_discovery_result=workflow_discovery_result,
+                workflow_continuation_context=workflow_continuation_context,
+                workflow_gap_recovery_enabled=workflow_gap_recovery_enabled,
+                user_concept_id=user_concept_id,
+                org_concept_id=org_concept_id,
+            )
 
         wf_result = executor.run(
             definition=definition,
@@ -20543,13 +20522,30 @@ class InternalMCPChatOrchestrator:
             environment=env,
         )
 
-        # 4. Convert workflow result to OrchestratorResult
-        # This closes the 'communicative gap' by using the completion report
+        # 4. Handle fallback if no workflow was selected by the master workflow
+        if wf_result.status == "failed" and wf_result.error == "turn_execution_no_workflow_selected":
+            return self.run(
+                prompt=prompt,
+                context=context,
+                llm_client=llm_client,
+                model=model,
+                user_namespace=user_namespace,
+                gmail_profile=gmail_profile,
+                auxiliary_system_prompt=auxiliary_system_prompt,
+                preferred_language=preferred_language,
+                progress_tracker=progress_tracker,
+                conversation_session_id=conversation_session_id,
+                turn_id=turn_id,
+                workflow_discovery_result=wf_result.data.get("workflow_discovery") or workflow_discovery_result,
+                workflow_continuation_context=workflow_continuation_context,
+                workflow_gap_recovery_enabled=workflow_gap_recovery_enabled,
+                user_concept_id=user_concept_id,
+                org_concept_id=org_concept_id,
+            )
+
+        # 5. Convert workflow result to OrchestratorResult
+        # Gap 4: Orchestrator fallback reply composition removed. VWL step must write response_text.
         response_text = wf_result.data.get("response_text")
-        if not response_text and "completion_report" in wf_result.data:
-            # TODO: Generate narration from report if not already done by workflow
-            report = wf_result.data["completion_report"]
-            response_text = f"Ingestion complete. Status: {report.get('verification_status')}"
 
         return OrchestratorResult(
             response_text=response_text or "Workflow execution completed without response text.",
@@ -20559,6 +20555,11 @@ class InternalMCPChatOrchestrator:
             llm_usage=wf_result.data.get("llm_usage"),
             aux_llm_calls=list(wf_result.data.get("aux_llm_calls", [])),
             orchestrator_duration_ms=wf_result.duration_ms,
+            selected_workflow_trace=wf_result.data.get("selected_workflow_trace"),
+            critic_verdict=wf_result.data.get("critic_verdict"),
+            completion_gate_verdict=wf_result.data.get("completion_gate_verdict"),
+            completion_report=wf_result.data.get("completion_report"),
+            workflow_discovery=wf_result.data.get("workflow_discovery") or workflow_discovery_result,
         )
 
     def run(

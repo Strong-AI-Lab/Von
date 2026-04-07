@@ -1123,23 +1123,13 @@ def _build_arxiv_inspect_existing_state_handler():
                 error="arxiv_identifier_missing",
             )
 
-        # Look for existing paper concept by arXiv ID
-        search_results = concept_service.search_concepts(
-            query=arxiv_id,
-            match_type="substring",
-            filter_kind=["individual"],
-            instance_of="#V#scholarly_article",
-        )
-
+        # JVNAUTOSCI-1768: Proper search over ontology identity relations.
+        from ...services.arxiv_paper_link_service import predict_arxiv_paper_concept_id
+        predicted_cid = predict_arxiv_paper_concept_id(arxiv_id)
+        
         paper_concept_id = None
-        for result in search_results:
-            cid = result.get("concept_id")
-            if not cid:
-                continue
-            # Double check it matches
-            if arxiv_id.lower() in cid.lower():
-                paper_concept_id = cid
-                break
+        if concept_service.concept_exists(predicted_cid):
+            paper_concept_id = predicted_cid
 
         file_copy_concept_id = None
         if paper_concept_id:

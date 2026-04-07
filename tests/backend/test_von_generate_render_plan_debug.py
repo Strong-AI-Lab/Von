@@ -21,6 +21,9 @@ class _StubOrchestrator:
     def run(self, **_kwargs):
         return self._result
 
+    def execute_conversation_turn_supervised(self, **_kwargs):
+        return self._result
+
 
 class _StubTaskStatus:
     def __init__(self, *, status: str, result=None, error: str | None = None):

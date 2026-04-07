@@ -1409,7 +1409,7 @@
             "state_id": "execution"
           },
           {
-            "action_id": "turn_execution.narrate",
+            "action_id": null,
             "conditional_transitions": [
               {
                 "condition_spec": {
@@ -1419,10 +1419,29 @@
                 "to_state": "critic"
               }
             ],
+            "execution_mode": "llm",
+            "llm_policy": {
+              "context_fields": [
+                {
+                  "context_key": "user_prompt",
+                  "label": "User Request"
+                },
+                {
+                  "context_key": "completion_report",
+                  "label": "Completion Report"
+                }
+              ]
+            },
+            "prompt_concept_ids": [
+              "#V#prompt_turn_execution_narrate_completion_report"
+            ],
+            "writes_context_keys": [
+              "response_text"
+            ],
             "state_id": "narration"
           },
           {
-            "action_id": "kb_mutation.critic",
+            "action_id": null,
             "conditional_transitions": [
               {
                 "condition_spec": {
@@ -1432,10 +1451,25 @@
                 "to_state": "completion_gate"
               }
             ],
+            "execution_mode": "llm",
+            "llm_policy": {
+              "context_fields": [
+                {
+                  "context_key": "completion_report",
+                  "label": "Completion Report"
+                }
+              ]
+            },
+            "prompt_concept_ids": [
+              "#V#episode_critic_evaluation_prompt"
+            ],
+            "writes_context_keys": [
+              "critic_verdict"
+            ],
             "state_id": "critic"
           },
           {
-            "action_id": "turn_execution.completion_gate",
+            "action_id": null,
             "conditional_transitions": [
               {
                 "condition_spec": {
@@ -1445,7 +1479,10 @@
                 "to_state": "completed"
               }
             ],
-            "state_id": "completion_gate"
+            "state_id": "completion_gate",
+            "writes_context_keys": [
+              "completion_gate_verdict"
+            ]
           },
           {
             "state_id": "completed"

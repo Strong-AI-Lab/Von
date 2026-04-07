@@ -5702,7 +5702,7 @@ def _maybe_handle_prompt_introspection_fastpath(
     role_in_org: str | None,
     history_user_id: str | None,
     session_id: str,
-    auxiliary_system_prompt: str | None,
+    dynamic_instructions: str | None,
     user_prompt_debug: dict,
     context: list[dict],
     interaction_timestamp_utc: str,
@@ -5797,7 +5797,7 @@ def _maybe_handle_prompt_introspection_fastpath(
         )
         if not isinstance(prompt_ids, list):
             prompt_ids = []
-        prompt_text_value = auxiliary_system_prompt or ""
+        prompt_text_value = dynamic_instructions or ""
         prompt_text_value = (
             prompt_text_value.strip()
             if isinstance(prompt_text_value, str)
@@ -6450,9 +6450,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
     presenter_mode_requested = bool(data.get("presenter_mode"))
 
     request_start_perf = time.perf_counter()
+    workflow_discovery_result = None
     progress_heartbeat_stop_event: threading.Event | None = None
     progress_heartbeat_thread: threading.Thread | None = None
-
     interaction_timestamp_utc = (
         datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     )
@@ -6863,7 +6863,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         # ---------------------------------------------------------
         # JVNAUTOSCI-797: user-specific system prompt from Vontology
         # ---------------------------------------------------------
-        auxiliary_system_prompt = None
+        dynamic_instructions = None
         narration_prompt_text = None
         narration_prompt_fragments = []
         screen_prompt_text = None
@@ -6933,11 +6933,11 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     if not content.strip():
                         continue
                     prompt_texts.append(content)
-                auxiliary_system_prompt = "\n\n".join(
+                dynamic_instructions = "\n\n".join(
                     text.strip() for text in prompt_texts if text and text.strip()
                 )
-                auxiliary_system_prompt = (
-                    auxiliary_system_prompt.strip() if auxiliary_system_prompt else None
+                dynamic_instructions = (
+                    dynamic_instructions.strip() if dynamic_instructions else None
                 )
 
                 narration_texts = []
@@ -6974,13 +6974,13 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     screen_prompt_text.strip() if screen_prompt_text else None
                 )
 
-                if auxiliary_system_prompt:
+                if dynamic_instructions:
                     user_prompt_debug["loaded"] = True
-                    user_prompt_debug["chars"] = len(auxiliary_system_prompt)
-                if auxiliary_system_prompt:
+                    user_prompt_debug["chars"] = len(dynamic_instructions)
+                if dynamic_instructions:
                     current_app.logger.info(
                         "[CHAT_PROMPT] Loaded %d chars of user-specific prompt for %s",
-                        len(auxiliary_system_prompt),
+                        len(dynamic_instructions),
                         user_concept_id,
                     )
             except Exception as e:
@@ -7003,7 +7003,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     role_in_org=role_in_org,
                     history_user_id=history_user_id,
                     session_id=session_id,
-                    auxiliary_system_prompt=auxiliary_system_prompt,
+                    auxiliary_system_prompt=dynamic_instructions,
                     user_prompt_debug=user_prompt_debug,
                     context=context,
                     interaction_timestamp_utc=interaction_timestamp_utc,
@@ -7122,11 +7122,11 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
         # Ensure user-specific system prompt is included even when the orchestrator
         # is disabled/unavailable.
-        if auxiliary_system_prompt:
+        if dynamic_instructions:
             user_prompt_message = {
                 "role": "system",
                 "content": "USER-SPECIFIC SYSTEM PROMPT (from Vontology):\n"
-                + auxiliary_system_prompt,
+                + dynamic_instructions,
             }
             if not enhanced_context or enhanced_context[0].get("role") != "system":
                 enhanced_context.insert(0, user_prompt_message)
@@ -7362,99 +7362,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     "request_id": request_id,
                 },
             )
-
-        # ---------------------------------------------------------
-        # JVNAUTOSCI-1076: Workflow discovery during conversation turn
-        # ---------------------------------------------------------
-        # Search for applicable workflows based on user input.
-        # Results are surfaced in llm_debug for the Thinking context display.
-        workflow_discovery_result: dict[str, Any] | None = None
-        workflow_discovery_enabled = os.getenv(
-            "VON_WORKFLOW_DISCOVERY_ENABLE", "1"
-        ).lower() in {"1", "true"}
-
-        if workflow_discovery_enabled and prompt_text and len(prompt_text.strip()) >= 5:
-            try:
-                if show_tool_use_progress:
-                    _set_tool_progress(
-                        progress_scope_key,
-                        request_id,
-                        {
-                            "status": "thinking",
-                            "phase": "workflow_discovery",
-                            "phase_label": "Searching for workflows",
-                            "goal_label": progress_goal_label,
-                            "request_id": request_id,
-                        },
-                    )
-                from ...services.workflow_discovery_service import (
-                    discover_workflows_for_turn,
-                )
-
-                workflow_discovery_result = discover_workflows_for_turn(
-                    workflow_discovery_query,
-                    namespace=user_namespace,
-                )
-                workflow_discovery_progress = _normalise_workflow_discovery_progress_payload(
-                    workflow_discovery_result,
-                    query=workflow_discovery_query,
-                    namespace=user_namespace,
-                )
-                if workflow_discovery_result:
-                    current_app.logger.info(
-                        "[WORKFLOW_DISCOVERY] Found %d relevant workflows for prompt",
-                        workflow_discovery_result.get("match_count", 0),
-                    )
-                # Emit workflow discovery outcome for frontend even when no
-                # workflow matched, so the thinking card can show an explicit
-                # "no workflow found" step instead of silently skipping it.
-                if show_tool_use_progress:
-                    match_count = int(workflow_discovery_progress.get("match_count", 0))
-                    candidate_count = int(
-                        workflow_discovery_progress.get("candidate_count", 0)
-                    )
-                    _set_tool_progress(
-                        progress_scope_key,
-                        request_id,
-                        {
-                            "status": "thinking",
-                            "phase": "workflow_discovery_complete",
-                            "phase_label": (
-                                "Found workflows"
-                                if match_count > 0
-                                else "Found workflow candidates"
-                                if candidate_count > 0
-                                else "No workflows found"
-                            ),
-                            "goal_label": progress_goal_label,
-                            "request_id": request_id,
-                            "workflow_discovery": workflow_discovery_progress,
-                            "workflow_match_count": match_count,
-                            "workflow_candidate_count": candidate_count,
-                        },
-                    )
-            except Exception as e:
-                current_app.logger.warning("[WORKFLOW_DISCOVERY] Search failed: %s", e)
-                workflow_discovery_result = None
-                if show_tool_use_progress:
-                    _set_tool_progress(
-                        progress_scope_key,
-                        request_id,
-                        {
-                            "status": "thinking",
-                            "phase": "workflow_discovery_complete",
-                            "phase_label": "Workflow discovery failed",
-                            "goal_label": progress_goal_label,
-                            "request_id": request_id,
-                            "workflow_discovery": _normalise_workflow_discovery_progress_payload(
-                                None,
-                                query=workflow_discovery_query,
-                                namespace=user_namespace,
-                                error=str(e),
-                            ),
-                            "workflow_match_count": 0,
-                        },
-                    )
 
         # ---------------------------------------------------------
         # Tool-backed RAG counts (avoid KA vs chat-history confusion)
@@ -8279,90 +8186,16 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 conversation_turn_instance_created_new = None
 
         if orchestrator is None:
-            orchestrator_status = current_app.config.get(
-                "INTERNAL_MCP_ORCHESTRATOR_STATUS"
-            ) or {}
-            orch_state = orchestrator_status.get("state", "unknown")
-            current_app.logger.warning(
-                "[ORCHESTRATOR_FALLBACK] orchestrator is None "
-                "(state=%s); falling back to direct LLM generate for request_id=%s",
-                orch_state,
-                request_id,
+            response_text = _handle_orchestrator_missing_fallback(
+                llm_client=llm_client,
+                model_name=model_name,
+                prompt_text=prompt_text,
+                enhanced_context=enhanced_context,
+                request_id=request_id,
+                gateway=gateway,
+                auxiliary_llm_calls=auxiliary_llm_calls,
+                llm_interaction=llm_interaction,
             )
-            auxiliary_llm_calls.append(
-                {
-                    "type": "orchestrator_unavailable_fallback",
-                    "orchestrator_state": orch_state,
-                    "orchestrator_status_error": orchestrator_status.get("error"),
-                }
-            )
-
-            method_catalogue_for_fallback: Mapping[str, Any] | None = None
-            if gateway is not None and callable(getattr(gateway, "describe_methods", None)):
-                try:
-                    described = gateway.describe_methods()
-                    if isinstance(described, Mapping):
-                        method_catalogue_for_fallback = described
-                except Exception:
-                    method_catalogue_for_fallback = None
-
-            fallback_requirement_state = (
-                InternalMCPChatOrchestrator._derive_prompt_tool_requirements(
-                    prompt_text,
-                    method_catalogue=method_catalogue_for_fallback,
-                    context_messages=enhanced_context,
-                )
-            )
-            unavailable_required_tools = list(
-                cast(
-                    list[str],
-                    fallback_requirement_state.get("unavailable_required_tools") or [],
-                )
-            )
-            if unavailable_required_tools:
-                auxiliary_llm_calls.append(
-                    annotate_python_decision_event(
-                        {
-                            "type": "prompt_tool_requirements_preflight",
-                            "stage": "fallback_direct_llm",
-                            "required_tools": list(
-                                cast(
-                                    list[str],
-                                    fallback_requirement_state.get("required_tools") or [],
-                                )
-                            ),
-                            "unavailable_required_tools": list(
-                                unavailable_required_tools
-                            ),
-                        },
-                        stage="fallback_direct_llm",
-                        component="internal_mcp_orchestrator",
-                        function="_derive_prompt_tool_requirements",
-                        decision_class="prompt_requirement_inference",
-                        decision_source="explicit_identifier_parse",
-                        changed_outcome=True,
-                        reason_code="explicit_prompt_tool_unavailable_in_fallback",
-                        possible_inappropriate_python_code_use=False,
-                    )
-                )
-            llm_start_perf = time.perf_counter()
-            response_text = llm_client.generate(
-                prompt_text, context=enhanced_context, model=model_name
-            )
-            llm_interaction["duration_ms"] = (
-                time.perf_counter() - llm_start_perf
-            ) * 1000.0
-            llm_interaction["calls"] = [
-                {
-                    "type": "llm.generate",
-                    "model": model_name,
-                    "provider": _infer_provider(model_name),
-                    "duration_ms": llm_interaction["duration_ms"],
-                    "usage": None,
-                    "workflow": "von_generate",
-                    "stage": "fallback_direct_llm",
-                }
-            ]
         else:
             try:
                 current_app.logger.info(
@@ -8409,54 +8242,24 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         },
                     )
 
-                _submit_conversation_turn_instance()
+                # JVNAUTOSCI-1768: Consolidated entry point. Discovery now happens inside the workflow.
                 orchestrator_start_perf = time.perf_counter()
-
-                # JVNAUTOSCI-1763: arXiv ingestion refactor to supervised path.
-                from ...workflows.definitions import ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
-                
-                is_arxiv_workflow = (
-                    isinstance(workflow_discovery_result, Mapping)
-                    and workflow_discovery_result.get("selected_workflow_id") == ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
+                orchestrator_result = orchestrator.execute_conversation_turn_supervised(
+                    prompt=prompt_text,
+                    context=enhanced_context,
+                    llm_client=llm_client,
+                    model=model_name,
+                    user_namespace=user_namespace,
+                    gmail_profile=request_gmail_profile,
+                    auxiliary_system_prompt=dynamic_instructions,
+                    preferred_language=request_language,
+                    progress_tracker=progress_tracker,
+                    conversation_session_id=session_id,
+                    turn_id=request_id,
+                    workflow_continuation_context=workflow_continuation_context,
+                    user_concept_id=user_concept_id,
+                    org_concept_id=org_concept_id,
                 )
-
-                if is_arxiv_workflow:
-                    current_app.logger.info("[SUPERVISED] Using Master Turn Workflow for arXiv turn.")
-                    orchestrator_result = orchestrator.execute_conversation_turn_supervised(
-                        prompt=prompt_text,
-                        context=enhanced_context,
-                        llm_client=llm_client,
-                        model=model_name,
-                        user_namespace=user_namespace,
-                        gmail_profile=request_gmail_profile,
-                        auxiliary_system_prompt=auxiliary_system_prompt,
-                        preferred_language=request_language,
-                        progress_tracker=progress_tracker,
-                        conversation_session_id=session_id,
-                        turn_id=request_id,
-                        workflow_discovery_result=workflow_discovery_result,
-                        workflow_continuation_context=workflow_continuation_context,
-                        user_concept_id=user_concept_id,
-                        org_concept_id=org_concept_id,
-                    )
-                else:
-                    orchestrator_result = orchestrator.run(
-                        prompt=prompt_text,
-                        context=enhanced_context,
-                        llm_client=llm_client,
-                        model=model_name,
-                        user_namespace=user_namespace,
-                        gmail_profile=request_gmail_profile,
-                        auxiliary_system_prompt=auxiliary_system_prompt,
-                        preferred_language=request_language,
-                        progress_tracker=progress_tracker,
-                        conversation_session_id=session_id,
-                        turn_id=request_id,
-                        workflow_discovery_result=workflow_discovery_result,
-                        workflow_continuation_context=workflow_continuation_context,
-                        user_concept_id=user_concept_id,
-                        org_concept_id=org_concept_id,
-                    )
                 llm_interaction["duration_ms"] = (
                     time.perf_counter() - orchestrator_start_perf
                 ) * 1000.0
@@ -9026,14 +8829,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                                     "model": screen_model_used,
                                 }
                             )
-                            synthesis_response = llm_client.generate(
-                                prompt="Generate <screen> display content",
-                                context=[
-                                    {"role": "system", "content": synthesis_system},
-                                    {"role": "user", "content": synthesis_user},
-                                ],
-                                model=screen_model_used,
-                            )
+                            synthesis_response = _llm_generate_screen_backfill(llm_client, synthesis_system, synthesis_user, screen_model_used)
                             screen_duration_ms = (
                                 time.perf_counter() - llm_start
                             ) * 1000.0
@@ -9413,7 +9209,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         llm_client=llm_client,
                         model=model_name,
                         user_namespace=user_namespace,
-                        auxiliary_system_prompt=auxiliary_system_prompt,
+                        auxiliary_system_prompt=dynamic_instructions,
                         trace=narration_trace,
                     )
 
@@ -9531,14 +9327,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         f"{screen_text}\n"
                     )
 
-                    narration_response = llm_client.generate(
-                        prompt="Generate <spoken> talk track",
-                        context=[
-                            {"role": "system", "content": narration_system},
-                            {"role": "user", "content": narration_user},
-                        ],
-                        model=model_name,
-                    )
+                    narration_response = _llm_generate_spoken_backfill(llm_client, narration_system, narration_user, model_name)
                     spoken_backfill_source = "llm_synthesis"
                     spoken_backfill_model_id = model_name
 
@@ -9783,7 +9572,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     sent_context_for_stats = build_augmented(
                         enhanced_context,
                         user_namespace=user_namespace,
-                        auxiliary_system_prompt=auxiliary_system_prompt,
+                        auxiliary_system_prompt=dynamic_instructions,
                     )
                 except Exception:
                     sent_context_for_stats = enhanced_context
@@ -9892,7 +9681,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         llm_client=llm_client,
                         model=model_name,
                         user_namespace=user_namespace,
-                        auxiliary_system_prompt=auxiliary_system_prompt,
+                        auxiliary_system_prompt=dynamic_instructions,
                         trace=None,
                         conversation_session_id=session_id,
                         turn_id=request_id,
@@ -9988,11 +9777,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     llm_start = time.perf_counter()
                     buttonify_response = None
                     try:
-                        buttonify_response = llm_client.generate(
-                            prompt=buttonify_prompt,
-                            context=[],
-                            model=buttonify_model_used,
-                        )
+                        buttonify_response = _llm_generate_buttonify(llm_client, buttonify_prompt, buttonify_model_used)
                         _record_stage_llm_call(
                             call_type="llm.generate",
                             model_name=buttonify_model_used,
@@ -11253,14 +11038,7 @@ def history_backfill_spoken():
             f"{screen_text}\n"
         )
 
-        narration_response = llm_client.generate(
-            prompt="Generate <spoken> talk track",
-            context=[
-                {"role": "system", "content": narration_system},
-                {"role": "user", "content": narration_user},
-            ],
-            model=model_name,
-        )
+        narration_response = _llm_generate_spoken_backfill(llm_client, narration_system, narration_user, model_name)
 
         spoken = _extract_spoken_only(str(narration_response))
         if not spoken:
@@ -12858,7 +12636,7 @@ def chat_session_links():
         )
         session_id = None
         if isinstance(requested_session_id, str) and requested_session_id.strip():
-            session_id = requested_session_id.strip()
+            session_id = requested_sessiosion_id.strip()
         else:
             session_id = session.get("session_id")
 
@@ -13807,3 +13585,259 @@ def get_my_organisations():
     except Exception as e:
         print(f"Error getting organisations: {e}")
         return jsonify({"error": str(e)}), 500
+
+
+def _handle_orchestrator_missing_fallback(
+    llm_client,
+    model_name,
+    prompt_text,
+    enhanced_context,
+    request_id,
+    gateway,
+    auxiliary_llm_calls,
+    llm_interaction,
+) -> str:
+    """Handle orchestrator missing fallback."""
+    import time
+    from typing import Mapping, cast
+    from ...integrations.internal_mcp.orchestrator import (
+        InternalMCPChatOrchestrator,
+    )
+    from flask import current_app
+    
+    # Heuristic for provider inference if needed
+    def _infer_provider(model: str | None) -> str:
+        if not model: return "unknown"
+        if "gpt" in model.lower(): return "openai"
+        if "claude" in model.lower(): return "anthropic"
+        if "gemini" in model.lower(): return "google"
+        return "unknown"
+
+    orchestrator_status = current_app.config.get(
+        'INTERNAL_MCP_ORCHESTRATOR_STATUS'
+    ) or {}
+    orch_state = orchestrator_status.get('state', 'unknown')
+    current_app.logger.warning(
+        '[ORCHESTRATOR_FALLBACK] orchestrator is None '
+        '(state=%s); falling back to direct LLM generate for request_id=%s',
+        orch_state,
+        request_id,
+    )
+    auxiliary_llm_calls.append(
+        {
+            'type': 'orchestrator_unavailable_fallback',
+            'orchestrator_state': orch_state,
+            'orchestrator_status_error': orchestrator_status.get('error'),
+        }
+    )
+
+    method_catalogue_for_fallback = None
+    if gateway is not None and hasattr(gateway, 'describe_methods'):
+        try:
+            described = gateway.describe_methods()
+            if isinstance(described, Mapping):
+                method_catalogue_for_fallback = described
+        except Exception:
+            method_catalogue_for_fallback = None
+
+    fallback_requirement_state = (
+        InternalMCPChatOrchestrator._derive_prompt_tool_requirements(
+            prompt_text,
+            method_catalogue=method_catalogue_for_fallback,
+            context_messages=enhanced_context,
+        )
+    )
+    unavailable_required_tools = list(
+        fallback_requirement_state.get('unavailable_required_tools') or []
+    )
+    if unavailable_required_tools:
+        from src.backend.services.telemetry_service import annotate_python_decision_event
+        auxiliary_llm_calls.append(
+            annotate_python_decision_event(
+                {
+                    'type': 'prompt_tool_requirements_preflight',
+                    'stage': 'fallback_direct_llm',
+                    'required_tools': list(
+                        cast(
+                            list[str],
+                            fallback_requirement_state.get('required_tools') or [],
+                        )
+                    ),
+                    'unavailable_required_tools': list(
+                        unavailable_required_tools
+                    ),
+                },
+                stage='fallback_direct_llm',
+                component='internal_mcp_orchestrator',
+                function='_derive_prompt_tool_requirements',
+                decision_class='prompt_requirement_inference',
+                decision_source='explicit_identifier_parse',
+                changed_outcome=True,
+                reason_code='explicit_prompt_tool_unavailable_in_fallback',
+                possible_inappropriate_python_code_use=False,
+            )
+        )
+    llm_start_perf = time.perf_counter()
+    response_text = llm_client.generate(
+        prompt_text, context=enhanced_context, model=model_name
+    )
+    llm_interaction['duration_ms'] = (
+        time.perf_counter() - llm_start_perf
+    ) * 1000.0
+    llm_interaction['calls'] = [
+        {
+            'type': 'llm.generate',
+            'model': model_name,
+            'provider': _infer_provider(model_name),
+            'duration_ms': llm_interaction['duration_ms'],
+            'usage': None,
+            'workflow': 'von_generate',
+            'stage': 'fallback_direct_llm',
+        }
+    ]
+    return response_text
+
+def _perform_legacy_spoken_backfill(
+    llm_client,
+    model_name,
+    prompt_text,
+    presenter_mode_requested,
+    presenter_channels,
+    screen_text,
+    has_tool_messages,
+    narration_prompt_text,
+    speech_info,
+):
+    """Perform legacy spoken backfill logic extracted from generate()."""
+    import time
+    from flask import current_app
+    
+    def _coerce_spoken_text(text: object) -> str | None:
+        if not text: return None
+        if isinstance(text, str): return text
+        if hasattr(text, "text"): return str(text.text)
+        return str(text)
+
+    spoken_backfill_status = 'not_started'
+    spoken_backfill_suppression_reason = None
+    spoken_backfill_applied = False
+    spoken_backfill_error_class = None
+    spoken_backfill_source = None
+    spoken_backfill_model_id = None
+    spoken_backfill_second_pass_reason = None
+    spoken_backfill_started_perf = time.perf_counter()
+
+    presenter_channels_missing = (
+        not isinstance(presenter_channels, dict) or not presenter_channels
+    )
+
+    needs_spoken_backfill = presenter_mode_requested and (
+        presenter_channels_missing or not presenter_channels.get('spoken')
+    )
+
+    if needs_spoken_backfill:
+        try:
+            if not screen_text or len(screen_text.strip()) < 10:
+                spoken_backfill_second_pass_reason = 'insufficient_screen_text'
+            else:
+                timing_hint = None
+                try:
+                    speech = speech_info if isinstance(speech_info, dict) else {}
+                    raw_settings = speech.get('settings')
+                    settings = raw_settings if isinstance(raw_settings, dict) else {}
+                    preferred = settings.get('preferred_speaking_seconds')
+                    maximum = settings.get('max_speaking_seconds')
+                    try:
+                        preferred_int = int(preferred) if preferred is not None else None
+                    except Exception:
+                        preferred_int = None
+                    try:
+                        maximum_int = int(maximum) if maximum is not None else None
+                    except Exception:
+                        maximum_int = None
+                    if preferred_int is not None:
+                        preferred_int = max(1, min(preferred_int, 600))
+                    if maximum_int is not None:
+                        maximum_int = max(1, min(maximum_int, 600))
+                    effective_preferred = preferred_int
+                    if preferred_int is not None and maximum_int is not None:
+                        effective_preferred = min(preferred_int, maximum_int)
+                    if effective_preferred is not None or maximum_int is not None:
+                        timing_hint = (
+                            f'Speech timing hint: preferred={effective_preferred!r}, max={maximum_int!r}.'
+                        )
+                except Exception:
+                    pass
+
+                narration_system = (
+                    'You are Von. Produce a short talk track for text-to-speech. '
+                    'Return ONLY one block: <spoken>...</spoken>. '
+                    'Do not include <screen>. Do not include code blocks. '
+                    + ('\n\n' + timing_hint if timing_hint else '')
+                    + ('\n\nVON CHAT NARRATION PROMPT:\n' + narration_prompt_text if narration_prompt_text else '')
+                )
+                narration_user = f'User: {prompt_text}\n\nContent: {screen_text}'
+                narration_response = _llm_generate_spoken_backfill(llm_client, narration_system, narration_user, model_name)
+                spoken_backfill_source = 'llm_synthesis'
+                spoken_backfill_model_id = model_name
+                spoken_fallback = _coerce_spoken_text(narration_response)
+                if not spoken_fallback:
+                    spoken_fallback = _coerce_spoken_text(screen_text)
+                    if spoken_fallback:
+                        spoken_backfill_source = 'screen_text_fallback'
+                if spoken_fallback:
+                    base_channels = dict(presenter_channels) if isinstance(presenter_channels, dict) else {}
+                    base_channels['screen'] = screen_text
+                    base_channels['spoken'] = spoken_fallback
+                    base_channels['format'] = 'narration_fallback_v1'
+                    presenter_channels = base_channels
+                    spoken_backfill_applied = True
+        except Exception as exc:
+            spoken_backfill_error_class = type(exc).__name__
+
+    latency = (time.perf_counter() - spoken_backfill_started_perf) * 1000.0
+    if not presenter_mode_requested:
+        spoken_backfill_status = 'skipped'
+        spoken_backfill_suppression_reason = 'presenter_mode_disabled'
+    elif not needs_spoken_backfill:
+        spoken_backfill_status = 'skipped'
+        spoken_backfill_suppression_reason = 'not_required'
+    elif spoken_backfill_applied:
+        spoken_backfill_status = 'success'
+    elif spoken_backfill_error_class:
+        spoken_backfill_status = 'failure'
+        spoken_backfill_suppression_reason = 'model_error'
+    else:
+        spoken_backfill_status = 'no_op'
+        spoken_backfill_suppression_reason = spoken_backfill_second_pass_reason or 'no_spoken_generated'
+
+    return presenter_channels, spoken_backfill_status, spoken_backfill_suppression_reason, latency
+
+
+
+def _llm_generate_screen_backfill(llm_client, system, user, model):
+    return llm_client.generate(
+        prompt="Generate <screen> display content",
+        context=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        model=model,
+    )
+
+def _llm_generate_spoken_backfill(llm_client, system, user, model):
+    return llm_client.generate(
+        prompt="Generate <spoken> talk track",
+        context=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        model=model,
+    )
+
+def _llm_generate_buttonify(llm_client, prompt, model):
+    return llm_client.generate(
+        prompt=prompt,
+        context=[],
+        model=model,
+    )
