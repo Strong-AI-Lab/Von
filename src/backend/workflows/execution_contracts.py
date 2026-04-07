@@ -71,6 +71,7 @@ WORKFLOW_FOR_EACH_ALLOWED_SUCCESS_POLICIES: tuple[str, ...] = (
 
 WORKFLOW_STEP_RESULT_ENVELOPE_SCHEMA_VERSION = "workflow_step_result_envelope.v1"
 WORKFLOW_RESULT_ENVELOPE_SCHEMA_VERSION = "workflow_result_envelope.v1"
+ARXIV_INGESTION_COMPLETION_REPORT_SCHEMA_VERSION = "arxiv_ingestion_completion_report.v1"
 
 WORKFLOW_STEP_RESULT_ENVELOPES_KEY = "workflow_step_result_envelopes"
 LAST_WORKFLOW_STEP_RESULT_ENVELOPE_KEY = "last_workflow_step_result_envelope"
@@ -359,4 +360,56 @@ def set_workflow_result_envelope(
     envelope: Mapping[str, Any],
 ) -> None:
     context[WORKFLOW_RESULT_ENVELOPE_KEY] = snapshot_workflow_mapping(envelope)
+
+
+def build_arxiv_ingestion_completion_report(
+    *,
+    source_uri: str | None = None,
+    arxiv_id: str | None = None,
+    metadata_status: str | None = None,
+    acquisition_mode: str | None = None,
+    download_attempted: bool = False,
+    download_succeeded: bool = False,
+    used_existing_file_copy: bool = False,
+    recovered_partial_state: bool = False,
+    file_copy_concept_id: str | None = None,
+    paper_concept_id: str | None = None,
+    author_concept_ids: list[str] | None = None,
+    topic_concept_ids: list[str] | None = None,
+    decisions: list[str] | None = None,
+    done: list[str] | None = None,
+    not_done: list[str] | None = None,
+    verification_status: str | None = None,
+    verification_failures: list[str] | None = None,
+    follow_up_required: bool = False,
+    user_safe_operational_summary: str | None = None,
+    # Legacy fields for backward compatibility
+    created_ids: list[str] | None = None,
+    reused_ids: list[str] | None = None,
+    decisions_taken: list[str] | None = None,
+) -> dict[str, Any]:
+    """Return a structured completion report for arXiv ingestion workflows."""
+    return {
+        "schema_version": ARXIV_INGESTION_COMPLETION_REPORT_SCHEMA_VERSION,
+        "source_uri": source_uri,
+        "arxiv_id": arxiv_id,
+        "metadata_status": metadata_status,
+        "acquisition_mode": acquisition_mode,
+        "download_attempted": bool(download_attempted),
+        "download_succeeded": bool(download_succeeded),
+        "used_existing_file_copy": bool(used_existing_file_copy),
+        "recovered_partial_state": bool(recovered_partial_state),
+        "file_copy_concept_id": file_copy_concept_id,
+        "paper_concept_id": paper_concept_id,
+        "author_concept_ids": list(author_concept_ids or []),
+        "topic_concept_ids": list(topic_concept_ids or []),
+        "decisions": list(decisions or decisions_taken or []),
+        "done": list(done or created_ids or []),
+        "reused_ids": list(reused_ids or []),  # Kept for legacy
+        "not_done": list(not_done or []),
+        "verification_status": str(verification_status or "unknown"),
+        "verification_failures": list(verification_failures or []),
+        "follow_up_required": bool(follow_up_required),
+        "user_safe_operational_summary": user_safe_operational_summary,
+    }
 

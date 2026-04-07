@@ -4227,6 +4227,10 @@ def build_turn_execution_record(
     search_evidence: Sequence[Mapping[str, Any]] | None = None,
     turn_execution_diagnostics: Mapping[str, Any] | None = None,
     aux_llm_calls: Sequence[Mapping[str, Any]] | None = None,
+    selected_workflow_trace: Mapping[str, Any] | None = None,
+    critic_verdict: Mapping[str, Any] | None = None,
+    completion_gate_verdict: Mapping[str, Any] | None = None,
+    arxiv_completion_report: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     resolved_actor_concept_id, actor_identity_source = _resolve_actor_concept_identity(
         actor_concept_id=actor_concept_id,
@@ -4465,14 +4469,18 @@ def build_turn_execution_record(
             "retry": retry,
             "workflow_stage_model": build_conversation_turn_stage_model_snapshot(),
             "workflow_stage_path": workflow_stage_path,
+            "selected_workflow_trace": selected_workflow_trace,
         },
         "postcondition_checks": postcondition_checks,
         "critic": {
             "enabled": True,
             "workflow_id": "#V#kb_mutation_postcondition_critic_workflow",
             "summary": critic_summary,
+            "verdict": critic_verdict,
         },
         "completion_gate": completion_gate,
+        "completion_gate_verdict": completion_gate_verdict,
+        "arxiv_completion_report": arxiv_completion_report,
         "final_response": {
             "response_sha256": _hash_text(response_text),
             "completion_claim_detected": bool(completion_claim["detected"]),

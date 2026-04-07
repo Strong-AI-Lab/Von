@@ -67,9 +67,11 @@ from ...workflows.execution_contracts import (
 )
 from ...workflows.mcp_tool_bridge import workflow_action_result_from_mcp_payload
 from ...workflows.definitions import (
+    ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
     CHAT_ASSISTANT_WORKFLOW_ID,
     CHAT_BUTTONIFY_WORKFLOW_ID,
     CHAT_NARRATION_WORKFLOW_ID,
+    CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
     CONCEPT_SUGGESTION_PREFLIGHT_WORKFLOW_ID,
     KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
     MISSING_TOOL_CALL_WORKFLOW_ID,
@@ -20462,6 +20464,102 @@ class InternalMCPChatOrchestrator:
             included.append(item)
 
         return included, excluded
+
+    def execute_conversation_turn_supervised(
+        self,
+        *,
+        prompt: str,
+        context: Optional[Sequence[Mapping[str, Any]]],
+        llm_client: Any,
+        model: Optional[str],
+        user_namespace: Optional[str] = None,
+        gmail_profile: Optional[str] = None,
+        auxiliary_system_prompt: str | None = None,
+        preferred_language: str | None = None,
+        progress_tracker: ProgressTracker | None = None,
+        conversation_session_id: Optional[str] = None,
+        turn_id: Optional[str] = None,
+        workflow_discovery_result: Mapping[str, Any] | None = None,
+        workflow_continuation_context: Mapping[str, Any] | None = None,
+        workflow_gap_recovery_enabled: bool = True,
+        user_concept_id: Optional[str] = None,
+        org_concept_id: Optional[str] = None,
+    ) -> OrchestratorResult:
+        """Execute the current turn via the durable Master Turn Workflow.
+
+        JVNAUTOSCI-1763: This is the 'Supervised Path' where the workflow
+        owns the turn lifecycle, supports real-time narration, and reports
+        durable outcomes (e.g. arXiv ingestion reports).
+        """
+        from ...workflows.registry_factory import get_workflow_registry
+        from ...workflows.engine import WorkflowExecutor, WorkflowEnvironment
+        from ...workflows.definitions import CONVERSATION_TURN_EXECUTION_WORKFLOW_ID
+
+        # 1. Setup execution environment with step callback for progress tracking
+        def _step_callback(envelope: Mapping[str, Any]) -> None:
+            if progress_tracker:
+                progress_tracker.emit({
+                    "status": "workflow_step_complete",
+                    "workflow_id": envelope.get("workflow_id"),
+                    "state_id": envelope.get("state_id"),
+                    "action_id": envelope.get("action_id"),
+                    "action_status": envelope.get("action_status"),
+                    "outcome": envelope.get("action_outcome"),
+                })
+
+        env = WorkflowEnvironment(
+            llm_client=llm_client,
+            gateway=self._gateway,
+            user_namespace=user_namespace,
+            gmail_profile=gmail_profile,
+            preferred_language=preferred_language,
+            user_concept_id=user_concept_id,
+            org_concept_id=org_concept_id,
+            step_callback=_step_callback,
+        )
+
+        # 2. Prepare workflow inputs
+        # We pass the prompt and context into the turn workflow
+        workflow_inputs = {
+            "user_prompt": prompt,
+            "conversation_context": list(context or []),
+            "workflow_discovery": dict(workflow_discovery_result or {}),
+            "continuation_context": dict(workflow_continuation_context or {}),
+            "auxiliary_system_prompt": auxiliary_system_prompt,
+        }
+
+        # 3. Execute the Master Turn Workflow synchronously (for now)
+        # Phase 0/B: Use the durable registry but run via synchronous executor
+        registry = get_workflow_registry()
+        executor = WorkflowExecutor(registry.action_registry)
+        
+        definition = registry.get(CONVERSATION_TURN_EXECUTION_WORKFLOW_ID)
+        if not definition:
+            raise ValueError(f"Master turn workflow not found: {CONVERSATION_TURN_EXECUTION_WORKFLOW_ID}")
+
+        wf_result = executor.run(
+            definition=definition,
+            inputs=workflow_inputs,
+            environment=env,
+        )
+
+        # 4. Convert workflow result to OrchestratorResult
+        # This closes the 'communicative gap' by using the completion report
+        response_text = wf_result.data.get("response_text")
+        if not response_text and "completion_report" in wf_result.data:
+            # TODO: Generate narration from report if not already done by workflow
+            report = wf_result.data["completion_report"]
+            response_text = f"Ingestion complete. Status: {report.get('verification_status')}"
+
+        return OrchestratorResult(
+            response_text=response_text or "Workflow execution completed without response text.",
+            extra_messages=list(wf_result.data.get("extra_messages", [])),
+            tool_invocations=list(wf_result.data.get("tool_invocations", [])),
+            llm_calls=list(wf_result.data.get("llm_calls", [])),
+            llm_usage=wf_result.data.get("llm_usage"),
+            aux_llm_calls=list(wf_result.data.get("aux_llm_calls", [])),
+            orchestrator_duration_ms=wf_result.duration_ms,
+        )
 
     def run(
         self,

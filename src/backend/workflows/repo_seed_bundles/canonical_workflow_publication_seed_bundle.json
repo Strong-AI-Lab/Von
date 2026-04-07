@@ -1380,48 +1380,62 @@
     },
     {
       "publication_spec": {
-        "initial_state": "critic",
+        "initial_state": "routing",
         "steps": [
           {
-            "action_concept_id": null,
-            "action_id": "turn_execution.critic",
-            "concept_id": null,
+            "action_id": "turn_execution.route",
             "conditional_transitions": [
               {
                 "condition_spec": {
                   "kind": "always"
                 },
-                "reason": "critic_completed",
+                "reason": "routing_resolved",
+                "to_state": "execution"
+              }
+            ],
+            "state_id": "routing"
+          },
+          {
+            "action_id": "turn_execution.execute_selected",
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "execution_completed",
+                "to_state": "narration"
+              }
+            ],
+            "state_id": "execution"
+          },
+          {
+            "action_id": "turn_execution.narrate",
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "narration_completed",
+                "to_state": "critic"
+              }
+            ],
+            "state_id": "narration"
+          },
+          {
+            "action_id": "kb_mutation.critic",
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "critic_decided",
                 "to_state": "completion_gate"
               }
             ],
-            "context_input_mapping_specs": [],
-            "context_input_mappings": [],
-            "effects": [],
-            "execution_mode": null,
-            "invoked_workflow_id": null,
-            "llm_policy": null,
-            "mutation_authority": null,
-            "next_state": null,
-            "on_approval_required_state": null,
-            "on_break_state": null,
-            "on_continue_state": null,
-            "on_failure_state": null,
-            "on_false_state": null,
-            "on_true_state": null,
-            "on_unknown_state": null,
-            "prompt_concept_ids": [],
-            "state_id": "critic",
-            "static_input_bindings": [],
-            "tool_output_context_mappings": [],
-            "tool_output_mapping_specs": [],
-            "validation_policy": null,
-            "writes_context_keys": []
+            "state_id": "critic"
           },
           {
-            "action_concept_id": null,
             "action_id": "turn_execution.completion_gate",
-            "concept_id": null,
             "conditional_transitions": [
               {
                 "condition_spec": {
@@ -1431,56 +1445,13 @@
                 "to_state": "completed"
               }
             ],
-            "context_input_mapping_specs": [],
-            "context_input_mappings": [],
-            "effects": [],
-            "execution_mode": null,
-            "invoked_workflow_id": null,
-            "llm_policy": null,
-            "mutation_authority": null,
-            "next_state": null,
-            "on_approval_required_state": null,
-            "on_break_state": null,
-            "on_continue_state": null,
-            "on_failure_state": null,
-            "on_false_state": null,
-            "on_true_state": null,
-            "on_unknown_state": null,
-            "prompt_concept_ids": [],
-            "state_id": "completion_gate",
-            "static_input_bindings": [],
-            "tool_output_context_mappings": [],
-            "tool_output_mapping_specs": [],
-            "validation_policy": null,
-            "writes_context_keys": []
+            "state_id": "completion_gate"
           },
           {
-            "action_concept_id": null,
-            "action_id": null,
-            "concept_id": null,
-            "conditional_transitions": [],
-            "context_input_mapping_specs": [],
-            "context_input_mappings": [],
-            "effects": [],
-            "execution_mode": null,
-            "invoked_workflow_id": null,
-            "llm_policy": null,
-            "mutation_authority": null,
-            "next_state": null,
-            "on_approval_required_state": null,
-            "on_break_state": null,
-            "on_continue_state": null,
-            "on_failure_state": null,
-            "on_false_state": null,
-            "on_true_state": null,
-            "on_unknown_state": null,
-            "prompt_concept_ids": [],
-            "state_id": "completed",
-            "static_input_bindings": [],
-            "tool_output_context_mappings": [],
-            "tool_output_mapping_specs": [],
-            "validation_policy": null,
-            "writes_context_keys": []
+            "state_id": "completed"
+          },
+          {
+            "state_id": "failed"
           }
         ]
       },

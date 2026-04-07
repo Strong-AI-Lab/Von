@@ -62,6 +62,7 @@ class WorkflowEnvironment:
     # LLM selection, namespace resolution, and access filtering work correctly.
     user_concept_id: str | None = None
     org_concept_id: str | None = None
+    step_callback: Callable[[Mapping[str, Any]], None] | None = None
 
 
 @dataclass(frozen=True)

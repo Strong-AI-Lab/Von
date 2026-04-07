@@ -1158,6 +1158,7 @@ def _register_durable_action_modules(registry: ActionRegistry) -> None:
     from .subworkflow_actions import register_subworkflow_actions
     from .talk_representation_workflow import register_talk_representation_actions
     from .testing_workflow_actions import register_testing_workflow_actions
+    from .turn_execution_actions import register_turn_execution_actions
     from .workflow_creation_workflow import register_workflow_creation_actions
     from .workflow_gap_recovery_workflow import (
         register_workflow_gap_recovery_actions,
@@ -1191,6 +1192,7 @@ def _register_durable_action_modules(registry: ActionRegistry) -> None:
     register_workflow_creation_actions(registry)
     register_testing_workflow_actions(registry)
     register_skill_interop_actions(registry)
+    register_turn_execution_actions(registry)
 
 
 def build_durable_action_registry() -> ActionRegistry:

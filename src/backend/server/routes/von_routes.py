@@ -8411,23 +8411,52 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
                 _submit_conversation_turn_instance()
                 orchestrator_start_perf = time.perf_counter()
-                orchestrator_result = orchestrator.run(
-                    prompt=prompt_text,
-                    context=enhanced_context,
-                    llm_client=llm_client,
-                    model=model_name,
-                    user_namespace=user_namespace,
-                    gmail_profile=request_gmail_profile,
-                    auxiliary_system_prompt=auxiliary_system_prompt,
-                    preferred_language=request_language,
-                    progress_tracker=progress_tracker,
-                    conversation_session_id=session_id,
-                    turn_id=request_id,
-                    workflow_discovery_result=workflow_discovery_result,
-                    workflow_continuation_context=workflow_continuation_context,
-                    user_concept_id=user_concept_id,
-                    org_concept_id=org_concept_id,
+
+                # JVNAUTOSCI-1763: arXiv ingestion refactor to supervised path.
+                from ...workflows.definitions import ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
+                
+                is_arxiv_workflow = (
+                    isinstance(workflow_discovery_result, Mapping)
+                    and workflow_discovery_result.get("selected_workflow_id") == ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
                 )
+
+                if is_arxiv_workflow:
+                    current_app.logger.info("[SUPERVISED] Using Master Turn Workflow for arXiv turn.")
+                    orchestrator_result = orchestrator.execute_conversation_turn_supervised(
+                        prompt=prompt_text,
+                        context=enhanced_context,
+                        llm_client=llm_client,
+                        model=model_name,
+                        user_namespace=user_namespace,
+                        gmail_profile=request_gmail_profile,
+                        auxiliary_system_prompt=auxiliary_system_prompt,
+                        preferred_language=request_language,
+                        progress_tracker=progress_tracker,
+                        conversation_session_id=session_id,
+                        turn_id=request_id,
+                        workflow_discovery_result=workflow_discovery_result,
+                        workflow_continuation_context=workflow_continuation_context,
+                        user_concept_id=user_concept_id,
+                        org_concept_id=org_concept_id,
+                    )
+                else:
+                    orchestrator_result = orchestrator.run(
+                        prompt=prompt_text,
+                        context=enhanced_context,
+                        llm_client=llm_client,
+                        model=model_name,
+                        user_namespace=user_namespace,
+                        gmail_profile=request_gmail_profile,
+                        auxiliary_system_prompt=auxiliary_system_prompt,
+                        preferred_language=request_language,
+                        progress_tracker=progress_tracker,
+                        conversation_session_id=session_id,
+                        turn_id=request_id,
+                        workflow_discovery_result=workflow_discovery_result,
+                        workflow_continuation_context=workflow_continuation_context,
+                        user_concept_id=user_concept_id,
+                        org_concept_id=org_concept_id,
+                    )
                 llm_interaction["duration_ms"] = (
                     time.perf_counter() - orchestrator_start_perf
                 ) * 1000.0

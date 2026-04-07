@@ -515,6 +515,17 @@ class DurableWorkflowExecutor:
                     context_after=context,
                 )
                 append_step_result_envelope(context=context, envelope=step_envelope)
+
+                if environment.step_callback:
+                    try:
+                        environment.step_callback(step_envelope)
+                    except Exception:
+                        logger.warning(
+                            "[durable_workflow] Step callback failed for %s",
+                            instance_id,
+                            exc_info=True,
+                        )
+
                 if step_envelope["control_signal"] != "none":
                     event = {
                         "status": "control_signal",

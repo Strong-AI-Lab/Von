@@ -1742,6 +1742,17 @@ class WorkflowExecutor:
                     )
                     step_envelope["state_attempt"] = state_attempt
                     append_step_result_envelope(context=context, envelope=step_envelope)
+
+                    if environment.step_callback:
+                        try:
+                            environment.step_callback(step_envelope)
+                        except Exception:
+                            logger.warning(
+                                "[workflow_engine] Step callback failed for %s",
+                                definition.workflow_id,
+                                exc_info=True,
+                            )
+
                     if trace is not None and step_envelope["control_signal"] != "none":
                         event = {
                             "status": "control_signal",
