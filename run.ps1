@@ -1887,6 +1887,17 @@ function Start-VonServer {
 
     $pdm = if (Test-Path (Join-Path $Root '.venv\Scripts\pdm.exe')) { Join-Path $Root '.venv\Scripts\pdm.exe' } else { 'pdm' }
     $venvPython = Join-Path $Root '.venv\Scripts\python.exe'
+
+    $purityScript = Join-Path $Root 'scripts/check_workflow_purity.py'
+    if (Test-Path $purityScript) {
+        Write-LauncherLog "Running Workflow Purity Check (warn-only)..."
+        if (Test-Path $venvPython) {
+            & $venvPython $purityScript 2>&1 | ForEach-Object { Write-LauncherLog "[purity-check] $_" }
+        } else {
+            & $pdm run python $purityScript 2>&1 | ForEach-Object { Write-LauncherLog "[purity-check] $_" }
+        }
+    }
+
     $serverExe = $null
     $serverArgs = @()
     $launchMode = 'direct-python'

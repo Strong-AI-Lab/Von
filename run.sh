@@ -1107,6 +1107,16 @@ start_server() {
         launch_mode="pdm-fallback"
     fi
 
+    local purity_script="${ROOT}/scripts/check_workflow_purity.py"
+    if [ -f "$purity_script" ]; then
+        log "Running Workflow Purity Check (warn-only)..."
+        if [ "$launch_mode" = "pdm-fallback" ]; then
+            "$py" run python "$purity_script" 2>&1 | while IFS= read -r line; do log "[purity-check] $line"; done || true
+        else
+            "$py" "$purity_script" 2>&1 | while IFS= read -r line; do log "[purity-check] $line"; done || true
+        fi
+    fi
+
     log "Starting Von server on port $PORT (mode=$launch_mode)..."
     rm -f "$NEW_LOG" "$SERVER_ERR_LOG" 2>/dev/null || true
     : > "$NEW_LOG" 2>/dev/null || true
