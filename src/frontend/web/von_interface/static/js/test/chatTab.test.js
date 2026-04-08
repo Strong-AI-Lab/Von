@@ -2736,9 +2736,16 @@ describe('thinking card toggle accessibility', () => {
 
             expect(indicatorText.textContent).toContain('Still preparing response');
             expect(document.getElementById('loadingIndicatorDetail').innerHTML)
-                .toContain('taking longer than usual');
+                .toContain('have not arrived yet');
             expect(document.getElementById('loadingIndicatorDetail').innerHTML)
                 .not.toContain('timed out after');
+
+            jest.advanceTimersByTime(11_000);
+            await Promise.resolve();
+            await Promise.resolve();
+
+            expect(document.getElementById('loadingIndicatorDetail').innerHTML)
+                .toContain('remain delayed');
 
             document.getElementById('abortButton').click();
             await Promise.resolve();

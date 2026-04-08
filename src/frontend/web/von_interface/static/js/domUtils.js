@@ -350,6 +350,7 @@ async function getCurrentOrganisationInfo(settingsOverride = null) {
 let footerDbRetryTimerId = null;
 let footerDbLoadGeneration = 0;
 let footerServerReachability = null;
+let footerLlmExecutionRefreshScheduled = false;
 const FOOTER_DB_PROBE_STATS_KEY = 'von_footer_db_probe_stats_v1';
 const FOOTER_DB_PROBE_SAMPLE_LIMIT = 32;
 const FOOTER_DB_RETRY_MIN_MS = 1500;
@@ -461,6 +462,89 @@ function clearFooterDbRetryTimer() {
     clearTimeout(footerDbRetryTimerId);
     footerDbRetryTimerId = null;
   }
+}
+
+function normaliseFooterTelemetryStrings(values) {
+  if (!Array.isArray(values)) return [];
+  const result = [];
+  const seen = new Set();
+  for (const value of values) {
+    if (typeof value !== 'string') continue;
+    const cleaned = value.trim();
+    if (!cleaned) continue;
+    const dedupeKey = cleaned.toLowerCase();
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    result.push(cleaned);
+  }
+  return result;
+}
+
+function readLatestLlmExecutionTelemetry() {
+  try {
+    const raw = window.__vonLatestLlmExecutionTelemetry;
+    if (!raw || typeof raw !== 'object') return null;
+    const callModels = normaliseFooterTelemetryStrings(raw.call_models);
+    const callProviders = normaliseFooterTelemetryStrings(raw.call_providers);
+    const requestedModel = (typeof raw.requested_model === 'string' && raw.requested_model.trim())
+      ? raw.requested_model.trim()
+      : null;
+    const actualModel = (typeof raw.actual_model === 'string' && raw.actual_model.trim())
+      ? raw.actual_model.trim()
+      : (callModels.length ? callModels[callModels.length - 1] : null);
+    const actualProvider = (typeof raw.actual_provider === 'string' && raw.actual_provider.trim())
+      ? raw.actual_provider.trim()
+      : (callProviders.length ? callProviders[callProviders.length - 1] : null);
+    const primaryFailureKind = (typeof raw.primary_failure_kind === 'string' && raw.primary_failure_kind.trim())
+      ? raw.primary_failure_kind.trim()
+      : null;
+    const primaryFailureReason = (typeof raw.primary_failure_reason === 'string' && raw.primary_failure_reason.trim())
+      ? raw.primary_failure_reason.trim()
+      : null;
+    const error = (typeof raw.error === 'string' && raw.error.trim())
+      ? raw.error.trim()
+      : null;
+    const warnings = normaliseFooterTelemetryStrings(raw.warnings).slice(0, 3);
+    if (!requestedModel && !actualModel && !actualProvider && !primaryFailureReason && !error && warnings.length === 0) {
+      return null;
+    }
+    return {
+      requestedModel,
+      actualModel,
+      actualProvider,
+      callModels,
+      callProviders,
+      fallbackUsed: !!raw.fallback_used,
+      primaryFailureKind,
+      primaryFailureReason,
+      error,
+      warnings,
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+function scheduleFooterModelInfoRefresh() {
+  if (footerLlmExecutionRefreshScheduled) return;
+  footerLlmExecutionRefreshScheduled = true;
+  const schedule = (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function')
+    ? window.requestAnimationFrame.bind(window)
+    : (cb) => setTimeout(cb, 0);
+  schedule(() => {
+    footerLlmExecutionRefreshScheduled = false;
+    if (document.getElementById('modelInfoFooter')) {
+      void setModelInfoFooterText();
+    }
+  });
+}
+
+try {
+  document.addEventListener('von:latestLlmExecutionTelemetryUpdated', () => {
+    scheduleFooterModelInfoRefresh();
+  });
+} catch (_) {
+  // Ignore missing document in tests or constrained environments.
 }
 
 function updateFooterReadinessState(footerContainer, readinessIssues) {
@@ -778,22 +862,24 @@ export async function setModelInfoFooterText() {
     readinessIssues.add('llm');
   }
 
+  const executionTelemetry = readLatestLlmExecutionTelemetry();
+
   // Determine LLM status styles
   const status = llmInfo?.status || 'unknown';
   const errorMsg = llmInfo?.error || '';
   const llmHost = typeof llmInfo?.details?.host === 'string' ? llmInfo.details.host : '';
   let llmClass = '';
-  let llmTooltipSuffix = '';
+  let configuredStatusLabel = 'Unknown';
 
   if (status === 'missing_key') {
     llmClass = 'missing-key';
-    llmTooltipSuffix = `\nStatus: Missing Key`;
+    configuredStatusLabel = 'Missing Key';
   } else if (status === 'error') {
     llmClass = 'error';
-    llmTooltipSuffix = `\nStatus: Error\n${errorMsg}`;
+    configuredStatusLabel = 'Error';
   } else if (status === 'ready') {
     llmClass = 'ready';
-    llmTooltipSuffix = `\nStatus: Ready`;
+    configuredStatusLabel = 'Ready';
   }
 
   // Build dynamic segments (User / Org as concept buttons)
@@ -896,15 +982,58 @@ export async function setModelInfoFooterText() {
   }
 
   {
+    const configuredProvider = (typeof activeLlm?.provider === 'string' && activeLlm.provider.trim())
+      ? activeLlm.provider.trim()
+      : ((typeof llmInfo?.provider === 'string' && llmInfo.provider.trim()) ? llmInfo.provider.trim() : '');
+    const configuredModel = (typeof activeLlm?.model === 'string' && activeLlm.model.trim())
+      ? activeLlm.model.trim()
+      : '';
+    const requestedModel = executionTelemetry?.requestedModel || configuredModel;
+    const actualModel = executionTelemetry?.actualModel || '';
+    const actualProvider = executionTelemetry?.actualProvider || '';
+    const actualDiffersFromRequested = !!actualModel && !!requestedModel && actualModel !== requestedModel;
+    const actualDiffersFromConfiguredProvider = !!actualProvider && !!configuredProvider && actualProvider !== configuredProvider;
+    const failureReason = executionTelemetry?.primaryFailureReason || executionTelemetry?.error || '';
+    const executionOverlayActive = !!executionTelemetry && (
+      !!executionTelemetry.fallbackUsed
+      || actualDiffersFromRequested
+      || actualDiffersFromConfiguredProvider
+      || !!failureReason
+    );
+    const executionStatusLabel = executionTelemetry?.primaryFailureKind === 'quota_exhausted'
+      ? 'Quota Exhausted'
+      : (executionTelemetry?.fallbackUsed ? 'Fallback Active' : (failureReason ? 'Execution Error' : 'Last Execution'));
     const titleParts = ['Open language model settings'];
-    titleParts.push(`Status: ${status}`);
-    if (activeLlm?.provider) titleParts.push(`Provider: ${activeLlm.provider}`);
-    if (activeLlm?.model) titleParts.push(`Model: ${activeLlm.model}`);
+    titleParts.push(`Configured status: ${configuredStatusLabel}`);
+    if (configuredProvider) titleParts.push(`Configured provider: ${configuredProvider}`);
+    if (configuredModel) titleParts.push(`Configured model: ${configuredModel}`);
     if (llmHost) titleParts.push(`Host: ${llmHost}`);
     if (errorMsg) titleParts.push(`Error: ${errorMsg}`);
+    if (executionOverlayActive) {
+      llmClass = 'fatal';
+      titleParts.push(`Last execution status: ${executionStatusLabel}`);
+      if (requestedModel) titleParts.push(`Requested model: ${requestedModel}`);
+      if (actualProvider) titleParts.push(`Executed provider: ${actualProvider}`);
+      if (actualModel) titleParts.push(`Executed model: ${actualModel}`);
+      if (executionTelemetry?.callModels?.length > 1) {
+        titleParts.push(`Execution models tried: ${executionTelemetry.callModels.join(', ')}`);
+      }
+      if (executionTelemetry?.primaryFailureKind) {
+        titleParts.push(`Failure kind: ${executionTelemetry.primaryFailureKind}`);
+      }
+      if (failureReason) {
+        titleParts.push(`Failure reason: ${failureReason}`);
+      }
+      if (executionTelemetry?.warnings?.length) {
+        titleParts.push(`Warnings: ${executionTelemetry.warnings.join(' | ')}`);
+      }
+    }
+    const displayModelText = executionOverlayActive
+      ? (actualModel || requestedModel || configuredModel || 'Not Set')
+      : (configuredModel || 'Not Set');
     const modelSettingsSegment = makeActionButton(
       'Model',
-      activeLlm?.model || 'Not Set',
+      displayModelText,
       () => { openSettingsForModelControls(); },
       {
         ariaLabel: 'Open language model settings',
@@ -912,12 +1041,6 @@ export async function setModelInfoFooterText() {
       }
     );
     if (llmClass) modelSettingsSegment.classList.add('llm-status-badge', llmClass);
-    if (llmTooltipSuffix) {
-      const btn = modelSettingsSegment.querySelector('.concept-footer-button');
-      if (btn) {
-        btn.title = titleParts.join('\n') + llmTooltipSuffix;
-      }
-    }
     segments.push(modelSettingsSegment);
   }
 

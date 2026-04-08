@@ -70,6 +70,7 @@ function buildChatFetchHeaders(extraHeaders = {}) {
 // Store LLM debug data for each turn
 const llmDebugData = new Map();
 const llmDebugFetchInFlight = new Map();
+const LATEST_LLM_EXECUTION_TELEMETRY_SCHEMA_VERSION = 'latest_llm_execution_telemetry.v1';
 const CONVERSATION_INFO_COPY_BUTTON_ID = 'copyConversationInfoJsonBtn';
 const CONVERSATION_INFO_COPY_BUTTON_LABEL = 'ℹ';
 const CONVERSATION_INFO_COPY_BUTTON_TITLE_READY = 'Copy conversation info as JSON';
@@ -243,11 +244,194 @@ function setLlmDebugDataEntry(turnId, debugData) {
     }
     llmDebugData.set(turnId, debugData);
     refreshConversationInfoCopyButtonState();
+    publishLatestLlmExecutionTelemetry();
 }
 
 function clearLlmDebugDataEntries() {
     llmDebugData.clear();
     refreshConversationInfoCopyButtonState();
+    publishLatestLlmExecutionTelemetry();
+}
+
+function normaliseTelemetryStringArray(values) {
+    if (!Array.isArray(values)) {
+        return [];
+    }
+    const normalised = [];
+    const seen = new Set();
+    for (const value of values) {
+        if (typeof value !== 'string') {
+            continue;
+        }
+        const cleaned = value.trim();
+        if (!cleaned) {
+            continue;
+        }
+        const dedupeKey = cleaned.toLowerCase();
+        if (seen.has(dedupeKey)) {
+            continue;
+        }
+        seen.add(dedupeKey);
+        normalised.push(cleaned);
+    }
+    return normalised;
+}
+
+function extractLatestLlmExecutionFailure(auxCalls = []) {
+    const policyStages = Array.isArray(auxCalls)
+        ? auxCalls.filter((entry) => entry && typeof entry === 'object' && entry.type === 'workflow_model_policy_stage')
+        : [];
+
+    for (let index = policyStages.length - 1; index >= 0; index -= 1) {
+        const stageEntry = policyStages[index];
+        const errors = Array.isArray(stageEntry.errors) ? stageEntry.errors : [];
+        const fallbackAttempts = Array.isArray(stageEntry.fallback_attempts) ? stageEntry.fallback_attempts : [];
+        const candidates = [...errors, ...fallbackAttempts];
+        for (const candidate of candidates) {
+            if (!candidate || typeof candidate !== 'object') {
+                continue;
+            }
+            const failureKind = (typeof candidate.failure_kind === 'string' && candidate.failure_kind.trim())
+                ? candidate.failure_kind.trim()
+                : null;
+            const failureReason = (typeof candidate.error === 'string' && candidate.error.trim())
+                ? candidate.error.trim()
+                : null;
+            if (failureKind || failureReason) {
+                return {
+                    fallbackUsed: true,
+                    failureKind,
+                    failureReason,
+                };
+            }
+        }
+        if (stageEntry.fallback_used) {
+            return {
+                fallbackUsed: true,
+                failureKind: null,
+                failureReason: null,
+            };
+        }
+    }
+
+    return {
+        fallbackUsed: false,
+        failureKind: null,
+        failureReason: null,
+    };
+}
+
+function buildLatestLlmExecutionTelemetrySummary(turnId, debugData) {
+    if (!debugData || typeof debugData !== 'object') {
+        return null;
+    }
+
+    const llmInteraction = (debugData.llm_interaction && typeof debugData.llm_interaction === 'object')
+        ? debugData.llm_interaction
+        : ((debugData.metadata?.llm_interaction && typeof debugData.metadata.llm_interaction === 'object')
+            ? debugData.metadata.llm_interaction
+            : null);
+    const rawCalls = Array.isArray(llmInteraction?.calls) ? llmInteraction.calls : [];
+    const callModels = [];
+    const callProviders = [];
+    let actualModel = null;
+    let actualProvider = null;
+
+    for (const call of rawCalls) {
+        if (!call || typeof call !== 'object') {
+            continue;
+        }
+        const model = (typeof call.model === 'string' && call.model.trim())
+            ? call.model.trim()
+            : null;
+        const provider = (typeof call.provider === 'string' && call.provider.trim())
+            ? call.provider.trim()
+            : null;
+        if (model) {
+            callModels.push(model);
+            actualModel = model;
+        }
+        if (provider) {
+            callProviders.push(provider);
+            actualProvider = provider;
+        }
+    }
+
+    const fallbackCallModels = normaliseTelemetryStringArray(llmInteraction?.call_models);
+    if (!actualModel && fallbackCallModels.length > 0) {
+        actualModel = fallbackCallModels[fallbackCallModels.length - 1];
+    }
+
+    const fallbackCallProviders = normaliseTelemetryStringArray(llmInteraction?.call_providers);
+    if (!actualProvider && fallbackCallProviders.length > 0) {
+        actualProvider = fallbackCallProviders[fallbackCallProviders.length - 1];
+    }
+
+    const uniqueCallModels = normaliseTelemetryStringArray([...callModels, ...fallbackCallModels]);
+    const uniqueCallProviders = normaliseTelemetryStringArray([...callProviders, ...fallbackCallProviders]);
+    const requestedModel = (typeof llmInteraction?.requested_model === 'string' && llmInteraction.requested_model.trim())
+        ? llmInteraction.requested_model.trim()
+        : ((typeof debugData.model === 'string' && debugData.model.trim()) ? debugData.model.trim() : null);
+    const topLevelError = (typeof debugData.error === 'string' && debugData.error.trim())
+        ? debugData.error.trim()
+        : null;
+    const warnings = deriveLlmDebugWarnings(debugData);
+    const failure = extractLatestLlmExecutionFailure(debugData.aux_llm_calls);
+    const callNoteIndicatesFallback = rawCalls.some((call) => (
+        typeof call?.note === 'string'
+        && call.note.toLowerCase().includes('trying fallback')
+    ));
+    const fallbackUsed = !!failure.fallbackUsed || callNoteIndicatesFallback;
+    const primaryFailureReason = failure.failureReason || topLevelError || (warnings[0] || null);
+
+    if (
+        !requestedModel
+        && !actualModel
+        && !actualProvider
+        && !primaryFailureReason
+        && warnings.length === 0
+    ) {
+        return null;
+    }
+
+    return {
+        schema_version: LATEST_LLM_EXECUTION_TELEMETRY_SCHEMA_VERSION,
+        turn_id: typeof turnId === 'string' ? turnId : null,
+        timestamp: debugData.timestamp ?? null,
+        requested_model: requestedModel,
+        actual_model: actualModel,
+        actual_provider: actualProvider,
+        call_models: uniqueCallModels,
+        call_providers: uniqueCallProviders,
+        fallback_used: fallbackUsed,
+        primary_failure_kind: failure.failureKind || null,
+        primary_failure_reason: primaryFailureReason,
+        error: topLevelError,
+        warnings: warnings.slice(0, 5),
+    };
+}
+
+function publishLatestLlmExecutionTelemetry() {
+    const latestEntry = getLatestLlmDebugEntryForExport();
+    const summary = latestEntry
+        ? buildLatestLlmExecutionTelemetrySummary(latestEntry.turnId, latestEntry.debugData)
+        : null;
+
+    try {
+        window.__vonLatestLlmExecutionTelemetry = summary;
+    } catch (_) {
+        // Ignore non-writable globals in constrained environments.
+    }
+
+    try {
+        document.dispatchEvent(new CustomEvent('von:latestLlmExecutionTelemetryUpdated', {
+            detail: summary,
+        }));
+    } catch (_) {
+        // Telemetry publication should not block normal flow.
+    }
+
+    return summary;
 }
 
 function isDocumentVisibleForRealtimeConnections() {
@@ -4468,7 +4652,7 @@ function buildProgressPollTimeoutFallback(request, requestId) {
         subtask: currentSubtask || (usesClientInitialPlaceholder ? 'request setup' : 'live progress'),
         result_summary: elapsedMs !== null && elapsedMs >= (THINKING_PROGRESS_TIMEOUT_VISIBLE_AFTER_MS * 2)
             ? 'Von is still working. Live progress updates remain delayed, and the interface will keep retrying automatically.'
-            : 'Von is still working. Live progress updates are taking longer than usual, so the interface will keep retrying automatically.'
+            : 'Von is still working. Live progress updates have not arrived yet, so the interface will keep retrying automatically.'
     });
 }
 
@@ -23869,6 +24053,13 @@ export async function __testOnly_copyConversationInfoToClipboard(button = null) 
 }
 export function __testOnly_clearLlmDebugData() {
     clearLlmDebugDataEntries();
+}
+export function __testOnly_getLatestLlmExecutionTelemetry() {
+    try {
+        return window.__vonLatestLlmExecutionTelemetry || null;
+    } catch (_) {
+        return null;
+    }
 }
 export function __testOnly_setTranscriptTurns(turns = []) {
     transcriptTurns.length = 0;
