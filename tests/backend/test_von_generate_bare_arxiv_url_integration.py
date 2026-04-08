@@ -287,6 +287,7 @@ def test_generate_bare_arxiv_url_recovers_from_noisy_initial_tool_plan_output(
             "I would route this as plain_response.",
             '{"action":"call_tool","tool":"download_paper","payload":{"arxiv_id":"2510.06248"}}',
             "Downloaded and represented the paper.",
+            "Downloaded and represented the paper.",
         ]
     )
     app = _make_app(monkeypatch, llm=llm)
@@ -349,7 +350,7 @@ def test_generate_bare_arxiv_url_recovers_from_noisy_initial_tool_plan_output(
     assert int(tool_stage.get("tool_success_count") or 0) >= 1
     assert tool_stage.get("tool_failure_count") == 0
     assert tool_stage.get("tool_pending_count") == 0
-    assert len(llm.calls) == 4
+    assert len(llm.calls) == 5
 
 
 def test_generate_bare_arxiv_url_without_selector_still_forces_tool_pipeline_routing(
@@ -373,7 +374,9 @@ def test_generate_bare_arxiv_url_without_selector_still_forces_tool_pipeline_rou
     llm_debug = body.get("llm_debug") or {}
 
     workflow_routing = llm_debug.get("workflow_routing") or {}
-    assert not workflow_routing
+    assert workflow_routing.get("workflow_id") == CHAT_ASSISTANT_WORKFLOW_ID
+    assert workflow_routing.get("verdict") == "selector_disabled"
+    assert workflow_routing.get("source") == "default"
 
     diagnostics = llm_debug.get("turn_execution_diagnostics") or {}
     assert diagnostics.get("tool_call_count") == 1
@@ -478,6 +481,7 @@ def test_generate_bare_arxiv_url_with_explicit_denial_stays_non_mutating(monkeyp
                 '{"workflow_id":"#V#chat_assistant_workflow","confidence":0.9,'
                 '"reasoning":"Explicit denial keeps this read-only."}'
             ),
+            "Read-only response.",
             "Read-only response.",
         ]
     )

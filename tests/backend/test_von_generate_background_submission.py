@@ -20,6 +20,9 @@ class _StubOrchestrator:
         return None
 
     def run(self, **_kwargs):
+        return self.execute_conversation_turn_supervised(**_kwargs)
+
+    def execute_conversation_turn_supervised(self, **_kwargs):
         return self._result
 
 

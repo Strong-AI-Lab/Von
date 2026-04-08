@@ -8,6 +8,9 @@ class _CapturingOrchestrator:
         self.calls: list[dict[str, object]] = []
 
     def run(self, **kwargs):
+        return self.execute_conversation_turn_supervised(**kwargs)
+
+    def execute_conversation_turn_supervised(self, **kwargs):
         self.calls.append(kwargs)
 
         from src.backend.integrations.internal_mcp.orchestrator import (

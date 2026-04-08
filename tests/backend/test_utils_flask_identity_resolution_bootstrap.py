@@ -10,6 +10,13 @@ def test_build_durable_workflow_bootstrap_summary_surfaces_seed_repair_drift() -
 
     summary = utils_flask._build_durable_workflow_bootstrap_summary(
         {
+            "conversation_turn_workflow_bootstrap": {
+                "success": True,
+                "publication": {
+                    "materialisation_status": "current",
+                    "drift_detected": False,
+                },
+            },
             "paper_workflow_bootstrap": {
                 "success": True,
                 "publication": {
@@ -32,6 +39,11 @@ def test_build_durable_workflow_bootstrap_summary_surfaces_seed_repair_drift() -
     )
 
     assert summary == {
+        "conversation_turn_workflow_bootstrap": {
+            "success": True,
+            "materialisation_status": "current",
+            "drift_detected": False,
+        },
         "paper_workflow_bootstrap": {
             "success": True,
             "materialisation_status": "repaired_from_repo_seed",
@@ -53,6 +65,7 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     import src.backend.server.utils_flask as utils_flask
     from src.backend.workflows.durable import startup as durable_startup
     from src.backend.services import (
+        conversation_turn_workflow_vontology_service as conversation_turn_workflow_bootstrap,
         entity_representation_workflow_vontology_service as entity_workflow_bootstrap,
         episode_evaluation_workflow_vontology_service as episode_evaluation_workflow_bootstrap,
         identity_resolution_schedule_bootstrap_service as schedule_bootstrap,
@@ -163,6 +176,20 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
         },
     )
     monkeypatch.setattr(
+        conversation_turn_workflow_bootstrap,
+        "bootstrap_canonical_conversation_turn_workflows",
+        lambda: {
+            "success": True,
+            "workflow_ids": [
+                "#V#chat_assistant_workflow",
+                "#V#tool_calling_workflow",
+                "#V#turn_completion_gate_workflow",
+                "#V#conversation_turn_execution_workflow",
+            ],
+            "publication": {"skipped": True},
+        },
+    )
+    monkeypatch.setattr(
         paper_workflow_bootstrap,
         "bootstrap_canonical_paper_representation_workflows",
         lambda: {
@@ -225,6 +252,11 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     entity_workflow_bootstrap_report = result.get("entity_workflow_bootstrap")
     assert isinstance(entity_workflow_bootstrap_report, dict)
     assert entity_workflow_bootstrap_report.get("success") is True
+    conversation_turn_workflow_bootstrap_report = result.get(
+        "conversation_turn_workflow_bootstrap"
+    )
+    assert isinstance(conversation_turn_workflow_bootstrap_report, dict)
+    assert conversation_turn_workflow_bootstrap_report.get("success") is True
     paper_workflow_bootstrap_report = result.get("paper_workflow_bootstrap")
     assert isinstance(paper_workflow_bootstrap_report, dict)
     assert paper_workflow_bootstrap_report.get("success") is True

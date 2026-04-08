@@ -262,7 +262,7 @@
             "context_input_mapping_specs": [],
             "context_input_mappings": [],
             "effects": [],
-            "execution_mode": "llm",
+            "execution_mode": null,
             "invoked_workflow_id": null,
             "llm_policy": {
               "context_fields": [
@@ -565,8 +565,44 @@
     },
     {
       "publication_spec": {
-        "initial_state": "completed",
+        "initial_state": "respond",
         "steps": [
+          {
+            "action_concept_id": null,
+            "action_id": "tool_calling.respond",
+            "concept_id": null,
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "response_ready",
+                "to_state": "completed"
+              }
+            ],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": null,
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "respond",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [],
+            "validation_policy": null,
+            "writes_context_keys": []
+          },
           {
             "action_concept_id": null,
             "action_id": null,
@@ -1059,13 +1095,9 @@
             "context_input_mapping_specs": [],
             "context_input_mappings": [],
             "effects": [],
-            "execution_mode": "llm",
+            "execution_mode": null,
             "invoked_workflow_id": null,
-            "llm_policy": {
-              "policy_stage": "tool_call",
-              "prompt_text_context_key": "prompt",
-              "tool_mode": "allowed"
-            },
+            "llm_policy": null,
             "mutation_authority": {
               "maximum_level": "external_system_guarded",
               "schema_version": "workflow_step_mutation_authority.v1"
@@ -1317,6 +1349,14 @@
             "conditional_transitions": [
               {
                 "condition_spec": {
+                  "key": "completion_gate_requires_follow_up",
+                  "kind": "context_flag"
+                },
+                "reason": "follow_up_required",
+                "to_state": "failed"
+              },
+              {
+                "condition_spec": {
                   "kind": "always"
                 },
                 "reason": "decided",
@@ -1373,6 +1413,34 @@
             "tool_output_mapping_specs": [],
             "validation_policy": null,
             "writes_context_keys": []
+          },
+          {
+            "action_concept_id": null,
+            "action_id": null,
+            "concept_id": null,
+            "conditional_transitions": [],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": null,
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "failed",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [],
+            "validation_policy": null,
+            "writes_context_keys": []
           }
         ]
       },
@@ -1409,7 +1477,7 @@
             "state_id": "execution"
           },
           {
-            "action_id": null,
+            "action_id": "llm.action",
             "conditional_transitions": [
               {
                 "condition_spec": {
@@ -1435,13 +1503,20 @@
             "prompt_concept_ids": [
               "#V#prompt_turn_execution_narrate_completion_report"
             ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_narration_final_response_to_response_text",
+                "context_key": "response_text",
+                "tool_output_field": "final_response"
+              }
+            ],
             "writes_context_keys": [
               "response_text"
             ],
             "state_id": "narration"
           },
           {
-            "action_id": null,
+            "action_id": "turn_execution.critic",
             "conditional_transitions": [
               {
                 "condition_spec": {
@@ -1451,26 +1526,23 @@
                 "to_state": "completion_gate"
               }
             ],
-            "execution_mode": "llm",
-            "llm_policy": {
-              "context_fields": [
-                {
-                  "context_key": "completion_report",
-                  "label": "Completion Report"
-                }
-              ]
-            },
-            "prompt_concept_ids": [
-              "#V#episode_critic_evaluation_prompt"
-            ],
-            "writes_context_keys": [
-              "critic_verdict"
-            ],
+            "execution_mode": null,
+            "llm_policy": null,
+            "prompt_concept_ids": [],
+            "writes_context_keys": [],
             "state_id": "critic"
           },
           {
-            "action_id": null,
+            "action_id": "turn_execution.completion_gate",
             "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "key": "completion_gate_requires_follow_up",
+                  "kind": "context_flag"
+                },
+                "reason": "follow_up_required",
+                "to_state": "failed"
+              },
               {
                 "condition_spec": {
                   "kind": "always"
@@ -1480,9 +1552,7 @@
               }
             ],
             "state_id": "completion_gate",
-            "writes_context_keys": [
-              "completion_gate_verdict"
-            ]
+            "writes_context_keys": []
           },
           {
             "state_id": "completed"

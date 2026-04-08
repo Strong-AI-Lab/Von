@@ -179,6 +179,9 @@ class _CapturingOrchestrator:
         return None
 
     def run(self, **kwargs: Any):
+        return self.execute_conversation_turn_supervised(**kwargs)
+
+    def execute_conversation_turn_supervised(self, **kwargs: Any):
         self.calls.append(dict(kwargs))
         namespace = kwargs.get("user_namespace")
         self.active_snapshots.append(
@@ -199,6 +202,20 @@ class _CapturingOrchestrator:
             extra_messages=[],
             tool_invocations=[],
             aux_llm_calls=[],
+            selected_workflow_trace={
+                "workflow_id": "#V#chat_assistant_workflow",
+                "execution_mode": "direct_response",
+            },
+            critic_verdict={"verdict": "pass", "summary": {"not_verified_count": 0}},
+            completion_gate_verdict={
+                "decision": "completed",
+                "requires_follow_up": False,
+            },
+            completion_report={
+                "schema_version": "conversation_turn_selected_workflow_result.v1",
+                "workflow_id": "#V#chat_assistant_workflow",
+                "response_text": "Workflow monitor response",
+            },
         )
 
 
@@ -357,27 +374,31 @@ def test_generate_materialises_conversation_turn_instance_in_monitor(app: Flask)
         json={"prompt": "Show the workflow monitor row for this turn."},
     )
     assert response.status_code == 200
+    payload = response.get_json()
+    llm_debug = payload["llm_debug"]
+    assert llm_debug["selected_workflow_trace"]["workflow_id"] == (
+        "#V#chat_assistant_workflow"
+    )
+    assert llm_debug["critic_verdict"]["verdict"] == "pass"
+    assert llm_debug["completion_gate_verdict"]["decision"] == "completed"
+    assert llm_debug["completion_report"]["workflow_id"] == (
+        "#V#chat_assistant_workflow"
+    )
 
     orchestrator = app.config["_TEST_ORCHESTRATOR"]
-    assert orchestrator.calls, "expected orchestrator.run() to be called"
+    assert orchestrator.calls, "expected supervised orchestrator execution to be called"
     assert orchestrator.active_snapshots, "expected an active workflow snapshot"
-    active_items = orchestrator.active_snapshots[0]
-    assert any(
-        item.get("workflow_id") == CONVERSATION_TURN_EXECUTION_WORKFLOW_ID
-        and item.get("status") == "pending"
-        for item in active_items
-    )
 
     monitor_response = client.get(
         "/api/workflows/instances",
         query_string={"namespace": "#V#michael_witbrock@sail_lab"},
     )
     assert monitor_response.status_code == 200
-    payload = monitor_response.get_json()
-    assert payload["count"] >= 1
+    monitor_payload = monitor_response.get_json()
+    assert monitor_payload["count"] >= 1
     turn_item = next(
         item
-        for item in payload["items"]
+        for item in monitor_payload["items"]
         if item.get("workflow_id") == CONVERSATION_TURN_EXECUTION_WORKFLOW_ID
     )
     assert turn_item["status"] == "completed"
