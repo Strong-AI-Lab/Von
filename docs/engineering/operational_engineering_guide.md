@@ -137,6 +137,18 @@ For minimum local and hosted environment sets, see
 - When creating Jira issues on the user's behalf, assign them to the
   authenticated Jira user by default unless the user explicitly asks for a
   different assignee or Jira refuses the assignment.
+- Once Jira work is clearly in scope for the current request, do not impose
+  extra human-attention cost for low-risk Jira hygiene. By default, go ahead
+  and perform routine housekeeping such as:
+  - transitioning the current issue to the appropriate in-progress or done
+    state
+  - adding concise progress or closure comments that reflect actual work
+  - setting the obvious parent epic when the fit is clear from current context
+  - adding or updating straightforward issue links between clearly related
+    tasks created or discussed in the same thread
+- Ask before Jira mutations that materially change planning intent or ownership,
+  such as rewording issue scope, changing assignee away from the authenticated
+  user, reprioritising, bulk-editing many issues, or creating uncertain links.
 
 Jira MCP failure checkpoint:
 
