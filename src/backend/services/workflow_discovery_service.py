@@ -28,7 +28,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ..vontology.utils_vontology import get_concept_description
 from .file_copy_reference_service import extract_file_copy_concept_ids_from_text
@@ -57,7 +57,10 @@ DEFAULT_MAX_RESULTS = 3
 
 # Search timeout in seconds
 SEARCH_TIMEOUT_SECONDS = 0.5
-DISCOVERY_CAPABILITY_INDEX_MAX_WAIT_SECONDS = 0.0
+# Cold-start capability-index waits should be bounded and should not consume the
+# full discovery budget. Discovery still needs time to surface fallback causes.
+DISCOVERY_CAPABILITY_INDEX_MAX_WAIT_SECONDS = 0.75
+DISCOVERY_CAPABILITY_INDEX_WAIT_TIMEOUT_FRACTION = 0.5
 
 # Executability reason codes (JVNAUTOSCI-1088).
 EXECUTABILITY_EXECUTABLE_NOW = "executable_now"
@@ -220,6 +223,7 @@ class WorkflowDiscoveryResult:
     search_sources: List[str] = field(default_factory=list)
     keyword_fallback_queries: List[str] = field(default_factory=list)
     allow_non_executable: bool = False
+    match_absence_reason: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialisation."""
@@ -246,6 +250,7 @@ class WorkflowDiscoveryResult:
             "search_sources": list(self.search_sources),
             "keyword_fallback_queries": list(self.keyword_fallback_queries),
             "allow_non_executable": self.allow_non_executable,
+            "match_absence_reason": self.match_absence_reason,
             "errors": self.errors if self.errors else None,
         }
 
@@ -374,6 +379,86 @@ def _search_workflows_vontology(
         logger.warning(f"Vontology workflow search failed: {e}")
 
     return []
+
+
+def _compute_capability_index_wait_seconds(timeout_seconds: float) -> float:
+    """Return the bounded wait budget for a cold capability-index build."""
+    try:
+        timeout_budget = max(0.0, float(timeout_seconds))
+    except (TypeError, ValueError):
+        timeout_budget = 0.0
+    if timeout_budget <= 0.0:
+        return 0.0
+    return min(
+        DISCOVERY_CAPABILITY_INDEX_MAX_WAIT_SECONDS,
+        timeout_budget * DISCOVERY_CAPABILITY_INDEX_WAIT_TIMEOUT_FRACTION,
+    )
+
+
+def _derive_capability_index_unavailability_errors(
+    *,
+    runtime_state: Mapping[str, Any],
+    wait_seconds: float,
+) -> list[str]:
+    errors: list[str] = []
+    ready = bool(runtime_state.get("ready", False))
+    build_in_progress = bool(runtime_state.get("build_in_progress", False))
+    if wait_seconds > 0.0 and build_in_progress and not ready:
+        errors.append("capability_index_wait_timed_out")
+    if build_in_progress:
+        errors.append("capability_index_build_in_progress")
+    elif not ready:
+        errors.append("capability_index_not_ready")
+    last_error = runtime_state.get("last_error")
+    if isinstance(last_error, str) and last_error.strip():
+        errors.append(f"capability_index_build_error:{last_error.strip()}")
+    return errors
+
+
+def _derive_discovery_result_match_absence_reason(
+    *,
+    candidates: Sequence[WorkflowMatch],
+    routing_matches: Sequence[WorkflowMatch],
+    errors: Sequence[str],
+) -> str | None:
+    if routing_matches:
+        return None
+
+    if not candidates:
+        error_set = {str(item).strip() for item in errors if str(item).strip()}
+        if (
+            "capability_index_wait_timed_out" in error_set
+            and "capability_index_build_in_progress" in error_set
+        ):
+            return "capability_index_wait_timed_out_build_in_progress"
+        if "capability_index_build_in_progress" in error_set:
+            return "capability_index_build_in_progress"
+        if "capability_index_not_ready" in error_set:
+            return "capability_index_not_ready"
+        if any(
+            error.startswith("capability_index_build_error:") for error in error_set
+        ):
+            return "capability_index_build_error"
+        return "no_discovery_candidates"
+
+    excluded_candidates = [
+        match
+        for match in candidates
+        if isinstance(match.routing_exclusion_reason, str)
+        and match.routing_exclusion_reason.strip()
+    ]
+    if excluded_candidates and len(excluded_candidates) >= len(candidates):
+        exclusion_reasons = {
+            str(match.routing_exclusion_reason).strip()
+            for match in excluded_candidates
+            if str(match.routing_exclusion_reason).strip()
+        }
+        if len(exclusion_reasons) == 1:
+            return next(iter(exclusion_reasons))
+        return "all_discovery_candidates_excluded"
+    if excluded_candidates:
+        return "no_routing_match_after_exclusions"
+    return "no_routing_match_above_threshold"
 
 
 def _resolve_query_file_copy_contexts(query: str) -> tuple[list[dict[str, Any]], list[str]]:
@@ -986,6 +1071,7 @@ def _search_workflow_capabilities(
     query: str,
     *,
     limit: int = DEFAULT_MAX_RESULTS * 3,
+    max_wait_seconds: float | None = None,
 ) -> List[WorkflowMatch]:
     """Search the dedicated workflow capability index (primary search path).
 
@@ -995,12 +1081,17 @@ def _search_workflow_capabilities(
     fallback paths.
     """
     try:
+        effective_max_wait_seconds = (
+            DISCOVERY_CAPABILITY_INDEX_MAX_WAIT_SECONDS
+            if max_wait_seconds is None
+            else max(0.0, float(max_wait_seconds))
+        )
         cap_matches = search_workflow_capabilities(
             query,
             max_results=limit,
             min_score=0.01,
             non_blocking=True,
-            max_wait_seconds=DISCOVERY_CAPABILITY_INDEX_MAX_WAIT_SECONDS,
+            max_wait_seconds=effective_max_wait_seconds,
         )
         results: list[WorkflowMatch] = []
         for cap in cap_matches:
@@ -1071,6 +1162,9 @@ def discover_workflows(
     errors.extend(context_errors)
     search_query = _augment_query_with_file_copy_context(query, file_copy_contexts)
     keyword_fallback_queries = _build_keyword_fallback_queries(query, file_copy_contexts)
+    capability_index_wait_seconds = _compute_capability_index_wait_seconds(
+        timeout_seconds
+    )
 
     # JVNAUTOSCI-1424 Phase 2: Search the dedicated capability index FIRST.
     # This covers all registered workflows (built-in + Vontology) with rich
@@ -1079,7 +1173,9 @@ def discover_workflows(
     try:
         search_sources.append("capability_index")
         capability_matches = _search_workflow_capabilities(
-            search_query, limit=max_results * 3
+            search_query,
+            limit=max_results * 3,
+            max_wait_seconds=capability_index_wait_seconds,
         )
         capability_index_state = get_workflow_capability_index_runtime_state()
         all_matches.extend(capability_matches)
@@ -1089,13 +1185,12 @@ def discover_workflows(
             max_results=max_results,
         )
         if not capability_matches:
-            if bool(capability_index_state.get("build_in_progress", False)):
-                errors.append("capability_index_build_in_progress")
-            elif not bool(capability_index_state.get("ready", False)):
-                errors.append("capability_index_not_ready")
-            last_error = capability_index_state.get("last_error")
-            if isinstance(last_error, str) and last_error.strip():
-                errors.append(f"capability_index_build_error:{last_error.strip()}")
+            errors.extend(
+                _derive_capability_index_unavailability_errors(
+                    runtime_state=capability_index_state,
+                    wait_seconds=capability_index_wait_seconds,
+                )
+            )
     except Exception as e:
         capability_matches_sufficient = False
         errors.append(f"capability_index_error: {e}")
@@ -1164,6 +1259,11 @@ def discover_workflows(
         ranked_matches,
         allow_non_executable=allow_non_executable,
     )
+    match_absence_reason = _derive_discovery_result_match_absence_reason(
+        candidates=ranked_matches,
+        routing_matches=routing_matches or [],
+        errors=errors,
+    )
 
     executable_match_count = _count_executable_matches(ranked_matches)
     try:
@@ -1198,6 +1298,7 @@ def discover_workflows(
         search_sources=search_sources,
         keyword_fallback_queries=keyword_fallback_queries,
         allow_non_executable=allow_non_executable,
+        match_absence_reason=match_absence_reason,
     )
 
 

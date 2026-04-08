@@ -1539,10 +1539,28 @@ def _derive_discovery_match_absence_reason(
     discovery_candidates: Sequence[Mapping[str, Any]],
     routing_matches: Sequence[Mapping[str, Any]],
     excluded_candidates: Sequence[Mapping[str, Any]],
+    discovery_errors: Sequence[str] = (),
+    explicit_match_absence_reason: str | None = None,
 ) -> str | None:
+    if explicit_match_absence_reason:
+        return explicit_match_absence_reason
     if routing_matches:
         return None
     if not discovery_candidates:
+        error_set = {str(item).strip() for item in discovery_errors if str(item).strip()}
+        if (
+            "capability_index_wait_timed_out" in error_set
+            and "capability_index_build_in_progress" in error_set
+        ):
+            return "capability_index_wait_timed_out_build_in_progress"
+        if "capability_index_build_in_progress" in error_set:
+            return "capability_index_build_in_progress"
+        if "capability_index_not_ready" in error_set:
+            return "capability_index_not_ready"
+        if any(
+            error.startswith("capability_index_build_error:") for error in error_set
+        ):
+            return "capability_index_build_error"
         return "no_discovery_candidates"
     if excluded_candidates and len(excluded_candidates) >= len(discovery_candidates):
         exclusion_counts = _count_named_values(
@@ -1821,10 +1839,17 @@ def build_workflow_routing_diagnostics(
     selector_fallback_failure_kind_counts = _sorted_count_entries(
         _count_named_values(selector_model_errors, field_name="failure_kind")
     )
+    discovery_errors = _dedupe_string_sequence(
+        workflow_discovery_payload.get("errors") or []
+    )
     discovery_match_absence_reason = _derive_discovery_match_absence_reason(
         discovery_candidates=discovery_candidates,
         routing_matches=routing_matches,
         excluded_candidates=excluded_candidates,
+        discovery_errors=discovery_errors,
+        explicit_match_absence_reason=_safe_str(
+            workflow_discovery_payload.get("match_absence_reason")
+        ),
     )
     primary_fallback_failure_kind = None
     for attempt in selector_model_attempts:
@@ -1932,9 +1957,7 @@ def build_workflow_routing_diagnostics(
             "search_sources": _dedupe_string_sequence(
                 workflow_discovery_payload.get("search_sources") or []
             ),
-            "errors": _dedupe_string_sequence(
-                workflow_discovery_payload.get("errors") or []
-            ),
+            "errors": discovery_errors,
             "candidate_source_counts": discovery_candidate_source_counts,
             "routing_exclusion_reason_counts": discovery_exclusion_reason_counts,
             "candidate_ids": _extract_workflow_ids(

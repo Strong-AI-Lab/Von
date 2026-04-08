@@ -940,6 +940,37 @@ def test_build_workflow_routing_diagnostics_preserves_local_handoff_failure_deta
     )
 
 
+def test_build_workflow_routing_diagnostics_derives_capability_index_timeout_cause() -> None:
+    diagnostics = build_workflow_routing_diagnostics(
+        workflow_discovery={
+            "query": "Download and represent https://arxiv.org/abs/2411.04983",
+            "matches": [],
+            "candidates": [],
+            "errors": [
+                "capability_index_wait_timed_out",
+                "capability_index_build_in_progress",
+            ],
+        },
+        workflow_routing={},
+        turn_execution_diagnostics={
+            "latest_progress": {
+                "counters": {"tools_started": 0, "tools_completed": 0},
+                "diagnostic_events": [],
+            }
+        },
+        aux_llm_calls=[],
+        execution_summary={},
+    )
+
+    assert diagnostics["discovery"]["match_absence_reason"] == (
+        "capability_index_wait_timed_out_build_in_progress"
+    )
+    assert diagnostics["discovery"]["errors"] == [
+        "capability_index_wait_timed_out",
+        "capability_index_build_in_progress",
+    ]
+
+
 def test_build_turn_execution_correctness_summary_marks_successful_completion() -> None:
     summary = build_turn_execution_correctness_summary(
         completion_gate={

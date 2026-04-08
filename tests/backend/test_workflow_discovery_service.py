@@ -17,6 +17,7 @@ import pytest
 from src.backend.services.workflow_discovery_service import (
     DEFAULT_MAX_RESULTS,
     DEFAULT_RELEVANCE_THRESHOLD,
+    DISCOVERY_CAPABILITY_INDEX_WAIT_TIMEOUT_FRACTION,
     EXECUTABILITY_DRAFT_NOT_PUBLISHED,
     EXECUTABILITY_EXECUTABLE_NOW,
     EXECUTABILITY_GRAPH_INCOMPLETE,
@@ -114,6 +115,7 @@ class TestWorkflowDiscoveryResult:
         assert result.query == ""
         assert result.threshold == DEFAULT_RELEVANCE_THRESHOLD
         assert result.errors == []
+        assert result.match_absence_reason is None
 
     def test_to_dict_returns_correct_structure(self) -> None:
         """to_dict should return JSON-serialisable dict."""
@@ -139,6 +141,7 @@ class TestWorkflowDiscoveryResult:
             search_sources=["semantic", "vontology"],
             keyword_fallback_queries=["workflow fallback"],
             allow_non_executable=True,
+            match_absence_reason="capability_index_build_in_progress",
         )
         output = result.to_dict()
 
@@ -152,6 +155,7 @@ class TestWorkflowDiscoveryResult:
         assert output["search_sources"] == ["semantic", "vontology"]
         assert output["keyword_fallback_queries"] == ["workflow fallback"]
         assert output["allow_non_executable"] is True
+        assert output["match_absence_reason"] == "capability_index_build_in_progress"
         assert output["errors"] == ["minor warning"]
 
     def test_to_dict_errors_none_when_empty(self) -> None:
@@ -550,13 +554,17 @@ class TestDiscoverWorkflowsForTurn:
         self, mock_discover: MagicMock
     ) -> None:
         """Wrapper should preserve an attempted zero-match discovery result."""
-        mock_discover.return_value = WorkflowDiscoveryResult(matches=[])
+        mock_discover.return_value = WorkflowDiscoveryResult(
+            matches=[],
+            match_absence_reason="capability_index_build_in_progress",
+        )
         result = discover_workflows_for_turn("test query input")
         assert result is not None
         assert result["match_count"] == 0
         assert result["candidate_count"] == 0
         assert result["matches"] == []
         assert result["candidates"] == []
+        assert result["match_absence_reason"] == "capability_index_build_in_progress"
 
     @patch("src.backend.services.workflow_discovery_service.discover_workflows")
     def test_returns_candidate_payload_when_only_non_routing_candidates_exist(
@@ -708,32 +716,45 @@ class TestDiscoverWorkflowsForTurn:
     @patch("src.backend.services.workflow_discovery_service._search_workflows_name_fallback")
     @patch("src.backend.services.workflow_discovery_service._search_workflows_vontology")
     @patch("src.backend.services.workflow_discovery_service._search_workflows_semantic")
+    @patch("src.backend.services.workflow_discovery_service._search_workflow_capabilities")
     @patch(
         "src.backend.services.workflow_discovery_service.get_workflow_capability_index_runtime_state"
     )
-    def test_records_capability_index_build_in_progress_and_uses_fallback_search(
+    def test_records_capability_index_timeout_cause_and_uses_bounded_wait(
         self,
         mock_capability_state: MagicMock,
+        mock_capability: MagicMock,
         mock_semantic: MagicMock,
         mock_vontology: MagicMock,
         mock_name_fallback: MagicMock,
         mock_enrich: MagicMock,
     ) -> None:
+        mock_capability.return_value = []
         mock_capability_state.return_value = {
             "ready": False,
             "build_in_progress": True,
             "last_error": None,
         }
-        mock_semantic.return_value = [
-            WorkflowMatch("#V#semantic_candidate", "Semantic candidate", relevance_score=0.81)
-        ]
+        mock_semantic.return_value = []
         mock_vontology.return_value = []
         mock_name_fallback.return_value = []
         mock_enrich.side_effect = lambda matches: matches
 
-        result = discover_workflows("Represent the uploaded paper now", max_results=1)
+        result = discover_workflows(
+            "Represent the uploaded paper now",
+            max_results=1,
+            timeout_seconds=1.0,
+        )
 
+        assert mock_capability.call_args.kwargs["max_wait_seconds"] == pytest.approx(
+            1.0 * DISCOVERY_CAPABILITY_INDEX_WAIT_TIMEOUT_FRACTION
+        )
+        assert "capability_index_wait_timed_out" in result.errors
         assert "capability_index_build_in_progress" in result.errors
+        assert (
+            result.match_absence_reason
+            == "capability_index_wait_timed_out_build_in_progress"
+        )
         assert mock_semantic.called is True
 
     @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
