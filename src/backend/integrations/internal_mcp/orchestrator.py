@@ -182,6 +182,7 @@ class OrchestratorResult:
     orchestrator_duration_ms: float | None = None
     # JVNAUTOSCI-825: Workflow routing transparency.
     workflow_routing: WorkflowRoutingInfo | None = None
+    workflow_discovery_result: Mapping[str, Any] | None = None
     # JVNAUTOSCI-1140: Optional renderer routing/render-mode diagnostics.
     # Present only when renderer applicability routing is enabled and evaluated.
     render_plan: Mapping[str, Any] | None = None
@@ -20714,6 +20715,7 @@ class InternalMCPChatOrchestrator:
             discovered = discover_workflows_for_turn(
                 prompt_text,
                 namespace=env.user_namespace,
+                workflow_registry=self._workflow_registry,
             )
             workflow_discovery_result = (
                 dict(discovered) if isinstance(discovered, Mapping) else {}
@@ -21507,6 +21509,10 @@ class InternalMCPChatOrchestrator:
             llm_usage=_aggregate_usage_total(),
             orchestrator_duration_ms=(time.perf_counter() - orchestrator_start) * 1000.0,
             workflow_routing=_workflow_routing_info(workflow_data.get("workflow_routing")),
+            workflow_discovery_result=(
+                _string_key_mapping(workflow_data.get("workflow_discovery_result"))
+                or _string_key_mapping(workflow_data.get("workflow_discovery"))
+            ),
             selected_workflow_trace=_string_key_mapping(
                 workflow_data.get("selected_workflow_trace")
             ),

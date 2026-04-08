@@ -202,6 +202,38 @@ class _CapturingOrchestrator:
             extra_messages=[],
             tool_invocations=[],
             aux_llm_calls=[],
+            workflow_discovery_result={
+                "query": "Show the workflow monitor row for this turn.",
+                "requested_query": "Show the workflow monitor row for this turn.",
+                "candidate_count": 1,
+                "match_count": 1,
+                "candidates": [
+                    {
+                        "concept_id": "#V#chat_assistant_workflow",
+                        "name": "Chat Assistant Workflow",
+                        "description": "General conversational workflow.",
+                        "relevance_score": 0.9,
+                    }
+                ],
+                "matches": [
+                    {
+                        "concept_id": "#V#chat_assistant_workflow",
+                        "name": "Chat Assistant Workflow",
+                        "description": "General conversational workflow.",
+                        "relevance_score": 0.9,
+                    }
+                ],
+                "routing_matches": [
+                    {
+                        "concept_id": "#V#chat_assistant_workflow",
+                        "name": "Chat Assistant Workflow",
+                        "description": "General conversational workflow.",
+                        "relevance_score": 0.9,
+                    }
+                ],
+                "search_sources": ["registry_keyword_fallback"],
+                "errors": [],
+            },
             selected_workflow_trace={
                 "workflow_id": "#V#chat_assistant_workflow",
                 "execution_mode": "direct_response",
@@ -379,6 +411,10 @@ def test_generate_materialises_conversation_turn_instance_in_monitor(app: Flask)
     assert llm_debug["selected_workflow_trace"]["workflow_id"] == (
         "#V#chat_assistant_workflow"
     )
+    assert llm_debug["workflow_discovery"]["candidate_count"] == 1
+    assert llm_debug["turn_execution_diagnostics"]["workflow_routing_diagnostics"][
+        "discovery"
+    ]["candidate_count"] == 1
     assert llm_debug["critic_verdict"]["verdict"] == "pass"
     assert llm_debug["completion_gate_verdict"]["decision"] == "completed"
     assert llm_debug["completion_report"]["workflow_id"] == (

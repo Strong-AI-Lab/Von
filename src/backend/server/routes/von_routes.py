@@ -8311,6 +8311,24 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 raw_render_plan = getattr(orchestrator_result, "render_plan", None)
                 if isinstance(raw_render_plan, dict):
                     render_plan_debug = dict(raw_render_plan)
+                workflow_discovery_raw = getattr(
+                    orchestrator_result, "workflow_discovery_result", None
+                )
+                if not isinstance(workflow_discovery_raw, Mapping):
+                    selected_workflow_trace_raw = getattr(
+                        orchestrator_result, "selected_workflow_trace", None
+                    )
+                    if isinstance(selected_workflow_trace_raw, Mapping):
+                        trace_workflow_discovery = selected_workflow_trace_raw.get(
+                            "workflow_discovery_result"
+                        )
+                        if isinstance(trace_workflow_discovery, Mapping):
+                            workflow_discovery_raw = trace_workflow_discovery
+                workflow_discovery_result = (
+                    dict(workflow_discovery_raw)
+                    if isinstance(workflow_discovery_raw, Mapping)
+                    else None
+                )
                 workflow_routing_raw = getattr(
                     orchestrator_result, "workflow_routing", None
                 )
