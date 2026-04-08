@@ -20709,7 +20709,7 @@ class InternalMCPChatOrchestrator:
         if not isinstance(raw_discovery, Mapping):
             raw_discovery = data.get("workflow_discovery")
         workflow_discovery_result: dict[str, Any]
-        if isinstance(raw_discovery, Mapping):
+        if isinstance(raw_discovery, Mapping) and raw_discovery:
             workflow_discovery_result = dict(raw_discovery)
         elif prompt_text:
             discovered = discover_workflows_for_turn(
@@ -20974,6 +20974,14 @@ class InternalMCPChatOrchestrator:
                     ),
                 }
                 completion_report_source = "synthetic_selected_workflow_summary"
+        child_result_snapshot = _build_workflow_execution_aux_result_snapshot(child_result)
+        if isinstance(completion_report, Mapping):
+            completion_report = dict(completion_report)
+            if isinstance(child_result_snapshot, Mapping) and child_result_snapshot:
+                completion_report.setdefault("result_snapshot", dict(child_result_snapshot))
+                for key, value in child_result_snapshot.items():
+                    if isinstance(key, str) and key not in completion_report:
+                        completion_report[key] = value
 
         final_response = child_outputs.get("final_response")
         if not isinstance(final_response, str) or not final_response.strip():
@@ -20996,6 +21004,11 @@ class InternalMCPChatOrchestrator:
                 "child_workflow_final_state": final_state,
                 "child_workflow_error": failure_detail,
                 "completion_report_source": completion_report_source,
+                "child_result_snapshot": (
+                    dict(child_result_snapshot)
+                    if isinstance(child_result_snapshot, Mapping)
+                    else None
+                ),
             },
             "workflow_routing": (
                 dict(data.get("workflow_routing"))
@@ -21293,8 +21306,18 @@ class InternalMCPChatOrchestrator:
             "prompt_for_requirements": prompt,
             "augmented_context": list(context or []),
             "conversation_context": list(context or []),
-            "workflow_discovery_result": dict(workflow_discovery_result or {}),
-            "workflow_discovery": dict(workflow_discovery_result or {}),
+            "workflow_discovery_result": (
+                dict(workflow_discovery_result)
+                if isinstance(workflow_discovery_result, Mapping)
+                and workflow_discovery_result
+                else None
+            ),
+            "workflow_discovery": (
+                dict(workflow_discovery_result)
+                if isinstance(workflow_discovery_result, Mapping)
+                and workflow_discovery_result
+                else None
+            ),
             "workflow_routing": None,
             "continuation_context": dict(workflow_continuation_context or {}),
             "auxiliary_system_prompt": auxiliary_system_prompt,
