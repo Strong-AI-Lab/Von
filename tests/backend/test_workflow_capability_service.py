@@ -18,6 +18,8 @@ from src.backend.services.workflow_capability_service import (
     _workflow_id_to_name,
     build_workflow_capability_text,
     get_workflow_capability_index,
+    invalidate_workflow_capability_index,
+    prewarm_workflow_capability_index,
     reset_workflow_capability_index,
     search_workflow_capabilities,
 )
@@ -274,24 +276,25 @@ class TestIndexFromRegistry:
             )
         )
         monkeypatch.setattr(
-            "src.backend.workflows.vontology_loader.resolve_workflow_description",
-            lambda _workflow_id, **_kwargs: (
-                "Repair existing workflows or create new ones from requests.",
-                "text_relation:#V#hasDescription",
-            ),
-        )
-        monkeypatch.setattr(
-            "src.backend.workflows.vontology_loader.resolve_workflow_discovery_exemplars",
-            lambda _workflow_id: (
-                {
-                    "schema_version": "workflow_discovery_exemplars.v1",
-                    "keywords": ["workflow creation", "workflow repair"],
-                    "examples": [
-                        "Create a workflow from this description request."
-                    ],
-                },
-                "text_relation:#V#hasWorkflowDiscoveryExemplarsJson",
-            ),
+            "src.backend.workflows.vontology_loader.batch_fetch_workflow_routing_metadata",
+            lambda workflow_ids: {
+                "#V#workflow_repair_or_create_workflow": {
+                    "description_text": (
+                        "Repair existing workflows or create new ones from requests."
+                    ),
+                    "description_source": "text_relation:#V#hasDescription",
+                    "discovery_exemplars": {
+                        "schema_version": "workflow_discovery_exemplars.v1",
+                        "keywords": ["workflow creation", "workflow repair"],
+                        "examples": [
+                            "Create a workflow from this description request."
+                        ],
+                    },
+                    "discovery_exemplars_source": (
+                        "text_relation:#V#hasWorkflowDiscoveryExemplarsJson"
+                    ),
+                }
+            },
         )
 
         index = WorkflowCapabilityIndex()
@@ -307,6 +310,63 @@ class TestIndexFromRegistry:
             in capability_text
         )
 
+        results = index.search("Create a workflow from this description request.")
+        assert results
+        assert results[0].workflow_id == "#V#workflow_repair_or_create_workflow"
+
+    def test_index_from_registry_uses_batched_routing_metadata(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from src.backend.workflows import WorkflowRegistry
+        from src.backend.workflows.workflow_registry import LazyWorkflowRegistration
+
+        registry = WorkflowRegistry()
+        registry.register_lazy(
+            LazyWorkflowRegistration(
+                workflow_id="#V#workflow_repair_or_create_workflow",
+                purpose="",
+                source="vontology",
+            )
+        )
+        monkeypatch.setattr(
+            "src.backend.workflows.vontology_loader.batch_fetch_workflow_routing_metadata",
+            lambda workflow_ids: {
+                "#V#workflow_repair_or_create_workflow": {
+                    "description_text": (
+                        "Repair existing workflows or create new ones from requests."
+                    ),
+                    "description_source": "text_relation:#V#hasDescription",
+                    "discovery_exemplars": {
+                        "schema_version": "workflow_discovery_exemplars.v1",
+                        "keywords": ["workflow creation", "workflow repair"],
+                        "examples": [
+                            "Create a workflow from this description request."
+                        ],
+                    },
+                    "discovery_exemplars_source": (
+                        "text_relation:#V#hasWorkflowDiscoveryExemplarsJson"
+                    ),
+                }
+            },
+        )
+        monkeypatch.setattr(
+            "src.backend.workflows.vontology_loader.resolve_workflow_description",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("batch metadata should avoid per-workflow description fetches")
+            ),
+        )
+        monkeypatch.setattr(
+            "src.backend.workflows.vontology_loader.resolve_workflow_discovery_exemplars",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("batch metadata should avoid per-workflow exemplar fetches")
+            ),
+        )
+
+        index = WorkflowCapabilityIndex()
+        count = index.index_from_registry(registry)
+
+        assert count == 1
         results = index.search("Create a workflow from this description request.")
         assert results
         assert results[0].workflow_id == "#V#workflow_repair_or_create_workflow"
@@ -410,12 +470,8 @@ def test_search_workflow_capabilities_populates_empty_index_from_registry(
     registry = build_test_conversation_turn_registry()
 
     monkeypatch.setattr(
-        "src.backend.workflows.durable.registry_factory.build_durable_workflow_registry_read_only",
+        "src.backend.workflows.durable.registry_factory.get_shared_workflow_registry_read_only",
         lambda defer_parity_work=False: registry,
-    )
-    monkeypatch.setattr(
-        "src.backend.workflows.vontology_loader.batch_fetch_workflow_purposes",
-        lambda workflow_ids: {},
     )
 
     results = search_workflow_capabilities(
@@ -433,11 +489,14 @@ def test_search_workflow_capabilities_non_blocking_triggers_background_rebuild(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     reset_workflow_capability_index()
-    started: list[bool] = []
+    started: list[tuple[bool, object | None]] = []
+    sentinel_registry = object()
 
     monkeypatch.setattr(
         "src.backend.services.workflow_capability_service._start_background_workflow_capability_index_build",
-        lambda *, force_refresh=False: started.append(bool(force_refresh)) or True,
+        lambda *, force_refresh=False, workflow_registry=None: (
+            started.append((bool(force_refresh), workflow_registry)) or True
+        ),
     )
 
     results = search_workflow_capabilities(
@@ -445,7 +504,42 @@ def test_search_workflow_capabilities_non_blocking_triggers_background_rebuild(
         max_results=5,
         min_score=0.01,
         non_blocking=True,
+        workflow_registry=sentinel_registry,
     )
 
     assert results == []
-    assert started == [False]
+    assert started == [(False, sentinel_registry)]
+
+
+def test_prewarm_workflow_capability_index_starts_background_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[tuple[bool, object | None]] = []
+    sentinel_registry = object()
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_capability_service._start_background_workflow_capability_index_build",
+        lambda *, force_refresh=False, workflow_registry=None: (
+            observed.append((bool(force_refresh), workflow_registry)) or True
+        ),
+    )
+
+    started = prewarm_workflow_capability_index(
+        force_refresh=True,
+        workflow_registry=sentinel_registry,
+    )
+
+    assert started is True
+    assert observed == [(True, sentinel_registry)]
+
+
+def test_invalidate_workflow_capability_index_clears_cached_entries() -> None:
+    reset_workflow_capability_index()
+    index = get_workflow_capability_index()
+    index.index_workflow("#V#test_workflow", "Capability text for invalidation test")
+
+    result = invalidate_workflow_capability_index()
+
+    assert result["success"] is True
+    assert result["had_cached_entries"] is True
+    assert get_workflow_capability_index().size == 0

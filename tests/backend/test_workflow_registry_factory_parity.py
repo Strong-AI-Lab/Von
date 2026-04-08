@@ -47,6 +47,53 @@ def _build_registration(
     )
 
 
+def test_get_shared_workflow_registry_read_only_starts_capability_index_warmup(
+    monkeypatch,
+):
+    sentinel_registry = object()
+    observed: list[tuple[bool, object | None]] = []
+
+    monkeypatch.setattr(registry_factory, "_shared_workflow_registry", None)
+    monkeypatch.setattr(
+        registry_factory,
+        "build_workflow_registry_read_only",
+        lambda defer_parity_work=True: sentinel_registry,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_capability_service.prewarm_workflow_capability_index",
+        lambda *, force_refresh=False, workflow_registry=None: (
+            observed.append((bool(force_refresh), workflow_registry)) or True
+        ),
+    )
+
+    result = registry_factory.get_shared_workflow_registry_read_only(
+        defer_parity_work=True,
+        force_rebuild=True,
+    )
+
+    assert result is sentinel_registry
+    assert observed == [(False, sentinel_registry)]
+
+
+def test_invalidate_shared_workflow_registry_read_only_resets_capability_index(
+    monkeypatch,
+):
+    observed: list[bool] = []
+
+    monkeypatch.setattr(registry_factory, "_shared_workflow_registry", object())
+    monkeypatch.setattr(
+        "src.backend.services.workflow_capability_service.invalidate_workflow_capability_index",
+        lambda: observed.append(True) or {"success": True},
+    )
+
+    result = registry_factory.invalidate_shared_workflow_registry_read_only()
+
+    assert result["success"] is True
+    assert result["had_cached_value"] is True
+    assert result["capability_index_invalidated"] is True
+    assert observed == [True]
+
+
 def test_workflow_parity_inventory_includes_drift_reason_codes(monkeypatch):
     def _mock_build_graph(workflow_id: str):
         if workflow_id == "#V#wf_ok":
@@ -399,7 +446,6 @@ def test_runtime_registry_bootstrap_excludes_representation_publication_reports(
             },
         },
     )
-    monkeypatch.setattr(registry_factory, "batch_fetch_workflow_purposes", lambda workflow_ids: {})
     monkeypatch.setattr(
         workflow_capability_service,
         "get_workflow_capability_index",

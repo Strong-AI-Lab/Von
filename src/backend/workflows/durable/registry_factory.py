@@ -32,7 +32,6 @@ from ..vontology_loader import (
     build_workflow_process_graph,
     discover_workflow_ids,
     load_workflow_definition_from_vontology,
-    batch_fetch_workflow_purposes,
     resolve_workflow_description,
 )
 from ..workflow_concept_authority_service import (
@@ -96,12 +95,29 @@ def get_shared_workflow_registry_read_only(
     """
 
     global _shared_workflow_registry
+    created_registry = False
     with _shared_workflow_registry_lock:
         if force_rebuild or _shared_workflow_registry is None:
             _shared_workflow_registry = build_workflow_registry_read_only(
                 defer_parity_work=defer_parity_work
             )
-        return _shared_workflow_registry
+            created_registry = True
+        registry = _shared_workflow_registry
+
+    if created_registry and registry is not None:
+        try:
+            from ...services.workflow_capability_service import (
+                prewarm_workflow_capability_index,
+            )
+
+            prewarm_workflow_capability_index(workflow_registry=registry)
+        except Exception:
+            logger.debug(
+                "shared workflow registry could not start capability-index warm-up",
+                exc_info=True,
+            )
+
+    return registry
 
 
 def invalidate_shared_workflow_registry_read_only() -> dict[str, Any]:
@@ -111,10 +127,24 @@ def invalidate_shared_workflow_registry_read_only() -> dict[str, Any]:
     with _shared_workflow_registry_lock:
         had_registry = _shared_workflow_registry is not None
         _shared_workflow_registry = None
+    capability_index_invalidated = False
+    try:
+        from ...services.workflow_capability_service import (
+            invalidate_workflow_capability_index,
+        )
+
+        invalidate_workflow_capability_index()
+        capability_index_invalidated = True
+    except Exception:
+        logger.debug(
+            "shared workflow registry invalidation could not reset capability index",
+            exc_info=True,
+        )
     return {
         "success": True,
         "cache": "shared_workflow_registry_read_only",
         "had_cached_value": had_registry,
+        "capability_index_invalidated": capability_index_invalidated,
     }
 
 
@@ -1017,37 +1047,6 @@ def _launch_deferred_registry_work(
                 _last_inventory_snapshot = inventory_snapshot
 
             _apply_workflow_parity_policy(inventory_snapshot)
-
-            # JVNAUTOSCI-1424 Phase 2: Build the workflow capability index
-            # for RAG-first routing.  This is deferred to avoid blocking
-            # startup — the index is populated from the registry after
-            # bootstrap and parity work completes.
-            try:
-                # Batch-fetch descriptions for lazy workflows so the
-                # capability index has searchable text.
-                lazy_ids = list(registry.lazy_workflow_ids())
-                if lazy_ids:
-                    purposes = batch_fetch_workflow_purposes(lazy_ids)
-                    for wf_id, purpose_text in purposes.items():
-                        lazy_reg = registry._lazy.get(wf_id)  # type: ignore[attr-defined]
-                        if lazy_reg and not lazy_reg.purpose:
-                            lazy_reg.purpose = purpose_text
-
-                from ...services.workflow_capability_service import (
-                    get_workflow_capability_index,
-                )
-
-                cap_index = get_workflow_capability_index()
-                cap_count = cap_index.index_from_registry(registry)
-                logger.info(
-                    "[workflow_capability_index] Built with %d entries.",
-                    cap_count,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "workflow_capability_index_build_failed: %s",
-                    exc,
-                )
 
             logger.info(
                 "Deferred workflow registry work completed: "

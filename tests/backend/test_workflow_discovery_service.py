@@ -758,12 +758,6 @@ class TestDiscoverWorkflowsForTurn:
         assert mock_semantic.called is True
 
     @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
-    @patch(
-        "src.backend.services.workflow_discovery_service._has_authoritative_routing_text"
-    )
-    @patch(
-        "src.backend.services.workflow_discovery_service._classify_workflow_concept_executability"
-    )
     @patch("src.backend.services.workflow_discovery_service._search_workflows_name_fallback")
     @patch("src.backend.services.workflow_discovery_service._search_workflows_vontology")
     @patch("src.backend.services.workflow_discovery_service._search_workflows_semantic")
@@ -771,59 +765,51 @@ class TestDiscoverWorkflowsForTurn:
     @patch(
         "src.backend.services.workflow_discovery_service.get_workflow_capability_index_runtime_state"
     )
-    def test_registry_keyword_fallback_recovers_candidates_during_capability_cold_start(
+    def test_retired_registry_keyword_fallback_uses_secondary_searches_instead(
         self,
         mock_capability_state: MagicMock,
         mock_capability: MagicMock,
         mock_semantic: MagicMock,
         mock_vontology: MagicMock,
         mock_name_fallback: MagicMock,
-        mock_classify: MagicMock,
-        mock_has_authoritative_text: MagicMock,
         mock_enrich: MagicMock,
     ) -> None:
-        class _FakeRegistry:
-            def lazy_workflow_ids(self):
-                return ["#V#uploaded_file_representation_workflow"]
-
-            def eager_workflow_ids(self):
-                return []
-
-            def peek_registration(self, workflow_id):
-                return SimpleNamespace(source="vontology", purpose="")
-
-            def get_registration(self, workflow_id):
-                return self.peek_registration(workflow_id)
-
         mock_capability.return_value = []
         mock_capability_state.return_value = {
             "ready": False,
             "build_in_progress": True,
             "last_error": None,
         }
-        mock_semantic.return_value = []
+        mock_semantic.return_value = [
+            WorkflowMatch(
+                "#V#uploaded_file_representation_workflow",
+                "Uploaded file representation workflow",
+                relevance_score=0.81,
+            )
+        ]
         mock_vontology.return_value = []
         mock_name_fallback.return_value = []
-        mock_classify.return_value = (True, EXECUTABILITY_EXECUTABLE_NOW, None)
-        mock_has_authoritative_text.return_value = True
         mock_enrich.side_effect = lambda matches: matches
 
         result = discover_workflows(
             "Run the uploaded file representation workflow",
             max_results=1,
-            workflow_registry=_FakeRegistry(),
+            workflow_registry=SimpleNamespace(),
         )
 
-        assert result.search_sources == ["capability_index", "registry_keyword_fallback"]
+        assert result.search_sources == [
+            "capability_index",
+            "semantic",
+            "vontology",
+            "name_fallback",
+        ]
+        assert "registry_keyword_fallback" not in result.search_sources
         assert [match.concept_id for match in result.matches] == [
             "#V#uploaded_file_representation_workflow"
         ]
-        assert [match.concept_id for match in (result.routing_matches or [])] == [
-            "#V#uploaded_file_representation_workflow"
-        ]
-        assert mock_semantic.called is False
-        assert mock_vontology.called is False
-        assert mock_name_fallback.called is False
+        assert mock_semantic.called is True
+        assert mock_vontology.called is True
+        assert mock_name_fallback.called is True
 
     @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
     @patch("src.backend.services.workflow_discovery_service._search_workflows_name_fallback")

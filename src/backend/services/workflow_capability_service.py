@@ -197,12 +197,15 @@ class WorkflowCapabilityIndex:
         skipped_non_authoritative = 0
         skipped_missing_purpose = 0
         pending_entries: Dict[str, _CapabilityEntry] = {}
+        candidate_rows: list[tuple[str, Any, Any]] = []
+        authoritative_workflow_ids: list[str] = []
 
         def _index_candidate(
             *,
             workflow_id: str,
             purpose: Any,
             source: Any,
+            routing_metadata: Mapping[str, Any] | None = None,
         ) -> None:
             nonlocal skipped_non_authoritative
             nonlocal skipped_missing_purpose
@@ -211,6 +214,7 @@ class WorkflowCapabilityIndex:
                 workflow_id=workflow_id,
                 source=source,
                 purpose=purpose,
+                routing_metadata=routing_metadata,
             )
             if text is None:
                 if reason == "non_authoritative_source":
@@ -236,19 +240,44 @@ class WorkflowCapabilityIndex:
         # Eager registrations.
         for wid in list(registry.eager_workflow_ids()):
             reg = registry._workflows.get(wid)  # type: ignore[attr-defined]
-            _index_candidate(
-                workflow_id=wid,
-                purpose=(reg.purpose if reg else None),
-                source=(reg.source if reg else None),
-            )
+            workflow_id = str(wid or "").strip()
+            purpose = reg.purpose if reg else None
+            source = reg.source if reg else None
+            if workflow_id:
+                candidate_rows.append((workflow_id, purpose, source))
+                if str(source or "").strip().lower() == "vontology":
+                    authoritative_workflow_ids.append(workflow_id)
 
         # Lazy registrations (metadata only, no definition load).
         for wid in list(registry.lazy_workflow_ids()):
             lazy = registry._lazy.get(wid)  # type: ignore[attr-defined]
+            workflow_id = str(wid or "").strip()
+            purpose = lazy.purpose if lazy else None
+            source = lazy.source if lazy else None
+            if workflow_id:
+                candidate_rows.append((workflow_id, purpose, source))
+                if str(source or "").strip().lower() == "vontology":
+                    authoritative_workflow_ids.append(workflow_id)
+
+        authoritative_routing_metadata: Dict[str, Dict[str, Any]] = {}
+        if authoritative_workflow_ids:
+            try:
+                from ..workflows.vontology_loader import (
+                    batch_fetch_workflow_routing_metadata,
+                )
+
+                authoritative_routing_metadata = batch_fetch_workflow_routing_metadata(
+                    authoritative_workflow_ids
+                )
+            except Exception:
+                authoritative_routing_metadata = {}
+
+        for workflow_id, purpose, source in candidate_rows:
             _index_candidate(
-                workflow_id=wid,
-                purpose=(lazy.purpose if lazy else None),
-                source=(lazy.source if lazy else None),
+                workflow_id=workflow_id,
+                purpose=purpose,
+                source=source,
+                routing_metadata=authoritative_routing_metadata.get(workflow_id),
             )
 
         with self._lock:
@@ -407,6 +436,7 @@ def _resolve_authoritative_capability_text(
     workflow_id: str,
     source: Any,
     purpose: Any,
+    routing_metadata: Mapping[str, Any] | None = None,
 ) -> tuple[str | None, str]:
     """Return authoritative routing text or a deterministic skip reason."""
 
@@ -414,52 +444,70 @@ def _resolve_authoritative_capability_text(
     if source_token != "vontology":
         return None, "non_authoritative_source"
 
-    try:
-        from ..workflows.vontology_loader import (
-            resolve_workflow_description,
-            resolve_workflow_discovery_exemplars,
-        )
+    relation_text = ""
+    relation_source = ""
+    discovery_exemplars: Mapping[str, Any] | None = None
+    discovery_exemplars_source = ""
+    if isinstance(routing_metadata, Mapping):
+        relation_text = _normalise_capability_text(routing_metadata.get("description_text"))
+        relation_source = str(routing_metadata.get("description_source") or "").strip()
+        raw_exemplars = routing_metadata.get("discovery_exemplars")
+        if isinstance(raw_exemplars, Mapping):
+            discovery_exemplars = raw_exemplars
+        discovery_exemplars_source = str(
+            routing_metadata.get("discovery_exemplars_source") or ""
+        ).strip()
+    else:
+        try:
+            from ..workflows.vontology_loader import (
+                resolve_workflow_description,
+                resolve_workflow_discovery_exemplars,
+            )
 
-        relation_text, relation_source = resolve_workflow_description(
-            workflow_id,
-            workflow_source="vontology",
-            registration_purpose=purpose,
-        )
-        discovery_exemplars, discovery_exemplars_source = (
-            resolve_workflow_discovery_exemplars(workflow_id)
-        )
-        if relation_text and relation_source.startswith("text_relation:"):
-            capability_parts = [relation_text]
-            if isinstance(discovery_exemplars, Mapping):
-                keywords = discovery_exemplars.get("keywords") or []
-                if isinstance(keywords, Sequence) and not isinstance(keywords, str):
-                    keyword_text = ", ".join(
-                        str(item).strip()
-                        for item in keywords
-                        if isinstance(item, str) and str(item).strip()
+            relation_text, relation_source = resolve_workflow_description(
+                workflow_id,
+                workflow_source="vontology",
+                registration_purpose=purpose,
+            )
+            discovery_exemplars, discovery_exemplars_source = (
+                resolve_workflow_discovery_exemplars(workflow_id)
+            )
+        except Exception:
+            relation_text = ""
+            relation_source = ""
+            discovery_exemplars = None
+            discovery_exemplars_source = ""
+
+    if relation_text and relation_source.startswith("text_relation:"):
+        capability_parts = [relation_text]
+        if isinstance(discovery_exemplars, Mapping):
+            keywords = discovery_exemplars.get("keywords") or []
+            if isinstance(keywords, Sequence) and not isinstance(keywords, str):
+                keyword_text = ", ".join(
+                    str(item).strip()
+                    for item in keywords
+                    if isinstance(item, str) and str(item).strip()
+                )
+                if keyword_text:
+                    capability_parts.append(f"Keywords: {keyword_text}")
+            examples = discovery_exemplars.get("examples") or []
+            if isinstance(examples, Sequence) and not isinstance(examples, str):
+                example_lines = [
+                    str(item).strip()
+                    for item in examples
+                    if isinstance(item, str) and str(item).strip()
+                ]
+                if example_lines:
+                    capability_parts.append(
+                        "Example requests: " + " | ".join(example_lines)
                     )
-                    if keyword_text:
-                        capability_parts.append(f"Keywords: {keyword_text}")
-                examples = discovery_exemplars.get("examples") or []
-                if isinstance(examples, Sequence) and not isinstance(examples, str):
-                    example_lines = [
-                        str(item).strip()
-                        for item in examples
-                        if isinstance(item, str) and str(item).strip()
-                    ]
-                    if example_lines:
-                        capability_parts.append(
-                            "Example requests: " + " | ".join(example_lines)
-                        )
-            source_parts = [relation_source]
-            if (
-                isinstance(discovery_exemplars_source, str)
-                and discovery_exemplars_source.startswith("text_relation:")
-            ):
-                source_parts.append(discovery_exemplars_source)
-            return "\n\n".join(capability_parts), "+".join(source_parts)
-    except Exception:
-        pass
+        source_parts = [relation_source]
+        if (
+            isinstance(discovery_exemplars_source, str)
+            and discovery_exemplars_source.startswith("text_relation:")
+        ):
+            source_parts.append(discovery_exemplars_source)
+        return "\n\n".join(capability_parts), "+".join(source_parts)
 
     purpose_text = _normalise_capability_text(purpose)
     if not purpose_text:
@@ -590,6 +638,7 @@ def _perform_workflow_capability_index_build(
     *,
     force_refresh: bool = False,
     mode: str,
+    workflow_registry: Any | None = None,
 ) -> WorkflowCapabilityIndex:
     attempt_monotonic = time.monotonic()
     _INDEX_REBUILD_COMPLETED.clear()
@@ -601,24 +650,13 @@ def _perform_workflow_capability_index_build(
     )
     try:
         from ..workflows.durable.registry_factory import (
-            build_durable_workflow_registry_read_only,
+            get_shared_workflow_registry_read_only,
         )
-        from ..workflows.vontology_loader import batch_fetch_workflow_purposes
-        from ..workflows.workflow_registry import LazyWorkflowRegistration
-
-        registry = build_durable_workflow_registry_read_only(defer_parity_work=True)
-        lazy_ids = list(registry.lazy_workflow_ids())
-        if lazy_ids:
-            purposes = batch_fetch_workflow_purposes(lazy_ids)
-            for workflow_id, purpose in purposes.items():
-                registration = registry.peek_registration(workflow_id)
-                if (
-                    isinstance(registration, LazyWorkflowRegistration)
-                    and not registration.purpose
-                    and isinstance(purpose, str)
-                    and purpose.strip()
-                ):
-                    registration.purpose = purpose.strip()
+        registry = (
+            workflow_registry
+            if workflow_registry is not None
+            else get_shared_workflow_registry_read_only(defer_parity_work=True)
+        )
 
         index = get_workflow_capability_index()
         count = index.index_from_registry(registry)
@@ -650,6 +688,7 @@ def _perform_workflow_capability_index_build(
 def _start_background_workflow_capability_index_build(
     *,
     force_refresh: bool = False,
+    workflow_registry: Any | None = None,
 ) -> bool:
     """Trigger a background build if one is not already running."""
 
@@ -676,6 +715,7 @@ def _start_background_workflow_capability_index_build(
                 _perform_workflow_capability_index_build(
                     force_refresh=force_refresh,
                     mode="background",
+                    workflow_registry=workflow_registry,
                 )
         except Exception as exc:
             logger.warning("workflow_capability_index_background_build_failed: %s", exc)
@@ -704,6 +744,7 @@ def ensure_workflow_capability_index_populated(
     force_refresh: bool = False,
     block: bool = True,
     max_wait_seconds: float | None = None,
+    workflow_registry: Any | None = None,
 ) -> WorkflowCapabilityIndex:
     """Build the shared capability index on demand from authoritative workflows.
 
@@ -717,7 +758,10 @@ def ensure_workflow_capability_index_populated(
         return index
 
     if not block:
-        _start_background_workflow_capability_index_build(force_refresh=force_refresh)
+        _start_background_workflow_capability_index_build(
+            force_refresh=force_refresh,
+            workflow_registry=workflow_registry,
+        )
         wait_seconds = max(0.0, float(max_wait_seconds or 0.0))
         if wait_seconds > 0.0:
             _INDEX_REBUILD_COMPLETED.wait(wait_seconds)
@@ -745,6 +789,7 @@ def ensure_workflow_capability_index_populated(
             return _perform_workflow_capability_index_build(
                 force_refresh=force_refresh,
                 mode="blocking",
+                workflow_registry=workflow_registry,
             )
         except Exception as exc:
             logger.warning("workflow_capability_index_on_demand_build_failed: %s", exc)
@@ -758,12 +803,14 @@ def search_workflow_capabilities(
     min_score: float = 0.0,
     non_blocking: bool = False,
     max_wait_seconds: float | None = None,
+    workflow_registry: Any | None = None,
 ) -> List[WorkflowCapabilityMatch]:
     """Search workflow capabilities, rebuilding the index on bounded misses."""
 
     index = ensure_workflow_capability_index_populated(
         block=not non_blocking,
         max_wait_seconds=max_wait_seconds,
+        workflow_registry=workflow_registry,
     )
     results = index.search(query, max_results=max_results, min_score=min_score)
     if results:
@@ -771,10 +818,26 @@ def search_workflow_capabilities(
     if non_blocking:
         return []
 
-    refreshed = ensure_workflow_capability_index_populated(force_refresh=True)
+    refreshed = ensure_workflow_capability_index_populated(
+        force_refresh=True,
+        workflow_registry=workflow_registry,
+    )
     if refreshed is index and refreshed.size == 0:
         return []
     return refreshed.search(query, max_results=max_results, min_score=min_score)
+
+
+def prewarm_workflow_capability_index(
+    *,
+    force_refresh: bool = False,
+    workflow_registry: Any | None = None,
+) -> bool:
+    """Start capability-index warm-up without blocking the caller."""
+
+    return _start_background_workflow_capability_index_build(
+        force_refresh=force_refresh,
+        workflow_registry=workflow_registry,
+    )
 
 
 def reset_workflow_capability_index() -> None:
@@ -790,3 +853,15 @@ def reset_workflow_capability_index() -> None:
         _INDEX_REBUILD_STATE["last_error"] = None
         _INDEX_REBUILD_STATE["last_mode"] = None
     _INDEX_REBUILD_COMPLETED.set()
+
+
+def invalidate_workflow_capability_index() -> dict[str, Any]:
+    """Drop the cached capability index so the next lookup rebuilds it."""
+
+    previous_state = get_workflow_capability_index_runtime_state()
+    reset_workflow_capability_index()
+    return {
+        "success": True,
+        "cache": "workflow_capability_index",
+        "had_cached_entries": bool(previous_state.get("size", 0)),
+    }

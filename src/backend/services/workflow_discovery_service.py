@@ -648,123 +648,6 @@ def _search_workflows_name_fallback(
     return matches
 
 
-def _iter_registry_registration_ids(workflow_registry: Any) -> list[str]:
-    if workflow_registry is None:
-        return []
-
-    workflow_ids: list[str] = []
-    seen: set[str] = set()
-    for accessor_name in ("all_workflow_ids", "lazy_workflow_ids", "eager_workflow_ids"):
-        accessor = getattr(workflow_registry, accessor_name, None)
-        if not callable(accessor):
-            continue
-        try:
-            raw_values = accessor()
-        except Exception:
-            continue
-        if not isinstance(raw_values, Sequence) or isinstance(raw_values, str):
-            continue
-        for raw_workflow_id in raw_values or []:
-            workflow_id = str(raw_workflow_id or "").strip()
-            if not workflow_id:
-                continue
-            lowered = workflow_id.lower()
-            if lowered in seen:
-                continue
-            seen.add(lowered)
-            workflow_ids.append(workflow_id)
-    return workflow_ids
-
-
-def _get_registry_registration(workflow_registry: Any, workflow_id: str) -> Any:
-    if workflow_registry is None:
-        return None
-
-    for accessor_name in ("peek_registration", "get_registration"):
-        accessor = getattr(workflow_registry, accessor_name, None)
-        if not callable(accessor):
-            continue
-        try:
-            registration = accessor(workflow_id)
-        except Exception:
-            continue
-        if registration is not None:
-            return registration
-    return None
-
-
-def _workflow_id_to_display_name(workflow_id: str) -> str:
-    clean = str(workflow_id or "").strip()
-    if clean.startswith("#V#"):
-        clean = clean[3:]
-    return clean.replace("_", " ").strip().title() or str(workflow_id or "").strip()
-
-
-def _search_workflows_registry_keyword_fallback(
-    queries: List[str],
-    *,
-    workflow_registry: Any,
-    limit: int = DEFAULT_MAX_RESULTS * 2,
-) -> List[WorkflowMatch]:
-    if workflow_registry is None:
-        return []
-
-    workflow_ids = _iter_registry_registration_ids(workflow_registry)
-    if not workflow_ids:
-        return []
-
-    matches: list[WorkflowMatch] = []
-    seen_keys: set[tuple[str, str]] = set()
-    for search_query in queries:
-        lowered_query = str(search_query or "").strip().lower()
-        if len(lowered_query) < 3:
-            continue
-        for workflow_id in workflow_ids:
-            registration = _get_registry_registration(workflow_registry, workflow_id)
-            source = str(getattr(registration, "source", "") or "").strip().lower()
-            if source and source != "vontology":
-                continue
-
-            display_name = _workflow_id_to_display_name(workflow_id)
-            candidate_values = [
-                display_name.lower(),
-                workflow_id.lower(),
-            ]
-            registration_purpose = str(getattr(registration, "purpose", "") or "").strip()
-            if registration_purpose:
-                candidate_values.append(registration_purpose.lower())
-
-            match_source: str | None = None
-            score = 0.0
-            if lowered_query in candidate_values:
-                match_source = "registry_exact_name"
-                score = 1.0
-            elif any(lowered_query in value for value in candidate_values):
-                match_source = "registry_substring_name"
-                score = 0.82
-
-            if match_source is None:
-                continue
-
-            dedupe_key = (workflow_id.lower(), match_source)
-            if dedupe_key in seen_keys:
-                continue
-            seen_keys.add(dedupe_key)
-            matches.append(
-                WorkflowMatch(
-                    concept_id=workflow_id,
-                    name=display_name,
-                    description=registration_purpose or None,
-                    relevance_score=score,
-                    match_source=match_source,
-                )
-            )
-            if len(matches) >= limit:
-                return matches
-
-    return matches
-
-
 def _enrich_workflow_matches(matches: List[WorkflowMatch]) -> List[WorkflowMatch]:
     """Enrich workflow matches with descriptions from Vontology."""
     if not matches:
@@ -1143,6 +1026,11 @@ def _has_enough_capability_matches(
     threshold: float,
     max_results: int,
 ) -> bool:
+    # The capability index is the authoritative primary routing substrate.
+    # Once it produces at least one threshold-qualified workflow, discovery
+    # should not keep spending turn budget on slower secondary searches just to
+    # fill the remaining result slots.
+    required_qualifying_count = 1 if max(1, int(max_results)) >= 1 else 1
     seen_ids: set[str] = set()
     qualifying_count = 0
     for match in matches:
@@ -1153,7 +1041,7 @@ def _has_enough_capability_matches(
         if float(match.relevance_score or 0.0) < threshold:
             continue
         qualifying_count += 1
-        if qualifying_count >= max(1, int(max_results)):
+        if qualifying_count >= required_qualifying_count:
             return True
     return False
 
@@ -1189,6 +1077,7 @@ def _search_workflow_capabilities(
     *,
     limit: int = DEFAULT_MAX_RESULTS * 3,
     max_wait_seconds: float | None = None,
+    workflow_registry: Any | None = None,
 ) -> List[WorkflowMatch]:
     """Search the dedicated workflow capability index (primary search path).
 
@@ -1209,6 +1098,7 @@ def _search_workflow_capabilities(
             min_score=0.01,
             non_blocking=True,
             max_wait_seconds=effective_max_wait_seconds,
+            workflow_registry=workflow_registry,
         )
         results: list[WorkflowMatch] = []
         for cap in cap_matches:
@@ -1294,6 +1184,7 @@ def discover_workflows(
             search_query,
             limit=max_results * 3,
             max_wait_seconds=capability_index_wait_seconds,
+            workflow_registry=workflow_registry,
         )
         capability_index_state = get_workflow_capability_index_runtime_state()
         all_matches.extend(capability_matches)
@@ -1313,30 +1204,6 @@ def discover_workflows(
         capability_matches_sufficient = False
         errors.append(f"capability_index_error: {e}")
         logger.warning("Workflow capability index search failed: %s", e)
-
-    if (
-        not capability_matches_sufficient
-        and workflow_registry is not None
-        and keyword_fallback_queries
-    ):
-        # JVNAUTOSCI-1782: generic cold-start recovery while the capability
-        # index is still building. JVNAUTOSCI-1783 tracks retiring this once
-        # the authoritative index becomes available early enough on cold start.
-        try:
-            search_sources.append("registry_keyword_fallback")
-            registry_keyword_matches = _search_workflows_registry_keyword_fallback(
-                keyword_fallback_queries,
-                workflow_registry=workflow_registry,
-                limit=max_results * 2,
-            )
-            all_matches.extend(registry_keyword_matches)
-            capability_matches_sufficient = any(
-                float(match.relevance_score or 0.0) >= relevance_threshold
-                for match in registry_keyword_matches
-            )
-        except Exception as e:
-            errors.append(f"workflow_registry_fallback_error: {e}")
-            logger.warning("Registry workflow fallback discovery failed: %s", e)
 
     # Secondary: existing search sources fill gaps the capability index misses.
     if (

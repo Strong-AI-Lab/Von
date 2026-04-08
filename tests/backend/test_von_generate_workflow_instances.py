@@ -231,7 +231,7 @@ class _CapturingOrchestrator:
                         "relevance_score": 0.9,
                     }
                 ],
-                "search_sources": ["registry_keyword_fallback"],
+                "search_sources": ["capability_index"],
                 "errors": [],
             },
             selected_workflow_trace={

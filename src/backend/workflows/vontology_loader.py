@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Seque
 from ..db.repositories.concepts_repository import ConceptsRepository
 from ..services.text_value_service import (
     get_preferred_text_for_concept,
+    get_preferred_texts_for_concepts,
     get_texts_for_concept,
 )
 from .prompt_metadata_resolution import (
@@ -3850,17 +3851,82 @@ def batch_fetch_workflow_purposes(
     registrations so the workflow capability index has searchable text
     for Vontology-authored workflows without resolving full definitions.
     """
+    routing_metadata = batch_fetch_workflow_routing_metadata(workflow_ids)
     purposes: Dict[str, str] = {}
-    for wf_id in workflow_ids:
-        if not isinstance(wf_id, str) or not wf_id.strip():
-            continue
-        try:
-            text, _source = resolve_workflow_description(
-                wf_id.strip(),
-                workflow_source="vontology",
-            )
-            if text:
-                purposes[wf_id.strip()] = text[:300]
-        except Exception:
-            continue
+    for workflow_id, metadata in routing_metadata.items():
+        text = _normalise_non_empty_text(metadata.get("description_text"))
+        if text:
+            purposes[workflow_id] = text[:300]
     return purposes
+
+
+def batch_fetch_workflow_routing_metadata(
+    workflow_ids: Iterable[str],
+) -> Dict[str, Dict[str, Any]]:
+    """Batch-fetch routing descriptions and discovery exemplars for workflows.
+
+    This preserves the same authoritative text-relation precedence as the
+    per-workflow helpers while avoiding one-by-one Vontology text fetch loops
+    when registry-wide surfaces (such as capability indexing) need many
+    workflow descriptions at once.
+    """
+
+    ordered_workflow_ids: list[str] = []
+    seen_workflow_ids: set[str] = set()
+    for raw_workflow_id in workflow_ids:
+        if not isinstance(raw_workflow_id, str):
+            continue
+        workflow_id = raw_workflow_id.strip()
+        if not workflow_id or workflow_id in seen_workflow_ids:
+            continue
+        seen_workflow_ids.add(workflow_id)
+        ordered_workflow_ids.append(workflow_id)
+
+    if not ordered_workflow_ids:
+        return {}
+
+    description_rows = get_preferred_texts_for_concepts(
+        ordered_workflow_ids,
+        predicate_precedence=WORKFLOW_ROUTING_DESCRIPTION_TEXT_PREDICATE_PRECEDENCE,
+        preferred_languages=("en-NZ", "en"),
+        limit_per_concept=200,
+    )
+    exemplar_rows = get_preferred_texts_for_concepts(
+        ordered_workflow_ids,
+        predicate_precedence=WORKFLOW_DISCOVERY_EXEMPLARS_TEXT_PREDICATE_PRECEDENCE,
+        preferred_languages=("en-NZ", "en"),
+        limit_per_concept=50,
+    )
+
+    metadata_by_workflow_id: Dict[str, Dict[str, Any]] = {}
+    for workflow_id in ordered_workflow_ids:
+        workflow_metadata: Dict[str, Any] = {}
+
+        description_row = description_rows.get(workflow_id)
+        if isinstance(description_row, Mapping):
+            predicate = _normalise_non_empty_text(description_row.get("predicate"))
+            text = _normalise_non_empty_text(description_row.get("text"))
+            if predicate and text:
+                structured_purpose = _extract_structured_workflow_purpose(text)
+                workflow_metadata["description_text"] = structured_purpose or text
+                workflow_metadata["description_source"] = (
+                    f"text_relation:{predicate}:purpose"
+                    if structured_purpose
+                    else f"text_relation:{predicate}"
+                )
+
+        exemplar_row = exemplar_rows.get(workflow_id)
+        if isinstance(exemplar_row, Mapping):
+            predicate = _normalise_non_empty_text(exemplar_row.get("predicate"))
+            exemplars = _parse_workflow_discovery_exemplars_text_value(
+                exemplar_row.get("text")
+            )
+            if predicate and exemplars is not None:
+                workflow_metadata["discovery_exemplars"] = exemplars
+                workflow_metadata["discovery_exemplars_source"] = (
+                    f"text_relation:{predicate}"
+                )
+
+        metadata_by_workflow_id[workflow_id] = workflow_metadata
+
+    return metadata_by_workflow_id
