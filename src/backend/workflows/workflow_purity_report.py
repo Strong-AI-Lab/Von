@@ -107,6 +107,7 @@ WORKFLOW_PROMPT_SOURCE_FUNCTION_PATTERNS = (
 REPO_SEED_AUTHORITY_SCAN_GLOBS = ("src/backend/**/*.py",)
 REPO_SEED_AUTHORITY_ALLOWED_PATHS = frozenset(
     {
+        "src/backend/services/conversation_turn_workflow_vontology_service.py",
         "src/backend/services/entity_representation_workflow_vontology_service.py",
         "src/backend/services/episode_evaluation_workflow_vontology_service.py",
         "src/backend/services/paper_recommendation_workflow_vontology_service.py",
@@ -131,6 +132,30 @@ REPO_SEED_AUTHORITY_PATTERNS = {
     "repo_seed_template_hydration": re.compile(
         r"\bensure_repo_seeded_workflow_template_bundle\s*\("
     ),
+}
+
+WORKFLOW_ID_SPECIAL_CASE_SCAN_GLOBS = (
+    "src/backend/integrations/internal_mcp/orchestrator.py",
+    "src/backend/server/routes/von_routes.py",
+    "src/backend/workflows/durable/turn_execution_actions.py",
+)
+WORKFLOW_ID_SPECIAL_CASE_OPERATORS = (
+    ast.Eq,
+    ast.NotEq,
+    ast.In,
+    ast.NotIn,
+)
+
+SUPERVISED_FAIL_OPEN_CONTRACT = {
+    "path": "src/backend/integrations/internal_mcp/orchestrator.py",
+    "function": "execute_conversation_turn_supervised",
+    "forbidden_patterns": {
+        "fallback_to_legacy_run": re.compile(r"\bself\.run\s*\("),
+        "synthetic_missing_response_success": re.compile(
+            r"Workflow execution completed without response text",
+            re.IGNORECASE,
+        ),
+    },
 }
 
 SEED_FALLBACK_ORDER_CONTRACTS = (
@@ -249,14 +274,19 @@ def _extract_top_level_function_source(
         return None
 
     lines = text.splitlines()
-    for node in tree.body:
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        if node.name != function_name:
-            continue
+    matching_nodes = sorted(
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == function_name
+        ),
+        key=lambda item: int(getattr(item, "lineno", 0) or 0),
+    )
+    for node in matching_nodes:
         end_lineno = getattr(node, "end_lineno", None)
         if end_lineno is None:
-            return None
+            continue
         start_line = int(node.lineno)
         end_line = int(end_lineno)
         function_text = "\n".join(lines[start_line - 1 : end_line])
@@ -670,6 +700,126 @@ def _scan_vontology_first_seed_fallback_contracts(project_root: Path) -> dict[st
     }
 
 
+def _extract_workflow_id_string(node: ast.AST) -> str | None:
+    if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+        return None
+    candidate = str(node.value).strip()
+    if not candidate.startswith("#V#"):
+        return None
+    return candidate if candidate.endswith("_workflow") else None
+
+
+def _scan_workflow_id_special_case_branches(project_root: Path) -> dict[str, Any]:
+    matches: list[dict[str, Any]] = []
+    for path in _iter_files(project_root, WORKFLOW_ID_SPECIAL_CASE_SCAN_GLOBS):
+        relative_path = _relative_path(path, project_root)
+        text = path.read_text(encoding="utf-8")
+        try:
+            tree = ast.parse(text, filename=relative_path)
+        except SyntaxError:
+            continue
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Compare):
+                continue
+            if not any(
+                isinstance(operator, WORKFLOW_ID_SPECIAL_CASE_OPERATORS)
+                for operator in node.ops
+            ):
+                continue
+            workflow_ids = [
+                workflow_id
+                for workflow_id in (
+                    _extract_workflow_id_string(node.left),
+                    *(
+                        _extract_workflow_id_string(comparator)
+                        for comparator in node.comparators
+                    ),
+                )
+                if workflow_id
+            ]
+            if not workflow_ids:
+                continue
+            operator_names = [
+                type(operator).__name__
+                for operator in node.ops
+                if isinstance(operator, WORKFLOW_ID_SPECIAL_CASE_OPERATORS)
+            ]
+            matches.append(
+                {
+                    "path": relative_path,
+                    "line": int(node.lineno),
+                    "workflow_ids": sorted(dict.fromkeys(workflow_ids)),
+                    "operators": operator_names,
+                }
+            )
+
+    return {
+        "match_count": len(matches),
+        "matches": matches,
+        "file_globs": list(WORKFLOW_ID_SPECIAL_CASE_SCAN_GLOBS),
+    }
+
+
+def _scan_supervised_fail_open_fallbacks(project_root: Path) -> dict[str, Any]:
+    contract = dict(SUPERVISED_FAIL_OPEN_CONTRACT)
+    relative_path = str(contract["path"])
+    function_name = str(contract["function"])
+    forbidden_patterns = {
+        str(name): pattern
+        for name, pattern in dict(contract.get("forbidden_patterns") or {}).items()
+        if isinstance(name, str) and isinstance(pattern, re.Pattern)
+    }
+    source_path = project_root / relative_path
+    if not source_path.exists():
+        return {
+            "path": relative_path,
+            "function": function_name,
+            "status": "file_missing",
+            "offending_match_count": 0,
+            "offending_matches": [],
+            "forbidden_patterns": sorted(forbidden_patterns),
+        }
+
+    function_record = _extract_top_level_function_source(
+        path=source_path,
+        project_root=project_root,
+        function_name=function_name,
+    )
+    if function_record is None:
+        return {
+            "path": relative_path,
+            "function": function_name,
+            "status": "function_missing",
+            "offending_match_count": 0,
+            "offending_matches": [],
+            "forbidden_patterns": sorted(forbidden_patterns),
+        }
+
+    function_text = str(function_record["text"])
+    start_line = int(function_record["start_line"])
+    offending_matches: list[dict[str, Any]] = []
+    for pattern_name, pattern in forbidden_patterns.items():
+        for match in pattern.finditer(function_text):
+            offending_matches.append(
+                {
+                    "path": relative_path,
+                    "function": function_name,
+                    "pattern": pattern_name,
+                    "line": start_line + _line_number(function_text, match.start()) - 1,
+                }
+            )
+
+    return {
+        "path": relative_path,
+        "function": function_name,
+        "status": "violation" if offending_matches else "ok",
+        "offending_match_count": len(offending_matches),
+        "offending_matches": offending_matches,
+        "forbidden_patterns": sorted(forbidden_patterns),
+    }
+
+
 def _collect_registry_sources(registry: Any | None) -> dict[str, Any]:
     if registry is None:
         return {
@@ -838,6 +988,8 @@ def build_workflow_purity_report(
     workflow_prompt_sources = _scan_python_authored_workflow_prompt_sources(repo_root)
     repo_seed_authority = _scan_repo_seed_authority_drift(repo_root)
     seed_fallback_contracts = _scan_vontology_first_seed_fallback_contracts(repo_root)
+    workflow_id_special_cases = _scan_workflow_id_special_case_branches(repo_root)
+    supervised_fail_open_fallbacks = _scan_supervised_fail_open_fallbacks(repo_root)
     builtin_capability_overrides = sorted(BUILTIN_WORKFLOW_CAPABILITIES)
 
     counters = {
@@ -865,6 +1017,12 @@ def build_workflow_purity_report(
         ),
         "vontology_first_seed_fallback_violation_count": int(
             seed_fallback_contracts.get("violation_count", 0)
+        ),
+        "workflow_id_special_case_count": int(
+            workflow_id_special_cases.get("match_count", 0)
+        ),
+        "supervised_fail_open_fallback_count": int(
+            supervised_fail_open_fallbacks.get("offending_match_count", 0)
         ),
     }
 
@@ -897,6 +1055,8 @@ def build_workflow_purity_report(
             ),
             "repo_seed_authority_drift": repo_seed_authority,
             "vontology_first_seed_fallback_contracts": seed_fallback_contracts,
+            "workflow_id_special_cases": workflow_id_special_cases,
+            "supervised_fail_open_fallbacks": supervised_fail_open_fallbacks,
             "direct_instance_create": direct_create,
             "env_event_binding_authority": env_event_binding,
             "legacy_selector_support": legacy_selector,

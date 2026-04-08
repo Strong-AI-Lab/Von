@@ -1192,6 +1192,24 @@ def _build_definition_from_publication_spec(
                 }
                 action_input_mapping["$required"] = bool(mapping_spec.required)
                 action_inputs[mapping_spec.tool_param.strip()] = action_input_mapping
+        prompt_contract: dict[str, Any] | None = None
+        prompt_concept_ids = tuple(
+            item.strip()
+            for item in step.prompt_concept_ids
+            if isinstance(item, str) and item.strip()
+        )
+        if prompt_concept_ids:
+            prompt_contract = {
+                "validation_policy": "fail",
+                "requested_prompt_concept_ids": list(prompt_concept_ids),
+                "metadata": {
+                    "prompt_source": "canonical_workflow_publication_spec",
+                    "workflow_id": workflow_id,
+                    "state_id": step.state_id,
+                },
+            }
+            if len(prompt_concept_ids) == 1:
+                prompt_contract["resolved_prompt_concept_id"] = prompt_concept_ids[0]
         actions = (
             (
                 WorkflowActionInvocation(
@@ -1214,6 +1232,7 @@ def _build_definition_from_publication_spec(
                         if isinstance(step.validation_policy, Mapping)
                         else None
                     ),
+                    prompt_contract=prompt_contract,
                 ),
             )
             if isinstance(step.action_id, str) and step.action_id.strip()
@@ -2373,6 +2392,12 @@ def publish_canonical_chat_workflow_graphs(
                     str,
                 ):
                     workflow_purpose = str(registration.purpose).strip() or None
+        if (
+            workflow_id not in explicit_publication_specs
+            and registration_definition is not None
+        ):
+            spec = _build_publication_spec_from_definition(registration_definition)
+            available_publication_specs[workflow_id] = spec
         if spec is None:
             spec = resolve_authoritative_workflow_publication_spec(
                 workflow_id,
@@ -2652,9 +2677,17 @@ def publish_canonical_chat_workflow_graphs(
                     and isinstance(encoded_value, str)
                     and encoded_value.strip()
                 ]
-            runtime_input_maps = list(
-                step_relationships.get(_CANONICAL_GRAPH_PREDICATES["hasInputMap"]) or []
-            )
+            runtime_input_maps = [
+                item
+                for item in (
+                    step_relationships.get(_CANONICAL_GRAPH_PREDICATES["hasInputMap"])
+                    or []
+                )
+                if isinstance(item, str)
+                and not item.startswith("workflow_step_execution_mode=")
+                and not item.startswith("workflow_step_llm_policy=")
+                and not item.startswith("workflow_step_validation_policy=")
+            ]
             if isinstance(execution_mode, str) and execution_mode.strip():
                 runtime_input_maps.append(
                     "workflow_step_execution_mode="
@@ -2928,6 +2961,13 @@ def publish_canonical_chat_workflow_graphs(
                 workflow_id,
                 reason="workflow_graph_published",
             )
+
+    try:
+        from .durable.registry_factory import invalidate_shared_workflow_registry_read_only
+
+        invalidate_shared_workflow_registry_read_only()
+    except Exception:
+        pass
 
     return {
         "counts": {

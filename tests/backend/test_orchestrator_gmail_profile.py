@@ -1,8 +1,12 @@
+import pytest
+
 from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
 )
-
-
+from src.backend.workflows.durable.registry_factory import (
+    invalidate_shared_workflow_registry_read_only,
+)
+from workflow_test_support import bootstrap_authoritative_conversation_turn_workflows
 class DummyGateway:
     def __init__(self):
         self.enabled = True
@@ -11,7 +15,7 @@ class DummyGateway:
     def describe_methods(self):
         return {
             "gmail_list_messages": {
-                "description": "",
+                "description": "List Gmail messages for a profile.",
                 "input_schema": {"required": ["profile"], "optional": {}},
             }
         }
@@ -37,6 +41,15 @@ class DummyLLM:
         return self.responses.pop(0)
 
 
+@pytest.fixture(autouse=True)
+def _bootstrap_conversation_turn_authority() -> None:
+    invalidate_shared_workflow_registry_read_only()
+    bootstrap_authoritative_conversation_turn_workflows()
+    invalidate_shared_workflow_registry_read_only()
+    yield
+    invalidate_shared_workflow_registry_read_only()
+
+
 def test_injects_default_gmail_profile_into_payload():
     gateway = DummyGateway()
     llm = DummyLLM(
@@ -56,7 +69,6 @@ def test_injects_default_gmail_profile_into_payload():
         context=None,
         llm_client=llm,
         model="test-model",
-        user_namespace="#V#user",
     )
 
     assert gateway.calls, "Gateway should have been invoked"
@@ -92,7 +104,6 @@ def test_gmail_profile_prefers_request_over_default():
         context=None,
         llm_client=llm,
         model="test-model",
-        user_namespace="#V#user",
         gmail_profile="user-picked",
     )
 

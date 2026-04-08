@@ -203,7 +203,7 @@ def test_create_flask_app_defers_durable_workflow_startup(monkeypatch):
     assert final_status.get("ready") is True
 
 
-def test_build_durable_workflow_registry_uses_deferred_read_only_builder(
+def test_build_durable_workflow_registry_uses_shared_deferred_read_only_builder(
     monkeypatch,
 ):
     import src.backend.server.utils_flask as utils_flask
@@ -212,14 +212,16 @@ def test_build_durable_workflow_registry_uses_deferred_read_only_builder(
     sentinel_registry = object()
     observed: dict[str, object] = {}
 
-    def _stub_build_workflow_registry_read_only(*, defer_parity_work: bool = False):
+    def _stub_get_shared_workflow_registry_read_only(
+        *, defer_parity_work: bool = False
+    ):
         observed["defer_parity_work"] = defer_parity_work
         return sentinel_registry
 
     monkeypatch.setattr(
         registry_factory,
-        "build_workflow_registry_read_only",
-        _stub_build_workflow_registry_read_only,
+        "get_shared_workflow_registry_read_only",
+        _stub_get_shared_workflow_registry_read_only,
     )
 
     result = utils_flask._build_durable_workflow_registry()

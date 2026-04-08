@@ -6,7 +6,7 @@ import copy
 import json
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from . import concept_service
 from .text_value_service import upsert_singleton_text_relation
@@ -873,6 +873,7 @@ def bootstrap_repo_seed_workflow_bundle(
     asset_path: str | Path,
     publish_context_manager_factory: Callable[[], Any] | None = None,
     force_republish: bool = False,
+    target_workflow_ids: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Publish and validate one repo-side workflow seed bundle.
 
@@ -892,6 +893,38 @@ def bootstrap_repo_seed_workflow_bundle(
     workflow_launch_contracts = dict(bundle.get("workflow_launch_contracts") or {})
     step_text_relations = dict(bundle.get("step_text_relations") or {})
     supported_action_ids = tuple(bundle.get("supported_action_ids") or ())
+    requested_workflow_ids = tuple(
+        str(workflow_id).strip()
+        for workflow_id in (target_workflow_ids or ())
+        if isinstance(workflow_id, str) and str(workflow_id).strip()
+    )
+    if requested_workflow_ids:
+        allowed_ids = set(requested_workflow_ids)
+        publication_specs = {
+            workflow_id: spec
+            for workflow_id, spec in publication_specs.items()
+            if workflow_id in allowed_ids
+        }
+        publication_purposes = {
+            workflow_id: purpose
+            for workflow_id, purpose in publication_purposes.items()
+            if workflow_id in allowed_ids
+        }
+        workflow_type_ids = {
+            workflow_id: type_ids
+            for workflow_id, type_ids in workflow_type_ids.items()
+            if workflow_id in allowed_ids
+        }
+        workflow_text_relations = {
+            workflow_id: relation_specs
+            for workflow_id, relation_specs in workflow_text_relations.items()
+            if workflow_id in allowed_ids
+        }
+        workflow_launch_contracts = {
+            workflow_id: contract
+            for workflow_id, contract in workflow_launch_contracts.items()
+            if workflow_id in allowed_ids
+        }
     target_workflow_ids = tuple(publication_specs.keys())
     already_current, existing_validation_by_workflow_id, materialisation_preflight = (
         _validate_existing_materialisation(

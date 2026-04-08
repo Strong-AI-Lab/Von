@@ -4135,6 +4135,26 @@ def _finalise_llm_debug_info(
                 if isinstance(llm_debug_info.get("aux_llm_calls"), list)
                 else []
             ),
+            selected_workflow_trace=(
+                llm_debug_info.get("selected_workflow_trace")
+                if isinstance(llm_debug_info.get("selected_workflow_trace"), dict)
+                else None
+            ),
+            critic_verdict=(
+                llm_debug_info.get("critic_verdict")
+                if isinstance(llm_debug_info.get("critic_verdict"), dict)
+                else None
+            ),
+            completion_gate_verdict=(
+                llm_debug_info.get("completion_gate_verdict")
+                if isinstance(llm_debug_info.get("completion_gate_verdict"), dict)
+                else None
+            ),
+            completion_report=(
+                llm_debug_info.get("completion_report")
+                if isinstance(llm_debug_info.get("completion_report"), dict)
+                else None
+            ),
         )
         llm_debug_info["turn_execution_record"] = turn_execution_record
         routing_diagnostics = turn_execution_record.get("workflow_routing_diagnostics")
@@ -5702,7 +5722,8 @@ def _maybe_handle_prompt_introspection_fastpath(
     role_in_org: str | None,
     history_user_id: str | None,
     session_id: str,
-    dynamic_instructions: str | None,
+    dynamic_instructions: str | None = None,
+    auxiliary_system_prompt: str | None = None,
     user_prompt_debug: dict,
     context: list[dict],
     interaction_timestamp_utc: str,
@@ -5714,6 +5735,8 @@ def _maybe_handle_prompt_introspection_fastpath(
     gateway = current_app.config.get("INTERNAL_MCP_GATEWAY")
     import json as _json
     prompt_namespace = user_namespace or user_concept_id
+    if dynamic_instructions is None and isinstance(auxiliary_system_prompt, str):
+        dynamic_instructions = auxiliary_system_prompt
 
     tool_messages: list[dict] = []
     tool_invocations: list[dict] = []
@@ -8185,6 +8208,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 conversation_turn_instance_id = None
                 conversation_turn_instance_created_new = None
 
+        orchestrator_result = None
         if orchestrator is None:
             response_text = _handle_orchestrator_missing_fallback(
                 llm_client=llm_client,
@@ -8241,6 +8265,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                             "request_id": request_id,
                         },
                     )
+
+                _submit_conversation_turn_instance()
 
                 # JVNAUTOSCI-1768: Consolidated entry point. Discovery now happens inside the workflow.
                 orchestrator_start_perf = time.perf_counter()
@@ -10063,6 +10089,54 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             "workflow_routing": workflow_routing_info,
             "display_elements": display_elements_contract,
             "turn_execution_diagnostics": turn_execution_diagnostics,
+            "selected_workflow_trace": (
+                dict(raw_selected_workflow_trace)
+                if isinstance(
+                    raw_selected_workflow_trace := getattr(
+                        orchestrator_result,
+                        "selected_workflow_trace",
+                        None,
+                    ),
+                    dict,
+                )
+                else None
+            ),
+            "critic_verdict": (
+                dict(raw_critic_verdict)
+                if isinstance(
+                    raw_critic_verdict := getattr(
+                        orchestrator_result,
+                        "critic_verdict",
+                        None,
+                    ),
+                    dict,
+                )
+                else None
+            ),
+            "completion_gate_verdict": (
+                dict(raw_completion_gate_verdict)
+                if isinstance(
+                    raw_completion_gate_verdict := getattr(
+                        orchestrator_result,
+                        "completion_gate_verdict",
+                        None,
+                    ),
+                    dict,
+                )
+                else None
+            ),
+            "completion_report": (
+                dict(raw_completion_report)
+                if isinstance(
+                    raw_completion_report := getattr(
+                        orchestrator_result,
+                        "completion_report",
+                        None,
+                    ),
+                    dict,
+                )
+                else None
+            ),
         }
         if isinstance(render_plan_debug, dict):
             llm_debug_info["render_plan"] = dict(render_plan_debug)
@@ -12636,7 +12710,7 @@ def chat_session_links():
         )
         session_id = None
         if isinstance(requested_session_id, str) and requested_session_id.strip():
-            session_id = requested_sessiosion_id.strip()
+            session_id = requested_session_id.strip()
         else:
             session_id = session.get("session_id")
 
@@ -13651,7 +13725,6 @@ def _handle_orchestrator_missing_fallback(
         fallback_requirement_state.get('unavailable_required_tools') or []
     )
     if unavailable_required_tools:
-        from src.backend.services.telemetry_service import annotate_python_decision_event
         auxiliary_llm_calls.append(
             annotate_python_decision_event(
                 {
@@ -13713,9 +13786,13 @@ def _perform_legacy_spoken_backfill(
     from flask import current_app
     
     def _coerce_spoken_text(text: object) -> str | None:
-        if not text: return None
-        if isinstance(text, str): return text
-        if hasattr(text, "text"): return str(text.text)
+        if not text:
+            return None
+        if isinstance(text, str):
+            return text
+        text_attr = getattr(text, "text", None)
+        if text_attr is not None:
+            return str(text_attr)
         return str(text)
 
     spoken_backfill_status = 'not_started'

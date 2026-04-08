@@ -1979,6 +1979,16 @@ class InternalMCPChatOrchestrator:
         )
         registry.register(
             ActionSpec(
+                action_id="tool_calling.respond",
+                handler=self._action_tool_calling_respond,
+                description=(
+                    "Composite tool-calling contract action for authoritative "
+                    "workflow steps that expect a single response phase."
+                ),
+            )
+        )
+        registry.register(
+            ActionSpec(
                 action_id="tool_calling.plan",
                 handler=self._action_tool_calling_plan,
                 description="Initial LLM call + missing-tool-call recovery.",
@@ -2005,20 +2015,36 @@ class InternalMCPChatOrchestrator:
                 description="Summariser LLM call; detect chained tool calls.",
             )
         )
-        registry.register(
+        override_registry = ActionRegistry()
+        override_registry.register(
+            ActionSpec(
+                action_id="turn_execution.route",
+                handler=self._action_turn_execution_route,
+                description="Resolve workflow routing for the current supervised turn.",
+            )
+        )
+        override_registry.register(
+            ActionSpec(
+                action_id="turn_execution.execute_selected",
+                handler=self._action_turn_execution_execute_selected,
+                description="Execute the selected workflow on the supervised path.",
+            )
+        )
+        override_registry.register(
             ActionSpec(
                 action_id="turn_execution.critic",
                 handler=self._action_turn_execution_critic,
                 description="Evaluate required effects and postcondition checks for the turn.",
             )
         )
-        registry.register(
+        override_registry.register(
             ActionSpec(
                 action_id="turn_execution.completion_gate",
                 handler=self._action_turn_execution_completion_gate,
                 description="Apply completion gate and prevent false completion claims.",
             )
         )
+        registry.merge(override_registry, overwrite=True)
 
         # JVNAUTOSCI-922 Phase 3.1: Fallback handler for Vontology-defined
         # MCP tool actions.  Any action_id not explicitly registered is
@@ -4958,6 +4984,145 @@ class InternalMCPChatOrchestrator:
             outputs["aux_llm_calls"] = aux_log
         return WorkflowActionResult(outputs=outputs)
 
+    @staticmethod
+    def _merge_action_outputs_into_workflow_data(
+        data: MutableMapping[str, Any],
+        outputs: Mapping[str, Any],
+    ) -> None:
+        for key, value in outputs.items():
+            if isinstance(key, str):
+                data[key] = value
+
+    def _materialise_tool_calling_orchestrator_result(
+        self,
+        data: MutableMapping[str, Any],
+        orchestrator_result: Any,
+    ) -> None:
+        if not isinstance(orchestrator_result, OrchestratorResult):
+            return
+        data["final_response"] = orchestrator_result.response_text
+        data["current_response"] = orchestrator_result.response_text
+
+        invocations = data.get("invocations")
+        if isinstance(invocations, list):
+            invocations.extend(
+                dict(item)
+                for item in orchestrator_result.tool_invocations
+                if isinstance(item, Mapping)
+            )
+        else:
+            data["invocations"] = [
+                dict(item)
+                for item in orchestrator_result.tool_invocations
+                if isinstance(item, Mapping)
+            ]
+
+        tool_messages = data.get("tool_messages")
+        if isinstance(tool_messages, list):
+            tool_messages.extend(
+                dict(item)
+                for item in orchestrator_result.extra_messages
+                if isinstance(item, Mapping)
+            )
+        else:
+            data["tool_messages"] = [
+                dict(item)
+                for item in orchestrator_result.extra_messages
+                if isinstance(item, Mapping)
+            ]
+
+        aux_llm_calls = data.get("aux_llm_calls")
+        if isinstance(aux_llm_calls, list):
+            aux_llm_calls.extend(
+                dict(item)
+                for item in orchestrator_result.aux_llm_calls
+                if isinstance(item, Mapping)
+            )
+
+    def _action_tool_calling_respond(self, request: Any) -> WorkflowActionResult:
+        """Run the authoritative composite tool-calling contract in one action."""
+
+        data = request.data
+
+        plan_result = self._action_tool_calling_plan(request)
+        self._merge_action_outputs_into_workflow_data(data, plan_result.outputs)
+        orchestrator_result = data.get("orchestrator_result")
+        if isinstance(orchestrator_result, OrchestratorResult):
+            self._materialise_tool_calling_orchestrator_result(data, orchestrator_result)
+            return WorkflowActionResult(
+                outputs={
+                    "final_response": data.get("final_response"),
+                    "current_response": data.get("current_response"),
+                    "orchestrator_result": orchestrator_result,
+                    "tool_calls_present": False,
+                    "direct_response": True,
+                    "result": False,
+                }
+            )
+        if not plan_result.ok:
+            return plan_result
+        if bool(data.get("direct_response")) or not bool(data.get("tool_calls_present")):
+            return WorkflowActionResult(
+                outputs={
+                    "final_response": data.get("final_response"),
+                    "current_response": data.get("current_response")
+                    or data.get("final_response"),
+                    "tool_calls_present": bool(data.get("tool_calls_present")),
+                    "direct_response": bool(data.get("direct_response")),
+                    "result": data.get("result"),
+                }
+            )
+
+        while True:
+            validate_result = self._action_tool_calling_validate(request)
+            self._merge_action_outputs_into_workflow_data(data, validate_result.outputs)
+            orchestrator_result = data.get("orchestrator_result")
+            if isinstance(orchestrator_result, OrchestratorResult):
+                self._materialise_tool_calling_orchestrator_result(
+                    data,
+                    orchestrator_result,
+                )
+                return WorkflowActionResult(
+                    outputs={
+                        "final_response": data.get("final_response"),
+                        "current_response": data.get("current_response"),
+                        "orchestrator_result": orchestrator_result,
+                        "tool_calls_present": False,
+                        "direct_response": True,
+                        "result": False,
+                    }
+                )
+            if not validate_result.ok:
+                return validate_result
+            if not bool(data.get("tool_calls_validated")):
+                return WorkflowActionResult(
+                    status="failed",
+                    error="tool_calls_not_validated",
+                    outputs={"result": False},
+                )
+
+            execute_result = self._action_tool_calling_execute(request)
+            self._merge_action_outputs_into_workflow_data(data, execute_result.outputs)
+            if not execute_result.ok:
+                return execute_result
+
+            backfill_result = self._action_tool_calling_backfill(request)
+            self._merge_action_outputs_into_workflow_data(data, backfill_result.outputs)
+            if not backfill_result.ok:
+                return backfill_result
+            if bool(data.get("more_tool_calls")):
+                continue
+            return WorkflowActionResult(
+                outputs={
+                    "final_response": data.get("final_response"),
+                    "current_response": data.get("current_response")
+                    or data.get("final_response"),
+                    "tool_calls_present": bool(data.get("tool_calls_present")),
+                    "direct_response": bool(data.get("direct_response")),
+                    "result": data.get("result"),
+                }
+            )
+
     def _action_tool_calling_plan(self, request: Any) -> WorkflowActionResult:
         """Phase 1 of tool calling: initial LLM call + missing-tool-call recovery.
 
@@ -6513,6 +6678,7 @@ class InternalMCPChatOrchestrator:
 
             exc = interpretation.tool_call_parse_error
             recovery_reason: str | None = None
+            semantic_retry_reason_override: str | None = None
             override_retry_reason = data.get("missing_tool_call_retry_reason_override")
             has_override_retry_reason = isinstance(
                 override_retry_reason, str
@@ -6521,12 +6687,38 @@ class InternalMCPChatOrchestrator:
                 recovery_reason = "parse_error"
             elif has_override_retry_reason:
                 recovery_reason = "required_prompt_tools_missing"
+            elif isinstance(current_response, str) and current_response.strip():
+                semantic_assessment = self._assess_missing_tool_call(
+                    response_text=current_response,
+                    use_structured=False,
+                    interpretation=interpretation,
+                    llm_client=env.llm_client,
+                    model=env.model,
+                    classifier_model=model_for_stage("classifier"),
+                    aux_log=[],
+                    tool_call_parse_error=None,
+                    allow_semantic_retry=True,
+                )
+                if (
+                    isinstance(semantic_assessment.retry_reason, str)
+                    and semantic_assessment.retry_reason
+                ):
+                    recovery_reason = "semantic_missing_tool_call"
+                    semantic_retry_reason_override = (
+                        semantic_assessment.retry_reason
+                    )
 
             if recovery_reason is not None:
+                recovery_inputs: Mapping[str, Any] = data
+                if semantic_retry_reason_override and not has_override_retry_reason:
+                    recovery_inputs = dict(data)
+                    recovery_inputs["missing_tool_call_retry_reason_override"] = (
+                        semantic_retry_reason_override
+                    )
                 recovery_data = self._run_missing_tool_call_recovery_workflow(
                     request=request,
                     environment=env,
-                    data=data,
+                    data=recovery_inputs,
                     response_text=(
                         current_response
                         if isinstance(current_response, str)
@@ -9422,6 +9614,29 @@ class InternalMCPChatOrchestrator:
             # to avoid triggering on long explanatory responses
             if len(text) < 500:
                 return True
+
+        # Routing/control-plane leakage is also a no-op in a tool-planning turn.
+        routing_phrases = (
+            "route this as",
+            "route this to",
+            "routing this as",
+            "selected workflow",
+            "select workflow",
+        )
+        routing_targets = (
+            "plain_response",
+            "tool_pipeline",
+            "chat_assistant_workflow",
+            "tool_calling_workflow",
+            "chat_narration_workflow",
+            "workflow_id",
+        )
+        if (
+            len(text) < 300
+            and any(phrase in lowered for phrase in routing_phrases)
+            and any(target in lowered for target in routing_targets)
+        ):
+            return True
 
         # Secondary trigger: explicit step-by-step change description without any tool JSON.
         # Only count as missing-tool-call if the assistant also uses tool-y language.
@@ -20426,6 +20641,417 @@ class InternalMCPChatOrchestrator:
 
         return included, excluded
 
+    def _build_selector_default_candidates(self) -> list[dict[str, Any]]:
+        candidate_ids = (
+            CHAT_ASSISTANT_WORKFLOW_ID,
+            TOOL_CALLING_WORKFLOW_ID,
+            CHAT_NARRATION_WORKFLOW_ID,
+        )
+        candidates: list[dict[str, Any]] = []
+        for workflow_id in candidate_ids:
+            registration = self._workflow_registry.get_registration(workflow_id)
+            if registration is None:
+                continue
+            name = workflow_id[3:] if workflow_id.startswith("#V#") else workflow_id
+            name = name.replace("_", " ").strip().title() or workflow_id
+            description = str(getattr(registration, "purpose", "") or "").strip()
+            candidates.append(
+                {
+                    "concept_id": workflow_id,
+                    "name": name,
+                    "description": description,
+                    "candidate_source": "selector_default",
+                    "candidate_reason": "builtin_selector_candidate",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "is_policy_safe": True,
+                    "routing_eligible": True,
+                    "routing_exclusion_reason": None,
+                }
+            )
+        return candidates
+
+    @staticmethod
+    def _merge_selector_candidates(
+        primary: Sequence[Mapping[str, Any]],
+        secondary: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        merged: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        for source in (primary, secondary):
+            for item in source:
+                if not isinstance(item, Mapping):
+                    continue
+                concept_id = str(item.get("concept_id") or "").strip()
+                if not concept_id:
+                    continue
+                dedupe_key = concept_id.lower()
+                if dedupe_key in seen_ids:
+                    continue
+                seen_ids.add(dedupe_key)
+                merged.append(dict(item))
+        return merged
+
+    def _action_turn_execution_route(self, request: Any) -> WorkflowActionResult:
+        """Select the workflow for the current supervised turn."""
+
+        from ...services.workflow_discovery_service import discover_workflows_for_turn
+
+        data = request.data
+        env = request.environment
+        prompt_text = data.get("user_prompt")
+        if not isinstance(prompt_text, str) or not prompt_text.strip():
+            prompt_text = data.get("prompt")
+        prompt_text = str(prompt_text or "").strip()
+
+        raw_discovery = data.get("workflow_discovery_result")
+        if not isinstance(raw_discovery, Mapping):
+            raw_discovery = data.get("workflow_discovery")
+        workflow_discovery_result: dict[str, Any]
+        if isinstance(raw_discovery, Mapping):
+            workflow_discovery_result = dict(raw_discovery)
+        elif prompt_text:
+            discovered = discover_workflows_for_turn(
+                prompt_text,
+                namespace=env.user_namespace,
+            )
+            workflow_discovery_result = (
+                dict(discovered) if isinstance(discovered, Mapping) else {}
+            )
+        else:
+            workflow_discovery_result = {}
+
+        discovered_matches: list[dict[str, Any]] = []
+        excluded_discovered_matches: list[dict[str, Any]] = []
+        if workflow_discovery_result:
+            (
+                discovered_matches,
+                excluded_discovered_matches,
+            ) = self._prepare_selector_discovered_matches(
+                workflow_discovery_result,
+                turn_text=prompt_text,
+            )
+        selector_candidate_matches = self._merge_selector_candidates(
+            self._build_selector_default_candidates(),
+            discovered_matches,
+        )
+
+        policy_state = cast(
+            _WorkflowModelPolicyState,
+            data.get("policy_state"),
+        )
+        registry_snapshot = data.get("registry_snapshot")
+        user_concept_id = data.get("user_concept_id")
+        org_concept_id = data.get("org_concept_id")
+        model_for_stage = data.get("model_for_stage")
+        default_model_raw = (
+            model_for_stage("classifier")
+            if callable(model_for_stage)
+            else getattr(env, "model", None)
+        )
+        default_model = (
+            default_model_raw.strip()
+            if isinstance(default_model_raw, str) and default_model_raw.strip()
+            else None
+        )
+        llm_calls = data.get("llm_calls")
+        if not isinstance(llm_calls, list):
+            llm_calls = []
+            data["llm_calls"] = llm_calls
+        aux_llm_calls = data.get("aux_llm_calls")
+        if not isinstance(aux_llm_calls, list):
+            aux_llm_calls = []
+            data["aux_llm_calls"] = aux_llm_calls
+        record_llm_call = data.get("record_llm_call")
+        emit_progress = data.get("emit_progress")
+
+        if not callable(record_llm_call):
+            def _noop_record_llm_call(**_kwargs: Any) -> None:
+                return None
+
+            record_llm_call = _noop_record_llm_call
+
+        selected_workflow_id = CHAT_ASSISTANT_WORKFLOW_ID
+        if env.user_namespace and self._workflow_selector.enabled():
+            selector_prompt = self._workflow_selector.prepare_selection_prompt(
+                turn_text=prompt_text,
+                discovered_workflows=selector_candidate_matches or None,
+            )
+            if not selector_prompt.prompt_text:
+                selector_selection = (
+                    self._workflow_selector.resolve_prompt_unavailable_selection(
+                        selection_prompt=selector_prompt,
+                    )
+                )
+            else:
+                selector_response_text, _classifier_model, _selector_candidate = (
+                    self._run_llm_with_fallbacks(
+                        stage="workflow_dispatch",
+                        policy_stage="classifier",
+                        prompt="Select workflow",
+                        context=[{"role": "system", "content": selector_prompt.prompt_text}],
+                        default_client=env.llm_client,
+                        default_model=default_model,
+                        policy_state=policy_state,
+                        registry_snapshot=registry_snapshot,
+                        user_concept_id=user_concept_id,
+                        org_concept_id=org_concept_id,
+                        llm_calls_log=llm_calls,
+                        aux_log=aux_llm_calls,
+                        record_llm_call=cast(Callable[..., Any], record_llm_call),
+                        emit_progress=(
+                            cast(Callable[[Mapping[str, Any]], None], emit_progress)
+                            if callable(emit_progress)
+                            else None
+                        ),
+                    )
+                )
+                selector_selection = self._workflow_selector.resolve_selection(
+                    raw_response=selector_response_text,
+                    prompt_id=selector_prompt.prompt_id,
+                    prompt_used=selector_prompt.prompt_text,
+                    discovered_workflow_ids=selector_prompt.discovered_workflow_ids,
+                    candidate_entries=(
+                        tuple(selector_prompt.candidate_entries)
+                        + tuple(
+                            item
+                            for item in excluded_discovered_matches
+                            if isinstance(item, Mapping)
+                        )
+                    ),
+                )
+            if (
+                isinstance(selector_selection.workflow_id, str)
+                and selector_selection.workflow_id.strip()
+            ):
+                selected_workflow_id = selector_selection.workflow_id.strip()
+            routing_info = WorkflowRoutingInfo(
+                workflow_id=selected_workflow_id,
+                verdict=selector_selection.verdict,
+                prompt_id=selector_selection.prompt_id,
+                discovered_workflow_ids=selector_selection.discovered_workflow_ids,
+                source=(
+                    selector_selection.selection_source
+                    if isinstance(selector_selection.selection_source, str)
+                    and selector_selection.selection_source.strip()
+                    else "selector"
+                ),
+                confidence_score=selector_selection.confidence_score,
+                reasoning=selector_selection.reasoning,
+                selection_rationale=_derive_workflow_selection_rationale(
+                    selected_workflow_id=selected_workflow_id,
+                    selector_verdict=selector_selection.verdict,
+                    selector_source=(
+                        selector_selection.selection_source
+                        if isinstance(selector_selection.selection_source, str)
+                        and selector_selection.selection_source.strip()
+                        else "selector"
+                    ),
+                    candidate_workflow_ids=selector_selection.discovered_workflow_ids,
+                    explicit_reasoning=selector_selection.reasoning,
+                ),
+            )
+        else:
+            routing_info = WorkflowRoutingInfo(
+                workflow_id=selected_workflow_id,
+                verdict="selector_disabled",
+                prompt_id=None,
+                discovered_workflow_ids=tuple(
+                    str(item.get("concept_id"))
+                    for item in selector_candidate_matches
+                    if isinstance(item.get("concept_id"), str)
+                ),
+                source="default",
+            )
+
+        if not selected_workflow_id:
+            return WorkflowActionResult(
+                status="failed",
+                error="turn_execution_no_workflow_selected",
+                outputs={
+                    "workflow_discovery_result": workflow_discovery_result,
+                    "workflow_discovery": workflow_discovery_result,
+                },
+            )
+
+        return WorkflowActionResult(
+            outputs={
+                "selected_workflow_id": selected_workflow_id,
+                "workflow_discovery_result": workflow_discovery_result,
+                "workflow_discovery": workflow_discovery_result,
+                "workflow_routing": asdict(routing_info),
+                "selected_workflow_trace": {
+                    "selected_workflow_id": selected_workflow_id,
+                    "workflow_routing": asdict(routing_info),
+                    "selector_candidate_ids": [
+                        str(item.get("concept_id"))
+                        for item in selector_candidate_matches
+                        if isinstance(item.get("concept_id"), str)
+                    ],
+                    "excluded_candidate_ids": [
+                        str(item.get("concept_id"))
+                        for item in excluded_discovered_matches
+                        if isinstance(item.get("concept_id"), str)
+                    ],
+                    "workflow_discovery_result": workflow_discovery_result,
+                },
+            }
+        )
+
+    def _action_turn_execution_execute_selected(
+        self,
+        request: Any,
+    ) -> WorkflowActionResult:
+        """Run the selected workflow and surface its completion artefacts."""
+
+        data = request.data
+        env = request.environment
+        selected_workflow_id = data.get("selected_workflow_id")
+        if not isinstance(selected_workflow_id, str) or not selected_workflow_id.strip():
+            return WorkflowActionResult(
+                status="failed",
+                error="turn_execution_no_workflow_selected",
+            )
+        selected_workflow_id = selected_workflow_id.strip()
+
+        child_result = self.execute_workflow(
+            selected_workflow_id,
+            data=dict(data),
+            llm_client=env.llm_client,
+            model=getattr(env, "model", None),
+            user_namespace=env.user_namespace,
+            auxiliary_system_prompt=getattr(env, "auxiliary_system_prompt", None),
+            trace=request.trace,
+            environment=env,
+            conversation_session_id=data.get("conversation_session_id"),
+            turn_id=data.get("turn_id"),
+            episode_source="conversation_turn_selected_workflow",
+        )
+        if child_result is None:
+            return WorkflowActionResult(
+                status="failed",
+                error=f"selected_workflow_definition_not_found:{selected_workflow_id}",
+            )
+
+        child_outputs = (
+            dict(child_result.data)
+            if isinstance(getattr(child_result, "data", None), Mapping)
+            else {}
+        )
+        completed = _workflow_result_effective_completed(child_result)
+        final_state = (
+            str(child_result.final_state).strip()
+            if isinstance(getattr(child_result, "final_state", None), str)
+            else None
+        )
+        failure_detail = _extract_explicit_workflow_failure_detail(child_result) or (
+            child_result.error if isinstance(child_result.error, str) else None
+        )
+
+        completion_report = child_outputs.get("completion_report")
+        completion_report_source = "child_completion_report"
+        if not isinstance(completion_report, Mapping):
+            summary_payload = child_outputs.get("workflow_execution_summary")
+            if isinstance(summary_payload, Mapping):
+                completion_report = dict(summary_payload)
+                completion_report_source = "workflow_execution_summary"
+            else:
+                response_preview = child_outputs.get("response_text")
+                if not isinstance(response_preview, str) or not response_preview.strip():
+                    response_preview = child_outputs.get("final_response")
+                completion_report = {
+                    "schema_version": "conversation_turn_selected_workflow_result.v1",
+                    "workflow_id": selected_workflow_id,
+                    "completed": completed,
+                    "final_state": final_state,
+                    "error": failure_detail,
+                    "response_text": (
+                        response_preview.strip()
+                        if isinstance(response_preview, str) and response_preview.strip()
+                        else None
+                    ),
+                }
+                completion_report_source = "synthetic_selected_workflow_summary"
+
+        final_response = child_outputs.get("final_response")
+        if not isinstance(final_response, str) or not final_response.strip():
+            final_response = child_outputs.get("response_text")
+        current_response = child_outputs.get("current_response")
+        if not isinstance(current_response, str) or not current_response.strip():
+            current_response = final_response
+
+        outputs: dict[str, Any] = {
+            "selected_workflow_id": selected_workflow_id,
+            "completion_report": dict(completion_report),
+            "selected_workflow_trace": {
+                **(
+                    dict(data.get("selected_workflow_trace"))
+                    if isinstance(data.get("selected_workflow_trace"), Mapping)
+                    else {}
+                ),
+                "selected_workflow_id": selected_workflow_id,
+                "child_workflow_completed": completed,
+                "child_workflow_final_state": final_state,
+                "child_workflow_error": failure_detail,
+                "completion_report_source": completion_report_source,
+            },
+            "workflow_routing": (
+                dict(data.get("workflow_routing"))
+                if isinstance(data.get("workflow_routing"), Mapping)
+                else None
+            ),
+            "workflow_discovery_result": (
+                dict(data.get("workflow_discovery_result"))
+                if isinstance(data.get("workflow_discovery_result"), Mapping)
+                else (
+                    dict(data.get("workflow_discovery"))
+                    if isinstance(data.get("workflow_discovery"), Mapping)
+                    else {}
+                )
+            ),
+            "workflow_discovery": (
+                dict(data.get("workflow_discovery_result"))
+                if isinstance(data.get("workflow_discovery_result"), Mapping)
+                else (
+                    dict(data.get("workflow_discovery"))
+                    if isinstance(data.get("workflow_discovery"), Mapping)
+                    else {}
+                )
+            ),
+        }
+        if isinstance(final_response, str) and final_response.strip():
+            outputs["final_response"] = final_response
+        if isinstance(current_response, str) and current_response.strip():
+            outputs["current_response"] = current_response
+        response_text = child_outputs.get("response_text")
+        if isinstance(response_text, str) and response_text.strip():
+            outputs["response_text"] = response_text
+
+        if not completed:
+            return WorkflowActionResult(
+                status="failed",
+                error=(
+                    failure_detail
+                    or f"selected_workflow_failed:{selected_workflow_id}"
+                ),
+                outputs=outputs,
+            )
+
+        if (
+            not isinstance(outputs.get("response_text"), str)
+            and not isinstance(outputs.get("final_response"), str)
+            and not isinstance(outputs.get("completion_report"), Mapping)
+        ):
+            return WorkflowActionResult(
+                status="failed",
+                error=(
+                    "selected_workflow_missing_required_outputs:"
+                    f"{selected_workflow_id}"
+                ),
+                outputs=outputs,
+            )
+        return WorkflowActionResult(outputs=outputs)
+
     def execute_conversation_turn_supervised(
         self,
         *,
@@ -20452,114 +21078,470 @@ class InternalMCPChatOrchestrator:
         owns the turn lifecycle, supports real-time narration, and reports
         durable outcomes (e.g. arXiv ingestion reports).
         """
-        from ...workflows.registry_factory import get_workflow_registry
-        from ...workflows.engine import WorkflowExecutor, WorkflowEnvironment
-        from ...workflows.definitions import CONVERSATION_TURN_EXECUTION_WORKFLOW_ID
+        from ...workflows.action_registry import WorkflowEnvironment
 
-        # 1. Setup execution environment with step callback for progress tracking
+        orchestrator_start = time.perf_counter()
+        llm_calls: list[dict[str, Any]] = []
+        aux_llm_calls: list[dict[str, Any]] = []
+        tool_invocations: list[dict[str, Any]] = []
+        tool_messages: list[dict[str, Any]] = []
+
         def _step_callback(envelope: Mapping[str, Any]) -> None:
             if progress_tracker:
-                progress_tracker.emit({
-                    "status": "workflow_step_complete",
-                    "workflow_id": envelope.get("workflow_id"),
-                    "state_id": envelope.get("state_id"),
-                    "action_id": envelope.get("action_id"),
-                    "action_status": envelope.get("action_status"),
-                    "outcome": envelope.get("action_outcome"),
-                })
+                progress_tracker.emit(
+                    {
+                        "status": "workflow_step_complete",
+                        "workflow_id": envelope.get("workflow_id"),
+                        "state_id": envelope.get("state_id"),
+                        "action_id": envelope.get("action_id"),
+                        "action_status": envelope.get("action_status"),
+                        "outcome": envelope.get("action_outcome"),
+                    }
+                )
+
+        def _emit_progress_local(info: Mapping[str, Any]) -> None:
+            if progress_tracker is not None:
+                progress_tracker.emit(info)
+            else:
+                self._emit_progress(info)
+
+        def _emit_phase_transition_local(
+            phase: str,
+            *,
+            extra: Mapping[str, Any] | None = None,
+        ) -> None:
+            if progress_tracker is not None:
+                progress_tracker.transition_phase(phase, extra=extra)
+            else:
+                self._emit_phase_transition(phase, extra=extra)
+
+        def _check_cancellation_local() -> None:
+            return None
+
+        def _record_llm_call(
+            *,
+            call_type: str,
+            model_name: str | None,
+            duration_ms: float | None,
+            usage: Mapping[str, Any] | None = None,
+            note: str | None = None,
+            stage: str | None = None,
+            provider: str | None = None,
+            candidate: Mapping[str, Any] | None = None,
+        ) -> None:
+            payload: dict[str, Any] = {
+                "type": call_type,
+                "model": model_name,
+                "provider": provider,
+                "duration_ms": duration_ms,
+                "usage": dict(usage) if isinstance(usage, Mapping) else None,
+                "workflow": "internal_mcp",
+            }
+            if isinstance(stage, str) and stage.strip():
+                payload["stage"] = stage.strip()
+            if isinstance(note, str) and note.strip():
+                payload["note"] = note.strip()
+            if isinstance(candidate, Mapping) and candidate:
+                payload["candidate"] = dict(candidate)
+            llm_calls.append(payload)
+
+        def _aggregate_usage_total() -> Mapping[str, int] | None:
+            totals: dict[str, int] = {}
+            any_usage = False
+            for call in llm_calls:
+                usage_value = call.get("usage")
+                if not isinstance(usage_value, Mapping):
+                    continue
+                for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                    value = usage_value.get(key)
+                    if isinstance(value, int):
+                        totals[key] = totals.get(key, 0) + value
+                        any_usage = True
+            return totals if any_usage else None
+
+        def _build_tool_call_parse_error_result(
+            tool_call_parse_error: ToolCallParsingError,
+            *,
+            invocations_override: Sequence[Mapping[str, Any]] = (),
+            tool_messages_override: Sequence[Mapping[str, Any]] = (),
+        ) -> OrchestratorResult:
+            rejected_tool_call = tool_call_parse_error.raw_response
+            if isinstance(rejected_tool_call, str):
+                rejected_tool_call = rejected_tool_call[:8000]
+            merged_invocations = list(invocations_override)
+            merged_invocations.append(
+                {
+                    "tool": "__tool_call_parse_error__",
+                    "payload": (
+                        {"raw_tool_call": rejected_tool_call}
+                        if rejected_tool_call is not None
+                        else {}
+                    ),
+                    "error": str(tool_call_parse_error),
+                }
+            )
+            return OrchestratorResult(
+                response_text=(
+                    "Tool call was not executed due to an MCP serialisation error. "
+                    f"({tool_call_parse_error})\n\n"
+                    "Please try again. If this keeps happening, copy the LLM debug "
+                    "output so we can reproduce it."
+                ),
+                extra_messages=tuple(tool_messages_override),
+                tool_invocations=tuple(merged_invocations),
+                aux_llm_calls=tuple(aux_llm_calls),
+            )
+
+        def _build_tool_call_validation_error_result(
+            errors: Sequence[str],
+            warnings: Sequence[str],
+            tool_unavailable: Sequence[str],
+            *,
+            raw_tool_call: str | None,
+            invocations_override: Sequence[Mapping[str, Any]] = (),
+            tool_messages_override: Sequence[Mapping[str, Any]] = (),
+        ) -> OrchestratorResult:
+            payload: dict[str, Any] = {
+                "errors": list(errors),
+                "warnings": list(warnings),
+                "tool_unavailable": list(tool_unavailable),
+            }
+            if raw_tool_call:
+                payload["raw_tool_call"] = raw_tool_call[:8000]
+
+            merged_invocations = list(invocations_override)
+            merged_invocations.append(
+                {
+                    "tool": "__tool_call_validation_error__",
+                    "payload": payload,
+                    "error": "; ".join(errors) if errors else "validation_failed",
+                }
+            )
+            message_lines = ["Tool call was not executed due to a validation error."]
+            if tool_unavailable:
+                message_lines.append(
+                    "Unavailable tools: " + ", ".join(sorted(set(tool_unavailable)))
+                )
+            if errors:
+                message_lines.append("Errors:")
+                message_lines.extend([f"- {err}" for err in errors])
+            if warnings:
+                message_lines.append("Warnings:")
+                message_lines.extend([f"- {warning}" for warning in warnings])
+            message_lines.append(
+                "\nPlease retry. If this keeps happening, share the debug output so we can reproduce it."
+            )
+            return OrchestratorResult(
+                response_text="\n".join(message_lines),
+                extra_messages=tuple(tool_messages_override),
+                tool_invocations=tuple(merged_invocations),
+                aux_llm_calls=tuple(aux_llm_calls),
+            )
+
+        policy_state, _policy_telemetry = self._load_workflow_model_policy(
+            preferred_language
+        )
+
+        def _load_registry_snapshot() -> Mapping[str, Any] | None:
+            try:
+                from ...services.model_registry_service import get_model_registry_snapshot
+
+                return get_model_registry_snapshot(
+                    preferred_language=preferred_language,
+                )
+            except Exception:
+                return None
+
+        registry_snapshot = _load_registry_snapshot()
+        recent_user_prompts = self._extract_recent_user_prompts(context, max_count=5)
+        user_concept_id, org_concept_id = _resolve_identity_context(
+            user_concept_id=user_concept_id,
+            org_concept_id=org_concept_id,
+            user_namespace=user_namespace,
+        )
+
+        def _model_for_stage(stage: str) -> Optional[str]:
+            return self._select_model_for_stage(
+                stage=stage,
+                default_model=model,
+                policy_state=policy_state,
+                registry_snapshot=registry_snapshot,
+                user_concept_id=user_concept_id,
+                org_concept_id=org_concept_id,
+            )
 
         env = WorkflowEnvironment(
             llm_client=llm_client,
             gateway=self._gateway,
+            model=model,
             user_namespace=user_namespace,
-            gmail_profile=gmail_profile,
-            preferred_language=preferred_language,
+            auxiliary_system_prompt=auxiliary_system_prompt,
+            max_tool_invocations=self._max_tool_invocations,
+            max_tool_result_chars=self._max_tool_result_chars,
+            max_tool_result_field_chars=self._max_tool_result_field_chars,
+            default_gmail_profile=gmail_profile or self._default_gmail_profile,
             user_concept_id=user_concept_id,
             org_concept_id=org_concept_id,
             step_callback=_step_callback,
         )
 
-        # 2. Prepare workflow inputs
-        # We pass the prompt and context into the turn workflow
         workflow_inputs = {
+            "prompt": prompt,
             "user_prompt": prompt,
+            "prompt_for_requirements": prompt,
+            "augmented_context": list(context or []),
             "conversation_context": list(context or []),
+            "workflow_discovery_result": dict(workflow_discovery_result or {}),
             "workflow_discovery": dict(workflow_discovery_result or {}),
+            "workflow_routing": None,
             "continuation_context": dict(workflow_continuation_context or {}),
             "auxiliary_system_prompt": auxiliary_system_prompt,
+            "policy_state": policy_state,
+            "registry_snapshot": registry_snapshot,
+            "user_concept_id": user_concept_id,
+            "org_concept_id": org_concept_id,
+            "conversation_session_id": conversation_session_id,
+            "turn_id": turn_id,
+            "recent_user_prompts": recent_user_prompts,
+            "write_intent_context_reused": False,
+            "gmail_profile": gmail_profile or self._default_gmail_profile,
+            "workflow_episode_source": "conversation_turn_supervised",
+            "workflow_episode_stage": "conversation_turn",
+            "model_for_stage": _model_for_stage,
+            "record_llm_call": _record_llm_call,
+            "emit_progress": _emit_progress_local,
+            "emit_phase_transition": _emit_phase_transition_local,
+            "check_cancellation": _check_cancellation_local,
+            "build_parse_error_result": _build_tool_call_parse_error_result,
+            "build_validation_error_result": _build_tool_call_validation_error_result,
+            "aux_llm_calls": aux_llm_calls,
+            "llm_calls": llm_calls,
+            "invocations": tool_invocations,
+            "tool_messages": tool_messages,
+            "iteration_count": 0,
+            "allowed_write_tools": set(),
+            "missing_tool_call_retry_attempts": 0,
+            "missing_tool_call_retry_budget": int(
+                self._max_missing_tool_call_retries_per_turn
+            ),
+            "completion_gate_repeat_iteration": False,
+            "completion_gate_loop_retry_reason": None,
+            "completion_gate_loop_stop_reason": None,
+            "completion_gate_loop_attempts": 0,
+            "completion_gate_loop_max_attempts": 0,
+            "completion_gate_loop_started_monotonic": float(time.monotonic()),
+            "completion_gate_loop_elapsed_ms": 0,
+            "completion_gate_loop_max_elapsed_ms": int(
+                self._completion_gate_loop_max_elapsed_ms
+            ),
+            "completion_gate_loop_no_progress_streak": 0,
+            "completion_gate_loop_no_progress_limit": int(
+                self._completion_gate_loop_no_progress_limit
+            ),
+            "completion_gate_loop_stall_events": 0,
+            "completion_gate_loop_stall_elapsed_ms": 0,
+            "completion_gate_loop_stall_max_elapsed_ms": int(
+                self._completion_gate_loop_stall_max_elapsed_ms
+            ),
+            "completion_gate_loop_stall_started_monotonic": None,
+            "completion_gate_loop_last_invocation_count": 0,
+            "completion_gate_loop_last_blocking_signature": "",
+            "completion_gate_escalation_signal": False,
+            "completion_gate_escalation_reason": None,
         }
 
-        # 3. Execute the Master Turn Workflow synchronously (for now)
-        # Phase 0/B: Use the durable registry but run via synchronous executor
-        registry = get_workflow_registry()
-        executor = WorkflowExecutor(registry.action_registry)
-        
-        definition = registry.get(CONVERSATION_TURN_EXECUTION_WORKFLOW_ID)
-        if not definition:
-            # Fallback to standard run if master workflow is missing (should not happen in prod)
-            return self.run(
-                prompt=prompt,
-                context=context,
-                llm_client=llm_client,
-                model=model,
-                user_namespace=user_namespace,
-                gmail_profile=gmail_profile,
-                auxiliary_system_prompt=auxiliary_system_prompt,
-                preferred_language=preferred_language,
-                progress_tracker=progress_tracker,
-                conversation_session_id=conversation_session_id,
-                turn_id=turn_id,
-                workflow_discovery_result=workflow_discovery_result,
-                workflow_continuation_context=workflow_continuation_context,
-                workflow_gap_recovery_enabled=workflow_gap_recovery_enabled,
-                user_concept_id=user_concept_id,
-                org_concept_id=org_concept_id,
+        wf_result = self.execute_workflow(
+            CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+            data=workflow_inputs,
+            llm_client=llm_client,
+            model=model,
+            user_namespace=user_namespace,
+            auxiliary_system_prompt=auxiliary_system_prompt,
+            environment=env,
+            conversation_session_id=conversation_session_id,
+            turn_id=turn_id,
+            episode_source="conversation_turn_supervised",
+        )
+        workflow_data = (
+            dict(wf_result.data)
+            if wf_result is not None and isinstance(getattr(wf_result, "data", None), Mapping)
+            else {}
+        )
+        response_text = workflow_data.get("response_text")
+        final_response = workflow_data.get("final_response")
+        gate_reported_outcome = (
+            "completion_gate_decision" in workflow_data
+            or "completion_gate_evidence_payload" in workflow_data
+        )
+        if isinstance(final_response, str) and final_response.strip():
+            if (
+                gate_reported_outcome
+                and wf_result is not None
+                and not _workflow_result_effective_completed(wf_result)
+            ):
+                response_text = final_response
+            elif not isinstance(response_text, str) or not response_text.strip():
+                response_text = final_response
+
+        if wf_result is None:
+            response_text = (
+                "I couldn't complete that request because the authoritative "
+                "conversation-turn workflow definition was not available."
+            )
+        elif not _workflow_result_effective_completed(wf_result):
+            failure_detail = _extract_explicit_workflow_failure_detail(wf_result)
+            gate_reported_response = (
+                isinstance(response_text, str)
+                and response_text.strip()
+                and gate_reported_outcome
+            )
+            if not gate_reported_response:
+                detail_suffix = f" {failure_detail}" if failure_detail else ""
+                response_text = (
+                    "I couldn't complete that request because the authoritative "
+                    f"conversation-turn workflow failed.{detail_suffix}"
+                )
+        elif not isinstance(response_text, str) or not response_text.strip():
+            response_text = (
+                "I couldn't complete that request because the authoritative "
+                "conversation-turn workflow did not produce a user-visible response."
             )
 
-        wf_result = executor.run(
-            definition=definition,
-            inputs=workflow_inputs,
-            environment=env,
+        def _string_key_mapping(value: object) -> Mapping[str, Any] | None:
+            if not isinstance(value, Mapping):
+                return None
+            return {
+                key: item
+                for key, item in value.items()
+                if isinstance(key, str)
+            }
+
+        def _workflow_routing_info(value: object) -> WorkflowRoutingInfo | None:
+            if isinstance(value, WorkflowRoutingInfo):
+                return value
+            if not isinstance(value, Mapping):
+                return None
+
+            workflow_id = value.get("workflow_id")
+            verdict = value.get("verdict")
+            if not isinstance(workflow_id, str) or not workflow_id.strip():
+                return None
+            if not isinstance(verdict, str) or not verdict.strip():
+                return None
+
+            discovered_workflow_ids_raw = value.get("discovered_workflow_ids")
+            discovered_workflow_ids: tuple[str, ...] = ()
+            if isinstance(discovered_workflow_ids_raw, Sequence) and not isinstance(
+                discovered_workflow_ids_raw, (str, bytes, bytearray)
+            ):
+                discovered_workflow_ids = tuple(
+                    item.strip()
+                    for item in discovered_workflow_ids_raw
+                    if isinstance(item, str) and item.strip()
+                )
+
+            prompt_id_raw = value.get("prompt_id")
+            prompt_id = (
+                prompt_id_raw.strip()
+                if isinstance(prompt_id_raw, str) and prompt_id_raw.strip()
+                else None
+            )
+            source_raw = value.get("source")
+            source = (
+                source_raw.strip()
+                if isinstance(source_raw, str) and source_raw.strip()
+                else "selector"
+            )
+            reasoning_raw = value.get("reasoning")
+            reasoning = reasoning_raw if isinstance(reasoning_raw, str) else ""
+            selection_rationale_raw = value.get("selection_rationale")
+            selection_rationale = (
+                selection_rationale_raw
+                if isinstance(selection_rationale_raw, str)
+                else ""
+            )
+
+            routing_duration_raw = value.get("routing_duration_ms")
+            routing_duration_ms = (
+                float(routing_duration_raw)
+                if isinstance(routing_duration_raw, (int, float))
+                and not isinstance(routing_duration_raw, bool)
+                else None
+            )
+            confidence_raw = value.get("confidence_score")
+            confidence_score = (
+                float(confidence_raw)
+                if isinstance(confidence_raw, (int, float))
+                and not isinstance(confidence_raw, bool)
+                else 0.0
+            )
+
+            return WorkflowRoutingInfo(
+                workflow_id=workflow_id.strip(),
+                verdict=verdict.strip(),
+                prompt_id=prompt_id,
+                discovered_workflow_ids=discovered_workflow_ids,
+                routing_duration_ms=routing_duration_ms,
+                source=source,
+                confidence_score=confidence_score,
+                reasoning=reasoning,
+                selection_rationale=selection_rationale,
+            )
+
+        safe_response_text = (
+            response_text if isinstance(response_text, str) else str(response_text or "")
         )
 
-        # 4. Handle fallback if no workflow was selected by the master workflow
-        if wf_result.status == "failed" and wf_result.error == "turn_execution_no_workflow_selected":
-            return self.run(
-                prompt=prompt,
-                context=context,
-                llm_client=llm_client,
-                model=model,
-                user_namespace=user_namespace,
-                gmail_profile=gmail_profile,
-                auxiliary_system_prompt=auxiliary_system_prompt,
-                preferred_language=preferred_language,
-                progress_tracker=progress_tracker,
-                conversation_session_id=conversation_session_id,
-                turn_id=turn_id,
-                workflow_discovery_result=wf_result.data.get("workflow_discovery") or workflow_discovery_result,
-                workflow_continuation_context=workflow_continuation_context,
-                workflow_gap_recovery_enabled=workflow_gap_recovery_enabled,
-                user_concept_id=user_concept_id,
-                org_concept_id=org_concept_id,
-            )
-
-        # 5. Convert workflow result to OrchestratorResult
-        # Gap 4: Orchestrator fallback reply composition removed. VWL step must write response_text.
-        response_text = wf_result.data.get("response_text")
-
         return OrchestratorResult(
-            response_text=response_text or "Workflow execution completed without response text.",
-            extra_messages=list(wf_result.data.get("extra_messages", [])),
-            tool_invocations=list(wf_result.data.get("tool_invocations", [])),
-            llm_calls=list(wf_result.data.get("llm_calls", [])),
-            llm_usage=wf_result.data.get("llm_usage"),
-            aux_llm_calls=list(wf_result.data.get("aux_llm_calls", [])),
-            orchestrator_duration_ms=wf_result.duration_ms,
-            selected_workflow_trace=wf_result.data.get("selected_workflow_trace"),
-            critic_verdict=wf_result.data.get("critic_verdict"),
-            completion_gate_verdict=wf_result.data.get("completion_gate_verdict"),
-            completion_report=wf_result.data.get("completion_report"),
-            workflow_discovery=wf_result.data.get("workflow_discovery") or workflow_discovery_result,
+            response_text=safe_response_text,
+            extra_messages=tuple(
+                item for item in tool_messages if isinstance(item, Mapping)
+            ),
+            tool_invocations=tuple(
+                item for item in tool_invocations if isinstance(item, Mapping)
+            ),
+            aux_llm_calls=tuple(
+                item for item in aux_llm_calls if isinstance(item, Mapping)
+            ),
+            llm_calls=tuple(item for item in llm_calls if isinstance(item, Mapping)),
+            llm_usage=_aggregate_usage_total(),
+            orchestrator_duration_ms=(time.perf_counter() - orchestrator_start) * 1000.0,
+            workflow_routing=_workflow_routing_info(workflow_data.get("workflow_routing")),
+            selected_workflow_trace=_string_key_mapping(
+                workflow_data.get("selected_workflow_trace")
+            ),
+            critic_verdict=_string_key_mapping(
+                workflow_data.get("critic_verdict")
+            ),
+            completion_gate_verdict=(
+                {
+                    "decision": workflow_data.get("completion_gate_decision"),
+                    "decision_reason": workflow_data.get(
+                        "completion_gate_decision_reason"
+                    ),
+                    "requires_follow_up": workflow_data.get(
+                        "completion_gate_requires_follow_up"
+                    ),
+                    "safe_to_claim_completion": workflow_data.get(
+                        "completion_gate_safe_to_claim_completion"
+                    ),
+                    "terminal_outcome": workflow_data.get(
+                        "completion_gate_terminal_outcome"
+                    ),
+                    "evidence_payload": workflow_data.get(
+                        "completion_gate_evidence_payload"
+                    ),
+                }
+                if workflow_data
+                and (
+                    "completion_gate_decision" in workflow_data
+                    or "completion_gate_evidence_payload" in workflow_data
+                )
+                else None
+            ),
+            completion_report=_string_key_mapping(
+                workflow_data.get("completion_report")
+            ),
         )
 
     def run(

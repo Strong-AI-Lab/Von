@@ -75,4 +75,63 @@ if ($legacyHits.Count -gt 0) {
     exit 1
 }
 
+$workflowPurityTriggerPatterns = @(
+    '^src/backend/integrations/internal_mcp/orchestrator\.py$',
+    '^src/backend/server/routes/von_routes\.py$',
+    '^src/backend/workflows/',
+    '^src/backend/services/.+workflow.+\.py$',
+    '^src/backend/services/conversation_turn_workflow_vontology_service\.py$',
+    '^scripts/check_workflow_purity\.py$',
+    '^scripts/workflow_purity_report\.py$',
+    '^tests/backend/test_workflow_purity.*\.py$',
+    '^tests/backend/fixtures/workflow_purity_baseline\.json$',
+    '^\.githooks/pre-commit\.ps1$'
+)
+
+$runWorkflowPurityGate = $false
+foreach ($file in $staged) {
+    foreach ($pattern in $workflowPurityTriggerPatterns) {
+        if ($file -match $pattern) {
+            $runWorkflowPurityGate = $true
+            break
+        }
+    }
+    if ($runWorkflowPurityGate) {
+        break
+    }
+}
+
+if ($runWorkflowPurityGate) {
+    $repoRoot = (git rev-parse --show-toplevel).Trim()
+    $purityScript = Join-Path $repoRoot 'scripts/check_workflow_purity.py'
+    $venvPython = Join-Path $repoRoot '.venv\Scripts\python.exe'
+    $pdm = if (Test-Path (Join-Path $repoRoot '.venv\Scripts\pdm.exe')) {
+        Join-Path $repoRoot '.venv\Scripts\pdm.exe'
+    } else {
+        'pdm'
+    }
+
+    if (-not (Test-Path $purityScript)) {
+        Write-Host "Workflow purity gate script is missing: $purityScript" -ForegroundColor Red
+        exit 1
+    }
+
+    Write-Host "Running workflow purity gate..." -ForegroundColor Cyan
+    Push-Location $repoRoot
+    try {
+        if (Test-Path $venvPython) {
+            & $venvPython $purityScript
+        } else {
+            & $pdm run python $purityScript
+        }
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "Workflow purity gate failed. Fix the reported violations or refresh the baseline deliberately." -ForegroundColor Red
+            exit 1
+        }
+    }
+    finally {
+        Pop-Location
+    }
+}
+
 exit 0

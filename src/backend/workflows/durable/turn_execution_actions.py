@@ -39,7 +39,10 @@ def _build_turn_execution_route_handler() -> Any:
         # 1. Use existing discovery results if provided, else perform discovery
         discovery = request.data.get("workflow_discovery")
         prompt = request.data.get("user_prompt")
-        
+        if not isinstance(prompt, str) or not prompt.strip():
+            prompt = request.data.get("prompt")
+        prompt = prompt.strip() if isinstance(prompt, str) else ""
+
         if not discovery or not discovery.get("selected_workflow_id"):
             discovery_result = discover_workflows_for_turn(
                 prompt,
@@ -57,7 +60,6 @@ def _build_turn_execution_route_handler() -> Any:
             outputs={
                 "selected_workflow_id": selected_workflow_id,
                 "workflow_discovery": discovery,
-                "is_arxiv": selected_workflow_id == "#V#arxiv_paper_representation_workflow"
             }
         )
     return _handle
@@ -66,6 +68,8 @@ def _build_turn_execution_route_handler() -> Any:
 def _build_turn_execution_execute_selected_handler() -> Any:
     def _handle(request: WorkflowActionRequest) -> WorkflowActionResult:
         """Execute the selected capability workflow with supervision."""
+        from .registry_factory import get_shared_durable_action_registry
+
         selected_workflow_id = request.data.get("selected_workflow_id")
         if not selected_workflow_id:
             return WorkflowActionResult(
@@ -73,31 +77,51 @@ def _build_turn_execution_execute_selected_handler() -> Any:
                 error="turn_execution_no_workflow_selected",
             )
 
-        # In Phase B, we use the subworkflow action to run the selected workflow.
-        # The 'step_callback' in the environment will handle real-time events.
-        from .subworkflow_actions import _build_subworkflow_handler
-        from ..registry_factory import get_workflow_registry
-        
-        # We wrap the existing subworkflow handler
-        registry = get_workflow_registry()
-        sub_handler = _build_subworkflow_handler(
-            registry=registry.action_registry,
-            definition_loader=registry.get,
-        )
-        
-        # We need to construct a WorkflowActionRequest for the subworkflow
-        # but since we are already in an action, we can just call it?
-        # Actually, it's better to use the subworkflow action ID if it's registered.
-        
-        return registry.action_registry.execute(
+        subworkflow_inputs = {
+            "workflow_id": selected_workflow_id,
+            **{
+                str(key): value
+                for key, value in request.data.items()
+                if isinstance(key, str)
+            },
+        }
+        subworkflow_result = get_shared_durable_action_registry().execute(
             "workflow_invoke_subworkflow",
-            inputs={"workflow_id": selected_workflow_id},
+            inputs=subworkflow_inputs,
             context=request.data,
             env=request.environment,
             trace=request.trace,
             workflow_id=request.workflow_id,
             workflow_state_id=request.workflow_state_id,
         )
+        if not subworkflow_result.ok:
+            return subworkflow_result
+
+        child_result = subworkflow_result.outputs.get("result")
+        child_payload = dict(child_result) if isinstance(child_result, Mapping) else {}
+        completion_report = child_payload.get("completion_report")
+        if not isinstance(completion_report, Mapping):
+            response_text = child_payload.get("response_text")
+            if not isinstance(response_text, str) or not response_text.strip():
+                response_text = child_payload.get("final_response")
+            completion_report = {
+                "schema_version": "conversation_turn_selected_workflow_result.v1",
+                "workflow_id": selected_workflow_id,
+                "response_text": (
+                    response_text.strip()
+                    if isinstance(response_text, str) and response_text.strip()
+                    else None
+                ),
+            }
+        outputs = {
+            "selected_workflow_id": selected_workflow_id,
+            "completion_report": dict(completion_report),
+        }
+        if isinstance(child_payload.get("final_response"), str):
+            outputs["final_response"] = child_payload.get("final_response")
+        if isinstance(child_payload.get("current_response"), str):
+            outputs["current_response"] = child_payload.get("current_response")
+        return WorkflowActionResult(outputs=outputs)
     return _handle
 
 

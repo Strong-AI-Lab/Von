@@ -9,6 +9,12 @@ from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
     _WorkflowModelPolicyState,
 )
+from src.backend.services.conversation_turn_workflow_vontology_service import (
+    _load_narration_prompt_seed_text,
+)
+from src.backend.services.prompt_template_service import (
+    PromptTemplateService as _RealPromptTemplateService,
+)
 from workflow_test_support import (
     TEST_WORKFLOW_SELECTOR_PROMPT_ID,
     TEST_WORKFLOW_SELECTOR_PROMPT_TEMPLATE,
@@ -251,6 +257,43 @@ def build_db_independent_orchestrator(
         for item in (orchestrator._TURN_SELECTOR_PROMPTS or ())
         if isinstance(item, str) and str(item).strip()
     }
+    narration_prompt_id = "#V#prompt_turn_execution_narrate_completion_report"
+
+    class _HarnessPromptTemplateService:
+        def __init__(self, default_max_chars: int = 24000):
+            self._delegate = _RealPromptTemplateService(default_max_chars=default_max_chars)
+
+        def render_prompt(
+            self,
+            concept_ids: Any,
+            *,
+            variables: Any = None,
+            fallback: Any = None,
+            max_chars: Any = None,
+        ) -> Any:
+            requested_prompt_ids = [
+                str(item).strip()
+                for item in (concept_ids or ())
+                if isinstance(item, str) and str(item).strip()
+            ]
+            if narration_prompt_id in requested_prompt_ids:
+                return SimpleNamespace(
+                    text=_load_narration_prompt_seed_text(),
+                    prompt_id=narration_prompt_id,
+                    variables=dict(variables or {}),
+                    truncated=False,
+                )
+            return self._delegate.render_prompt(
+                concept_ids,
+                variables=variables,
+                fallback=fallback,
+                max_chars=max_chars,
+            )
+
+    monkeypatch.setattr(
+        "src.backend.workflows.llm_step_executor.PromptTemplateService",
+        _HarnessPromptTemplateService,
+    )
 
     def _render_prompt_with_narration_fallback(
         prompt_ids: Any,
