@@ -60,6 +60,7 @@ const LS_USER_KEY = 'von_current_user';
 const LS_ORG_KEY = 'von_current_org';
 const LS_LANG_KEY = 'von_preferred_language';
 const LS_AUTO_RELOAD = 'von:autoReloadOnRestart';
+const LS_OPENAI_SELECTED_MODEL = 'von:openaiSelectedModel';
 const LS_GMAIL_PROFILE = 'von_gmail_profile';
 const LS_TTS_VOICE_URI = 'chatTtsVoiceUri';
 const LS_TTS_LANGUAGE = 'chatTtsLanguage';
@@ -86,6 +87,7 @@ let runtimeStatusInFlight = false;
 let backgroundTaskUnsubscribe = null;
 let gmailProfileStatusInFlight = false;
 let currentResolvedLlm = null;
+let latestOpenAiModelProbe = null;
 
 let __vonIsAdminOrOwner = false;
 let __canPersistWriteConservatism = false;
@@ -314,26 +316,187 @@ async function syncInitialScopedSelections({
   void refreshRagStatus();
 }
 
-function buildEnabledLlmSelections() {
+function resolveOllamaSelection(includeFallback = false) {
+  const ollamaModelSelect = document.getElementById('globalModelSelect');
+  if (!ollamaModelSelect) return null;
+
+  let ollamaOption = ollamaModelSelect.selectedOptions?.[0] || null;
+  let ollamaModel = ollamaOption
+    ? (ollamaOption.dataset.modelName || ollamaModelSelect.value)
+    : ollamaModelSelect.value;
+
+  if (!ollamaModel && includeFallback) {
+    ollamaOption = Array.from(ollamaModelSelect.options || []).find((option) =>
+      String(option?.dataset?.modelName || option?.value || '').trim(),
+    ) || null;
+    ollamaModel = ollamaOption
+      ? (ollamaOption.dataset.modelName || ollamaOption.value)
+      : '';
+
+    if (ollamaOption && ollamaOption.value) {
+      ollamaModelSelect.selectedIndex = Array.from(ollamaModelSelect.options).indexOf(ollamaOption);
+      ollamaModelSelect.value = ollamaOption.value;
+    }
+  }
+
+  if (!ollamaModel) return null;
+
+  const selection = { provider: 'ollama', model: ollamaModel };
+  const hostUrl = ollamaOption?.dataset?.hostUrl || null;
+  if (hostUrl) selection.host = hostUrl;
+  return selection;
+}
+
+function buildEnabledLlmSelections({ includeOllamaFallback = false } = {}) {
   const selections = [];
   const openaiModelSelect = document.getElementById('openaiModelSelect');
-  const ollamaModelSelect = document.getElementById('globalModelSelect');
+  const openAiPremiumToggle = document.getElementById('enableOpenAiPremiumToggle');
 
   const openaiModel = openaiModelSelect?.value;
   if (openaiModel) {
+    setStoredOpenAiSelectedModel(openaiModel);
+  }
+  if (openAiPremiumToggle?.checked && openaiModel) {
     selections.push({ provider: 'openai', model: openaiModel });
   }
 
-  const ollamaOption = ollamaModelSelect?.selectedOptions?.[0];
-  const ollamaModel = ollamaOption ? (ollamaOption.dataset.modelName || ollamaModelSelect?.value) : ollamaModelSelect?.value;
-  if (ollamaModel) {
-    const selection = { provider: 'ollama', model: ollamaModel };
-    const hostUrl = ollamaOption?.dataset?.hostUrl || null;
-    if (hostUrl) selection.host = hostUrl;
-    selections.push(selection);
+  const ollamaSelection = resolveOllamaSelection(includeOllamaFallback);
+  if (ollamaSelection) {
+    selections.push(ollamaSelection);
   }
 
   return selections;
+}
+
+function getStoredOpenAiSelectedModel() {
+  try {
+    return String(localStorage.getItem(LS_OPENAI_SELECTED_MODEL) || '').trim();
+  } catch {
+    return '';
+  }
+}
+
+function setStoredOpenAiSelectedModel(modelName) {
+  try {
+    const trimmed = String(modelName || '').trim();
+    if (trimmed) {
+      localStorage.setItem(LS_OPENAI_SELECTED_MODEL, trimmed);
+    } else {
+      localStorage.removeItem(LS_OPENAI_SELECTED_MODEL);
+    }
+  } catch {
+    // Ignore localStorage failures.
+  }
+}
+
+function setInlineStatusMessage(element, text, tone = null) {
+  if (!element) return;
+  element.textContent = String(text || '').trim();
+  element.className = 'status-message';
+  if (tone === 'success' || tone === 'error') {
+    element.classList.add(tone);
+  }
+  element.style.display = element.textContent ? 'block' : 'none';
+}
+
+function updateOpenAiModelStatusMessage() {
+  const statusEl = document.getElementById('openaiModelStatusMessage');
+  const toggleEl = document.getElementById('enableOpenAiPremiumToggle');
+  const selectEl = document.getElementById('openaiModelSelect');
+  if (!statusEl) return;
+
+  const premiumEnabled = !!toggleEl?.checked;
+  const selectedModel = String(selectEl?.value || getStoredOpenAiSelectedModel() || '').trim();
+
+  if (!selectedModel) {
+    setInlineStatusMessage(
+      statusEl,
+      premiumEnabled
+        ? 'Select a premium model, then test it before relying on it.'
+        : 'Premium use is disabled. Ollama remains the active provider.',
+      null,
+    );
+    return;
+  }
+
+  if (latestOpenAiModelProbe && latestOpenAiModelProbe.model === selectedModel) {
+    if (latestOpenAiModelProbe.usable) {
+      const prefix = premiumEnabled
+        ? `${selectedModel} is usable.`
+        : `${selectedModel} tested successfully, but premium use is disabled.`;
+      setInlineStatusMessage(
+        statusEl,
+        latestOpenAiModelProbe.reason ? `${prefix} ${latestOpenAiModelProbe.reason}` : prefix,
+        premiumEnabled ? 'success' : null,
+      );
+      return;
+    }
+    const failurePrefix = premiumEnabled
+      ? `${selectedModel} is not usable.`
+      : `Premium use is disabled. ${selectedModel} also failed its last test.`;
+    setInlineStatusMessage(
+      statusEl,
+      latestOpenAiModelProbe.reason
+        ? `${failurePrefix} ${latestOpenAiModelProbe.reason}`
+        : failurePrefix,
+      'error',
+    );
+    return;
+  }
+
+  setInlineStatusMessage(
+    statusEl,
+    premiumEnabled
+      ? `Selected premium model has not been tested yet.`
+      : `Premium use is disabled. You can still test ${selectedModel} before enabling it.`,
+    null,
+  );
+}
+
+async function testSelectedOpenAiModel() {
+  const apiKeyEnvVar = document.getElementById('openaiApiKeyEnvVar')?.value;
+  const selectedModel = String(document.getElementById('openaiModelSelect')?.value || '').trim();
+  const statusEl = document.getElementById('openaiModelStatusMessage');
+
+  if (!selectedModel) {
+    latestOpenAiModelProbe = null;
+    updateOpenAiModelStatusMessage();
+    return { usable: false, model: null, reason: 'No premium model selected.' };
+  }
+
+  setStoredOpenAiSelectedModel(selectedModel);
+  setInlineStatusMessage(statusEl, `Testing ${selectedModel}...`, null);
+
+  try {
+    const response = await postJson('/api/settings/openai/test_model', {
+      api_key_env_var: apiKeyEnvVar,
+      model: selectedModel,
+    });
+    latestOpenAiModelProbe = {
+      usable: !!response?.usable,
+      model: String(response?.model || selectedModel),
+      reason: String(response?.reason || '').trim(),
+      failure_kind: String(response?.failure_kind || '').trim() || null,
+    };
+  } catch (error) {
+    const message = String(error?.message || '').trim();
+    const restartHint = (
+      /404/.test(message)
+      || /unexpected token </i.test(message)
+      || /failed to fetch/i.test(message)
+    )
+      ? 'The server needs a restart before the premium model test endpoint is available.'
+      : null;
+    latestOpenAiModelProbe = {
+      usable: false,
+      model: selectedModel,
+      reason: restartHint || message || 'Premium model test failed.',
+      failure_kind: restartHint ? 'server_restart_required' : 'request_failed',
+    };
+  }
+
+  updateOpenAiModelStatusMessage();
+  return latestOpenAiModelProbe;
 }
 
 function resolveActiveLlmFromSelections(enabledLlms, preferredProvider = null) {
@@ -1692,7 +1855,47 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Save settings after potentially switching host
     saveAllSettings('ollama');
   });
-  document.getElementById('openaiModelSelect')?.addEventListener('change', () => saveAllSettings('openai'));
+  document.getElementById('openaiModelSelect')?.addEventListener('change', async () => {
+    const selectedModel = document.getElementById('openaiModelSelect')?.value || '';
+    setStoredOpenAiSelectedModel(selectedModel);
+    latestOpenAiModelProbe = null;
+    updateOpenAiModelStatusMessage();
+    await testSelectedOpenAiModel();
+    await saveAllSettings(
+      document.getElementById('enableOpenAiPremiumToggle')?.checked ? 'openai' : 'ollama',
+    );
+  });
+  document.getElementById('enableOpenAiPremiumToggle')?.addEventListener('change', async (event) => {
+    const premiumToggle = event?.target;
+    updateOpenAiModelStatusMessage();
+    if (!premiumToggle?.checked) {
+      const saved = await saveAllSettings('ollama');
+      if (!saved) {
+        premiumToggle.checked = true;
+        updateOpenAiModelStatusMessage();
+      }
+      return;
+    }
+
+    const probe = await testSelectedOpenAiModel();
+    if (!probe?.usable) {
+      premiumToggle.checked = false;
+      updateOpenAiModelStatusMessage();
+      showStatusMessage(
+        'settingsStatusMessage',
+        'Premium use remains disabled because the selected model test failed.',
+        true,
+      );
+      await saveAllSettings('ollama');
+      return;
+    }
+
+    const saved = await saveAllSettings('openai');
+    if (!saved) {
+      premiumToggle.checked = false;
+      updateOpenAiModelStatusMessage();
+    }
+  });
   document.getElementById('currentUserSelect')?.addEventListener('change', async () => {
     const sel = document.getElementById('currentUserSelect');
     const opt = sel?.selectedOptions?.[0];
@@ -1831,6 +2034,7 @@ document.getElementById('loadOllamaModelsButton')?.addEventListener('click', loa
 
 // Other event listeners
 document.getElementById('verifyOpenAiApiKeyButton')?.addEventListener('click', verifyOpenAiApiKey);
+document.getElementById('testOpenAiModelButton')?.addEventListener('click', testSelectedOpenAiModel);
 
 // Add event listener for disable remote Ollama scan toggle
 document.addEventListener('DOMContentLoaded', () => {
@@ -2042,6 +2246,13 @@ async function loadAndDisplaySettings() {
       currentOpenAIModel,
     } = resolveDisplayedProviderModels(settings);
     currentResolvedLlm = effectiveLlm || null;
+    const storedOpenAiModel = getStoredOpenAiSelectedModel();
+    const preferredOpenAiModel = currentOpenAIModel || storedOpenAiModel || null;
+    const openAiPremiumEnabled = !!(
+      effectiveLlm?.provider === 'openai'
+      || (Array.isArray(settings.enabled_llms)
+        && settings.enabled_llms.some((entry) => entry?.provider === 'openai'))
+    );
 
     // Load and display Ollama hosts first
     await loadAndRenderOllamaHosts();
@@ -2050,9 +2261,9 @@ async function loadAndDisplaySettings() {
     await populateModelDropdown('globalModelSelect', currentOllamaModel);
 
     // Try to populate OpenAI models directly (without verification, if API key is already configured)
-    if (currentOpenAIModel) {
+    if (preferredOpenAiModel) {
       try {
-        await populateOpenAIModelDropdown('openaiModelSelect', currentOpenAIModel);
+        await populateOpenAIModelDropdown('openaiModelSelect', preferredOpenAiModel);
         const oac = document.getElementById('openaiModelsContainer');
         if (oac) { oac.style.display = 'block'; oac.classList.remove('hidden'); }
       } catch (error) {
@@ -2172,6 +2383,15 @@ async function loadAndDisplaySettings() {
     if (envVarInput && settings.openai_api_key_env_var) {
       envVarInput.value = settings.openai_api_key_env_var;
     }
+    const openAiPremiumToggle = document.getElementById('enableOpenAiPremiumToggle');
+    if (openAiPremiumToggle) {
+      openAiPremiumToggle.checked = openAiPremiumEnabled;
+    }
+    if (preferredOpenAiModel) {
+      setStoredOpenAiSelectedModel(preferredOpenAiModel);
+    }
+    latestOpenAiModelProbe = null;
+    updateOpenAiModelStatusMessage();
 
     // Populate Gmail profile selector
     try {
@@ -2454,11 +2674,20 @@ async function loadAndDisplayDbInfo() {
 }
 
 async function saveAllSettings(changedProvider = null) {
-  const ollamaModelSelect = document.getElementById('globalModelSelect');
-  const openaiModelSelect = document.getElementById('openaiModelSelect');
   const { scope: llmScope, conceptId: llmConceptId } = resolveActiveLlmScopeContext();
-  const enabledLlms = buildEnabledLlmSelections();
+  const enabledLlms = buildEnabledLlmSelections({
+    includeOllamaFallback: changedProvider === 'ollama',
+  });
   let activeLlm = resolveActiveLlmFromSelections(enabledLlms, changedProvider);
+
+  if (changedProvider === 'ollama' && !enabledLlms.some((entry) => entry?.provider === 'ollama')) {
+    showStatusMessage(
+      'settingsStatusMessage',
+      'Select an Ollama model before disabling premium use.',
+      true,
+    );
+    return false;
+  }
 
   if (enabledLlms.length && (!llmScope || !llmConceptId)) {
     showStatusMessage(
@@ -2466,7 +2695,7 @@ async function saveAllSettings(changedProvider = null) {
       'Select a current user or organisation before changing the model.',
       true,
     );
-    return;
+    return false;
   }
 
   if (activeLlm) {
@@ -2545,6 +2774,7 @@ async function saveAllSettings(changedProvider = null) {
     if (window.parent) {
       window.parent.document.dispatchEvent(new CustomEvent('von:settingsChanged'));
     }
+    return true;
   } catch (error) {
     console.error('Error saving settings:', error);
     showStatusMessage(
@@ -2552,6 +2782,7 @@ async function saveAllSettings(changedProvider = null) {
       error?.message || 'Failed to save settings.',
       true,
     );
+    return false;
   }
 }
 
@@ -3095,18 +3326,20 @@ export async function checkOpenAiEnvVar() {
   try {
     const response = await postJson('/api/settings/env_var/check', { env_var_name: apiKeyEnvVar });
     if (response.exists) {
-      verifyButton.style.backgroundColor = '#28a745'; // Green
+      verifyButton.classList.remove('hidden');
+      verifyButton.style.backgroundColor = '';
       verifyButton.style.display = 'inline-block';
       verifyButton.disabled = false;
       if (response.source === 'dotenv') {
-        statusMessage.textContent = `Key found (from .env because not in process environment): ${response.masked_value}`;
+        statusMessage.textContent = `Key found (from .env because not in process environment): ${response.masked_value}. Verify and test the selected model before enabling premium use.`;
       } else {
-        statusMessage.textContent = `Key found: ${response.masked_value}`;
+        statusMessage.textContent = `Key found: ${response.masked_value}. Verify and test the selected model before enabling premium use.`;
       }
-      statusMessage.className = 'status-message success';
+      statusMessage.className = 'status-message';
       statusMessage.style.display = 'block';
       return true;
     } else {
+      verifyButton.classList.add('hidden');
       verifyButton.style.display = 'none';
       verifyButton.disabled = true;
       statusMessage.textContent = 'No key found for this environment variable.';
@@ -3116,6 +3349,7 @@ export async function checkOpenAiEnvVar() {
     }
   } catch (error) {
     console.error('Error checking environment variable:', error);
+    verifyButton.classList.add('hidden');
     verifyButton.style.display = 'none';
     verifyButton.disabled = true;
     statusMessage.textContent = 'Error checking for key.';
@@ -3129,37 +3363,55 @@ async function verifyOpenAiApiKey(savedModel = null) {
   const apiKeyEnvVar = document.getElementById('openaiApiKeyEnvVar').value;
   const statusMessage = document.getElementById('openaiStatusMessage');
   const modelsContainer = document.getElementById('openaiModelsContainer');
+  const preferredModel = savedModel || getStoredOpenAiSelectedModel() || null;
 
-  statusMessage.style.display = 'block';
-  statusMessage.textContent = 'Verifying API key...';
-  statusMessage.className = 'status-message';
+  setInlineStatusMessage(
+    statusMessage,
+    'Verifying API key and loading premium models...',
+    null,
+  );
 
   try {
     const response = await postJson('/api/settings/openai/verify', { api_key_env_var: apiKeyEnvVar });
 
     if (response.success) {
-      statusMessage.textContent = 'API key is valid. Models loaded.';
-      statusMessage.classList.add('success');
+      setInlineStatusMessage(
+        statusMessage,
+        'API key verified. Premium models loaded. Test the selected model before relying on it.',
+        null,
+      );
       modelsContainer.style.display = 'block';
       modelsContainer.classList.remove('hidden');
 
-      renderOpenAIModelOptions('openaiModelSelect', response.models || [], savedModel);
+      renderOpenAIModelOptions('openaiModelSelect', response.models || [], preferredModel);
+      const selectedOpenAiModel = document.getElementById('openaiModelSelect')?.value;
+      if (selectedOpenAiModel) {
+        setStoredOpenAiSelectedModel(selectedOpenAiModel);
+      }
+      latestOpenAiModelProbe = null;
+      updateOpenAiModelStatusMessage();
     } else {
       throw new Error(response.error || 'Failed to verify API key.');
     }
   } catch (error) {
     // As a fallback, try the direct OpenAI models endpoint
     try {
-      await populateOpenAIModelDropdown('openaiModelSelect', savedModel);
-      statusMessage.textContent = 'Models loaded from cache. Please verify your API key for latest models.';
-      statusMessage.classList.add('success');
+      await populateOpenAIModelDropdown('openaiModelSelect', preferredModel);
+      setInlineStatusMessage(
+        statusMessage,
+        'Loaded a cached premium model list, but live verification failed. Test the selected model before enabling premium use.',
+        'error',
+      );
       modelsContainer.style.display = 'block';
       modelsContainer.classList.remove('hidden');
+      latestOpenAiModelProbe = null;
+      updateOpenAiModelStatusMessage();
     } catch (_) {
-      statusMessage.textContent = `Error: ${error.message}`;
-      statusMessage.classList.add('error');
+      setInlineStatusMessage(statusMessage, `Error: ${error.message}`, 'error');
       modelsContainer.style.display = 'none';
       modelsContainer.classList.add('hidden');
+      latestOpenAiModelProbe = null;
+      updateOpenAiModelStatusMessage();
     }
   }
 }

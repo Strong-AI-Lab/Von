@@ -2704,6 +2704,156 @@ def get_deprecation_metrics():
         return jsonify({"success": False, "error": "Failed to fetch metrics"}), 500
 
 
+@settings_bp.route("/openai/test_model", methods=["POST"])
+def test_openai_model():
+    """Probe whether a selected OpenAI model is actually usable for this key."""
+
+    def _classify_openai_probe_exception(exc: Exception) -> tuple[str, str]:
+        try:
+            import openai  # type: ignore
+
+            if isinstance(exc, openai.AuthenticationError):
+                return "authentication_error", f"OpenAI authentication failed: {exc}"
+            if isinstance(exc, openai.PermissionDeniedError):
+                return "permission_denied", f"OpenAI access was denied for this model: {exc}"
+            if isinstance(exc, openai.NotFoundError):
+                return "model_not_found", f"The selected OpenAI model was not found: {exc}"
+            if isinstance(exc, openai.RateLimitError):
+                body = getattr(exc, "body", None)
+                code = body.get("code") if isinstance(body, dict) else None
+                if code == "insufficient_quota":
+                    return "quota_exhausted", f"OpenAI quota exhausted (insufficient_quota): {exc}"
+                return "rate_limited", f"OpenAI rate limit exceeded: {exc}"
+            if isinstance(exc, openai.APIConnectionError):
+                return "connection_error", f"Could not reach the OpenAI API: {exc}"
+            if isinstance(exc, openai.BadRequestError):
+                return "bad_request", f"OpenAI rejected the selected model probe: {exc}"
+            if isinstance(exc, openai.APIError):
+                return "api_error", f"OpenAI API error while testing the selected model: {exc}"
+        except Exception:
+            pass
+        return "unexpected_error", f"Unexpected OpenAI model probe failure: {exc}"
+
+    payload = request.get_json(silent=True) or {}
+    api_key_env_var = str(
+        payload.get("api_key_env_var") or get_openai_env_var() or ""
+    ).strip()
+    requested_model = str(payload.get("model") or "").strip()
+
+    if not api_key_env_var:
+        return _jsonify_no_store(
+            {
+                "success": False,
+                "usable": False,
+                "failure_kind": "missing_key_env_var",
+                "reason": "OpenAI API key environment variable is not configured.",
+            },
+            400,
+        )
+    if not requested_model:
+        return _jsonify_no_store(
+            {
+                "success": False,
+                "usable": False,
+                "failure_kind": "missing_model",
+                "reason": "No premium model is selected.",
+            },
+            400,
+        )
+
+    try:
+        from ...languagemodels.llm_interface import resolve_openai_model_name
+
+        resolved_model = resolve_openai_model_name(requested_model) or requested_model
+        client = OpenAIClient(api_key_env_var=api_key_env_var)
+
+        try:
+            available_models = client.list_models()
+        except Exception as exc:
+            available_models = []
+            current_app.logger.warning(
+                "[openai_test_model] Failed to list OpenAI models before probe: %s",
+                exc,
+            )
+
+        if available_models and resolved_model not in available_models:
+            return _jsonify_no_store(
+                {
+                    "success": True,
+                    "usable": False,
+                    "model": resolved_model,
+                    "failure_kind": "model_unavailable",
+                    "reason": (
+                        f"{resolved_model} is not present in the models available to "
+                        "this API key."
+                    ),
+                }
+            )
+
+        try:
+            client.client.responses.create(
+                model=resolved_model,
+                input="Reply exactly with OK.",
+                max_output_tokens=8,
+            )
+        except Exception as responses_exc:
+            try:
+                client.client.chat.completions.create(
+                    model=resolved_model,
+                    messages=[
+                        {"role": "system", "content": "Reply exactly with OK."},
+                        {"role": "user", "content": "OK"},
+                    ],
+                    max_completion_tokens=8,
+                    temperature=0,
+                )
+            except Exception as completion_exc:
+                failure_kind, reason = _classify_openai_probe_exception(completion_exc)
+                current_app.logger.warning(
+                    "[openai_test_model] Probe failed for %s after responses/chat fallback. "
+                    "responses_error=%s completion_error=%s",
+                    resolved_model,
+                    responses_exc,
+                    completion_exc,
+                )
+                return _jsonify_no_store(
+                    {
+                        "success": True,
+                        "usable": False,
+                        "model": resolved_model,
+                        "failure_kind": failure_kind,
+                        "reason": reason,
+                    }
+                )
+
+        return _jsonify_no_store(
+            {
+                "success": True,
+                "usable": True,
+                "model": resolved_model,
+                "failure_kind": None,
+                "reason": "The selected premium model completed a live probe successfully.",
+            }
+        )
+    except Exception as exc:
+        failure_kind, reason = _classify_openai_probe_exception(exc)
+        current_app.logger.warning(
+            "[openai_test_model] Unexpected failure while testing %s: %s",
+            requested_model,
+            exc,
+            exc_info=True,
+        )
+        return _jsonify_no_store(
+            {
+                "success": True,
+                "usable": False,
+                "model": requested_model,
+                "failure_kind": failure_kind,
+                "reason": reason,
+            }
+        )
+
+
 # To make this blueprint usable, it needs to be registered in your main Flask app,
 # typically in src/workflows/von/main.py or wherever your Flask app is initialized.
 # Example:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Mapping, MutableMapping, Sequence
@@ -50,6 +51,8 @@ from .plan_state_runtime import (
     mark_workflow_plan_state_entry,
 )
 from .trace_model import WorkflowExecutionTrace
+
+logger = logging.getLogger(__name__)
 
 _CONTEXT_BINDING_KEYS: tuple[str, ...] = (
     "$context_key",

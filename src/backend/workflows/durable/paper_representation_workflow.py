@@ -30,6 +30,7 @@ from ..execution_contracts import build_arxiv_ingestion_completion_report
 
 logger = logging.getLogger(__name__)
 _PUBLICATION_DATE_PREDICATE_ID = "#V#has_publication_date"
+_MAX_TOPIC_RELATIONS = 3
 
 SCHOLARLY_PAPER_NORMALISE_INPUTS_ACTION_ID = "scholarly_paper.normalise_inputs"
 SCHOLARLY_PAPER_ENSURE_PAPER_CONCEPT_ACTION_ID = "scholarly_paper.ensure_paper_concept"
@@ -118,6 +119,10 @@ def _get_concept(concept_id: str) -> dict[str, Any] | None:
     except Exception:
         return None
     return concept if isinstance(concept, Mapping) else None
+
+
+def _concept_exists(concept_id: str) -> bool:
+    return _get_concept(concept_id) is not None
 
 
 def _first_non_empty_text(*values: Any) -> str | None:
@@ -806,7 +811,7 @@ def _build_scholarly_paper_ensure_paper_concept_handler():
             created = False
             if not _concept_exists(paper_concept_id):
                 metadata = _extract_metadata_from_context(request)
-                title = _extract_metadata_title(metadata)
+                title = extract_scholarly_metadata_title(metadata)
                 default_name = f"Scholarly paper for {file_copy_concept_id}"
                 concept_service.create_concept(
                     name=title or default_name,
@@ -1125,10 +1130,10 @@ def _build_arxiv_inspect_existing_state_handler():
 
         # JVNAUTOSCI-1768: Proper search over ontology identity relations.
         from ...services.arxiv_paper_link_service import predict_arxiv_paper_concept_id
-        predicted_cid = predict_arxiv_paper_concept_id(arxiv_id)
-        
+        predicted_cid = predict_arxiv_paper_concept_id(arxiv_id=arxiv_id)
+
         paper_concept_id = None
-        if concept_service.concept_exists(predicted_cid):
+        if _concept_exists(predicted_cid):
             paper_concept_id = predicted_cid
 
         file_copy_concept_id = None

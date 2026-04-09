@@ -324,11 +324,24 @@
             <label for="openaiApiKeyEnvVar">OpenAI API Key Environment Variable:</label>
             <input type="text" id="openaiApiKeyEnvVar" name="openai_api_key_env_var" value="OPENAI_API_KEY">
             <button id="verifyOpenAiApiKeyButton" class="hidden">Verify Key and Load Models</button>
+            <div class="inline-form inline-form-tight mt-2">
+                <input type="checkbox" id="enableOpenAiPremiumToggle" />
+                <label for="enableOpenAiPremiumToggle"
+                    title="When enabled, Von may use the selected OpenAI model. When disabled, Ollama remains active even if a premium model is configured.">Enable
+                    premium model use</label>
+            </div>
+            <small class="settings-note">Disable this to force Ollama while still keeping a premium model selected for testing.</small>
             <div id="openaiModelsContainer" class="hidden">
                 <label for="openaiModelSelect">Select OpenAI Model:</label>
                 <select id="openaiModelSelect" name="openai_model">
                     <!-- OpenAI models will be populated here -->
                 </select>
+                <div class="inline-form inline-form-tight mt-2">
+                    <button id="testOpenAiModelButton" class="btn-secondary" type="button">Test Selected Model</button>
+                </div>
+                <div id="openaiModelStatusMessage" class="status-message" role="alert">
+                    <!-- Status messages for the selected premium model will appear here -->
+                </div>
             </div>
             <div id="openaiStatusMessage" class="status-message" role="alert">
                 <!-- Status messages for OpenAI will appear here -->
