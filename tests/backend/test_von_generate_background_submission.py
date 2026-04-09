@@ -175,3 +175,25 @@ def test_resolve_generate_requested_model_prefers_explicit_request_model(monkeyp
 
     assert model_name == "gpt-5.4-nano"
     assert client_type == "openai"
+
+
+def test_resolve_generate_requested_model_overrides_scoped_setting_with_explicit_request(
+    monkeypatch,
+):
+    import src.backend.server.routes.von_routes as von_routes
+
+    monkeypatch.setattr(
+        von_routes,
+        "get_active_model_name",
+        lambda *args, **kwargs: "gpt-5.4-mini",
+    )
+
+    model_name, client_type = von_routes._resolve_generate_requested_model(
+        {"model": "ollama:llama3.1:8b"},
+        user_concept_id="#V#test_user",
+        org_concept_id=None,
+        configured_model=None,
+    )
+
+    assert model_name == "llama3.1:8b"
+    assert client_type == "ollama"

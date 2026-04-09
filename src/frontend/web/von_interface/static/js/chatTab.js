@@ -1,5 +1,6 @@
 // Chat Tab Module
 import { annotateTurn, fetchWithTimeout, getJsonDetailed, getUserContext, getWindowSessionId, postJson, WINDOW_SESSION_HEADER } from './apiService.js';
+import { resolveLocalRequestedLlm } from './utils/localModelPreferences.js';
 import { initializeConceptAutocomplete } from './components/conceptAutocomplete.js';
 import { initializeMessagePanel, loadUnreadCount } from './components/messagePanel.js';
 import { loadMyOrganisations } from './components/orgSelector.js';
@@ -21504,6 +21505,7 @@ async function handleSendPrompt(options = {}) {
 
         // Get user context from localStorage to send to backend
         const userContext = getUserContext();
+        const localRequestedLlm = resolveLocalRequestedLlm();
         // Presenter-mode controls whether the backend produces two-channel output
         // (screen + spoken). This should be enabled regardless of whether auto-TTS
         // is enabled, so clicking Speak later never needs to read raw markdown.
@@ -21525,6 +21527,7 @@ async function handleSendPrompt(options = {}) {
                 org_id: userContext.org_id,
                 language: userContext.language,
                 gmail_profile: userContext.gmail_profile,
+                ...(localRequestedLlm?.requestModel ? { model: localRequestedLlm.requestModel } : {}),
                 presenter_mode: presenterMode
             })
         });

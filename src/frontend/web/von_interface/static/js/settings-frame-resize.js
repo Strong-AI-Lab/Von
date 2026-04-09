@@ -11,7 +11,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let updateCount = 0;
   let maxUpdates = 5; // Reduced to prevent excessive updates
   let hasInitialUpdateBeenSent = false;
-  let lastUpdateTime = Date.now();
+  const MAX_REASONABLE_FRAME_HEIGHT = 30000;
   
   // Function to calculate and send the document height to the parent
   function sendHeightToParent(forceUpdate = false) {
@@ -61,7 +61,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         
         // Prevent sending if height is unreasonably large (probably a loop)
-        if (heightWithBuffer > 10000) {
+        if (heightWithBuffer > MAX_REASONABLE_FRAME_HEIGHT) {
           console.warn('Iframe height seems too large, preventing potential loop:', heightWithBuffer);
           return;
         }
@@ -69,7 +69,6 @@ document.addEventListener('DOMContentLoaded', () => {
         isUpdating = true;
         lastSentHeight = heightWithBuffer;
         hasInitialUpdateBeenSent = true;
-        lastUpdateTime = Date.now();
         
         // Send the height to the parent window
         window.parent.postMessage({ 

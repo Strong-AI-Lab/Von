@@ -3,6 +3,7 @@ import {
     __testOnly_buildStoredUserContextFromOption,
     __testOnly_formatRagSummaryForSettings,
     __testOnly_getPreferredRagNamespace,
+    __testOnly_resolveActiveLlmFromSelections,
     __testOnly_resolveDisplayedProviderModels,
     __testOnly_syncInitialScopedSelections,
 } from '../settingsPage.js';
@@ -109,6 +110,19 @@ describe('settingsPage RAG status summary', () => {
 
         expect(result.currentOpenAIModel).toBe('gpt-5.4-nano');
         expect(result.currentOllamaModel).toBe('llama3.1:8b');
+    });
+
+    test('prefers an explicit provider switch over the previously resolved model', () => {
+        const result = __testOnly_resolveActiveLlmFromSelections(
+            [
+                { provider: 'openai', model: 'gpt-5.4-mini' },
+                { provider: 'ollama', model: 'llama3.1:8b' },
+            ],
+            'openai',
+            { provider: 'ollama', model: 'llama3.1:8b' },
+        );
+
+        expect(result).toEqual({ provider: 'openai', model: 'gpt-5.4-mini' });
     });
 
     test('initial scoped selection sync backfills storage and composite namespace from selected user and org', async () => {

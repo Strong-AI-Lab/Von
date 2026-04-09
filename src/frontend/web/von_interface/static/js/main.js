@@ -239,7 +239,7 @@ function setupSettingsFrameResizing() {
     if (event.data && event.data.type === 'settings-frame-height') {
       if (userResized) return; // do not override manual resize
       const rawHeight = event.data.height;
-      if (rawHeight > 10000) return;
+      if (rawHeight > 30000) return;
       const adjusted = computeAvailableHeight(rawHeight);
       if (Math.abs(adjusted - lastAutoHeight) < 5) return;
       settingsFrame.style.height = `${adjusted}px`;
@@ -657,7 +657,7 @@ function startHealthPolling() {
   }
   // Copy-to-clipboard behavior for local IP address
   if (localIpSpan) {
-    localIpSpan.addEventListener('click', async (e) => {
+    localIpSpan.addEventListener('click', async () => {
       const ipText = localIpSpan.textContent.trim();
       if (!ipText || ipText === '?') return;
       try {
@@ -671,7 +671,7 @@ function startHealthPolling() {
   }
   // Copy-to-clipboard behavior for public IP address
   if (publicIpSpan) {
-    publicIpSpan.addEventListener('click', async (e) => {
+    publicIpSpan.addEventListener('click', async () => {
       const ipText = publicIpSpan.textContent.trim();
       if (!ipText || ipText === '?') return;
       try {
@@ -685,7 +685,7 @@ function startHealthPolling() {
   }
   // Copy-to-clipboard behavior for PID
   if (pidSpan) {
-    pidSpan.addEventListener('click', async (e) => {
+    pidSpan.addEventListener('click', async () => {
       const pidText = pidSpan.textContent.trim();
       if (!pidText || pidText === '?' || /[^0-9]/.test(pidText)) return;
       try {
@@ -1182,10 +1182,6 @@ function startHealthPolling() {
               const chMessages = (typeof rs.chat_history_messages === 'number') ? rs.chat_history_messages : 0;
               const chOk = (typeof rs.chat_history_rag_success === 'number') ? rs.chat_history_rag_success : 0;
               const chFail = (typeof rs.chat_history_rag_failed === 'number') ? rs.chat_history_rag_failed : 0;
-              const chInNs = (typeof rs.chat_history_sessions_in_namespace === 'number') ? rs.chat_history_sessions_in_namespace : null;
-              const chMissingNs = (typeof rs.chat_history_sessions_missing_namespace === 'number') ? rs.chat_history_sessions_missing_namespace : null;
-              const chOtherNs = (typeof rs.chat_history_sessions_other_namespace === 'number') ? rs.chat_history_sessions_other_namespace : null;
-
               const titleParts = [
                 `KA sessions indexed=${i}`,
                 `pending=${p}`,
@@ -1415,15 +1411,10 @@ function startHealthPolling() {
                   errors: []
                 };
 
-                let lastSid = null;
-                let lastChunkStart = null;
-                let lastChunkNo = null;
-
                 for (let i = 0; i < targets.length; i++) {
                   const t = targets[i];
                   const sid = t.session_id;
                   const missing = t.messages_missing_index;
-                  lastSid = sid;
 
                   if (progressEl) progressEl.value = i;
                   if (progressTextEl) {
@@ -1454,8 +1445,6 @@ function startHealthPolling() {
 
                   while (true) {
                     chunkNo += 1;
-                    lastChunkNo = chunkNo;
-                    lastChunkStart = chunkStart;
 
                     let res;
                     const chunkAttemptStarted = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
@@ -1672,7 +1661,7 @@ function startHealthPolling() {
                   } else {
                     ragModalBody.innerHTML = ragModalBody.innerHTML + '<hr/><p><em>Copy failed.</em></p>';
                   }
-                } catch (e) {
+                } catch (_) {
                   ragModalBody.innerHTML = ragModalBody.innerHTML + '<hr/><p><em>Copy failed.</em></p>';
                 }
               });
@@ -1808,7 +1797,6 @@ function startHealthPolling() {
                   }
                 } catch (_) { /* ignore */ }
               }
-              const total = (typeof rs.total === 'number') ? rs.total : null;
               const scopedSessions = (typeof rs.scoped_sessions === 'number') ? rs.scoped_sessions : null;
               const indexed = (typeof rs.indexed === 'number') ? rs.indexed : 0;
               const pending = (typeof rs.pending === 'number') ? rs.pending : 0;
@@ -2160,7 +2148,7 @@ function startHealthPolling() {
               } else {
                 ragModalBody.innerHTML = ragModalBody.innerHTML + '<hr/><p>Integrity check failed.</p>';
               }
-            } catch (e) {
+            } catch (_) {
               ragModalBody.innerHTML = ragModalBody.innerHTML + '<hr/><p>Integrity check error.</p>';
             } finally {
               ragModalCheck.disabled = false;

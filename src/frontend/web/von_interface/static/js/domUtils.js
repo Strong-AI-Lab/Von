@@ -1,4 +1,5 @@
 import { openSettingsTabAndFocus } from './utils/settingsNavigation.js';
+import { applyLocalModelPreferenceOverlay } from './utils/localModelPreferences.js';
 
 export const elements = {};
 
@@ -301,7 +302,7 @@ async function getSettings() {
     if (settings) {
       // Use resolved_llm as the active_llm (no global fallback)
       settings.active_llm = settings.resolved_llm || null;
-      return settings;
+      return applyLocalModelPreferenceOverlay(settings);
     }
   } catch (err) {
     console.warn('Error loading settings:', err);

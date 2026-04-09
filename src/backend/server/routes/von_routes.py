@@ -3253,13 +3253,13 @@ def _resolve_generate_requested_model(
     """Resolve the effective model name and optional explicit provider override.
 
     Precedence:
-    1. Scoped user/org LLM setting
-    2. Explicit request model sent by the UI
+    1. Explicit request model sent by the UI
+    2. Scoped user/org LLM setting
     3. Legacy app-config model value
 
     The explicit request model is important for browser-local UI selections,
-    especially when the user is not authenticated and therefore has no scoped
-    persisted model setting to resolve.
+    including machine-local Ollama overrides that should not be persisted into
+    shared scoped settings.
     """
 
     requested_model_name = data.get("model") if isinstance(data, Mapping) else None
@@ -3268,13 +3268,9 @@ def _resolve_generate_requested_model(
     else:
         requested_model_name = None
 
-    resolved_model_name = get_active_model_name(
-        user_concept_id=user_concept_id,
-        org_concept_id=org_concept_id,
-    )
     explicit_client_type = None
-    model_name = resolved_model_name
-    if not model_name and requested_model_name:
+    model_name = None
+    if requested_model_name:
         requested_openai_model = _extract_openai_model_id(requested_model_name)
         requested_ollama_model = _extract_ollama_model_id(requested_model_name)
         if requested_openai_model and _looks_like_openai_model(requested_openai_model):
@@ -3285,6 +3281,11 @@ def _resolve_generate_requested_model(
             model_name = requested_ollama_model
         else:
             model_name = requested_model_name
+    if not model_name:
+        model_name = get_active_model_name(
+            user_concept_id=user_concept_id,
+            org_concept_id=org_concept_id,
+        )
     if not model_name and isinstance(configured_model, str) and configured_model.strip():
         model_name = configured_model.strip()
 

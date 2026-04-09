@@ -46,6 +46,16 @@ import {
   fetchUserPreferences,
   hydrateStoredSelectionsFromUserPreferences,
 } from './utils/userPreferenceBootstrap.js';
+import {
+  clearStoredOllamaSelection,
+  getLocalPremiumModelUseEnabled,
+  getStoredOllamaSelection,
+  getStoredOpenAiSelectedModel,
+  hasLocalPremiumModelUsePreference,
+  setLocalPremiumModelUseEnabled,
+  setStoredOllamaSelection,
+  setStoredOpenAiSelectedModel,
+} from './utils/localModelPreferences.js';
 
 // Helper to build fetch headers with window session context (JVNAUTOSCI-1011)
 function buildSettingsFetchHeaders(extraHeaders = {}) {
@@ -60,7 +70,6 @@ const LS_USER_KEY = 'von_current_user';
 const LS_ORG_KEY = 'von_current_org';
 const LS_LANG_KEY = 'von_preferred_language';
 const LS_AUTO_RELOAD = 'von:autoReloadOnRestart';
-const LS_OPENAI_SELECTED_MODEL = 'von:openaiSelectedModel';
 const LS_GMAIL_PROFILE = 'von_gmail_profile';
 const LS_TTS_VOICE_URI = 'chatTtsVoiceUri';
 const LS_TTS_LANGUAGE = 'chatTtsLanguage';
@@ -341,52 +350,27 @@ function resolveOllamaSelection(includeFallback = false) {
 
   if (!ollamaModel) return null;
 
-  const selection = { provider: 'ollama', model: ollamaModel };
+  const selection = {
+    provider: 'ollama',
+    model: ollamaModel,
+    value: ollamaOption?.value || ollamaModelSelect.value || null,
+  };
   const hostUrl = ollamaOption?.dataset?.hostUrl || null;
   if (hostUrl) selection.host = hostUrl;
   return selection;
 }
 
-function buildEnabledLlmSelections({ includeOllamaFallback = false } = {}) {
+function buildPersistedLlmSelections() {
   const selections = [];
   const openaiModelSelect = document.getElementById('openaiModelSelect');
-  const openAiPremiumToggle = document.getElementById('enableOpenAiPremiumToggle');
 
-  const openaiModel = openaiModelSelect?.value;
+  const openaiModel = String(openaiModelSelect?.value || '').trim();
   if (openaiModel) {
     setStoredOpenAiSelectedModel(openaiModel);
-  }
-  if (openAiPremiumToggle?.checked && openaiModel) {
     selections.push({ provider: 'openai', model: openaiModel });
   }
 
-  const ollamaSelection = resolveOllamaSelection(includeOllamaFallback);
-  if (ollamaSelection) {
-    selections.push(ollamaSelection);
-  }
-
   return selections;
-}
-
-function getStoredOpenAiSelectedModel() {
-  try {
-    return String(localStorage.getItem(LS_OPENAI_SELECTED_MODEL) || '').trim();
-  } catch {
-    return '';
-  }
-}
-
-function setStoredOpenAiSelectedModel(modelName) {
-  try {
-    const trimmed = String(modelName || '').trim();
-    if (trimmed) {
-      localStorage.setItem(LS_OPENAI_SELECTED_MODEL, trimmed);
-    } else {
-      localStorage.removeItem(LS_OPENAI_SELECTED_MODEL);
-    }
-  } catch {
-    // Ignore localStorage failures.
-  }
 }
 
 function setInlineStatusMessage(element, text, tone = null) {
@@ -413,7 +397,7 @@ function updateOpenAiModelStatusMessage() {
       statusEl,
       premiumEnabled
         ? 'Select a premium model, then test it before relying on it.'
-        : 'Premium use is disabled. Ollama remains the active provider.',
+        : 'Premium use is disabled on this machine. Ollama remains the active provider here.',
       null,
     );
     return;
@@ -433,7 +417,7 @@ function updateOpenAiModelStatusMessage() {
     }
     const failurePrefix = premiumEnabled
       ? `${selectedModel} is not usable.`
-      : `Premium use is disabled. ${selectedModel} also failed its last test.`;
+      : `Premium use is disabled on this machine. ${selectedModel} also failed its last test.`;
     setInlineStatusMessage(
       statusEl,
       latestOpenAiModelProbe.reason
@@ -448,9 +432,18 @@ function updateOpenAiModelStatusMessage() {
     statusEl,
     premiumEnabled
       ? `Selected premium model has not been tested yet.`
-      : `Premium use is disabled. You can still test ${selectedModel} before enabling it.`,
+      : `Premium use is disabled on this machine. You can still test ${selectedModel} before enabling it.`,
     null,
   );
+}
+
+function notifyLocalModelPreferenceChanged() {
+  if (window.parent?.updateModelInfoFooterDisplay) {
+    window.parent.updateModelInfoFooterDisplay();
+  }
+  if (window.parent) {
+    window.parent.document.dispatchEvent(new CustomEvent('von:settingsChanged'));
+  }
 }
 
 async function testSelectedOpenAiModel() {
@@ -499,21 +492,25 @@ async function testSelectedOpenAiModel() {
   return latestOpenAiModelProbe;
 }
 
-function resolveActiveLlmFromSelections(enabledLlms, preferredProvider = null) {
+function resolveActiveLlmFromSelections(
+  enabledLlms,
+  preferredProvider = null,
+  currentResolved = currentResolvedLlm,
+) {
   if (!Array.isArray(enabledLlms) || !enabledLlms.length) return null;
-
-  const matchesCurrent = enabledLlms.find((entry) =>
-    currentResolvedLlm
-    && entry?.provider === currentResolvedLlm.provider
-    && entry?.model === currentResolvedLlm.model
-    && (entry?.host || null) === (currentResolvedLlm.host || null)
-  );
-  if (matchesCurrent) return { ...matchesCurrent };
 
   if (preferredProvider) {
     const preferred = enabledLlms.find((entry) => entry?.provider === preferredProvider);
     if (preferred) return { ...preferred };
   }
+
+  const matchesCurrent = enabledLlms.find((entry) =>
+    currentResolved
+    && entry?.provider === currentResolved.provider
+    && entry?.model === currentResolved.model
+    && (entry?.host || null) === (currentResolved.host || null)
+  );
+  if (matchesCurrent) return { ...matchesCurrent };
 
   return { ...enabledLlms[0] };
 }
@@ -1577,6 +1574,19 @@ export function __testOnly_resolveDisplayedProviderModels(settings) {
 }
 
 // Export for testing
+export function __testOnly_resolveActiveLlmFromSelections(
+  enabledLlms,
+  preferredProvider = null,
+  currentResolved = null,
+) {
+  return resolveActiveLlmFromSelections(
+    enabledLlms,
+    preferredProvider,
+    currentResolved,
+  );
+}
+
+// Export for testing
 export function __testOnly_buildStoredUserContextFromOption(option) {
   return buildStoredUserContextFromOption(option);
 }
@@ -1853,7 +1863,13 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     }
     // Save settings after potentially switching host
-    saveAllSettings('ollama');
+    const ollamaSelection = resolveOllamaSelection(false);
+    if (ollamaSelection) {
+      setStoredOllamaSelection(ollamaSelection);
+    } else {
+      clearStoredOllamaSelection();
+    }
+    notifyLocalModelPreferenceChanged();
   });
   document.getElementById('openaiModelSelect')?.addEventListener('change', async () => {
     const selectedModel = document.getElementById('openaiModelSelect')?.value || '';
@@ -1861,40 +1877,42 @@ document.addEventListener('DOMContentLoaded', async () => {
     latestOpenAiModelProbe = null;
     updateOpenAiModelStatusMessage();
     await testSelectedOpenAiModel();
-    await saveAllSettings(
-      document.getElementById('enableOpenAiPremiumToggle')?.checked ? 'openai' : 'ollama',
-    );
+    await saveAllSettings();
+    notifyLocalModelPreferenceChanged();
   });
   document.getElementById('enableOpenAiPremiumToggle')?.addEventListener('change', async (event) => {
     const premiumToggle = event?.target;
-    updateOpenAiModelStatusMessage();
     if (!premiumToggle?.checked) {
-      const saved = await saveAllSettings('ollama');
-      if (!saved) {
+      const ollamaSelection = resolveOllamaSelection(false);
+      if (!ollamaSelection) {
         premiumToggle.checked = true;
         updateOpenAiModelStatusMessage();
+        showStatusMessage(
+          'settingsStatusMessage',
+          'Select an Ollama model before disabling premium use on this machine.',
+          true,
+        );
+        return;
       }
+      setStoredOllamaSelection(ollamaSelection);
+      setLocalPremiumModelUseEnabled(false);
+      updateOpenAiModelStatusMessage();
+      notifyLocalModelPreferenceChanged();
       return;
     }
 
+    setLocalPremiumModelUseEnabled(true);
+    updateOpenAiModelStatusMessage();
     const probe = await testSelectedOpenAiModel();
     if (!probe?.usable) {
-      premiumToggle.checked = false;
-      updateOpenAiModelStatusMessage();
       showStatusMessage(
         'settingsStatusMessage',
-        'Premium use remains disabled because the selected model test failed.',
+        'Premium use is enabled for this machine, but the selected model test failed. Check the premium model before relying on it.',
         true,
       );
-      await saveAllSettings('ollama');
-      return;
     }
-
-    const saved = await saveAllSettings('openai');
-    if (!saved) {
-      premiumToggle.checked = false;
-      updateOpenAiModelStatusMessage();
-    }
+    await saveAllSettings();
+    notifyLocalModelPreferenceChanged();
   });
   document.getElementById('currentUserSelect')?.addEventListener('change', async () => {
     const sel = document.getElementById('currentUserSelect');
@@ -2242,16 +2260,15 @@ async function loadAndDisplaySettings() {
     // not a stale enabled_llms entry from an older or broader context.
     const {
       effectiveLlm,
-      currentOllamaModel,
       currentOpenAIModel,
     } = resolveDisplayedProviderModels(settings);
     currentResolvedLlm = effectiveLlm || null;
+    const storedOllamaSelection = getStoredOllamaSelection();
+    const currentOllamaModel = storedOllamaSelection?.value || null;
     const storedOpenAiModel = getStoredOpenAiSelectedModel();
     const preferredOpenAiModel = currentOpenAIModel || storedOpenAiModel || null;
-    const openAiPremiumEnabled = !!(
-      effectiveLlm?.provider === 'openai'
-      || (Array.isArray(settings.enabled_llms)
-        && settings.enabled_llms.some((entry) => entry?.provider === 'openai'))
+    const openAiPremiumEnabled = getLocalPremiumModelUseEnabled(
+      !hasLocalPremiumModelUsePreference() && !!preferredOpenAiModel,
     );
 
     // Load and display Ollama hosts first
@@ -2673,40 +2690,20 @@ async function loadAndDisplayDbInfo() {
   }
 }
 
-async function saveAllSettings(changedProvider = null) {
+async function saveAllSettings() {
   const { scope: llmScope, conceptId: llmConceptId } = resolveActiveLlmScopeContext();
-  const enabledLlms = buildEnabledLlmSelections({
-    includeOllamaFallback: changedProvider === 'ollama',
-  });
-  let activeLlm = resolveActiveLlmFromSelections(enabledLlms, changedProvider);
+  const enabledLlms = buildPersistedLlmSelections();
+  let activeLlm = resolveActiveLlmFromSelections(enabledLlms, 'openai');
 
-  if (changedProvider === 'ollama' && !enabledLlms.some((entry) => entry?.provider === 'ollama')) {
-    showStatusMessage(
-      'settingsStatusMessage',
-      'Select an Ollama model before disabling premium use.',
-      true,
-    );
-    return false;
-  }
-
-  if (enabledLlms.length && (!llmScope || !llmConceptId)) {
-    showStatusMessage(
-      'settingsStatusMessage',
-      'Select a current user or organisation before changing the model.',
-      true,
-    );
-    return false;
-  }
-
-  if (activeLlm) {
+  if (activeLlm && llmScope && llmConceptId) {
     activeLlm.scope = llmScope;
     activeLlm.concept_id = llmConceptId;
+  } else {
+    activeLlm = null;
   }
 
   // We now persist user/org/language only in localStorage; do not send to backend
   const settings = {
-    active_llm: activeLlm,
-    enabled_llms: enabledLlms,
     openai_api_key_env_var: document.getElementById('openaiApiKeyEnvVar')?.value,
     preload_vontology_tree: !!document.getElementById('preloadVontologyTreeToggle')?.checked,
     fetch_counts_on_load: !!document.getElementById('fetchCountsOnLoadToggle')?.checked,
@@ -2733,6 +2730,11 @@ async function saveAllSettings(changedProvider = null) {
     if (adminToggleEl) {
       settings.disable_write_tool_conservatism = !adminToggleEl.checked;
     }
+  }
+
+  if (activeLlm && enabledLlms.length) {
+    settings.active_llm = activeLlm;
+    settings.enabled_llms = enabledLlms;
   }
 
   try {
