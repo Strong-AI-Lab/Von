@@ -920,14 +920,46 @@ def test_turn_execution_list_and_get_wrappers(monkeypatch):
     assert listed["collection"] == "turn_execution_records"
     assert len(listed["items"]) == 1
     assert listed["items"][0]["request_id"] == "req-wrap-1"
+    assert "session_id" not in listed["items"][0]
+    assert listed["items"][0]["identifier_binding"] == {
+        "mode": "turn_execution_record_projection",
+        "request_id_field": "request_id",
+        "chat_session_id_field": "chat_session_id",
+        "request_id_aliases_session_id": False,
+    }
 
     got = cat._turn_execution_get(namespace="#V#user@org", request_id="req-wrap-1")
     assert got["success"] is True
     assert got["request_id"] == "req-wrap-1"
+    assert "session_id" not in got
+    assert got["identifier_binding"] == {
+        "mode": "turn_execution_record_projection",
+        "request_id_field": "request_id",
+        "chat_session_id_field": "chat_session_id",
+        "request_id_aliases_session_id": False,
+    }
+
+
+def test_turn_execution_get_rejects_session_id_alias(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    monkeypatch.setattr(
+        "src.backend.db.connection_manager.get_db",
+        lambda: _DB({"turn_execution_records": _TurnExecutionCollection([])}),
+    )
+
+    result = cat._turn_execution_get(namespace="#V#user@org", session_id="req-wrap-1")
+
+    assert result["success"] is False
+    assert result["error_code"] == "missing_parameter"
 
 
 def test_turn_execution_get_diagnostics_returns_embedded_payload(monkeypatch):
     from src.backend.integrations.internal_mcp import catalogue as cat
+    from src.backend.services.conversation_scope_binding_service import (
+        verify_conversation_scope_binding,
+        verify_history_location_binding,
+    )
 
     chat_docs = [
         {
@@ -1026,15 +1058,26 @@ def test_turn_execution_get_diagnostics_returns_embedded_payload(monkeypatch):
     assert result["mcp_access"]["turn_execution_get_diagnostics"]["tool_name"] == (
         "turn_execution_get_diagnostics"
     )
-    assert result["mcp_access"]["chat_history_get_debug_entry"]["arguments"] == {
-        "session_id": "chat-diag-1",
-        "history_index": 1,
-        "namespace": "#V#user@org",
-    }
-    assert result["mcp_access"]["conversation_telemetry_get_locator"]["arguments"] == {
-        "session_id": "chat-diag-1",
-        "namespace": "#V#user@org",
-    }
+    debug_args = result["mcp_access"]["chat_history_get_debug_entry"]["arguments"]
+    assert debug_args["namespace"] == "#V#user@org"
+    assert debug_args["organisation_concept_id"] == "#V#org"
+    verified_history_ref = verify_history_location_binding(
+        debug_args["history_location_ref"]
+    )
+    assert verified_history_ref["success"] is True
+    assert verified_history_ref["chat_session_id"] == "chat-diag-1"
+    assert verified_history_ref["history_index"] == 1
+
+    locator_args = result["mcp_access"]["conversation_telemetry_get_locator"][
+        "arguments"
+    ]
+    assert locator_args["namespace"] == "#V#user@org"
+    assert locator_args["organisation_concept_id"] == "#V#org"
+    verified_conversation_ref = verify_conversation_scope_binding(
+        locator_args["conversation_ref"]
+    )
+    assert verified_conversation_ref["success"] is True
+    assert verified_conversation_ref["chat_session_id"] == "chat-diag-1"
     assert result["mcp_access"]["workflow_execution_traces"] == [
         {
             "execution_id": "exec-diag-1",

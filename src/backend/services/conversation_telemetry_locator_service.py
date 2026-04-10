@@ -6,6 +6,10 @@ from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from . import chat_history_service
+from .conversation_scope_binding_service import (
+    build_conversation_scope_binding,
+    build_history_location_binding,
+)
 
 CONVERSATION_LLM_TELEMETRY_LOCATOR_SCHEMA_VERSION = (
     "conversation_llm_telemetry_locator.v1"
@@ -104,6 +108,8 @@ def build_conversation_llm_telemetry_locator(
     user_id: str,
     session_id: str,
     namespace: str | None = None,
+    requested_user_id: str | None = None,
+    requested_namespace: str | None = None,
     organisation_concept_id: str | None = None,
     include_legacy: bool = True,
 ) -> dict[str, Any]:
@@ -127,6 +133,27 @@ def build_conversation_llm_telemetry_locator(
     resolved_org_id = _safe_str(organisation_concept_id) or _safe_str(
         session_summary.get("organisation_concept_id")
     )
+    requested_user_id_value = _safe_str(requested_user_id) or user_id_value
+    requested_namespace_value = (
+        _safe_str(requested_namespace) or _safe_str(namespace) or resolved_namespace
+    )
+    conversation_ref = build_conversation_scope_binding(
+        chat_session_id=session_id_value,
+        history_owner_user_id=user_id_value,
+        read_namespace=resolved_namespace,
+        organisation_concept_id=resolved_org_id,
+    )
+
+    def _build_bound_conversation_args(*, include_debug: bool | None = None) -> dict[str, Any]:
+        arguments = {
+            "conversation_ref": conversation_ref,
+            "namespace": requested_namespace_value,
+            "user_concept_id": requested_user_id_value,
+            "organisation_concept_id": resolved_org_id,
+        }
+        if include_debug is not None:
+            arguments["include_debug"] = include_debug
+        return arguments
 
     history = chat_history_service.get_chat_history(
         user_id_value,
@@ -190,10 +217,15 @@ def build_conversation_llm_telemetry_locator(
                 "chat_history_get_debug_entry": _build_tool_call_descriptor(
                     "chat_history_get_debug_entry",
                     {
-                        "session_id": session_id_value,
-                        "history_index": history_index,
-                        "namespace": resolved_namespace,
-                        "user_concept_id": user_id_value,
+                        "history_location_ref": build_history_location_binding(
+                            chat_session_id=session_id_value,
+                            history_index=history_index,
+                            history_owner_user_id=user_id_value,
+                            read_namespace=resolved_namespace,
+                            organisation_concept_id=resolved_org_id,
+                        ),
+                        "namespace": requested_namespace_value,
+                        "user_concept_id": requested_user_id_value,
                         "organisation_concept_id": resolved_org_id,
                     },
                     purpose="Fetch the exact stored llm_debug_data for this history entry.",
@@ -254,25 +286,14 @@ def build_conversation_llm_telemetry_locator(
         "mcp_access": {
             "conversation_telemetry_get_locator": _build_tool_call_descriptor(
                 "conversation_telemetry_get_locator",
-                {
-                    "session_id": session_id_value,
-                    "namespace": resolved_namespace,
-                    "user_concept_id": user_id_value,
-                    "organisation_concept_id": resolved_org_id,
-                },
+                _build_bound_conversation_args(),
                 purpose=(
                     "Rebuild this compact conversation-turn locator from stored chat history."
                 ),
             ),
             "chat_history_get_segments": _build_tool_call_descriptor(
                 "chat_history_get_segments",
-                {
-                    "session_id": session_id_value,
-                    "namespace": resolved_namespace,
-                    "user_concept_id": user_id_value,
-                    "organisation_concept_id": resolved_org_id,
-                    "include_debug": True,
-                },
+                _build_bound_conversation_args(include_debug=True),
                 purpose="Fetch the stored conversation transcript segments and embedded debug payloads.",
             ),
             "turn_execution_list": _build_tool_call_descriptor(

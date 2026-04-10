@@ -66,4 +66,6 @@ def test_history_telemetry_locator_uses_org_hint_to_upgrade_bare_namespace(
     assert body["history_owner_user_id"] == "#V#test_user"
     assert body["requested_user_id"] == "#V#test_user"
     assert captured["namespace"] == "#V#test_user@org"
+    assert captured["requested_namespace"] == "#V#test_user@org"
+    assert captured["requested_user_id"] == "#V#test_user"
     assert captured["organisation_concept_id"] == "#V#org"

@@ -7,6 +7,10 @@ from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
 from .chat_history_service import get_chat_history_collection_service
+from .conversation_scope_binding_service import (
+    build_conversation_scope_binding,
+    build_history_location_binding,
+)
 from .turn_execution_record_service import get_turn_execution_records_collection
 from ..workflows.conversation_turn_stage_model import (
     build_conversation_turn_stage_model_snapshot,
@@ -260,6 +264,8 @@ def _build_turn_diagnostics_mcp_access(
     namespace: str | None,
     session_id: str | None,
     history_index: int | None,
+    history_owner_user_id: str | None,
+    organisation_concept_id: str | None,
     payload: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     access: dict[str, Any] = {
@@ -281,20 +287,28 @@ def _build_turn_diagnostics_mcp_access(
         ),
     }
     if session_id:
+        conversation_ref = build_conversation_scope_binding(
+            chat_session_id=session_id,
+            history_owner_user_id=history_owner_user_id,
+            read_namespace=namespace,
+            organisation_concept_id=organisation_concept_id,
+        )
         access["conversation_telemetry_get_locator"] = _build_tool_call_descriptor(
             "conversation_telemetry_get_locator",
             {
-                "session_id": session_id,
+                "conversation_ref": conversation_ref,
                 "namespace": namespace,
+                "organisation_concept_id": organisation_concept_id,
             },
             purpose="Fetch the compact conversation locator for the surrounding chat session.",
         )
         access["chat_history_get_segments"] = _build_tool_call_descriptor(
             "chat_history_get_segments",
             {
-                "session_id": session_id,
+                "conversation_ref": conversation_ref,
                 "namespace": namespace,
                 "include_debug": True,
+                "organisation_concept_id": organisation_concept_id,
             },
             purpose="Fetch the stored transcript segments and embedded debug payloads for this session.",
         )
@@ -302,9 +316,15 @@ def _build_turn_diagnostics_mcp_access(
         access["chat_history_get_debug_entry"] = _build_tool_call_descriptor(
             "chat_history_get_debug_entry",
             {
-                "session_id": session_id,
-                "history_index": history_index,
+                "history_location_ref": build_history_location_binding(
+                    chat_session_id=session_id,
+                    history_index=history_index,
+                    history_owner_user_id=history_owner_user_id,
+                    read_namespace=namespace,
+                    organisation_concept_id=organisation_concept_id,
+                ),
                 "namespace": namespace,
+                "organisation_concept_id": organisation_concept_id,
             },
             purpose="Fetch the exact stored llm_debug_data entry for this assistant turn.",
         )
@@ -821,6 +841,10 @@ def get_turn_execution_diagnostics_payload(
         namespace=_safe_str(payload.get("namespace")),
         session_id=_safe_str(payload.get("chat_session_id")),
         history_index=history_index if isinstance(history_index, int) else None,
+        history_owner_user_id=_safe_str(payload.get("derived_user_concept_id")),
+        organisation_concept_id=_safe_str(
+            payload.get("derived_organisation_concept_id")
+        ),
         payload=payload,
     )
     payload["success"] = True

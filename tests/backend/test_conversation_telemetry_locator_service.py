@@ -48,6 +48,10 @@ def test_build_conversation_locator_prefers_exact_namespace_and_preserves_org_sc
     monkeypatch,
 ):
     from src.backend.services import chat_history_service
+    from src.backend.services.conversation_scope_binding_service import (
+        verify_conversation_scope_binding,
+        verify_history_location_binding,
+    )
     from src.backend.services.conversation_telemetry_locator_service import (
         build_conversation_llm_telemetry_locator,
     )
@@ -104,18 +108,27 @@ def test_build_conversation_locator_prefers_exact_namespace_and_preserves_org_sc
     assert payload["metadata"]["total_turns"] == 1
     assert payload["metadata"]["transcript_turn_count"] == 1
     assert payload["turns"][0]["request_id"] == "req-123"
-    assert payload["turns"][0]["mcp_access"]["chat_history_get_debug_entry"][
+    debug_args = payload["turns"][0]["mcp_access"]["chat_history_get_debug_entry"][
         "arguments"
-    ] == {
-        "session_id": "s1",
-        "history_index": 0,
-        "namespace": "#V#u@org",
-        "user_concept_id": "#V#u",
-        "organisation_concept_id": "#V#org",
-    }
-    assert payload["mcp_access"]["conversation_telemetry_get_locator"]["arguments"] == {
-        "session_id": "s1",
-        "namespace": "#V#u@org",
-        "user_concept_id": "#V#u",
-        "organisation_concept_id": "#V#org",
-    }
+    ]
+    assert debug_args["namespace"] == "#V#u@org"
+    assert debug_args["user_concept_id"] == "#V#u"
+    assert debug_args["organisation_concept_id"] == "#V#org"
+    verified_history_ref = verify_history_location_binding(
+        debug_args["history_location_ref"]
+    )
+    assert verified_history_ref["success"] is True
+    assert verified_history_ref["chat_session_id"] == "s1"
+    assert verified_history_ref["history_index"] == 0
+
+    locator_args = payload["mcp_access"]["conversation_telemetry_get_locator"][
+        "arguments"
+    ]
+    assert locator_args["namespace"] == "#V#u@org"
+    assert locator_args["user_concept_id"] == "#V#u"
+    assert locator_args["organisation_concept_id"] == "#V#org"
+    verified_conversation_ref = verify_conversation_scope_binding(
+        locator_args["conversation_ref"]
+    )
+    assert verified_conversation_ref["success"] is True
+    assert verified_conversation_ref["chat_session_id"] == "s1"

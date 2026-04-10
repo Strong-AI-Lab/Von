@@ -11249,10 +11249,12 @@ def _chat_history_get_segments(**kwargs):
     payload = {
         "success": True,
         "session_id": access.get("session_id"),
+        "chat_session_id": access.get("chat_session_id"),
         "history_owner_user_id": access.get("read_user_id"),
         "requested_user_id": access.get("requested_user_id"),
         "namespace": access.get("read_namespace"),
         "access_mode": access.get("access_mode"),
+        "identifier_binding": access.get("identifier_binding"),
         "segments": segments,
         "segment_count": len(segments) if isinstance(segments, list) else 0,
         "history_truncated": bool(
@@ -11274,12 +11276,17 @@ def _chat_history_get_debug_entry(**kwargs):
         return access
 
     history_index = kwargs.get("history_index")
+    if not isinstance(history_index, int):
+        history_index = access.get("history_index")
     if not isinstance(history_index, int) or history_index < 0:
         return make_error_response(
             "missing_parameter",
-            "Missing required parameter: history_index",
-            details={"missing": ["history_index"]},
-            suggestions=["Provide a non-negative history_index"],
+            "Missing required parameter: history_location_ref or history_index",
+            details={"missing": ["history_location_ref", "history_index"]},
+            suggestions=[
+                "Provide an authoritative history_location_ref",
+                "Or provide a non-negative history_index",
+            ],
         )
 
     include_legacy = kwargs.get("include_legacy", True)
@@ -11313,10 +11320,12 @@ def _chat_history_get_debug_entry(**kwargs):
                 "session_id": access.get("session_id"),
                 "history_index": history_index,
             },
+            "chat_session_id": access.get("chat_session_id"),
             "history_owner_user_id": access.get("read_user_id"),
             "requested_user_id": access.get("requested_user_id"),
             "namespace": access.get("read_namespace"),
             "access_mode": access.get("access_mode"),
+            "identifier_binding": access.get("identifier_binding"),
         }
 
     payload = {
@@ -11325,10 +11334,12 @@ def _chat_history_get_debug_entry(**kwargs):
             "session_id": access.get("session_id"),
             "history_index": history_index,
         },
+        "chat_session_id": access.get("chat_session_id"),
         "history_owner_user_id": access.get("read_user_id"),
         "requested_user_id": access.get("requested_user_id"),
         "namespace": access.get("read_namespace"),
         "access_mode": access.get("access_mode"),
+        "identifier_binding": access.get("identifier_binding"),
         "llm_debug_data": debug_data,
     }
     return _with_rag_provenance(
@@ -11352,6 +11363,12 @@ def _conversation_telemetry_get_locator(**kwargs):
             user_id=str(access["read_user_id"]),
             session_id=str(access["session_id"]),
             namespace=_clean_optional_string(access.get("read_namespace")),
+            requested_user_id=_normalise_optional_concept_id(
+                access.get("requested_user_id")
+            ),
+            requested_namespace=_clean_optional_string(
+                access.get("requested_namespace")
+            ),
             organisation_concept_id=_normalise_optional_concept_id(
                 access.get("organisation_concept_id")
             ),
@@ -11370,6 +11387,7 @@ def _conversation_telemetry_get_locator(**kwargs):
     payload["history_owner_user_id"] = access.get("read_user_id")
     payload["requested_user_id"] = access.get("requested_user_id")
     payload["access_mode"] = access.get("access_mode")
+    payload["identifier_binding"] = access.get("identifier_binding")
     return _with_rag_provenance(
         payload=payload,
         item_kind="conversation_telemetry_locator",
@@ -11428,18 +11446,16 @@ def _turn_execution_list(**kwargs):
 
 def _turn_execution_get(**kwargs):
     request_id = kwargs.get("request_id")
-    session_id = kwargs.get("session_id")
-    target = request_id if request_id is not None else session_id
-    if not isinstance(target, str) or not target.strip():
+    if not isinstance(request_id, str) or not request_id.strip():
         return make_error_response(
             "missing_parameter",
             "Missing required parameter: request_id",
             details={"missing": ["request_id"]},
-            suggestions=["Provide request_id (or session_id alias)"],
+            suggestions=["Provide request_id"],
         )
     forwarded = dict(kwargs)
     forwarded["collection"] = "turn_execution_records"
-    forwarded["session_id"] = target.strip()
+    forwarded["session_id"] = request_id.strip()
     return _rag_get_item(**forwarded)
 
 
@@ -11450,17 +11466,15 @@ def _turn_execution_get_diagnostics(**kwargs):
     )
 
     request_id = kwargs.get("request_id")
-    session_id = kwargs.get("session_id")
-    target = request_id if request_id is not None else session_id
-    if not isinstance(target, str) or not target.strip():
+    if not isinstance(request_id, str) or not request_id.strip():
         return make_error_response(
             "missing_parameter",
             "Missing required parameter: request_id",
             details={"missing": ["request_id"]},
-            suggestions=["Provide request_id (or session_id alias)"],
+            suggestions=["Provide request_id"],
         )
 
-    request_id_value = target.strip()
+    request_id_value = request_id.strip()
     try:
         payload = get_turn_execution_diagnostics_payload(
             request_id=request_id_value,
@@ -11506,7 +11520,7 @@ def _turn_execution_get_critic_bundle(**kwargs):
     )
 
     return build_episode_critic_evidence_bundle(
-        request_id=kwargs.get("request_id") or kwargs.get("session_id"),
+        request_id=kwargs.get("request_id"),
         instance_id=kwargs.get("instance_id"),
         namespace=kwargs.get("namespace"),
         neighbour_turn_count=kwargs.get("neighbour_turn_count", 2),
@@ -16466,7 +16480,6 @@ def _rag_list_indexed(**kwargs):
             items.append(
                 {
                     "collection": collection,
-                    "session_id": doc.get("request_id"),
                     "request_id": doc.get("request_id"),
                     "chat_session_id": doc.get("session_id"),
                     "created_at_utc": doc.get("created_at_utc"),
@@ -16507,6 +16520,12 @@ def _rag_list_indexed(**kwargs):
                     "escalation_reason": escalation_reason,
                     "critic_summary": critic_summary,
                     "rag_indexing_state": rag_indexing_state,
+                    "identifier_binding": {
+                        "mode": "turn_execution_record_projection",
+                        "request_id_field": "request_id",
+                        "chat_session_id_field": "chat_session_id",
+                        "request_id_aliases_session_id": False,
+                    },
                     "item_kind": "turn_execution_record",
                     "source_system": "mongo.turn_execution_records",
                     "namespace_source": ns_report.get("namespace_source"),
@@ -17197,7 +17216,6 @@ def _rag_get_item(**kwargs):
         payload = {
             "collection": collection,
             **collection_report,
-            "session_id": doc.get("request_id"),
             "request_id": doc.get("request_id"),
             "chat_session_id": doc.get("session_id"),
             "created_at_utc": doc.get("created_at_utc"),
@@ -17222,6 +17240,12 @@ def _rag_get_item(**kwargs):
             "critic": critic_payload,
             "final_response": final_response_payload,
             "rag_indexing_state": rag_indexing_state,
+            "identifier_binding": {
+                "mode": "turn_execution_record_projection",
+                "request_id_field": "request_id",
+                "chat_session_id_field": "chat_session_id",
+                "request_id_aliases_session_id": False,
+            },
             "item_kind": "turn_execution_record",
             "source_system": "mongo.turn_execution_records",
             "namespace_source": ns_report.get("namespace_source"),
@@ -22088,6 +22112,10 @@ def _resolve_chat_history_read_target(
     payload: Mapping[str, Any],
 ) -> dict[str, Any] | dict[str, object]:
     from ...services import chat_history_service
+    from ...services.conversation_scope_binding_service import (
+        verify_conversation_scope_binding,
+        verify_history_location_binding,
+    )
     from ...services.shared_conversation_service import (
         get_accepted_invite_for_user_session,
         resolve_conversation_owner,
@@ -22097,12 +22125,125 @@ def _resolve_chat_history_read_target(
         _resolve_shared_conversation_actor_context(payload)
     )
     session_id = _clean_optional_string(payload.get("session_id"))
+    identifier_binding: dict[str, Any] = {
+        "mode": "raw_parameters",
+        "chat_session_id_source": "payload.session_id" if session_id else None,
+        "history_index_source": (
+            "payload.history_index"
+            if isinstance(payload.get("history_index"), int)
+            else None
+        ),
+        "reference_kind": None,
+    }
+    bound_conversation_context: dict[str, Any] | None = None
+    bound_history_index: int | None = None
+
+    def _binding_error_result(
+        *,
+        message: str,
+        identifier_binding_payload: Mapping[str, Any],
+        details: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        merged_details = {
+            "identifier_binding": dict(identifier_binding_payload),
+        }
+        if isinstance(details, Mapping):
+            merged_details.update(dict(details))
+        return make_error_response(
+            "INVALID_CONTEXT_BINDING",
+            message,
+            details=merged_details,
+        )
+
+    conversation_ref = payload.get("conversation_ref")
+    if conversation_ref is not None:
+        verified_conversation = verify_conversation_scope_binding(conversation_ref)
+        if not verified_conversation.get("success"):
+            return _binding_error_result(
+                message=str(verified_conversation.get("error_message")),
+                identifier_binding_payload=verified_conversation.get(
+                    "identifier_binding", {}
+                ),
+            )
+        bound_conversation_context = dict(verified_conversation)
+        bound_session_id = _clean_optional_string(
+            verified_conversation.get("chat_session_id")
+        )
+        if session_id and session_id != bound_session_id:
+            return _binding_error_result(
+                message="session_id does not match conversation_ref.chat_session_id",
+                identifier_binding_payload=verified_conversation.get(
+                    "identifier_binding", {}
+                ),
+                details={
+                    "provided_session_id": session_id,
+                    "bound_chat_session_id": bound_session_id,
+                },
+            )
+        session_id = bound_session_id
+        identifier_binding = dict(verified_conversation["identifier_binding"])
+
+    history_location_ref = payload.get("history_location_ref")
+    if history_location_ref is not None:
+        verified_history_location = verify_history_location_binding(history_location_ref)
+        if not verified_history_location.get("success"):
+            return _binding_error_result(
+                message=str(verified_history_location.get("error_message")),
+                identifier_binding_payload=verified_history_location.get(
+                    "identifier_binding", {}
+                ),
+            )
+        bound_session_id = _clean_optional_string(
+            verified_history_location.get("chat_session_id")
+        )
+        if session_id and session_id != bound_session_id:
+            return _binding_error_result(
+                message=(
+                    "session_id does not match history_location_ref.chat_session_id"
+                ),
+                identifier_binding_payload=verified_history_location.get(
+                    "identifier_binding", {}
+                ),
+                details={
+                    "provided_session_id": session_id,
+                    "bound_chat_session_id": bound_session_id,
+                },
+            )
+        raw_history_index = payload.get("history_index")
+        history_index_value = (
+            raw_history_index if isinstance(raw_history_index, int) else None
+        )
+        bound_history_index = verified_history_location.get("history_index")
+        if (
+            isinstance(history_index_value, int)
+            and isinstance(bound_history_index, int)
+            and history_index_value != bound_history_index
+        ):
+            return _binding_error_result(
+                message=(
+                    "history_index does not match history_location_ref.history_index"
+                ),
+                identifier_binding_payload=verified_history_location.get(
+                    "identifier_binding", {}
+                ),
+                details={
+                    "provided_history_index": history_index_value,
+                    "bound_history_index": bound_history_index,
+                },
+            )
+        session_id = bound_session_id
+        if bound_conversation_context is None:
+            bound_conversation_context = dict(verified_history_location)
+        identifier_binding = dict(verified_history_location["identifier_binding"])
 
     if not session_id:
         return make_error_response(
             "MISSING_PARAM",
-            "Missing required parameter: session_id",
-            suggestions=["Provide a non-empty session_id"],
+            "Missing required parameter: conversation_ref or session_id",
+            suggestions=[
+                "Provide an authoritative conversation_ref",
+                "Or provide a non-empty session_id",
+            ],
         )
     if not user_concept_id:
         return make_error_response(
@@ -22181,14 +22322,64 @@ def _resolve_chat_history_read_target(
             or namespace
             or chat_history_service.resolve_chat_history_namespace(owner_user_id)
         )
+        if isinstance(bound_conversation_context, Mapping):
+            bound_owner = _normalise_optional_concept_id(
+                bound_conversation_context.get("history_owner_user_id")
+            )
+            bound_org = _normalise_optional_concept_id(
+                bound_conversation_context.get("organisation_concept_id")
+            )
+            if bound_owner and bound_owner != owner_user_id:
+                return _binding_error_result(
+                    message=(
+                        "Bound conversation reference owner does not match the "
+                        "resolved authorised conversation owner"
+                    ),
+                    identifier_binding_payload=identifier_binding,
+                    details={
+                        "bound_history_owner_user_id": bound_owner,
+                        "resolved_history_owner_user_id": owner_user_id,
+                        "chat_session_id": session_id,
+                    },
+                )
+            if (
+                bound_org
+                and _normalise_optional_concept_id(effective_org)
+                and bound_org != _normalise_optional_concept_id(effective_org)
+            ):
+                return _binding_error_result(
+                    message=(
+                        "Bound conversation reference organisation does not match "
+                        "the resolved authorised conversation organisation"
+                    ),
+                    identifier_binding_payload=identifier_binding,
+                    details={
+                        "bound_organisation_concept_id": bound_org,
+                        "resolved_organisation_concept_id": _normalise_optional_concept_id(
+                            effective_org
+                        ),
+                        "chat_session_id": session_id,
+                    },
+                )
         return {
             "success": True,
             "session_id": session_id,
+            "chat_session_id": session_id,
             "read_user_id": owner_user_id,
             "requested_user_id": user_concept_id,
             "read_namespace": owner_namespace,
+            "requested_namespace": namespace,
             "access_mode": "invitee",
             "organisation_concept_id": effective_org,
+            "history_index": bound_history_index,
+            "identifier_binding": {
+                **identifier_binding,
+                "requested_user_id": user_concept_id,
+                "requested_namespace": namespace,
+                "resolved_history_owner_user_id": owner_user_id,
+                "resolved_read_namespace": owner_namespace,
+                "access_mode": "invitee",
+            },
         }
 
     read_user_id = owner_user_id or user_concept_id
@@ -22226,17 +22417,71 @@ def _resolve_chat_history_read_target(
             details={
                 "user_concept_id": user_concept_id,
                 "session_id": session_id,
+                "identifier_binding": identifier_binding,
             },
         )
+
+    if isinstance(bound_conversation_context, Mapping):
+        bound_owner = _normalise_optional_concept_id(
+            bound_conversation_context.get("history_owner_user_id")
+        )
+        bound_org = _normalise_optional_concept_id(
+            bound_conversation_context.get("organisation_concept_id")
+        )
+        if bound_owner and bound_owner != read_user_id:
+            return _binding_error_result(
+                message=(
+                    "Bound conversation reference owner does not match the "
+                    "resolved authorised conversation owner"
+                ),
+                identifier_binding_payload=identifier_binding,
+                details={
+                    "bound_history_owner_user_id": bound_owner,
+                    "resolved_history_owner_user_id": read_user_id,
+                    "chat_session_id": session_id,
+                },
+            )
+        if (
+            bound_org
+            and _normalise_optional_concept_id(organisation_concept_id)
+            and bound_org != _normalise_optional_concept_id(organisation_concept_id)
+        ):
+            return _binding_error_result(
+                message=(
+                    "Bound conversation reference organisation does not match "
+                    "the resolved authorised conversation organisation"
+                ),
+                identifier_binding_payload=identifier_binding,
+                details={
+                    "bound_organisation_concept_id": bound_org,
+                    "resolved_organisation_concept_id": _normalise_optional_concept_id(
+                        organisation_concept_id
+                    ),
+                    "chat_session_id": session_id,
+                },
+            )
 
     return {
         "success": True,
         "session_id": session_id,
+        "chat_session_id": session_id,
         "read_user_id": read_user_id,
         "requested_user_id": user_concept_id,
         "read_namespace": read_namespace,
+        "requested_namespace": namespace,
         "access_mode": "owner" if read_user_id == user_concept_id else "delegated",
         "organisation_concept_id": organisation_concept_id,
+        "history_index": bound_history_index,
+        "identifier_binding": {
+            **identifier_binding,
+            "requested_user_id": user_concept_id,
+            "requested_namespace": namespace,
+            "resolved_history_owner_user_id": read_user_id,
+            "resolved_read_namespace": read_namespace,
+            "access_mode": "owner"
+            if read_user_id == user_concept_id
+            else "delegated",
+        },
     }
 
 
@@ -24445,8 +24690,10 @@ def build_default_catalogue() -> MethodCatalogue:
             name="chat_history_get_segments",
             handler=_chat_history_get_segments,
             input_schema=Schema(
-                required={"session_id": str},
+                required={},
                 optional={
+                    "conversation_ref": (dict,),
+                    "session_id": (str, type(None)),
                     "namespace": (str, type(None)),
                     "user_concept_id": (str, type(None)),
                     "organisation_concept_id": (str, type(None)),
@@ -24457,23 +24704,28 @@ def build_default_catalogue() -> MethodCatalogue:
                 },
                 allow_unknown=True,
                 description=(
-                    "Fetch stored chat-history segments for a session, including history locations "
-                    "and optional embedded llm_debug_data."
+                    "Fetch stored chat-history segments for a conversation, preferably using "
+                    "an authoritative conversation_ref emitted by server-side telemetry builders."
                 ),
             ),
             output_schema=None,
             category="read",
             description=(
                 "Fetch the stored conversation transcript in segment form, with optional embedded "
-                "assistant llm_debug_data and history_location locators."
+                "assistant llm_debug_data and history_location locators. Prefer conversation_ref "
+                "over raw session_id on model-driven paths."
             ),
         ),
         MethodDefinition(
             name="chat_history_get_debug_entry",
             handler=_chat_history_get_debug_entry,
             input_schema=Schema(
-                required={"session_id": str, "history_index": int},
+                required={},
                 optional={
+                    "conversation_ref": (dict,),
+                    "history_location_ref": (dict,),
+                    "session_id": (str, type(None)),
+                    "history_index": (int, type(None)),
                     "namespace": (str, type(None)),
                     "user_concept_id": (str, type(None)),
                     "organisation_concept_id": (str, type(None)),
@@ -24481,22 +24733,25 @@ def build_default_catalogue() -> MethodCatalogue:
                 },
                 allow_unknown=True,
                 description=(
-                    "Fetch the exact stored llm_debug_data for one session/history_index pair."
+                    "Fetch the exact stored llm_debug_data for one assistant history entry, "
+                    "preferably via history_location_ref."
                 ),
             ),
             output_schema=None,
             category="read",
             description=(
                 "Fetch full stored llm_debug_data for one assistant history entry using its "
-                "history_location locator."
+                "history_location locator. Prefer authoritative history_location_ref over raw ids."
             ),
         ),
         MethodDefinition(
             name="conversation_telemetry_get_locator",
             handler=_conversation_telemetry_get_locator,
             input_schema=Schema(
-                required={"session_id": str},
+                required={},
                 optional={
+                    "conversation_ref": (dict,),
+                    "session_id": (str, type(None)),
                     "namespace": (str, type(None)),
                     "user_concept_id": (str, type(None)),
                     "organisation_concept_id": (str, type(None)),
@@ -24504,14 +24759,16 @@ def build_default_catalogue() -> MethodCatalogue:
                 },
                 allow_unknown=True,
                 description=(
-                    "Build a compact server-side locator for conversation turn telemetry."
+                    "Build a compact server-side locator for conversation turn telemetry, "
+                    "preferably via an authoritative conversation_ref."
                 ),
             ),
             output_schema=None,
             category="read",
             description=(
                 "Build the compact conversation telemetry locator so agents can fetch the same "
-                "stored conversation/turn diagnostics without pasting large JSON blobs."
+                "stored conversation/turn diagnostics without pasting large JSON blobs. Prefer "
+                "conversation_ref over raw session_id on model-driven paths."
             ),
         ),
         MethodDefinition(
@@ -25293,16 +25550,12 @@ def build_default_catalogue() -> MethodCatalogue:
             name="turn_execution_get",
             handler=_turn_execution_get,
             input_schema=Schema(
-                required={},
+                required={"request_id": str},
                 optional={
-                    "request_id": (str, type(None)),
-                    "session_id": (str, type(None)),
                     "namespace": (str, type(None)),
                 },
                 allow_unknown=True,
-                description=(
-                    "Get one turn execution record by request_id (session_id accepted as alias)."
-                ),
+                description="Get one turn execution record by request_id.",
             ),
             output_schema=None,
             category="read",
@@ -25315,17 +25568,12 @@ def build_default_catalogue() -> MethodCatalogue:
             name="turn_execution_get_diagnostics",
             handler=_turn_execution_get_diagnostics,
             input_schema=Schema(
-                required={},
+                required={"request_id": str},
                 optional={
-                    "request_id": (str, type(None)),
-                    "session_id": (str, type(None)),
                     "namespace": (str, type(None)),
                 },
                 allow_unknown=True,
-                description=(
-                    "Get one full turn diagnostics payload by request_id "
-                    "(session_id accepted as alias)."
-                ),
+                description="Get one full turn diagnostics payload by request_id.",
             ),
             output_schema=None,
             category="read",
@@ -25341,7 +25589,6 @@ def build_default_catalogue() -> MethodCatalogue:
                 required={},
                 optional={
                     "request_id": (str, type(None)),
-                    "session_id": (str, type(None)),
                     "instance_id": (str, type(None)),
                     "namespace": (str, type(None)),
                     "neighbour_turn_count": (int,),

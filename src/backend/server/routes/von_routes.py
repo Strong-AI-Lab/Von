@@ -10796,6 +10796,8 @@ def history_telemetry_locator():
             user_id=owner_user_id,
             session_id=session_id,
             namespace=owner_namespace,
+            requested_user_id=user_concept_id,
+            requested_namespace=namespace,
             organisation_concept_id=(
                 _normalise_concept_id(shared_invite.get("organisation_concept_id"))
                 if shared_invite

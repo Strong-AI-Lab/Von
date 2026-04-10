@@ -146,6 +146,117 @@
             }
         },
         {
+            "name": "chat_history_get_debug_entry",
+            "description": "Fetch full stored llm_debug_data for one assistant history entry using its history_location locator. Prefer authoritative history_location_ref over raw ids.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "conversation_ref": {
+                        "type": "object",
+                        "additionalProperties": true
+                    },
+                    "history_location_ref": {
+                        "type": "object",
+                        "additionalProperties": true
+                    },
+                    "session_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "history_index": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "user_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "organisation_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "include_legacy": {
+                        "type": "boolean"
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "Fetch the exact stored llm_debug_data for one assistant history entry, preferably via history_location_ref."
+            }
+        },
+        {
+            "name": "chat_history_get_segments",
+            "description": "Fetch the stored conversation transcript in segment form, with optional embedded assistant llm_debug_data and history_location locators. Prefer conversation_ref over raw session_id on model-driven paths.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "conversation_ref": {
+                        "type": "object",
+                        "additionalProperties": true
+                    },
+                    "session_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "user_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "organisation_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "segment_size": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    },
+                    "history_tail_limit": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    },
+                    "include_debug": {
+                        "type": "boolean"
+                    },
+                    "include_legacy": {
+                        "type": "boolean"
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "Fetch stored chat-history segments for a conversation, preferably using an authoritative conversation_ref emitted by server-side telemetry builders."
+            }
+        },
+        {
             "name": "coding_agent_mcp_access_profile",
             "description": "Report the effective coding-agent Vontology MCP access profile, including dev/test/prod-like authority state, write defaults, and safety boundaries.",
             "inputSchema": {
@@ -578,6 +689,49 @@
                 ],
                 "additionalProperties": true,
                 "description": "context_search input: query (str, required), context (str, required, contextual information to improve search), max_results (int, default 10), search_depth (str, 'basic'|'advanced', default 'basic'), include_answer (bool, AI-generated answer)"
+            }
+        },
+        {
+            "name": "conversation_telemetry_get_locator",
+            "description": "Build the compact conversation telemetry locator so agents can fetch the same stored conversation/turn diagnostics without pasting large JSON blobs. Prefer conversation_ref over raw session_id on model-driven paths.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "conversation_ref": {
+                        "type": "object",
+                        "additionalProperties": true
+                    },
+                    "session_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "user_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "organisation_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "include_legacy": {
+                        "type": "boolean"
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "Build a compact server-side locator for conversation turn telemetry, preferably via an authoritative conversation_ref."
             }
         },
         {
@@ -4306,16 +4460,7 @@
                 "type": "object",
                 "properties": {
                     "request_id": {
-                        "type": [
-                            "string",
-                            "null"
-                        ]
-                    },
-                    "session_id": {
-                        "type": [
-                            "string",
-                            "null"
-                        ]
+                        "type": "string"
                     },
                     "namespace": {
                         "type": [
@@ -4324,9 +4469,11 @@
                         ]
                     }
                 },
-                "required": [],
+                "required": [
+                    "request_id"
+                ],
                 "additionalProperties": true,
-                "description": "Get one turn execution record by request_id (session_id accepted as alias)."
+                "description": "Get one turn execution record by request_id."
             }
         },
         {
@@ -4336,12 +4483,6 @@
                 "type": "object",
                 "properties": {
                     "request_id": {
-                        "type": [
-                            "string",
-                            "null"
-                        ]
-                    },
-                    "session_id": {
                         "type": [
                             "string",
                             "null"
@@ -4375,16 +4516,7 @@
                 "type": "object",
                 "properties": {
                     "request_id": {
-                        "type": [
-                            "string",
-                            "null"
-                        ]
-                    },
-                    "session_id": {
-                        "type": [
-                            "string",
-                            "null"
-                        ]
+                        "type": "string"
                     },
                     "namespace": {
                         "type": [
@@ -4393,9 +4525,58 @@
                         ]
                     }
                 },
-                "required": [],
+                "required": [
+                    "request_id"
+                ],
                 "additionalProperties": true,
-                "description": "Get one full turn diagnostics payload by request_id (session_id accepted as alias)."
+                "description": "Get one full turn diagnostics payload by request_id."
+            }
+        },
+        {
+            "name": "turn_execution_get_live_progress",
+            "description": "Fetch the serialised live progress snapshot for an active turn so thinking telemetry can be dereferenced through MCP.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "request_id": {
+                        "type": "string"
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "user_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "window_session_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "anonymous_session_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "scope_key": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "request_id"
+                ],
+                "additionalProperties": true,
+                "description": "Fetch the current live progress snapshot for an in-flight turn request."
             }
         },
         {
@@ -5550,6 +5731,45 @@
                 "required": [],
                 "additionalProperties": true,
                 "description": "List workflow schedules."
+            }
+        },
+        {
+            "name": "workflow_list_use_episodes",
+            "description": "List workflow-use episodes for execution-monitor drill-down and workflow telemetry locators.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "workflow_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "session_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "turn_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "limit": {
+                        "type": "integer"
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "List workflow-use episodes with optional workflow, session, or turn filters."
             }
         },
         {
