@@ -459,6 +459,148 @@ def _normalise_failure_codes(raw_codes: Any) -> list[str]:
     return ordered
 
 
+def _custom_workflow_execution_progress_observed(
+    custom_workflow_execution: Mapping[str, Any] | None,
+) -> bool:
+    if not isinstance(custom_workflow_execution, Mapping):
+        return False
+    return any(
+        _safe_non_negative_int(custom_workflow_execution.get(field_name)) > 0
+        for field_name in (
+            "action_started_count",
+            "action_completed_count",
+            "action_failure_count",
+            "durable_side_effect_count",
+            "terminal_effect_count",
+        )
+    )
+
+
+def _derive_execution_signal_completion_blocker(
+    *,
+    execution_summary: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(execution_summary, Mapping):
+        return None
+
+    selected_execution_mode = (
+        _safe_str(execution_summary.get("selected_execution_mode")) or ""
+    ).lower()
+    dispatch_terminal_status = (
+        _safe_str(execution_summary.get("dispatch_terminal_status")) or ""
+    ).lower()
+    dispatch_terminal_failure_reason = _safe_str(
+        execution_summary.get("dispatch_terminal_failure_reason")
+    )
+    dispatch_terminal_failure_detail = _safe_str(
+        execution_summary.get("dispatch_terminal_failure_detail")
+    )
+    dispatch_workflow_id = _safe_str(execution_summary.get("dispatch_workflow_id"))
+    planned_count = _safe_non_negative_int(execution_summary.get("planned_count"))
+    executed_count = _safe_non_negative_int(execution_summary.get("executed_count"))
+    successful_invocation_count = _safe_non_negative_int(
+        execution_summary.get("successful_invocation_count")
+    )
+    failed_invocation_count = _safe_non_negative_int(
+        execution_summary.get("failed_invocation_count")
+    )
+    blocked_invocation_count = _safe_non_negative_int(
+        execution_summary.get("blocked_invocation_count")
+    )
+    zero_tool_reason_code = _safe_str(execution_summary.get("zero_tool_reason_code"))
+    failure_codes = _normalise_failure_codes(execution_summary.get("failure_codes"))
+    if dispatch_terminal_failure_reason and dispatch_terminal_failure_reason not in {
+        code.lower() for code in failure_codes
+    }:
+        failure_codes.insert(0, dispatch_terminal_failure_reason)
+
+    effect_type = (
+        "workflow_execution"
+        if selected_execution_mode == "custom_workflow"
+        else "tool_execution"
+    )
+    custom_workflow_execution = execution_summary.get("custom_workflow_execution")
+    execution_progress_observed = executed_count > 0
+    if effect_type == "workflow_execution":
+        execution_progress_observed = execution_progress_observed or (
+            _custom_workflow_execution_progress_observed(custom_workflow_execution)
+        )
+
+    if dispatch_terminal_status == "failed":
+        if not failure_codes:
+            failure_codes.append(
+                "custom_workflow_dispatch_failed"
+                if effect_type == "workflow_execution"
+                else "tool_dispatch_failed"
+            )
+        if dispatch_terminal_failure_detail:
+            decision_reason = dispatch_terminal_failure_detail
+        elif effect_type == "workflow_execution":
+            decision_reason = (
+                _infer_custom_workflow_required_effect(execution_summary=execution_summary)
+                or {}
+            ).get("status_reason") or _CUSTOM_WORKFLOW_EXECUTION_FAILURE_REASON
+        else:
+            decision_reason = _TOOL_EXECUTION_FAILURE_REASON_MAP.get(
+                failure_codes[0],
+                "Planned tool execution did not complete successfully.",
+            )
+        status = "not_satisfied" if execution_progress_observed else "not_executed"
+        return {
+            "effect_id": "effect_execution_signal_1",
+            "effect_type": effect_type,
+            "status": status,
+            "status_reason": decision_reason,
+            "failure_code": failure_codes[0],
+            "failure_codes": list(failure_codes),
+            "decision": "failed" if status == "not_satisfied" else "escalation_required",
+            "decision_reason": decision_reason,
+            "repeat_eligible": False,
+            "source": "execution_signals",
+            "workflow_id": dispatch_workflow_id or None,
+        }
+
+    if planned_count <= 0 or successful_invocation_count > 0:
+        return None
+
+    if not failure_codes:
+        failure_codes.append(
+            zero_tool_reason_code or "planned_tool_execution_without_success"
+        )
+
+    status = (
+        "not_satisfied"
+        if (
+            executed_count > 0
+            or failed_invocation_count > 0
+            or blocked_invocation_count > 0
+        )
+        else "not_executed"
+    )
+    if status == "not_satisfied":
+        decision_reason = (
+            "Planned tool execution completed without any successful tool result."
+        )
+    else:
+        decision_reason = _TOOL_EXECUTION_FAILURE_REASON_MAP.get(
+            failure_codes[0],
+            "Planned tool execution did not produce any successful tool result.",
+        )
+
+    return {
+        "effect_id": "effect_execution_signal_1",
+        "effect_type": "tool_execution",
+        "status": status,
+        "status_reason": decision_reason,
+        "failure_code": failure_codes[0],
+        "failure_codes": list(failure_codes),
+        "decision": "failed" if status == "not_satisfied" else "escalation_required",
+        "decision_reason": decision_reason,
+        "repeat_eligible": status != "not_satisfied",
+        "source": "execution_signals",
+    }
+
+
 def _classify_turn_execution_failure_mode(item: Mapping[str, Any]) -> str:
     """Classify a turn execution record into a detailed failure mode."""
 
@@ -497,11 +639,8 @@ def _classify_turn_execution_failure_mode(item: Mapping[str, Any]) -> str:
     )
     dispatch_raw = workflow_routing_diagnostics.get("dispatch")
     dispatch = dispatch_raw if isinstance(dispatch_raw, Mapping) else {}
-    dispatch_terminal_status = (
-        str(dispatch.get("dispatch_terminal_status") or "").strip().lower()
-    )
-    zero_tool_reason_code = (
-        str(dispatch.get("zero_tool_reason_code") or "").strip().lower()
+    execution_signal_blocker = _derive_execution_signal_completion_blocker(
+        execution_summary=dispatch
     )
 
     if decision == "failed":
@@ -515,9 +654,7 @@ def _classify_turn_execution_failure_mode(item: Mapping[str, Any]) -> str:
             return "postcondition_inconclusive"
         return "partial_unspecified"
     if decision == "completed":
-        if dispatch_terminal_status == "failed":
-            return "false_completion_gate_state"
-        if zero_tool_reason_code == "custom_workflow_failed_before_tool_invocation":
+        if execution_signal_blocker is not None:
             return "false_completion_gate_state"
         if not safe_to_claim_completion:
             return "false_completion_gate_state"
@@ -2118,6 +2255,15 @@ def build_workflow_routing_diagnostics(
             "executed_count": _safe_non_negative_int(
                 execution_summary_payload.get("executed_count")
             ),
+            "successful_invocation_count": _safe_non_negative_int(
+                execution_summary_payload.get("successful_invocation_count")
+            ),
+            "failed_invocation_count": _safe_non_negative_int(
+                execution_summary_payload.get("failed_invocation_count")
+            ),
+            "blocked_invocation_count": _safe_non_negative_int(
+                execution_summary_payload.get("blocked_invocation_count")
+            ),
             "zero_tools_executed": bool(
                 execution_summary_payload.get("zero_tools_executed")
             ),
@@ -2160,6 +2306,15 @@ def build_workflow_routing_diagnostics(
                 ),
                 "invocation_count": _safe_non_negative_int(
                     tool_execution_payload.get("invocation_count")
+                ),
+                "successful_invocation_count": _safe_non_negative_int(
+                    tool_execution_payload.get("successful_invocation_count")
+                ),
+                "failed_invocation_count": _safe_non_negative_int(
+                    tool_execution_payload.get("failed_invocation_count")
+                ),
+                "blocked_invocation_count": _safe_non_negative_int(
+                    tool_execution_payload.get("blocked_invocation_count")
                 ),
                 "worker_unavailable_event_count": _safe_non_negative_int(
                     tool_execution_payload.get("worker_unavailable_event_count")
@@ -2514,10 +2669,20 @@ def _summarise_tool_execution_context(
 
     parse_error_invocation_count = 0
     validation_error_invocation_count = 0
+    successful_invocation_count = 0
+    failed_invocation_count = 0
+    blocked_invocation_count = 0
     for invocation in serialised_invocations:
         if not isinstance(invocation, Mapping):
             continue
         tool_name = (_safe_str(invocation.get("tool")) or "").lower()
+        invocation_status = (_safe_str(invocation.get("status")) or "").lower()
+        if invocation_status == "ok":
+            successful_invocation_count += 1
+        elif invocation_status == "blocked":
+            blocked_invocation_count += 1
+        elif invocation_status:
+            failed_invocation_count += 1
         if tool_name == "__tool_call_parse_error__":
             parse_error_invocation_count += 1
         elif tool_name == "__tool_call_validation_error__":
@@ -2725,6 +2890,9 @@ def _summarise_tool_execution_context(
         "started_count": observed_started_count,
         "executed_count": observed_executed_count,
         "invocation_count": invocation_count,
+        "successful_invocation_count": successful_invocation_count,
+        "failed_invocation_count": failed_invocation_count,
+        "blocked_invocation_count": blocked_invocation_count,
         "worker_unavailable_event_count": worker_unavailable_event_count,
         "tool_plan_stage_event_count": tool_plan_stage_event_count,
         "tool_execute_stage_event_count": tool_execute_stage_event_count,
@@ -2799,6 +2967,9 @@ def _summarise_tool_execution_context(
         "started_count": tool_execution["started_count"],
         "executed_count": tool_execution["executed_count"],
         "invocation_count": tool_execution["invocation_count"],
+        "successful_invocation_count": tool_execution["successful_invocation_count"],
+        "failed_invocation_count": tool_execution["failed_invocation_count"],
+        "blocked_invocation_count": tool_execution["blocked_invocation_count"],
         "worker_unavailable_event_count": tool_execution[
             "worker_unavailable_event_count"
         ],
@@ -2887,31 +3058,9 @@ def _infer_custom_workflow_required_effect(
         if isinstance(custom_workflow_execution, Mapping)
         else {}
     )
-    action_started_count = _safe_non_negative_int(
-        custom_workflow_summary.get("action_started_count")
-    )
-    action_completed_count = _safe_non_negative_int(
-        custom_workflow_summary.get("action_completed_count")
-    )
-    action_failure_count = _safe_non_negative_int(
-        custom_workflow_summary.get("action_failure_count")
-    )
-    durable_side_effect_count = _safe_non_negative_int(
-        custom_workflow_summary.get("durable_side_effect_count")
-    )
-    terminal_effect_count = _safe_non_negative_int(
-        custom_workflow_summary.get("terminal_effect_count")
-    )
 
-    execution_progress_observed = any(
-        count > 0
-        for count in (
-            action_started_count,
-            action_completed_count,
-            action_failure_count,
-            durable_side_effect_count,
-            terminal_effect_count,
-        )
+    execution_progress_observed = _custom_workflow_execution_progress_observed(
+        custom_workflow_summary
     )
 
     failure_codes: list[str] = []
@@ -4038,6 +4187,7 @@ def _derive_completion_gate(
     required_effects: Sequence[Mapping[str, Any]],
     postcondition_checks: Sequence[Mapping[str, Any]],
     completion_claim_validated: bool,
+    execution_summary: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     decision = "completed"
     decision_reason = "No blocking effect detected."
@@ -4195,6 +4345,47 @@ def _derive_completion_gate(
         if not blocking_failure_codes:
             blocking_failure_codes = ["postcondition_inconclusive"]
 
+    execution_signal_blocker = None
+    repeat_eligible = True
+    if decision == "completed":
+        execution_signal_blocker = _derive_execution_signal_completion_blocker(
+            execution_summary=execution_summary
+        )
+        if isinstance(execution_signal_blocker, Mapping):
+            blocking_effect_ids = [
+                _safe_str(execution_signal_blocker.get("effect_id"))
+                or "effect_execution_signal_1"
+            ]
+            blocking_failure_codes = _normalise_failure_codes(
+                execution_signal_blocker.get("failure_codes")
+            )
+            single_failure_code = _safe_str(execution_signal_blocker.get("failure_code"))
+            if single_failure_code and single_failure_code not in blocking_failure_codes:
+                blocking_failure_codes.append(single_failure_code)
+            decision = (
+                _safe_str(execution_signal_blocker.get("decision"))
+                or "escalation_required"
+            )
+            decision_reason = (
+                _safe_str(execution_signal_blocker.get("decision_reason"))
+                or "Execution evidence does not support a completed verdict."
+            )
+            repeat_eligible = bool(execution_signal_blocker.get("repeat_eligible", True))
+            unresolved_preconditions.append(
+                {
+                    "effect_id": _safe_str(execution_signal_blocker.get("effect_id"))
+                    or "effect_execution_signal_1",
+                    "effect_type": _safe_str(execution_signal_blocker.get("effect_type"))
+                    or "tool_execution",
+                    "status": _safe_str(execution_signal_blocker.get("status"))
+                    or "not_executed",
+                    "status_reason": _safe_str(
+                        execution_signal_blocker.get("status_reason")
+                    ),
+                    "failure_codes": blocking_failure_codes,
+                }
+            )
+
     if decision == "completed" and not completion_claim_validated:
         decision = "partial"
         decision_reason = (
@@ -4205,7 +4396,11 @@ def _derive_completion_gate(
 
     safe_to_claim = decision == "completed"
     evidence_payload = {
-        "evaluation_basis": "required_effects_and_postcondition_checks",
+        "evaluation_basis": (
+            "required_effects_postcondition_checks_and_execution_signals"
+            if execution_signal_blocker
+            else "required_effects_and_postcondition_checks"
+        ),
         "required_effect_count": len(required_effects),
         "postcondition_check_count": len(postcondition_checks),
         "postcondition_summary": _summarise_check_counts(postcondition_checks),
@@ -4213,6 +4408,12 @@ def _derive_completion_gate(
         "unresolved_effect_ids": sorted(set(unresolved_check_ids)),
         "unresolved_preconditions": unresolved_preconditions,
         "unresolved_postcondition_checks": unresolved_postcondition_checks,
+        "execution_signal_blocker": (
+            dict(execution_signal_blocker)
+            if isinstance(execution_signal_blocker, Mapping)
+            else None
+        ),
+        "repeat_eligible": repeat_eligible,
         "completion_outcome": (
             "success"
             if decision == "completed"
@@ -4229,6 +4430,7 @@ def _derive_completion_gate(
         "blocking_failure_codes": blocking_failure_codes,
         "safe_to_claim_completion": safe_to_claim,
         "requires_follow_up": not safe_to_claim,
+        "repeat_eligible": repeat_eligible,
         "evidence_payload": evidence_payload,
     }
 
@@ -4358,6 +4560,7 @@ def build_turn_execution_record(
         required_effects=required_effects,
         postcondition_checks=postcondition_checks,
         completion_claim_validated=bool(completion_claim["validated"]),
+        execution_summary=execution_summary,
     )
 
     latest_progress = (

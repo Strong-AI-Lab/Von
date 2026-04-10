@@ -67,7 +67,6 @@ from ...workflows.execution_contracts import (
 )
 from ...workflows.mcp_tool_bridge import workflow_action_result_from_mcp_payload
 from ...workflows.definitions import (
-    ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
     CHAT_ASSISTANT_WORKFLOW_ID,
     CHAT_BUTTONIFY_WORKFLOW_ID,
     CHAT_NARRATION_WORKFLOW_ID,
@@ -7155,6 +7154,9 @@ class InternalMCPChatOrchestrator:
         requires_follow_up = bool(
             completion_gate_payload.get("requires_follow_up", False)
         )
+        repeat_eligible = bool(
+            completion_gate_payload.get("repeat_eligible", requires_follow_up)
+        )
         loop_attempts = self._coerce_non_negative_int(
             data.get("completion_gate_loop_attempts"),
             default=0,
@@ -7237,7 +7239,27 @@ class InternalMCPChatOrchestrator:
             )
 
         if not safe_to_claim_completion:
-            if decision == "failed":
+            unresolved_effect_types = {
+                str(unresolved.get("effect_type") or "").strip()
+                for unresolved in unresolved_preconditions
+                if isinstance(unresolved, Mapping)
+                and isinstance(unresolved.get("effect_type"), str)
+                and str(unresolved.get("effect_type") or "").strip()
+            }
+            if unresolved_effect_types == {"tool_execution"}:
+                if decision == "failed":
+                    status_line = (
+                        "Execution status: planned tool execution did not complete successfully."
+                    )
+                else:
+                    status_line = (
+                        "Execution status: required tool execution was not completed."
+                    )
+            elif unresolved_effect_types == {"workflow_execution"}:
+                status_line = (
+                    "Execution status: selected workflow execution did not complete successfully."
+                )
+            elif decision == "failed":
                 status_line = "Execution status: requested mutation failed or was blocked."
             elif decision == "escalation_required":
                 status_line = "Execution status: requested mutation was not executed."
@@ -7347,9 +7369,13 @@ class InternalMCPChatOrchestrator:
         repeat_iteration = False
         repeat_stop_reason: str | None = None
         loop_retry_reason: str | None = None
+        terminal_non_repeatable = False
 
         if requires_follow_up:
-            if loop_attempts >= loop_max_attempts:
+            if not repeat_eligible:
+                terminal_non_repeatable = True
+                repeat_stop_reason = "terminal_execution_failure"
+            elif loop_attempts >= loop_max_attempts:
                 repeat_stop_reason = "attempt_budget_exhausted"
             elif loop_elapsed_ms >= loop_max_elapsed_ms:
                 repeat_stop_reason = "elapsed_budget_exhausted"
@@ -7387,14 +7413,20 @@ class InternalMCPChatOrchestrator:
         terminal_outcome = "completed"
         if repeat_iteration:
             terminal_outcome = "retrying"
+        elif terminal_non_repeatable:
+            terminal_outcome = "failed" if decision == "failed" else "follow_up_required"
         elif requires_follow_up and repeat_stop_reason:
             terminal_outcome = repeat_stop_reason
         elif requires_follow_up:
             terminal_outcome = "follow_up_required"
         escalation_signal = bool(
-            requires_follow_up and not repeat_iteration and repeat_stop_reason
+            requires_follow_up
+            and not repeat_iteration
+            and (terminal_non_repeatable or repeat_stop_reason)
         )
-        escalation_reason = repeat_stop_reason if escalation_signal else None
+        escalation_reason = (
+            repeat_stop_reason if escalation_signal else None
+        )
 
         completion_gate_evidence_payload: dict[str, Any] = dict(record_evidence_payload)
         completion_gate_evidence_payload.update(
@@ -7403,6 +7435,7 @@ class InternalMCPChatOrchestrator:
                 "decision_reason": decision_reason,
                 "safe_to_claim_completion": safe_to_claim_completion,
                 "requires_follow_up": requires_follow_up,
+                "repeat_eligible": repeat_eligible,
                 "blocking_effect_ids": list(blocking_effect_ids),
                 "blocking_failure_codes": list(blocking_failure_codes),
                 "unresolved_preconditions": unresolved_preconditions,
@@ -7594,6 +7627,7 @@ class InternalMCPChatOrchestrator:
                             "decision_reason": decision_reason,
                             "safe_to_claim_completion": safe_to_claim_completion,
                             "requires_follow_up": requires_follow_up,
+                            "repeat_eligible": repeat_eligible,
                             "blocking_effect_ids": list(blocking_effect_ids),
                             "blocking_failure_codes": list(blocking_failure_codes),
                             "unresolved_preconditions": unresolved_preconditions,
@@ -7638,6 +7672,7 @@ class InternalMCPChatOrchestrator:
                 "completion_gate_blocking_failure_codes": list(blocking_failure_codes),
                 "completion_gate_safe_to_claim_completion": safe_to_claim_completion,
                 "completion_gate_requires_follow_up": requires_follow_up,
+                "completion_gate_repeat_eligible": repeat_eligible,
                 "completion_gate_unresolved_preconditions": unresolved_preconditions,
                 "completion_gate_evidence_payload": completion_gate_evidence_payload,
                 "completion_gate_terminal_outcome": terminal_outcome,

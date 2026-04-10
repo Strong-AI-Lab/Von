@@ -7,6 +7,10 @@ from unittest.mock import MagicMock, patch
 from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
 )
+from src.backend.services.turn_execution_record_service import (
+    _derive_completion_gate,
+    build_turn_execution_correctness_summary,
+)
 from src.backend.workflows.action_registry import WorkflowActionRequest, WorkflowEnvironment
 
 
@@ -735,6 +739,217 @@ def test_turn_execution_critic_blocks_failed_custom_workflow_dispatch() -> None:
     ]
     assert "before any action could start" in str(
         completion_gate.get("decision_reason") or ""
+    )
+
+
+def test_turn_execution_critic_blocks_planned_tool_run_without_success() -> None:
+    orchestrator = _build_orchestrator()
+    request = _build_request(
+        action_id="turn_execution.critic",
+        data={
+            "prompt": "Explain the failure in more detail from the telemetry.",
+            "final_response": "I checked the telemetry and everything completed normally.",
+            "invocations": [
+                {
+                    "tool": "conversation_telemetry_get_locator",
+                    "error": "PERMISSION_DENIED",
+                    "payload": {
+                        "status": "error",
+                        "summary": "Error: PERMISSION_DENIED",
+                    },
+                },
+                {
+                    "tool": "chat_history_get_segments",
+                    "error": "PERMISSION_DENIED",
+                    "payload": {
+                        "status": "error",
+                        "summary": "Error: PERMISSION_DENIED",
+                    },
+                },
+            ],
+            "aux_llm_calls": [
+                {
+                    "type": "workflow_dispatch_boundary",
+                    "boundary": "execution_mode_selected",
+                    "status": "selected",
+                    "selected_execution_mode": "tool_pipeline",
+                },
+                {
+                    "type": "workflow_dispatch_boundary",
+                    "boundary": "workflow_handoff",
+                    "status": "started",
+                    "selected_execution_mode": "tool_pipeline",
+                },
+            ],
+            "turn_id": "req-turn-critic-read-fail",
+            "conversation_session_id": "session-critic-read-fail",
+            "workflow_discovery_result": None,
+            "workflow_routing": {
+                "workflow_id": "#V#tool_calling_workflow",
+                "verdict": "tool_seeking",
+            },
+        },
+    )
+
+    result = orchestrator._action_turn_execution_critic(request)
+    assert result.ok
+
+    record = result.outputs.get("turn_execution_record")
+    assert isinstance(record, dict)
+    required_effects = record.get("required_effects")
+    assert isinstance(required_effects, list)
+    assert required_effects == []
+
+    completion_gate = record.get("completion_gate")
+    assert isinstance(completion_gate, dict)
+    assert completion_gate.get("decision") == "failed"
+    assert completion_gate.get("safe_to_claim_completion") is False
+    assert completion_gate.get("requires_follow_up") is True
+    assert completion_gate.get("repeat_eligible") is False
+    assert completion_gate.get("blocking_failure_codes") == [
+        "planned_tool_execution_without_success"
+    ]
+    evidence_payload = completion_gate.get("evidence_payload")
+    assert isinstance(evidence_payload, dict)
+    blocker = evidence_payload.get("execution_signal_blocker")
+    assert isinstance(blocker, dict)
+    assert blocker.get("effect_type") == "tool_execution"
+    assert blocker.get("status") == "not_satisfied"
+
+
+def test_turn_execution_correctness_flags_completed_planned_tool_run_without_success_as_false_success() -> None:
+    correctness = build_turn_execution_correctness_summary(
+        completion_gate={
+            "decision": "completed",
+            "safe_to_claim_completion": True,
+            "requires_follow_up": False,
+        },
+        required_effects=[],
+        critic_summary={"not_verified_count": 0},
+        final_response={
+            "completion_claim_detected": False,
+            "completion_claim_validated": True,
+        },
+        workflow_selection={
+            "selected_workflow_id": "#V#tool_calling_workflow",
+            "selector_verdict": "tool_seeking",
+        },
+        workflow_routing_diagnostics={
+            "dispatch": {
+                "selected_execution_mode": "tool_pipeline",
+                "planned_count": 2,
+                "executed_count": 2,
+                "successful_invocation_count": 0,
+                "failed_invocation_count": 2,
+                "blocked_invocation_count": 0,
+                "failure_codes": [],
+            }
+        },
+    )
+
+    assert correctness["failure_mode"] == "false_completion_gate_state"
+    assert correctness["overall_outcome"] == "false_success"
+    assert correctness["metric_labels"]["false_success"] is True
+
+
+def test_derive_completion_gate_blocks_workflow_terminal_failure_without_required_effects() -> None:
+    completion_gate = _derive_completion_gate(
+        required_effects=[],
+        postcondition_checks=[],
+        completion_claim_validated=True,
+        execution_summary={
+            "selected_execution_mode": "custom_workflow",
+            "dispatch_workflow_id": "#V#diagnostic_workflow",
+            "dispatch_terminal_status": "failed",
+            "dispatch_terminal_failure_reason": "workflow_runtime_failed",
+            "dispatch_terminal_failure_detail": (
+                "Diagnostic workflow failed before any workflow action could start."
+            ),
+            "planned_count": 0,
+            "executed_count": 0,
+            "successful_invocation_count": 0,
+            "failed_invocation_count": 0,
+            "blocked_invocation_count": 0,
+            "failure_codes": ["workflow_runtime_failed"],
+            "custom_workflow_execution": {
+                "action_started_count": 0,
+                "action_completed_count": 0,
+                "action_failure_count": 0,
+                "durable_side_effect_count": 0,
+                "terminal_effect_count": 0,
+            },
+        },
+    )
+
+    assert completion_gate["decision"] == "escalation_required"
+    assert completion_gate["safe_to_claim_completion"] is False
+    assert completion_gate["requires_follow_up"] is True
+    assert completion_gate["repeat_eligible"] is False
+    assert completion_gate["blocking_failure_codes"] == ["workflow_runtime_failed"]
+    evidence_payload = completion_gate["evidence_payload"]
+    assert evidence_payload["evaluation_basis"] == (
+        "required_effects_postcondition_checks_and_execution_signals"
+    )
+
+
+def test_turn_completion_gate_does_not_repeat_terminal_execution_failure() -> None:
+    orchestrator = _build_orchestrator()
+    request = _build_request(
+        action_id="turn_execution.completion_gate",
+        data={
+            "final_response": "I checked the telemetry.",
+            "invocations": [],
+            "turn_execution_record": {
+                "completion_gate": {
+                    "decision": "failed",
+                    "decision_reason": (
+                        "Planned tool execution completed without any successful tool result."
+                    ),
+                    "safe_to_claim_completion": False,
+                    "requires_follow_up": True,
+                    "repeat_eligible": False,
+                    "blocking_effect_ids": ["effect_execution_signal_1"],
+                    "blocking_failure_codes": [
+                        "planned_tool_execution_without_success"
+                    ],
+                    "evidence_payload": {
+                        "unresolved_preconditions": [
+                            {
+                                "effect_id": "effect_execution_signal_1",
+                                "effect_type": "tool_execution",
+                                "status": "not_satisfied",
+                                "status_reason": (
+                                    "Planned tool execution completed without any successful tool result."
+                                ),
+                                "failure_codes": [
+                                    "planned_tool_execution_without_success"
+                                ],
+                            }
+                        ]
+                    },
+                }
+            },
+            "completion_gate_loop_attempts": 0,
+            "completion_gate_loop_max_attempts": 3,
+            "completion_gate_loop_max_elapsed_ms": 60_000,
+            "completion_gate_loop_no_progress_streak": 0,
+            "completion_gate_loop_no_progress_limit": 1,
+            "completion_gate_loop_last_invocation_count": 0,
+            "completion_gate_loop_last_blocking_signature": "",
+        },
+    )
+
+    result = orchestrator._action_turn_execution_completion_gate(request)
+    assert result.ok
+    assert result.outputs.get("completion_gate_repeat_iteration") is False
+    assert result.outputs.get("completion_gate_repeat_eligible") is False
+    assert result.outputs.get("completion_gate_loop_stop_reason") == (
+        "terminal_execution_failure"
+    )
+    assert result.outputs.get("completion_gate_terminal_outcome") == "failed"
+    assert result.outputs.get("completion_gate_escalation_signal") is True
+    assert result.outputs.get("completion_gate_escalation_reason") == (
+        "terminal_execution_failure"
     )
 
 
