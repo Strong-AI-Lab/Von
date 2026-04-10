@@ -23,6 +23,9 @@ from .plan_state_runtime import (
     normalise_workflow_plan_state_policy_spec,
     normalise_workflow_step_checkpoint_policy_spec,
 )
+from .terminal_success_contracts import (
+    normalise_workflow_terminal_success_contract,
+)
 from .subworkflow_contracts import (
     WORKFLOW_SUBWORKFLOW_ACTION_ID,
     build_subworkflow_contract,
@@ -354,6 +357,16 @@ WORKFLOW_COMPLETION_GATE_TEXT_PREDICATE_PRECEDENCE: Tuple[
         "hasWorkflowCompletionGateJson",
         "#V#has_workflow_completion_gate_json",
         "has_workflow_completion_gate_json",
+    ),
+)
+WORKFLOW_TERMINAL_SUCCESS_CONTRACT_TEXT_PREDICATE_PRECEDENCE: Tuple[
+    Tuple[str, ...], ...
+] = (
+    (
+        "#V#hasWorkflowTerminalSuccessContractJson",
+        "hasWorkflowTerminalSuccessContractJson",
+        "#V#has_workflow_terminal_success_contract_json",
+        "has_workflow_terminal_success_contract_json",
     ),
 )
 WORKFLOW_LAUNCH_INPUT_CONTRACT_SOURCE_NONE = "none"
@@ -2442,6 +2455,25 @@ def resolve_workflow_long_horizon_policies(
             f"{workflow_id}:{completion_gate_source}"
         )
 
+    terminal_success_contract, terminal_success_contract_source = (
+        _resolve_policy_from_text_relations(
+            concept_id=workflow_id,
+            predicate_precedence=WORKFLOW_TERMINAL_SUCCESS_CONTRACT_TEXT_PREDICATE_PRECEDENCE,
+            normaliser=normalise_workflow_terminal_success_contract,
+            text_rows=text_rows,
+        )
+    )
+    if terminal_success_contract is not None:
+        policies["terminal_success_contract"] = terminal_success_contract
+    elif (
+        isinstance(terminal_success_contract_source, str)
+        and terminal_success_contract_source
+    ):
+        warnings.append(
+            "workflow_terminal_success_contract_invalid:"
+            f"{workflow_id}:{terminal_success_contract_source}"
+        )
+
     return policies, warnings
 
 
@@ -3066,6 +3098,7 @@ def load_workflow_definition_from_vontology(
         "workflow_step_mutation_authority_invalid:",
         "workflow_plan_state_policy_invalid:",
         "workflow_completion_gate_invalid:",
+        "workflow_terminal_success_contract_invalid:",
     )
     for warning in warnings:
         if isinstance(warning, str) and warning.startswith(fatal_warning_prefixes):

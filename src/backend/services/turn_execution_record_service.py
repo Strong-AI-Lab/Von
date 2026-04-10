@@ -520,11 +520,74 @@ def _derive_execution_signal_completion_blocker(
         else "tool_execution"
     )
     custom_workflow_execution = execution_summary.get("custom_workflow_execution")
+    terminal_success_evaluation = (
+        custom_workflow_execution.get("terminal_success_evaluation")
+        if isinstance(custom_workflow_execution, Mapping)
+        else None
+    )
+    terminal_success_contract = (
+        custom_workflow_execution.get("terminal_success_contract")
+        if isinstance(custom_workflow_execution, Mapping)
+        else None
+    )
     execution_progress_observed = executed_count > 0
     if effect_type == "workflow_execution":
         execution_progress_observed = execution_progress_observed or (
             _custom_workflow_execution_progress_observed(custom_workflow_execution)
         )
+
+    if effect_type == "workflow_execution" and isinstance(
+        terminal_success_contract, Mapping
+    ) and not isinstance(terminal_success_evaluation, Mapping):
+        terminal_status = _safe_str(
+            custom_workflow_execution.get("terminal_status")
+            if isinstance(custom_workflow_execution, Mapping)
+            else None
+        )
+        if not terminal_status:
+            decision_reason = "Contracted workflow did not report a terminal status."
+            return {
+                "effect_id": "effect_workflow_terminal_contract_1",
+                "effect_type": effect_type,
+                "status": "not_satisfied",
+                "status_reason": decision_reason,
+                "failure_code": "contracted_workflow_terminal_status_missing",
+                "failure_codes": ["contracted_workflow_terminal_status_missing"],
+                "decision": "failed",
+                "decision_reason": decision_reason,
+                "repeat_eligible": False,
+                "source": "workflow_terminal_success_contract",
+                "workflow_id": dispatch_workflow_id or None,
+            }
+
+    if effect_type == "workflow_execution" and isinstance(
+        terminal_success_evaluation, Mapping
+    ):
+        contract_succeeded = terminal_success_evaluation.get("success")
+        if contract_succeeded is False:
+            contract_failure_codes = _normalise_failure_codes(
+                terminal_success_evaluation.get("failure_codes")
+            )
+            if not contract_failure_codes:
+                contract_failure_codes = [
+                    "contracted_workflow_terminal_success_contract_unmet"
+                ]
+            decision_reason = _safe_str(
+                terminal_success_evaluation.get("decision_reason")
+            ) or "Contracted workflow terminal-success requirements were not met."
+            return {
+                "effect_id": "effect_workflow_terminal_contract_1",
+                "effect_type": effect_type,
+                "status": "not_satisfied",
+                "status_reason": decision_reason,
+                "failure_code": contract_failure_codes[0],
+                "failure_codes": list(contract_failure_codes),
+                "decision": "failed",
+                "decision_reason": decision_reason,
+                "repeat_eligible": False,
+                "source": "workflow_terminal_success_contract",
+                "workflow_id": dispatch_workflow_id or None,
+            }
 
     if dispatch_terminal_status == "failed":
         if not failure_codes:
@@ -545,7 +608,13 @@ def _derive_execution_signal_completion_blocker(
                 failure_codes[0],
                 "Planned tool execution did not complete successfully.",
             )
-        status = "not_satisfied" if execution_progress_observed else "not_executed"
+        workflow_contract_present = isinstance(terminal_success_contract, Mapping) or (
+            isinstance(terminal_success_evaluation, Mapping)
+        )
+        if effect_type == "workflow_execution" and workflow_contract_present:
+            status = "not_satisfied"
+        else:
+            status = "not_satisfied" if execution_progress_observed else "not_executed"
         return {
             "effect_id": "effect_execution_signal_1",
             "effect_type": effect_type,
@@ -1425,7 +1494,33 @@ def _build_custom_workflow_execution_summary(
         or "workflow_execution_summary.v1",
         "workflow_id": workflow_id,
         "completed": completed_value if isinstance(completed_value, bool) else None,
+        "effective_completed": (
+            summary_payload.get("effective_completed")
+            if isinstance(summary_payload.get("effective_completed"), bool)
+            else None
+        ),
+        "terminal_status": _safe_str(summary_payload.get("terminal_status")),
         "final_state": final_state,
+        "completion_gate_safe_to_claim_completion": (
+            summary_payload.get("completion_gate_safe_to_claim_completion")
+            if isinstance(
+                summary_payload.get("completion_gate_safe_to_claim_completion"), bool
+            )
+            else None
+        ),
+        "completion_gate_blocking_reason_codes": _dedupe_string_sequence(
+            summary_payload.get("completion_gate_blocking_reason_codes") or []
+        ),
+        "terminal_success_contract": (
+            dict(summary_payload.get("terminal_success_contract"))
+            if isinstance(summary_payload.get("terminal_success_contract"), Mapping)
+            else None
+        ),
+        "terminal_success_evaluation": (
+            dict(summary_payload.get("terminal_success_evaluation"))
+            if isinstance(summary_payload.get("terminal_success_evaluation"), Mapping)
+            else None
+        ),
         "step_result_envelope_count": step_result_envelope_count,
         "action_started_count": action_started_count,
         "action_completed_count": action_completed_count,
@@ -2354,8 +2449,63 @@ def build_workflow_routing_diagnostics(
                         )
                         else None
                     ),
+                    "effective_completed": (
+                        custom_workflow_execution_payload.get("effective_completed")
+                        if isinstance(
+                            custom_workflow_execution_payload.get(
+                                "effective_completed"
+                            ),
+                            bool,
+                        )
+                        else None
+                    ),
+                    "terminal_status": _safe_str(
+                        custom_workflow_execution_payload.get("terminal_status")
+                    ),
                     "final_state": _safe_str(
                         custom_workflow_execution_payload.get("final_state")
+                    ),
+                    "completion_gate_safe_to_claim_completion": (
+                        custom_workflow_execution_payload.get(
+                            "completion_gate_safe_to_claim_completion"
+                        )
+                        if isinstance(
+                            custom_workflow_execution_payload.get(
+                                "completion_gate_safe_to_claim_completion"
+                            ),
+                            bool,
+                        )
+                        else None
+                    ),
+                    "completion_gate_blocking_reason_codes": _dedupe_string_sequence(
+                        custom_workflow_execution_payload.get(
+                            "completion_gate_blocking_reason_codes"
+                        )
+                        or []
+                    ),
+                    "terminal_success_contract": (
+                        dict(custom_workflow_execution_payload.get("terminal_success_contract"))
+                        if isinstance(
+                            custom_workflow_execution_payload.get(
+                                "terminal_success_contract"
+                            ),
+                            Mapping,
+                        )
+                        else None
+                    ),
+                    "terminal_success_evaluation": (
+                        dict(
+                            custom_workflow_execution_payload.get(
+                                "terminal_success_evaluation"
+                            )
+                        )
+                        if isinstance(
+                            custom_workflow_execution_payload.get(
+                                "terminal_success_evaluation"
+                            ),
+                            Mapping,
+                        )
+                        else None
                     ),
                     "step_result_envelope_count": _safe_non_negative_int(
                         custom_workflow_execution_payload.get(

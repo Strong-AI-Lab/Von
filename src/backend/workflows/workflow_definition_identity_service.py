@@ -21,6 +21,9 @@ from .plan_state_runtime import (
     normalise_workflow_plan_state_policy_spec,
     normalise_workflow_step_checkpoint_policy_spec,
 )
+from .terminal_success_contracts import (
+    normalise_workflow_terminal_success_contract,
+)
 from .execution_contracts import (
     WORKFLOW_CONTROL_BREAK_ACTION_IDS,
     WORKFLOW_CONTROL_CONTINUE_ACTION_IDS,
@@ -632,6 +635,7 @@ def validate_workflow_definition_contract(
             "fork_join_issues": [],
             "plan_state_issues": [],
             "completion_gate_issues": [],
+            "terminal_success_contract_issues": [],
             "prompt_contract_issues": [],
         }
 
@@ -662,6 +666,7 @@ def validate_workflow_definition_contract(
     runtime_policy_issues: list[dict[str, Any]] = []
     plan_state_issues: list[dict[str, Any]] = []
     completion_gate_issues: list[dict[str, Any]] = []
+    terminal_success_contract_issues: list[dict[str, Any]] = []
     prompt_contract_issues: list[dict[str, Any]] = []
     declared_fork_ids: set[str] = set()
 
@@ -703,6 +708,17 @@ def validate_workflow_definition_contract(
         )
     except ValueError as exc:
         completion_gate_issues.append(
+            {
+                "scope": "workflow",
+                "reason_code": str(exc),
+            }
+        )
+    try:
+        normalise_workflow_terminal_success_contract(
+            definition_metadata.get("terminal_success_contract")
+        )
+    except ValueError as exc:
+        terminal_success_contract_issues.append(
             {
                 "scope": "workflow",
                 "reason_code": str(exc),
@@ -1333,6 +1349,14 @@ def validate_workflow_definition_contract(
             str(item.get("reason_code") or ""),
         ),
     )
+    terminal_success_contract_issues = sorted(
+        terminal_success_contract_issues,
+        key=lambda item: (
+            str(item.get("scope") or ""),
+            str(item.get("state_id") or ""),
+            str(item.get("reason_code") or ""),
+        ),
+    )
     prompt_contract_issues = sorted(
         prompt_contract_issues,
         key=lambda item: (
@@ -1372,6 +1396,8 @@ def validate_workflow_definition_contract(
         errors.append("workflow_plan_state_policy_invalid")
     if completion_gate_issues:
         errors.append("workflow_completion_gate_invalid")
+    if terminal_success_contract_issues:
+        errors.append("workflow_terminal_success_contract_invalid")
     if any(
         str(item.get("severity") or "").strip().lower() == "error"
         for item in prompt_contract_issues
@@ -1422,6 +1448,7 @@ def validate_workflow_definition_contract(
         "runtime_policy_issues": runtime_policy_issues,
         "plan_state_issues": plan_state_issues,
         "completion_gate_issues": completion_gate_issues,
+        "terminal_success_contract_issues": terminal_success_contract_issues,
         "prompt_contract_issues": prompt_contract_issues,
     }
 

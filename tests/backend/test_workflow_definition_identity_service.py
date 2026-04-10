@@ -654,6 +654,61 @@ def test_validate_contract_accepts_context_only_completion_gate() -> None:
     assert validation.get("completion_gate_issues") == []
 
 
+def test_validate_contract_accepts_terminal_success_contract() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#terminal_success_contract_workflow",
+        initial_state="done",
+        states={
+            "done": WorkflowStateSpec(
+                state_id="done",
+                actions=(WorkflowActionInvocation(action_id="mark.done"),),
+                terminal=True,
+            ),
+        },
+        termination_states=("done",),
+        metadata={
+            "terminal_success_contract": {
+                "schema_version": "workflow_terminal_success_contract.v1",
+                "success_statuses": ["completed"],
+                "required_summary_fields": [
+                    "workflow_id",
+                    "terminal_status",
+                    "final_state",
+                    "completed",
+                ],
+            }
+        },
+    )
+
+    validation = validate_workflow_definition_contract(definition=definition)
+
+    assert validation["valid"] is True
+    assert validation.get("terminal_success_contract_issues") == []
+
+
+def test_validate_contract_rejects_invalid_terminal_success_contract() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#terminal_success_contract_invalid_workflow",
+        initial_state="done",
+        states={
+            "done": WorkflowStateSpec(
+                state_id="done",
+                actions=(WorkflowActionInvocation(action_id="mark.done"),),
+                terminal=True,
+            ),
+        },
+        termination_states=("done",),
+        metadata={"terminal_success_contract": "invalid"},
+    )
+
+    validation = validate_workflow_definition_contract(definition=definition)
+
+    assert validation["valid"] is False
+    assert "workflow_terminal_success_contract_invalid" in (
+        validation.get("errors") or []
+    )
+
+
 def test_validate_contract_accepts_join_with_declared_fork() -> None:
     definition = WorkflowDefinition(
         workflow_id="#V#join_valid_workflow",

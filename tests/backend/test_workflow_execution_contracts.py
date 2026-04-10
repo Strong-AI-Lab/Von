@@ -60,6 +60,7 @@ def test_workflow_executor_emits_step_and_workflow_result_envelopes() -> None:
     assert result.final_state == "compute"
     assert result.result_envelope is not None
     assert result.result_envelope.get("control_signal") == "return"
+    assert result.result_envelope.get("terminal_status") == "completed"
     assert result.result_envelope.get("declared_output_payload") == {"answer": 42}
     envelopes = result.data.get("workflow_step_result_envelopes")
     assert isinstance(envelopes, list)
@@ -108,6 +109,8 @@ def test_workflow_executor_fails_break_without_explicit_on_break_route() -> None
 
     assert result.completed is False
     assert result.error == "workflow_break_outside_loop_scope"
+    assert result.result_envelope is not None
+    assert result.result_envelope.get("terminal_status") == "failed"
 
 
 def test_step_result_envelope_snapshots_are_detached_from_live_context() -> None:

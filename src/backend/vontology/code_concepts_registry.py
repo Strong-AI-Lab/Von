@@ -108,6 +108,8 @@ _WORKFLOW_PREDICATE_IDS = [
     "#V#has_workflow_plan_state_policy_json",
     "#V#hasWorkflowCompletionGateJson",
     "#V#has_workflow_completion_gate_json",
+    "#V#hasWorkflowTerminalSuccessContractJson",
+    "#V#has_workflow_terminal_success_contract_json",
 ]
 
 _WORKFLOW_PROMPT_PREDICATE_IDS = [

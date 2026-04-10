@@ -64,6 +64,7 @@ from ...workflows.execution_contracts import (
     WORKFLOW_RUNTIME_EVENTS_KEY,
     WORKFLOW_RESULT_ENVELOPE_KEY,
     WORKFLOW_STEP_RESULT_ENVELOPES_KEY,
+    derive_workflow_terminal_status,
 )
 from ...workflows.mcp_tool_bridge import workflow_action_result_from_mcp_payload
 from ...workflows.definitions import (
@@ -88,6 +89,10 @@ from ...workflows.engine import (
     WorkflowResult,
 )
 from ...workflows.metadata_validation import validate_state_metadata_pre_action
+from ...workflows.plan_state_runtime import WORKFLOW_COMPLETION_GATE_KEY
+from ...workflows.terminal_success_contracts import (
+    evaluate_workflow_terminal_success_contract,
+)
 from ...workflows.workflow_launch_input_contracts import (
     resolve_workflow_launch_inputs,
 )
@@ -374,6 +379,72 @@ def _workflow_final_state_is_failure_like(final_state: str | None) -> bool:
     )
 
 
+def _workflow_completion_gate_summary(workflow_result: Any) -> dict[str, Any] | None:
+    result_data = getattr(workflow_result, "data", None)
+    if not isinstance(result_data, Mapping):
+        return None
+    gate_raw = result_data.get(WORKFLOW_COMPLETION_GATE_KEY)
+    gate = gate_raw if isinstance(gate_raw, Mapping) else {}
+    if not gate:
+        return None
+    blocking_reason_codes = [
+        _workflow_execution_summary_text(item)
+        for item in gate.get("blocking_reason_codes") or []
+        if _workflow_execution_summary_text(item)
+    ]
+    return {
+        "safe_to_claim_completion": bool(gate.get("safe_to_claim_completion", False)),
+        "blocking_reason_codes": list(blocking_reason_codes),
+    }
+
+
+def _workflow_terminal_success_contract_from_result(
+    workflow_result: Any,
+) -> Mapping[str, Any] | None:
+    result_data = getattr(workflow_result, "data", None)
+    if not isinstance(result_data, Mapping):
+        return None
+    contract = result_data.get("workflow_terminal_success_contract")
+    if isinstance(contract, Mapping):
+        return contract
+    return None
+
+
+def _workflow_terminal_success_evaluation_from_result(
+    workflow_result: Any,
+) -> Mapping[str, Any] | None:
+    result_data = getattr(workflow_result, "data", None)
+    if not isinstance(result_data, Mapping):
+        return None
+    evaluation = result_data.get("workflow_terminal_success_evaluation")
+    if isinstance(evaluation, Mapping):
+        return evaluation
+    return None
+
+
+def _derive_workflow_terminal_status(workflow_result: Any) -> str | None:
+    result_data = getattr(workflow_result, "data", None)
+    if isinstance(result_data, Mapping):
+        result_envelope = result_data.get(WORKFLOW_RESULT_ENVELOPE_KEY)
+        if isinstance(result_envelope, Mapping):
+            envelope_status = _workflow_execution_summary_text(
+                result_envelope.get("terminal_status")
+            )
+            if envelope_status:
+                return envelope_status
+    error_text = _workflow_execution_summary_text(getattr(workflow_result, "error", None))
+    final_state = _workflow_execution_summary_text(
+        getattr(workflow_result, "final_state", None)
+    )
+    if not final_state:
+        return None
+    return derive_workflow_terminal_status(
+        completed=bool(getattr(workflow_result, "completed", False)),
+        final_state=final_state,
+        error=error_text or None,
+    )
+
+
 def _workflow_result_effective_completed(workflow_result: Any) -> bool:
     if not bool(getattr(workflow_result, "completed", False)):
         return False
@@ -382,7 +453,14 @@ def _workflow_result_effective_completed(workflow_result: Any) -> bool:
     final_state = _workflow_execution_summary_text(
         getattr(workflow_result, "final_state", None)
     )
-    return not _workflow_final_state_is_failure_like(final_state)
+    if _workflow_final_state_is_failure_like(final_state):
+        return False
+    terminal_success_evaluation = _workflow_terminal_success_evaluation_from_result(
+        workflow_result
+    )
+    if isinstance(terminal_success_evaluation, Mapping):
+        return bool(terminal_success_evaluation.get("success"))
+    return True
 
 
 def _workflow_execution_summary_mapping_list(value: Any) -> list[Mapping[str, Any]]:
@@ -747,12 +825,22 @@ def _build_workflow_execution_summary(
     final_state = _workflow_execution_summary_text(
         getattr(workflow_result, "final_state", None)
     )
-    completed = _workflow_result_effective_completed(workflow_result)
+    completed = bool(getattr(workflow_result, "completed", False))
+    terminal_status = _derive_workflow_terminal_status(workflow_result)
+    completion_gate_summary = _workflow_completion_gate_summary(workflow_result)
+    terminal_success_contract = _workflow_terminal_success_contract_from_result(
+        workflow_result
+    )
+    terminal_success_evaluation = _workflow_terminal_success_evaluation_from_result(
+        workflow_result
+    )
 
-    return {
+    summary: dict[str, Any] = {
         "schema_version": _WORKFLOW_EXECUTION_SUMMARY_SCHEMA_VERSION,
         "workflow_id": workflow_id,
         "completed": completed,
+        "effective_completed": _workflow_result_effective_completed(workflow_result),
+        "terminal_status": terminal_status,
         "final_state": final_state,
         "step_result_envelope_count": len(step_envelopes),
         "action_started_count": len(step_envelopes),
@@ -768,6 +856,18 @@ def _build_workflow_execution_summary(
         "durable_side_effect_count": durable_side_effect_count,
         "durable_side_effects": durable_side_effects,
     }
+    if isinstance(completion_gate_summary, Mapping):
+        summary["completion_gate_safe_to_claim_completion"] = bool(
+            completion_gate_summary.get("safe_to_claim_completion", False)
+        )
+        summary["completion_gate_blocking_reason_codes"] = list(
+            completion_gate_summary.get("blocking_reason_codes") or []
+        )
+    if isinstance(terminal_success_contract, Mapping):
+        summary["terminal_success_contract"] = dict(terminal_success_contract)
+    if isinstance(terminal_success_evaluation, Mapping):
+        summary["terminal_success_evaluation"] = dict(terminal_success_evaluation)
+    return summary
 
 
 def _build_workflow_execution_aux_entry(
@@ -19093,6 +19193,44 @@ class InternalMCPChatOrchestrator:
                 workflow_ids.append(workflow_id)
             return workflow_ids
 
+        def _attach_terminal_success_contract(
+            workflow_result: Any,
+        ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+            result_data = getattr(workflow_result, "data", None)
+            if not isinstance(result_data, dict):
+                return None, None
+
+            contract_payload = result_data.get("workflow_terminal_success_contract")
+            if not isinstance(contract_payload, Mapping):
+                definition_metadata = (
+                    dict(getattr(workflow_def, "metadata", {}) or {})
+                    if workflow_def is not None
+                    and isinstance(getattr(workflow_def, "metadata", None), Mapping)
+                    else {}
+                )
+                contract_payload = definition_metadata.get("terminal_success_contract")
+            contract = (
+                dict(contract_payload)
+                if isinstance(contract_payload, Mapping)
+                else None
+            )
+            if not isinstance(contract, dict):
+                return None, None
+
+            result_data["workflow_terminal_success_contract"] = dict(contract)
+            summary_for_evaluation = _build_workflow_execution_summary(
+                workflow_id=workflow_id,
+                workflow_result=workflow_result,
+            )
+            evaluation = evaluate_workflow_terminal_success_contract(
+                contract=contract,
+                execution_summary=summary_for_evaluation,
+            )
+            if isinstance(evaluation, Mapping):
+                result_data["workflow_terminal_success_evaluation"] = dict(evaluation)
+                return dict(contract), dict(evaluation)
+            return dict(contract), None
+
         def _build_turn_execution_selection_snapshot(
             *,
             workflow_data: Any,
@@ -19854,6 +19992,7 @@ class InternalMCPChatOrchestrator:
                         + ",".join(unresolved_required_inputs)
                     ),
                 )
+                _attach_terminal_success_contract(launch_failure_result)
                 launch_failure_result.data["workflow_execution_summary"] = (
                     _build_workflow_execution_summary(
                         workflow_id=workflow_id,
@@ -20407,6 +20546,7 @@ class InternalMCPChatOrchestrator:
                 trace=trace,
             )
             if isinstance(getattr(result, "data", None), dict):
+                _attach_terminal_success_contract(result)
                 result.data["workflow_execution_summary"] = (
                     _build_workflow_execution_summary(
                         workflow_id=workflow_id,

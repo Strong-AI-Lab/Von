@@ -339,6 +339,11 @@ def build_workflow_result_envelope(
         "schema_version": WORKFLOW_RESULT_ENVELOPE_SCHEMA_VERSION,
         "workflow_id": str(workflow_id or "").strip(),
         "completed": bool(completed),
+        "terminal_status": derive_workflow_terminal_status(
+            completed=bool(completed),
+            final_state=str(final_state or "").strip(),
+            error=str(error) if error else None,
+        ),
         "final_state": str(final_state or "").strip(),
         "control_signal": normalise_control_signal(control_signal),
         "declared_output_payload": return_payload,
@@ -360,6 +365,23 @@ def set_workflow_result_envelope(
     envelope: Mapping[str, Any],
 ) -> None:
     context[WORKFLOW_RESULT_ENVELOPE_KEY] = snapshot_workflow_mapping(envelope)
+
+
+def derive_workflow_terminal_status(
+    *,
+    completed: bool,
+    final_state: str,
+    error: str | None,
+) -> str:
+    error_text = str(error or "").strip().lower()
+    final_state_text = str(final_state or "").strip().lower()
+    if error_text == "cancelled":
+        return "cancelled"
+    if completed:
+        return "completed"
+    if error_text or final_state_text in {"failed", "error", "cancelled"}:
+        return "failed"
+    return "terminated"
 
 
 def build_arxiv_ingestion_completion_report(

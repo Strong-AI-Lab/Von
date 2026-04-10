@@ -625,6 +625,7 @@ Current schema versions:
 - `workflow_step_checkpoint_policy.v1`
 - `workflow_plan_state_policy.v1`
 - `workflow_completion_gate.v1`
+- `workflow_terminal_success_contract.v1`
 - `workflow_launch_input_contract.v1`
 - `workflow_template_profile.v1`
 
@@ -641,6 +642,8 @@ Normative semantics:
 - checkpoint policies update the shared runtime plan-state artefact rather than introducing workflow-specific Python persistence logic;
 - plan-state items support `pending|in_progress|blocked|done` statuses, bounded checkpoint history, periodic summary snapshots, resumable cursor snapshots, and resume telemetry;
 - completion gates MUST fail closed before terminal success when required plan items or required context keys are not satisfied;
+- terminal-success contracts MAY declare which terminal statuses count as success for a workflow boundary and which execution-summary fields MUST be present before a parent turn or workflow may treat the child workflow as successful;
+- when a workflow declares a terminal-success contract, runtimes and parent completion gates MUST fail closed if terminal status or other contracted summary fields are absent or violate the contract;
 - launch input contracts MAY map invocation-context values into workflow context keys before the initial state executes;
 - launch input contracts MUST remain declarative, so reusable extractors such as quoted-text extraction or workflow-ID list extraction are configured in metadata rather than hard-coded for specific workflow IDs.
 - typed-subworkflow route maps MAY be published on workflow concepts via `#V#hasWorkflowTypedSubworkflowRouteMapJson` using schema `workflow_typed_subworkflow_route_map.v1`;

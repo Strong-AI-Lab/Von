@@ -893,6 +893,148 @@ def test_derive_completion_gate_blocks_workflow_terminal_failure_without_require
     )
 
 
+def test_derive_completion_gate_fails_when_contracted_workflow_reports_failed_terminal_status() -> None:
+    completion_gate = _derive_completion_gate(
+        required_effects=[],
+        postcondition_checks=[],
+        completion_claim_validated=True,
+        execution_summary={
+            "selected_execution_mode": "custom_workflow",
+            "dispatch_workflow_id": "#V#diagnostic_workflow",
+            "dispatch_terminal_status": "failed",
+            "dispatch_terminal_failure_reason": "workflow_runtime_failed",
+            "dispatch_terminal_failure_detail": "Diagnostic workflow failed.",
+            "planned_count": 0,
+            "executed_count": 0,
+            "successful_invocation_count": 0,
+            "failed_invocation_count": 0,
+            "blocked_invocation_count": 0,
+            "failure_codes": ["workflow_runtime_failed"],
+            "custom_workflow_execution": {
+                "workflow_id": "#V#diagnostic_workflow",
+                "completed": False,
+                "terminal_status": "failed",
+                "final_state": "failed",
+                "terminal_success_contract": {
+                    "schema_version": "workflow_terminal_success_contract.v1",
+                    "success_statuses": ["completed"],
+                },
+                "terminal_success_evaluation": {
+                    "schema_version": "workflow_terminal_success_evaluation.v1",
+                    "success": False,
+                    "terminal_status": "failed",
+                    "failure_codes": [
+                        "contracted_workflow_terminal_status_unexpected"
+                    ],
+                    "decision_reason": (
+                        "Contracted workflow terminal status failed is not listed as a success status."
+                    ),
+                },
+            },
+        },
+    )
+
+    assert completion_gate["decision"] == "failed"
+    assert completion_gate["safe_to_claim_completion"] is False
+    assert completion_gate["requires_follow_up"] is True
+    assert completion_gate["repeat_eligible"] is False
+    assert completion_gate["blocking_failure_codes"] == [
+        "contracted_workflow_terminal_status_unexpected"
+    ]
+
+
+def test_derive_completion_gate_fails_when_contracted_workflow_terminal_status_missing() -> None:
+    completion_gate = _derive_completion_gate(
+        required_effects=[],
+        postcondition_checks=[],
+        completion_claim_validated=True,
+        execution_summary={
+            "selected_execution_mode": "custom_workflow",
+            "dispatch_workflow_id": "#V#diagnostic_workflow",
+            "dispatch_terminal_status": "",
+            "planned_count": 0,
+            "executed_count": 0,
+            "successful_invocation_count": 0,
+            "failed_invocation_count": 0,
+            "blocked_invocation_count": 0,
+            "failure_codes": [],
+            "custom_workflow_execution": {
+                "workflow_id": "#V#diagnostic_workflow",
+                "completed": False,
+                "terminal_status": "",
+                "final_state": "done",
+                "terminal_success_contract": {
+                    "schema_version": "workflow_terminal_success_contract.v1",
+                    "success_statuses": ["completed"],
+                },
+                "terminal_success_evaluation": {
+                    "schema_version": "workflow_terminal_success_evaluation.v1",
+                    "success": False,
+                    "terminal_status": None,
+                    "failure_codes": [
+                        "contracted_workflow_terminal_status_missing"
+                    ],
+                    "decision_reason": (
+                        "Contracted workflow did not report a terminal status."
+                    ),
+                },
+            },
+        },
+    )
+
+    assert completion_gate["decision"] == "failed"
+    assert completion_gate["safe_to_claim_completion"] is False
+    assert completion_gate["requires_follow_up"] is True
+    assert completion_gate["repeat_eligible"] is False
+    assert completion_gate["blocking_failure_codes"] == [
+        "contracted_workflow_terminal_status_missing"
+    ]
+
+
+def test_derive_completion_gate_allows_contracted_workflow_success_status() -> None:
+    completion_gate = _derive_completion_gate(
+        required_effects=[],
+        postcondition_checks=[],
+        completion_claim_validated=True,
+        execution_summary={
+            "selected_execution_mode": "custom_workflow",
+            "dispatch_workflow_id": "#V#diagnostic_workflow",
+            "dispatch_terminal_status": "completed",
+            "planned_count": 0,
+            "executed_count": 0,
+            "successful_invocation_count": 0,
+            "failed_invocation_count": 0,
+            "blocked_invocation_count": 0,
+            "failure_codes": [],
+            "custom_workflow_execution": {
+                "workflow_id": "#V#diagnostic_workflow",
+                "completed": True,
+                "effective_completed": True,
+                "terminal_status": "completed",
+                "final_state": "done",
+                "terminal_success_contract": {
+                    "schema_version": "workflow_terminal_success_contract.v1",
+                    "success_statuses": ["completed"],
+                },
+                "terminal_success_evaluation": {
+                    "schema_version": "workflow_terminal_success_evaluation.v1",
+                    "success": True,
+                    "terminal_status": "completed",
+                    "failure_codes": [],
+                    "decision_reason": (
+                        "Contracted workflow reported a terminal success state."
+                    ),
+                },
+            },
+        },
+    )
+
+    assert completion_gate["decision"] == "completed"
+    assert completion_gate["safe_to_claim_completion"] is True
+    assert completion_gate["requires_follow_up"] is False
+    assert completion_gate["blocking_failure_codes"] == []
+
+
 def test_turn_completion_gate_does_not_repeat_terminal_execution_failure() -> None:
     orchestrator = _build_orchestrator()
     request = _build_request(

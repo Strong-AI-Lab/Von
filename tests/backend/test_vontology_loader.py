@@ -609,6 +609,14 @@ class TestWorkflowLongHorizonPolicyResolution:
                         '"required_context_keys":["dispatch.completed"]}'
                     ),
                 },
+                {
+                    "predicate": "#V#hasWorkflowTerminalSuccessContractJson",
+                    "text": (
+                        '{"schema_version":"workflow_terminal_success_contract.v1",'
+                        '"success_statuses":["completed"],'
+                        '"required_summary_fields":["workflow_id","terminal_status","final_state","completed"]}'
+                    ),
+                },
             ],
         ):
             policies, warnings = resolve_workflow_long_horizon_policies(
@@ -634,6 +642,15 @@ class TestWorkflowLongHorizonPolicyResolution:
             "discover": "done",
             "dispatch": "done",
         }
+        assert policies["terminal_success_contract"]["success_statuses"] == [
+            "completed"
+        ]
+        assert policies["terminal_success_contract"]["required_summary_fields"] == [
+            "workflow_id",
+            "terminal_status",
+            "final_state",
+            "completed",
+        ]
 
     def test_resolve_workflow_long_horizon_policies_fetches_texts_once(self):
         rows = [
@@ -649,6 +666,13 @@ class TestWorkflowLongHorizonPolicyResolution:
                 "text": (
                     '{"schema_version":"workflow_completion_gate.v1",'
                     '"required_done_plan_items":["discover"]}'
+                ),
+            },
+            {
+                "predicate": "#V#hasWorkflowTerminalSuccessContractJson",
+                "text": (
+                    '{"schema_version":"workflow_terminal_success_contract.v1",'
+                    '"success_statuses":["completed"]}'
                 ),
             },
         ]

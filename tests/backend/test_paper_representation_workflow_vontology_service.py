@@ -103,6 +103,16 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
     )
     assert arxiv_definition is not None
+    scholarly_terminal_contract = scholarly_definition.metadata.get(
+        "terminal_success_contract"
+    )
+    assert isinstance(scholarly_terminal_contract, dict)
+    assert scholarly_terminal_contract.get("success_statuses") == ["completed"]
+    arxiv_terminal_contract = arxiv_definition.metadata.get(
+        "terminal_success_contract"
+    )
+    assert isinstance(arxiv_terminal_contract, dict)
+    assert arxiv_terminal_contract.get("success_statuses") == ["completed"]
     arxiv_launch_contract = arxiv_definition.metadata.get("launch_input_contract")
     assert isinstance(arxiv_launch_contract, dict)
     assert arxiv_launch_contract.get("schema_version") == (
@@ -472,7 +482,10 @@ def test_bootstrap_preserves_authoritative_state_when_repo_seed_snapshot_is_stal
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
     )
     assert repaired_routing_source.startswith("text_relation:")
-    assert repaired_routing_profile == updated_routing_profile
+    assert repaired_routing_profile == {
+        **updated_routing_profile,
+        "explicit_workflow_context_required": False,
+    }
     repaired_discovery_exemplars, repaired_discovery_source = (
         resolve_workflow_discovery_exemplars(ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID)
     )
@@ -620,6 +633,10 @@ def test_export_refreshes_paper_repo_seed_bundle_from_authority(
     )
     assert any(
         item.get("predicate") == "#V#hasWorkflowDiscoveryExemplarsJson"
+        for item in text_relations
+    )
+    assert any(
+        item.get("predicate") == "#V#hasWorkflowTerminalSuccessContractJson"
         for item in text_relations
     )
 
