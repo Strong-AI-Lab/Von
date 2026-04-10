@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import pytest
+
 from representation_intent_regression_helpers import (
     build_turn_record as _build_record,
 )
+from src.backend.workflows.engine import WorkflowDefinition
 
 
 def _paper_continuation_contract() -> dict[str, object]:
@@ -28,6 +31,102 @@ def _paper_continuation_contract() -> dict[str, object]:
             }
         ],
     }
+
+
+def _workflow_required_effects_contract() -> dict[str, object]:
+    return {
+        "schema_version": "workflow_required_effects_contract.v1",
+        "contract_id": "conversation_diagnostics",
+        "required_effects": [
+            {
+                "effect_id": "conversation_locator",
+                "effect_type": "diagnostic_evidence",
+                "required_tools": ["conversation_telemetry_get_locator"],
+                "activation_required_tools": [
+                    "conversation_telemetry_get_locator",
+                    "chat_history_get_segments",
+                    "chat_history_get_debug_entry",
+                ],
+                "activation_required_tools_match": "any",
+                "missing_failure_code": "conversation_locator_missing",
+                "failed_failure_code": "conversation_locator_failed",
+            },
+            {
+                "effect_id": "conversation_history",
+                "effect_type": "diagnostic_evidence",
+                "required_tools": [
+                    "chat_history_get_segments",
+                    "chat_history_get_debug_entry",
+                ],
+                "required_tools_match": "any",
+                "activation_required_tools": [
+                    "conversation_telemetry_get_locator",
+                    "chat_history_get_segments",
+                    "chat_history_get_debug_entry",
+                ],
+                "activation_required_tools_match": "any",
+                "missing_failure_code": "conversation_history_missing",
+                "failed_failure_code": "conversation_history_failed",
+            },
+        ],
+    }
+
+
+def _patch_workflow_required_effects_contract(monkeypatch) -> None:
+    contract = _workflow_required_effects_contract()
+    definition = WorkflowDefinition(
+        workflow_id="#V#tool_calling_workflow",
+        initial_state="done",
+        states={},
+        metadata={
+            "required_effects_contract": contract,
+            "required_effects_contract_source": (
+                "text_relation:#V#hasWorkflowRequiredEffectsContractJson"
+            ),
+        },
+    )
+
+    class _Registry:
+        def get(self, workflow_id: str):
+            if workflow_id == "#V#tool_calling_workflow":
+                return definition
+            return None
+
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.registry_factory.get_shared_workflow_registry_read_only",
+        lambda defer_parity_work=True: _Registry(),
+    )
+
+
+@pytest.fixture(autouse=True)
+def _stub_shared_workflow_registry(monkeypatch):
+    class _EmptyRegistry:
+        def get(self, workflow_id: str):
+            return None
+
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.registry_factory.get_shared_workflow_registry_read_only",
+        lambda defer_parity_work=True: _EmptyRegistry(),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.turn_execution_record_service.build_conversation_turn_stage_model_snapshot",
+        lambda: {
+            "schema_version": "conversation_turn_stage_model.v1",
+            "workflow_representation_id": "#V#conversation_turn_execution_workflow",
+            "stages": [],
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.turn_execution_record_service.build_conversation_turn_stage_path",
+        lambda runtime_stages, workflow_id=None: {
+            "schema_version": "conversation_turn_stage_path.v1",
+            "workflow_id": workflow_id,
+            "workflow_id_source": "test_stub",
+            "path": [],
+            "unmapped_runtime_stages": [],
+            "observed_workflow_ids": [],
+        },
+    )
 
 
 def test_prompt_only_representation_request_does_not_emit_required_effects_contract() -> None:
@@ -322,3 +421,123 @@ def test_summary_only_write_activity_does_not_emit_generic_mutation_effect() -> 
         isinstance(effect, dict) and effect.get("effect_type") != "kb_mutation"
         for effect in required_effects
     )
+
+
+def test_workflow_authored_required_evidence_contract_blocks_missing_locator(
+    monkeypatch,
+) -> None:
+    _patch_workflow_required_effects_contract(monkeypatch)
+
+    record = _build_record(
+        prompt_text="Explain the failure in more detail from the telemetry.",
+        tool_invocations=[
+            {
+                "tool": "chat_history_get_segments",
+                "payload": {"success": True},
+            }
+        ],
+    )
+
+    execution = record.get("execution")
+    assert isinstance(execution, dict)
+    workflow_contract = execution.get("workflow_required_effects_contract")
+    assert isinstance(workflow_contract, dict)
+    assert workflow_contract.get("contract_id") == "conversation_diagnostics"
+
+    required_effects = record.get("required_effects")
+    assert isinstance(required_effects, list)
+    locator_effect = next(
+        effect
+        for effect in required_effects
+        if effect.get("effect_id") == "conversation_locator"
+    )
+    history_effect = next(
+        effect
+        for effect in required_effects
+        if effect.get("effect_id") == "conversation_history"
+    )
+    assert locator_effect.get("intent_origin") == "workflow_authored"
+    assert locator_effect.get("status") == "not_executed"
+    assert locator_effect.get("failure_code") == "conversation_locator_missing"
+    assert history_effect.get("status") == "satisfied"
+
+    completion_gate = record.get("completion_gate") or {}
+    assert completion_gate.get("decision") == "escalation_required"
+    assert completion_gate.get("safe_to_claim_completion") is False
+    assert completion_gate.get("requires_follow_up") is True
+    assert "conversation_locator_missing" in (
+        completion_gate.get("blocking_failure_codes") or []
+    )
+
+
+def test_required_evidence_permission_denied_is_preserved_distinctly(
+    monkeypatch,
+) -> None:
+    _patch_workflow_required_effects_contract(monkeypatch)
+
+    record = _build_record(
+        prompt_text="Explain the failure in more detail from the telemetry.",
+        tool_invocations=[
+            {
+                "tool": "conversation_telemetry_get_locator",
+                "error": "PERMISSION_DENIED",
+                "result_summary": "Error: PERMISSION_DENIED — Not authorised for conversation",
+                "payload": {"success": False},
+            },
+            {
+                "tool": "chat_history_get_segments",
+                "payload": {"success": True},
+            },
+        ],
+    )
+
+    required_effects = record.get("required_effects")
+    assert isinstance(required_effects, list)
+    locator_effect = next(
+        effect
+        for effect in required_effects
+        if effect.get("effect_id") == "conversation_locator"
+    )
+    assert locator_effect.get("status") == "not_satisfied"
+    assert "required_evidence_permission_denied" in (
+        locator_effect.get("failure_codes") or []
+    )
+
+    completion_gate = record.get("completion_gate") or {}
+    assert completion_gate.get("decision") == "failed"
+    assert completion_gate.get("safe_to_claim_completion") is False
+    assert "required_evidence_permission_denied" in (
+        completion_gate.get("blocking_failure_codes") or []
+    )
+    assert "PERMISSION_DENIED" in (completion_gate.get("decision_reason") or "")
+
+
+def test_incidental_read_tool_failure_outside_required_evidence_contract_does_not_block(
+    monkeypatch,
+) -> None:
+    _patch_workflow_required_effects_contract(monkeypatch)
+
+    record = _build_record(
+        prompt_text="Explain the failure in more detail from the telemetry.",
+        response_text="Here is the telemetry explanation.",
+        tool_invocations=[
+            {
+                "tool": "fetch_concept",
+                "payload": {"success": True},
+            },
+            {
+                "tool": "search_concepts",
+                "error": "lookup_failed",
+                "result_summary": "Search failed",
+                "payload": {"success": False},
+            }
+        ],
+    )
+
+    required_effects = record.get("required_effects")
+    assert isinstance(required_effects, list)
+    assert required_effects == []
+
+    completion_gate = record.get("completion_gate") or {}
+    assert completion_gate.get("decision") == "completed"
+    assert completion_gate.get("safe_to_claim_completion") is True

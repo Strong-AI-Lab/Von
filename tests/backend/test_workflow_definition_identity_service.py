@@ -686,6 +686,39 @@ def test_validate_contract_accepts_terminal_success_contract() -> None:
     assert validation.get("terminal_success_contract_issues") == []
 
 
+def test_validate_contract_accepts_required_effects_contract() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#required_effects_contract_workflow",
+        initial_state="done",
+        states={
+            "done": WorkflowStateSpec(
+                state_id="done",
+                actions=(WorkflowActionInvocation(action_id="mark.done"),),
+                terminal=True,
+            ),
+        },
+        termination_states=("done",),
+        metadata={
+            "required_effects_contract": {
+                "schema_version": "workflow_required_effects_contract.v1",
+                "contract_id": "conversation_diagnostics",
+                "required_effects": [
+                    {
+                        "effect_id": "locator",
+                        "effect_type": "diagnostic_evidence",
+                        "required_tools": ["conversation_telemetry_get_locator"],
+                    }
+                ],
+            }
+        },
+    )
+
+    validation = validate_workflow_definition_contract(definition=definition)
+
+    assert validation["valid"] is True
+    assert validation.get("required_effects_contract_issues") == []
+
+
 def test_validate_contract_rejects_invalid_terminal_success_contract() -> None:
     definition = WorkflowDefinition(
         workflow_id="#V#terminal_success_contract_invalid_workflow",
@@ -705,6 +738,29 @@ def test_validate_contract_rejects_invalid_terminal_success_contract() -> None:
 
     assert validation["valid"] is False
     assert "workflow_terminal_success_contract_invalid" in (
+        validation.get("errors") or []
+    )
+
+
+def test_validate_contract_rejects_invalid_required_effects_contract() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#required_effects_contract_invalid_workflow",
+        initial_state="done",
+        states={
+            "done": WorkflowStateSpec(
+                state_id="done",
+                actions=(WorkflowActionInvocation(action_id="mark.done"),),
+                terminal=True,
+            ),
+        },
+        termination_states=("done",),
+        metadata={"required_effects_contract": "invalid"},
+    )
+
+    validation = validate_workflow_definition_contract(definition=definition)
+
+    assert validation["valid"] is False
+    assert "workflow_required_effects_contract_invalid" in (
         validation.get("errors") or []
     )
 

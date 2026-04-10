@@ -1264,6 +1264,13 @@
           }
         ]
       },
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowRequiredEffectsContractJson",
+          "text": "{\"schema_version\":\"workflow_required_effects_contract.v1\",\"contract_id\":\"conversation_diagnostics_required_evidence\",\"required_effects\":[{\"effect_id\":\"conversation_locator\",\"effect_type\":\"diagnostic_evidence\",\"required_tools\":[\"conversation_telemetry_get_locator\"],\"activation_required_tools\":[\"conversation_telemetry_get_locator\",\"chat_history_get_segments\",\"chat_history_get_debug_entry\"],\"activation_required_tools_match\":\"any\",\"missing_failure_code\":\"conversation_locator_missing\",\"failed_failure_code\":\"conversation_locator_failed\"},{\"effect_id\":\"conversation_history\",\"effect_type\":\"diagnostic_evidence\",\"required_tools\":[\"chat_history_get_segments\",\"chat_history_get_debug_entry\"],\"required_tools_match\":\"any\",\"activation_required_tools\":[\"conversation_telemetry_get_locator\",\"chat_history_get_segments\",\"chat_history_get_debug_entry\"],\"activation_required_tools_match\":\"any\",\"missing_failure_code\":\"conversation_history_missing\",\"failed_failure_code\":\"conversation_history_failed\"}]}",
+          "lang": "en-NZ"
+        }
+      ],
       "workflow_id": "#V#tool_calling_workflow"
     },
     {

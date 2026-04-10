@@ -34,6 +34,9 @@ from ..workflows.conversation_turn_stage_model import (
     build_conversation_turn_stage_model_snapshot,
     build_conversation_turn_stage_path,
 )
+from ..workflows.required_effects_contracts import (
+    WORKFLOW_REQUIRED_EFFECTS_CONTRACT_SCHEMA_VERSION,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -3710,11 +3713,146 @@ def _build_representation_required_effects_contract(
     return _representation_contract_from_continuation_context(continuation_context)
 
 
+def _load_workflow_required_effects_contract(
+    *,
+    workflow_id: str | None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    workflow_id_value = _safe_str(workflow_id)
+    if not workflow_id_value:
+        return None, None
+
+    definition = None
+    try:
+        from ..workflows.durable.registry_factory import (
+            get_shared_workflow_registry_read_only,
+        )
+
+        registry = get_shared_workflow_registry_read_only(defer_parity_work=True)
+        definition = registry.get(workflow_id_value) if registry is not None else None
+    except Exception:
+        logger.debug(
+            "workflow required-effects contract load via registry failed",
+            exc_info=True,
+        )
+
+    if definition is None:
+        return None, None
+
+    metadata_raw = getattr(definition, "metadata", None)
+    metadata = dict(metadata_raw) if isinstance(metadata_raw, Mapping) else {}
+    contract = metadata.get("required_effects_contract")
+    if not isinstance(contract, Mapping):
+        return None, None
+    contract_source = _safe_str(metadata.get("required_effects_contract_source"))
+    return dict(contract), contract_source
+
+
 def _is_representation_effect_type(effect_type: str | None) -> bool:
     if not isinstance(effect_type, str):
         return False
     lowered = effect_type.strip().lower()
     return lowered == "scholarly_representation" or lowered.startswith("representation_")
+
+
+def _is_evidence_effect_type(effect_type: str | None) -> bool:
+    if not isinstance(effect_type, str):
+        return False
+    lowered = effect_type.strip().lower()
+    return lowered == "required_evidence" or lowered.endswith("_evidence") or (
+        "evidence" in lowered
+    )
+
+
+def _normalise_required_tools_match_mode(value: Any, *, default: str = "any") -> str:
+    token = (_safe_str(value) or "").lower().replace("-", "_")
+    if token in {"all", "every"}:
+        return "all"
+    if token in {"any", "one", "some"}:
+        return "any"
+    return default
+
+
+def _tools_match_mode_satisfied(
+    *,
+    observed_tools: set[str],
+    required_tools: Sequence[str],
+    match_mode: str,
+) -> bool:
+    cleaned_required = [
+        tool.lower().strip() for tool in required_tools if isinstance(tool, str) and tool.strip()
+    ]
+    if not cleaned_required:
+        return False
+    if match_mode == "all":
+        return all(tool in observed_tools for tool in cleaned_required)
+    return any(tool in observed_tools for tool in cleaned_required)
+
+
+def _effect_failure_code_slug(effect: Mapping[str, Any]) -> str:
+    effect_id = _safe_str(effect.get("effect_id")) or "required_effect"
+    slug = re.sub(r"[^a-z0-9]+", "_", effect_id.lower()).strip("_")
+    return slug or "required_effect"
+
+
+def _summarise_required_tool_failure(
+    *,
+    effect: Mapping[str, Any],
+    failed_tools: set[str],
+    blocked_tools: set[str],
+    tool_invocations: Sequence[Mapping[str, Any]] | None,
+) -> tuple[str, list[str]]:
+    required_tools = _dedupe_string_sequence(effect.get("required_tools") or [])
+    effect_slug = _effect_failure_code_slug(effect)
+    default_failed_code = (
+        _safe_str(effect.get("failed_failure_code"))
+        or f"{effect_slug}_failed"
+    )
+    default_reason = (
+        _safe_str(effect.get("not_satisfied_reason"))
+        or "Required evidence retrieval failed."
+    )
+
+    for tool_name in required_tools:
+        lowered = tool_name.lower()
+        if lowered not in failed_tools and lowered not in blocked_tools:
+            continue
+        for invocation in tool_invocations or ():
+            if not isinstance(invocation, Mapping):
+                continue
+            invocation_tool = _safe_str(invocation.get("tool")) or _safe_str(
+                invocation.get("method")
+            )
+            if (invocation_tool or "").lower() != lowered:
+                continue
+            payload = _extract_tool_invocation_payload(invocation)
+            status = _classify_tool_invocation_status(
+                invocation=invocation,
+                payload=payload,
+            )
+            if status == "ok":
+                continue
+            error_text = _safe_str(invocation.get("error"))
+            result_summary = _safe_str(invocation.get("result_summary"))
+            payload_summary = (
+                _safe_str(payload.get("result_summary")) if isinstance(payload, Mapping) else None
+            ) or (
+                _safe_str(payload.get("summary")) if isinstance(payload, Mapping) else None
+            )
+            detail = error_text or result_summary or payload_summary
+            if status == "blocked":
+                detail = detail or f"Required evidence tool was blocked: {tool_name}."
+            else:
+                detail = detail or f"Required evidence tool failed: {tool_name}."
+            detail_lower = detail.lower()
+            failure_codes = [default_failed_code]
+            if "permission_denied" in detail_lower or "permission denied" in detail_lower:
+                failure_codes.insert(0, "required_evidence_permission_denied")
+            elif "not authorised for conversation" in detail_lower or (
+                "not authorized for conversation" in detail_lower
+            ):
+                failure_codes.insert(0, "required_evidence_permission_denied")
+            return detail, _dedupe_string_sequence(failure_codes)
+    return default_reason, [default_failed_code]
 
 
 _REPRESENTATION_EFFECT_PAYLOAD_KEYS: dict[str, str] = {
@@ -3880,17 +4018,48 @@ def _materialise_required_effects_from_contract(
     if not isinstance(raw_effects, Sequence) or isinstance(raw_effects, (str, bytes)):
         return []
 
-    successful_lookup = {name.lower() for name in successful_tools if isinstance(name, str)}
+    successful_lookup = {
+        name.lower() for name in successful_tools if isinstance(name, str)
+    }
     failed_lookup = {name.lower() for name in failed_tools if isinstance(name, str)}
     blocked_lookup = {name.lower() for name in blocked_tools if isinstance(name, str)}
+    observed_lookup = successful_lookup.union(failed_lookup).union(blocked_lookup)
 
-    domain_id = _safe_str(contract.get("domain_profile_id")) or "representation"
+    contract_schema_version = _safe_str(contract.get("schema_version")) or ""
+    contract_intent = (_safe_str(contract.get("intent_class")) or "").lower()
+    contract_source = (
+        "workflow_required_effects_contract"
+        if contract_schema_version == WORKFLOW_REQUIRED_EFFECTS_CONTRACT_SCHEMA_VERSION
+        else "required_effects_contract"
+    )
+    domain_id = _safe_str(contract.get("domain_profile_id")) or (
+        "evidence" if contract_intent == "evidence" else "representation"
+    )
     required_effects: list[dict[str, Any]] = []
     for template in raw_effects:
         if not isinstance(template, Mapping):
             continue
         effect = dict(template)
         required_tools = _dedupe_string_sequence(effect.get("required_tools") or [])
+        if not required_tools:
+            continue
+        required_tools_match = _normalise_required_tools_match_mode(
+            effect.get("required_tools_match"),
+            default="any",
+        )
+        activation_required_tools = _dedupe_string_sequence(
+            effect.get("activation_required_tools") or []
+        )
+        activation_required_tools_match = _normalise_required_tools_match_mode(
+            effect.get("activation_required_tools_match"),
+            default="any",
+        )
+        if activation_required_tools and not _tools_match_mode_satisfied(
+            observed_tools=observed_lookup,
+            required_tools=activation_required_tools,
+            match_mode=activation_required_tools_match,
+        ):
+            continue
 
         existing_status = (_safe_str(effect.get("status")) or "").lower()
         effect_status = (
@@ -3898,40 +4067,71 @@ def _materialise_required_effects_from_contract(
             if existing_status in {"satisfied", "not_satisfied", "not_executed"}
             else "not_executed"
         )
-        status_reason = _safe_str(effect.get("status_reason")) or (
-            "No required representation tool execution was observed."
+        default_not_executed_reason = (
+            _safe_str(effect.get("not_executed_reason"))
+            or _safe_str(effect.get("status_reason"))
+            or (
+                "No required representation tool execution was observed."
+                if contract_intent == "representation"
+                or _is_representation_effect_type(_safe_str(effect.get("effect_type")))
+                else "Required evidence was not retrieved."
+                if _is_evidence_effect_type(_safe_str(effect.get("effect_type")))
+                else "Required effect was not observed."
+            )
         )
+        status_reason = default_not_executed_reason
         failure_codes = _normalise_failure_codes(effect.get("failure_codes"))
         explicit_failure_code = _safe_str(effect.get("failure_code"))
         if explicit_failure_code and explicit_failure_code not in failure_codes:
             failure_codes.append(explicit_failure_code)
 
         targets = _dedupe_string_sequence(effect.get("targets") or [])
+        effect_slug = _effect_failure_code_slug(effect)
+        is_representation_effect = contract_intent == "representation" or (
+            _is_representation_effect_type(_safe_str(effect.get("effect_type")))
+        )
+        default_missing_failure_code = (
+            _safe_str(effect.get("missing_failure_code"))
+            or (
+                f"{domain_id}_representation_not_executed"
+                if is_representation_effect
+                else f"{effect_slug}_not_executed"
+            )
+        )
         first_success_tool: str | None = None
         matching_success_payloads: list[Mapping[str, Any]] = []
         successful_other_target = False
-        for tool in required_tools:
-            if tool.lower() not in successful_lookup:
+        successful_required_tools: list[str] = []
+        for tool_name in required_tools:
+            if tool_name.lower() not in successful_lookup:
                 continue
             payloads, successful_count = _collect_successful_tool_payloads(
                 tool_invocations=tool_invocations,
-                tool_name=tool,
+                tool_name=tool_name,
                 targets=targets,
             )
             if payloads or not targets:
-                first_success_tool = tool
-                matching_success_payloads = payloads
-                break
-            if successful_count > 0:
+                successful_required_tools.append(tool_name)
+                if first_success_tool is None:
+                    first_success_tool = tool_name
+                    matching_success_payloads = payloads
+            elif successful_count > 0:
                 successful_other_target = True
 
-        if first_success_tool:
+        if required_tools_match == "all":
+            success_requirement_met = (
+                len(successful_required_tools) == len(required_tools)
+            )
+        else:
+            success_requirement_met = bool(successful_required_tools)
+
+        if success_requirement_met and first_success_tool:
             payload_verdict = _evaluate_representation_effect_payloads(
                 effect=effect,
                 tool_name=first_success_tool,
                 payloads=matching_success_payloads,
             )
-            if isinstance(payload_verdict, Mapping):
+            if is_representation_effect and isinstance(payload_verdict, Mapping):
                 effect_status = _safe_str(payload_verdict.get("status")) or "not_satisfied"
                 status_reason = _safe_str(payload_verdict.get("status_reason")) or (
                     "Representation payload verification failed."
@@ -3942,40 +4142,41 @@ def _materialise_required_effects_from_contract(
             else:
                 effect_status = "satisfied"
                 status_reason = (
-                    "Observed required representation tool invocation: "
+                    "Observed required "
+                    f"{'representation tool' if is_representation_effect else 'tool'} invocation: "
                     f"{first_success_tool}."
                 )
                 failure_codes = []
         else:
-            first_failed_tool = next(
-                (
-                    tool
-                    for tool in required_tools
-                    if tool.lower() in failed_lookup or tool.lower() in blocked_lookup
-                ),
-                None,
+            has_failed_required_tool = any(
+                tool.lower() in failed_lookup or tool.lower() in blocked_lookup
+                for tool in required_tools
             )
-            if first_failed_tool:
+            if has_failed_required_tool:
                 effect_status = "not_satisfied"
-                status_reason = (
-                    "Required representation tool failed or was blocked: "
-                    f"{first_failed_tool}."
+                status_reason, failure_codes = _summarise_required_tool_failure(
+                    effect=effect,
+                    failed_tools=failed_lookup,
+                    blocked_tools=blocked_lookup,
+                    tool_invocations=tool_invocations,
                 )
-                failure_codes = [f"{domain_id}_representation_tool_failed"]
-            elif successful_other_target:
+            elif successful_other_target and is_representation_effect:
                 effect_status = "not_executed"
                 status_reason = (
                     "Required representation tool ran, but not for the required "
                     "artefact target."
                 )
                 failure_codes = [f"{domain_id}_representation_wrong_target"]
-            elif not required_tools and not failure_codes:
-                failure_codes = [f"{domain_id}_representation_not_executed"]
-            elif required_tools:
-                failure_codes = [f"{domain_id}_representation_not_executed"]
+            else:
+                effect_status = "not_executed"
+                status_reason = default_not_executed_reason
+                failure_codes = [default_missing_failure_code]
 
         effect["status"] = effect_status
         effect["status_reason"] = status_reason
+        if contract_source == "workflow_required_effects_contract":
+            effect.setdefault("intent_origin", "workflow_authored")
+        effect.setdefault("source", contract_source)
         if failure_codes:
             effect["failure_code"] = failure_codes[0]
             effect["failure_codes"] = failure_codes
@@ -4430,7 +4631,25 @@ def _derive_completion_gate(
             for effect in required_effects
         ):
             decision = "failed"
-            decision_reason = "Mutation attempt failed or was blocked."
+            first_evidence_status_reason = next(
+                (
+                    _safe_str(entry.get("status_reason"))
+                    for entry in unresolved_preconditions
+                    if _is_evidence_effect_type(_safe_str(entry.get("effect_type")))
+                    and _safe_str(entry.get("status_reason"))
+                ),
+                None,
+            )
+            if unresolved_effect_types and all(
+                _is_evidence_effect_type(effect_type)
+                for effect_type in unresolved_effect_types
+            ):
+                decision_reason = (
+                    first_evidence_status_reason
+                    or "Required evidence retrieval failed."
+                )
+            else:
+                decision_reason = "Mutation attempt failed or was blocked."
         else:
             decision = "escalation_required"
             representation_failure_reason = next(
@@ -4448,6 +4667,15 @@ def _derive_completion_gate(
                     if _is_representation_effect_type(
                         _safe_str(entry.get("effect_type"))
                     )
+                    and _safe_str(entry.get("status_reason"))
+                ),
+                None,
+            )
+            first_evidence_status_reason = next(
+                (
+                    _safe_str(entry.get("status_reason"))
+                    for entry in unresolved_preconditions
+                    if _is_evidence_effect_type(_safe_str(entry.get("effect_type")))
                     and _safe_str(entry.get("status_reason"))
                 ),
                 None,
@@ -4485,6 +4713,14 @@ def _derive_completion_gate(
                     first_representation_status_reason
                     or representation_failure_reason
                     or "Required representation was not executed."
+                )
+            elif unresolved_effect_types and all(
+                _is_evidence_effect_type(effect_type)
+                for effect_type in unresolved_effect_types
+            ):
+                decision_reason = (
+                    first_evidence_status_reason
+                    or "Required evidence was not retrieved."
                 )
             else:
                 decision_reason = "Required mutation was not executed."
@@ -4662,8 +4898,20 @@ def build_turn_execution_record(
         prompt_text=prompt_text,
         aux_llm_calls=aux_llm_calls,
     )
+    workflow_required_effects_contract, workflow_required_effects_contract_source = (
+        _load_workflow_required_effects_contract(
+            workflow_id=selected_workflow_id,
+        )
+    )
     representation_effects = _materialise_required_effects_from_contract(
         contract=representation_effects_contract,
+        successful_tools=successful_tools,
+        failed_tools=failed_tools,
+        blocked_tools=blocked_tools,
+        tool_invocations=tool_invocations,
+    )
+    workflow_required_effects = _materialise_required_effects_from_contract(
+        contract=workflow_required_effects_contract,
         successful_tools=successful_tools,
         failed_tools=failed_tools,
         blocked_tools=blocked_tools,
@@ -4672,9 +4920,10 @@ def build_turn_execution_record(
 
     required_effects: list[dict[str, Any]] = []
     required_effects.extend(representation_effects)
+    required_effects.extend(workflow_required_effects)
 
     mutation_effects: list[dict[str, Any]] = []
-    if not representation_effects:
+    if not representation_effects and not workflow_required_effects:
         # Mutation effects must remain tool-authored or workflow-authored.
         # Do not fall back to generic observed-tool mutation contracts.
         mutation_effects = _build_tool_authored_mutation_effects(
@@ -4682,7 +4931,12 @@ def build_turn_execution_record(
         )
     required_effects.extend(mutation_effects)
 
-    if not mutation_effects and not successful_write_tools and not representation_effects:
+    if (
+        not mutation_effects
+        and not successful_write_tools
+        and not representation_effects
+        and not workflow_required_effects
+    ):
         tool_execution_effect = _infer_tool_execution_required_effect(
             execution_summary=execution_summary
         )
@@ -4810,6 +5064,19 @@ def build_turn_execution_record(
                 profile_resolution.get("fail_closed_reason")
             )
     execution_summary_with_contract["search_evidence_count"] = len(search_evidence_payload)
+    if isinstance(workflow_required_effects_contract, Mapping):
+        execution_summary_with_contract["workflow_required_effects_contract_id"] = (
+            _safe_str(workflow_required_effects_contract.get("contract_id"))
+        )
+        execution_summary_with_contract["workflow_required_effects_declared_count"] = len(
+            workflow_required_effects_contract.get("required_effects") or []
+        )
+        execution_summary_with_contract["workflow_required_effects_contract_source"] = (
+            workflow_required_effects_contract_source
+        )
+    execution_summary_with_contract["workflow_required_effects_materialised_count"] = len(
+        workflow_required_effects
+    )
 
     record_payload = {
         "schema_version": TURN_EXECUTION_RECORD_SCHEMA_VERSION,
@@ -4841,6 +5108,7 @@ def build_turn_execution_record(
             "search_evidence": search_evidence_payload,
             "summary": execution_summary_with_contract,
             "required_effects_contract": representation_effects_contract,
+            "workflow_required_effects_contract": workflow_required_effects_contract,
             "diagnostic_events": diagnostic_events,
             "retry": retry,
             "workflow_stage_model": build_conversation_turn_stage_model_snapshot(),
