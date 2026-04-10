@@ -46,6 +46,28 @@ _PAPER_REPO_SEED_ASSET_PATH = (
     / "repo_seed_bundles"
     / "paper_representation_workflow_seed_bundle.json"
 )
+_LIVE_ARXIV_ACCEPTANCE_PRIMARY_PAPER_ENV = "VON_LIVE_ARXIV_ACCEPTANCE_PAPER"
+_LIVE_ARXIV_ACCEPTANCE_SAMPLE_ENV = "VON_LIVE_ARXIV_ACCEPTANCE_SAMPLE"
+_LIVE_ARXIV_ACCEPTANCE_RUN_ENV = "VON_RUN_LIVE_ARXIV_WORKFLOW_ACCEPTANCE"
+_LIVE_ARXIV_ACCEPTANCE_BATCH_RUN_ENV = "VON_RUN_LIVE_ARXIV_WORKFLOW_ACCEPTANCE_BATCH"
+_LIVE_ARXIV_ACCEPTANCE_PRIMARY_PAPER = "2505.14396"
+_LIVE_ARXIV_ACCEPTANCE_SAMPLE: tuple[str, ...] = (
+    "2505.14396",
+    "2402.18144",
+    "2404.12494",
+    "2411.04983",
+    "2603.01896",
+    "2603.21702",
+    "2602.20478",
+    "2510.06248",
+    "2512.23959",
+    "2506.16596",
+)
+_LIVE_ARXIV_ACCEPTANCE_USER_ID = "#V#michael_witbrock"
+_LIVE_ARXIV_ACCEPTANCE_ORG_ID = "#V#university_of_auckland_strong_ai_lab"
+_LIVE_ARXIV_ACCEPTANCE_NAMESPACE = (
+    f"{_LIVE_ARXIV_ACCEPTANCE_USER_ID}@{_LIVE_ARXIV_ACCEPTANCE_ORG_ID.removeprefix('#V#')}"
+)
 
 
 def _upsert_workflow_json_text(
@@ -62,6 +84,222 @@ def _upsert_workflow_json_text(
         context={"source": "test_paper_representation_workflow_vontology_service"},
         garbage_collect=True,
     )
+
+
+def _live_acceptance_enabled(*, batch: bool = False) -> bool:
+    env_name = (
+        _LIVE_ARXIV_ACCEPTANCE_BATCH_RUN_ENV
+        if batch
+        else _LIVE_ARXIV_ACCEPTANCE_RUN_ENV
+    )
+    return os.getenv(env_name) == "1"
+
+
+def _skip_live_acceptance(*, batch: bool = False) -> None:
+    if batch:
+        pytest.skip(
+            f"Set {_LIVE_ARXIV_ACCEPTANCE_BATCH_RUN_ENV}=1 to run live arXiv batch acceptance."
+        )
+    pytest.skip(
+        f"Set {_LIVE_ARXIV_ACCEPTANCE_RUN_ENV}=1 to run live arXiv acceptance."
+    )
+
+
+def _dedupe_case_entries(entries: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for raw_entry in entries:
+        entry = str(raw_entry).strip()
+        if not entry:
+            continue
+        lowered = entry.casefold()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        deduped.append(entry)
+    return deduped
+
+
+def _parse_live_arxiv_acceptance_entries(
+    value: str | None,
+    *,
+    default_entries: tuple[str, ...],
+) -> list[str]:
+    if not isinstance(value, str) or not value.strip():
+        return list(default_entries)
+
+    entries: list[str] = []
+    for line in value.replace("\r", "\n").split("\n"):
+        for item in line.split(","):
+            text = item.strip()
+            if text:
+                entries.append(text)
+    return _dedupe_case_entries(entries) or list(default_entries)
+
+
+def _resolve_live_arxiv_acceptance_primary_paper() -> str:
+    entries = _parse_live_arxiv_acceptance_entries(
+        os.getenv(_LIVE_ARXIV_ACCEPTANCE_PRIMARY_PAPER_ENV),
+        default_entries=(_LIVE_ARXIV_ACCEPTANCE_PRIMARY_PAPER,),
+    )
+    return entries[0]
+
+
+def _resolve_live_arxiv_acceptance_sample() -> list[str]:
+    return _parse_live_arxiv_acceptance_entries(
+        os.getenv(_LIVE_ARXIV_ACCEPTANCE_SAMPLE_ENV),
+        default_entries=_LIVE_ARXIV_ACCEPTANCE_SAMPLE,
+    )
+
+
+def _normalise_live_arxiv_source_uri(paper_ref: str) -> str:
+    text = str(paper_ref).strip()
+    if "://" in text:
+        return text
+    return f"https://arxiv.org/abs/{text}"
+
+
+def _build_live_arxiv_prompt_text(paper_ref: str) -> str:
+    return f"Represent this paper {_normalise_live_arxiv_source_uri(paper_ref)}"
+
+
+def _prepare_live_arxiv_acceptance_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Any:
+    monkeypatch.setenv("VON_BLOB_STORE_BACKEND", "local")
+    monkeypatch.setenv("VON_EVENT_WORKFLOW_INTEGRATION_ENABLE", "0")
+
+    bootstrap_canonical_paper_representation_workflows()
+    registry_factory._resolve_subworkflow_definition.cache_clear()
+
+    definition = load_workflow_definition_from_vontology(
+        ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
+    )
+    assert definition is not None
+    return definition
+
+
+def _execute_live_arxiv_acceptance_case(
+    *,
+    definition: Any,
+    paper_ref: str,
+) -> dict[str, Any]:
+    prompt_text = _build_live_arxiv_prompt_text(paper_ref)
+    source_uri = _normalise_live_arxiv_source_uri(paper_ref)
+    fixture = prepare_arxiv_paper_ingestion_test_fixture(
+        prompt_text=prompt_text,
+        source_uri=source_uri,
+        arxiv_id=None if "://" in paper_ref else paper_ref,
+        user_concept_id=_LIVE_ARXIV_ACCEPTANCE_USER_ID,
+        timeout_seconds=45.0,
+        repair_existing_artifacts=True,
+    )
+    if fixture.get("success") is not True:
+        return {
+            "paper_ref": paper_ref,
+            "stage": "prepare_fixture",
+            "success": False,
+            "fixture": fixture,
+        }
+
+    result: Any | None = None
+    verification: dict[str, Any] | None = None
+    cleanup: dict[str, Any] | None = None
+
+    try:
+        result = WorkflowExecutor(
+            registry=registry_factory.build_durable_action_registry(),
+            max_transitions=40,
+        ).run(
+            definition,
+            environment=WorkflowEnvironment(
+                llm_client=None,
+                user_namespace=_LIVE_ARXIV_ACCEPTANCE_NAMESPACE,
+                user_concept_id=_LIVE_ARXIV_ACCEPTANCE_USER_ID,
+                org_concept_id=_LIVE_ARXIV_ACCEPTANCE_ORG_ID,
+            ),
+            data={
+                "prompt": fixture["prompt_text"],
+                "arxiv_id": fixture["arxiv_id"],
+                "source_uri": fixture["source_uri"],
+                "original_filename": fixture["original_filename"],
+            },
+        )
+
+        verification = verify_arxiv_paper_ingestion_test_result(
+            workflow_execution={
+                "completed": result.completed,
+                "final_state": result.final_state,
+                "error": result.error,
+                "final_status": "completed" if result.completed else "failed",
+                "outputs": dict(result.data),
+            },
+            arxiv_id=fixture["arxiv_id"],
+            source_uri=fixture["source_uri"],
+            expected_title=fixture["expected_title"],
+            expected_summary=fixture["expected_summary"],
+            expected_publication_date=fixture["expected_publication_date"],
+            expected_author_names=fixture["expected_author_names"],
+            expected_author_concept_ids=fixture["expected_author_concept_ids"],
+            expected_topic_labels=fixture["expected_topic_labels"],
+            expected_topic_concept_ids=fixture["expected_topic_concept_ids"],
+            paper_concept_id=fixture["paper_concept_id"],
+        )
+    except Exception as exc:
+        cleanup = cleanup_arxiv_paper_ingestion_test_artifacts(
+            paper_concept_id=fixture["paper_concept_id"],
+            file_copy_concept_id=None,
+            author_concept_ids=fixture["expected_author_concept_ids"],
+            topic_concept_ids=fixture["expected_topic_concept_ids"],
+            preexisting_author_concept_ids=fixture["preexisting_author_concept_ids"],
+            preexisting_topic_concept_ids=fixture["preexisting_topic_concept_ids"],
+        )
+        return {
+            "paper_ref": paper_ref,
+            "arxiv_id": fixture.get("arxiv_id"),
+            "source_uri": fixture.get("source_uri"),
+            "success": False,
+            "stage": "workflow_execution_exception",
+            "error": f"{type(exc).__name__}: {exc}",
+            "fixture": fixture,
+            "cleanup": cleanup,
+        }
+
+    cleanup = cleanup_arxiv_paper_ingestion_test_artifacts(
+        paper_concept_id=verification.get("paper_concept_id")
+        or fixture["paper_concept_id"],
+        file_copy_concept_id=verification.get("file_copy_concept_id"),
+        author_concept_ids=fixture["expected_author_concept_ids"],
+        topic_concept_ids=fixture["expected_topic_concept_ids"],
+        preexisting_author_concept_ids=fixture["preexisting_author_concept_ids"],
+        preexisting_topic_concept_ids=fixture["preexisting_topic_concept_ids"],
+    )
+
+    success = (
+        result.completed is True
+        and result.final_state
+        == authority_service._step_concept_id(
+            workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+            state_id="completed",
+        )
+        and verification.get("verification_passed") is True
+        and cleanup.get("cleanup_passed") is True
+    )
+    return {
+        "paper_ref": paper_ref,
+        "arxiv_id": fixture.get("arxiv_id"),
+        "source_uri": fixture.get("source_uri"),
+        "success": success,
+        "stage": "complete" if success else "verification_or_cleanup",
+        "workflow_completed": result.completed,
+        "workflow_final_state": result.final_state,
+        "workflow_error": result.error,
+        "verification_passed": verification.get("verification_passed"),
+        "cleanup_passed": cleanup.get("cleanup_passed"),
+        "fixture": fixture,
+        "verification": verification,
+        "cleanup": cleanup,
+    }
 
 
 @pytest.fixture
@@ -650,82 +888,44 @@ def test_live_arxiv_paper_representation_workflow_acceptance(
     _reset_mock_db: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    if os.getenv("VON_RUN_LIVE_ARXIV_WORKFLOW_ACCEPTANCE") != "1":
-        pytest.skip("Set VON_RUN_LIVE_ARXIV_WORKFLOW_ACCEPTANCE=1 to run live arXiv acceptance.")
+    if not _live_acceptance_enabled():
+        _skip_live_acceptance()
 
-    monkeypatch.setenv("VON_BLOB_STORE_BACKEND", "local")
-    monkeypatch.setenv("VON_EVENT_WORKFLOW_INTEGRATION_ENABLE", "0")
-
-    bootstrap_canonical_paper_representation_workflows()
-    registry_factory._resolve_subworkflow_definition.cache_clear()
-
-    definition = load_workflow_definition_from_vontology(
-        ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
-    )
-    assert definition is not None
-
-    fixture = prepare_arxiv_paper_ingestion_test_fixture(
-        prompt_text="Represent this paper https://arxiv.org/abs/2603.01896",
-        source_uri="https://arxiv.org/abs/2603.01896",
-        arxiv_id="2603.01896",
-        user_concept_id="#V#michael_witbrock",
-        timeout_seconds=45.0,
-        repair_existing_artifacts=True,
-    )
-    assert fixture.get("success") is True, fixture
-
-    result = WorkflowExecutor(
-        registry=registry_factory.build_durable_action_registry(),
-        max_transitions=40,
-    ).run(
-        definition,
-        environment=WorkflowEnvironment(
-            llm_client=None,
-            user_namespace="#V#michael_witbrock@university_of_auckland_strong_ai_lab",
-            user_concept_id="#V#michael_witbrock",
-            org_concept_id="#V#university_of_auckland_strong_ai_lab",
-        ),
-        data={
-            "prompt": fixture["prompt_text"],
-            "arxiv_id": fixture["arxiv_id"],
-            "source_uri": fixture["source_uri"],
-            "original_filename": fixture["original_filename"],
-        },
+    definition = _prepare_live_arxiv_acceptance_environment(monkeypatch)
+    report = _execute_live_arxiv_acceptance_case(
+        definition=definition,
+        paper_ref=_resolve_live_arxiv_acceptance_primary_paper(),
     )
 
-    verification = verify_arxiv_paper_ingestion_test_result(
-        workflow_execution={
-            "completed": result.completed,
-            "final_state": result.final_state,
-            "error": result.error,
-            "final_status": "completed" if result.completed else "failed",
-            "outputs": dict(result.data),
-        },
-        arxiv_id=fixture["arxiv_id"],
-        source_uri=fixture["source_uri"],
-        expected_title=fixture["expected_title"],
-        expected_summary=fixture["expected_summary"],
-        expected_publication_date=fixture["expected_publication_date"],
-        expected_author_names=fixture["expected_author_names"],
-        expected_author_concept_ids=fixture["expected_author_concept_ids"],
-        expected_topic_labels=fixture["expected_topic_labels"],
-        expected_topic_concept_ids=fixture["expected_topic_concept_ids"],
-        paper_concept_id=fixture["paper_concept_id"],
-    )
+    assert report.get("success") is True, report
 
-    cleanup = cleanup_arxiv_paper_ingestion_test_artifacts(
-        paper_concept_id=verification.get("paper_concept_id") or fixture["paper_concept_id"],
-        file_copy_concept_id=verification.get("file_copy_concept_id"),
-        author_concept_ids=fixture["expected_author_concept_ids"],
-        topic_concept_ids=fixture["expected_topic_concept_ids"],
-        preexisting_author_concept_ids=fixture["preexisting_author_concept_ids"],
-        preexisting_topic_concept_ids=fixture["preexisting_topic_concept_ids"],
-    )
 
-    assert result.completed is True
-    assert result.final_state == authority_service._step_concept_id(
-        workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
-        state_id="completed",
-    )
-    assert verification.get("verification_passed") is True, verification
-    assert cleanup.get("cleanup_passed") is True, cleanup
+def test_live_arxiv_paper_representation_workflow_acceptance_batch(
+    _reset_mock_db: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not _live_acceptance_enabled(batch=True):
+        _skip_live_acceptance(batch=True)
+
+    sample = _resolve_live_arxiv_acceptance_sample()
+    assert len(sample) >= 10, {
+        "error": "live_arxiv_acceptance_sample_too_small",
+        "count": len(sample),
+        "sample": sample,
+    }
+
+    definition = _prepare_live_arxiv_acceptance_environment(monkeypatch)
+    reports = [
+        _execute_live_arxiv_acceptance_case(definition=definition, paper_ref=paper_ref)
+        for paper_ref in sample
+    ]
+    success_count = sum(1 for report in reports if report.get("success") is True)
+    success_rate_pct = round((float(success_count) * 100.0) / float(len(reports)), 2)
+    failures = [report for report in reports if report.get("success") is not True]
+
+    assert success_rate_pct >= 90.0, {
+        "success_rate_pct": success_rate_pct,
+        "success_count": success_count,
+        "case_count": len(reports),
+        "failures": failures,
+    }

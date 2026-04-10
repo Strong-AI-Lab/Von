@@ -2004,6 +2004,33 @@ def test_turn_execution_build_dashboard_gateway_e2e(monkeypatch):
     assert imposition.get("success") is True
 
 
+def test_turn_execution_build_dashboard_gateway_accepts_omitted_limit_and_offset(
+    monkeypatch,
+):
+    _install_minimal_imposition_profile_loader(monkeypatch)
+    docs = _build_dashboard_trace_docs()
+    coll = _TurnExecutionCollection(docs)
+    monkeypatch.setattr(
+        "src.backend.db.connection_manager.get_db",
+        lambda: _DB({"turn_execution_records": coll}),
+    )
+
+    gateway = _build_gateway()
+    payload = gateway.invoke(
+        "turn_execution_build_dashboard",
+        {
+            "namespace": "#V#user@org",
+        },
+    ).payload
+
+    assert payload["success"] is True
+    turn_filters = payload.get("filters", {}).get("turn_execution")
+    assert isinstance(turn_filters, dict)
+    assert turn_filters.get("limit") == 20
+    assert turn_filters.get("offset") == 0
+    assert payload.get("summary_cards")
+
+
 def test_turn_execution_backfill_wrapper_returns_provenance(monkeypatch):
     from src.backend.integrations.internal_mcp import catalogue as cat
 
