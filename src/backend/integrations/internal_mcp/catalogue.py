@@ -10573,8 +10573,8 @@ def _turn_execution_build_benchmark(**kwargs):
     )
     filters_payload = {
         "namespace": kwargs.get("namespace"),
-        "limit": kwargs.get("limit"),
-        "offset": kwargs.get("offset"),
+        "limit": result.get("limit"),
+        "offset": result.get("offset"),
         "decision": kwargs.get("decision"),
         "decisions": kwargs.get("decisions"),
         "workflow_id": kwargs.get("workflow_id"),
@@ -16027,8 +16027,8 @@ def _rag_list_indexed(**kwargs):
         )
     collection_report = _resolve_rag_collection_from_kwargs(kwargs)
     collection = collection_report.get("effective_collection")
-    limit = int(kwargs.get("limit", 20))
-    offset = int(kwargs.get("offset", 0))
+    limit = max(1, _normalise_non_negative_int(kwargs.get("limit") or 20))
+    offset = _normalise_non_negative_int(kwargs.get("offset") or 0)
 
     ns_report = _resolve_rag_namespace_from_kwargs(kwargs)
     ns = ns_report.get("namespace")

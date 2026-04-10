@@ -302,6 +302,23 @@ For local browser acceptance work, the implemented pseudouser path from
 - use the Settings-tab `Browser Test Login` control on a `localhost` /
   `127.0.0.1` session to establish the representative user-view fixture.
 
+### 7.6 Env-gated live arXiv acceptance
+
+- The paper-representation workflow now has an env-gated live acceptance lane in
+  `tests/backend/test_paper_representation_workflow_vontology_service.py`.
+- Use `VON_RUN_LIVE_ARXIV_WORKFLOW_ACCEPTANCE=1` for the single-paper smoke path.
+- Use `VON_LIVE_ARXIV_ACCEPTANCE_PAPER` to override the single-paper case.
+  The default is `2505.14396`, matching the current Jira-guided acceptance
+  paper for `JVNAUTOSCI-1799`.
+- Use `VON_RUN_LIVE_ARXIV_WORKFLOW_ACCEPTANCE_BATCH=1` for the representative
+  batch path, and `VON_LIVE_ARXIV_ACCEPTANCE_SAMPLE` to override the default
+  sample list.
+- Keep the live lane nearest-real-path and fail-closed:
+  - force `VON_BLOB_STORE_BACKEND=local` inside the test lane
+  - disable event-workflow integration for the lane
+  - use the workflow-driven fixture, verification, and cleanup helpers rather
+    than ad-hoc setup/teardown code
+
 ## 8. Practical Refactoring and Consistency Habits
 
 - Search first before adding helpers or parallel pathways.
