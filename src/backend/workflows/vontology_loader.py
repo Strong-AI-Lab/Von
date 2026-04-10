@@ -23,6 +23,9 @@ from .plan_state_runtime import (
     normalise_workflow_plan_state_policy_spec,
     normalise_workflow_step_checkpoint_policy_spec,
 )
+from .required_effects_contracts import (
+    normalise_workflow_required_effects_contract,
+)
 from .terminal_success_contracts import (
     normalise_workflow_terminal_success_contract,
 )
@@ -367,6 +370,16 @@ WORKFLOW_TERMINAL_SUCCESS_CONTRACT_TEXT_PREDICATE_PRECEDENCE: Tuple[
         "hasWorkflowTerminalSuccessContractJson",
         "#V#has_workflow_terminal_success_contract_json",
         "has_workflow_terminal_success_contract_json",
+    ),
+)
+WORKFLOW_REQUIRED_EFFECTS_CONTRACT_TEXT_PREDICATE_PRECEDENCE: Tuple[
+    Tuple[str, ...], ...
+] = (
+    (
+        "#V#hasWorkflowRequiredEffectsContractJson",
+        "hasWorkflowRequiredEffectsContractJson",
+        "#V#has_workflow_required_effects_contract_json",
+        "has_workflow_required_effects_contract_json",
     ),
 )
 WORKFLOW_LAUNCH_INPUT_CONTRACT_SOURCE_NONE = "none"
@@ -2474,6 +2487,25 @@ def resolve_workflow_long_horizon_policies(
             f"{workflow_id}:{terminal_success_contract_source}"
         )
 
+    required_effects_contract, required_effects_contract_source = (
+        _resolve_policy_from_text_relations(
+            concept_id=workflow_id,
+            predicate_precedence=WORKFLOW_REQUIRED_EFFECTS_CONTRACT_TEXT_PREDICATE_PRECEDENCE,
+            normaliser=normalise_workflow_required_effects_contract,
+            text_rows=text_rows,
+        )
+    )
+    if required_effects_contract is not None:
+        policies["required_effects_contract"] = required_effects_contract
+    elif (
+        isinstance(required_effects_contract_source, str)
+        and required_effects_contract_source
+    ):
+        warnings.append(
+            "workflow_required_effects_contract_invalid:"
+            f"{workflow_id}:{required_effects_contract_source}"
+        )
+
     return policies, warnings
 
 
@@ -3099,6 +3131,7 @@ def load_workflow_definition_from_vontology(
         "workflow_plan_state_policy_invalid:",
         "workflow_completion_gate_invalid:",
         "workflow_terminal_success_contract_invalid:",
+        "workflow_required_effects_contract_invalid:",
     )
     for warning in warnings:
         if isinstance(warning, str) and warning.startswith(fatal_warning_prefixes):

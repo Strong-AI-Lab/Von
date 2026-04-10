@@ -617,6 +617,15 @@ class TestWorkflowLongHorizonPolicyResolution:
                         '"required_summary_fields":["workflow_id","terminal_status","final_state","completed"]}'
                     ),
                 },
+                {
+                    "predicate": "#V#hasWorkflowRequiredEffectsContractJson",
+                    "text": (
+                        '{"schema_version":"workflow_required_effects_contract.v1",'
+                        '"contract_id":"conversation_diagnostics",'
+                        '"required_effects":[{"effect_id":"locator","effect_type":"diagnostic_evidence",'
+                        '"required_tools":["conversation_telemetry_get_locator"]}]}'
+                    ),
+                },
             ],
         ):
             policies, warnings = resolve_workflow_long_horizon_policies(
@@ -651,6 +660,12 @@ class TestWorkflowLongHorizonPolicyResolution:
             "final_state",
             "completed",
         ]
+        assert policies["required_effects_contract"]["contract_id"] == (
+            "conversation_diagnostics"
+        )
+        assert policies["required_effects_contract"]["required_effects"][0][
+            "effect_type"
+        ] == "diagnostic_evidence"
 
     def test_resolve_workflow_long_horizon_policies_fetches_texts_once(self):
         rows = [
@@ -673,6 +688,14 @@ class TestWorkflowLongHorizonPolicyResolution:
                 "text": (
                     '{"schema_version":"workflow_terminal_success_contract.v1",'
                     '"success_statuses":["completed"]}'
+                ),
+            },
+            {
+                "predicate": "#V#hasWorkflowRequiredEffectsContractJson",
+                "text": (
+                    '{"schema_version":"workflow_required_effects_contract.v1",'
+                    '"required_effects":[{"effect_id":"locator","effect_type":"diagnostic_evidence",'
+                    '"required_tools":["conversation_telemetry_get_locator"]}]}'
                 ),
             },
         ]
