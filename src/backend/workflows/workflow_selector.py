@@ -59,6 +59,7 @@ class WorkflowSelectionPrompt:
     discovered_workflow_ids: tuple[str, ...] = ()
     candidate_entries: tuple[dict[str, Any], ...] = ()
     candidate_list_text: str | None = None
+    continuation_routing_context_text: str | None = None
     requested_prompt_ids: tuple[str, ...] = ()
     prompt_provenance: Mapping[str, Any] = field(default_factory=dict)
     policy_recommendation: Mapping[str, Any] = field(default_factory=dict)
@@ -452,6 +453,7 @@ class WorkflowSelector:
         *,
         turn_text: str,
         discovered_workflows: Sequence[Mapping[str, Any]] | None = None,
+        continuation_routing_context_text: str | None = None,
     ) -> WorkflowSelectionPrompt:
         """Build the selection prompt.
 
@@ -462,6 +464,7 @@ class WorkflowSelector:
         return self._prepare_rag_first_prompt(
             turn_text=turn_text,
             candidate_workflows=discovered_workflows,
+            continuation_routing_context_text=continuation_routing_context_text,
         )
 
     # ------------------------------------------------------------------
@@ -473,6 +476,7 @@ class WorkflowSelector:
         *,
         turn_text: str,
         candidate_workflows: Sequence[Mapping[str, Any]] | None = None,
+        continuation_routing_context_text: str | None = None,
     ) -> WorkflowSelectionPrompt:
         """Build the RAG-first ranker prompt from candidate workflows."""
         candidate_ids: list[str] = []
@@ -603,6 +607,12 @@ class WorkflowSelector:
             )
 
         candidate_list = "\n".join(candidate_lines)
+        continuation_context_text = (
+            str(continuation_routing_context_text).strip()
+            if isinstance(continuation_routing_context_text, str)
+            and continuation_routing_context_text.strip()
+            else "No active workflow continuation context."
+        )
         immutable_candidate_entries = tuple(
             {
                 str(key): value
@@ -618,6 +628,7 @@ class WorkflowSelector:
             "render_variables": {
                 "turn_text": turn_text,
                 "candidate_list": candidate_list,
+                "continuation_routing_context": continuation_context_text,
             },
             "truncated": False,
         }
@@ -625,7 +636,11 @@ class WorkflowSelector:
         try:
             prompt = self._prompt_service.render_prompt(
                 requested_prompt_ids,
-                variables={"turn_text": turn_text, "candidate_list": candidate_list},
+                variables={
+                    "turn_text": turn_text,
+                    "candidate_list": candidate_list,
+                    "continuation_routing_context": continuation_context_text,
+                },
                 fallback=None,
                 max_chars=6000,
             )
@@ -636,6 +651,7 @@ class WorkflowSelector:
                 discovered_workflow_ids=tuple(candidate_ids),
                 candidate_entries=immutable_candidate_entries,
                 candidate_list_text=candidate_list,
+                continuation_routing_context_text=continuation_context_text,
                 requested_prompt_ids=requested_prompt_ids,
                 prompt_provenance=prompt_provenance_base,
                 policy_recommendation=policy_recommendation,
@@ -650,6 +666,7 @@ class WorkflowSelector:
                 discovered_workflow_ids=tuple(candidate_ids),
                 candidate_entries=immutable_candidate_entries,
                 candidate_list_text=candidate_list,
+                continuation_routing_context_text=continuation_context_text,
                 requested_prompt_ids=requested_prompt_ids,
                 prompt_provenance=prompt_provenance_base,
                 policy_recommendation=policy_recommendation,
@@ -670,6 +687,7 @@ class WorkflowSelector:
                 discovered_workflow_ids=tuple(candidate_ids),
                 candidate_entries=immutable_candidate_entries,
                 candidate_list_text=candidate_list,
+                continuation_routing_context_text=continuation_context_text,
                 requested_prompt_ids=requested_prompt_ids,
                 prompt_provenance=prompt_provenance,
                 policy_recommendation=policy_recommendation,
@@ -682,6 +700,7 @@ class WorkflowSelector:
                 discovered_workflow_ids=tuple(candidate_ids),
                 candidate_entries=immutable_candidate_entries,
                 candidate_list_text=candidate_list,
+                continuation_routing_context_text=continuation_context_text,
                 requested_prompt_ids=requested_prompt_ids,
                 prompt_provenance=prompt_provenance,
                 policy_recommendation=policy_recommendation,
@@ -694,6 +713,7 @@ class WorkflowSelector:
             discovered_workflow_ids=tuple(candidate_ids),
             candidate_entries=immutable_candidate_entries,
             candidate_list_text=candidate_list,
+            continuation_routing_context_text=continuation_context_text,
             requested_prompt_ids=requested_prompt_ids,
             prompt_provenance=prompt_provenance,
             policy_recommendation=policy_recommendation,

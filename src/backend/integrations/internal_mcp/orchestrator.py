@@ -22549,6 +22549,7 @@ class InternalMCPChatOrchestrator:
             try:
                 from ...services.workflow_continuation_service import (
                     assess_prompt_for_workflow_continuation,
+                    build_workflow_continuation_summary_text,
                     build_workflow_continuation_routing_prompt,
                     build_workflow_continuation_system_message,
                     get_session_workflow_continuation_context,
@@ -22626,6 +22627,11 @@ class InternalMCPChatOrchestrator:
                     )
                     workflow_continuation_payload_local["apply_signals"] = list(
                         apply_signals
+                    )
+                    workflow_continuation_payload_local[
+                        "selector_routing_context_text"
+                    ] = build_workflow_continuation_summary_text(
+                        workflow_continuation_payload_local
                     )
                     if bool(workflow_continuation_payload_local.get("applied")):
                         system_message = build_workflow_continuation_system_message(
@@ -23024,8 +23030,19 @@ class InternalMCPChatOrchestrator:
             )
             selector_start = time.perf_counter()
             selector_prompt = self._workflow_selector.prepare_selection_prompt(
-                turn_text=effective_prompt_for_routing,
+                turn_text=prompt,
                 discovered_workflows=selector_candidate_matches or None,
+                continuation_routing_context_text=(
+                    str(
+                        workflow_continuation_payload.get(
+                            "selector_routing_context_text"
+                        )
+                        or ""
+                    ).strip()
+                    if isinstance(workflow_continuation_payload, Mapping)
+                    and bool(workflow_continuation_payload.get("applied"))
+                    else None
+                ),
             )
             selector_policy = (
                 dict(selector_prompt.policy_recommendation)
@@ -23044,6 +23061,9 @@ class InternalMCPChatOrchestrator:
                 "prompt": _build_text_telemetry(selector_prompt.prompt_text),
                 "candidate_list": _build_text_telemetry(
                     selector_prompt.candidate_list_text
+                ),
+                "continuation_context": _build_text_telemetry(
+                    selector_prompt.continuation_routing_context_text
                 ),
                 "candidate_entries": _copy_mapping_sequence(
                     selector_prompt.candidate_entries

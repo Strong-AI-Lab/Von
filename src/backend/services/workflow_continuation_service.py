@@ -88,6 +88,12 @@ def _dedupe_strings(values: Any) -> list[str]:
     return deduped
 
 
+def _copy_mapping(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    return {str(key): nested for key, nested in value.items() if isinstance(key, str)}
+
+
 def _normalise_required_effect(effect: Mapping[str, Any]) -> dict[str, Any] | None:
     effect_id = _safe_str(effect.get("effect_id"))
     effect_type = _safe_str(effect.get("effect_type"))
@@ -253,6 +259,58 @@ def get_session_workflow_continuation_context(
         if isinstance(required_effects_contract, Mapping)
         else None
     )
+    workflow_required_effects_contract = execution.get(
+        "workflow_required_effects_contract"
+    )
+    workflow_required_effects_contract = (
+        dict(workflow_required_effects_contract)
+        if isinstance(workflow_required_effects_contract, Mapping)
+        else None
+    )
+    execution_summary = execution.get("summary")
+    execution_summary = (
+        dict(execution_summary) if isinstance(execution_summary, Mapping) else {}
+    )
+    latest_episode_payload = (
+        dict(latest_episode) if isinstance(latest_episode, Mapping) else None
+    )
+    workflow_definition_identity = (
+        _copy_mapping(latest_episode_payload.get("workflow_definition_identity"))
+        if isinstance(latest_episode_payload, Mapping)
+        else None
+    )
+    resolved_contract_identifiers = {
+        "required_effects_contract_profile_selected_id": _safe_str(
+            execution_summary.get("required_effects_contract_profile_selected_id")
+        ),
+        "required_effects_contract_domain": _safe_str(
+            execution_summary.get("required_effects_contract_domain")
+        ),
+        "required_effects_contract_domain_concept_id": _safe_str(
+            execution_summary.get("required_effects_contract_domain_concept_id")
+        ),
+        "required_effects_contract_profile_source": _safe_str(
+            execution_summary.get("required_effects_contract_profile_source")
+        ),
+        "workflow_required_effects_contract_id": _safe_str(
+            execution_summary.get("workflow_required_effects_contract_id")
+        ),
+        "workflow_required_effects_contract_source": _safe_str(
+            execution_summary.get("workflow_required_effects_contract_source")
+        ),
+        "selected_execution_mode": _safe_str(
+            execution_summary.get("selected_execution_mode")
+        ),
+        "dispatch_workflow_id": _safe_str(execution_summary.get("dispatch_workflow_id")),
+        "dispatch_terminal_status": _safe_str(
+            execution_summary.get("dispatch_terminal_status")
+        ),
+    }
+    resolved_contract_identifiers = {
+        key: value
+        for key, value in resolved_contract_identifiers.items()
+        if isinstance(value, str) and value
+    }
 
     return {
         "session_id": clean_session_id,
@@ -291,14 +349,40 @@ def get_session_workflow_continuation_context(
         "completion_gate_decision_reason": _safe_str(
             completion_gate.get("decision_reason")
         ),
+        "active_workflow_episode_id": (
+            _safe_str(latest_episode_payload.get("episode_id"))
+            if isinstance(latest_episode_payload, Mapping)
+            else None
+        ),
+        "active_workflow_source": (
+            _safe_str(latest_episode_payload.get("source"))
+            if isinstance(latest_episode_payload, Mapping)
+            else None
+        ),
+        "active_workflow_status": (
+            _safe_str(latest_episode_payload.get("status"))
+            if isinstance(latest_episode_payload, Mapping)
+            else None
+        ),
+        "active_workflow_terminal_stage": (
+            _safe_str(latest_episode_payload.get("terminal_stage"))
+            if isinstance(latest_episode_payload, Mapping)
+            else None
+        ),
+        "active_workflow_final_state": (
+            _safe_str(latest_episode_payload.get("final_state"))
+            if isinstance(latest_episode_payload, Mapping)
+            else None
+        ),
         "requires_follow_up": requires_follow_up,
         "safe_to_claim_completion": safe_to_claim_completion,
         "has_unresolved_required_effects": bool(unresolved_required_effects),
         "unresolved_required_effects": unresolved_required_effects,
         "required_effects_contract": required_effects_contract,
-        "latest_workflow_episode": (
-            dict(latest_episode) if isinstance(latest_episode, Mapping) else None
-        ),
+        "workflow_required_effects_contract": workflow_required_effects_contract,
+        "workflow_definition_identity": workflow_definition_identity,
+        "resolved_contract_identifiers": resolved_contract_identifiers,
+        "latest_workflow_episode": latest_episode_payload,
     }
 
 
@@ -396,29 +480,59 @@ def assess_prompt_for_workflow_continuation(
     }
 
 
-def build_workflow_continuation_routing_prompt(
-    *,
-    prompt: str,
-    continuation_context: Mapping[str, Any],
+def build_workflow_continuation_summary_text(
+    continuation_context: Mapping[str, Any] | None,
 ) -> str:
-    """Return routing/planning text enriched with authoritative continuation facts."""
+    """Summarise authoritative continuation facts for routing or planning."""
 
-    prompt_text = _safe_str(prompt) or ""
-    if not prompt_text or not isinstance(continuation_context, Mapping):
-        return prompt_text
-
+    if not isinstance(continuation_context, Mapping):
+        return ""
     summary_lines = [
         "ACTIVE WORKFLOW CONTINUATION CONTEXT",
         f"Session: {_safe_str(continuation_context.get('session_id')) or 'unknown'}",
         (
-            "Selected workflow: "
+            "Active workflow episode: "
+            f"{_safe_str(continuation_context.get('active_workflow_episode_id')) or 'unknown'}"
+        ),
+        (
+            "Active workflow source: "
+            f"{_safe_str(continuation_context.get('active_workflow_source')) or 'unknown'}"
+        ),
+        (
+            "Selected workflow / episode workflow: "
             f"{_safe_str(continuation_context.get('selected_workflow_id')) or 'unknown'}"
         ),
         (
-            "Completion gate: "
+            "Prior completion gate verdict: "
             f"{_safe_str(continuation_context.get('completion_gate_decision')) or 'unknown'}"
         ),
     ]
+    completion_gate_reason = _safe_str(
+        continuation_context.get("completion_gate_decision_reason")
+    )
+    if completion_gate_reason:
+        summary_lines.append(f"Prior completion gate reason: {completion_gate_reason}")
+    active_workflow_status = _safe_str(continuation_context.get("active_workflow_status"))
+    if active_workflow_status:
+        summary_lines.append(f"Active workflow status: {active_workflow_status}")
+    active_workflow_final_state = _safe_str(
+        continuation_context.get("active_workflow_final_state")
+    )
+    if active_workflow_final_state:
+        summary_lines.append(f"Active workflow final state: {active_workflow_final_state}")
+    workflow_definition_identity = continuation_context.get("workflow_definition_identity")
+    if isinstance(workflow_definition_identity, Mapping):
+        workflow_definition_hash = _safe_str(
+            workflow_definition_identity.get("definition_hash")
+        )
+        if workflow_definition_hash:
+            summary_lines.append(
+                f"Workflow definition identity: {workflow_definition_hash}"
+            )
+    if continuation_context.get("requires_follow_up") is True:
+        summary_lines.append("Follow-up still required: yes")
+    elif continuation_context.get("requires_follow_up") is False:
+        summary_lines.append("Follow-up still required: no")
 
     unresolved_effects = continuation_context.get("unresolved_required_effects")
     if isinstance(unresolved_effects, list) and unresolved_effects:
@@ -430,6 +544,8 @@ def build_workflow_continuation_routing_prompt(
             targets = ", ".join(_dedupe_strings(effect.get("targets")))
             required_tools = ", ".join(_dedupe_strings(effect.get("required_tools")))
             description = _safe_str(effect.get("description")) or ""
+            status_reason = _safe_str(effect.get("status_reason")) or ""
+            failure_code = _safe_str(effect.get("failure_code")) or ""
             line = f"- {effect_type}"
             if targets:
                 line += f" | targets: {targets}"
@@ -437,6 +553,10 @@ def build_workflow_continuation_routing_prompt(
                 line += f" | required_tools: {required_tools}"
             if description:
                 line += f" | description: {description}"
+            if failure_code:
+                line += f" | failure_code: {failure_code}"
+            if status_reason:
+                line += f" | status_reason: {status_reason}"
             summary_lines.append(line)
 
     required_effects_contract = continuation_context.get("required_effects_contract")
@@ -451,10 +571,56 @@ def build_workflow_continuation_routing_prompt(
                 summary_lines.append(f"Artefact file_copy_ids: {file_copy_ids}")
             if urls:
                 summary_lines.append(f"Artefact urls: {urls}")
+    workflow_required_effects_contract = continuation_context.get(
+        "workflow_required_effects_contract"
+    )
+    if isinstance(workflow_required_effects_contract, Mapping):
+        workflow_required_effects_contract_id = _safe_str(
+            workflow_required_effects_contract.get("contract_id")
+        )
+        if workflow_required_effects_contract_id:
+            summary_lines.append(
+                "Workflow required-evidence contract: "
+                f"{workflow_required_effects_contract_id}"
+            )
+    resolved_contract_identifiers = continuation_context.get("resolved_contract_identifiers")
+    if isinstance(resolved_contract_identifiers, Mapping) and resolved_contract_identifiers:
+        summary_lines.append("Resolved workflow contracts and profile identifiers:")
+        ordered_keys = (
+            "workflow_required_effects_contract_id",
+            "workflow_required_effects_contract_source",
+            "required_effects_contract_profile_selected_id",
+            "required_effects_contract_profile_source",
+            "required_effects_contract_domain",
+            "required_effects_contract_domain_concept_id",
+            "selected_execution_mode",
+            "dispatch_workflow_id",
+            "dispatch_terminal_status",
+        )
+        for key in ordered_keys:
+            value = _safe_str(resolved_contract_identifiers.get(key))
+            if value:
+                summary_lines.append(f"- {key}: {value}")
 
-    summary_lines.append("Current user turn:")
-    summary_lines.append(prompt_text)
     return "\n".join(summary_lines)
+
+
+def build_workflow_continuation_routing_prompt(
+    *,
+    prompt: str,
+    continuation_context: Mapping[str, Any],
+) -> str:
+    """Return routing/planning text enriched with authoritative continuation facts."""
+
+    prompt_text = _safe_str(prompt) or ""
+    if not prompt_text or not isinstance(continuation_context, Mapping):
+        return prompt_text
+
+    summary = build_workflow_continuation_summary_text(continuation_context)
+    if not summary:
+        return prompt_text
+
+    return "\n".join((summary, "Current user turn:", prompt_text))
 
 
 def build_workflow_continuation_system_message(
@@ -464,13 +630,14 @@ def build_workflow_continuation_system_message(
 
     if not isinstance(continuation_context, Mapping):
         return None
-    summary = build_workflow_continuation_routing_prompt(
-        prompt="Use this authoritative session state when deciding continuation, repair, or verification work.",
-        continuation_context=continuation_context,
-    )
+    summary = build_workflow_continuation_summary_text(continuation_context)
     if not summary:
         return None
-    return summary
+    return (
+        "Use this authoritative session state when deciding continuation, repair, "
+        "or verification work.\n\n"
+        f"{summary}"
+    )
 
 
 def extract_file_copy_targets_from_continuation_context(

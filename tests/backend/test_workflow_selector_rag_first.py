@@ -222,6 +222,46 @@ class TestRagFirstPrompt:
         assert prompt.prompt_provenance["render_variables"]["turn_text"] == (
             "Run the meeting invitation test"
         )
+        assert prompt.prompt_provenance["render_variables"][
+            "continuation_routing_context"
+        ] == "No active workflow continuation context."
+
+    def test_prompt_carries_explicit_continuation_context(self):
+        selector = _build_selector()
+        prompt = selector.prepare_selection_prompt(
+            turn_text="Explain the failure from the telemetry",
+            continuation_routing_context_text=(
+                "ACTIVE WORKFLOW CONTINUATION CONTEXT\n"
+                "Active workflow episode: wfep_telemetry\n"
+                "Active workflow source: conversation_turn\n"
+                "Selected workflow / episode workflow: #V#missing_tool_call_workflow\n"
+                "Prior completion gate verdict: follow_up_required"
+            ),
+            discovered_workflows=[
+                {
+                    "concept_id": "#V#missing_tool_call_workflow",
+                    "name": "Missing Tool Call Workflow",
+                    "description": "Recover when tool emission failed.",
+                    "candidate_source": "workflow_discovery",
+                    "candidate_reason": "discovered_workflow_candidate",
+                },
+                {
+                    "concept_id": "#V#chat_assistant_workflow",
+                    "name": "Chat Assistant",
+                    "description": "Plain conversational response.",
+                    "candidate_source": "selector_default",
+                    "candidate_reason": "builtin_selector_candidate",
+                },
+            ],
+        )
+
+        assert prompt.continuation_routing_context_text is not None
+        assert "wfep_telemetry" in prompt.continuation_routing_context_text
+        assert "workflow continuation context" in prompt.prompt_text.lower()
+        assert "#V#missing_tool_call_workflow" in prompt.prompt_text
+        assert prompt.prompt_provenance["render_variables"][
+            "continuation_routing_context"
+        ].startswith("ACTIVE WORKFLOW CONTINUATION CONTEXT")
 
     def test_prompt_carries_candidate_evidence_signals(self):
         selector = _build_selector()

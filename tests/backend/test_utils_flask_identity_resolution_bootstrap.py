@@ -17,6 +17,13 @@ def test_build_durable_workflow_bootstrap_summary_surfaces_seed_repair_drift() -
                     "drift_detected": False,
                 },
             },
+            "turn_pipeline_monitoring_workflow_bootstrap": {
+                "success": True,
+                "publication": {
+                    "materialisation_status": "current",
+                    "drift_detected": False,
+                },
+            },
             "paper_workflow_bootstrap": {
                 "success": True,
                 "publication": {
@@ -40,6 +47,11 @@ def test_build_durable_workflow_bootstrap_summary_surfaces_seed_repair_drift() -
 
     assert summary == {
         "conversation_turn_workflow_bootstrap": {
+            "success": True,
+            "materialisation_status": "current",
+            "drift_detected": False,
+        },
+        "turn_pipeline_monitoring_workflow_bootstrap": {
             "success": True,
             "materialisation_status": "current",
             "drift_detected": False,
@@ -74,6 +86,8 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
         parent_specificity_vontology_service as parent_specificity_prompt_bootstrap,
         testing_workflow_vontology_service as testing_workflow_bootstrap,
         talk_representation_workflow_vontology_service as talk_workflow_bootstrap,
+        turn_pipeline_monitoring_schedule_bootstrap_service as turn_pipeline_monitoring_schedule_bootstrap,
+        turn_pipeline_monitoring_workflow_vontology_service as turn_pipeline_monitoring_workflow_bootstrap,
         workflow_description_vontology_service as workflow_description_prompt_bootstrap,
         workflow_gap_vontology_service as workflow_gap_prompt_bootstrap,
     )
@@ -221,6 +235,18 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
         },
     )
     monkeypatch.setattr(
+        turn_pipeline_monitoring_workflow_bootstrap,
+        "bootstrap_canonical_turn_pipeline_monitoring_workflows",
+        lambda: {
+            "success": True,
+            "workflow_ids": [
+                "#V#turn_pipeline_monitoring_workflow",
+                "#V#turn_pipeline_tier1_regression_workflow",
+            ],
+            "publication": {"skipped": True},
+        },
+    )
+    monkeypatch.setattr(
         talk_workflow_bootstrap,
         "bootstrap_canonical_talk_representation_workflows",
         lambda: {
@@ -228,6 +254,11 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
             "workflow_ids": ["#V#talk_representation_workflow"],
             "publication": {"skipped": True},
         },
+    )
+    monkeypatch.setattr(
+        turn_pipeline_monitoring_schedule_bootstrap,
+        "ensure_turn_pipeline_monitoring_schedules",
+        lambda: {"success": True, "ensured": True, "created_count": 2},
     )
 
     app_logger = MagicMock()
@@ -268,6 +299,11 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     testing_workflow_bootstrap_report = result.get("testing_workflow_bootstrap")
     assert isinstance(testing_workflow_bootstrap_report, dict)
     assert testing_workflow_bootstrap_report.get("success") is True
+    turn_pipeline_monitoring_workflow_bootstrap_report = result.get(
+        "turn_pipeline_monitoring_workflow_bootstrap"
+    )
+    assert isinstance(turn_pipeline_monitoring_workflow_bootstrap_report, dict)
+    assert turn_pipeline_monitoring_workflow_bootstrap_report.get("success") is True
     talk_workflow_bootstrap_report = result.get("talk_workflow_bootstrap")
     assert isinstance(talk_workflow_bootstrap_report, dict)
     assert talk_workflow_bootstrap_report.get("success") is True
@@ -275,6 +311,11 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     assert isinstance(workflow_authority_bootstrap_report, dict)
     assert workflow_authority_bootstrap_report.get("success") is True
     assert workflow_authority_bootstrap_report.get("counts", {}).get("updated") == 10
+    turn_pipeline_monitoring_schedule_report = result.get(
+        "turn_pipeline_monitoring_schedule_bootstrap"
+    )
+    assert isinstance(turn_pipeline_monitoring_schedule_report, dict)
+    assert turn_pipeline_monitoring_schedule_report.get("success") is True
     parent_schedule_report = result.get("parent_specificity_schedule_bootstrap")
     assert isinstance(parent_schedule_report, dict)
     assert parent_schedule_report.get("success") is True

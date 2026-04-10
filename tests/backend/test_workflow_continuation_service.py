@@ -21,6 +21,14 @@ def test_get_session_workflow_continuation_context_uses_latest_record_and_episod
                 "safe_to_claim_completion": False,
             },
             "execution": {
+                "summary": {
+                    "required_effects_contract_profile_selected_id": "paper",
+                    "required_effects_contract_profile_source": "workflow_contract",
+                    "workflow_required_effects_contract_id": "conversation_diagnostics",
+                    "workflow_required_effects_contract_source": "definition_metadata",
+                    "selected_execution_mode": "tool_pipeline",
+                    "dispatch_workflow_id": "#V#tool_calling_workflow",
+                },
                 "required_effects_contract": {
                     "schema_version": "required_effects_contract.v1",
                     "intent_class": "representation",
@@ -29,7 +37,11 @@ def test_get_session_workflow_continuation_context_uses_latest_record_and_episod
                         "file_copy_ids": ["#V#uploaded_file_copy_abc123"],
                         "urls": [],
                     },
-                }
+                },
+                "workflow_required_effects_contract": {
+                    "schema_version": "workflow_required_effects_contract.v1",
+                    "contract_id": "conversation_diagnostics",
+                },
             },
             "required_effects": [
                 {
@@ -49,8 +61,15 @@ def test_get_session_workflow_continuation_context_uses_latest_record_and_episod
         service,
         "get_latest_workflow_use_episode",
         lambda **_kwargs: {
+            "episode_id": "wfep_1380",
             "workflow_id": "#V#scholarly_paper_representation_workflow",
             "session_id": "session-1380",
+            "source": "conversation_turn",
+            "status": "failed",
+            "final_state": "repair_required",
+            "workflow_definition_identity": {
+                "definition_hash": "defhash-1380",
+            },
         },
     )
 
@@ -66,10 +85,25 @@ def test_get_session_workflow_continuation_context_uses_latest_record_and_episod
     assert context["requires_follow_up"] is True
     assert context["safe_to_claim_completion"] is False
     assert context["has_unresolved_required_effects"] is True
+    assert context["active_workflow_episode_id"] == "wfep_1380"
+    assert context["active_workflow_source"] == "conversation_turn"
+    assert context["active_workflow_final_state"] == "repair_required"
+    assert context["workflow_definition_identity"]["definition_hash"] == "defhash-1380"
     assert context["unresolved_required_effects"][0]["required_tools"] == [
         "materialise_scholarly_representation_for_file_copy"
     ]
     assert context["required_effects_contract"]["domain_profile_id"] == "paper"
+    assert context["workflow_required_effects_contract"]["contract_id"] == (
+        "conversation_diagnostics"
+    )
+    assert context["resolved_contract_identifiers"] == {
+        "required_effects_contract_profile_selected_id": "paper",
+        "required_effects_contract_profile_source": "workflow_contract",
+        "workflow_required_effects_contract_id": "conversation_diagnostics",
+        "workflow_required_effects_contract_source": "definition_metadata",
+        "selected_execution_mode": "tool_pipeline",
+        "dispatch_workflow_id": "#V#tool_calling_workflow",
+    }
 
 
 def test_assess_prompt_for_workflow_continuation_requires_selected_workflow() -> None:
@@ -245,8 +279,12 @@ def test_build_workflow_continuation_routing_prompt_summarises_targets_and_tools
         prompt="Please proceed.",
         continuation_context={
             "session_id": "session-1380",
+            "active_workflow_episode_id": "wfep_1380",
+            "active_workflow_source": "conversation_turn",
+            "workflow_definition_identity": {"definition_hash": "defhash-1380"},
             "selected_workflow_id": "#V#scholarly_paper_representation_workflow",
             "completion_gate_decision": "escalation_required",
+            "completion_gate_decision_reason": "Representation was not executed.",
             "unresolved_required_effects": [
                 {
                     "effect_type": "scholarly_representation",
@@ -263,13 +301,32 @@ def test_build_workflow_continuation_routing_prompt_summarises_targets_and_tools
                     "urls": ["https://arxiv.org/abs/2502.14996"],
                 }
             },
+            "workflow_required_effects_contract": {
+                "contract_id": "conversation_diagnostics"
+            },
+            "resolved_contract_identifiers": {
+                "workflow_required_effects_contract_id": "conversation_diagnostics",
+                "required_effects_contract_profile_selected_id": "paper",
+                "selected_execution_mode": "tool_pipeline",
+            },
         },
     )
 
     assert "ACTIVE WORKFLOW CONTINUATION CONTEXT" in prompt
-    assert "Selected workflow: #V#scholarly_paper_representation_workflow" in prompt
+    assert "Active workflow episode: wfep_1380" in prompt
+    assert "Active workflow source: conversation_turn" in prompt
+    assert (
+        "Selected workflow / episode workflow: "
+        "#V#scholarly_paper_representation_workflow"
+    ) in prompt
+    assert "Prior completion gate reason: Representation was not executed." in prompt
+    assert "Workflow definition identity: defhash-1380" in prompt
     assert (
         "required_tools: materialise_scholarly_representation_for_file_copy" in prompt
+    )
+    assert "Workflow required-evidence contract: conversation_diagnostics" in prompt
+    assert (
+        "required_effects_contract_profile_selected_id: paper" in prompt
     )
     assert "Artefact file_copy_ids: #V#uploaded_file_copy_abc123" in prompt
     assert "Artefact urls: https://arxiv.org/abs/2502.14996" in prompt

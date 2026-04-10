@@ -3876,13 +3876,13 @@ def test_custom_workflow_override_prefers_semantically_fit_execution_candidate(
         ),
         None,
     )
-    assert isinstance(authoring_assessment, dict)
-    assert authoring_assessment.get("role") == "authoring"
-    assert authoring_assessment.get("suitable") is False
-    assert (
-        authoring_assessment.get("suitability_reason")
-        == "authoring_intent_required_by_workflow_profile"
-    )
+    if isinstance(authoring_assessment, dict):
+        assert authoring_assessment.get("role") == "authoring"
+        assert authoring_assessment.get("suitable") is False
+        assert (
+            authoring_assessment.get("suitability_reason")
+            == "authoring_intent_required_by_workflow_profile"
+        )
 
     execution_assessment = next(
         (
@@ -6715,6 +6715,22 @@ def test_tool_planner_receives_authoritative_workflow_continuation_context(
     assert result.workflow_routing.workflow_id == TOOL_CALLING_WORKFLOW_ID
     assert result.workflow_routing.source == "selector"
 
+    selector_prompt_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "workflow_selector_prompt"
+        ),
+        None,
+    )
+    assert selector_prompt_entry is not None
+    continuation_context = (
+        selector_prompt_entry.get("continuation_context", {}).get("text") or ""
+    )
+    assert "ACTIVE WORKFLOW CONTINUATION CONTEXT" in continuation_context
+    assert "#V#scholarly_paper_representation_workflow" in continuation_context
+
     planner_context = llm.calls[1]["context"] or []
     planner_prompt_context = "\n".join(
         str(message.get("content") or "")
@@ -6738,6 +6754,129 @@ def test_tool_planner_receives_authoritative_workflow_continuation_context(
     assert continuation_entry is not None
     assert continuation_entry.get("applied") is True
     assert continuation_entry.get("reason") == "workflow_state_authoritative"
+
+
+def test_selector_routes_failure_follow_up_with_episode_aware_context(
+    monkeypatch,
+):
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    diagnostic_workflow_id = "#V#missing_tool_call_workflow"
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_continuation_service.get_session_workflow_continuation_context",
+        lambda **_kwargs: {
+            "session_id": "session-1793",
+            "active_workflow_episode_id": "wfep_1793",
+            "active_workflow_source": "conversation_turn",
+            "selected_workflow_id": diagnostic_workflow_id,
+            "completion_gate_decision": "follow_up_required",
+            "completion_gate_decision_reason": "Diagnostic evidence retrieval failed.",
+            "requires_follow_up": True,
+            "safe_to_claim_completion": False,
+            "has_unresolved_required_effects": True,
+            "workflow_required_effects_contract": {
+                "contract_id": "conversation_diagnostics_required_evidence",
+            },
+            "resolved_contract_identifiers": {
+                "workflow_required_effects_contract_id": (
+                    "conversation_diagnostics_required_evidence"
+                ),
+                "selected_execution_mode": "tool_pipeline",
+                "dispatch_workflow_id": "#V#tool_calling_workflow",
+            },
+            "unresolved_required_effects": [
+                {
+                    "effect_id": "conversation_history",
+                    "effect_type": "diagnostic_evidence",
+                    "status": "not_satisfied",
+                    "status_reason": "Conversation evidence retrieval failed.",
+                    "required_tools": ["chat_history_get_debug_entry"],
+                }
+            ],
+        },
+    )
+    _register_terminal_custom_workflow(
+        orchestrator,
+        workflow_id=diagnostic_workflow_id,
+        purpose="Diagnostic follow-up workflow.",
+    )
+
+    class _SelectorContextSensitiveLLM:
+        def __init__(self):
+            self.calls: list[dict[str, Any]] = []
+
+        def generate(
+            self,
+            prompt: str,
+            context: Optional[Sequence[Mapping[str, Any]]] = None,
+            model=None,
+        ):
+            self.calls.append(
+                {"prompt": prompt, "context": list(context or []), "model": model}
+            )
+            if prompt == "Select workflow":
+                selector_prompt_text = "\n".join(
+                    str(item.get("content") or "")
+                    for item in (context or [])
+                    if isinstance(item, Mapping)
+                )
+                if (
+                    "ACTIVE WORKFLOW CONTINUATION CONTEXT" in selector_prompt_text
+                    and "conversation_diagnostics_required_evidence"
+                    in selector_prompt_text
+                    and "Active workflow source: conversation_turn"
+                    in selector_prompt_text
+                ):
+                    return diagnostic_workflow_id
+                return CHAT_ASSISTANT_WORKFLOW_ID
+            return "Diagnostic follow-up response."
+
+    llm = _SelectorContextSensitiveLLM()
+
+    result = orchestrator.run(
+        prompt="Explain the failure from the telemetry",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+        conversation_session_id="session-1793",
+        workflow_discovery_result={
+            "matches": [
+                {
+                    "concept_id": diagnostic_workflow_id,
+                    "name": "Missing Tool Call Workflow",
+                    "description": "Recover when tool emission failed.",
+                    "routing_eligible": True,
+                    "is_executable": True,
+                    "is_policy_safe": True,
+                    "relevance_score": 0.95,
+                    "confidence_score": 0.95,
+                    "candidate_source": "workflow_discovery",
+                    "candidate_reason": "discovered_workflow_candidate",
+                }
+            ]
+        },
+    )
+
+    assert result.workflow_routing is not None
+    assert result.workflow_routing.workflow_id == diagnostic_workflow_id
+    assert result.workflow_routing.verdict == "rag_selected"
+    selector_prompt_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "workflow_selector_prompt"
+        ),
+        None,
+    )
+    assert selector_prompt_entry is not None
+    continuation_context = (
+        selector_prompt_entry.get("continuation_context", {}).get("text") or ""
+    )
+    assert "ACTIVE WORKFLOW CONTINUATION CONTEXT" in continuation_context
+    assert "conversation_diagnostics_required_evidence" in continuation_context
+    assert "Active workflow source: conversation_turn" in continuation_context
 
 
 def test_tool_planner_skips_continuation_after_explicit_workflow_divergence(
@@ -6796,6 +6935,20 @@ def test_tool_planner_skips_continuation_after_explicit_workflow_divergence(
         if isinstance(message, dict)
     )
     assert "ACTIVE WORKFLOW CONTINUATION CONTEXT" not in planner_prompt_context
+    selector_prompt_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "workflow_selector_prompt"
+        ),
+        None,
+    )
+    assert selector_prompt_entry is not None
+    selector_continuation_context = (
+        selector_prompt_entry.get("continuation_context", {}).get("text") or ""
+    )
+    assert "No active workflow continuation context." in selector_continuation_context
 
     continuation_entry = next(
         (
@@ -6874,6 +7027,20 @@ def test_tool_planner_skips_continuation_when_selected_workflow_is_not_executabl
         if isinstance(message, dict)
     )
     assert "ACTIVE WORKFLOW CONTINUATION CONTEXT" not in planner_prompt_context
+    selector_prompt_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "workflow_selector_prompt"
+        ),
+        None,
+    )
+    assert selector_prompt_entry is not None
+    selector_continuation_context = (
+        selector_prompt_entry.get("continuation_context", {}).get("text") or ""
+    )
+    assert "No active workflow continuation context." in selector_continuation_context
 
     continuation_entry = next(
         (

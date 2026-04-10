@@ -228,6 +228,7 @@ def _build_durable_workflow_bootstrap_summary(
         "paper_recommendation_workflow_bootstrap",
         "talk_workflow_bootstrap",
         "testing_workflow_bootstrap",
+        "turn_pipeline_monitoring_workflow_bootstrap",
         "workflow_authority_bootstrap",
         "workflow_authoring_prompt_bootstrap",
     ):
@@ -432,6 +433,9 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         from ..services.testing_workflow_vontology_service import (
             bootstrap_canonical_testing_workflows,
         )
+        from ..services.turn_pipeline_monitoring_workflow_vontology_service import (
+            bootstrap_canonical_turn_pipeline_monitoring_workflows,
+        )
         from ..services.talk_representation_workflow_vontology_service import (
             bootstrap_canonical_talk_representation_workflows,
         )
@@ -485,6 +489,12 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             label="testing workflow",
             bootstrap_fn=bootstrap_canonical_testing_workflows,
         )
+        turn_pipeline_monitoring_workflow_bootstrap_report = (
+            _run_workflow_family_bootstrap(
+                label="turn-pipeline monitoring workflow",
+                bootstrap_fn=bootstrap_canonical_turn_pipeline_monitoring_workflows,
+            )
+        )
 
         workflow_authority_bootstrap_report = _bootstrap_workflow_authority_for_startup(
             app_logger
@@ -529,6 +539,9 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         )
         result["talk_workflow_bootstrap"] = talk_workflow_bootstrap_report
         result["testing_workflow_bootstrap"] = testing_workflow_bootstrap_report
+        result["turn_pipeline_monitoring_workflow_bootstrap"] = (
+            turn_pipeline_monitoring_workflow_bootstrap_report
+        )
         result["workflow_authority_bootstrap"] = workflow_authority_bootstrap_report
         if not bool(entity_workflow_bootstrap_report.get("success", False)):
             app_logger.warning(
@@ -578,6 +591,13 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             app_logger.warning(
                 "[durable_workflows] testing workflow bootstrap failed: %s",
                 testing_workflow_bootstrap_report,
+            )
+        if not bool(
+            turn_pipeline_monitoring_workflow_bootstrap_report.get("success", False)
+        ):
+            app_logger.warning(
+                "[durable_workflows] turn-pipeline monitoring workflow bootstrap failed: %s",
+                turn_pipeline_monitoring_workflow_bootstrap_report,
             )
         if not bool(workflow_authority_bootstrap_report.get("success", False)):
             app_logger.warning(
@@ -711,6 +731,28 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         except Exception as schedule_exc:
             app_logger.warning(
                 "[durable_workflows] paper recommendation schedule bootstrap error: %s",
+                schedule_exc,
+            )
+
+        try:
+            from ..services.turn_pipeline_monitoring_schedule_bootstrap_service import (
+                ensure_turn_pipeline_monitoring_schedules,
+            )
+
+            turn_pipeline_monitoring_schedule_report = (
+                ensure_turn_pipeline_monitoring_schedules()
+            )
+            result["turn_pipeline_monitoring_schedule_bootstrap"] = (
+                turn_pipeline_monitoring_schedule_report
+            )
+            if not bool(turn_pipeline_monitoring_schedule_report.get("success", False)):
+                app_logger.warning(
+                    "[durable_workflows] turn-pipeline monitoring schedule bootstrap failed: %s",
+                    turn_pipeline_monitoring_schedule_report,
+                )
+        except Exception as schedule_exc:
+            app_logger.warning(
+                "[durable_workflows] turn-pipeline monitoring schedule bootstrap error: %s",
                 schedule_exc,
             )
 

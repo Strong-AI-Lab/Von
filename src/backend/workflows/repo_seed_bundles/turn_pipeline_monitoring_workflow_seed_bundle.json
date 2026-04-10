@@ -1,0 +1,260 @@
+{
+  "family_id": "turn_pipeline_monitoring_workflow_seed_bundle",
+  "managed_by": "turn_pipeline_monitoring_workflow_vontology_service",
+  "schema_version": "repo_seed_workflow_bundle.v1",
+  "source_tag": "JVNAUTOSCI-1795",
+  "supported_action_ids": [
+    "workflow_mcp_health_check",
+    "turn_execution_search_failures",
+    "turn_execution_build_dashboard",
+    "turn_execution_build_selector_benchmark"
+  ],
+  "workflows": [
+    {
+      "workflow_id": "#V#turn_pipeline_monitoring_workflow",
+      "display_name": "Turn Pipeline Monitoring Workflow",
+      "description": "Run the workflow MCP health check, scan recent turn-execution failures, and build the dashboard that surfaces active regressions for the turn pipeline.",
+      "content": "Scheduled turn-pipeline monitoring workflow that runs gateway-path health checks, failure scanning, and dashboard generation so regressions become visible through durable execution traces rather than only ad hoc pull diagnostics.",
+      "type_ids": [
+        "#V#ai_workflow",
+        "#V#durable_workflow"
+      ],
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"maintenance\",\"authoring_intent_required\":false,\"explicit_workflow_context_required\":true,\"prefer_existing_capability\":false}",
+          "lang": "en-NZ"
+        }
+      ],
+      "publication_spec": {
+        "initial_state": "run_health_check",
+        "steps": [
+          {
+            "state_id": "run_health_check",
+            "action_id": "workflow_mcp_health_check",
+            "static_input_bindings": [
+              [
+                "include_introspection",
+                false
+              ],
+              [
+                "namespace",
+                {
+                  "$context_key": "namespace"
+                }
+              ]
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_turn_pipeline_monitoring_workflow_run_health_check_failed_tools_to_health_check_failed_tools",
+                "context_key": "health_check_failed_tools",
+                "tool_output_field": "failed_tools"
+              }
+            ],
+            "next_state": "search_recent_failures",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "search_recent_failures",
+            "action_id": "turn_execution_search_failures",
+            "static_input_bindings": [
+              [
+                "namespace",
+                {
+                  "$context_key": "namespace"
+                }
+              ],
+              [
+                "limit",
+                {
+                  "$context_key": "limit"
+                }
+              ],
+              [
+                "offset",
+                0
+              ],
+              [
+                "include_completed",
+                true
+              ],
+              [
+                "max_cases",
+                {
+                  "$context_key": "max_cases"
+                }
+              ]
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_turn_pipeline_monitoring_workflow_search_recent_failures_likely_failure_count_to_likely_failure_count",
+                "context_key": "likely_failure_count",
+                "tool_output_field": "likely_failure_count"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_turn_pipeline_monitoring_workflow_search_recent_failures_failure_mode_counts_to_failure_mode_counts",
+                "context_key": "failure_mode_counts",
+                "tool_output_field": "failure_mode_counts"
+              }
+            ],
+            "next_state": "build_dashboard",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "build_dashboard",
+            "action_id": "turn_execution_build_dashboard",
+            "static_input_bindings": [
+              [
+                "namespace",
+                {
+                  "$context_key": "namespace"
+                }
+              ],
+              [
+                "limit",
+                {
+                  "$context_key": "limit"
+                }
+              ],
+              [
+                "offset",
+                0
+              ],
+              [
+                "include_completed",
+                true
+              ],
+              [
+                "max_cases",
+                {
+                  "$context_key": "max_cases"
+                }
+              ],
+              [
+                "selector_case_set",
+                {
+                  "$context_key": "selector_case_set"
+                }
+              ],
+              [
+                "selector_max_cases",
+                {
+                  "$context_key": "selector_max_cases"
+                }
+              ],
+              [
+                "baseline_false_success_rate_pct",
+                {
+                  "$context_key": "baseline_false_success_rate_pct"
+                }
+              ],
+              [
+                "baseline_selector_accuracy_pct",
+                {
+                  "$context_key": "baseline_selector_accuracy_pct"
+                }
+              ],
+              [
+                "regression_tolerance_pct",
+                {
+                  "$context_key": "regression_tolerance_pct"
+                }
+              ],
+              [
+                "latency_regression_tolerance_pct",
+                {
+                  "$context_key": "latency_regression_tolerance_pct"
+                }
+              ]
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_turn_pipeline_monitoring_workflow_build_dashboard_regression_views_active_regressions_to_active_regressions",
+                "context_key": "active_regressions",
+                "tool_output_field": "regression_views.active_regressions"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_turn_pipeline_monitoring_workflow_build_dashboard_summary_cards_to_dashboard_summary_cards",
+                "context_key": "dashboard_summary_cards",
+                "tool_output_field": "summary_cards"
+              }
+            ],
+            "next_state": "complete",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "complete"
+          },
+          {
+            "state_id": "failed"
+          }
+        ]
+      }
+    },
+    {
+      "workflow_id": "#V#turn_pipeline_tier1_regression_workflow",
+      "display_name": "Turn Pipeline Tier 1 Regression Workflow",
+      "description": "Run the selector-routing tier-1 benchmark corpus so turn-pipeline routing regressions are captured in a durable execution trace on a recurring schedule.",
+      "content": "Scheduled turn-pipeline tier-1 regression workflow that runs the selector-routing benchmark corpus from the repo-side seed bundle and records the resulting benchmark signals in a durable execution trace.",
+      "type_ids": [
+        "#V#ai_workflow",
+        "#V#durable_workflow"
+      ],
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"maintenance\",\"authoring_intent_required\":false,\"explicit_workflow_context_required\":true,\"prefer_existing_capability\":false}",
+          "lang": "en-NZ"
+        }
+      ],
+      "publication_spec": {
+        "initial_state": "build_selector_benchmark",
+        "steps": [
+          {
+            "state_id": "build_selector_benchmark",
+            "action_id": "turn_execution_build_selector_benchmark",
+            "static_input_bindings": [
+              [
+                "case_set",
+                {
+                  "$context_key": "case_set"
+                }
+              ],
+              [
+                "max_cases",
+                {
+                  "$context_key": "max_cases"
+                }
+              ]
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_turn_pipeline_tier1_regression_workflow_build_selector_benchmark_metrics_selector_accuracy_pct_to_selector_accuracy_pct",
+                "context_key": "selector_accuracy_pct",
+                "tool_output_field": "metrics.selector_accuracy_pct"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_turn_pipeline_tier1_regression_workflow_build_selector_benchmark_corpus_case_set_to_selector_case_set_resolved",
+                "context_key": "selector_case_set_resolved",
+                "tool_output_field": "corpus.case_set"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_turn_pipeline_tier1_regression_workflow_build_selector_benchmark_benchmark_signals_to_selector_benchmark_signals",
+                "context_key": "selector_benchmark_signals",
+                "tool_output_field": "benchmark_signals"
+              }
+            ],
+            "next_state": "complete",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "complete"
+          },
+          {
+            "state_id": "failed"
+          }
+        ]
+      }
+    }
+  ]
+}

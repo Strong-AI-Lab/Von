@@ -191,7 +191,21 @@ See:
   registry and regenerate `src/backend/mcp_server/vontology_mcp.json` so the
   stdio surface, manifest, and handler contracts stay in sync.
 
-### 6.4 GitHub
+### 6.4 Scheduled monitoring workflows
+
+- When adding recurring monitoring or regression detection for workflow or turn
+  surfaces, prefer the full authority pattern:
+  - a Vontology-defined workflow published from a repo seed bundle
+  - a managed schedule bootstrap service that only ensures schedule presence and
+    configuration
+  - startup integration in `utils_flask._start_durable_workflow_system()`
+  - targeted tests for publication, startup bootstrap, and real workflow
+    execution via gateway-backed fallback actions
+- Keep Python responsible only for schedule bootstrap, runtime plumbing, and
+  fail-closed enforcement. Do not encode the monitoring policy itself in Python
+  cron-like logic if a durable workflow can express it.
+
+### 6.5 GitHub
 
 - Prefer Von's internal GitHub MCP proxy and its guardrails for GitHub access.
 - Keep write behaviour fail-closed and allow-list aware.
@@ -200,7 +214,7 @@ See:
 
 - `docs/engineering/github_internal_mcp_runbook.md`
 
-### 6.4 Vontology and MCP field notes
+### 6.6 Vontology and MCP field notes
 
 - Prefer `upsert_singleton_text_relation` for canonical singleton text
   predicates rather than repeatedly appending parallel values.

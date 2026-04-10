@@ -124,6 +124,10 @@ _apply_dotenv_overrides(
         # Durable workflow runtime control must resolve from .env because the
         # local launcher and VS Code hosts do not reliably inherit it.
         "VON_DURABLE_WORKFLOWS_ENABLE",
+        "VON_TURN_PIPELINE_MONITORING_SCHEDULE_ENABLE",
+        "VON_TURN_PIPELINE_MONITORING_INTERVAL_SECONDS",
+        "VON_TURN_PIPELINE_TIER1_REGRESSION_INTERVAL_SECONDS",
+        "VON_TURN_PIPELINE_TIER1_CASE_SET",
         "VON_DEBUG_USER_PROMPT_LOADING",
         "VON_DEFAULT_NAMESPACE",
         "VON_DETERMINISTIC_INTROSPECTION",
