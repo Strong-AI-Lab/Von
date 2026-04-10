@@ -134,6 +134,15 @@ For minimum local and hosted environment sets, see
 - Use the Atlassian recovery runbook rather than handwritten REST workarounds.
 - If the Jira pathway is broken, improve the canonical path or document the gap
   instead of normalising ad-hoc bypasses.
+- When updating Jira descriptions through MCP, do not rely on wiki-style
+  pseudo-markup such as `h2.`, `* item`, or ad-hoc plain-text headings unless
+  the tool explicitly documents that format. The safe default is Atlassian
+  document structure (`type: "doc"` with real `heading`, `paragraph`,
+  `bulletList`, and `orderedList` nodes).
+- After substantial Jira description rewrites, do a quick read-back check to
+  confirm the stored payload contains structured heading/list nodes rather than
+  flattened paragraph text. Treat bad Jira rendering as a tooling-path defect to
+  correct, not as cosmetic noise to ignore.
 - When creating Jira issues on the user's behalf, assign them to the
   authenticated Jira user by default unless the user explicitly asks for a
   different assignee or Jira refuses the assignment.
