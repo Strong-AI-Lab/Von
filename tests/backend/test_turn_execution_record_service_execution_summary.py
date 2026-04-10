@@ -319,32 +319,77 @@ def test_tool_execution_summary_preserves_custom_workflow_first_step_failure_loc
     ]
     assert summary["dispatch_terminal_failing_state_id"] == "prepare_spec"
     assert summary["dispatch_terminal_failing_action_id"] == "tool.prepare_spec"
-    assert summary["custom_workflow_execution"] == {
-        "observed": True,
-        "schema_version": "workflow_execution_summary.v1",
-        "workflow_id": "#V#meeting_invitation_testing_workflow",
-        "completed": False,
-        "final_state": "prepare_spec",
-        "step_result_envelope_count": 0,
-        "action_started_count": 0,
-        "action_completed_count": 0,
-        "action_success_count": 0,
-        "action_failure_count": 0,
-        "action_unknown_count": 0,
-        "first_failing_state_id": "prepare_spec",
-        "first_failing_action_id": "tool.prepare_spec",
-        "runtime_event_count": 0,
-        "terminal_effect_count": 0,
-        "terminal_effects": [],
-        "durable_side_effect_count": 0,
-        "durable_side_effects": [],
-    }
+    custom_execution = summary["custom_workflow_execution"]
+    assert custom_execution["observed"] is True
+    assert custom_execution["schema_version"] == "workflow_execution_summary.v1"
+    assert custom_execution["workflow_id"] == "#V#meeting_invitation_testing_workflow"
+    assert custom_execution["completed"] is False
+    assert custom_execution["final_state"] == "prepare_spec"
+    assert custom_execution["step_result_envelope_count"] == 0
+    assert custom_execution["action_started_count"] == 0
+    assert custom_execution["action_completed_count"] == 0
+    assert custom_execution["action_success_count"] == 0
+    assert custom_execution["action_failure_count"] == 0
+    assert custom_execution["action_unknown_count"] == 0
+    assert custom_execution["first_failing_state_id"] == "prepare_spec"
+    assert custom_execution["first_failing_action_id"] == "tool.prepare_spec"
+    assert custom_execution["runtime_event_count"] == 0
+    assert custom_execution["terminal_effect_count"] == 0
+    assert custom_execution["terminal_effects"] == []
+    assert custom_execution["durable_side_effect_count"] == 0
+    assert custom_execution["durable_side_effects"] == []
     assert summary["zero_tools_executed"] is True
     assert summary["failure_codes"] == []
     assert summary["zero_tool_reason_code"] == (
         "custom_workflow_failed_before_tool_invocation"
     )
     assert summary["zero_tool_execution_expected"] is False
+
+
+def test_tool_execution_summary_promotes_authoritative_submission_failure_to_dispatch_failure() -> None:
+    summary = _summarise_tool_execution_context(
+        workflow_routing={
+            "workflow_id": "#V#conversation_turn_execution_workflow",
+            "verdict": "rag_selected",
+        },
+        turn_execution_diagnostics={
+            "latest_progress": {
+                "counters": {"tools_started": 0, "tools_completed": 0},
+                "diagnostic_events": [],
+            }
+        },
+        aux_llm_calls=[
+            {
+                "type": "workflow_instance_submission",
+                "workflow_id": "#V#conversation_turn_execution_workflow",
+                "status": "submission_failed",
+                "reason_code": "workflow_not_runnable",
+                "error": (
+                    "Workflow #V#conversation_turn_execution_workflow is not runnable "
+                    "because actions turn_execution.critic and "
+                    "turn_execution.completion_gate are unsupported."
+                ),
+                "submission": {
+                    "verification": {
+                        "runnable_verification_success": False,
+                        "unsupported_action_ids": [
+                            "turn_execution.critic",
+                            "turn_execution.completion_gate",
+                        ],
+                    }
+                },
+            }
+        ],
+        serialised_invocations=[],
+    )
+
+    assert summary["selected_execution_mode"] == "custom_workflow"
+    assert summary["dispatch_workflow_id"] == "#V#conversation_turn_execution_workflow"
+    assert summary["dispatch_terminal_status"] == "failed"
+    assert summary["dispatch_terminal_failure_reason"] == "workflow_not_runnable"
+    assert "turn_execution.critic" in (
+        summary["dispatch_terminal_failure_detail"] or ""
+    )
 
 
 def test_tool_execution_summary_records_custom_workflow_action_and_side_effect_evidence() -> None:
@@ -1030,3 +1075,85 @@ def test_build_turn_execution_correctness_summary_marks_plain_response_misroutin
     assert summary["metric_labels"]["unresolved_follow_up_needed"] is True
     assert summary["metric_labels"]["tool_or_workflow_misrouting"] is True
     assert summary["selection_labels"]["plain_response_route_selected"] is True
+
+
+def test_build_turn_execution_correctness_summary_marks_launchability_fallback_misrouting() -> None:
+    summary = build_turn_execution_correctness_summary(
+        completion_gate={
+            "decision": "escalation_required",
+            "decision_reason": "Selected workflow was not executed.",
+            "safe_to_claim_completion": False,
+            "requires_follow_up": True,
+        },
+        required_effects=[{"effect_id": "effect_1", "status": "not_executed"}],
+        critic_summary={"not_verified_count": 1},
+        final_response={
+            "completion_claim_detected": True,
+            "completion_claim_validated": False,
+        },
+        workflow_selection={
+            "selected_workflow_id": "#V#tool_calling_workflow",
+            "selector_verdict": "tool_contract_override",
+            "selector_source": "selector_override",
+        },
+        workflow_routing_diagnostics={
+            "selector": {
+                "override_events": [
+                    {
+                        "reason": "selected_custom_workflow_launchability_requires_safe_general_fallback",
+                        "prior_selected_workflow_id": "#V#arxiv_paper_representation_workflow",
+                        "selected_workflow_id": "#V#tool_calling_workflow",
+                        "custom_workflow_override_reason": "no_custom_workflow_candidates",
+                        "launch_viability_probe": {
+                            "prior_selected_workflow": {"launchable": False}
+                        },
+                    }
+                ]
+            }
+        },
+    )
+
+    assert summary["failure_mode"] == "mutation_not_executed"
+    assert summary["overall_outcome"] == "tool_or_workflow_misrouting"
+    assert summary["likely_failure_to_act"] is True
+    assert summary["metric_labels"]["tool_or_workflow_misrouting"] is True
+    assert summary["selection_labels"]["tool_route_selected"] is True
+    assert summary["selection_labels"]["launchability_degraded_tool_route"] is True
+
+
+def test_build_turn_execution_correctness_summary_marks_submission_failure_false_success() -> None:
+    summary = build_turn_execution_correctness_summary(
+        completion_gate={
+            "decision": "completed",
+            "decision_reason": "No blocking effect detected.",
+            "safe_to_claim_completion": True,
+            "requires_follow_up": False,
+        },
+        required_effects=[],
+        critic_summary={"not_verified_count": 0, "inconclusive_count": 0},
+        final_response={
+            "completion_claim_detected": True,
+            "completion_claim_validated": True,
+        },
+        workflow_selection={
+            "selected_workflow_id": "#V#conversation_turn_execution_workflow",
+            "selector_verdict": "rag_selected",
+            "selector_source": "workflow_owned",
+        },
+        workflow_routing_diagnostics={
+            "dispatch": {
+                "selected_execution_mode": "custom_workflow",
+                "dispatch_workflow_id": "#V#conversation_turn_execution_workflow",
+                "dispatch_terminal_status": "failed",
+                "dispatch_terminal_failure_reason": "workflow_not_runnable",
+                "dispatch_terminal_failure_detail": (
+                    "Workflow submission failed before any tool or workflow execution."
+                ),
+                "failure_codes": ["workflow_not_runnable"],
+            }
+        },
+    )
+
+    assert summary["failure_mode"] == "false_completion_gate_state"
+    assert summary["overall_outcome"] == "false_success"
+    assert summary["metric_labels"]["false_success"] is True

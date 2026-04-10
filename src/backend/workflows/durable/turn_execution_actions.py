@@ -20,6 +20,10 @@ from ..action_registry import (
 from ..execution_contracts import (
     WORKFLOW_STEP_RESULT_ENVELOPE_SCHEMA_VERSION,
 )
+from .turn_execution_runtime_support import (
+    run_turn_execution_completion_gate,
+    run_turn_execution_critic,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +129,29 @@ def _build_turn_execution_execute_selected_handler() -> Any:
     return _handle
 
 
+def _build_turn_execution_critic_handler() -> Any:
+    def _handle(request: WorkflowActionRequest) -> WorkflowActionResult:
+        return run_turn_execution_critic(
+            request,
+            annotation_component="durable_turn_execution_actions",
+            annotation_function="_build_turn_execution_critic_handler",
+        )
+
+    return _handle
+
+
+def _build_turn_execution_completion_gate_handler() -> Any:
+    def _handle(request: WorkflowActionRequest) -> WorkflowActionResult:
+        return run_turn_execution_completion_gate(
+            request,
+            annotation_component="durable_turn_execution_actions",
+            annotation_function="_build_turn_execution_completion_gate_handler",
+            introspection_auto_apply_env="VON_WORKFLOW_INTROSPECTION_AUTO_APPLY",
+        )
+
+    return _handle
+
+
 def register_turn_execution_actions(registry: ActionRegistry) -> None:
     """Register all master-turn control plane actions."""
     
@@ -144,5 +171,18 @@ def register_turn_execution_actions(registry: ActionRegistry) -> None:
         )
     )
 
-    # Note: Critic and Completion Gate are often synthetic engine-level actions
-    # but can be registered here if they need custom durable implementations.
+    registry.register_if_absent(
+        ActionSpec(
+            action_id=TURN_EXECUTION_CRITIC_ACTION_ID,
+            handler=_build_turn_execution_critic_handler(),
+            description="Evaluate required effects and postcondition checks for the turn.",
+        )
+    )
+
+    registry.register_if_absent(
+        ActionSpec(
+            action_id=TURN_EXECUTION_COMPLETION_GATE_ACTION_ID,
+            handler=_build_turn_execution_completion_gate_handler(),
+            description="Apply completion gate and prevent false completion claims.",
+        )
+    )

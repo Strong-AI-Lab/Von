@@ -256,3 +256,7 @@ def test_execute_selected_promotes_child_result_snapshot_into_completion_report(
     assert report["file_copy_concept_id"] == "#V#file_copy_456"
     assert report["result_snapshot"]["paper_concept_id"] == "#V#paper_123"
     assert report["result_snapshot"]["file_copy_concept_id"] == "#V#file_copy_456"
+    assert "Created paper concept: #V#paper_123." in report["response_text"]
+    assert "Linked file copy: #V#file_copy_456." in report["response_text"]
+    assert "Created paper concept: #V#paper_123." in result.outputs["response_text"]
+    assert "Linked file copy: #V#file_copy_456." in result.outputs["response_text"]

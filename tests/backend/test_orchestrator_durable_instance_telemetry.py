@@ -416,6 +416,8 @@ def test_execute_workflow_marks_failure_like_terminal_state_as_failed(
     result_data = cast(dict[str, Any], resolved_result.data)
     summary = cast(dict[str, Any], result_data["workflow_execution_summary"])
     assert summary["completed"] is False
+    assert summary["reported_completed"] is True
+    assert summary["effective_completed"] is False
     assert len(fake_manager.mark_completed_calls) == 0
     assert len(fake_manager.mark_failed_calls) == 1
     failed_call = fake_manager.mark_failed_calls[0]

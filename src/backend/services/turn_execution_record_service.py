@@ -13,7 +13,7 @@ import logging
 import re
 import threading
 from datetime import datetime, timezone
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, cast
 
 from pymongo import ASCENDING, DESCENDING
 from pymongo.errors import OperationFailure, PyMongoError
@@ -785,6 +785,55 @@ def is_turn_execution_likely_failure_to_act(failure_mode: str) -> bool:
     }
 
 
+def _has_tool_route_launchability_degradation(
+    workflow_routing_diagnostics: Mapping[str, Any] | None,
+) -> bool:
+    if not isinstance(workflow_routing_diagnostics, Mapping):
+        return False
+
+    selector_payload = workflow_routing_diagnostics.get("selector")
+    selector_payload = (
+        selector_payload if isinstance(selector_payload, Mapping) else {}
+    )
+    override_events = selector_payload.get("override_events")
+    if not isinstance(override_events, list):
+        return False
+
+    for event in override_events:
+        if not isinstance(event, Mapping):
+            continue
+        prior_selected_workflow_id = _safe_str(event.get("prior_selected_workflow_id"))
+        selected_workflow_id = _safe_str(event.get("selected_workflow_id"))
+        reason = (_safe_str(event.get("reason")) or "").lower()
+        custom_override_reason = (
+            _safe_str(event.get("custom_workflow_override_reason")) or ""
+        ).lower()
+        launch_viability_probe = event.get("launch_viability_probe")
+        prior_probe = (
+            launch_viability_probe.get("prior_selected_workflow")
+            if isinstance(launch_viability_probe, Mapping)
+            else None
+        )
+        prior_launchable = (
+            prior_probe.get("launchable")
+            if isinstance(prior_probe, Mapping)
+            else None
+        )
+
+        if not prior_selected_workflow_id:
+            continue
+        if selected_workflow_id != "#V#tool_calling_workflow":
+            continue
+        if reason == "selected_custom_workflow_launchability_requires_safe_general_fallback":
+            return True
+        if "launchability" in reason:
+            return True
+        if custom_override_reason and prior_launchable is False:
+            return True
+
+    return False
+
+
 def build_turn_execution_correctness_summary(
     *,
     completion_gate: Mapping[str, Any] | None,
@@ -858,6 +907,10 @@ def build_turn_execution_correctness_summary(
         (selected_workflow_id or "") == "#V#tool_calling_workflow"
         or selector_verdict_lower in _TOOL_CALLING_SELECTOR_VERDICTS
     )
+    launchability_degraded_tool_route = bool(
+        tool_route_selected
+        and _has_tool_route_launchability_degradation(workflow_routing_payload)
+    )
     abstain_escalate_no_safe_route = (
         selector_verdict_lower in _ABSTAIN_OR_NO_SAFE_ROUTE_SELECTOR_VERDICTS
         or (
@@ -868,7 +921,7 @@ def build_turn_execution_correctness_summary(
     )
     tool_or_workflow_misrouting = bool(
         likely_failure_to_act
-        and plain_response_route_selected
+        and (plain_response_route_selected or launchability_degraded_tool_route)
         and not abstain_escalate_no_safe_route
     )
     false_success = failure_mode in _FALSE_SUCCESS_FAILURE_MODES
@@ -908,6 +961,7 @@ def build_turn_execution_correctness_summary(
             "selector_source": selector_source,
             "plain_response_route_selected": plain_response_route_selected,
             "tool_route_selected": tool_route_selected,
+            "launchability_degraded_tool_route": launchability_degraded_tool_route,
             "tool_or_workflow_misrouting": tool_or_workflow_misrouting,
             "abstain_escalate_no_safe_route": abstain_escalate_no_safe_route,
         },
@@ -1545,12 +1599,22 @@ def _build_custom_workflow_execution_summary(
             summary_payload.get("completion_gate_blocking_reason_codes") or []
         ),
         "terminal_success_contract": (
-            dict(summary_payload.get("terminal_success_contract"))
+            dict(
+                cast(
+                    Mapping[str, Any],
+                    summary_payload.get("terminal_success_contract"),
+                )
+            )
             if isinstance(summary_payload.get("terminal_success_contract"), Mapping)
             else None
         ),
         "terminal_success_evaluation": (
-            dict(summary_payload.get("terminal_success_evaluation"))
+            dict(
+                cast(
+                    Mapping[str, Any],
+                    summary_payload.get("terminal_success_evaluation"),
+                )
+            )
             if isinstance(summary_payload.get("terminal_success_evaluation"), Mapping)
             else None
         ),
@@ -2517,7 +2581,14 @@ def build_workflow_routing_diagnostics(
                         or []
                     ),
                     "terminal_success_contract": (
-                        dict(custom_workflow_execution_payload.get("terminal_success_contract"))
+                        dict(
+                            cast(
+                                Mapping[str, Any],
+                                custom_workflow_execution_payload.get(
+                                    "terminal_success_contract"
+                                ),
+                            )
+                        )
                         if isinstance(
                             custom_workflow_execution_payload.get(
                                 "terminal_success_contract"
@@ -2528,8 +2599,11 @@ def build_workflow_routing_diagnostics(
                     ),
                     "terminal_success_evaluation": (
                         dict(
-                            custom_workflow_execution_payload.get(
-                                "terminal_success_evaluation"
+                            cast(
+                                Mapping[str, Any],
+                                custom_workflow_execution_payload.get(
+                                    "terminal_success_evaluation"
+                                ),
                             )
                         )
                         if isinstance(
@@ -2878,6 +2952,10 @@ def _summarise_tool_execution_context(
         aux_llm_calls,
         entry_type="workflow_dispatch_boundary",
     )
+    workflow_instance_submission_events = _collect_aux_entries(
+        aux_llm_calls,
+        entry_type="workflow_instance_submission",
+    )
     selected_execution_mode = ""
     dispatch_workflow_id = ""
     contract_resolution_status = ""
@@ -2895,6 +2973,11 @@ def _summarise_tool_execution_context(
     dispatch_terminal_failing_action_id = ""
     dispatch_terminal_unresolved_required_inputs: list[str] = []
     dispatch_terminal_launch_input_resolution_status = ""
+    latest_workflow_instance_submission = (
+        workflow_instance_submission_events[-1]
+        if workflow_instance_submission_events
+        else {}
+    )
     for entry in aux_llm_calls or ():
         if not isinstance(entry, Mapping):
             continue
@@ -2974,6 +3057,39 @@ def _summarise_tool_execution_context(
                 dispatch_terminal_failure_error_class = (
                     _safe_str(event.get("error_class")) or ""
                 )
+
+    submission_status = _safe_str(latest_workflow_instance_submission.get("status")) or ""
+    submission_reason_code = _safe_str(
+        latest_workflow_instance_submission.get("reason_code")
+    ) or ""
+    submission_payload = latest_workflow_instance_submission.get("submission")
+    submission_payload = submission_payload if isinstance(submission_payload, Mapping) else {}
+    submission_verification = submission_payload.get("verification")
+    submission_verification = (
+        submission_verification if isinstance(submission_verification, Mapping) else {}
+    )
+    submission_verification_failed = submission_verification.get(
+        "runnable_verification_success"
+    ) is False
+    if (
+        not dispatch_boundary_events
+        and submission_status == "submission_failed"
+        and (submission_verification_failed or submission_reason_code == "workflow_not_runnable")
+    ):
+        dispatch_workflow_id = (
+            _safe_str(latest_workflow_instance_submission.get("workflow_id"))
+            or dispatch_workflow_id
+        )
+        selected_execution_mode = selected_execution_mode or "custom_workflow"
+        dispatch_terminal_status = "failed"
+        dispatch_terminal_failure_reason = (
+            submission_reason_code or "workflow_instance_submission_failed"
+        )
+        dispatch_terminal_failure_detail = (
+            _safe_str(latest_workflow_instance_submission.get("error"))
+            or _safe_str(submission_payload.get("error"))
+            or dispatch_terminal_failure_detail
+        )
 
     invocation_count = len(serialised_invocations)
     observed_started_count = max(progress_tools_started, tool_call_start_event_count)

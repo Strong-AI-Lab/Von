@@ -10,6 +10,7 @@ from src.backend.workflows.durable.workflow_instance_submission_service import (
     verify_workflow_runnable,
 )
 from src.backend.workflows.durable.registry_factory import (
+    build_durable_action_registry,
     invalidate_shared_durable_action_registry,
     invalidate_shared_workflow_registry_read_only,
 )
@@ -508,6 +509,62 @@ def test_verify_workflow_runnable_accepts_shared_conversation_actions_via_fallba
         return_value=frozenset(workflow_action_ids),
     ):
         verification = verify_workflow_runnable("#V#candidate_workflow")
+
+    assert verification.runnable_verification_success is True
+    assert set(verification.discovered_action_ids) == set(workflow_action_ids)
+    assert verification.unsupported_action_ids == ()
+    assert verification.contract_validation is not None
+    assert verification.contract_validation.get("valid") is True
+
+
+def test_verify_workflow_runnable_accepts_turn_execution_runtime_support_actions() -> None:
+    workflow_action_ids = (
+        "turn_execution.critic",
+        "turn_execution.completion_gate",
+    )
+    graph = {
+        "workflow_id": "#V#conversation_turn_execution_workflow",
+        "initial_step": "#V#start",
+        "steps": [
+            {
+                "step_id": "#V#start",
+                "name": "Start",
+                "invokes_action": workflow_action_ids[0],
+            }
+        ],
+        "edges": [],
+        "warnings": [],
+    }
+    definition = WorkflowDefinition(
+        workflow_id="#V#conversation_turn_execution_workflow",
+        initial_state="#V#start",
+        states={
+            "#V#start": WorkflowStateSpec(
+                state_id="#V#start",
+                actions=tuple(
+                    WorkflowActionInvocation(action_id=action_id)
+                    for action_id in workflow_action_ids
+                ),
+                terminal=True,
+            )
+        },
+        termination_states=("#V#start",),
+    )
+
+    with patch(
+        "src.backend.workflows.durable.workflow_instance_submission_service.build_workflow_process_graph_from_definition",
+        return_value=graph,
+    ), patch(
+        "src.backend.workflows.durable.registry_factory.get_shared_workflow_registry_read_only",
+        return_value=_make_registry(
+            definition,
+            workflow_id="#V#conversation_turn_execution_workflow",
+        ),
+    ), patch(
+        "src.backend.workflows.durable.registry_factory.get_shared_durable_action_registry",
+        return_value=build_durable_action_registry(),
+    ):
+        verification = verify_workflow_runnable("#V#conversation_turn_execution_workflow")
 
     assert verification.runnable_verification_success is True
     assert set(verification.discovered_action_ids) == set(workflow_action_ids)

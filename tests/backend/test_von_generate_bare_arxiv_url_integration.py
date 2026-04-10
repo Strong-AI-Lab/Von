@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 from flask import Flask
 
@@ -19,6 +20,7 @@ from src.backend.integrations.internal_mcp.gateway import (
 )
 from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
 from src.backend.workflows.definitions import (
+    ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
     CHAT_ASSISTANT_WORKFLOW_ID,
     TOOL_CALLING_WORKFLOW_ID,
 )
@@ -144,10 +146,14 @@ def _make_app(
     llm: _LLMSequence,
     selector_enabled: bool = True,
     proxy_factory=None,
+    workflow_discovery_result=None,
 ) -> Flask:
     from src.backend.server.routes.von_routes import von_bp
 
-    monkeypatch.setenv("VON_WORKFLOW_DISCOVERY_ENABLE", "0")
+    monkeypatch.setenv(
+        "VON_WORKFLOW_DISCOVERY_ENABLE",
+        "1" if workflow_discovery_result is not None else "0",
+    )
     monkeypatch.setenv("VON_DB_NAME", "test_von_db")
     monkeypatch.setattr(
         "src.backend.server.routes.von_routes.build_conversation_turn_stage_model_snapshot",
@@ -181,9 +187,13 @@ def _make_app(
         "src.backend.services.chat_auxiliary_prompt_service.get_user_specific_prompt_fragments",
         lambda _user_id, **_kwargs: [],
     )
+    if callable(workflow_discovery_result):
+        discovery_handler = workflow_discovery_result
+    else:
+        discovery_handler = lambda *_args, **_kwargs: workflow_discovery_result
     monkeypatch.setattr(
         "src.backend.services.workflow_discovery_service.discover_workflows_for_turn",
-        lambda *_args, **_kwargs: None,
+        discovery_handler,
     )
     monkeypatch.setattr(
         "src.backend.services.workflow_continuation_service.get_session_workflow_continuation_context",
@@ -209,7 +219,136 @@ def _make_app(
     return app
 
 
-def test_generate_bare_arxiv_url_auto_represents_paper(monkeypatch):
+def test_generate_bare_arxiv_url_routes_to_specialised_workflow_and_surfaces_created_concepts(
+    monkeypatch,
+):
+    llm = _LLMSequence(
+        [
+            (
+                '{"workflow_id":"#V#arxiv_paper_representation_workflow",'
+                '"confidence":0.99,'
+                '"reasoning":"Bare arXiv URL should use the specialised arXiv '
+                'paper representation workflow."}'
+            ),
+            "Downloaded and represented the paper.",
+            "Downloaded and represented the paper.",
+            "Downloaded and represented the paper.",
+        ]
+    )
+    discovery_result = {
+        "query": "https://arxiv.org/abs/2510.06248",
+        "requested_query": "https://arxiv.org/abs/2510.06248",
+        "search_sources": ["capability_index"],
+        "candidate_count": 1,
+        "match_count": 1,
+        "matches": [
+            {
+                "concept_id": ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+                "name": "Arxiv Paper Representation Workflow",
+                "description": "Represent an arXiv paper from a raw URL or arXiv identifier.",
+                "is_executable": True,
+                "executability_reason": "executable_now",
+                "is_policy_safe": True,
+                "routing_eligible": True,
+                "candidate_source": "capability_index",
+            }
+        ],
+        "candidates": [
+            {
+                "concept_id": ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+                "name": "Arxiv Paper Representation Workflow",
+                "description": "Represent an arXiv paper from a raw URL or arXiv identifier.",
+                "is_executable": True,
+                "executability_reason": "executable_now",
+                "is_policy_safe": True,
+                "routing_eligible": True,
+                "candidate_source": "capability_index",
+            }
+        ],
+    }
+    app = _make_app(
+        monkeypatch,
+        llm=llm,
+        workflow_discovery_result=discovery_result,
+    )
+
+    orchestrator = app.config["INTERNAL_MCP_ORCHESTRATOR"]
+    original_execute_workflow = orchestrator.execute_workflow
+
+    def _execute_workflow(workflow_id: str, **kwargs):
+        if workflow_id != ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID:
+            return original_execute_workflow(workflow_id, **kwargs)
+        return SimpleNamespace(
+            completed=True,
+            final_state="verify_arxiv_path",
+            error=None,
+            data={
+                "response_text": "Downloaded and represented the paper.",
+                "final_response": "Downloaded and represented the paper.",
+                "paper_concept_id": "#V#paper_on_arxiv_2510_06248",
+                "file_copy_concept_id": "#V#uploaded_file_copy_2510_06248",
+                "workflow_execution_summary": {
+                    "schema_version": "workflow_execution_summary.v1",
+                    "workflow_id": ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+                    "completed": True,
+                    "final_state": "verify_arxiv_path",
+                    "durable_side_effect_count": 2,
+                    "durable_side_effects": [
+                        {
+                            "mutation_kind": "created",
+                            "artefact_type": "paper_concept",
+                            "artefact_count": 1,
+                            "artefact_ids": ["#V#paper_on_arxiv_2510_06248"],
+                        },
+                        {
+                            "mutation_kind": "created",
+                            "artefact_type": "file_copy",
+                            "artefact_count": 1,
+                            "artefact_ids": ["#V#uploaded_file_copy_2510_06248"],
+                        },
+                    ],
+                },
+            },
+        )
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
+
+    client = app.test_client()
+    response = client.post(
+        "/von/generate",
+        json={"prompt": "https://arxiv.org/abs/2510.06248"},
+    )
+    assert response.status_code == 200
+
+    body = response.get_json()
+    assert isinstance(body, dict)
+    text = body.get("response") or ""
+    assert "Created paper concept: #V#paper_on_arxiv_2510_06248." in text
+    assert "Linked file copy: #V#uploaded_file_copy_2510_06248." in text
+    assert "Downloaded and represented the paper." in text
+
+    llm_debug = body.get("llm_debug") or {}
+    workflow_routing = llm_debug.get("workflow_routing") or {}
+    assert workflow_routing.get("workflow_id") == ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
+    assert workflow_routing.get("source") == "selector"
+
+    tool_invocations = llm_debug.get("tool_invocations") or []
+    assert tool_invocations == []
+
+    turn_record = llm_debug.get("turn_execution_record") or {}
+    completion_report = turn_record.get("completion_report") or {}
+    assert completion_report.get("paper_concept_id") == "#V#paper_on_arxiv_2510_06248"
+    assert completion_report.get("file_copy_concept_id") == (
+        "#V#uploaded_file_copy_2510_06248"
+    )
+    assert "Created paper concept: #V#paper_on_arxiv_2510_06248." in (
+        completion_report.get("response_text") or ""
+    )
+
+
+def test_generate_bare_arxiv_url_falls_back_to_tool_pipeline_when_specialised_route_is_unavailable(
+    monkeypatch,
+):
     llm = _LLMSequence(
         [
             (
@@ -511,4 +650,8 @@ def test_generate_bare_arxiv_url_with_explicit_denial_stays_non_mutating(monkeyp
 
     turn_record = llm_debug.get("turn_execution_record") or {}
     required_effects = turn_record.get("required_effects") or []
-    assert not required_effects
+    assert not any(
+        isinstance(effect, dict)
+        and list(effect.get("required_tools") or []) == ["download_paper"]
+        for effect in required_effects
+    )

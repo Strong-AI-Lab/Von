@@ -59,6 +59,7 @@ from ...workflows.action_registry import (
     WorkflowActionResult,
     WorkflowEnvironment,
 )
+from ...workflows import WorkflowRegistration
 from ...workflows.execution_contracts import (
     LAST_WORKFLOW_STEP_RESULT_ENVELOPE_KEY,
     WORKFLOW_RUNTIME_EVENTS_KEY,
@@ -101,6 +102,10 @@ from ...workflows.workflow_selector import WorkflowSelector
 from ...workflows.durable.registry_factory import (
     get_shared_durable_action_registry,
     get_shared_workflow_registry_read_only,
+)
+from ...workflows.durable.turn_execution_runtime_support import (
+    run_turn_execution_completion_gate,
+    run_turn_execution_critic,
 )
 from ...workflows.workflow_gap_workflow_contracts import (
     WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
@@ -825,7 +830,8 @@ def _build_workflow_execution_summary(
     final_state = _workflow_execution_summary_text(
         getattr(workflow_result, "final_state", None)
     )
-    completed = bool(getattr(workflow_result, "completed", False))
+    reported_completed = bool(getattr(workflow_result, "completed", False))
+    effective_completed = _workflow_result_effective_completed(workflow_result)
     terminal_status = _derive_workflow_terminal_status(workflow_result)
     completion_gate_summary = _workflow_completion_gate_summary(workflow_result)
     terminal_success_contract = _workflow_terminal_success_contract_from_result(
@@ -838,8 +844,12 @@ def _build_workflow_execution_summary(
     summary: dict[str, Any] = {
         "schema_version": _WORKFLOW_EXECUTION_SUMMARY_SCHEMA_VERSION,
         "workflow_id": workflow_id,
-        "completed": completed,
-        "effective_completed": _workflow_result_effective_completed(workflow_result),
+        # `completed` is the verdict callers should trust; preserve the raw executor
+        # flag separately because some workflows historically reported `completed=True`
+        # even when their terminal state or error made the outcome failure-like.
+        "completed": effective_completed,
+        "effective_completed": effective_completed,
+        "reported_completed": reported_completed,
         "terminal_status": terminal_status,
         "final_state": final_state,
         "step_result_envelope_count": len(step_envelopes),
@@ -1784,6 +1794,67 @@ class InternalMCPChatOrchestrator:
             self._max_tool_result_chars = 20_000
         if not hasattr(self, "_max_tool_result_field_chars"):
             self._max_tool_result_field_chars = 8_000
+
+    def _resolve_workflow_registration_and_definition(
+        self,
+        workflow_id: str | None,
+        *,
+        register_authoritative_fallback: bool = True,
+    ) -> tuple[WorkflowRegistration | None, Any | None]:
+        """Resolve a workflow definition from runtime registry or Vontology.
+
+        Selector-time launchability checks and execution handoff both need the
+        authoritative workflow definition even when the current registry
+        snapshot does not already contain the workflow ID. Fall back to the
+        Vontology loader and promote the result into the local registry so the
+        remainder of the turn observes a consistent definition/source.
+        """
+
+        self._ensure_workflow_runtime_surfaces()
+        workflow_id_text = (
+            str(workflow_id).strip()
+            if isinstance(workflow_id, str) and str(workflow_id).strip()
+            else None
+        )
+        if not workflow_id_text:
+            return None, None
+
+        registration = self._workflow_registry.get_registration(workflow_id_text)
+        definition = (
+            registration.definition
+            if registration is not None
+            else self._workflow_registry.get(workflow_id_text)
+        )
+        if definition is not None:
+            return registration, definition
+
+        authoritative_definition = load_workflow_definition_from_vontology(
+            workflow_id_text
+        )
+        if authoritative_definition is None:
+            return registration, None
+
+        if register_authoritative_fallback:
+            try:
+                self._workflow_registry.register_or_replace(
+                    WorkflowRegistration(
+                        workflow_id=authoritative_definition.workflow_id,
+                        definition=authoritative_definition,
+                        purpose=authoritative_definition.purpose,
+                        source="vontology",
+                    )
+                )
+                registration = self._workflow_registry.get_registration(workflow_id_text)
+                definition = (
+                    registration.definition if registration is not None else None
+                )
+            except Exception:
+                registration = None
+                definition = authoritative_definition
+        else:
+            definition = authoritative_definition
+
+        return registration, definition
 
     def get_execution_caps(self) -> dict[str, int]:
         return {
@@ -3904,6 +3975,110 @@ class InternalMCPChatOrchestrator:
         return lines
 
     @classmethod
+    def _render_custom_workflow_artefact_lines(
+        cls,
+        data: Mapping[str, Any],
+    ) -> list[str]:
+        lines: list[str] = []
+        paper_concept_id = cls._coerce_non_empty_text(data.get("paper_concept_id"))
+        file_copy_concept_id = cls._coerce_non_empty_text(
+            data.get("file_copy_concept_id")
+        )
+        if paper_concept_id:
+            lines.append(f"Created paper concept: {paper_concept_id}.")
+        if file_copy_concept_id:
+            lines.append(f"Linked file copy: {file_copy_concept_id}.")
+
+        workflow_execution_summary = data.get("workflow_execution_summary")
+        durable_side_effects = (
+            workflow_execution_summary.get("durable_side_effects")
+            if isinstance(workflow_execution_summary, Mapping)
+            else None
+        )
+        if isinstance(durable_side_effects, list):
+            for item in durable_side_effects[:3]:
+                if not isinstance(item, Mapping):
+                    continue
+                mutation_kind = cls._coerce_non_empty_text(item.get("mutation_kind"))
+                artefact_type = cls._coerce_non_empty_text(item.get("artefact_type"))
+                artefact_ids = item.get("artefact_ids")
+                if (
+                    mutation_kind == "created"
+                    and artefact_type
+                    and isinstance(artefact_ids, list)
+                    and artefact_ids
+                ):
+                    first_id = cls._coerce_non_empty_text(artefact_ids[0])
+                    if first_id and first_id not in {
+                        paper_concept_id,
+                        file_copy_concept_id,
+                    }:
+                        lines.append(
+                            f"Created {artefact_type.replace('_', ' ')}: {first_id}."
+                        )
+        return lines
+
+    @classmethod
+    def _collect_surfaceable_artefact_ids(
+        cls,
+        data: Mapping[str, Any] | None,
+    ) -> tuple[str, ...]:
+        if not isinstance(data, Mapping):
+            return ()
+
+        collected: list[str] = []
+        seen: set[str] = set()
+
+        def _add_identifier(value: Any) -> None:
+            identifier = cls._coerce_non_empty_text(value)
+            if not identifier:
+                return
+            lowered = identifier.lower()
+            if lowered in seen:
+                return
+            seen.add(lowered)
+            collected.append(identifier)
+
+        for key in ("paper_concept_id", "file_copy_concept_id"):
+            _add_identifier(data.get(key))
+
+        result_snapshot = data.get("result_snapshot")
+        if isinstance(result_snapshot, Mapping):
+            for key in ("paper_concept_id", "file_copy_concept_id"):
+                _add_identifier(result_snapshot.get(key))
+
+        durable_side_effects = data.get("durable_side_effects")
+        if isinstance(durable_side_effects, list):
+            for item in durable_side_effects[:6]:
+                if not isinstance(item, Mapping):
+                    continue
+                artefact_ids = item.get("artefact_ids")
+                if not isinstance(artefact_ids, list):
+                    continue
+                for artefact_id in artefact_ids[:6]:
+                    _add_identifier(artefact_id)
+
+        return tuple(collected)
+
+    @classmethod
+    def _response_mentions_surfaceable_artefacts(
+        cls,
+        response_text: Any,
+        artefact_ids: Sequence[str] | None,
+    ) -> bool:
+        text = response_text if isinstance(response_text, str) else ""
+        if not text.strip():
+            return False
+        identifiers = [
+            item.strip()
+            for item in (artefact_ids or ())
+            if isinstance(item, str) and item.strip()
+        ]
+        if not identifiers:
+            return False
+        return all(identifier in text for identifier in identifiers)
+
+    @classmethod
     def _render_custom_workflow_response_text(
         cls,
         *,
@@ -3918,6 +4093,7 @@ class InternalMCPChatOrchestrator:
         response_text = cls._coerce_non_empty_text(data.get("response_text"))
         summary_text = cls._coerce_non_empty_text(data.get("summary"))
         final_response_text = cls._coerce_non_empty_text(data.get("final_response"))
+        artefact_lines = cls._render_custom_workflow_artefact_lines(data)
 
         if not workflow_completed:
             if response_text and not cls._looks_like_machine_json_text(response_text):
@@ -3933,11 +4109,13 @@ class InternalMCPChatOrchestrator:
         for text in (response_text, summary_text, final_response_text):
             if text:
                 candidate_text = text
+                if artefact_lines and not cls._looks_like_machine_json_text(text):
+                    return "\n".join([*artefact_lines, "", text])
                 if not cls._looks_like_machine_json_text(text):
                     return text
                 break
 
-        lines: list[str] = []
+        lines: list[str] = list(artefact_lines)
 
         verdict = cls._coerce_non_empty_text(data.get("verdict"))
         if verdict:
@@ -6989,6 +7167,12 @@ class InternalMCPChatOrchestrator:
         )
 
     def _action_turn_execution_critic(self, request: Any) -> WorkflowActionResult:
+        return run_turn_execution_critic(
+            request,
+            annotation_component="internal_mcp_orchestrator",
+            annotation_function="_action_turn_execution_critic",
+        )
+
         """Build turn execution evidence and postcondition checks."""
 
         data = request.data
@@ -7121,6 +7305,25 @@ class InternalMCPChatOrchestrator:
     def _action_turn_execution_completion_gate(
         self, request: Any
     ) -> WorkflowActionResult:
+        return run_turn_execution_completion_gate(
+            request,
+            annotation_component="internal_mcp_orchestrator",
+            annotation_function="_action_turn_execution_completion_gate",
+            introspection_auto_apply_env=self._INTROSPECTION_AUTO_APPLY_ENV,
+            loop_max_attempts_default=int(
+                getattr(self, "_completion_gate_loop_max_attempts", 1)
+            ),
+            loop_max_elapsed_ms_default=int(
+                getattr(self, "_completion_gate_loop_max_elapsed_ms", 60_000)
+            ),
+            loop_no_progress_limit_default=int(
+                getattr(self, "_completion_gate_loop_no_progress_limit", 1)
+            ),
+            loop_stall_max_elapsed_ms_default=int(
+                getattr(self, "_completion_gate_loop_stall_max_elapsed_ms", 10_000)
+            ),
+        )
+
         """Apply completion gate policy and annotate unresolved execution."""
 
         data = request.data
@@ -19156,16 +19359,15 @@ class InternalMCPChatOrchestrator:
                 build_workflow_definition_identity,
             )
 
-            workflow_registration = self._workflow_registry.get_registration(workflow_id)
-            workflow_definition_for_identity = (
-                workflow_registration.definition
-                if workflow_registration is not None
-                else self._workflow_registry.get(workflow_id)
+            workflow_registration, workflow_definition_for_identity = (
+                self._resolve_workflow_registration_and_definition(workflow_id)
             )
             workflow_def = workflow_definition_for_identity
             workflow_source = (
                 str(getattr(workflow_registration, "source", "") or "").strip()
                 if workflow_registration is not None
+                else "vontology"
+                if workflow_definition_for_identity is not None
                 else "unknown"
             ) or "unknown"
             workflow_definition_identity = build_workflow_definition_identity(
@@ -19976,7 +20178,9 @@ class InternalMCPChatOrchestrator:
 
         if workflow_def is None:
             try:
-                workflow_def = self._workflow_registry.get(workflow_id)
+                workflow_def = self._resolve_workflow_registration_and_definition(
+                    workflow_id
+                )[1]
             except Exception:
                 workflow_def = None
 
@@ -20549,7 +20753,7 @@ class InternalMCPChatOrchestrator:
             if workflow_definition_for_identity is not None
             else workflow_def
             if workflow_def is not None
-            else self._workflow_registry.get(workflow_id)
+            else self._resolve_workflow_registration_and_definition(workflow_id)[1]
         )
         if workflow_def is None:
             if callable(finalise_episode_fn):
@@ -21178,6 +21382,10 @@ class InternalMCPChatOrchestrator:
             if isinstance(getattr(child_result, "data", None), Mapping)
             else {}
         )
+        rendered_child_response_text = self._render_custom_workflow_response_text(
+            workflow_id=selected_workflow_id,
+            workflow_result=child_result,
+        )
         completed = _workflow_result_effective_completed(child_result)
         final_state = (
             str(child_result.final_state).strip()
@@ -21196,7 +21404,9 @@ class InternalMCPChatOrchestrator:
                 completion_report = dict(summary_payload)
                 completion_report_source = "workflow_execution_summary"
             else:
-                response_preview = child_outputs.get("response_text")
+                response_preview = rendered_child_response_text
+                if not isinstance(response_preview, str) or not response_preview.strip():
+                    response_preview = child_outputs.get("response_text")
                 if not isinstance(response_preview, str) or not response_preview.strip():
                     response_preview = child_outputs.get("final_response")
                 completion_report = {
@@ -21215,16 +21425,28 @@ class InternalMCPChatOrchestrator:
         child_result_snapshot = _build_workflow_execution_aux_result_snapshot(child_result)
         if isinstance(completion_report, Mapping):
             completion_report = dict(completion_report)
+            if (
+                isinstance(rendered_child_response_text, str)
+                and rendered_child_response_text.strip()
+            ):
+                completion_report.setdefault(
+                    "response_text",
+                    rendered_child_response_text.strip(),
+                )
             if isinstance(child_result_snapshot, Mapping) and child_result_snapshot:
                 completion_report.setdefault("result_snapshot", dict(child_result_snapshot))
                 for key, value in child_result_snapshot.items():
                     if isinstance(key, str) and key not in completion_report:
                         completion_report[key] = value
 
-        final_response = child_outputs.get("final_response")
+        final_response = rendered_child_response_text
+        if not isinstance(final_response, str) or not final_response.strip():
+            final_response = child_outputs.get("final_response")
         if not isinstance(final_response, str) or not final_response.strip():
             final_response = child_outputs.get("response_text")
-        current_response = child_outputs.get("current_response")
+        current_response = rendered_child_response_text
+        if not isinstance(current_response, str) or not current_response.strip():
+            current_response = child_outputs.get("current_response")
         if not isinstance(current_response, str) or not current_response.strip():
             current_response = final_response
 
@@ -21276,7 +21498,9 @@ class InternalMCPChatOrchestrator:
             outputs["final_response"] = final_response
         if isinstance(current_response, str) and current_response.strip():
             outputs["current_response"] = current_response
-        response_text = child_outputs.get("response_text")
+        response_text = rendered_child_response_text
+        if not isinstance(response_text, str) or not response_text.strip():
+            response_text = child_outputs.get("response_text")
         if isinstance(response_text, str) and response_text.strip():
             outputs["response_text"] = response_text
 
@@ -21625,13 +21849,48 @@ class InternalMCPChatOrchestrator:
             turn_id=turn_id,
             episode_source="conversation_turn_supervised",
         )
+        workflow_data_raw = (
+            getattr(wf_result, "data", None) if wf_result is not None else None
+        )
         workflow_data = (
-            dict(wf_result.data)
-            if wf_result is not None and isinstance(getattr(wf_result, "data", None), Mapping)
+            dict(cast(Mapping[str, Any], workflow_data_raw))
+            if isinstance(workflow_data_raw, Mapping)
             else {}
+        )
+        completion_report_raw = workflow_data.get("completion_report")
+        completion_report_payload = (
+            dict(cast(Mapping[str, Any], completion_report_raw))
+            if isinstance(completion_report_raw, Mapping)
+            else {}
+        )
+        completion_report_response_text = (
+            self._coerce_non_empty_text(completion_report_payload.get("response_text"))
+            if completion_report_payload
+            else None
+        )
+        completion_report_artefact_ids = self._collect_surfaceable_artefact_ids(
+            completion_report_payload
         )
         response_text = workflow_data.get("response_text")
         final_response = workflow_data.get("final_response")
+        if (
+            completion_report_response_text
+            and completion_report_artefact_ids
+            and not self._response_mentions_surfaceable_artefacts(
+                response_text,
+                completion_report_artefact_ids,
+            )
+        ):
+            response_text = completion_report_response_text
+        if (
+            completion_report_response_text
+            and completion_report_artefact_ids
+            and not self._response_mentions_surfaceable_artefacts(
+                final_response,
+                completion_report_artefact_ids,
+            )
+        ):
+            final_response = completion_report_response_text
         gate_reported_outcome = (
             "completion_gate_decision" in workflow_data
             or "completion_gate_evidence_payload" in workflow_data
@@ -28214,7 +28473,9 @@ class InternalMCPChatOrchestrator:
                     },
                 }
 
-            workflow_def = self._workflow_registry.get(clean_workflow_id)
+            _registration, workflow_def = (
+                self._resolve_workflow_registration_and_definition(clean_workflow_id)
+            )
             if workflow_def is None:
                 return {
                     "workflow_id": clean_workflow_id,
@@ -28412,10 +28673,11 @@ class InternalMCPChatOrchestrator:
                 ):
                     continue
 
-                registration = self._workflow_registry.get_registration(
-                    candidate_workflow_id
+                registration, workflow_definition = (
+                    self._resolve_workflow_registration_and_definition(
+                        candidate_workflow_id
+                    )
                 )
-                workflow_definition = self._workflow_registry.get(candidate_workflow_id)
                 definition_metadata = getattr(workflow_definition, "metadata", None)
                 workflow_purpose = str(
                     getattr(registration, "purpose", None)
