@@ -1130,6 +1130,64 @@ def test_execution_signal_blocker_returns_none_when_no_tools_planned() -> None:
     assert result is None
 
 
+def test_execution_signal_blocker_normalises_mixed_case_terminal_failure_code() -> None:
+    """Inserted dispatch failure codes should be canonical lowercase values."""
+    result = _derive_execution_signal_completion_blocker(
+        execution_summary={
+            "selected_execution_mode": "tool_pipeline",
+            "dispatch_terminal_status": "failed",
+            "dispatch_terminal_failure_reason": "Workflow_Runtime_Failed",
+            "dispatch_terminal_failure_detail": "Tool pipeline failed.",
+            "planned_count": 1,
+            "executed_count": 0,
+            "successful_invocation_count": 0,
+            "failed_invocation_count": 1,
+            "blocked_invocation_count": 0,
+            "failure_codes": [],
+        },
+    )
+
+    assert isinstance(result, dict)
+    assert result.get("failure_code") == "workflow_runtime_failed"
+    assert result.get("failure_codes") == ["workflow_runtime_failed"]
+
+
+def test_derive_completion_gate_defaults_execution_signal_repeat_to_closed() -> None:
+    """Missing blocker repeat metadata must default closed in the service path."""
+    with patch(
+        "src.backend.services.turn_execution_record_service."
+        "_derive_execution_signal_completion_blocker",
+        return_value={
+            "effect_id": "effect_execution_signal_1",
+            "effect_type": "tool_execution",
+            "status": "not_executed",
+            "status_reason": "Required tool execution was not observed.",
+            "failure_code": "tool_dispatch_failed",
+            "failure_codes": ["tool_dispatch_failed"],
+            "decision": "escalation_required",
+            "decision_reason": "Required tool execution was not observed.",
+        },
+    ):
+        completion_gate = _derive_completion_gate(
+            required_effects=[],
+            postcondition_checks=[],
+            completion_claim_validated=True,
+            execution_summary={
+                "selected_execution_mode": "tool_pipeline",
+                "dispatch_terminal_status": "completed",
+                "planned_count": 1,
+                "executed_count": 0,
+                "successful_invocation_count": 0,
+                "failed_invocation_count": 0,
+                "blocked_invocation_count": 0,
+                "failure_codes": [],
+            },
+        )
+
+    assert completion_gate["decision"] == "escalation_required"
+    assert completion_gate["repeat_eligible"] is False
+
+
 def test_turn_completion_gate_requests_repeat_when_budget_available() -> None:
     orchestrator = _build_orchestrator()
     request = _build_request(
@@ -1166,6 +1224,110 @@ def test_turn_completion_gate_requests_repeat_when_budget_available() -> None:
     evidence_payload = result.outputs.get("completion_gate_evidence_payload")
     assert isinstance(evidence_payload, dict)
     assert evidence_payload.get("terminal_outcome") == "retrying"
+
+
+def test_turn_completion_gate_defaults_blocker_repeat_to_closed() -> None:
+    orchestrator = _build_orchestrator()
+    request = _build_request(
+        action_id="turn_execution.completion_gate",
+        data={
+            "final_response": "I have completed the update.",
+            "invocations": [],
+            "turn_execution_record": {
+                "completion_gate": {
+                    "decision": "escalation_required",
+                    "decision_reason": "Required tool execution was not observed.",
+                    "safe_to_claim_completion": False,
+                    "requires_follow_up": True,
+                    "blocking_effect_ids": ["effect_execution_signal_1"],
+                    "blocking_failure_codes": ["tool_dispatch_failed"],
+                    "evidence_payload": {
+                        "execution_signal_blocker": {
+                            "effect_id": "effect_execution_signal_1",
+                            "effect_type": "tool_execution",
+                            "status": "not_executed",
+                            "status_reason": "Required tool execution was not observed.",
+                            "failure_code": "tool_dispatch_failed",
+                            "failure_codes": ["tool_dispatch_failed"],
+                            "decision": "escalation_required",
+                            "decision_reason": "Required tool execution was not observed.",
+                            "source": "execution_signals",
+                        }
+                    },
+                }
+            },
+            "completion_gate_loop_attempts": 0,
+            "completion_gate_loop_max_attempts": 1,
+            "completion_gate_loop_max_elapsed_ms": 60_000,
+            "completion_gate_loop_no_progress_streak": 0,
+            "completion_gate_loop_no_progress_limit": 1,
+            "completion_gate_loop_last_invocation_count": 0,
+            "completion_gate_loop_last_blocking_signature": "",
+        },
+    )
+
+    result = orchestrator._action_turn_execution_completion_gate(request)
+    assert result.ok
+    assert result.outputs.get("completion_gate_repeat_iteration") is False
+    assert result.outputs.get("completion_gate_repeat_eligible") is False
+    assert result.outputs.get("completion_gate_loop_stop_reason") == (
+        "terminal_execution_failure"
+    )
+    assert result.outputs.get("completion_gate_terminal_outcome") == (
+        "follow_up_required"
+    )
+
+
+def test_turn_completion_gate_emits_execution_signal_blocker_override_annotation() -> None:
+    orchestrator = _build_orchestrator()
+    aux_llm_calls: list[dict[str, Any]] = []
+    request = _build_request(
+        action_id="turn_execution.completion_gate",
+        data={
+            "final_response": "I have completed the update.",
+            "invocations": [],
+            "aux_llm_calls": aux_llm_calls,
+            "turn_execution_record": {
+                "completion_gate": {
+                    "decision": "failed",
+                    "decision_reason": "Diagnostic workflow failed.",
+                    "safe_to_claim_completion": False,
+                    "requires_follow_up": True,
+                    "repeat_eligible": False,
+                    "blocking_effect_ids": ["effect_execution_signal_1"],
+                    "blocking_failure_codes": ["workflow_runtime_failed"],
+                    "evidence_payload": {
+                        "execution_signal_blocker": {
+                            "effect_id": "effect_execution_signal_1",
+                            "effect_type": "workflow_execution",
+                            "status": "not_satisfied",
+                            "status_reason": "Diagnostic workflow failed.",
+                            "failure_code": "workflow_runtime_failed",
+                            "failure_codes": ["workflow_runtime_failed"],
+                            "decision": "failed",
+                            "decision_reason": "Diagnostic workflow failed.",
+                            "source": "execution_signals",
+                            "workflow_id": "#V#diagnostic_workflow",
+                        }
+                    },
+                }
+            },
+        },
+    )
+
+    result = orchestrator._action_turn_execution_completion_gate(request)
+    assert result.ok
+    assert any(
+        entry.get("type") == "execution_signal_blocker_override"
+        for entry in aux_llm_calls
+        if isinstance(entry, dict)
+    )
+    assert any(
+        entry.get("type") == "turn_completion_gate"
+        and entry.get("execution_signal_blocker_triggered") is True
+        for entry in aux_llm_calls
+        if isinstance(entry, dict)
+    )
 
 
 def test_turn_completion_gate_stops_repeat_when_attempt_budget_exhausted() -> None:

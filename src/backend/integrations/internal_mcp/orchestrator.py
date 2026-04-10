@@ -7170,6 +7170,14 @@ class InternalMCPChatOrchestrator:
             if isinstance(record_evidence_payload_raw, Mapping)
             else {}
         )
+        execution_signal_blocker = record_evidence_payload.get(
+            "execution_signal_blocker"
+        )
+        execution_signal_blocker = (
+            dict(execution_signal_blocker)
+            if isinstance(execution_signal_blocker, Mapping)
+            else {}
+        )
 
         unresolved_preconditions: list[dict[str, Any]] = []
         unresolved_preconditions_raw = record_evidence_payload.get("unresolved_preconditions")
@@ -7254,8 +7262,11 @@ class InternalMCPChatOrchestrator:
         requires_follow_up = bool(
             completion_gate_payload.get("requires_follow_up", False)
         )
+        repeat_eligible_default = (
+            False if execution_signal_blocker else requires_follow_up
+        )
         repeat_eligible = bool(
-            completion_gate_payload.get("repeat_eligible", requires_follow_up)
+            completion_gate_payload.get("repeat_eligible", repeat_eligible_default)
         )
         loop_attempts = self._coerce_non_negative_int(
             data.get("completion_gate_loop_attempts"),
@@ -7718,6 +7729,55 @@ class InternalMCPChatOrchestrator:
 
         if isinstance(aux_llm_calls, list):
             try:
+                if execution_signal_blocker:
+                    blocker_failure_codes = _normalise_string_list(
+                        execution_signal_blocker.get("failure_codes")
+                    )
+                    blocker_failure_code = str(
+                        execution_signal_blocker.get("failure_code") or ""
+                    ).strip()
+                    if (
+                        blocker_failure_code
+                        and blocker_failure_code not in blocker_failure_codes
+                    ):
+                        blocker_failure_codes.append(blocker_failure_code)
+                    aux_llm_calls.append(
+                        annotate_python_decision_event(
+                            {
+                                "type": "execution_signal_blocker_override",
+                                "workflow_id": TURN_COMPLETION_GATE_WORKFLOW_ID,
+                                "overridden_decision": "completed",
+                                "decision": decision,
+                                "decision_reason": decision_reason,
+                                "repeat_eligible": repeat_eligible,
+                                "effect_id": execution_signal_blocker.get("effect_id"),
+                                "effect_type": execution_signal_blocker.get(
+                                    "effect_type"
+                                ),
+                                "status": execution_signal_blocker.get("status"),
+                                "status_reason": execution_signal_blocker.get(
+                                    "status_reason"
+                                ),
+                                "failure_codes": blocker_failure_codes,
+                                "source": execution_signal_blocker.get("source"),
+                                "workflow_id_blocked": execution_signal_blocker.get(
+                                    "workflow_id"
+                                ),
+                            },
+                            stage="completion_gate",
+                            component="internal_mcp_orchestrator",
+                            function="_action_turn_execution_completion_gate",
+                            decision_class="execution_signal_blocker_override",
+                            decision_source="execution_signals",
+                            changed_outcome=True,
+                            reason_code=(
+                                blocker_failure_codes[0]
+                                if blocker_failure_codes
+                                else decision or "unknown"
+                            ),
+                            possible_inappropriate_python_code_use=False,
+                        )
+                    )
                 aux_llm_calls.append(
                     annotate_python_decision_event(
                         {
@@ -7730,6 +7790,9 @@ class InternalMCPChatOrchestrator:
                             "repeat_eligible": repeat_eligible,
                             "blocking_effect_ids": list(blocking_effect_ids),
                             "blocking_failure_codes": list(blocking_failure_codes),
+                            "execution_signal_blocker_triggered": bool(
+                                execution_signal_blocker
+                            ),
                             "unresolved_preconditions": unresolved_preconditions,
                             "terminal_outcome": terminal_outcome,
                             "evidence_payload": completion_gate_evidence_payload,

@@ -483,6 +483,30 @@ def _derive_execution_signal_completion_blocker(
     *,
     execution_summary: Mapping[str, Any] | None,
 ) -> dict[str, Any] | None:
+    """Fail closed when execution evidence contradicts a completed verdict.
+
+    This helper is only consulted from ``_derive_completion_gate`` after the
+    gate would otherwise conclude ``completed`` from required effects and
+    postcondition checks alone. It provides the final execution-signal guard
+    against false success.
+
+    Return contract:
+    - ``None`` means execution evidence does not block a completed verdict.
+    - a mapping means execution evidence overrides ``completed`` and supplies a
+      synthetic unresolved precondition plus completion-gate decision inputs
+      such as ``decision``, ``decision_reason``, ``failure_codes``, and
+      ``repeat_eligible``.
+
+    Main branch classes:
+    - contracted workflow terminal-success contract missing terminal status
+    - contracted workflow terminal-success contract evaluated false
+    - terminal dispatch failure for workflow or tool execution
+    - planned tool execution with zero successful results
+
+    ``repeat_eligible`` is part of the blocker contract, not a UI hint. When it
+    is absent downstream consumers must treat the blocker as non-repeatable by
+    default.
+    """
     if not isinstance(execution_summary, Mapping):
         return None
 
@@ -512,10 +536,16 @@ def _derive_execution_signal_completion_blocker(
     )
     zero_tool_reason_code = _safe_str(execution_summary.get("zero_tool_reason_code"))
     failure_codes = _normalise_failure_codes(execution_summary.get("failure_codes"))
-    if dispatch_terminal_failure_reason and dispatch_terminal_failure_reason not in {
-        code.lower() for code in failure_codes
-    }:
-        failure_codes.insert(0, dispatch_terminal_failure_reason)
+    normalised_dispatch_terminal_failure_reason = (
+        dispatch_terminal_failure_reason.lower()
+        if dispatch_terminal_failure_reason
+        else ""
+    )
+    if normalised_dispatch_terminal_failure_reason and (
+        normalised_dispatch_terminal_failure_reason
+        not in {code.lower() for code in failure_codes}
+    ):
+        failure_codes.insert(0, normalised_dispatch_terminal_failure_reason)
 
     effect_type = (
         "workflow_execution"
@@ -4756,7 +4786,9 @@ def _derive_completion_gate(
                 _safe_str(execution_signal_blocker.get("decision_reason"))
                 or "Execution evidence does not support a completed verdict."
             )
-            repeat_eligible = bool(execution_signal_blocker.get("repeat_eligible", True))
+            repeat_eligible = bool(
+                execution_signal_blocker.get("repeat_eligible", False)
+            )
             unresolved_preconditions.append(
                 {
                     "effect_id": _safe_str(execution_signal_blocker.get("effect_id"))
