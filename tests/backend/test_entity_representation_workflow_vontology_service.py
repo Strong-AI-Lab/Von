@@ -59,6 +59,13 @@ def test_bootstrap_materialises_entity_representation_workflow_family(
     )
     assert definition is not None
 
+    terminal_contract = definition.metadata.get("terminal_success_contract")
+    assert isinstance(terminal_contract, dict), (
+        "entity representation workflow must have a terminal success contract"
+    )
+    assert terminal_contract.get("success_statuses") == ["completed"]
+    assert terminal_contract.get("require_completed_true") is True
+
     launch_contract, launch_source = resolve_workflow_launch_input_contract(
         ENTITY_REPRESENTATION_WORKFLOW_ID
     )

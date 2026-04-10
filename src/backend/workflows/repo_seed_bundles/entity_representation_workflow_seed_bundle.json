@@ -44,6 +44,11 @@
           "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
           "text": "{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"represent person in vontology\",\"represent company in vontology\",\"represent event in vontology\",\"represent place in vontology\",\"entity representation workflow\"],\"examples\":[\"Represent these people in the Vontology if they are not already represented.\",\"Please represent this company in the Vontology.\",\"Represent this event in the Vontology.\",\"Represent this place in the Vontology.\"]}",
           "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowTerminalSuccessContractJson",
+          "text": "{\"schema_version\":\"workflow_terminal_success_contract.v1\",\"success_statuses\":[\"completed\"],\"required_summary_fields\":[\"workflow_id\",\"terminal_status\",\"final_state\",\"completed\"],\"require_terminal_status\":true,\"require_final_state\":true,\"require_completed_true\":true,\"require_completion_gate_safe_to_claim_completion\":false}",
+          "lang": "en-NZ"
         }
       ],
       "publication_spec": {

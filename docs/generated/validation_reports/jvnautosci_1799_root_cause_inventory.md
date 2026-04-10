@@ -1,9 +1,9 @@
 # JVNAUTOSCI-1799 Root-Cause Inventory
 
 Status: derived implementation/validation artefact  
-Date: 2026-04-10  
-Scope: arXiv paper representation reliability and one additional telemetry-surfaced
-monitoring family
+Date: 2026-04-10 (updated 2026-07-12)  
+Scope: arXiv paper representation reliability, entity representation workflow
+hardening, and one additional telemetry-surfaced monitoring family
 
 ## Acceptance evidence
 
@@ -78,4 +78,53 @@ monitoring family
 - Python changes in this task are support-surface only:
   - live acceptance harness and env-gated validation plumbing
   - safe pagination normalisation on the monitoring/dashboard path
+
+## AC4 — Entity representation workflow family audit (2026-07-12)
+
+### 5. Entity representation workflow missing terminal success contract
+
+- Symptom: the entity representation workflow family (`#V#entity_representation_workflow`
+  and four domain sub-workflows) had **no** `#V#hasWorkflowTerminalSuccessContractJson`
+  text relation. Without this, the turn execution pipeline cannot detect
+  false-success for entity representation workflows.
+- Comparison: the paper representation workflow has terminal success contracts on
+  both the scholarly wrapper and the arXiv pipeline workflow.
+- Fix implemented in this task:
+  - Added `hasWorkflowTerminalSuccessContractJson` text relation to the entity
+    representation seed bundle (`entity_representation_workflow_seed_bundle.json`)
+    with the same schema (`workflow_terminal_success_contract.v1`) as the paper
+    workflow.
+  - Added bootstrap test assertion verifying the contract is materialised and
+    its `success_statuses` and `require_completed_true` fields are correct.
+- Durable regression coverage:
+  - `tests/backend/test_entity_representation_workflow_vontology_service.py::test_bootstrap_materialises_entity_representation_workflow_family`
+
+### Remaining gaps surfaced by the entity audit (not addressed in this task)
+
+The following gaps are documented for future work:
+
+- **No required effects contract** on entity representation workflows. The
+  conversation turn workflow cannot verify that entity representation produced
+  the expected Vontology mutations.
+- **Missing representation contract profiles** for `event` and `place` domains.
+  Person and company profiles exist; event and place do not.
+- **No acceptance-level test fixture** (prepare/verify/cleanup pattern) for
+  entity representation, unlike the arXiv fixture infrastructure.
+- **No MCP testing tools** (`testing_prepare_entity_representation_fixture`,
+  `testing_verify_entity_representation_result`) registered in the catalogue.
+
+## Batch acceptance results (2026-07-12)
+
+- The batch acceptance test (`test_live_arxiv_paper_representation_workflow_acceptance_batch`)
+  was executed against 10 live arXiv papers with `VON_USE_MOCK_DB=1`.
+- Result: **0% success rate** (0 of 10 papers passed).
+- Root cause: `get_paper_metadata` MCP tool not registered in the test server
+  session (warning: "Tool 'get_paper_metadata' not listed by server"), combined
+  with missing `[pro]` feature dependencies. This is an environment-configuration
+  issue, not a workflow logic regression.
+- The acceptance test infrastructure itself is verified working: fixtures were
+  prepared, workflows were executed, verification ran, cleanup completed
+  successfully for all 10 papers.
+- **Follow-up needed**: ensure `get_paper_metadata` is available in the test MCP
+  server configuration, or mock it appropriately for acceptance testing.
   - operational documentation for the new live acceptance lane
