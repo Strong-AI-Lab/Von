@@ -173,7 +173,25 @@ See:
 - `docs/engineering/atlassian_mcp_recovery_runbook.md`
 - `docs/engineering/jira_components_taxonomy.md`
 
-### 6.3 GitHub
+### 6.3 Conversation-scoped evidence tools
+
+- For conversation-scoped MCP read tools, do not expose raw `session_id`
+  fields in model-facing `mcp_access` descriptors when an authoritative
+  server-bound reference can be emitted instead.
+- Prefer signed or otherwise server-bound `conversation_ref` and
+  `history_location_ref` descriptors emitted by authoritative services over
+  model-authored raw conversation identifiers.
+- Keep the authority split clean:
+  - workflow, prompt, and Vontology decide whether evidence is needed
+  - code provides only integrity surfaces such as binding, verification,
+    scope checking, and fail-closed resolution
+- In turn-execution payloads, keep `request_id` and `chat_session_id`
+  distinct. Do not alias `request_id` into `session_id` for convenience.
+- When changing model-facing MCP descriptors, update the canonical surface
+  registry and regenerate `src/backend/mcp_server/vontology_mcp.json` so the
+  stdio surface, manifest, and handler contracts stay in sync.
+
+### 6.4 GitHub
 
 - Prefer Von's internal GitHub MCP proxy and its guardrails for GitHub access.
 - Keep write behaviour fail-closed and allow-list aware.

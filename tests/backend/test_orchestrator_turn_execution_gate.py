@@ -9,6 +9,7 @@ from src.backend.integrations.internal_mcp.orchestrator import (
 )
 from src.backend.services.turn_execution_record_service import (
     _derive_completion_gate,
+    _derive_execution_signal_completion_blocker,
     build_turn_execution_correctness_summary,
 )
 from src.backend.workflows.action_registry import WorkflowActionRequest, WorkflowEnvironment
@@ -951,6 +952,40 @@ def test_turn_completion_gate_does_not_repeat_terminal_execution_failure() -> No
     assert result.outputs.get("completion_gate_escalation_reason") == (
         "terminal_execution_failure"
     )
+
+
+def test_execution_signal_blocker_returns_none_when_invocation_succeeded() -> None:
+    """When at least one invocation succeeded the blocker must not fire."""
+    result = _derive_execution_signal_completion_blocker(
+        execution_summary={
+            "selected_execution_mode": "tool_pipeline",
+            "dispatch_terminal_status": "completed",
+            "planned_count": 2,
+            "executed_count": 2,
+            "successful_invocation_count": 1,
+            "failed_invocation_count": 1,
+            "blocked_invocation_count": 0,
+            "failure_codes": [],
+        },
+    )
+    assert result is None
+
+
+def test_execution_signal_blocker_returns_none_when_no_tools_planned() -> None:
+    """Pure conversational turns (planned_count == 0) should never be blocked."""
+    result = _derive_execution_signal_completion_blocker(
+        execution_summary={
+            "selected_execution_mode": "tool_pipeline",
+            "dispatch_terminal_status": "completed",
+            "planned_count": 0,
+            "executed_count": 0,
+            "successful_invocation_count": 0,
+            "failed_invocation_count": 0,
+            "blocked_invocation_count": 0,
+            "failure_codes": [],
+        },
+    )
+    assert result is None
 
 
 def test_turn_completion_gate_requests_repeat_when_budget_available() -> None:

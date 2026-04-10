@@ -12,10 +12,12 @@ def test_chat_history_get_segments_returns_provenanced_payload(monkeypatch):
         lambda _kwargs: {
             "success": True,
             "session_id": "chat-1",
+            "chat_session_id": "chat-1",
             "read_user_id": "#V#user",
             "requested_user_id": "#V#user",
             "read_namespace": "#V#user@org",
             "access_mode": "owner",
+            "identifier_binding": {"mode": "raw_parameters"},
         },
     )
 
@@ -31,8 +33,10 @@ def test_chat_history_get_segments_returns_provenanced_payload(monkeypatch):
 
     assert result["success"] is True
     assert result["session_id"] == "chat-1"
+    assert result["chat_session_id"] == "chat-1"
     assert result["segment_count"] == 1
     assert result["history_truncated"] is False
+    assert result["identifier_binding"]["mode"] == "raw_parameters"
     assert result["provenance"]["item_kind"] == "chat_history_segments"
 
 
@@ -45,10 +49,12 @@ def test_chat_history_get_debug_entry_returns_history_location(monkeypatch):
         lambda _kwargs: {
             "success": True,
             "session_id": "chat-1",
+            "chat_session_id": "chat-1",
             "read_user_id": "#V#user",
             "requested_user_id": "#V#user",
             "read_namespace": "#V#user@org",
             "access_mode": "owner",
+            "identifier_binding": {"mode": "raw_parameters"},
         },
     )
 
@@ -68,7 +74,9 @@ def test_chat_history_get_debug_entry_returns_history_location(monkeypatch):
         "session_id": "chat-1",
         "history_index": 4,
     }
+    assert result["chat_session_id"] == "chat-1"
     assert result["llm_debug_data"]["request_id"] == "req-debug-1"
+    assert result["identifier_binding"]["mode"] == "raw_parameters"
     assert result["provenance"]["item_kind"] == "chat_history_debug_entry"
 
 
@@ -81,10 +89,13 @@ def test_conversation_telemetry_get_locator_wraps_builder(monkeypatch):
         lambda _kwargs: {
             "success": True,
             "session_id": "chat-1",
+            "chat_session_id": "chat-1",
             "read_user_id": "#V#user",
             "requested_user_id": "#V#user",
             "read_namespace": "#V#user@org",
             "access_mode": "owner",
+            "requested_namespace": "#V#user@org",
+            "identifier_binding": {"mode": "raw_parameters"},
         },
     )
 
@@ -120,7 +131,139 @@ def test_conversation_telemetry_get_locator_wraps_builder(monkeypatch):
     assert result["history_owner_user_id"] == "#V#user"
     assert result["requested_user_id"] == "#V#user"
     assert result["access_mode"] == "owner"
+    assert result["identifier_binding"]["mode"] == "raw_parameters"
     assert result["provenance"]["item_kind"] == "conversation_telemetry_locator"
+
+
+def test_chat_history_get_segments_accepts_bound_conversation_ref(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+    from src.backend.services.conversation_scope_binding_service import (
+        build_conversation_scope_binding,
+    )
+
+    conversation_ref = build_conversation_scope_binding(
+        chat_session_id="chat-bound-1",
+        history_owner_user_id="#V#owner",
+        read_namespace="#V#owner@org",
+        organisation_concept_id="#V#org",
+    )
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_event_integration_service.resolve_event_actor_context",
+        lambda user_id=None, org_id=None, namespace=None: (user_id, org_id),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.shared_conversation_service.resolve_conversation_owner",
+        lambda session_id: "#V#owner",
+    )
+    monkeypatch.setattr(
+        "src.backend.services.chat_history_service.has_chat_history_session",
+        lambda user_id, session_id, namespace=None, include_legacy=True: (
+            user_id == "#V#owner" and session_id == "chat-bound-1"
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.chat_history_service.get_chat_history_segments",
+        lambda *args, **kwargs: ([{"segment_index": 0, "history": []}], {}),
+    )
+
+    result = cat._chat_history_get_segments(
+        conversation_ref=conversation_ref,
+        namespace="#V#owner@org",
+        user_concept_id="#V#owner",
+        organisation_concept_id="#V#org",
+    )
+
+    assert result["success"] is True
+    assert result["identifier_binding"]["mode"] == "server_bound_reference"
+    assert result["identifier_binding"]["validation_status"] == "verified"
+
+
+def test_chat_history_get_segments_rejects_mismatched_session_id_and_bound_ref(
+    monkeypatch,
+):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+    from src.backend.services.conversation_scope_binding_service import (
+        build_conversation_scope_binding,
+    )
+
+    conversation_ref = build_conversation_scope_binding(
+        chat_session_id="chat-bound-2",
+        history_owner_user_id="#V#owner",
+    )
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_event_integration_service.resolve_event_actor_context",
+        lambda user_id=None, org_id=None, namespace=None: (user_id, org_id),
+    )
+
+    result = cat._chat_history_get_segments(
+        conversation_ref=conversation_ref,
+        session_id="req-wrong-2",
+        namespace="#V#owner@org",
+        user_concept_id="#V#owner",
+        organisation_concept_id="#V#org",
+    )
+
+    assert result["success"] is False
+    assert result["error_code"] == "INVALID_CONTEXT_BINDING"
+    assert result["error_details"]["identifier_binding"]["validation_status"] == (
+        "verified"
+    )
+
+
+def test_chat_history_get_debug_entry_accepts_history_location_ref(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+    from src.backend.services.conversation_scope_binding_service import (
+        build_history_location_binding,
+    )
+
+    history_location_ref = build_history_location_binding(
+        chat_session_id="chat-debug-1",
+        history_index=3,
+        history_owner_user_id="#V#owner",
+        read_namespace="#V#owner@org",
+        organisation_concept_id="#V#org",
+    )
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_event_integration_service.resolve_event_actor_context",
+        lambda user_id=None, org_id=None, namespace=None: (user_id, org_id),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.shared_conversation_service.resolve_conversation_owner",
+        lambda session_id: "#V#owner",
+    )
+    monkeypatch.setattr(
+        "src.backend.services.chat_history_service.has_chat_history_session",
+        lambda user_id, session_id, namespace=None, include_legacy=True: (
+            user_id == "#V#owner" and session_id == "chat-debug-1"
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.chat_history_service.get_chat_history_debug_entry",
+        lambda **kwargs: {
+            "request_id": "req-debug-bound-1",
+            "history_index": kwargs["history_index"],
+        },
+    )
+
+    result = cat._chat_history_get_debug_entry(
+        history_location_ref=history_location_ref,
+        namespace="#V#owner@org",
+        user_concept_id="#V#owner",
+        organisation_concept_id="#V#org",
+    )
+
+    assert result["success"] is True
+    assert result["history_location"] == {
+        "session_id": "chat-debug-1",
+        "history_index": 3,
+    }
+    assert result["identifier_binding"]["mode"] == "server_bound_reference"
+    assert result["identifier_binding"]["history_index_source"] == (
+        "history_location_ref"
+    )
 
 
 def test_turn_execution_get_live_progress_returns_provenanced_payload(monkeypatch):
