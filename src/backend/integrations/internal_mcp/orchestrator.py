@@ -98,6 +98,7 @@ from ...workflows.workflow_launch_input_contracts import (
     resolve_workflow_launch_inputs,
 )
 from ...workflows.vontology_loader import load_workflow_definition_from_vontology
+from ...workflows.launch_contracts import evaluate_launch_contract
 from ...workflows.workflow_selector import WorkflowSelector
 from ...workflows.durable.registry_factory import (
     get_shared_durable_action_registry,
@@ -28511,24 +28512,26 @@ class InternalMCPChatOrchestrator:
                 workflow_id_override=clean_workflow_id
             )
             workflow_metadata = getattr(workflow_def, "metadata", None)
-            launch_contract = (
+            
+            # Resolve launch inputs
+            launch_input_contract = (
                 workflow_metadata.get("launch_input_contract")
                 if isinstance(workflow_metadata, Mapping)
                 else None
             )
-            launch_contract_source = (
+            launch_input_contract_source = (
                 workflow_metadata.get("launch_input_contract_source")
                 if isinstance(workflow_metadata, Mapping)
                 else None
             )
             launch_resolution = resolve_workflow_launch_inputs(
                 workflow_id=clean_workflow_id,
-                contract=launch_contract if isinstance(launch_contract, Mapping) else None,
+                contract=launch_input_contract if isinstance(launch_input_contract, Mapping) else None,
                 inputs=probe_data,
                 contract_source=(
-                    str(launch_contract_source).strip()
-                    if isinstance(launch_contract_source, str)
-                    and launch_contract_source.strip()
+                    str(launch_input_contract_source).strip()
+                    if isinstance(launch_input_contract_source, str)
+                    and launch_input_contract_source.strip()
                     else None
                 ),
             )
@@ -28538,52 +28541,58 @@ class InternalMCPChatOrchestrator:
             initial_state_id = (
                 str(getattr(workflow_def, "initial_state", "") or "").strip() or None
             )
-            state_spec = None
-            workflow_states = getattr(workflow_def, "states", None)
-            if initial_state_id and isinstance(workflow_states, Mapping):
-                state_spec = workflow_states.get(initial_state_id)
+
+            launch_contract = (
+                workflow_metadata.get("launch_contract")
+                if isinstance(workflow_metadata, Mapping)
+                else None
+            )
+            
+            # Fallback for in-memory or legacy definitions
+            if launch_contract is None and initial_state_id:
+                workflow_states = getattr(workflow_def, "states", {})
+                if isinstance(workflow_states, Mapping):
+                    initial_state = workflow_states.get(initial_state_id)
+                    if initial_state:
+                        # Extract reads_context_keys from metadata (attr or dict)
+                        initial_meta = getattr(initial_state, "metadata", {})
+                        if not isinstance(initial_meta, Mapping):
+                            initial_meta = {}
+                        
+                        reads_keys = initial_meta.get("reads_context_keys", [])
+                        if isinstance(reads_keys, (list, tuple)) and reads_keys:
+                            preconditions = [{"type": "context_key_present", "key": str(key), "required": True} for key in reads_keys]
+                            launch_contract = {
+                                "schema_version": "launch_contract.v1",
+                                "preconditions": preconditions
+                            }
 
             pre_action_summary: dict[str, Any]
             pre_action_ok = False
-            if initial_state_id and state_spec is not None:
-                pre_validation = validate_state_metadata_pre_action(
-                    state_id=initial_state_id,
-                    metadata=getattr(state_spec, "metadata", None),
-                    context=probe_data,
-                )
-                pre_action_ok = bool(pre_validation.ok)
-                pre_action_failure = pre_validation.failure
+            
+            if isinstance(launch_contract, Mapping):
+                # Evaluate declarative launch contract
+                contract_result = evaluate_launch_contract(launch_contract, probe_data)
+                pre_action_ok = bool(contract_result.launchable)
+                
+                # If there are failures, pick the first one for the summary
+                failed_prec = next((r for r in contract_result.precondition_results if not r.satisfied and r.required), None)
+                
                 pre_action_summary = {
-                    "applied": bool(pre_validation.applied),
-                    "ok": bool(pre_validation.ok),
-                    "reason_code": (
-                        str(pre_action_failure.reason_code)
-                        if pre_action_failure is not None
-                        and isinstance(pre_action_failure.reason_code, str)
-                        and pre_action_failure.reason_code
-                        else None
-                    ),
-                    "symbol": (
-                        str(pre_action_failure.details.get("symbol"))
-                        if pre_action_failure is not None
-                        and isinstance(pre_action_failure.details, Mapping)
-                        and isinstance(pre_action_failure.details.get("symbol"), str)
-                        and str(pre_action_failure.details.get("symbol")).strip()
-                        else None
-                    ),
-                    "message": (
-                        str(pre_action_failure.message)
-                        if pre_action_failure is not None
-                        and isinstance(pre_action_failure.message, str)
-                        and pre_action_failure.message
-                        else None
-                    ),
+                    "applied": True,
+                    "ok": pre_action_ok,
+                    "reason_code": failed_prec.type if failed_prec else None,
+                    "symbol": failed_prec.context_key if failed_prec else None,
+                    "message": failed_prec.reason if failed_prec else None,
                 }
             else:
+                # No contract found, fallback to True for launchability since we're transitioning
+                # to declarative launch contracts, but mark it as not applied.
+                pre_action_ok = True
                 pre_action_summary = {
                     "applied": False,
-                    "ok": False,
-                    "reason_code": "initial_state_missing",
+                    "ok": True,
+                    "reason_code": "no_launch_contract",
                     "symbol": None,
                     "message": None,
                 }
@@ -28964,7 +28973,103 @@ class InternalMCPChatOrchestrator:
             )
             return True
 
-        def _maybe_override_selected_custom_workflow_for_launchability() -> None:
+        def _maybe_override_selected_custom_workflow_for_launchability() -> bool:
+            if not selected_workflow_id_text:
+                return True
+            if selected_workflow_id_text in {
+                CHAT_ASSISTANT_WORKFLOW_ID,
+                CHAT_NARRATION_WORKFLOW_ID,
+                TOOL_CALLING_WORKFLOW_ID,
+            }:
+                return True
+
+            try:
+                selected_probe = _get_cached_custom_workflow_launchability_probe(
+                    selected_workflow_id_text
+                )
+            except Exception as exc:
+                _record_custom_workflow_launchability_override_failure(
+                    reason="selected_custom_workflow_launchability_probe_failed",
+                    error=exc,
+                    selected_workflow_id=selected_workflow_id_text,
+                )
+                return False
+            if bool(selected_probe.get("launchable")):
+                return True
+
+            try:
+                override_policy = _evaluate_custom_workflow_override_policy(
+                    override_context="selected_custom_workflow_launchability_replacement",
+                    exclude_workflow_ids=(selected_workflow_id_text,),
+                )
+                _record_custom_workflow_override_policy(
+                    decision=override_policy,
+                    prior_selected_workflow_id=selected_workflow_id_text,
+                    preserved_execution_mode="custom_workflow",
+                )
+                prior_selected_workflow_id = selected_workflow_id_text
+                prior_selector_verdict = selector_verdict or None
+                replacement_probe = (
+                    _get_cached_custom_workflow_launchability_probe(
+                        override_policy.chosen_workflow_id
+                    )
+                    if isinstance(override_policy.chosen_workflow_id, str)
+                    and override_policy.chosen_workflow_id.strip()
+                    else None
+                )
+            except Exception as exc:
+                _record_custom_workflow_launchability_override_failure(
+                    reason="selected_custom_workflow_launchability_override_failed",
+                    error=exc,
+                    selected_workflow_id=selected_workflow_id_text,
+                    selected_probe=selected_probe,
+                )
+                return False
+            if replacement_probe is None:
+                # When a specialised workflow is semantically right but cannot
+                # launch from free-text turn inputs, prefer the safe generic
+                # tool path over promoting a weakly related custom workflow.
+                _force_tool_pipeline_routing(
+                    reason=(
+                        "selected_custom_workflow_launchability_requires_safe_general_fallback"
+                    ),
+                    excluded_selector_verdicts=[
+                        prior_selector_verdict or "rag_selected"
+                    ],
+                    extra_payload={
+                        "prior_selected_workflow_id": prior_selected_workflow_id,
+                        "prior_selector_verdict": prior_selector_verdict,
+                        "launch_viability_probe": {
+                            "prior_selected_workflow": dict(selected_probe),
+                        },
+                        "custom_workflow_override_reason": override_policy.reason_code,
+                    },
+                )
+                return False
+
+            reason = "selected_custom_workflow_not_launchable_from_turn_inputs"
+            reasoning = (
+                "Selected custom workflow could not launch from the current turn "
+                "inputs after launch-contract resolution and initial-state metadata "
+                "validation, so a semantically better launchable discovered custom "
+                "workflow was used instead."
+            )
+            _promote_selected_workflow_to_custom_dispatch(
+                replacement_probe=replacement_probe,
+                reason=reason,
+                verdict="launch_contract_override",
+                reasoning=reasoning,
+                prior_selected_workflow_id=prior_selected_workflow_id,
+                prior_selector_verdict=prior_selector_verdict,
+                extra_payload={
+                    "launch_viability_probe": {
+                        "prior_selected_workflow": dict(selected_probe),
+                        "replacement_workflow": dict(replacement_probe),
+                    },
+                    "custom_workflow_override_reason": override_policy.reason_code,
+                },
+            )
+            return True
             if not selected_workflow_id_text:
                 return
             if selected_workflow_id_text in {
@@ -29061,7 +29166,40 @@ class InternalMCPChatOrchestrator:
                 },
             )
 
-        _maybe_override_selected_custom_workflow_for_launchability()
+        if not _maybe_override_selected_custom_workflow_for_launchability():
+            if selector_requests_custom_workflow:
+                probe = _get_cached_custom_workflow_launchability_probe(selected_workflow_id_text)
+                if not bool(probe.get("launchable")):
+                    self._logger.error("[mcp_orchestrator] custom workflow launch blocked by gate: %s", selected_workflow_id_text)
+                    error_msg = "I identified a specialized workflow but could not launch it due to missing requirements."
+                    failed_prec = probe.get("pre_action_validation", {}).get("message")
+                    if failed_prec:
+                        error_msg += f" Details: {failed_prec}"
+                    
+                    response_text = _maybe_apply_narration_routing(
+                        error_msg,
+                        tool_invocations=(),
+                        tool_messages=(),
+                    )
+                    result = OrchestratorResult(
+                        response_text=response_text,
+                        extra_messages=(),
+                        tool_invocations=(),
+                        aux_llm_calls=tuple(aux_llm_calls),
+                        llm_calls=tuple(llm_calls),
+                        llm_usage=_aggregate_usage_total(),
+                        orchestrator_duration_ms=_orchestrator_duration_ms(),
+                        workflow_routing=routing_info,
+                        render_plan=_result_render_plan(),
+                    )
+                    _finalise_selection_experience_record(
+                        result=result,
+                        outcome="failed",
+                        final_state="launch_blocked",
+                        completed=False,
+                    )
+                    _persist_trace(status="completed")
+                    return result
 
         selected_workflow_name = _resolve_selected_workflow_name(
             selected_workflow_id_text

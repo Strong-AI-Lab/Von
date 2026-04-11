@@ -33,14 +33,17 @@ build_workflow_purity_report = _workflow_purity_report.build_workflow_purity_rep
 write_workflow_purity_baseline = _workflow_purity_report.write_workflow_purity_baseline
 
 
-def _print_regression_summary(report: dict[str, object]) -> None:
+def _print_regression_summary(report: dict[str, object], verbose: bool = False) -> None:
     print("Running workflow purity gate...")
-    print(report.get("summary_text") or "Workflow purity report generated.")
+    summary_text = str(report.get("summary_text") or "Workflow purity report generated.")
+    print(summary_text)
 
     baseline = report.get("baseline")
     comparison = baseline.get("comparison") if isinstance(baseline, dict) else {}
     if not isinstance(comparison, dict):
         comparison = {}
+
+    regression_detected = bool(comparison.get("regression_detected"))
 
     increased = comparison.get("increased_counters")
     if isinstance(increased, dict) and increased:
@@ -60,7 +63,7 @@ def _print_regression_summary(report: dict[str, object]) -> None:
         for key in missing:
             print(f" - {key}")
 
-    if comparison.get("regression_detected"):
+    if regression_detected:
         print(
             "Workflow purity gate failed. "
             f"Refresh only if the new baseline is deliberate: {WORKFLOW_PURITY_BASELINE_REFRESH_COMMAND}"
@@ -68,8 +71,9 @@ def _print_regression_summary(report: dict[str, object]) -> None:
         print(
             f"Baseline file: {Path(WORKFLOW_PURITY_BASELINE_PATH).as_posix()}"
         )
-        print("Full report:")
-        print(json.dumps(report, indent=2, sort_keys=True))
+        if verbose:
+            print("Full report:")
+            print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print("Workflow purity gate passed.")
 
@@ -91,10 +95,28 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Overwrite the checked-in baseline with the current counters.",
     )
+    parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Print full report JSON on failure.",
+    )
     args = parser.parse_args(argv)
 
     project_root = Path(args.project_root).resolve()
-    registry = build_workflow_purity_registry_snapshot()
+    
+    # Try to include Vontology-backed workflows if DB is available
+    # so we can track synthesized launch contracts.
+    import os
+    if os.getenv("VON_DB_NAME"):
+        from src.backend.workflows.durable.registry_factory import build_vontology_workflow_registry_snapshot
+        try:
+            registry = build_vontology_workflow_registry_snapshot()
+        except Exception:
+            registry = build_workflow_purity_registry_snapshot()
+    else:
+        registry = build_workflow_purity_registry_snapshot()
+
     report = build_workflow_purity_report(registry=registry, project_root=project_root)
 
     if args.refresh_baseline:
@@ -102,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Refreshed workflow-purity baseline: {path.as_posix()}")
         return 0
 
-    _print_regression_summary(report)
+    _print_regression_summary(report, verbose=args.verbose)
     comparison = ((report.get("baseline") or {}).get("comparison") or {})
     if isinstance(comparison, dict) and comparison.get("regression_detected"):
         return 1

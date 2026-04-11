@@ -2117,6 +2117,31 @@ def _parse_json_object_text_value(text_value: Any) -> dict[str, Any] | None:
     return None
 
 
+
+def resolve_workflow_launch_contract(
+    workflow_id: str,
+) -> tuple[dict[str, Any] | None, str]:
+    """Resolve declarative launch contract from workflow text relations."""
+    if not isinstance(workflow_id, str) or not workflow_id.strip():
+        return None, "none"
+
+    texts: list[dict[str, Any]] = []
+    try:
+        raw_texts = get_texts_for_concept(workflow_id)
+    except Exception:
+        raw_texts = []
+    if isinstance(raw_texts, list):
+        texts = [item for item in raw_texts if isinstance(item, dict)]
+
+    for item in texts:
+        predicate = str(item.get("predicate") or "").strip()
+        if predicate in ("#V#has_launch_contract", "has_launch_contract"):
+            raw_payload = _parse_json_object_text_value(item.get("text"))
+            if raw_payload is not None:
+                return raw_payload, f"text_relation:{predicate}"
+
+    return None, "none"
+
 def resolve_workflow_launch_input_contract(
     workflow_id: str,
 ) -> tuple[dict[str, Any] | None, str]:
@@ -3684,6 +3709,9 @@ def load_workflow_definition_from_vontology(
     discovery_exemplars, discovery_exemplars_source = (
         resolve_workflow_discovery_exemplars(workflow_id)
     )
+    launch_contract, launch_contract_source = (
+        resolve_workflow_launch_contract(workflow_id)
+    )
     launch_input_contract, launch_input_contract_source = (
         resolve_workflow_launch_input_contract(workflow_id)
     )
@@ -3732,6 +3760,14 @@ def load_workflow_definition_from_vontology(
         workflow_metadata["discovery_exemplars_source"] = (
             discovery_exemplars_source
         )
+    if launch_contract is not None:
+        workflow_metadata["launch_contract"] = launch_contract
+    if (
+        isinstance(launch_contract_source, str)
+        and launch_contract_source
+        and launch_contract_source != "none"
+    ):
+        workflow_metadata["launch_contract_source"] = launch_contract_source
     if launch_input_contract is not None:
         workflow_metadata["launch_input_contract"] = launch_input_contract
     if (
@@ -3745,6 +3781,25 @@ def load_workflow_definition_from_vontology(
     graph_variable_declarations = graph.get("variable_declarations")
     if isinstance(graph_variable_declarations, list) and graph_variable_declarations:
         workflow_metadata["variable_declarations"] = graph_variable_declarations
+
+
+    # Synthesize fallback launch contract from initial state reads_context_keys
+    if "launch_contract" not in workflow_metadata and initial_state_id:
+        initial_state = states.get(initial_state_id)
+        if initial_state:
+            initial_metadata = getattr(initial_state, "metadata", {})
+            if isinstance(initial_metadata, Mapping):
+                reads_keys = initial_metadata.get("reads_context_keys", [])
+                if reads_keys:
+                    preconditions = []
+                    for key in reads_keys:
+                        preconditions.append({"type": "context_key_present", "key": key, "required": True})
+                    if preconditions:
+                        workflow_metadata["launch_contract"] = {
+                            "schema_version": "launch_contract.v1",
+                            "preconditions": preconditions,
+                        }
+                        workflow_metadata["launch_contract_source"] = "synthesized_from_initial_state"
 
     return WorkflowDefinition(
         workflow_id=workflow_id,

@@ -620,8 +620,12 @@ def _apply_workflow_parity_policy(inventory_snapshot: Dict[str, Any]) -> None:
 
     workflow_purity = inventory_snapshot.get("workflow_purity")
     if isinstance(workflow_purity, dict):
-        logger.info(
-            "[workflow_purity] %s",
+        # JVNAUTOSCI-1812: Keep logs clean by only emitting summary in INFO.
+        # Use DEBUG if full JSON detail is needed.
+        purity_summary = workflow_purity.get("summary_text", "purity report available")
+        logger.info("[workflow_purity] %s", purity_summary)
+        logger.debug(
+            "[workflow_purity_detail] %s",
             json.dumps(workflow_purity, sort_keys=True),
         )
 

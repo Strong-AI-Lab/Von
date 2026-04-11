@@ -484,6 +484,11 @@
           "predicate": "#V#hasWorkflowRoutingProfileJson",
           "text": "{\n  \"schema_version\": \"workflow_routing_profile.v1\",\n  \"role\": \"execution\",\n  \"authoring_intent_required\": false,\n  \"prefer_existing_capability\": false\n}",
           "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#has_launch_contract",
+          "language": "en-NZ",
+          "text": "{\"schema_version\":\"launch_contract.v1\",\"preconditions\":[{\"type\":\"context_key_present\",\"key\":\"file_copy_concept_id\",\"required\":true}]}"
         }
       ],
       "launch_input_contract": {

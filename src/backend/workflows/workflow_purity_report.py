@@ -853,6 +853,17 @@ def _collect_registry_sources(registry: Any | None) -> dict[str, Any]:
         source_by_workflow_id[workflow_id] = source
         source_counts[source] = source_counts.get(source, 0) + 1
 
+        # JVNAUTOSCI-1818: Track synthesized (virtual) launch contracts as impurities
+        # to encourage migration to fully KB-based declarative contracts.
+        try:
+            registration = registry.get_registration(workflow_id)
+            if registration and registration.definition:
+                metadata = registration.definition.metadata
+                if metadata.get("launch_contract_source") == "synthesized_from_initial_state":
+                    source_counts["synthesized_launch_contract_count"] = source_counts.get("synthesized_launch_contract_count", 0) + 1
+        except Exception:
+            pass
+
     return {
         "registry_available": True,
         "counts": source_counts,
@@ -1023,6 +1034,9 @@ def build_workflow_purity_report(
         ),
         "supervised_fail_open_fallback_count": int(
             supervised_fail_open_fallbacks.get("offending_match_count", 0)
+        ),
+        "synthesized_launch_contract_count": int(
+            source_counts.get("synthesized_launch_contract_count", 0)
         ),
     }
 

@@ -215,6 +215,7 @@ Tasks that consist only of a summary sentence and acceptance criteria without th
 
 - Prefer Von's internal Jira pathways when Atlassian MCP OAuth is unreliable.
 - Use the Atlassian recovery runbook rather than inventing Jira REST workarounds.
+- When the user asks for "recently closed" `JVNAUTOSCI` issues, interpret that by default as `project = JVNAUTOSCI AND statusCategory = Done AND resolved >= -48h ORDER BY resolved DESC` unless they explicitly ask for a narrower terminal status such as `Closed`.
 - Use workflow MCP tools as the default control surface for workflow behaviour.
 - Use host-neutral, PowerShell-first, bounded shell commands unless the environment clearly requires otherwise.
 - When adding credential or service-critical environment variables, register them in `_apply_dotenv_overrides()` (`src/workflows/von/main.py`), verify `.env` provides them, and emit clear resolution diagnostics.
