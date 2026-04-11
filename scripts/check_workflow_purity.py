@@ -33,10 +33,19 @@ build_workflow_purity_report = _workflow_purity_report.build_workflow_purity_rep
 write_workflow_purity_baseline = _workflow_purity_report.write_workflow_purity_baseline
 
 
-def _print_regression_summary(report: dict[str, object], verbose: bool = False) -> None:
-    print("Running workflow purity gate...")
+def _print_regression_summary(
+    report: dict[str, object],
+    verbose: bool = False,
+    quiet: bool = False,
+) -> None:
+    if not quiet:
+        print("Running workflow purity gate...")
+    
     summary_text = str(report.get("summary_text") or "Workflow purity report generated.")
     print(summary_text)
+
+    if quiet:
+        return
 
     baseline = report.get("baseline")
     comparison = baseline.get("comparison") if isinstance(baseline, dict) else {}
@@ -101,6 +110,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Print full report JSON on failure.",
     )
+    parser.add_argument(
+        "--quiet",
+        "-q",
+        action="store_true",
+        help="Only print the summary line.",
+    )
     args = parser.parse_args(argv)
 
     project_root = Path(args.project_root).resolve()
@@ -124,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Refreshed workflow-purity baseline: {path.as_posix()}")
         return 0
 
-    _print_regression_summary(report, verbose=args.verbose)
+    _print_regression_summary(report, verbose=args.verbose, quiet=args.quiet)
     comparison = ((report.get("baseline") or {}).get("comparison") or {})
     if isinstance(comparison, dict) and comparison.get("regression_detected"):
         return 1

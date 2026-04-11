@@ -1892,9 +1892,9 @@ function Start-VonServer {
     if (Test-Path $purityScript) {
         Write-LauncherLog "Running Workflow Purity Check (warn-only)..."
         if (Test-Path $venvPython) {
-            & $venvPython $purityScript 2>&1 | ForEach-Object { Write-LauncherLog "[purity-check] $_" }
+            & $venvPython $purityScript --quiet 2>&1 | ForEach-Object { Write-LauncherLog "[purity-check] $_" }
         } else {
-            & $pdm run python $purityScript 2>&1 | ForEach-Object { Write-LauncherLog "[purity-check] $_" }
+            & $pdm run python $purityScript --quiet 2>&1 | ForEach-Object { Write-LauncherLog "[purity-check] $_" }
         }
     }
 
