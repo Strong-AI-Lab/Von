@@ -179,6 +179,27 @@ Verify all of the following:
 - merge to `main`, verify `origin/main` contains the intended commit(s), then close the Jira issue
 - complete the reflection pass
 
+### 7.4 Jira task design quality
+
+Jira tasks are durable artefacts that other agents and humans rely on months later. A task that omits the analysis behind it forces the next implementer to redo the entire diagnosis. Every implementation or bug-fix task must include:
+
+1. **Observed failure evidence.** Concrete data: request IDs, telemetry field values, error messages, or user-visible symptoms. Quote the actual values — do not paraphrase.
+2. **Code path analysis with file and line references.** Trace the execution path through the relevant functions, naming each file, function, and approximate line number. The reader should be able to follow the path without searching.
+3. **Competing hypotheses with diagnosis steps.** When root cause is uncertain, state each plausible hypothesis explicitly and describe the concrete steps (log inspection, breakpoint, test case) that would confirm or eliminate it. Do not present a single guess as established fact.
+4. **Fix approach per hypothesis.** For each hypothesis, describe the intended code change — which function, what logic, why it resolves the root cause. If hypotheses share a fix, say so.
+5. **Regression test requirements.** Name the specific assertions the fix must be tested against (not generic "add tests"). State what conditions the test must reproduce and what the expected vs. failing outcome is.
+6. **Relationship to other tasks.** Link related issues and explain the relationship (shared root cause, same pipeline stage, discovered together, one blocks another). A link without explanation is insufficient.
+7. **Key file references.** List the primary files the implementer will need to read, with the relevant function or section name.
+
+When creating diagnostic or bug tasks from a failed-turn analysis:
+
+- Include the request_id and the turn execution record field values that demonstrate each failure.
+- When telemetry shows a candidate was excluded, record which filter excluded it and what the filter's inputs were.
+- When the failure involves a pipeline (discovery → selector → dispatch), trace the data through each stage boundary and identify where values diverge from expectation.
+- Do not describe test gaps abstractly. Name the specific structural flaw in the existing test (e.g. "the test pre-registers workflows, so the registry gate always passes").
+
+Tasks that consist only of a summary sentence and acceptance criteria without the analytical foundation are incomplete. The standard is: *an agent starting the task cold should be able to proceed to implementation without repeating the diagnostic investigation.*
+
 ## 8. Testing and telemetry rules
 
 1. Real call-path tests matter more than unit-shaped assumptions alone.

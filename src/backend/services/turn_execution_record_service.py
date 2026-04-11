@@ -2973,11 +2973,19 @@ def _summarise_tool_execution_context(
     dispatch_terminal_failing_action_id = ""
     dispatch_terminal_unresolved_required_inputs: list[str] = []
     dispatch_terminal_launch_input_resolution_status = ""
-    latest_workflow_instance_submission = (
-        workflow_instance_submission_events[-1]
-        if workflow_instance_submission_events
-        else {}
-    )
+    # JVNAUTOSCI-1809: Prefer the submission event matching the selector's
+    # chosen workflow.  Post-processing workflows (e.g. buttonify) append
+    # later submission events; using [-1] would misattribute dispatch
+    # identity to the post-processing workflow instead of the primary one.
+    latest_workflow_instance_submission: Mapping[str, Any] = {}
+    if workflow_instance_submission_events:
+        if selected_workflow_id:
+            for _sub_evt in workflow_instance_submission_events:
+                if _safe_str(_sub_evt.get("workflow_id")) == selected_workflow_id:
+                    latest_workflow_instance_submission = _sub_evt
+                    break
+        if not latest_workflow_instance_submission:
+            latest_workflow_instance_submission = workflow_instance_submission_events[0]
     for entry in aux_llm_calls or ():
         if not isinstance(entry, Mapping):
             continue

@@ -5197,6 +5197,12 @@ footer {
     border-color: #fca5a5;
 }
 
+.llm-status-badge.warning {
+    background: #fef3c7;
+    color: #92400e;
+    border-color: #fcd34d;
+}
+
 .llm-status-badge.missing-key {
     background: #fef3c7;
     color: #92400e;

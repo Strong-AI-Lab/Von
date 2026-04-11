@@ -481,6 +481,18 @@ function normaliseFooterTelemetryStrings(values) {
   return result;
 }
 
+/**
+ * Normalise a model name for alias-aware comparison.
+ *
+ * OpenAI resolves model aliases to dated snapshots (e.g. gpt-5.4-mini →
+ * gpt-5.4-mini-2026-03-17).  Stripping the trailing date suffix lets us
+ * compare the base family name without false-alarm mismatches.
+ */
+function normaliseModelNameForComparison(name) {
+  if (!name || typeof name !== 'string') return '';
+  return name.trim().replace(/-\d{4}-\d{2}-\d{2}$/, '');
+}
+
 function readLatestLlmExecutionTelemetry() {
   try {
     const raw = window.__vonLatestLlmExecutionTelemetry;
@@ -992,7 +1004,8 @@ export async function setModelInfoFooterText() {
     const requestedModel = executionTelemetry?.requestedModel || configuredModel;
     const actualModel = executionTelemetry?.actualModel || '';
     const actualProvider = executionTelemetry?.actualProvider || '';
-    const actualDiffersFromRequested = !!actualModel && !!requestedModel && actualModel !== requestedModel;
+    const actualDiffersFromRequested = !!actualModel && !!requestedModel
+      && normaliseModelNameForComparison(actualModel) !== normaliseModelNameForComparison(requestedModel);
     const actualDiffersFromConfiguredProvider = !!actualProvider && !!configuredProvider && actualProvider !== configuredProvider;
     const failureReason = executionTelemetry?.primaryFailureReason || executionTelemetry?.error || '';
     const executionOverlayActive = !!executionTelemetry && (
@@ -1011,7 +1024,8 @@ export async function setModelInfoFooterText() {
     if (llmHost) titleParts.push(`Host: ${llmHost}`);
     if (errorMsg) titleParts.push(`Error: ${errorMsg}`);
     if (executionOverlayActive) {
-      llmClass = 'fatal';
+      const hasHardFailure = !!failureReason || actualDiffersFromConfiguredProvider || actualDiffersFromRequested;
+      llmClass = hasHardFailure ? 'fatal' : 'warning';
       titleParts.push(`Last execution status: ${executionStatusLabel}`);
       if (requestedModel) titleParts.push(`Requested model: ${requestedModel}`);
       if (actualProvider) titleParts.push(`Executed provider: ${actualProvider}`);
