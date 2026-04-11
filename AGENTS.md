@@ -51,6 +51,7 @@ For practical engineering guidance distilled from prior implementation and
 debugging work, see:
 
 - `docs/engineering/operational_engineering_guide.md`
+- `docs/engineering/maintaining_global_design_constraints_and_authority_alignment_with_coding_agents.md`
 
 Use that document for environment handling, shell and host behaviour,
 credential-path issues, access/tooling defaults, pytest execution practice, and
@@ -85,6 +86,8 @@ For frontend/browser user-view validation practice, also see
 23. Notice when functions or methods are becoming large, tangled, or repeatedly patched. Treat that as a design signal, not merely a style issue. Prefer refactoring toward clear reusable support-surface functions with explicit inputs/outputs and better test seams.
 24. When coordination or decision-making logic inside Python looks like authored workflow policy, actively consider whether it should instead live in Von workflows, Vontology artefacts, prompt/programme artefacts, or other represented authority surfaces. Refactoring should reduce hidden code-side policy, not merely rearrange it.
 25. Agents are authorised to create new refactoring or architecture-alignment Jira tasks when they encounter code of this kind. Such tasks should explain the observed structural problem, why it matters now, and how the proposed refactor would improve code coherence, represented-authority alignment, and future change safety.
+26. Do not use size alone as the criterion for opening refactor tasks. A strong candidate usually combines size or repeated patch pressure with mixed responsibilities, weak test seams, user-visible interpretation risk, integration-boundary sprawl, or drift of workflow/control/verification logic away from represented authority.
+27. After a substantial workflow/orchestration refactor, perform a bounded structural scan of adjacent code for monoliths or authority-drift risks. Create linked follow-on Jira tasks when the architectural case is clear; do not create noise tickets based only on line count.
 
 ## 4. Workflow, prompt, and KB authority
 
@@ -189,6 +192,8 @@ Jira tasks are durable artefacts that other agents and humans rely on months lat
 When drafting or updating an implementation task, use recent evidence as the entry point for diagnosis, not as permission for a narrow local patch. Be very clear in the description about why the work needs to be done in light of the recent changes, and what it should achieve in terms of code coherence, design quality, and alignment with Von's architectural intent. If the evidence leads into a massive or over-entangled function, say so explicitly and frame the task around the durable structural change that is needed — for example extraction of reusable support surfaces, clearer authority boundaries, or better testable seams — rather than normalising another local edit inside the monolith. For workflow/orchestration work in particular, make explicit that workflow control and verification must remain Vontology-authored and mostly determined through flexible LLM reasoning over represented artefacts; the acceptable Python changes are support-surface improvements, not migration of decision policy or verification criteria into code.
 
 Agents should not wait for a human to request such a task explicitly. If they observe a large/tangled function, repeated local patching in the same area, or a drift risk where Python is absorbing workflow control or verification logic, they should open a refactoring or architecture-alignment Jira task proactively and document the rationale clearly.
+
+When scanning for such opportunities, prefer opening tasks where you can state the architectural risk precisely: mixed boundary responsibilities, hidden coordination or decision policy in Python, workflow/verification logic drifting away from Vontology/workflow authority, user-visible meaning being shaped in one monolith, poor test seams, or integration-boundary sprawl that invites duplicate definitions or schema drift. Do not open a refactor task solely because a function is long.
 
 1. **Observed failure evidence.** Concrete data: request IDs, telemetry field values, error messages, or user-visible symptoms. Quote the actual values — do not paraphrase.
 2. **Code path analysis with file and line references.** Trace the execution path through the relevant functions, naming each file, function, and approximate line number. The reader should be able to follow the path without searching.
