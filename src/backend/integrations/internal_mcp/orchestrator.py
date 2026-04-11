@@ -59,7 +59,7 @@ from ...workflows.action_registry import (
     WorkflowActionResult,
     WorkflowEnvironment,
 )
-from ...workflows import WorkflowRegistration
+from ...workflows import LazyWorkflowRegistration, WorkflowRegistration
 from ...workflows.execution_contracts import (
     LAST_WORKFLOW_STEP_RESULT_ENVELOPE_KEY,
     WORKFLOW_RUNTIME_EVENTS_KEY,
@@ -20977,6 +20977,25 @@ class InternalMCPChatOrchestrator:
             concept_id = str(candidate.get("concept_id") or "").strip()
             if not concept_id:
                 continue
+
+            # JVNAUTOSCI-1808: JIT lazy-register discovered candidates that
+            # are not yet in the registry.  Discovery already validated these
+            # as Vontology workflow concepts; the registry's definition_loader
+            # will materialise the full definition on first dispatch access.
+            if concept_id not in registry_ids:
+                jit_registered = self._workflow_registry.register_lazy(
+                    LazyWorkflowRegistration(
+                        workflow_id=concept_id,
+                        purpose=str(
+                            candidate.get("description")
+                            or candidate.get("purpose")
+                            or ""
+                        ).strip() or None,
+                        source="jit_discovery",
+                    )
+                )
+                if jit_registered:
+                    registry_ids.add(concept_id)
 
             registry_safe = concept_id in registry_ids
             raw_reason = candidate.get("executability_reason")
