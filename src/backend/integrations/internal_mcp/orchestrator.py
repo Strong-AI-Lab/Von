@@ -28785,6 +28785,65 @@ class InternalMCPChatOrchestrator:
                     trace.metadata["custom_workflow_override_policy"] = events
                 events.append(dict(payload))
 
+        def _record_custom_workflow_launchability_override_failure(
+            *,
+            reason: str,
+            error: Exception,
+            selected_workflow_id: str | None,
+            selected_probe: Mapping[str, Any] | None = None,
+        ) -> None:
+            payload: dict[str, Any] = {
+                "type": "workflow_selector_override",
+                "reason": reason,
+                "selected_workflow_id": selected_workflow_id,
+                "prior_selected_workflow_id": selected_workflow_id,
+                "preserved_selector_decision": True,
+                "error": str(error),
+                "error_class": type(error).__name__,
+            }
+            if isinstance(selected_probe, Mapping):
+                payload["launch_viability_probe"] = {
+                    "prior_selected_workflow": dict(selected_probe)
+                }
+            aux_llm_calls.append(
+                annotate_python_decision_event(
+                    payload,
+                    stage="workflow_dispatch",
+                    component="internal_mcp_orchestrator",
+                    function="_maybe_override_selected_custom_workflow_for_launchability",
+                    decision_class="workflow_selector_override",
+                    decision_source="workflow_launchability_check",
+                    changed_outcome=False,
+                    reason_code=reason,
+                    possible_inappropriate_python_code_use=False,
+                )
+            )
+            if trace_enabled and trace is not None:
+                raw_events = trace.metadata.get("workflow_selector_override_failures")
+                if isinstance(raw_events, list):
+                    events = raw_events
+                else:
+                    events = []
+                    trace.metadata["workflow_selector_override_failures"] = events
+                events.append(dict(payload))
+            _emit_progress_local(
+                {
+                    "status": "thinking",
+                    "stage": "workflow_dispatch_prepare",
+                    "phase": "workflow_dispatch_prepare",
+                    "phase_label": (
+                        "Launchability override failed; preserving selected workflow"
+                    ),
+                    "selected_workflow_id": selected_workflow_id,
+                    "selected_workflow_name": _resolve_selected_workflow_name(
+                        selected_workflow_id
+                    ),
+                    "workflow_selection_rationale": reason,
+                    "error_class": type(error).__name__,
+                    **_build_live_workflow_routing_payload(),
+                }
+            )
+
         def _promote_selected_workflow_to_custom_dispatch(
             *,
             replacement_probe: Mapping[str, Any] | None,
@@ -28915,31 +28974,48 @@ class InternalMCPChatOrchestrator:
             }:
                 return
 
-            selected_probe = _get_cached_custom_workflow_launchability_probe(
-                selected_workflow_id_text
-            )
+            try:
+                selected_probe = _get_cached_custom_workflow_launchability_probe(
+                    selected_workflow_id_text
+                )
+            except Exception as exc:
+                _record_custom_workflow_launchability_override_failure(
+                    reason="selected_custom_workflow_launchability_probe_failed",
+                    error=exc,
+                    selected_workflow_id=selected_workflow_id_text,
+                )
+                return
             if bool(selected_probe.get("launchable")):
                 return
 
-            override_policy = _evaluate_custom_workflow_override_policy(
-                override_context="selected_custom_workflow_launchability_replacement",
-                exclude_workflow_ids=(selected_workflow_id_text,)
-            )
-            _record_custom_workflow_override_policy(
-                decision=override_policy,
-                prior_selected_workflow_id=selected_workflow_id_text,
-                preserved_execution_mode="custom_workflow",
-            )
-            prior_selected_workflow_id = selected_workflow_id_text
-            prior_selector_verdict = selector_verdict or None
-            replacement_probe = (
-                _get_cached_custom_workflow_launchability_probe(
-                    override_policy.chosen_workflow_id
+            try:
+                override_policy = _evaluate_custom_workflow_override_policy(
+                    override_context="selected_custom_workflow_launchability_replacement",
+                    exclude_workflow_ids=(selected_workflow_id_text,),
                 )
-                if isinstance(override_policy.chosen_workflow_id, str)
-                and override_policy.chosen_workflow_id.strip()
-                else None
-            )
+                _record_custom_workflow_override_policy(
+                    decision=override_policy,
+                    prior_selected_workflow_id=selected_workflow_id_text,
+                    preserved_execution_mode="custom_workflow",
+                )
+                prior_selected_workflow_id = selected_workflow_id_text
+                prior_selector_verdict = selector_verdict or None
+                replacement_probe = (
+                    _get_cached_custom_workflow_launchability_probe(
+                        override_policy.chosen_workflow_id
+                    )
+                    if isinstance(override_policy.chosen_workflow_id, str)
+                    and override_policy.chosen_workflow_id.strip()
+                    else None
+                )
+            except Exception as exc:
+                _record_custom_workflow_launchability_override_failure(
+                    reason="selected_custom_workflow_launchability_override_failed",
+                    error=exc,
+                    selected_workflow_id=selected_workflow_id_text,
+                    selected_probe=selected_probe,
+                )
+                return
             if replacement_probe is None:
                 # When a specialised workflow is semantically right but cannot
                 # launch from free-text turn inputs, prefer the safe generic

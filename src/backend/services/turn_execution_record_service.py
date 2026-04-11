@@ -523,6 +523,9 @@ def _derive_execution_signal_completion_blocker(
         execution_summary.get("dispatch_terminal_failure_detail")
     )
     dispatch_workflow_id = _safe_str(execution_summary.get("dispatch_workflow_id"))
+    dispatch_event_count = _safe_non_negative_int(
+        execution_summary.get("dispatch_event_count")
+    )
     planned_count = _safe_non_negative_int(execution_summary.get("planned_count"))
     executed_count = _safe_non_negative_int(execution_summary.get("executed_count"))
     successful_invocation_count = _safe_non_negative_int(
@@ -568,6 +571,27 @@ def _derive_execution_signal_completion_blocker(
         execution_progress_observed = execution_progress_observed or (
             _custom_workflow_execution_progress_observed(custom_workflow_execution)
         )
+
+    if effect_type == "workflow_execution" and dispatch_event_count <= 0:
+        if not failure_codes:
+            failure_codes.append("custom_workflow_dispatch_not_started")
+        decision_reason = (
+            f"{dispatch_workflow_id or 'Selected workflow'} was selected but dispatch "
+            "never started."
+        )
+        return {
+            "effect_id": "effect_execution_signal_1",
+            "effect_type": effect_type,
+            "status": "not_executed",
+            "status_reason": decision_reason,
+            "failure_code": failure_codes[0],
+            "failure_codes": list(failure_codes),
+            "decision": "escalation_required",
+            "decision_reason": decision_reason,
+            "repeat_eligible": False,
+            "source": "execution_signals",
+            "workflow_id": dispatch_workflow_id or None,
+        }
 
     if effect_type == "workflow_execution" and isinstance(
         terminal_success_contract, Mapping
@@ -863,6 +887,8 @@ def build_turn_execution_correctness_summary(
         if isinstance(workflow_routing_diagnostics, Mapping)
         else {}
     )
+    dispatch_raw = workflow_routing_payload.get("dispatch")
+    dispatch = dispatch_raw if isinstance(dispatch_raw, Mapping) else {}
     completion_gate_payload = (
         dict(completion_gate) if isinstance(completion_gate, Mapping) else {}
     )
@@ -870,17 +896,46 @@ def build_turn_execution_correctness_summary(
         dict(final_response) if isinstance(final_response, Mapping) else {}
     )
 
-    decision = _safe_str(completion_gate_payload.get("decision"))
-    requires_follow_up = bool(completion_gate_payload.get("requires_follow_up", False))
-    safe_to_claim_completion = bool(
-        completion_gate_payload.get("safe_to_claim_completion", not requires_follow_up)
-    )
     selected_workflow_id = _safe_str(
         workflow_selection_payload.get("selected_workflow_id")
     )
     selector_verdict = _safe_str(workflow_selection_payload.get("selector_verdict"))
     selector_verdict_lower = (selector_verdict or "").lower()
     selector_source = _safe_str(workflow_selection_payload.get("selector_source"))
+    plain_response_route_selected = (
+        (selected_workflow_id or "") in _PLAIN_RESPONSE_WORKFLOW_IDS
+        or selector_verdict_lower == "plain_response"
+    )
+    tool_route_selected = (
+        (selected_workflow_id or "") == "#V#tool_calling_workflow"
+        or selector_verdict_lower in _TOOL_CALLING_SELECTOR_VERDICTS
+    )
+    custom_workflow_route_selected = bool(
+        selected_workflow_id
+        and not tool_route_selected
+        and not plain_response_route_selected
+    )
+    dispatch = dict(dispatch)
+    if not _safe_str(dispatch.get("selected_execution_mode")):
+        if tool_route_selected:
+            dispatch["selected_execution_mode"] = "tool_pipeline"
+        elif custom_workflow_route_selected:
+            dispatch["selected_execution_mode"] = "custom_workflow"
+        elif plain_response_route_selected:
+            dispatch["selected_execution_mode"] = "direct_response"
+    if (
+        not _safe_str(dispatch.get("dispatch_workflow_id"))
+        and selected_workflow_id
+        and (custom_workflow_route_selected or plain_response_route_selected)
+    ):
+        dispatch["dispatch_workflow_id"] = selected_workflow_id
+    workflow_routing_payload["dispatch"] = dict(dispatch)
+
+    decision = _safe_str(completion_gate_payload.get("decision"))
+    requires_follow_up = bool(completion_gate_payload.get("requires_follow_up", False))
+    safe_to_claim_completion = bool(
+        completion_gate_payload.get("safe_to_claim_completion", not requires_follow_up)
+    )
 
     failure_mode = _classify_turn_execution_failure_mode(
         {
@@ -898,15 +953,6 @@ def build_turn_execution_correctness_summary(
         }
     )
     likely_failure_to_act = is_turn_execution_likely_failure_to_act(failure_mode)
-
-    plain_response_route_selected = (
-        (selected_workflow_id or "") in _PLAIN_RESPONSE_WORKFLOW_IDS
-        or selector_verdict_lower == "plain_response"
-    )
-    tool_route_selected = (
-        (selected_workflow_id or "") == "#V#tool_calling_workflow"
-        or selector_verdict_lower in _TOOL_CALLING_SELECTOR_VERDICTS
-    )
     launchability_degraded_tool_route = bool(
         tool_route_selected
         and _has_tool_route_launchability_degradation(workflow_routing_payload)
@@ -2870,6 +2916,15 @@ def _summarise_tool_execution_context(
         selector_verdict_lower in _TOOL_CALLING_SELECTOR_VERDICTS
         or "tool_calling_workflow" in selected_workflow_id_lower
     )
+    plain_response_route_selected = bool(
+        (selected_workflow_id or "") in _PLAIN_RESPONSE_WORKFLOW_IDS
+        or selector_verdict_lower == "plain_response"
+    )
+    custom_workflow_route_selected = bool(
+        selected_workflow_id
+        and not tool_route_selected
+        and not plain_response_route_selected
+    )
 
     latest_progress = (
         turn_execution_diagnostics.get("latest_progress")
@@ -3106,8 +3161,11 @@ def _summarise_tool_execution_context(
         tool_call_end_event_count,
         invocation_count,
     )
-    if not selected_execution_mode and tool_route_selected:
-        selected_execution_mode = "tool_pipeline"
+    if not selected_execution_mode:
+        if tool_route_selected:
+            selected_execution_mode = "tool_pipeline"
+        elif custom_workflow_route_selected:
+            selected_execution_mode = "custom_workflow"
     if not dispatch_workflow_id and selected_execution_mode in {
         "direct_response",
         "custom_workflow",
@@ -3172,6 +3230,14 @@ def _summarise_tool_execution_context(
             if dispatch_terminal_failure_reason:
                 failure_codes.append(dispatch_terminal_failure_reason)
             failure_codes.append("tool_dispatch_failed_before_tool_execution")
+    if (
+        selected_execution_mode == "custom_workflow"
+        and not dispatch_boundary_events
+        and not workflow_instance_submission_events
+        and not dispatch_terminal_status
+        and not _custom_workflow_execution_progress_observed(custom_workflow_execution)
+    ):
+        failure_codes.append("custom_workflow_dispatch_not_started")
 
     deduped_failure_codes: list[str] = []
     seen_failure_codes: set[str] = set()

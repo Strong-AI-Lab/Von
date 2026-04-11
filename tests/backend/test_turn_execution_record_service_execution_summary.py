@@ -160,6 +160,38 @@ def test_tool_execution_summary_marks_missing_dispatch_boundary_after_tool_selec
     assert "tool_dispatch_boundary_missing" in list(summary.get("failure_codes") or [])
 
 
+def test_tool_execution_summary_marks_missing_dispatch_boundary_after_custom_selection() -> None:
+    summary = _summarise_tool_execution_context(
+        workflow_routing={
+            "workflow_id": "#V#arxiv_paper_representation_workflow",
+            "verdict": "rag_selected",
+        },
+        turn_execution_diagnostics={
+            "latest_progress": {
+                "counters": {"tools_started": 0, "tools_completed": 0},
+                "diagnostic_events": [],
+            }
+        },
+        aux_llm_calls=[
+            {
+                "type": "workflow_selector",
+                "workflow_id": "#V#arxiv_paper_representation_workflow",
+                "verdict": "rag_selected",
+            }
+        ],
+        serialised_invocations=[],
+    )
+
+    assert summary["tool_route_selected"] is False
+    assert summary["selected_execution_mode"] == "custom_workflow"
+    assert summary["dispatch_workflow_id"] == "#V#arxiv_paper_representation_workflow"
+    assert summary["last_successful_boundary"] == "workflow_selected"
+    assert "custom_workflow_dispatch_not_started" in list(
+        summary.get("failure_codes") or []
+    )
+    assert summary["custom_workflow_execution"]["observed"] is False
+
+
 def test_tool_execution_summary_preserves_local_handoff_failure_reason() -> None:
     summary = _summarise_tool_execution_context(
         workflow_routing={
@@ -1156,4 +1188,37 @@ def test_build_turn_execution_correctness_summary_marks_submission_failure_false
 
     assert summary["failure_mode"] == "false_completion_gate_state"
     assert summary["overall_outcome"] == "false_success"
+    assert summary["metric_labels"]["false_success"] is True
+
+
+def test_build_turn_execution_correctness_summary_marks_missing_custom_dispatch_false_success() -> None:
+    summary = build_turn_execution_correctness_summary(
+        completion_gate={
+            "decision": "completed",
+            "decision_reason": "No blocking effect detected.",
+            "safe_to_claim_completion": True,
+            "requires_follow_up": False,
+        },
+        required_effects=[],
+        critic_summary={"not_verified_count": 0, "inconclusive_count": 0},
+        final_response={
+            "completion_claim_detected": True,
+            "completion_claim_validated": True,
+        },
+        workflow_selection={
+            "selected_workflow_id": "#V#arxiv_paper_representation_workflow",
+            "selector_verdict": "rag_selected",
+            "selector_source": "selector",
+        },
+        workflow_routing_diagnostics={
+            "dispatch": {
+                "dispatch_event_count": 0,
+                "workflow_handoff_started": False,
+            }
+        },
+    )
+
+    assert summary["failure_mode"] == "false_completion_gate_state"
+    assert summary["overall_outcome"] == "false_success"
+    assert summary["metric_labels"]["successful_completion"] is False
     assert summary["metric_labels"]["false_success"] is True
