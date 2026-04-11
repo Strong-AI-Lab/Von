@@ -3640,6 +3640,121 @@ def test_custom_workflow_launchability_promotes_launchable_replacement_candidate
     assert dispatch_boundaries[-1].get("selected_workflow_id") == launchable_workflow_id
 
 
+def test_custom_workflow_launchability_override_failure_preserves_selected_dispatch(
+    monkeypatch,
+):
+    import src.backend.services.workflow_selection_policy_service as policy_module
+
+    monkeypatch.setattr(policy_module, "get_live_selection_policy", lambda: None)
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    selected_workflow_id = "#V#arxiv_paper_representation_workflow"
+
+    orchestrator._workflow_registry.register_or_replace(
+        WorkflowRegistration(
+            workflow_id=selected_workflow_id,
+            definition=WorkflowDefinition(
+                workflow_id=selected_workflow_id,
+                initial_state="normalise_inputs",
+                states={
+                    "normalise_inputs": WorkflowStateSpec(
+                        state_id="normalise_inputs",
+                        actions=(WorkflowActionInvocation(action_id="tool.prepare_spec"),),
+                        terminal=True,
+                        metadata={"reads_context_keys": ["file_copy_concept_id"]},
+                    )
+                },
+            ),
+            purpose="Selected workflow whose launchability override path will fail.",
+            source="test",
+        )
+    )
+
+    _stub_execute_workflow_result(
+        monkeypatch,
+        orchestrator,
+        expected_workflow_id=selected_workflow_id,
+        data={
+            "response_text": "Preserved selected workflow dispatch.",
+            "final_response": "Preserved selected workflow dispatch.",
+        },
+    )
+
+    def _raise_override_failure(**_kwargs: Any) -> Any:
+        raise AttributeError("override policy exploded")
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.orchestrator.choose_custom_workflow_override_candidate",
+        _raise_override_failure,
+    )
+
+    result = orchestrator.run(
+        prompt="https://arxiv.org/abs/2402.18144",
+        context=[],
+        llm_client=_CapturingLLM([selected_workflow_id]),
+        model=None,
+        user_namespace="#V#user@org",
+        workflow_discovery_result={
+            "matches": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Scholarly Paper Representation Workflow",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                }
+            ],
+            "candidates": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Scholarly Paper Representation Workflow",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                }
+            ],
+            "match_count": 1,
+        },
+        conversation_session_id="chat-launchability-override-failure",
+        turn_id="turn-launchability-override-failure",
+    )
+
+    assert result.response_text == "Preserved selected workflow dispatch."
+    assert result.workflow_routing is not None
+    assert result.workflow_routing.workflow_id == selected_workflow_id
+    assert result.workflow_routing.verdict == "rag_selected"
+    assert result.workflow_routing.source == "selector"
+
+    failure_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "workflow_selector_override"
+            and entry.get("reason")
+            == "selected_custom_workflow_launchability_override_failed"
+        ),
+        None,
+    )
+    assert failure_entry is not None
+    assert failure_entry.get("selected_workflow_id") == selected_workflow_id
+    assert failure_entry.get("prior_selected_workflow_id") == selected_workflow_id
+    assert failure_entry.get("preserved_selector_decision") is True
+    assert failure_entry.get("error_class") == "AttributeError"
+
+    dispatch_boundaries = [
+        entry
+        for entry in result.aux_llm_calls
+        if isinstance(entry, dict) and entry.get("type") == "workflow_dispatch_boundary"
+    ]
+    assert [entry.get("boundary") for entry in dispatch_boundaries[-3:]] == [
+        "execution_mode_selected",
+        "workflow_handoff",
+        "workflow_terminal",
+    ]
+    assert dispatch_boundaries[-3].get("selected_execution_mode") == "custom_workflow"
+    assert dispatch_boundaries[-3].get("selected_workflow_id") == selected_workflow_id
+    assert dispatch_boundaries[-2].get("selected_workflow_id") == selected_workflow_id
+    assert dispatch_boundaries[-1].get("selected_workflow_id") == selected_workflow_id
+
+
 def test_custom_workflow_override_prefers_semantically_fit_execution_candidate(
     monkeypatch,
 ):
