@@ -2298,8 +2298,19 @@ def build_workflow_routing_diagnostics(
             "step_label": _safe_str(event.get("step_label")),
             "status": step_status,
             "duration_ms": step_duration_ms,
+            "result_summary": _safe_str(event.get("result_summary")),
             "error_class": _safe_str(event.get("error_class")),
             "error": _safe_str(event.get("error")),
+            "workflow_id": _safe_str(event.get("workflow_id")),
+            "workflow_name": _safe_str(event.get("workflow_name")),
+            "reason_code": _safe_str(event.get("reason_code")),
+            "symbol": _safe_str(event.get("symbol")),
+            "workflow_launch_input_resolution_status": _safe_str(
+                event.get("workflow_launch_input_resolution_status")
+            ),
+            "unresolved_required_inputs": _dedupe_string_sequence(
+                event.get("unresolved_required_inputs") or []
+            ),
         }
         dispatch_prepare_steps.append(step_payload)
         dispatch_prepare_total_duration_ms += step_duration_ms

@@ -2121,7 +2121,6 @@ describe('thinking activity history normalisation', () => {
                 {
                     stage_id: 'workflow_dispatch_prepare',
                     stage_label: 'Workflow dispatch preparation',
-                    latest_subtask: 'Resolve workflow inputs',
                     selected_workflow_id: '#V#tool_calling_workflow',
                     selected_workflow_name: 'Tool calling workflow',
                     pre_dispatch: {
@@ -2133,16 +2132,18 @@ describe('thinking activity history normalisation', () => {
                         slowest_step_duration_ms: 12,
                         steps: [
                             {
-                                step_id: 'resolve_required_inputs',
-                                step_label: 'Resolve workflow inputs',
-                                status: 'completed',
-                                duration_ms: 7
-                            },
-                            {
                                 step_id: 'load_contract',
                                 step_label: 'Load workflow contract',
+                                result_summary: 'Loaded the launch contract from workflow metadata.',
                                 status: 'completed',
                                 duration_ms: 12
+                            },
+                            {
+                                step_id: 'launchability_probe',
+                                step_label: 'Evaluate launch requirements for Tool calling workflow',
+                                result_summary: 'All launch requirements satisfied.',
+                                status: 'completed',
+                                duration_ms: 7
                             }
                         ]
                     }
@@ -2157,7 +2158,7 @@ describe('thinking activity history normalisation', () => {
 
         expect(html).toContain('Workflow dispatch preparation');
         expect(html).toContain('Preparing Tool calling workflow (#V#tool_calling_workflow) for dispatch');
-        expect(html).toContain('Resolve workflow inputs');
+        expect(html).toContain('All launch requirements satisfied.');
         expect(html).toContain('Pre-dispatch checks');
         expect(html).toContain('Load workflow contract');
         expect(html).not.toContain('No recorded LLM input/output');

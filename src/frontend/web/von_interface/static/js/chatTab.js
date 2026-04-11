@@ -4025,6 +4025,10 @@ function buildThinkingPreDispatchStepLines(preDispatch) {
                 || formatThinkingActivityFallbackLabel(step.step_id)
                 || 'Unnamed step'
         ];
+        const resultSummary = normaliseThinkingActivityString(step.result_summary);
+        if (resultSummary && resultSummary !== bits[0]) {
+            bits.push(resultSummary);
+        }
         const status = normaliseThinkingActivityString(step.status);
         if (status) {
             bits.push(formatThinkingActivityFallbackLabel(status));
@@ -4706,6 +4710,10 @@ function buildWorkflowStageDetailPresentation(stageId, request) {
     }
 
     if (cleanStageId === 'workflow_dispatch_prepare') {
+        const latestPreDispatchStep = Array.isArray(stageData?.pre_dispatch?.steps)
+            && stageData.pre_dispatch.steps.length > 0
+            ? stageData.pre_dispatch.steps[stageData.pre_dispatch.steps.length - 1]
+            : null;
         const workflowText = formatWorkflowDisplayText(
             stageData?.selected_workflow_id,
             stageData?.selected_workflow_name,
@@ -4716,9 +4724,10 @@ function buildWorkflowStageDetailPresentation(stageId, request) {
             stageData?.selected_workflow_name,
             workflowDiscovery
         ) || escapeHtml(workflowText || '');
-        const latestCheckLabel = normaliseThinkingActivityString(stageData?.latest_subtask)
-            || normaliseThinkingActivityString(stageData?.latest_workflow_task)
-            || normaliseThinkingActivityString(stageData?.pre_dispatch?.steps?.[stageData?.pre_dispatch?.steps?.length - 1]?.step_label);
+        const latestCheckLabel = normaliseThinkingActivityString(latestPreDispatchStep?.result_summary)
+            || normaliseThinkingActivityString(latestPreDispatchStep?.step_label)
+            || normaliseThinkingActivityString(stageData?.latest_subtask)
+            || normaliseThinkingActivityString(stageData?.latest_workflow_task);
         const completedChecks = Number.isFinite(stageData?.pre_dispatch?.completed_step_count)
             ? Number(stageData.pre_dispatch.completed_step_count)
             : null;

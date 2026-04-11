@@ -99,6 +99,7 @@ from ...workflows.workflow_launch_input_contracts import (
 )
 from ...workflows.vontology_loader import load_workflow_definition_from_vontology
 from ...workflows.launch_contracts import evaluate_launch_contract
+from ...services.model_registry_service import get_model_registry_snapshot
 from ...workflows.workflow_selector import WorkflowSelector
 from ...workflows.durable.registry_factory import (
     get_shared_durable_action_registry,
@@ -21104,57 +21105,6 @@ class InternalMCPChatOrchestrator:
 
         return included, excluded
 
-    def _build_selector_default_candidates(self) -> list[dict[str, Any]]:
-        candidate_ids = (
-            CHAT_ASSISTANT_WORKFLOW_ID,
-            TOOL_CALLING_WORKFLOW_ID,
-            CHAT_NARRATION_WORKFLOW_ID,
-        )
-        candidates: list[dict[str, Any]] = []
-        for workflow_id in candidate_ids:
-            registration = self._workflow_registry.get_registration(workflow_id)
-            if registration is None:
-                continue
-            name = workflow_id[3:] if workflow_id.startswith("#V#") else workflow_id
-            name = name.replace("_", " ").strip().title() or workflow_id
-            description = str(getattr(registration, "purpose", "") or "").strip()
-            candidates.append(
-                {
-                    "concept_id": workflow_id,
-                    "name": name,
-                    "description": description,
-                    "candidate_source": "selector_default",
-                    "candidate_reason": "builtin_selector_candidate",
-                    "is_executable": True,
-                    "executability_reason": "executable_now",
-                    "is_policy_safe": True,
-                    "routing_eligible": True,
-                    "routing_exclusion_reason": None,
-                }
-            )
-        return candidates
-
-    @staticmethod
-    def _merge_selector_candidates(
-        primary: Sequence[Mapping[str, Any]],
-        secondary: Sequence[Mapping[str, Any]],
-    ) -> list[dict[str, Any]]:
-        merged: list[dict[str, Any]] = []
-        seen_ids: set[str] = set()
-        for source in (primary, secondary):
-            for item in source:
-                if not isinstance(item, Mapping):
-                    continue
-                concept_id = str(item.get("concept_id") or "").strip()
-                if not concept_id:
-                    continue
-                dedupe_key = concept_id.lower()
-                if dedupe_key in seen_ids:
-                    continue
-                seen_ids.add(dedupe_key)
-                merged.append(dict(item))
-        return merged
-
     def _action_turn_execution_route(self, request: Any) -> WorkflowActionResult:
         """Select the workflow for the current supervised turn."""
 
@@ -22292,6 +22242,59 @@ class InternalMCPChatOrchestrator:
             )
             return result
 
+        def _record_dispatch_prepare_note(
+            *,
+            step_id: str,
+            step_label: str,
+            status: str = "completed",
+            duration_ms: int = 0,
+            result_summary: str | None = None,
+            workflow_id: str | None = None,
+            workflow_name: str | None = None,
+            reason_code: str | None = None,
+            symbol: str | None = None,
+            unresolved_required_inputs: Sequence[str] | None = None,
+            error_class: str | None = None,
+            error: str | None = None,
+            launch_input_resolution_status: str | None = None,
+        ) -> None:
+            extra: dict[str, Any] = {}
+            if isinstance(result_summary, str) and result_summary.strip():
+                extra["result_summary"] = result_summary.strip()
+            if isinstance(workflow_id, str) and workflow_id.strip():
+                extra["workflow_id"] = workflow_id.strip()
+            if isinstance(workflow_name, str) and workflow_name.strip():
+                extra["workflow_name"] = workflow_name.strip()
+            if isinstance(reason_code, str) and reason_code.strip():
+                extra["reason_code"] = reason_code.strip()
+            if isinstance(symbol, str) and symbol.strip():
+                extra["symbol"] = symbol.strip()
+            cleaned_unresolved_inputs = [
+                item.strip()
+                for item in (unresolved_required_inputs or ())
+                if isinstance(item, str) and item.strip()
+            ]
+            if cleaned_unresolved_inputs:
+                extra["unresolved_required_inputs"] = cleaned_unresolved_inputs
+            if isinstance(error_class, str) and error_class.strip():
+                extra["error_class"] = error_class.strip()
+            if isinstance(error, str) and error.strip():
+                extra["error"] = error.strip()
+            if (
+                isinstance(launch_input_resolution_status, str)
+                and launch_input_resolution_status.strip()
+            ):
+                extra["workflow_launch_input_resolution_status"] = (
+                    launch_input_resolution_status.strip()
+                )
+            _record_dispatch_prepare_step(
+                step_id=step_id,
+                step_label=step_label,
+                duration_ms=duration_ms,
+                status=status,
+                extra=extra,
+            )
+
         def _finalise_selection_experience_record(
             *,
             result: OrchestratorResult,
@@ -23166,56 +23169,6 @@ class InternalMCPChatOrchestrator:
         discovered_matches: list[dict[str, Any]] = []
         excluded_discovered_matches: list[dict[str, Any]] = []
 
-        def _build_selector_default_candidates() -> list[dict[str, Any]]:
-            candidate_ids = (
-                CHAT_ASSISTANT_WORKFLOW_ID,
-                TOOL_CALLING_WORKFLOW_ID,
-                CHAT_NARRATION_WORKFLOW_ID,
-            )
-            candidates: list[dict[str, Any]] = []
-            for workflow_id in candidate_ids:
-                registration = self._workflow_registry.get_registration(workflow_id)
-                if registration is None:
-                    continue
-                name = workflow_id[3:] if workflow_id.startswith("#V#") else workflow_id
-                name = name.replace("_", " ").strip().title() or workflow_id
-                description = str(getattr(registration, "purpose", "") or "").strip()
-                candidates.append(
-                    {
-                        "concept_id": workflow_id,
-                        "name": name,
-                        "description": description,
-                        "candidate_source": "selector_default",
-                        "candidate_reason": "builtin_selector_candidate",
-                        "is_executable": True,
-                        "executability_reason": "executable_now",
-                        "is_policy_safe": True,
-                        "routing_eligible": True,
-                        "routing_exclusion_reason": None,
-                    }
-                )
-            return candidates
-
-        def _merge_selector_candidates(
-            primary: Sequence[Mapping[str, Any]],
-            secondary: Sequence[Mapping[str, Any]],
-        ) -> list[dict[str, Any]]:
-            merged: list[dict[str, Any]] = []
-            seen_ids: set[str] = set()
-            for source in (primary, secondary):
-                for item in source:
-                    if not isinstance(item, Mapping):
-                        continue
-                    concept_id = str(item.get("concept_id") or "").strip()
-                    if not concept_id:
-                        continue
-                    dedupe_key = concept_id.lower()
-                    if dedupe_key in seen_ids:
-                        continue
-                    seen_ids.add(dedupe_key)
-                    merged.append(dict(item))
-            return merged
-
         def _copy_mapping_sequence(values: Sequence[Any] | None) -> list[dict[str, Any]]:
             copied: list[dict[str, Any]] = []
             for item in values or ():
@@ -23290,29 +23243,14 @@ class InternalMCPChatOrchestrator:
                 payload["workflow_routing"] = None
             return payload
 
-        def _prepare_selector_candidates() -> tuple[
+        def _prepare_selector_candidates_local() -> tuple[
             list[dict[str, Any]],
             list[dict[str, Any]],
             list[dict[str, Any]],
         ]:
-            local_discovered_matches: list[dict[str, Any]] = []
-            local_excluded_matches: list[dict[str, Any]] = []
-            if isinstance(workflow_discovery_result, Mapping):
-                (
-                    local_discovered_matches,
-                    local_excluded_matches,
-                ) = self._prepare_selector_discovered_matches(
-                    workflow_discovery_result,
-                    turn_text=prompt,
-                )
-            local_selector_candidate_matches = _merge_selector_candidates(
-                _build_selector_default_candidates(),
-                local_discovered_matches,
-            )
-            return (
-                local_discovered_matches,
-                local_excluded_matches,
-                local_selector_candidate_matches,
+            return self._prepare_selector_candidates(
+                workflow_discovery_result=workflow_discovery_result,
+                prompt=prompt,
             )
 
         (
@@ -23322,7 +23260,7 @@ class InternalMCPChatOrchestrator:
         ) = _run_dispatch_prepare_step(
             "selector_candidate_preparation",
             "Prepare selector candidates",
-            _prepare_selector_candidates,
+            _prepare_selector_candidates_local,
         )
 
         routing_info: WorkflowRoutingInfo | None = None
@@ -28026,7 +27964,7 @@ class InternalMCPChatOrchestrator:
             aux_llm_calls.append(dict(decision))
             return dict(decision)
 
-        def _maybe_apply_narration_routing(
+        def _maybe_apply_narration_routing_local(
             screen_text: Any,
             *,
             tool_invocations: Sequence[Mapping[str, Any]] = (),
@@ -28037,103 +27975,29 @@ class InternalMCPChatOrchestrator:
                 tool_invocations=tool_invocations,
                 tool_messages=tool_messages,
             )
-            renderer_mode = str(renderer_plan.get("render_mode") or "").strip().lower()
-            renderer_requests_narration = bool(renderer_plan.get("should_narrate"))
-            selected_narration_workflow = bool(
-                selected_workflow_id_text == CHAT_NARRATION_WORKFLOW_ID
-                or (
-                    isinstance(routing_info, WorkflowRoutingInfo)
-                    and routing_info.workflow_id == CHAT_NARRATION_WORKFLOW_ID
-                )
+            return self._maybe_apply_narration_routing(
+                screen_text,
+                tool_invocations=tool_invocations,
+                tool_messages=tool_messages,
+                renderer_plan=renderer_plan,
+                selected_workflow_id_text=selected_workflow_id_text,
+                routing_info=routing_info,
+                selector_requests_narration=selector_requests_narration,
+                discovered_workflow_ids_for_contract_routing=discovered_workflow_ids_for_contract_routing,
+                prompt=prompt,
+                policy_state=policy_state,
+                registry_snapshot=registry_snapshot,
+                user_concept_id=user_concept_id,
+                org_concept_id=org_concept_id,
+                aux_llm_calls=aux_llm_calls,
+                _record_llm_call=_record_llm_call,
+                conversation_session_id=conversation_session_id,
+                turn_id=turn_id,
+                llm_client=llm_client,
+                _model_for_stage=_model_for_stage,
+                user_namespace=user_namespace,
+                auxiliary_system_prompt=auxiliary_system_prompt,
             )
-            should_route_narration = (
-                selected_narration_workflow
-                or selector_requests_narration
-                or renderer_requests_narration
-                or renderer_mode == "spoken+screen"
-            )
-            if not should_route_narration:
-                return screen_text
-            narration_workflow_id = self._resolve_workflow_id_for_action_contract(
-                required_action_ids=_NARRATION_ACTION_IDS,
-                preferred_workflow_id=selected_workflow_id_text,
-                candidate_workflow_ids=discovered_workflow_ids_for_contract_routing,
-                fallback_workflow_ids=(CHAT_NARRATION_WORKFLOW_ID,),
-            )
-            if narration_workflow_id is None:
-                return screen_text
-
-            try:
-                screen_value = (
-                    screen_text.strip()
-                    if isinstance(screen_text, str)
-                    else str(screen_text)
-                )
-                narration_data = {
-                    "presenter_mode_requested": True,
-                    "force_narration": True,
-                    "screen_text": screen_value,
-                    "user_prompt": prompt,
-                    "presenter_channels": {},
-                    "policy_state": policy_state,
-                    "default_model": _model_for_stage("narration"),
-                    "registry_snapshot": registry_snapshot,
-                    "user_concept_id": user_concept_id,
-                    "org_concept_id": org_concept_id,
-                    "aux_llm_calls": aux_llm_calls,
-                    "record_llm_call": _record_llm_call,
-                    "conversation_session_id": conversation_session_id,
-                    "turn_id": turn_id,
-                    "workflow_episode_source": "chat_turn_workflow",
-                    "workflow_episode_stage": "narration",
-                }
-
-                narration_result = self.execute_workflow(
-                    narration_workflow_id,
-                    data=narration_data,
-                    llm_client=llm_client,
-                    model=_model_for_stage("narration"),
-                    user_namespace=user_namespace,
-                    auxiliary_system_prompt=auxiliary_system_prompt,
-                    trace=None,
-                    conversation_session_id=conversation_session_id,
-                    turn_id=turn_id,
-                    episode_source="chat_turn_workflow",
-                )
-
-                channels_obj = (
-                    narration_result.data.get("presenter_channels")
-                    if narration_result is not None
-                    else None
-                )
-                if isinstance(channels_obj, dict):
-                    channels = cast(Mapping[str, Any], channels_obj)
-                    spoken = (
-                        channels.get("spoken")
-                        if isinstance(channels.get("spoken"), str)
-                        else None
-                    )
-                    screen = (
-                        channels.get("screen")
-                        if isinstance(channels.get("screen"), str)
-                        else None
-                    )
-                    if spoken and screen:
-                        aux_llm_calls.append(
-                            {
-                                "type": "narration",
-                                "workflow_id": narration_workflow_id,
-                                "presenter_channels": {
-                                    "spoken": spoken,
-                                    "screen": screen,
-                                },
-                            }
-                        )
-                        return f"<spoken>{spoken}</spoken>\n\n<screen>{screen}</screen>"
-            except Exception:
-                return screen_text
-
-            return screen_text
 
         def _result_render_plan() -> Mapping[str, Any] | None:
             if not renderer_routing_enabled:
@@ -28428,6 +28292,26 @@ class InternalMCPChatOrchestrator:
             )
             if trace_enabled and trace is not None:
                 trace.metadata["workflow_selector_override"] = dict(override_payload)
+            if reason == (
+                "selected_custom_workflow_launchability_requires_safe_general_fallback"
+            ):
+                prior_workflow_label = (
+                    _resolve_selected_workflow_name(prior_selected_workflow_id)
+                    or prior_selected_workflow_id
+                    or "selected workflow"
+                )
+                _record_dispatch_prepare_note(
+                    step_id="safe_general_fallback",
+                    step_label="Use safe general fallback",
+                    result_summary=(
+                        f"{prior_workflow_label} could not launch from the current "
+                        "turn inputs; using the general tool workflow instead."
+                    ),
+                    workflow_id=TOOL_CALLING_WORKFLOW_ID,
+                    workflow_name=_resolve_selected_workflow_name(
+                        TOOL_CALLING_WORKFLOW_ID
+                    ),
+                )
 
         def _build_custom_workflow_dispatch_data(
             workflow_id_override: str | None = None,
@@ -28473,164 +28357,6 @@ class InternalMCPChatOrchestrator:
                 "workflow_episode_stage": "workflow_dispatch",
             }
 
-        def _probe_custom_workflow_launchability(
-            workflow_id: str | None,
-        ) -> dict[str, Any]:
-            clean_workflow_id = (
-                workflow_id.strip()
-                if isinstance(workflow_id, str) and workflow_id.strip()
-                else None
-            )
-            if not clean_workflow_id:
-                return {
-                    "workflow_id": None,
-                    "launchable": False,
-                    "launch_input_resolution": {"status": "workflow_id_missing"},
-                    "pre_action_validation": {
-                        "applied": False,
-                        "ok": False,
-                        "reason_code": "workflow_id_missing",
-                    },
-                }
-
-            _registration, workflow_def = (
-                self._resolve_workflow_registration_and_definition(clean_workflow_id)
-            )
-            if workflow_def is None:
-                return {
-                    "workflow_id": clean_workflow_id,
-                    "launchable": False,
-                    "launch_input_resolution": {"status": "workflow_missing"},
-                    "pre_action_validation": {
-                        "applied": False,
-                        "ok": False,
-                        "reason_code": "workflow_missing",
-                    },
-                }
-
-            probe_data = _build_custom_workflow_dispatch_data(
-                workflow_id_override=clean_workflow_id
-            )
-            workflow_metadata = getattr(workflow_def, "metadata", None)
-            
-            # Resolve launch inputs
-            launch_input_contract = (
-                workflow_metadata.get("launch_input_contract")
-                if isinstance(workflow_metadata, Mapping)
-                else None
-            )
-            launch_input_contract_source = (
-                workflow_metadata.get("launch_input_contract_source")
-                if isinstance(workflow_metadata, Mapping)
-                else None
-            )
-            launch_resolution = resolve_workflow_launch_inputs(
-                workflow_id=clean_workflow_id,
-                contract=launch_input_contract if isinstance(launch_input_contract, Mapping) else None,
-                inputs=probe_data,
-                contract_source=(
-                    str(launch_input_contract_source).strip()
-                    if isinstance(launch_input_contract_source, str)
-                    and launch_input_contract_source.strip()
-                    else None
-                ),
-            )
-            for key, value in launch_resolution.resolved_inputs.items():
-                probe_data.setdefault(key, value)
-
-            initial_state_id = (
-                str(getattr(workflow_def, "initial_state", "") or "").strip() or None
-            )
-
-            launch_contract = (
-                workflow_metadata.get("launch_contract")
-                if isinstance(workflow_metadata, Mapping)
-                else None
-            )
-            
-            # Fallback for in-memory or legacy definitions
-            if launch_contract is None and initial_state_id:
-                workflow_states = getattr(workflow_def, "states", {})
-                if isinstance(workflow_states, Mapping):
-                    initial_state = workflow_states.get(initial_state_id)
-                    if initial_state:
-                        # Extract reads_context_keys from metadata (attr or dict)
-                        initial_meta = getattr(initial_state, "metadata", {})
-                        if not isinstance(initial_meta, Mapping):
-                            initial_meta = {}
-                        
-                        reads_keys = initial_meta.get("reads_context_keys", [])
-                        if isinstance(reads_keys, (list, tuple)) and reads_keys:
-                            preconditions = [{"type": "context_key_present", "key": str(key), "required": True} for key in reads_keys]
-                            launch_contract = {
-                                "schema_version": "launch_contract.v1",
-                                "preconditions": preconditions
-                            }
-
-            pre_action_summary: dict[str, Any]
-            pre_action_ok = False
-            
-            if isinstance(launch_contract, Mapping):
-                # Evaluate declarative launch contract
-                contract_result = evaluate_launch_contract(launch_contract, probe_data)
-                pre_action_ok = bool(contract_result.launchable)
-                
-                # If there are failures, pick the first one for the summary
-                failed_prec = next((r for r in contract_result.precondition_results if not r.satisfied and r.required), None)
-                
-                pre_action_summary = {
-                    "applied": True,
-                    "ok": pre_action_ok,
-                    "reason_code": failed_prec.type if failed_prec else None,
-                    "symbol": failed_prec.context_key if failed_prec else None,
-                    "message": failed_prec.reason if failed_prec else None,
-                }
-            else:
-                # No contract found, fallback to True for launchability since we're transitioning
-                # to declarative launch contracts, but mark it as not applied.
-                pre_action_ok = True
-                pre_action_summary = {
-                    "applied": False,
-                    "ok": True,
-                    "reason_code": "no_launch_contract",
-                    "symbol": None,
-                    "message": None,
-                }
-
-            resolution_diagnostics = (
-                dict(launch_resolution.diagnostics)
-                if isinstance(launch_resolution.diagnostics, Mapping)
-                else {}
-            )
-            launch_input_summary = {
-                "status": resolution_diagnostics.get("status"),
-                "contract_source": resolution_diagnostics.get("contract_source"),
-                "resolved_inputs": list(
-                    resolution_diagnostics.get("resolved_inputs", [])
-                )
-                if isinstance(resolution_diagnostics.get("resolved_inputs"), list)
-                else [],
-                "unresolved_required_inputs": list(
-                    resolution_diagnostics.get("unresolved_required_inputs", [])
-                )
-                if isinstance(
-                    resolution_diagnostics.get("unresolved_required_inputs"), list
-                )
-                else [],
-            }
-            unresolved_required_inputs = tuple(
-                item
-                for item in launch_resolution.unresolved_required_inputs
-                if isinstance(item, str) and item.strip()
-            )
-            return {
-                "workflow_id": clean_workflow_id,
-                "initial_state_id": initial_state_id,
-                "launchable": not unresolved_required_inputs and pre_action_ok,
-                "launch_input_resolution": launch_input_summary,
-                "pre_action_validation": pre_action_summary,
-            }
-
         custom_workflow_launchability_probe_cache: dict[str, dict[str, Any]] = {}
 
         def _get_cached_custom_workflow_launchability_probe(
@@ -28642,7 +28368,10 @@ class InternalMCPChatOrchestrator:
                 else None
             )
             if not clean_workflow_id:
-                return _probe_custom_workflow_launchability(workflow_id)
+                return self._probe_custom_workflow_launchability(
+                    workflow_id,
+                    build_custom_workflow_dispatch_data=_build_custom_workflow_dispatch_data,
+                )
 
             cached_probe = custom_workflow_launchability_probe_cache.get(
                 clean_workflow_id
@@ -28650,7 +28379,108 @@ class InternalMCPChatOrchestrator:
             if isinstance(cached_probe, Mapping):
                 return dict(cached_probe)
 
-            probe = _probe_custom_workflow_launchability(clean_workflow_id)
+            target_workflow_name = _resolve_selected_workflow_name(clean_workflow_id)
+            target_workflow_label = target_workflow_name or clean_workflow_id
+            step_label = (
+                f"Evaluate launch requirements for {target_workflow_label}"
+                if target_workflow_label
+                else "Evaluate launch requirements"
+            )
+            step_start = time.perf_counter()
+            try:
+                probe = self._probe_custom_workflow_launchability(
+                    clean_workflow_id,
+                    build_custom_workflow_dispatch_data=_build_custom_workflow_dispatch_data,
+                )
+            except Exception as exc:
+                duration_ms = int((time.perf_counter() - step_start) * 1000)
+                _record_dispatch_prepare_note(
+                    step_id="launchability_probe",
+                    step_label=step_label,
+                    status="failed",
+                    duration_ms=duration_ms,
+                    result_summary="Launchability check failed.",
+                    workflow_id=clean_workflow_id,
+                    workflow_name=target_workflow_name,
+                    error_class=exc.__class__.__name__,
+                    error=str(exc),
+                )
+                raise
+            duration_ms = int((time.perf_counter() - step_start) * 1000)
+            probe_payload = dict(probe) if isinstance(probe, Mapping) else {}
+            pre_action_validation_raw = probe_payload.get("pre_action_validation")
+            pre_action_validation = (
+                {
+                    str(key): value
+                    for key, value in pre_action_validation_raw.items()
+                }
+                if isinstance(pre_action_validation_raw, Mapping)
+                else {}
+            )
+            launch_input_resolution_raw = probe_payload.get("launch_input_resolution")
+            launch_input_resolution = (
+                {
+                    str(key): value
+                    for key, value in launch_input_resolution_raw.items()
+                }
+                if isinstance(launch_input_resolution_raw, Mapping)
+                else {}
+            )
+            unresolved_required_inputs = [
+                item.strip()
+                for item in (
+                    launch_input_resolution.get("unresolved_required_inputs") or []
+                )
+                if isinstance(item, str) and item.strip()
+            ]
+            pre_action_message = str(pre_action_validation.get("message") or "").strip()
+            pre_action_reason_code = (
+                str(pre_action_validation.get("reason_code") or "").strip() or None
+            )
+            pre_action_symbol = (
+                str(pre_action_validation.get("symbol") or "").strip() or None
+            )
+            launch_input_resolution_status = (
+                str(launch_input_resolution.get("status") or "").strip() or None
+            )
+            if bool(probe_payload.get("launchable")):
+                result_summary = "All launch requirements satisfied."
+                step_status = "completed"
+                error_text = None
+            else:
+                result_summary = (
+                    pre_action_message
+                    or (
+                        "Unresolved required launch inputs: "
+                        + ", ".join(unresolved_required_inputs)
+                        + "."
+                        if unresolved_required_inputs
+                        else ""
+                    )
+                    or (
+                        f"Workflow definition unavailable for {target_workflow_label}."
+                        if pre_action_reason_code == "workflow_missing"
+                        and target_workflow_label
+                        else ""
+                    )
+                    or "Launch requirements were not satisfied."
+                )
+                step_status = "failed"
+                error_text = pre_action_message or result_summary
+            _record_dispatch_prepare_note(
+                step_id="launchability_probe",
+                step_label=step_label,
+                status=step_status,
+                duration_ms=duration_ms,
+                result_summary=result_summary,
+                workflow_id=clean_workflow_id,
+                workflow_name=target_workflow_name,
+                reason_code=pre_action_reason_code,
+                symbol=pre_action_symbol,
+                unresolved_required_inputs=unresolved_required_inputs,
+                error=error_text,
+                launch_input_resolution_status=launch_input_resolution_status,
+            )
             custom_workflow_launchability_probe_cache[clean_workflow_id] = dict(probe)
             return dict(probe)
 
@@ -28956,6 +28786,27 @@ class InternalMCPChatOrchestrator:
             )
             if trace_enabled and trace is not None:
                 trace.metadata["workflow_selector_override"] = dict(override_payload)
+            prior_workflow_label = (
+                _resolve_selected_workflow_name(prior_selected_workflow_id)
+                or prior_selected_workflow_id
+                or "selected workflow"
+            )
+            replacement_workflow_name = _resolve_selected_workflow_name(
+                replacement_workflow_id
+            )
+            replacement_workflow_label = (
+                replacement_workflow_name or replacement_workflow_id or "launchable workflow"
+            )
+            _record_dispatch_prepare_note(
+                step_id="launchability_override",
+                step_label="Promote launchable workflow",
+                result_summary=(
+                    f"Using {replacement_workflow_label} because {prior_workflow_label} "
+                    "could not launch from the current turn inputs."
+                ),
+                workflow_id=replacement_workflow_id,
+                workflow_name=replacement_workflow_name,
+            )
             _emit_progress_local(
                 {
                     "status": "thinking",
@@ -29070,78 +28921,6 @@ class InternalMCPChatOrchestrator:
                 },
             )
             return True
-            if not selected_workflow_id_text:
-                return
-            if selected_workflow_id_text in {
-                CHAT_ASSISTANT_WORKFLOW_ID,
-                CHAT_NARRATION_WORKFLOW_ID,
-                TOOL_CALLING_WORKFLOW_ID,
-            }:
-                return
-
-            try:
-                selected_probe = _get_cached_custom_workflow_launchability_probe(
-                    selected_workflow_id_text
-                )
-            except Exception as exc:
-                _record_custom_workflow_launchability_override_failure(
-                    reason="selected_custom_workflow_launchability_probe_failed",
-                    error=exc,
-                    selected_workflow_id=selected_workflow_id_text,
-                )
-                return
-            if bool(selected_probe.get("launchable")):
-                return
-
-            try:
-                override_policy = _evaluate_custom_workflow_override_policy(
-                    override_context="selected_custom_workflow_launchability_replacement",
-                    exclude_workflow_ids=(selected_workflow_id_text,),
-                )
-                _record_custom_workflow_override_policy(
-                    decision=override_policy,
-                    prior_selected_workflow_id=selected_workflow_id_text,
-                    preserved_execution_mode="custom_workflow",
-                )
-                prior_selected_workflow_id = selected_workflow_id_text
-                prior_selector_verdict = selector_verdict or None
-                replacement_probe = (
-                    _get_cached_custom_workflow_launchability_probe(
-                        override_policy.chosen_workflow_id
-                    )
-                    if isinstance(override_policy.chosen_workflow_id, str)
-                    and override_policy.chosen_workflow_id.strip()
-                    else None
-                )
-            except Exception as exc:
-                _record_custom_workflow_launchability_override_failure(
-                    reason="selected_custom_workflow_launchability_override_failed",
-                    error=exc,
-                    selected_workflow_id=selected_workflow_id_text,
-                    selected_probe=selected_probe,
-                )
-                return
-            if replacement_probe is None:
-                # When a specialised workflow is semantically right but cannot
-                # launch from free-text turn inputs, prefer the safe generic
-                # tool path over promoting a weakly related custom workflow.
-                _force_tool_pipeline_routing(
-                    reason=(
-                        "selected_custom_workflow_launchability_requires_safe_general_fallback"
-                    ),
-                    excluded_selector_verdicts=[
-                        prior_selector_verdict or "rag_selected"
-                    ],
-                    extra_payload={
-                        "prior_selected_workflow_id": prior_selected_workflow_id,
-                        "prior_selector_verdict": prior_selector_verdict,
-                        "launch_viability_probe": {
-                            "prior_selected_workflow": dict(selected_probe),
-                        },
-                        "custom_workflow_override_reason": override_policy.reason_code,
-                    },
-                )
-                return
 
             reason = "selected_custom_workflow_not_launchable_from_turn_inputs"
             reasoning = (
@@ -29176,7 +28955,7 @@ class InternalMCPChatOrchestrator:
                     if failed_prec:
                         error_msg += f" Details: {failed_prec}"
                     
-                    response_text = _maybe_apply_narration_routing(
+                    response_text = _maybe_apply_narration_routing_local(
                         error_msg,
                         tool_invocations=(),
                         tool_messages=(),
@@ -29524,7 +29303,7 @@ class InternalMCPChatOrchestrator:
                 aux_log=aux_llm_calls if isinstance(aux_llm_calls, list) else None,
                 source_stage="run.plain_response",
             )
-            response_text = _maybe_apply_narration_routing(
+            response_text = _maybe_apply_narration_routing_local(
                 response_text,
                 tool_invocations=(),
                 tool_messages=(),
@@ -29738,7 +29517,7 @@ class InternalMCPChatOrchestrator:
                 "[mcp_orchestrator] no registry workflow satisfies the "
                 "tool-calling action contract"
             )
-            response_text = _maybe_apply_narration_routing(
+            response_text = _maybe_apply_narration_routing_local(
                 "I attempted to use tools but no executable tool-calling workflow "
                 "is available. Please try again or report this issue.",
                 tool_invocations=(),
@@ -30036,7 +29815,7 @@ class InternalMCPChatOrchestrator:
         invocations = tc_result.data.get("invocations", [])
         iteration_count = tc_result.data.get("iteration_count", 0)
 
-        final_response_text = _maybe_apply_narration_routing(
+        final_response_text = _maybe_apply_narration_routing_local(
             final_response,
             tool_invocations=(
                 tuple(invocations) if isinstance(invocations, (list, tuple)) else ()
@@ -30139,6 +29918,392 @@ class InternalMCPChatOrchestrator:
         result = _refresh_result_runtime_snapshots(result)
         _persist_trace(status=terminal_trace_status)
         return result
+
+    def _build_selector_default_candidates(self) -> list[dict[str, Any]]:
+        candidate_ids = (
+            CHAT_ASSISTANT_WORKFLOW_ID,
+            TOOL_CALLING_WORKFLOW_ID,
+            CHAT_NARRATION_WORKFLOW_ID,
+        )
+        candidates: list[dict[str, Any]] = []
+        for workflow_id in candidate_ids:
+            registration = self._workflow_registry.get_registration(workflow_id)
+            if registration is None:
+                continue
+            name = workflow_id[3:] if workflow_id.startswith("#V#") else workflow_id
+            name = name.replace("_", " ").strip().title() or workflow_id
+            description = str(getattr(registration, "purpose", "") or "").strip()
+            candidates.append(
+                {
+                    "concept_id": workflow_id,
+                    "name": name,
+                    "description": description,
+                    "candidate_source": "selector_default",
+                    "candidate_reason": "builtin_selector_candidate",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "is_policy_safe": True,
+                    "routing_eligible": True,
+                    "routing_exclusion_reason": None,
+                }
+            )
+        return candidates
+
+    @staticmethod
+    def _merge_selector_candidates(
+        primary: Sequence[Mapping[str, Any]],
+        secondary: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        merged: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        for source in (primary, secondary):
+            for item in source:
+                if not isinstance(item, Mapping):
+                    continue
+                concept_id = str(item.get("concept_id") or "").strip()
+                if not concept_id:
+                    continue
+                dedupe_key = concept_id.lower()
+                if dedupe_key in seen_ids:
+                    continue
+                seen_ids.add(dedupe_key)
+                merged.append(dict(item))
+        return merged
+
+    def _prepare_selector_candidates(
+        self,
+        *,
+        workflow_discovery_result: Mapping[str, Any] | None,
+        prompt: str,
+    ) -> tuple[
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+    ]:
+        local_discovered_matches: list[dict[str, Any]] = []
+        local_excluded_matches: list[dict[str, Any]] = []
+        if isinstance(workflow_discovery_result, Mapping):
+            (
+                local_discovered_matches,
+                local_excluded_matches,
+            ) = self._prepare_selector_discovered_matches(
+                workflow_discovery_result,
+                turn_text=prompt,
+            )
+        local_selector_candidate_matches = self._merge_selector_candidates(
+            self._build_selector_default_candidates(),
+            local_discovered_matches,
+        )
+        return (
+            local_discovered_matches,
+            local_excluded_matches,
+            local_selector_candidate_matches,
+        )
+
+    def _probe_custom_workflow_launchability(
+        self,
+        workflow_id: str | None,
+        *,
+        build_custom_workflow_dispatch_data: Callable[..., Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        clean_workflow_id = (
+            workflow_id.strip()
+            if isinstance(workflow_id, str) and workflow_id.strip()
+            else None
+        )
+        if not clean_workflow_id:
+            return {
+                "workflow_id": None,
+                "launchable": False,
+                "launch_input_resolution": {"status": "workflow_id_missing"},
+                "pre_action_validation": {
+                    "applied": False,
+                    "ok": False,
+                    "reason_code": "workflow_id_missing",
+                },
+            }
+
+        _registration, workflow_def = self._resolve_workflow_registration_and_definition(
+            clean_workflow_id
+        )
+        if workflow_def is None:
+            return {
+                "workflow_id": clean_workflow_id,
+                "launchable": False,
+                "launch_input_resolution": {"status": "workflow_missing"},
+                "pre_action_validation": {
+                    "applied": False,
+                    "ok": False,
+                    "reason_code": "workflow_missing",
+                },
+            }
+
+        raw_probe_data = build_custom_workflow_dispatch_data(
+            workflow_id_override=clean_workflow_id
+        )
+        probe_data = dict(raw_probe_data) if isinstance(raw_probe_data, Mapping) else {}
+        workflow_metadata = getattr(workflow_def, "metadata", None)
+
+        launch_input_contract = (
+            workflow_metadata.get("launch_input_contract")
+            if isinstance(workflow_metadata, Mapping)
+            else None
+        )
+        launch_input_contract_source = (
+            workflow_metadata.get("launch_input_contract_source")
+            if isinstance(workflow_metadata, Mapping)
+            else None
+        )
+        launch_resolution = resolve_workflow_launch_inputs(
+            workflow_id=clean_workflow_id,
+            contract=(
+                launch_input_contract
+                if isinstance(launch_input_contract, Mapping)
+                else None
+            ),
+            inputs=probe_data,
+            contract_source=(
+                str(launch_input_contract_source).strip()
+                if isinstance(launch_input_contract_source, str)
+                and launch_input_contract_source.strip()
+                else None
+            ),
+        )
+        for key, value in launch_resolution.resolved_inputs.items():
+            probe_data.setdefault(key, value)
+
+        initial_state_id = (
+            str(getattr(workflow_def, "initial_state", "") or "").strip() or None
+        )
+
+        launch_contract = (
+            workflow_metadata.get("launch_contract")
+            if isinstance(workflow_metadata, Mapping)
+            else None
+        )
+        if launch_contract is None and initial_state_id:
+            workflow_states = getattr(workflow_def, "states", {})
+            if isinstance(workflow_states, Mapping):
+                initial_state = workflow_states.get(initial_state_id)
+                if initial_state:
+                    initial_meta = getattr(initial_state, "metadata", {})
+                    if not isinstance(initial_meta, Mapping):
+                        initial_meta = {}
+                    reads_keys = initial_meta.get("reads_context_keys", [])
+                    if isinstance(reads_keys, (list, tuple)) and reads_keys:
+                        preconditions = [
+                            {
+                                "type": "context_key_present",
+                                "key": str(key),
+                                "required": True,
+                            }
+                            for key in reads_keys
+                        ]
+                        launch_contract = {
+                            "schema_version": "launch_contract.v1",
+                            "preconditions": preconditions,
+                        }
+
+        pre_action_summary: dict[str, Any]
+        pre_action_ok = False
+        if isinstance(launch_contract, Mapping):
+            contract_result = evaluate_launch_contract(launch_contract, probe_data)
+            pre_action_ok = bool(contract_result.launchable)
+            failed_precondition = next(
+                (
+                    result
+                    for result in contract_result.precondition_results
+                    if not result.satisfied and result.required
+                ),
+                None,
+            )
+            pre_action_summary = {
+                "applied": True,
+                "ok": pre_action_ok,
+                "reason_code": (
+                    failed_precondition.type if failed_precondition else None
+                ),
+                "symbol": (
+                    failed_precondition.context_key
+                    if failed_precondition
+                    else None
+                ),
+                "message": failed_precondition.reason if failed_precondition else None,
+            }
+        else:
+            pre_action_ok = True
+            pre_action_summary = {
+                "applied": False,
+                "ok": True,
+                "reason_code": "no_launch_contract",
+                "symbol": None,
+                "message": None,
+            }
+
+        resolution_diagnostics = (
+            dict(launch_resolution.diagnostics)
+            if isinstance(launch_resolution.diagnostics, Mapping)
+            else {}
+        )
+        launch_input_summary = {
+            "status": resolution_diagnostics.get("status"),
+            "contract_source": resolution_diagnostics.get("contract_source"),
+            "resolved_inputs": list(
+                resolution_diagnostics.get("resolved_inputs", [])
+            )
+            if isinstance(resolution_diagnostics.get("resolved_inputs"), list)
+            else [],
+            "unresolved_required_inputs": list(
+                resolution_diagnostics.get("unresolved_required_inputs", [])
+            )
+            if isinstance(
+                resolution_diagnostics.get("unresolved_required_inputs"), list
+            )
+            else [],
+        }
+        unresolved_required_inputs = tuple(
+            item
+            for item in launch_resolution.unresolved_required_inputs
+            if isinstance(item, str) and item.strip()
+        )
+        return {
+            "workflow_id": clean_workflow_id,
+            "initial_state_id": initial_state_id,
+            "launchable": not unresolved_required_inputs and pre_action_ok,
+            "launch_input_resolution": launch_input_summary,
+            "pre_action_validation": pre_action_summary,
+        }
+
+    def _maybe_apply_narration_routing(
+        self,
+        screen_text: Any,
+        *,
+        tool_invocations: Sequence[Mapping[str, Any]] = (),
+        tool_messages: Sequence[Mapping[str, Any]] = (),
+        renderer_plan: Mapping[str, Any],
+        selected_workflow_id_text: str | None,
+        routing_info: WorkflowRoutingInfo | None,
+        selector_requests_narration: bool,
+        discovered_workflow_ids_for_contract_routing: tuple[str, ...],
+        prompt: str,
+        policy_state: Mapping[str, Any] | None,
+        registry_snapshot: Mapping[str, Any] | None,
+        user_concept_id: str | None,
+        org_concept_id: str | None,
+        aux_llm_calls: list[Mapping[str, Any]],
+        _record_llm_call: Any,
+        conversation_session_id: str | None,
+        turn_id: str | None,
+        llm_client: Any,
+        _model_for_stage: Any,
+        user_namespace: str | None,
+        auxiliary_system_prompt: str | None,
+    ) -> Any:
+        narration_action_ids = frozenset(
+            {
+                "narration.classify",
+                "narration.select_prompts",
+                "narration.render",
+                "narration.emit_audio",
+            }
+        )
+        renderer_mode = str(renderer_plan.get("render_mode") or "").strip().lower()
+        renderer_requests_narration = bool(renderer_plan.get("should_narrate"))
+        selected_narration_workflow = bool(
+            selected_workflow_id_text == CHAT_NARRATION_WORKFLOW_ID
+            or (
+                isinstance(routing_info, WorkflowRoutingInfo)
+                and routing_info.workflow_id == CHAT_NARRATION_WORKFLOW_ID
+            )
+        )
+        should_route_narration = (
+            selected_narration_workflow
+            or selector_requests_narration
+            or renderer_requests_narration
+            or renderer_mode == "spoken+screen"
+        )
+        if not should_route_narration:
+            return screen_text
+        narration_workflow_id = self._resolve_workflow_id_for_action_contract(
+            required_action_ids=narration_action_ids,
+            preferred_workflow_id=selected_workflow_id_text,
+            candidate_workflow_ids=discovered_workflow_ids_for_contract_routing,
+            fallback_workflow_ids=(CHAT_NARRATION_WORKFLOW_ID,),
+        )
+        if narration_workflow_id is None:
+            return screen_text
+
+        try:
+            screen_value = (
+                screen_text.strip()
+                if isinstance(screen_text, str)
+                else str(screen_text)
+            )
+            narration_data = {
+                "presenter_mode_requested": True,
+                "force_narration": True,
+                "screen_text": screen_value,
+                "user_prompt": prompt,
+                "presenter_channels": {},
+                "policy_state": policy_state,
+                "default_model": _model_for_stage("narration"),
+                "registry_snapshot": registry_snapshot,
+                "user_concept_id": user_concept_id,
+                "org_concept_id": org_concept_id,
+                "aux_llm_calls": aux_llm_calls,
+                "record_llm_call": _record_llm_call,
+                "conversation_session_id": conversation_session_id,
+                "turn_id": turn_id,
+                "workflow_episode_source": "chat_turn_workflow",
+                "workflow_episode_stage": "narration",
+            }
+
+            narration_result = self.execute_workflow(
+                narration_workflow_id,
+                data=narration_data,
+                llm_client=llm_client,
+                model=_model_for_stage("narration"),
+                user_namespace=user_namespace,
+                auxiliary_system_prompt=auxiliary_system_prompt,
+                trace=None,
+                conversation_session_id=conversation_session_id,
+                turn_id=turn_id,
+                episode_source="chat_turn_workflow",
+            )
+
+            channels_obj = (
+                narration_result.data.get("presenter_channels")
+                if narration_result is not None
+                else None
+            )
+            if isinstance(channels_obj, dict):
+                channels = cast(Mapping[str, Any], channels_obj)
+                spoken = (
+                    channels.get("spoken")
+                    if isinstance(channels.get("spoken"), str)
+                    else None
+                )
+                screen = (
+                    channels.get("screen")
+                    if isinstance(channels.get("screen"), str)
+                    else None
+                )
+                if spoken and screen:
+                    aux_llm_calls.append(
+                        {
+                            "type": "narration",
+                            "workflow_id": narration_workflow_id,
+                            "presenter_channels": {
+                                "spoken": spoken,
+                                "screen": screen,
+                            },
+                        }
+                    )
+                    return f"<spoken>{spoken}</spoken>\n\n<screen>{screen}</screen>"
+        except Exception:
+            return screen_text
+
+        return screen_text
 
 
 __all__ = [
