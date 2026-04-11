@@ -1727,6 +1727,139 @@ function Get-ActualServerPort {
     return $null
 }
 
+function Get-RecordedPortFromPidFile {
+    param(
+        [string]$Path = $PidFile,
+        [int]$FallbackPort = $Port
+    )
+
+    if (-not $Path -or -not (Test-Path $Path)) { return $FallbackPort }
+    try {
+        $content = Get-Content $Path -ErrorAction Stop
+        foreach ($line in $content) {
+            if ($line -match '^PORT=([0-9]+)$') {
+                return [int]$Matches[1]
+            }
+        }
+    }
+    catch { }
+    return $FallbackPort
+}
+
+function Open-VonBrowserIfNeeded {
+    param([int]$TargetPort = $Port)
+
+    $shouldOpen = $false
+    if ($ForceBrowser) { $shouldOpen = $true }
+    elseif (-not (Test-Path $BrowserSentinel)) { $shouldOpen = $true }
+
+    if (-not $shouldOpen) {
+        Write-LauncherLog "Browser already opened previously (use -ForceBrowser to open again)."
+        return $false
+    }
+
+    try {
+        $url = "http://localhost:$TargetPort/"
+        # Try to open with Chrome (Beta first if -ChromeBeta, otherwise Beta has priority for MCP debugging)
+        $chromeBetaPaths = @(
+            "${env:ProgramFiles}\Google\Chrome Beta\Application\chrome.exe",
+            "${env:ProgramFiles(x86)}\Google\Chrome Beta\Application\chrome.exe",
+            "${env:LocalAppData}\Google\Chrome Beta\Application\chrome.exe"
+        )
+        $chromeStablePaths = @(
+            "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe",
+            "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
+            "${env:LocalAppData}\Google\Chrome\Application\chrome.exe"
+        )
+        # If -ChromeBeta is set, only try Beta; otherwise try Beta first then stable
+        if ($ChromeBeta) {
+            $chromePaths = $chromeBetaPaths
+        }
+        else {
+            $chromePaths = $chromeBetaPaths + $chromeStablePaths
+        }
+        $chromeFound = $false
+        $browserUsed = "default browser"
+        foreach ($chromePath in $chromePaths) {
+            if (Test-Path $chromePath) {
+                Start-Process $chromePath -ArgumentList $url | Out-Null
+                $chromeFound = $true
+                $browserUsed = "Chrome ($chromePath)"
+                break
+            }
+        }
+        if (-not $chromeFound) {
+            # Fallback to default browser if Chrome not found
+            Start-Process $url | Out-Null
+        }
+        if (-not (Test-Path $BrowserSentinel)) { Set-Content $BrowserSentinel (Get-Date).ToString('o') }
+        if ($ForceBrowser) { Write-LauncherLog "Opened browser (forced): $browserUsed" } else { Write-LauncherLog "Opened browser (first launch): $browserUsed" }
+        return $true
+    }
+    catch {
+        Write-LauncherLog "Browser open attempt failed: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Start-WorkflowPurityCheckNonBlocking {
+    $purityScript = Join-Path $Root 'scripts/check_workflow_purity.py'
+    if (-not (Test-Path $purityScript)) { return $false }
+
+    $purityPidFile = Join-Path $RunDir 'workflow_purity_check.pid'
+    if (Test-Path $purityPidFile) {
+        $pidContent = Get-Content $purityPidFile -Raw -ErrorAction SilentlyContinue
+        if ($pidContent -match 'PID=([0-9]+)') {
+            $existingPid = [int]$Matches[1]
+            if (Get-Process -Id $existingPid -ErrorAction SilentlyContinue) {
+                Write-LauncherLog "Workflow purity check already running (PID=$existingPid)."
+                return $false
+            }
+        }
+        Remove-Item $purityPidFile -Force -ErrorAction SilentlyContinue
+    }
+
+    $pdm = if (Test-Path (Join-Path $Root '.venv\Scripts\pdm.exe')) { Join-Path $Root '.venv\Scripts\pdm.exe' } else { 'pdm' }
+    $venvPython = Join-Path $Root '.venv\Scripts\python.exe'
+    $purityTimestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+    $purityLog = Join-Path $LogsDir "workflow_purity_${purityTimestamp}.log"
+    $purityErrLog = "$purityLog.err"
+
+    $purityExe = $null
+    $purityArgs = @()
+    $launchMode = 'pdm-fallback'
+    if (Test-Path $venvPython) {
+        $purityExe = $venvPython
+        $purityArgs = @($purityScript, '--quiet')
+        $launchMode = 'direct-python'
+    }
+    else {
+        $purityExe = $pdm
+        $purityArgs = @('run', 'python', $purityScript, '--quiet')
+    }
+
+    try {
+        $proc = Start-Process -FilePath $purityExe -ArgumentList $purityArgs -WorkingDirectory $Root -PassThru -WindowStyle Hidden -RedirectStandardOutput $purityLog -RedirectStandardError $purityErrLog
+        $startIso = (Get-Date).ToString('o')
+        Set-Content $purityPidFile "PID=$($proc.Id)`nSTART=$startIso"
+        Write-LauncherLog "Started workflow purity check in background (PID=$($proc.Id), mode=$launchMode). Logs: $purityLog ; stderr: $purityErrLog"
+        return $true
+    }
+    catch {
+        Write-LauncherLog "WARN: Failed to launch workflow purity check in background: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Invoke-VonHealthyStartFollowUps {
+    param([int]$TargetPort = $Port)
+
+    if (-not $NoBrowser) {
+        Open-VonBrowserIfNeeded -TargetPort $TargetPort | Out-Null
+    }
+    Start-WorkflowPurityCheckNonBlocking | Out-Null
+}
+
 function Start-RagWorker {
     if (Test-Path $RagPidFile) {
         $pidContent = Get-Content $RagPidFile -Raw -ErrorAction SilentlyContinue
@@ -1845,7 +1978,12 @@ function Start-VonServer {
 
     $existing = Get-ExistingProcess
     if ($existing) {
-        Write-LauncherLog "Already running (PID=$($existing.Id)). Use .\run.ps1 stop or restart."; return
+        $existingPort = Get-RecordedPortFromPidFile -FallbackPort $Port
+        Write-LauncherLog "Already running (PID=$($existing.Id)). Use .\run.ps1 stop or restart."
+        if (-not $NoBrowser) {
+            Open-VonBrowserIfNeeded -TargetPort $existingPort | Out-Null
+        }
+        return
     }
     if ($RestartTakeover) {
         $listenerToTakeOver = Get-ListeningProcessByPort -Port $Port
@@ -1864,11 +2002,17 @@ function Start-VonServer {
         if (-not $currentPidInFile) {
             Write-LauncherLog ("Port {0} already in use by PID={1}; assuming server already running (untracked)." -f $Port, $listener.Id)
             Write-PidFile $listener.Id
+            if (-not $NoBrowser) {
+                Open-VonBrowserIfNeeded -TargetPort $Port | Out-Null
+            }
             return
         }
         elseif ($currentPidInFile -ne $listener.Id) {
             Write-LauncherLog ("Port {0} owned by PID={1} but PID file had PID={2}; updating PID file to listener." -f $Port, $listener.Id, $currentPidInFile)
             Write-PidFile $listener.Id
+            if (-not $NoBrowser) {
+                Open-VonBrowserIfNeeded -TargetPort $Port | Out-Null
+            }
             return
         }
     }
@@ -1887,16 +2031,6 @@ function Start-VonServer {
 
     $pdm = if (Test-Path (Join-Path $Root '.venv\Scripts\pdm.exe')) { Join-Path $Root '.venv\Scripts\pdm.exe' } else { 'pdm' }
     $venvPython = Join-Path $Root '.venv\Scripts\python.exe'
-
-    $purityScript = Join-Path $Root 'scripts/check_workflow_purity.py'
-    if (Test-Path $purityScript) {
-        Write-LauncherLog "Running Workflow Purity Check (warn-only)..."
-        if (Test-Path $venvPython) {
-            & $venvPython $purityScript --quiet 2>&1 | ForEach-Object { Write-LauncherLog "[purity-check] $_" }
-        } else {
-            & $pdm run python $purityScript --quiet 2>&1 | ForEach-Object { Write-LauncherLog "[purity-check] $_" }
-        }
-    }
 
     $serverExe = $null
     $serverArgs = @()
@@ -2052,54 +2186,7 @@ function Start-VonServer {
         if ($healthy) {
             Write-LauncherLog "Server healthy (http://localhost:$Port)"
             Write-LauncherLog (Get-MongoConnectionSummary -Port $Port)
-            if (-not $NoBrowser) {
-                $shouldOpen = $false
-                if ($ForceBrowser) { $shouldOpen = $true }
-                elseif (-not (Test-Path $BrowserSentinel)) { $shouldOpen = $true }
-                if ($shouldOpen) {
-                    try {
-                        $url = "http://localhost:$Port/"
-                        # Try to open with Chrome (Beta first if -ChromeBeta, otherwise Beta has priority for MCP debugging)
-                        $chromeBetaPaths = @(
-                            "${env:ProgramFiles}\Google\Chrome Beta\Application\chrome.exe",
-                            "${env:ProgramFiles(x86)}\Google\Chrome Beta\Application\chrome.exe",
-                            "${env:LocalAppData}\Google\Chrome Beta\Application\chrome.exe"
-                        )
-                        $chromeStablePaths = @(
-                            "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe",
-                            "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
-                            "${env:LocalAppData}\Google\Chrome\Application\chrome.exe"
-                        )
-                        # If -ChromeBeta is set, only try Beta; otherwise try Beta first then stable
-                        if ($ChromeBeta) {
-                            $chromePaths = $chromeBetaPaths
-                        }
-                        else {
-                            $chromePaths = $chromeBetaPaths + $chromeStablePaths
-                        }
-                        $chromeFound = $false
-                        $browserUsed = "default browser"
-                        foreach ($chromePath in $chromePaths) {
-                            if (Test-Path $chromePath) {
-                                Start-Process $chromePath -ArgumentList $url | Out-Null
-                                $chromeFound = $true
-                                $browserUsed = "Chrome ($chromePath)"
-                                break
-                            }
-                        }
-                        if (-not $chromeFound) {
-                            # Fallback to default browser if Chrome not found
-                            Start-Process $url | Out-Null
-                        }
-                        if (-not (Test-Path $BrowserSentinel)) { Set-Content $BrowserSentinel (Get-Date).ToString('o') }
-                        if ($ForceBrowser) { Write-LauncherLog "Opened browser (forced): $browserUsed" } else { Write-LauncherLog "Opened browser (first launch): $browserUsed" }
-                    }
-                    catch { Write-LauncherLog "Browser open attempt failed: $($_.Exception.Message)" }
-                }
-                else {
-                    Write-LauncherLog "Browser already opened previously (use -ForceBrowser to open again)."
-                }
-            }
+            Invoke-VonHealthyStartFollowUps -TargetPort $Port
         }
         elseif ($listeningLogged) {
             Write-LauncherLog "WARNING: Port is listening but /health did not respond in ${HealthTimeoutSec + $HealthGraceSec}s; continuing (service may still be initializing)."
