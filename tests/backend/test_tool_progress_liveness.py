@@ -1399,6 +1399,243 @@ def test_turn_execution_diagnostics_include_routing_diagnostics_from_selector_an
     )
 
 
+def test_turn_execution_diagnostics_include_stage_specific_user_utility_payloads() -> None:
+    snapshot = von_routes._serialise_tool_progress_state(
+        {
+            "request_id": "req-stage-utility",
+            "status": "follow_up_required",
+            "phase": "completion_gate",
+            "stage": "completion_gate",
+            "phase_label": "Completion gate",
+            "selected_workflow_id": "#V#tool_calling_workflow",
+            "selected_workflow_name": "Tool calling workflow",
+            "workflow_selector_verdict": "tool_seeking",
+            "workflow_selector_source": "selector",
+            "workflow_stage_path": {
+                "schema_version": "conversation_turn_stage_path.v1",
+                "path": [
+                    {
+                        "stage_id": "workflow_dispatch_prepare",
+                        "stage_label": "Workflow dispatch preparation",
+                    },
+                    {"stage_id": "tool_plan", "stage_label": "Tool-call planning"},
+                    {"stage_id": "screen_backfill", "stage_label": "Screen backfill"},
+                    {"stage_id": "narration", "stage_label": "Narration rendering"},
+                    {
+                        "stage_id": "postcondition_critic",
+                        "stage_label": "Postcondition critic",
+                    },
+                    {"stage_id": "completion_gate", "stage_label": "Completion gate"},
+                ],
+            },
+            "workflow_routing_diagnostics": {
+                "dispatch": {
+                    "pre_dispatch": {
+                        "step_count": 2,
+                        "completed_step_count": 2,
+                        "failed_step_count": 0,
+                        "total_duration_ms": 19,
+                        "slowest_step_id": "load_contract",
+                        "slowest_step_label": "Load workflow contract",
+                        "slowest_step_duration_ms": 12,
+                        "steps": [
+                            {
+                                "step_id": "resolve_inputs",
+                                "step_label": "Resolve workflow inputs",
+                                "status": "completed",
+                                "duration_ms": 7,
+                            },
+                            {
+                                "step_id": "load_contract",
+                                "step_label": "Load workflow contract",
+                                "status": "completed",
+                                "duration_ms": 12,
+                            },
+                        ],
+                    },
+                    "tool_execution": {
+                        "planned_count": 2,
+                        "started_count": 1,
+                        "executed_count": 1,
+                        "invocation_count": 1,
+                        "successful_invocation_count": 1,
+                        "failed_invocation_count": 0,
+                        "blocked_invocation_count": 0,
+                        "worker_unavailable_event_count": 0,
+                        "tool_plan_stage_event_count": 1,
+                        "tool_execute_stage_event_count": 1,
+                        "parse_error_invocation_count": 0,
+                        "validation_error_invocation_count": 0,
+                        "zero_tools_executed": False,
+                        "failure_codes": [],
+                    },
+                }
+            },
+            "diagnostic_events": [
+                {
+                    "phase": "workflow_dispatch_prepare",
+                    "status": "thinking",
+                    "result_summary": "Preparing workflow dispatch",
+                    "subtask": "Resolve workflow inputs",
+                },
+                {
+                    "phase": "tool_plan",
+                    "status": "thinking",
+                    "workflow_task": "fetch_concept",
+                },
+                {
+                    "phase": "completion_gate",
+                    "status": "follow_up_required",
+                    "result_summary": "Follow-up required before completion.",
+                },
+            ],
+        }
+    )
+
+    diagnostics = von_routes._build_turn_execution_diagnostics(
+        request_id="req-stage-utility",
+        prompt_text="Represent this uploaded paper",
+        tool_progress_state=snapshot,
+        response_transformations={
+            "schema_version": "response_transformations.v1",
+            "transformations": [
+                {
+                    "transform_name": "screen_backfill",
+                    "status": "fallback_success",
+                    "source_path": "response_text_plus_follow_up_summary",
+                    "latency_ms": 44,
+                    "model_id": "gpt-4.1-mini",
+                    "input_summary": {
+                        "needs_backfill": True,
+                        "tool_message_count": 3,
+                    },
+                    "output_summary": {
+                        "applied": True,
+                        "presenter_format": (
+                            "screen_backfill_from_response_with_operational_summary_v1"
+                        ),
+                    },
+                },
+                {
+                    "transform_name": "spoken_backfill",
+                    "status": "fallback_success",
+                    "source_path": "screen_text_fallback",
+                    "latency_ms": 18,
+                    "model_id": "gpt-4.1-mini",
+                    "input_summary": {
+                        "needs_backfill": True,
+                        "tool_message_count": 3,
+                    },
+                    "output_summary": {
+                        "applied": True,
+                        "presenter_format": "narration_fallback_v1",
+                    },
+                },
+            ],
+        },
+        critic_verdict={
+            "workflow_id": "#V#kb_mutation_postcondition_critic_workflow",
+            "has_unresolved_checks": True,
+            "unresolved_check_count": 2,
+            "summary": {
+                "verified_count": 1,
+                "not_verified_count": 1,
+                "inconclusive_count": 1,
+                "error_count": 0,
+            },
+        },
+        completion_gate_verdict={
+            "decision": "follow_up_required",
+            "decision_reason": "required_effects_unresolved",
+            "requires_follow_up": True,
+            "safe_to_claim_completion": False,
+            "blocking_effect_ids": ["effect_tool_execution_1"],
+            "blocking_failure_codes": [
+                "tool_execution_required_but_not_observed"
+            ],
+        },
+    )
+
+    assert diagnostics.get("completion_gate") == {
+        "decision": "follow_up_required",
+        "decision_reason": "required_effects_unresolved",
+        "requires_follow_up": True,
+        "safe_to_claim_completion": False,
+        "blocking_effect_ids": ["effect_tool_execution_1"],
+        "blocking_failure_codes": ["tool_execution_required_but_not_observed"],
+    }
+    assert diagnostics.get("critic_verdict") == {
+        "workflow_id": "#V#kb_mutation_postcondition_critic_workflow",
+        "has_unresolved_checks": True,
+        "unresolved_check_count": 2,
+        "summary": {
+            "verified_count": 1,
+            "not_verified_count": 1,
+            "inconclusive_count": 1,
+            "error_count": 0,
+        },
+    }
+
+    stage_diagnostics = diagnostics.get("stage_diagnostics")
+    assert isinstance(stage_diagnostics, list)
+    by_stage = {
+        entry.get("stage_id"): entry
+        for entry in stage_diagnostics
+        if isinstance(entry, dict) and isinstance(entry.get("stage_id"), str)
+    }
+
+    assert by_stage["workflow_dispatch_prepare"]["selected_workflow_id"] == (
+        "#V#tool_calling_workflow"
+    )
+    assert by_stage["workflow_dispatch_prepare"]["pre_dispatch"]["slowest_step_label"] == (
+        "Load workflow contract"
+    )
+    assert by_stage["workflow_dispatch_prepare"]["latest_subtask"] == (
+        "Resolve workflow inputs"
+    )
+    assert by_stage["tool_plan"]["tool_execution"]["planned_count"] == 2
+    assert by_stage["screen_backfill"]["response_transformation"] == {
+        "transform_name": "screen_backfill",
+        "status": "fallback_success",
+        "source_path": "response_text_plus_follow_up_summary",
+        "latency_ms": 44,
+        "model_id": "gpt-4.1-mini",
+        "suppression_reason": None,
+        "error_class": None,
+        "input_summary": {
+            "needs_backfill": True,
+            "tool_message_count": 3,
+        },
+        "output_summary": {
+            "applied": True,
+            "presenter_format": (
+                "screen_backfill_from_response_with_operational_summary_v1"
+            ),
+        },
+    }
+    assert by_stage["narration"]["response_transformation"] == {
+        "transform_name": "spoken_backfill",
+        "status": "fallback_success",
+        "source_path": "screen_text_fallback",
+        "latency_ms": 18,
+        "model_id": "gpt-4.1-mini",
+        "suppression_reason": None,
+        "error_class": None,
+        "input_summary": {
+            "needs_backfill": True,
+            "tool_message_count": 3,
+        },
+        "output_summary": {
+            "applied": True,
+            "presenter_format": "narration_fallback_v1",
+        },
+    }
+    assert by_stage["postcondition_critic"]["critic_verdict"]["unresolved_check_count"] == 2
+    assert by_stage["completion_gate"]["completion_gate"]["blocking_effect_ids"] == [
+        "effect_tool_execution_1"
+    ]
+
+
 def test_turn_execution_diagnostics_clear_stale_selector_prompt_failure_after_success(
     monkeypatch,
 ) -> None:

@@ -1483,6 +1483,47 @@ def _canonicalise_turn_execution_stage_id(stage: Any) -> str | None:
     return clean_stage
 
 
+def _extract_response_transformation_event_summary(
+    response_transformations: Mapping[str, Any] | None,
+    *,
+    transform_name: str,
+) -> dict[str, Any] | None:
+    if not isinstance(response_transformations, Mapping):
+        return None
+
+    raw_transformations = response_transformations.get("transformations")
+    if not isinstance(raw_transformations, list):
+        return None
+
+    matched_event: dict[str, Any] | None = None
+    for raw_event in raw_transformations:
+        if not isinstance(raw_event, Mapping):
+            continue
+        if _progress_str(raw_event.get("transform_name")) != transform_name:
+            continue
+        matched_event = {
+            "transform_name": _progress_str(raw_event.get("transform_name")),
+            "status": _progress_str(raw_event.get("status")),
+            "source_path": _progress_str(raw_event.get("source_path")),
+            "latency_ms": _progress_number(raw_event.get("latency_ms")),
+            "model_id": _progress_str(raw_event.get("model_id")),
+            "suppression_reason": _progress_str(raw_event.get("suppression_reason")),
+            "error_class": _progress_str(raw_event.get("error_class")),
+            "input_summary": (
+                dict(raw_event.get("input_summary"))
+                if isinstance(raw_event.get("input_summary"), Mapping)
+                else {}
+            ),
+            "output_summary": (
+                dict(raw_event.get("output_summary"))
+                if isinstance(raw_event.get("output_summary"), Mapping)
+                else {}
+            ),
+        }
+
+    return matched_event
+
+
 def _build_turn_execution_stage_diagnostics(
     *,
     diagnostic_events: list[dict[str, Any]],
@@ -1492,6 +1533,9 @@ def _build_turn_execution_stage_diagnostics(
     workflow_discovery: Mapping[str, Any] | None,
     latest_progress: Mapping[str, Any] | None,
     aux_llm_calls: Sequence[Mapping[str, Any]] | None = None,
+    response_transformations: Mapping[str, Any] | None = None,
+    critic_verdict: Mapping[str, Any] | None = None,
+    completion_gate_verdict: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     path_entries_raw = (
         workflow_stage_path.get("path")
@@ -1539,6 +1583,14 @@ def _build_turn_execution_stage_diagnostics(
         authority_summary = build_stage_authority_summary(
             stage_id=stage_id,
             aux_entries=aux_llm_calls,
+        )
+        workflow_routing_diagnostics = latest_progress_payload.get(
+            "workflow_routing_diagnostics"
+        )
+        dispatch_payload = (
+            workflow_routing_diagnostics.get("dispatch")
+            if isinstance(workflow_routing_diagnostics, Mapping)
+            else None
         )
         stage_payload: dict[str, Any] = {
             "stage_id": stage_id,
@@ -1599,10 +1651,51 @@ def _build_turn_execution_stage_diagnostics(
             "python_decision_sources": list(
                 authority_summary["python_decision_sources"]
             ),
+            "latest_subtask": _progress_str(live_stage_payload.get("latest_subtask"))
+            or (
+                _progress_str(latest_stage_event.get("subtask"))
+                if isinstance(latest_stage_event, Mapping)
+                else None
+            )
+            or (
+                _progress_str(latest_progress_payload.get("subtask"))
+                if stage_id == latest_stage_id
+                else None
+            ),
+            "latest_workflow_task": _progress_str(
+                live_stage_payload.get("latest_workflow_task")
+            )
+            or (
+                _progress_str(latest_stage_event.get("workflow_task"))
+                if isinstance(latest_stage_event, Mapping)
+                else None
+            )
+            or (
+                _progress_str(latest_progress_payload.get("workflow_task"))
+                if stage_id == latest_stage_id
+                else None
+            ),
+            "latest_tool": _progress_str(live_stage_payload.get("latest_tool"))
+            or (
+                _progress_str(latest_stage_event.get("tool"))
+                if isinstance(latest_stage_event, Mapping)
+                else None
+            )
+            or (
+                _progress_str(latest_progress_payload.get("tool"))
+                if stage_id == latest_stage_id
+                else None
+            ),
         }
 
         if stage_id == "workflow_discovery" and isinstance(workflow_discovery, Mapping):
             stage_payload["workflow_discovery"] = dict(workflow_discovery)
+        if stage_id in {"tool_plan", "tool_execute"} and isinstance(
+            dispatch_payload, Mapping
+        ):
+            tool_execution = dispatch_payload.get("tool_execution")
+            if isinstance(tool_execution, Mapping):
+                stage_payload["tool_execution"] = dict(tool_execution)
         if stage_id == "tool_execute":
             summary_payload = (
                 tool_observation_summary if isinstance(tool_observation_summary, Mapping) else {}
@@ -1651,35 +1744,95 @@ def _build_turn_execution_stage_diagnostics(
                 if isinstance(latest_stage_event, Mapping)
                 else None
             )
-            workflow_routing_diagnostics = latest_progress_payload.get(
-                "workflow_routing_diagnostics"
+            if isinstance(dispatch_payload, Mapping):
+                pre_dispatch = dispatch_payload.get("pre_dispatch")
+                if isinstance(pre_dispatch, Mapping):
+                    stage_payload["pre_dispatch"] = dict(pre_dispatch)
+                stage_payload["dispatch_terminal_status"] = _progress_str(
+                    dispatch_payload.get("dispatch_terminal_status")
+                )
+                stage_payload["dispatch_terminal_failure_reason"] = _progress_str(
+                    dispatch_payload.get("dispatch_terminal_failure_reason")
+                )
+                stage_payload["dispatch_terminal_failure_detail"] = _progress_str(
+                    dispatch_payload.get("dispatch_terminal_failure_detail")
+                )
+                unresolved_required_inputs = dispatch_payload.get(
+                    "dispatch_terminal_unresolved_required_inputs"
+                )
+                if isinstance(unresolved_required_inputs, list):
+                    stage_payload["dispatch_terminal_unresolved_required_inputs"] = [
+                        str(item).strip()
+                        for item in unresolved_required_inputs
+                        if str(item).strip()
+                    ]
+
+        if stage_id == "postcondition_critic":
+            critic_payload = (
+                dict(critic_verdict)
+                if isinstance(critic_verdict, Mapping)
+                else {}
             )
-            if isinstance(workflow_routing_diagnostics, Mapping):
-                dispatch = workflow_routing_diagnostics.get("dispatch")
-                if isinstance(dispatch, Mapping):
-                    pre_dispatch = dispatch.get("pre_dispatch")
-                    if isinstance(pre_dispatch, Mapping):
-                        stage_payload["pre_dispatch"] = dict(pre_dispatch)
-                    stage_payload["dispatch_terminal_status"] = _progress_str(
-                        dispatch.get("dispatch_terminal_status")
+            if critic_payload:
+                stage_payload["critic_verdict"] = critic_payload
+
+        if stage_id == "completion_gate":
+            gate_payload = (
+                dict(completion_gate_verdict)
+                if isinstance(completion_gate_verdict, Mapping)
+                else {}
+            )
+            if not gate_payload:
+                gate_payload = {}
+                decision = _progress_str(
+                    latest_progress_payload.get("completion_gate_decision")
+                )
+                decision_reason = _progress_str(
+                    latest_progress_payload.get("completion_gate_decision_reason")
+                )
+                if decision:
+                    gate_payload["decision"] = decision
+                if decision_reason:
+                    gate_payload["decision_reason"] = decision_reason
+                requires_follow_up = latest_progress_payload.get(
+                    "completion_gate_requires_follow_up"
+                )
+                if isinstance(requires_follow_up, bool):
+                    gate_payload["requires_follow_up"] = requires_follow_up
+                safe_to_claim_completion = latest_progress_payload.get(
+                    "completion_gate_safe_to_claim_completion"
+                )
+                if isinstance(safe_to_claim_completion, bool):
+                    gate_payload["safe_to_claim_completion"] = (
+                        safe_to_claim_completion
                     )
-                    stage_payload["dispatch_terminal_failure_reason"] = _progress_str(
-                        dispatch.get("dispatch_terminal_failure_reason")
-                    )
-                    stage_payload["dispatch_terminal_failure_detail"] = _progress_str(
-                        dispatch.get("dispatch_terminal_failure_detail")
-                    )
-                    unresolved_required_inputs = dispatch.get(
-                        "dispatch_terminal_unresolved_required_inputs"
-                    )
-                    if isinstance(unresolved_required_inputs, list):
-                        stage_payload[
-                            "dispatch_terminal_unresolved_required_inputs"
-                        ] = [
-                            str(item).strip()
-                            for item in unresolved_required_inputs
-                            if str(item).strip()
-                        ]
+                blocking_effect_ids = latest_progress_payload.get(
+                    "completion_gate_blocking_effect_ids"
+                )
+                if isinstance(blocking_effect_ids, list):
+                    gate_payload["blocking_effect_ids"] = [
+                        str(item).strip()
+                        for item in blocking_effect_ids
+                        if str(item).strip()
+                    ]
+            if gate_payload:
+                stage_payload["completion_gate"] = gate_payload
+
+        if stage_id == "screen_backfill":
+            transformation = _extract_response_transformation_event_summary(
+                response_transformations,
+                transform_name="screen_backfill",
+            )
+            if transformation:
+                stage_payload["response_transformation"] = transformation
+
+        if stage_id == "narration":
+            transformation = _extract_response_transformation_event_summary(
+                response_transformations,
+                transform_name="spoken_backfill",
+            )
+            if transformation:
+                stage_payload["response_transformation"] = transformation
 
         if (
             latest_terminal_state in {"success", "failure"}
@@ -1703,6 +1856,9 @@ def _build_turn_execution_diagnostics(
     generated_at_utc: str | None = None,
     llm_calls: list[dict[str, Any]] | None = None,
     aux_llm_calls: list[dict[str, Any]] | None = None,
+    response_transformations: Mapping[str, Any] | None = None,
+    critic_verdict: Mapping[str, Any] | None = None,
+    completion_gate_verdict: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     code_version_details = get_runtime_code_version_info()
 
@@ -1805,6 +1961,9 @@ def _build_turn_execution_diagnostics(
         workflow_discovery=workflow_payload,
         latest_progress=latest_progress,
         aux_llm_calls=routing_aux_llm_calls,
+        response_transformations=response_transformations,
+        critic_verdict=critic_verdict,
+        completion_gate_verdict=completion_gate_verdict,
     )
     progress_events = _build_progress_events_from_phase_history(
         phase_history,
@@ -1851,6 +2010,21 @@ def _build_turn_execution_diagnostics(
         ),
         "workflow_discovery": workflow_payload,
         "workflow_routing_diagnostics": workflow_routing_diagnostics,
+        "critic_verdict": (
+            dict(critic_verdict)
+            if isinstance(critic_verdict, Mapping)
+            else None
+        ),
+        "completion_gate": (
+            dict(completion_gate_verdict)
+            if isinstance(completion_gate_verdict, Mapping)
+            else None
+        ),
+        "response_transformations": (
+            dict(response_transformations)
+            if isinstance(response_transformations, Mapping)
+            else None
+        ),
         "workflow_stage_model": build_conversation_turn_stage_model_snapshot(),
         "workflow_stage_path": workflow_stage_path,
         "stage_diagnostics": stage_diagnostics,
@@ -10036,6 +10210,36 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             workflow_routing=workflow_routing_info,
             llm_calls=llm_interaction["calls"],
             aux_llm_calls=auxiliary_llm_calls,
+            response_transformations=(
+                response_transformations
+                if "response_transformations" in locals()
+                and isinstance(response_transformations, Mapping)
+                else None
+            ),
+            critic_verdict=(
+                dict(raw_critic_verdict)
+                if isinstance(
+                    raw_critic_verdict := getattr(
+                        orchestrator_result,
+                        "critic_verdict",
+                        None,
+                    ),
+                    Mapping,
+                )
+                else None
+            ),
+            completion_gate_verdict=(
+                dict(raw_completion_gate_verdict)
+                if isinstance(
+                    raw_completion_gate_verdict := getattr(
+                        orchestrator_result,
+                        "completion_gate_verdict",
+                        None,
+                    ),
+                    Mapping,
+                )
+                else None
+            ),
         )
 
         workflow_use_episodes = [
