@@ -51,6 +51,7 @@ import {
     __testOnly_updateThinkingCardMeta,
     __testOnly_persistThinkingCardBodyHeightFromDom,
     __testOnly_syncThinkingCanonicalHistoriesFromProgress,
+    __testOnly_syncThinkingCanonicalStateFromTurnExecutionDiagnostics,
     __testOnly_resetChatConceptMetaCaches,
     __testOnly_createChatSession,
     __testOnly_buildConversationLlmTelemetryLocatorPayload,
@@ -1935,6 +1936,61 @@ describe('thinking activity history normalisation', () => {
         expect(diagnosticsPayload.phase_history[0]).toEqual(expect.objectContaining({ phase: 'phase_0' }));
     });
 
+    test('syncs canonical state from turn execution diagnostics payloads', () => {
+        const request = {
+            latestProgress: { stage: 'stale_stage' },
+            workflowStagePath: { path: [{ stage_id: 'stale_stage' }] },
+            workflowDiscovery: { match_count: 0 },
+            phaseHistory: [{ phase: 'stale_phase' }],
+            progressEvents: [{ stage: 'stale_stage' }],
+            activityHistory: [{ label: 'Stale activity' }],
+            stageDiagnostics: [{ stage_id: 'stale_stage' }]
+        };
+        const diagnostics = {
+            latest_progress: {
+                stage: 'completion_gate',
+                completion_gate_decision: 'follow_up_required'
+            },
+            workflow_stage_path: {
+                path: [
+                    { stage_id: 'workflow_dispatch_prepare', stage_label: 'Workflow dispatch preparation' },
+                    { stage_id: 'completion_gate', stage_label: 'Completion gate' }
+                ]
+            },
+            workflow_discovery: {
+                match_count: 1,
+                matches: [
+                    {
+                        concept_id: '#V#tool_calling_workflow',
+                        name: 'Tool calling workflow'
+                    }
+                ]
+            },
+            phase_history: [{ phase: 'completion_gate' }],
+            progress_events: [{ stage: 'completion_gate', status: 'completed' }],
+            activity_history: [{ label: 'Completion gate', state: 'success' }],
+            stage_diagnostics: [
+                {
+                    stage_id: 'completion_gate',
+                    stage_label: 'Completion gate',
+                    completion_gate: {
+                        decision: 'follow_up_required',
+                        blocking_effect_ids: ['effect_tool_execution_1']
+                    }
+                }
+            ]
+        };
+
+        expect(__testOnly_syncThinkingCanonicalStateFromTurnExecutionDiagnostics(request, diagnostics)).toBe(true);
+        expect(request.latestProgress).toEqual(diagnostics.latest_progress);
+        expect(request.workflowStagePath).toEqual(diagnostics.workflow_stage_path);
+        expect(request.workflowDiscovery).toEqual(diagnostics.workflow_discovery);
+        expect(request.phaseHistory).toEqual(diagnostics.phase_history);
+        expect(request.progressEvents).toEqual(diagnostics.progress_events);
+        expect(request.activityHistory).toEqual(diagnostics.activity_history);
+        expect(request.stageDiagnostics).toEqual(diagnostics.stage_diagnostics);
+    });
+
     test('prefers backend elapsed time and preserves workflow routing diagnostics', () => {
         const diagnosticsPayload = __testOnly_buildThinkingDiagnosticsPayload({
             clientRequestId: 'req-routing',
@@ -2043,6 +2099,223 @@ describe('thinking activity history normalisation', () => {
         expect(html).toContain('thinking-card-concept-link');
         expect(html).toContain('data-concept-id="#V#tool_calling_workflow"');
         expect(html).toContain('Plan tool calls');
+    });
+
+    test('renders workflow dispatch preparation with object-centred pre-dispatch detail', () => {
+        const html = __testOnly_renderThinkingCardBodyHTML({
+            workflowStagePath: {
+                path: [
+                    { stage_id: 'workflow_dispatch_prepare', stage_label: 'Workflow dispatch preparation' }
+                ]
+            },
+            workflowDiscovery: {
+                match_count: 1,
+                matches: [
+                    {
+                        concept_id: '#V#tool_calling_workflow',
+                        name: 'Tool calling workflow'
+                    }
+                ]
+            },
+            stageDiagnostics: [
+                {
+                    stage_id: 'workflow_dispatch_prepare',
+                    stage_label: 'Workflow dispatch preparation',
+                    latest_subtask: 'Resolve workflow inputs',
+                    selected_workflow_id: '#V#tool_calling_workflow',
+                    selected_workflow_name: 'Tool calling workflow',
+                    pre_dispatch: {
+                        step_count: 2,
+                        completed_step_count: 2,
+                        failed_step_count: 0,
+                        total_duration_ms: 19,
+                        slowest_step_label: 'Load workflow contract',
+                        slowest_step_duration_ms: 12,
+                        steps: [
+                            {
+                                step_id: 'resolve_required_inputs',
+                                step_label: 'Resolve workflow inputs',
+                                status: 'completed',
+                                duration_ms: 7
+                            },
+                            {
+                                step_id: 'load_contract',
+                                step_label: 'Load workflow contract',
+                                status: 'completed',
+                                duration_ms: 12
+                            }
+                        ]
+                    }
+                }
+            ],
+            latestProgress: {
+                phase: 'workflow_dispatch_prepare',
+                selected_workflow_id: '#V#tool_calling_workflow',
+                selected_workflow_name: 'Tool calling workflow'
+            }
+        });
+
+        expect(html).toContain('Workflow dispatch preparation');
+        expect(html).toContain('Preparing Tool calling workflow (#V#tool_calling_workflow) for dispatch');
+        expect(html).toContain('Resolve workflow inputs');
+        expect(html).toContain('Pre-dispatch checks');
+        expect(html).toContain('Load workflow contract');
+        expect(html).not.toContain('No recorded LLM input/output');
+    });
+
+    test('renders tool planning against the selected workflow instead of generic mechanism text', () => {
+        const html = __testOnly_renderThinkingCardBodyHTML({
+            workflowStagePath: {
+                path: [
+                    { stage_id: 'tool_plan', stage_label: 'Tool-call planning' }
+                ]
+            },
+            workflowDiscovery: {
+                match_count: 1,
+                matches: [
+                    {
+                        concept_id: '#V#tool_calling_workflow',
+                        name: 'Tool calling workflow'
+                    }
+                ]
+            },
+            stageDiagnostics: [
+                {
+                    stage_id: 'tool_plan',
+                    stage_label: 'Tool-call planning',
+                    latest_workflow_task: 'fetch_concept',
+                    selected_workflow_id: '#V#tool_calling_workflow',
+                    selected_workflow_name: 'Tool calling workflow',
+                    tool_execution: {
+                        planned_count: 2,
+                        started_count: 0,
+                        executed_count: 0,
+                        invocation_count: 0,
+                        successful_invocation_count: 0,
+                        failed_invocation_count: 0,
+                        blocked_invocation_count: 0,
+                        zero_tools_executed: false,
+                        failure_codes: []
+                    }
+                }
+            ],
+            latestProgress: {
+                phase: 'tool_plan',
+                selected_workflow_id: '#V#tool_calling_workflow',
+                selected_workflow_name: 'Tool calling workflow'
+            }
+        });
+
+        expect(html).toContain('Planning 2 tool calls for Tool calling workflow (#V#tool_calling_workflow) · fetch_concept');
+        expect(html).toContain('Planned tool calls');
+        expect(html).not.toContain('No recorded LLM input/output');
+    });
+
+    test('renders screen and narration backfill stages with source-aware summaries', () => {
+        const html = __testOnly_renderThinkingCardBodyHTML({
+            workflowStagePath: {
+                path: [
+                    { stage_id: 'screen_backfill', stage_label: 'Screen backfill' },
+                    { stage_id: 'narration', stage_label: 'Narration rendering' }
+                ]
+            },
+            stageDiagnostics: [
+                {
+                    stage_id: 'screen_backfill',
+                    stage_label: 'Screen backfill',
+                    response_transformation: {
+                        status: 'fallback_success',
+                        source_path: 'response_text_plus_follow_up_summary',
+                        latency_ms: 44,
+                        model_id: 'gpt-4.1-mini',
+                        input_summary: {
+                            needs_backfill: true,
+                            tool_message_count: 3
+                        },
+                        output_summary: {
+                            applied: true,
+                            presenter_format: 'screen_backfill_from_response_with_operational_summary_v1'
+                        }
+                    }
+                },
+                {
+                    stage_id: 'narration',
+                    stage_label: 'Narration rendering',
+                    response_transformation: {
+                        status: 'fallback_success',
+                        source_path: 'screen_text_fallback',
+                        latency_ms: 18,
+                        model_id: 'gpt-4.1-mini',
+                        input_summary: {
+                            needs_backfill: true,
+                            tool_message_count: 3
+                        },
+                        output_summary: {
+                            applied: true,
+                            presenter_format: 'narration_fallback_v1'
+                        }
+                    }
+                }
+            ],
+            latestProgress: {
+                phase: 'narration'
+            }
+        });
+
+        expect(html).toContain('Preparing the on-screen response from the drafted reply and follow-up summary');
+        expect(html).toContain('Preparing spoken narration from the prepared screen response');
+        expect(html).toContain('Presenter format');
+        expect(html).toContain('screen_backfill_from_response_with_operational_summary_v1');
+        expect(html).toContain('narration_fallback_v1');
+    });
+
+    test('renders postcondition critic and completion gate with unresolved outcome detail', () => {
+        const html = __testOnly_renderThinkingCardBodyHTML({
+            workflowStagePath: {
+                path: [
+                    { stage_id: 'postcondition_critic', stage_label: 'Postcondition critic' },
+                    { stage_id: 'completion_gate', stage_label: 'Completion gate' }
+                ]
+            },
+            stageDiagnostics: [
+                {
+                    stage_id: 'postcondition_critic',
+                    stage_label: 'Postcondition critic',
+                    critic_verdict: {
+                        workflow_id: '#V#kb_mutation_postcondition_critic_workflow',
+                        has_unresolved_checks: true,
+                        unresolved_check_count: 2,
+                        summary: {
+                            verified_count: 1,
+                            not_verified_count: 1,
+                            inconclusive_count: 1,
+                            error_count: 0
+                        }
+                    }
+                },
+                {
+                    stage_id: 'completion_gate',
+                    stage_label: 'Completion gate',
+                    completion_gate: {
+                        decision: 'follow_up_required',
+                        decision_reason: 'required_effects_unresolved',
+                        requires_follow_up: true,
+                        safe_to_claim_completion: false,
+                        blocking_effect_ids: ['effect_tool_execution_1'],
+                        blocking_failure_codes: ['tool_execution_required_but_not_observed']
+                    }
+                }
+            ],
+            latestProgress: {
+                phase: 'completion_gate'
+            }
+        });
+
+        expect(html).toContain('Found 2 unresolved postcondition checks');
+        expect(html).toContain('Follow-up is still required · 1 blocking effect');
+        expect(html).toContain('Blocking effects');
+        expect(html).toContain('effect_tool_execution_1');
+        expect(html).toContain('tool_execution_required_but_not_observed');
     });
 
     test('explains discovery-to-dispatch routing when selector chooses a workflow after no direct match', () => {
