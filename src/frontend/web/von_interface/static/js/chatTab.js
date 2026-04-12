@@ -1213,15 +1213,254 @@ function resolveThinkingTerminalStatus(progress) {
     return null;
 }
 
-function getWorkflowRoutingDispatchDiagnostics(progressLike) {
-    const workflowRoutingDiagnostics = (
-        progressLike
-        && typeof progressLike === 'object'
-        && progressLike.workflow_routing_diagnostics
+function getWorkflowSelectionSnapshot(value) {
+    if (!value || typeof value !== 'object') {
+        return null;
+    }
+
+    const workflowSelection = (
+        value.workflow_selection
+        && typeof value.workflow_selection === 'object'
+    )
+        ? value.workflow_selection
+        : (
+            value.workflowSelection
+            && typeof value.workflowSelection === 'object'
+                ? value.workflowSelection
+                : null
+        );
+
+    if (workflowSelection) {
+        return workflowSelection;
+    }
+
+    if (
+        typeof value.selected_workflow_id === 'string'
+        || typeof value.selected_workflow_name === 'string'
+        || typeof value.workflow_selector_verdict === 'string'
+        || typeof value.workflow_selector_source === 'string'
+        || Number.isFinite(value.workflow_match_count)
+        || Number.isFinite(value.workflow_candidate_count)
+    ) {
+        return value;
+    }
+
+    return null;
+}
+
+function getWorkflowRoutingDiagnostics(progressLike) {
+    if (!progressLike || typeof progressLike !== 'object') {
+        return null;
+    }
+
+    const directDiagnostics = (
+        progressLike.workflow_routing_diagnostics
         && typeof progressLike.workflow_routing_diagnostics === 'object'
     )
         ? progressLike.workflow_routing_diagnostics
+        : (
+            progressLike.workflowRoutingDiagnostics
+            && typeof progressLike.workflowRoutingDiagnostics === 'object'
+                ? progressLike.workflowRoutingDiagnostics
+                : null
+        );
+
+    if (directDiagnostics) {
+        return directDiagnostics;
+    }
+
+    if (
+        progressLike.schema_version === 'workflow_routing_diagnostics.v1'
+        || (progressLike.selector && typeof progressLike.selector === 'object')
+        || (progressLike.dispatch && typeof progressLike.dispatch === 'object')
+    ) {
+        return progressLike;
+    }
+
+    return null;
+}
+
+function deriveSelectedWorkflowIdFromRoutingDiagnostics(workflowRoutingDiagnostics) {
+    if (!workflowRoutingDiagnostics || typeof workflowRoutingDiagnostics !== 'object') {
+        return null;
+    }
+
+    const directCandidates = [
+        workflowRoutingDiagnostics.selected_workflow_id,
+        workflowRoutingDiagnostics.dispatch_workflow_id,
+        workflowRoutingDiagnostics?.selector?.selected_workflow_id,
+        workflowRoutingDiagnostics?.dispatch?.dispatch_workflow_id
+    ];
+    for (const candidate of directCandidates) {
+        const cleanCandidate = normaliseThinkingActivityString(candidate);
+        if (cleanCandidate) {
+            return cleanCandidate;
+        }
+    }
+
+    const overrideEvents = Array.isArray(workflowRoutingDiagnostics?.selector?.override_events)
+        ? workflowRoutingDiagnostics.selector.override_events
+        : [];
+    for (let index = overrideEvents.length - 1; index >= 0; index -= 1) {
+        const cleanCandidate = normaliseThinkingActivityString(
+            overrideEvents[index]?.selected_workflow_id
+        );
+        if (cleanCandidate) {
+            return cleanCandidate;
+        }
+    }
+
+    return null;
+}
+
+function deriveWorkflowSelectorVerdictFromRoutingDiagnostics(workflowRoutingDiagnostics) {
+    if (!workflowRoutingDiagnostics || typeof workflowRoutingDiagnostics !== 'object') {
+        return null;
+    }
+
+    const candidates = [
+        workflowRoutingDiagnostics.workflow_selector_verdict,
+        workflowRoutingDiagnostics.selector_verdict,
+        workflowRoutingDiagnostics?.selector?.workflow_selector_verdict,
+        workflowRoutingDiagnostics?.selector?.selector_verdict,
+        workflowRoutingDiagnostics?.selector?.verdict
+    ];
+    for (const candidate of candidates) {
+        const cleanCandidate = normaliseThinkingActivityString(candidate);
+        if (cleanCandidate) {
+            return cleanCandidate;
+        }
+    }
+
+    return null;
+}
+
+function deriveWorkflowSelectorSourceFromRoutingDiagnostics(workflowRoutingDiagnostics) {
+    if (!workflowRoutingDiagnostics || typeof workflowRoutingDiagnostics !== 'object') {
+        return null;
+    }
+
+    const candidates = [
+        workflowRoutingDiagnostics.workflow_selector_source,
+        workflowRoutingDiagnostics.selector_source,
+        workflowRoutingDiagnostics?.selector?.workflow_selector_source,
+        workflowRoutingDiagnostics?.selector?.selector_source,
+        workflowRoutingDiagnostics?.selector?.source
+    ];
+    for (const candidate of candidates) {
+        const cleanCandidate = normaliseThinkingActivityString(candidate);
+        if (cleanCandidate) {
+            return cleanCandidate;
+        }
+    }
+
+    return null;
+}
+
+function buildThinkingWorkflowSelectionSnapshot(sourceLike) {
+    const workflowSelection = getWorkflowSelectionSnapshot(sourceLike);
+    if (!workflowSelection) {
+        return null;
+    }
+
+    const selectedWorkflowId = normaliseThinkingActivityString(
+        workflowSelection.selected_workflow_id
+    ) || null;
+    const selectedWorkflowName = normaliseThinkingActivityString(
+        workflowSelection.selected_workflow_name
+    ) || null;
+    const selectorVerdict = normaliseThinkingActivityString(
+        workflowSelection.selector_verdict ?? workflowSelection.workflow_selector_verdict
+    ) || null;
+    const selectorSource = normaliseThinkingActivityString(
+        workflowSelection.selector_source ?? workflowSelection.workflow_selector_source
+    ) || null;
+    const workflowMatchCount = Number.isFinite(workflowSelection.workflow_match_count)
+        ? Math.max(0, Number(workflowSelection.workflow_match_count))
         : null;
+    const workflowCandidateCount = Number.isFinite(workflowSelection.workflow_candidate_count)
+        ? Math.max(0, Number(workflowSelection.workflow_candidate_count))
+        : null;
+
+    if (
+        !selectedWorkflowId
+        && !selectedWorkflowName
+        && !selectorVerdict
+        && !selectorSource
+        && workflowMatchCount === null
+        && workflowCandidateCount === null
+    ) {
+        return null;
+    }
+
+    return {
+        ...(workflowSelection && typeof workflowSelection === 'object' ? workflowSelection : {}),
+        selected_workflow_id: selectedWorkflowId,
+        selected_workflow_name: selectedWorkflowName,
+        selector_verdict: selectorVerdict,
+        selector_source: selectorSource,
+        workflow_match_count: workflowMatchCount,
+        workflow_candidate_count: workflowCandidateCount
+    };
+}
+
+function buildCanonicalWorkflowRoutingProgress(request, stageDiagnostic = null) {
+    const latestProgress = (request?.latestProgress && typeof request.latestProgress === 'object')
+        ? request.latestProgress
+        : null;
+    const workflowSelection = buildThinkingWorkflowSelectionSnapshot(
+        (request?.workflowSelection && typeof request.workflowSelection === 'object')
+            ? request.workflowSelection
+            : latestProgress
+    );
+    const workflowRoutingDiagnostics = getWorkflowRoutingDiagnostics(
+        (request?.workflowRoutingDiagnostics && typeof request.workflowRoutingDiagnostics === 'object')
+            ? request.workflowRoutingDiagnostics
+            : latestProgress
+    );
+
+    return {
+        ...(latestProgress && typeof latestProgress === 'object' ? latestProgress : {}),
+        workflow_selection: workflowSelection || null,
+        workflow_routing_diagnostics: workflowRoutingDiagnostics || null,
+        selected_workflow_id: normaliseThinkingActivityString(stageDiagnostic?.selected_workflow_id)
+            || normaliseThinkingActivityString(latestProgress?.selected_workflow_id)
+            || normaliseThinkingActivityString(workflowSelection?.selected_workflow_id)
+            || deriveSelectedWorkflowIdFromRoutingDiagnostics(workflowRoutingDiagnostics)
+            || null,
+        selected_workflow_name: normaliseThinkingActivityString(stageDiagnostic?.selected_workflow_name)
+            || normaliseThinkingActivityString(latestProgress?.selected_workflow_name)
+            || normaliseThinkingActivityString(workflowSelection?.selected_workflow_name)
+            || null,
+        workflow_selector_verdict: normaliseThinkingActivityString(stageDiagnostic?.workflow_selector_verdict)
+            || normaliseThinkingActivityString(latestProgress?.workflow_selector_verdict)
+            || normaliseThinkingActivityString(workflowSelection?.selector_verdict)
+            || deriveWorkflowSelectorVerdictFromRoutingDiagnostics(workflowRoutingDiagnostics)
+            || null,
+        workflow_selector_source: normaliseThinkingActivityString(stageDiagnostic?.workflow_selector_source)
+            || normaliseThinkingActivityString(latestProgress?.workflow_selector_source)
+            || normaliseThinkingActivityString(workflowSelection?.selector_source)
+            || deriveWorkflowSelectorSourceFromRoutingDiagnostics(workflowRoutingDiagnostics)
+            || null,
+        workflow_match_count: Number.isFinite(stageDiagnostic?.workflow_match_count)
+            ? Number(stageDiagnostic.workflow_match_count)
+            : (
+                Number.isFinite(latestProgress?.workflow_match_count)
+                    ? Number(latestProgress.workflow_match_count)
+                    : workflowSelection?.workflow_match_count
+            ),
+        workflow_candidate_count: Number.isFinite(stageDiagnostic?.workflow_candidate_count)
+            ? Number(stageDiagnostic.workflow_candidate_count)
+            : (
+                Number.isFinite(latestProgress?.workflow_candidate_count)
+                    ? Number(latestProgress.workflow_candidate_count)
+                    : workflowSelection?.workflow_candidate_count
+            )
+    };
+}
+
+function getWorkflowRoutingDispatchDiagnostics(progressLike) {
+    const workflowRoutingDiagnostics = getWorkflowRoutingDiagnostics(progressLike);
     const dispatchDiagnostics = workflowRoutingDiagnostics?.dispatch;
     return (dispatchDiagnostics && typeof dispatchDiagnostics === 'object')
         ? dispatchDiagnostics
@@ -1644,6 +1883,21 @@ function syncThinkingCanonicalStateFromTurnExecutionDiagnostics(request, diagnos
         updated = true;
     }
 
+    if (diagnostics.workflow_selection && typeof diagnostics.workflow_selection === 'object') {
+        request.workflowSelection = { ...diagnostics.workflow_selection };
+        updated = true;
+    }
+
+    if (
+        diagnostics.workflow_routing_diagnostics
+        && typeof diagnostics.workflow_routing_diagnostics === 'object'
+    ) {
+        request.workflowRoutingDiagnostics = {
+            ...diagnostics.workflow_routing_diagnostics
+        };
+        updated = true;
+    }
+
     if (Array.isArray(diagnostics.phase_history)) {
         request.phaseHistory = cloneThinkingStructuredHistory(diagnostics.phase_history);
         updated = true;
@@ -1806,6 +2060,14 @@ function applyThinkingProgressUpdate(request, nextProgress) {
     }
 
     request.latestProgress = nextProgress;
+    const workflowSelection = buildThinkingWorkflowSelectionSnapshot(nextProgress);
+    if (workflowSelection) {
+        request.workflowSelection = workflowSelection;
+    }
+    const workflowRoutingDiagnostics = getWorkflowRoutingDiagnostics(nextProgress);
+    if (workflowRoutingDiagnostics) {
+        request.workflowRoutingDiagnostics = { ...workflowRoutingDiagnostics };
+    }
     applyThinkingCardDisplayStateUpdate(request, {
         type: 'progress_update',
         progress: nextProgress
@@ -1865,6 +2127,15 @@ function createThinkingCardHistorySnapshot(request) {
                 : []
         }
         : null;
+    const workflowSelection = (request.workflowSelection && typeof request.workflowSelection === 'object')
+        ? { ...request.workflowSelection }
+        : null;
+    const workflowRoutingDiagnostics = (
+        request.workflowRoutingDiagnostics
+        && typeof request.workflowRoutingDiagnostics === 'object'
+    )
+        ? { ...request.workflowRoutingDiagnostics }
+        : null;
     const workflowStagePath = (request.workflowStagePath && typeof request.workflowStagePath === 'object')
         ? {
             ...request.workflowStagePath,
@@ -1892,6 +2163,8 @@ function createThinkingCardHistorySnapshot(request) {
         phaseHistory,
         toolUseProgressHistory: toolHistory,
         workflowDiscovery,
+        workflowSelection,
+        workflowRoutingDiagnostics,
         workflowStagePath,
         stageDiagnostics,
         latestProgress,
@@ -3346,8 +3619,15 @@ function buildWorkflowRoutingContext(progressLike, workflowDiscovery = null) {
         };
     }
 
-    const selectedWorkflowId = normaliseThinkingActivityString(progressLike.selected_workflow_id) || null;
-    const selectedWorkflowName = normaliseThinkingActivityString(progressLike.selected_workflow_name) || null;
+    const workflowSelection = getWorkflowSelectionSnapshot(progressLike);
+    const workflowRoutingDiagnostics = getWorkflowRoutingDiagnostics(progressLike);
+    const selectedWorkflowId = normaliseThinkingActivityString(progressLike.selected_workflow_id)
+        || normaliseThinkingActivityString(workflowSelection?.selected_workflow_id)
+        || deriveSelectedWorkflowIdFromRoutingDiagnostics(workflowRoutingDiagnostics)
+        || null;
+    const selectedWorkflowName = normaliseThinkingActivityString(progressLike.selected_workflow_name)
+        || normaliseThinkingActivityString(workflowSelection?.selected_workflow_name)
+        || null;
     const selectedWorkflowText = formatWorkflowDisplayText(
         selectedWorkflowId,
         selectedWorkflowName,
@@ -3358,11 +3638,25 @@ function buildWorkflowRoutingContext(progressLike, workflowDiscovery = null) {
         selectedWorkflowName,
         workflowDiscovery
     ) || (selectedWorkflowText ? escapeHtml(selectedWorkflowText) : '');
-    const selectorVerdict = normaliseThinkingActivityString(progressLike.workflow_selector_verdict) || null;
-    const selectorSource = normaliseThinkingActivityString(progressLike.workflow_selector_source) || null;
+    const selectorVerdict = normaliseThinkingActivityString(progressLike.workflow_selector_verdict)
+        || normaliseThinkingActivityString(
+            workflowSelection?.selector_verdict ?? workflowSelection?.workflow_selector_verdict
+        )
+        || deriveWorkflowSelectorVerdictFromRoutingDiagnostics(workflowRoutingDiagnostics)
+        || null;
+    const selectorSource = normaliseThinkingActivityString(progressLike.workflow_selector_source)
+        || normaliseThinkingActivityString(
+            workflowSelection?.selector_source ?? workflowSelection?.workflow_selector_source
+        )
+        || deriveWorkflowSelectorSourceFromRoutingDiagnostics(workflowRoutingDiagnostics)
+        || null;
     const workflowMatchCount = Number.isFinite(progressLike.workflow_match_count)
         ? Math.max(0, Number(progressLike.workflow_match_count))
-        : getWorkflowDiscoveryMatchCount(workflowDiscovery);
+        : (
+            Number.isFinite(workflowSelection?.workflow_match_count)
+                ? Math.max(0, Number(workflowSelection.workflow_match_count))
+                : getWorkflowDiscoveryMatchCount(workflowDiscovery)
+        );
     const dispatchDiagnostics = getWorkflowRoutingDispatchDiagnostics(progressLike);
 
     return {
@@ -3381,7 +3675,11 @@ function buildWorkflowRoutingContext(progressLike, workflowDiscovery = null) {
         workflowMatchCount,
         workflowCandidateCount: Number.isFinite(progressLike.workflow_candidate_count)
             ? Math.max(0, Number(progressLike.workflow_candidate_count))
-            : getWorkflowDiscoveryCandidateCount(workflowDiscovery),
+            : (
+                Number.isFinite(workflowSelection?.workflow_candidate_count)
+                    ? Math.max(0, Number(workflowSelection.workflow_candidate_count))
+                    : getWorkflowDiscoveryCandidateCount(workflowDiscovery)
+            ),
         dispatchTerminalStatus: normaliseThinkingActivityString(dispatchDiagnostics?.dispatch_terminal_status) || null,
         dispatchTerminalFailureReason: normaliseThinkingActivityString(dispatchDiagnostics?.dispatch_terminal_failure_reason) || null,
         dispatchTerminalFailureDetail: normaliseThinkingActivityString(dispatchDiagnostics?.dispatch_terminal_failure_detail) || null,
@@ -3784,32 +4082,10 @@ function buildThinkingWorkflowStageDiagnosticData(stageId, stageLabel, request) 
     const workflowDiscovery = (request?.workflowDiscovery && typeof request.workflowDiscovery === 'object')
         ? request.workflowDiscovery
         : null;
-    const latestProgress = (request?.latestProgress && typeof request.latestProgress === 'object')
-        ? request.latestProgress
-        : null;
     const toolHistory = getCanonicalThinkingToolHistory(request);
-    const stageRoutingProgress = {
-        ...(latestProgress && typeof latestProgress === 'object' ? latestProgress : {}),
-        selected_workflow_id: normaliseThinkingActivityString(stageDiagnostic?.selected_workflow_id)
-            || normaliseThinkingActivityString(latestProgress?.selected_workflow_id)
-            || null,
-        selected_workflow_name: normaliseThinkingActivityString(stageDiagnostic?.selected_workflow_name)
-            || normaliseThinkingActivityString(latestProgress?.selected_workflow_name)
-            || null,
-        workflow_selector_verdict: normaliseThinkingActivityString(stageDiagnostic?.workflow_selector_verdict)
-            || normaliseThinkingActivityString(latestProgress?.workflow_selector_verdict)
-            || null,
-        workflow_selector_source: normaliseThinkingActivityString(stageDiagnostic?.workflow_selector_source)
-            || normaliseThinkingActivityString(latestProgress?.workflow_selector_source)
-            || null,
-        workflow_match_count: Number.isFinite(stageDiagnostic?.workflow_match_count)
-            ? Number(stageDiagnostic.workflow_match_count)
-            : latestProgress?.workflow_match_count,
-        workflow_candidate_count: Number.isFinite(stageDiagnostic?.workflow_candidate_count)
-            ? Number(stageDiagnostic.workflow_candidate_count)
-            : latestProgress?.workflow_candidate_count
-    };
-    const routingNarrative = buildWorkflowRoutingNarrative(latestProgress, workflowDiscovery, {
+    const canonicalRoutingProgress = buildCanonicalWorkflowRoutingProgress(request);
+    const stageRoutingProgress = buildCanonicalWorkflowRoutingProgress(request, stageDiagnostic);
+    const routingNarrative = buildWorkflowRoutingNarrative(canonicalRoutingProgress, workflowDiscovery, {
         includeNoMatchTransition: true,
     });
     const stageRoutingNarrative = buildWorkflowRoutingNarrative(stageRoutingProgress, workflowDiscovery, {
@@ -3859,6 +4135,19 @@ function buildThinkingWorkflowStageDiagnosticData(stageId, stageLabel, request) 
                 .filter(Boolean)
             : []
     };
+
+    if (
+        stageRoutingNarrative.context.hasSelection
+        || stageRoutingNarrative.context.selectorVerdict
+        || stageRoutingNarrative.context.selectorSource
+    ) {
+        data.selected_workflow_id = stageRoutingNarrative.context.selectedWorkflowId;
+        data.selected_workflow_name = stageRoutingNarrative.context.selectedWorkflowName;
+        data.workflow_selector_verdict = stageRoutingNarrative.context.selectorVerdict;
+        data.workflow_selector_source = stageRoutingNarrative.context.selectorSource;
+        data.workflow_selection_narrative = stageRoutingNarrative.text || null;
+        data.workflow_selection_narrative_html = stageRoutingNarrative.html || null;
+    }
 
     data.latest_subtask = normaliseThinkingActivityString(stageDiagnostic?.latest_subtask)
         || normaliseThinkingActivityString(latestStageEvent?.subtask)
@@ -4365,7 +4654,26 @@ function renderThinkingWorkflowStageDiagnosticDataHTML(data, workflowDiscovery =
         sections.push(buildThinkingDiagnosticListHTML('Observed tool calls', toolLines));
     } else if (data.stage_id === 'screen_backfill' || data.stage_id === 'narration') {
         const transformation = data.response_transformation;
+        const selectedWorkflowHtml = renderWorkflowDisplayHtml(
+            data.selected_workflow_id,
+            data.selected_workflow_name,
+            workflowDiscovery
+        );
         facts.push(
+            {
+                label: 'Selected workflow',
+                value: formatWorkflowDisplayText(
+                    data.selected_workflow_id,
+                    data.selected_workflow_name,
+                    workflowDiscovery
+                ),
+                html: selectedWorkflowHtml
+            },
+            {
+                label: 'Routing rationale',
+                value: data.workflow_selection_narrative,
+                html: data.workflow_selection_narrative_html
+            },
             {
                 label: 'Transformation status',
                 value: transformation?.status
@@ -4595,6 +4903,7 @@ function buildWorkflowStageDetailPresentation(stageId, request) {
     const latestProgress = (request?.latestProgress && typeof request.latestProgress === 'object')
         ? request.latestProgress
         : null;
+    const canonicalRoutingProgress = buildCanonicalWorkflowRoutingProgress(request);
     const cleanStageId = normaliseThinkingActivityString(stageId);
     const stageDiagnostic = getThinkingStageDiagnosticEntry(request, cleanStageId);
     const stageData = buildThinkingWorkflowStageDiagnosticData(
@@ -4604,7 +4913,7 @@ function buildWorkflowStageDetailPresentation(stageId, request) {
             || 'Workflow step',
         request
     );
-    const routingNarrative = buildWorkflowRoutingNarrative(latestProgress, workflowDiscovery, {
+    const routingNarrative = buildWorkflowRoutingNarrative(canonicalRoutingProgress, workflowDiscovery, {
         includeNoMatchTransition: true,
     });
 
@@ -4815,10 +5124,33 @@ function buildWorkflowStageDetailPresentation(stageId, request) {
             cleanStageId,
             stageData?.response_transformation
         );
+        const workflowText = formatWorkflowDisplayText(
+            stageData?.selected_workflow_id,
+            stageData?.selected_workflow_name,
+            workflowDiscovery
+        );
+        const workflowHtml = renderWorkflowDisplayHtml(
+            stageData?.selected_workflow_id,
+            stageData?.selected_workflow_name,
+            workflowDiscovery
+        ) || escapeHtml(workflowText || '');
         if (transformationText) {
             return {
-                text: transformationText,
-                html: escapeHtml(transformationText)
+                text: workflowText
+                    ? `${transformationText} · Workflow: ${workflowText}`
+                    : transformationText,
+                html: workflowText
+                    ? `${escapeHtml(transformationText)} · Workflow: ${workflowHtml}`
+                    : escapeHtml(transformationText)
+            };
+        }
+        if (workflowText) {
+            const prefix = cleanStageId === 'narration'
+                ? 'Preparing spoken narration'
+                : 'Preparing the on-screen response';
+            return {
+                text: `${prefix} · Workflow: ${workflowText}`,
+                html: `${escapeHtml(prefix)} · Workflow: ${workflowHtml}`
             };
         }
     }
@@ -4918,7 +5250,10 @@ function buildThinkingWorkflowStageRows(request) {
                 request
             );
             const detailPresentation = buildWorkflowStageDetailPresentation('workflow_discovery', request);
-            const routingContext = buildWorkflowRoutingContext(request?.latestProgress, workflowDiscovery);
+            const routingContext = buildWorkflowRoutingContext(
+                buildCanonicalWorkflowRoutingProgress(request),
+                workflowDiscovery
+            );
             return [{
                 stageId: 'workflow_discovery',
                 label: 'Workflow discovery',
@@ -4937,7 +5272,10 @@ function buildThinkingWorkflowStageRows(request) {
     const latestProgress = (request.latestProgress && typeof request.latestProgress === 'object')
         ? request.latestProgress
         : null;
-    const routingContext = buildWorkflowRoutingContext(latestProgress, workflowDiscovery);
+    const routingContext = buildWorkflowRoutingContext(
+        buildCanonicalWorkflowRoutingProgress(request),
+        workflowDiscovery
+    );
     const latestStageId = (() => {
         const lastStage = path[path.length - 1];
         return normaliseThinkingActivityString(lastStage?.stage_id || lastStage?.runtime_stage_normalised);
@@ -21422,13 +21760,16 @@ function buildThinkingDiagnosticsPayload(request) {
             : [],
         tool_history: getCanonicalThinkingToolHistory(request).slice(-THINKING_DIAGNOSTICS_EXPORT_EVENT_LIMIT),
         workflow_discovery: request.workflowDiscovery || null,
-        workflow_routing_diagnostics: (
-            latestProgress
-            && latestProgress.workflow_routing_diagnostics
-            && typeof latestProgress.workflow_routing_diagnostics === 'object'
-        )
-            ? latestProgress.workflow_routing_diagnostics
-            : null,
+        workflow_selection: buildThinkingWorkflowSelectionSnapshot(
+            (request.workflowSelection && typeof request.workflowSelection === 'object')
+                ? request.workflowSelection
+                : latestProgress
+        ),
+        workflow_routing_diagnostics: getWorkflowRoutingDiagnostics(
+            (request.workflowRoutingDiagnostics && typeof request.workflowRoutingDiagnostics === 'object')
+                ? request.workflowRoutingDiagnostics
+                : latestProgress
+        ),
         workflow_stage_path: request.workflowStagePath || null,
         stage_diagnostics: buildThinkingStageDiagnosticsSnapshot(request)
     };
@@ -22036,6 +22377,8 @@ async function handleSendPrompt(options = {}) {
         activityHistory: [],
         toolUseProgressHistory: [],
         workflowStagePath: null,
+        workflowSelection: null,
+        workflowRoutingDiagnostics: null,
         latestProgress: null,
         progressEvents: [],
         phaseHistory: [],

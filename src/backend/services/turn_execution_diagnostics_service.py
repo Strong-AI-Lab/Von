@@ -576,6 +576,9 @@ def _build_fallback_turn_execution_diagnostics(
         "phase_history": [],
         "tool_history": tool_history,
         "workflow_discovery": workflow_discovery,
+        "workflow_selection": deepcopy(workflow_selection)
+        if isinstance(workflow_selection, Mapping)
+        else None,
         "workflow_routing_diagnostics": workflow_routing_diagnostics,
         "workflow_stage_model": workflow_stage_model,
         "workflow_stage_path": workflow_stage_path,
@@ -660,6 +663,13 @@ def _normalise_embedded_diagnostics_payload(
                 workflow_discovery = workflow_selection.get("workflow_discovery")
         if isinstance(workflow_discovery, Mapping):
             payload["workflow_discovery"] = deepcopy(workflow_discovery)
+
+    if not isinstance(payload.get("workflow_selection"), Mapping) and isinstance(
+        turn_record, Mapping
+    ):
+        workflow_selection = turn_record.get("workflow_selection")
+        if isinstance(workflow_selection, Mapping):
+            payload["workflow_selection"] = deepcopy(workflow_selection)
 
     if not isinstance(payload.get("workflow_routing_diagnostics"), Mapping):
         routing = None
