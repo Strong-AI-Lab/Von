@@ -6,7 +6,9 @@ from types import SimpleNamespace
 import pytest
 
 from src.backend.services.blob_store import (
+    FailoverBlobStore,
     LocalBlobStore,
+    S3BlobStore,
     SwiftBlobStore,
     _normalise_key,
     get_blob_store_from_env,
@@ -192,3 +194,305 @@ def test_swift_blob_store_cloud_not_found_falls_back_to_envvars(
     assert store._conn.kwargs["auth_url"] == "https://identity.example/v3"
     assert store._conn.kwargs["username"] == "demo-user"
     assert store._conn.kwargs["project_name"] == "demo-project"
+
+
+def test_s3_blob_store_methods_use_s3_client_signatures():
+    class _DummyBody:
+        def read(self):
+            return b"hello"
+
+    class _DummyPaginator:
+        def paginate(self, **kwargs):
+            assert kwargs == {"Bucket": "demo-bucket", "Prefix": "demo/"}
+            return [
+                {
+                    "Contents": [
+                        {"Key": "demo/alpha.txt"},
+                        {"Key": "demo/nested/beta.txt"},
+                    ]
+                }
+            ]
+
+    class _DummyClient:
+        def __init__(self):
+            self.put_calls = []
+            self.get_calls = []
+            self.head_calls = []
+            self.delete_calls = []
+
+        def put_object(self, **kwargs):
+            self.put_calls.append(kwargs)
+
+        def get_object(self, **kwargs):
+            self.get_calls.append(kwargs)
+            return {"Body": _DummyBody()}
+
+        def head_object(self, **kwargs):
+            self.head_calls.append(kwargs)
+            return {"ETag": "etag"}
+
+        def delete_object(self, **kwargs):
+            self.delete_calls.append(kwargs)
+
+        def get_paginator(self, name):
+            assert name == "list_objects_v2"
+            return _DummyPaginator()
+
+    store = S3BlobStore.__new__(S3BlobStore)
+    store._bucket = "demo-bucket"
+    store._endpoint_url = "https://object-storage.nz-por-1.catalystcloud.io"
+    store._prefix = "demo"
+    store._public_base_url = None
+    store._region_name = "nz-por-1"
+    store._access_key_id = "key"
+    store._secret_access_key = "secret"
+    store._session_token = None
+    store._addressing_style = "path"
+    store._client = _DummyClient()
+
+    ref = store.put_bytes(
+        "alpha.txt",
+        b"hello",
+        content_type="text/plain",
+        metadata={"owner": "test"},
+    )
+    assert ref.backend == "s3"
+    assert (
+        ref.uri
+        == "https://object-storage.nz-por-1.catalystcloud.io/demo-bucket/demo/alpha.txt"
+    )
+    assert store._client.put_calls == [
+        {
+            "Bucket": "demo-bucket",
+            "Key": "demo/alpha.txt",
+            "Body": b"hello",
+            "ContentType": "text/plain",
+            "Metadata": {"owner": "test"},
+        }
+    ]
+
+    assert store.get_bytes("alpha.txt") == b"hello"
+    assert store._client.get_calls == [
+        {"Bucket": "demo-bucket", "Key": "demo/alpha.txt"}
+    ]
+
+    assert store.exists("alpha.txt") is True
+    assert store._client.head_calls == [
+        {"Bucket": "demo-bucket", "Key": "demo/alpha.txt"}
+    ]
+
+    store.delete("alpha.txt")
+    assert store._client.delete_calls == [
+        {"Bucket": "demo-bucket", "Key": "demo/alpha.txt"}
+    ]
+
+    assert store.list() == ["alpha.txt", "nested/beta.txt"]
+
+
+def test_s3_blob_store_exists_returns_false_for_missing_object():
+    class _MissingObject(Exception):
+        def __init__(self):
+            self.response = {
+                "Error": {"Code": "404"},
+                "ResponseMetadata": {"HTTPStatusCode": 404},
+            }
+
+    class _DummyClient:
+        def head_object(self, **kwargs):
+            raise _MissingObject()
+
+    store = S3BlobStore.__new__(S3BlobStore)
+    store._bucket = "demo-bucket"
+    store._endpoint_url = "https://object-storage.nz-por-1.catalystcloud.io"
+    store._prefix = ""
+    store._public_base_url = None
+    store._region_name = "nz-por-1"
+    store._access_key_id = "key"
+    store._secret_access_key = "secret"
+    store._session_token = None
+    store._addressing_style = "path"
+    store._client = _DummyClient()
+
+    assert store.exists("missing.txt") is False
+
+
+def test_get_blob_store_from_env_s3_supports_swift_container_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import importlib as _importlib
+
+    captured_client_kwargs: dict[str, object] = {}
+
+    class _DummySession:
+        def client(self, service_name, **kwargs):
+            assert service_name == "s3"
+            captured_client_kwargs.update(kwargs)
+            return SimpleNamespace()
+
+    class _DummyConfig:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    boto3_mod = SimpleNamespace(session=SimpleNamespace(Session=lambda: _DummySession()))
+    config_mod = SimpleNamespace(Config=_DummyConfig)
+    real_import_module = _importlib.import_module
+
+    def _fake_import_module(name: str, package: str | None = None):
+        if name == "boto3":
+            return boto3_mod
+        if name == "botocore.config":
+            return config_mod
+        return real_import_module(name, package)
+
+    monkeypatch.setattr(_importlib, "import_module", _fake_import_module)
+    monkeypatch.setenv("VON_BLOB_STORE_BACKEND", "s3")
+    monkeypatch.setenv("VON_SWIFT_CONTAINER", "von-artifacts")
+    monkeypatch.setenv(
+        "VON_S3_ENDPOINT_URL", "https://object-storage.nz-por-1.catalystcloud.io"
+    )
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "demo-key")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "demo-secret")
+    monkeypatch.setenv("OS_REGION_NAME", "nz-por-1")
+    monkeypatch.setenv("VON_SWIFT_PREFIX", "von")
+
+    store = get_blob_store_from_env()
+    assert isinstance(store, S3BlobStore)
+    assert store._bucket == "von-artifacts"
+    assert store._prefix == "von"
+    assert captured_client_kwargs["endpoint_url"] == (
+        "https://object-storage.nz-por-1.catalystcloud.io"
+    )
+    assert captured_client_kwargs["region_name"] == "nz-por-1"
+    assert captured_client_kwargs["aws_access_key_id"] == "demo-key"
+
+
+def test_get_blob_store_from_env_swift_can_fail_over_to_s3_on_initialisation_failure(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("VON_BLOB_STORE_BACKEND", "swift")
+    monkeypatch.setenv("VON_SWIFT_CONTAINER", "von-artifacts")
+    monkeypatch.setenv(
+        "VON_S3_ENDPOINT_URL", "https://object-storage.nz-por-1.catalystcloud.io"
+    )
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "demo-key")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "demo-secret")
+
+    monkeypatch.setattr(
+        "src.backend.services.blob_store.SwiftBlobStore",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("Connect timeout to :5000")),
+    )
+
+    sentinel = SimpleNamespace(kind="s3")
+    monkeypatch.setattr(
+        "src.backend.services.blob_store._build_s3_blob_store_from_env",
+        lambda: sentinel,
+    )
+
+    store = get_blob_store_from_env()
+    assert store is sentinel
+
+
+def test_failover_blob_store_uses_secondary_after_transport_failure():
+    class _Primary:
+        def __init__(self):
+            self.calls = []
+
+        def put_bytes(self, key, data, *, content_type=None, metadata=None):
+            raise AssertionError("unexpected")
+
+        def get_bytes(self, key):
+            self.calls.append(key)
+            raise RuntimeError("Connect timeout to Keystone on :5000")
+
+        def exists(self, key):
+            raise AssertionError("unexpected")
+
+        def delete(self, key):
+            raise AssertionError("unexpected")
+
+        def list(self, prefix=""):
+            raise AssertionError("unexpected")
+
+    class _Secondary:
+        def __init__(self):
+            self.calls = []
+
+        def put_bytes(self, key, data, *, content_type=None, metadata=None):
+            raise AssertionError("unexpected")
+
+        def get_bytes(self, key):
+            self.calls.append(key)
+            return b"hello"
+
+        def exists(self, key):
+            raise AssertionError("unexpected")
+
+        def delete(self, key):
+            raise AssertionError("unexpected")
+
+        def list(self, prefix=""):
+            raise AssertionError("unexpected")
+
+    primary = _Primary()
+    secondary = _Secondary()
+    store = FailoverBlobStore(
+        primary=primary,
+        secondary=secondary,
+        primary_name="swift",
+        secondary_name="s3",
+    )
+
+    assert store.get_bytes("demo.txt") == b"hello"
+    assert store.get_bytes("demo.txt") == b"hello"
+    assert primary.calls == ["demo.txt"]
+    assert secondary.calls == ["demo.txt", "demo.txt"]
+
+
+def test_failover_blob_store_does_not_fail_over_on_not_found():
+    class _Primary:
+        def put_bytes(self, key, data, *, content_type=None, metadata=None):
+            raise AssertionError("unexpected")
+
+        def get_bytes(self, key):
+            raise AssertionError("unexpected")
+
+        def exists(self, key):
+            raise RuntimeError("404 Not Found")
+
+        def delete(self, key):
+            raise AssertionError("unexpected")
+
+        def list(self, prefix=""):
+            raise AssertionError("unexpected")
+
+    class _Secondary:
+        def __init__(self):
+            self.called = False
+
+        def put_bytes(self, key, data, *, content_type=None, metadata=None):
+            raise AssertionError("unexpected")
+
+        def get_bytes(self, key):
+            raise AssertionError("unexpected")
+
+        def exists(self, key):
+            self.called = True
+            return True
+
+        def delete(self, key):
+            raise AssertionError("unexpected")
+
+        def list(self, prefix=""):
+            raise AssertionError("unexpected")
+
+    secondary = _Secondary()
+    store = FailoverBlobStore(
+        primary=_Primary(),
+        secondary=secondary,
+        primary_name="swift",
+        secondary_name="s3",
+    )
+
+    with pytest.raises(RuntimeError, match="404 Not Found"):
+        store.exists("demo.txt")
+    assert secondary.called is False

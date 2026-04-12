@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Mapping, Protocol
+from typing import Any, Mapping, Protocol
 
 
 @dataclass(frozen=True)
@@ -34,6 +34,16 @@ class BlobStore(Protocol):
     def delete(self, key: str) -> None: ...
 
     def list(self, prefix: str = "") -> list[str]: ...
+
+
+def _first_non_empty_env(*names: str) -> str | None:
+    for name in names:
+        value = os.environ.get(name)
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if cleaned:
+                return cleaned
+    return None
 
 
 def _normalise_key(key: str) -> str:
@@ -383,6 +393,345 @@ class SwiftBlobStore:
         return keys
 
 
+class S3BlobStore:
+    """S3-compatible blob store.
+
+    This is intended for object stores that expose an S3-compatible API over
+    HTTPS, including Catalyst Cloud's object-storage endpoint on port 443.
+
+    Required for this store:
+    - bucket
+    - endpoint_url
+    - access_key_id
+    - secret_access_key
+
+    Optional:
+    - prefix
+    - public_base_url
+    - region_name
+    - session_token
+    - addressing_style (defaults to 'path')
+    """
+
+    def __init__(
+        self,
+        *,
+        bucket: str,
+        endpoint_url: str,
+        prefix: str = "",
+        public_base_url: str | None = None,
+        region_name: str | None = None,
+        access_key_id: str,
+        secret_access_key: str,
+        session_token: str | None = None,
+        addressing_style: str = "path",
+    ):
+        self._bucket = bucket
+        self._endpoint_url = endpoint_url.rstrip("/")
+        self._prefix = prefix.strip("/")
+        self._public_base_url = public_base_url.rstrip("/") if public_base_url else None
+        self._region_name = region_name
+        self._access_key_id = access_key_id
+        self._secret_access_key = secret_access_key
+        self._session_token = session_token
+        self._addressing_style = addressing_style.strip().lower() or "path"
+
+        self._client = self._create_client()
+
+    def _create_client(self):
+        try:
+            import importlib
+
+            boto3 = importlib.import_module("boto3")
+            config_mod = importlib.import_module("botocore.config")
+        except ModuleNotFoundError as exc:  # pragma: no cover
+            raise RuntimeError(
+                "S3 blob backend requires 'boto3' in the active runtime environment. "
+                "Rebuild the release virtualenv and ensure the dependency is installed "
+                "(for local development, install it via PDM)."
+            ) from exc
+
+        Config = getattr(config_mod, "Config")
+        session = boto3.session.Session()
+        return session.client(
+            "s3",
+            endpoint_url=self._endpoint_url,
+            region_name=self._region_name,
+            aws_access_key_id=self._access_key_id,
+            aws_secret_access_key=self._secret_access_key,
+            aws_session_token=self._session_token,
+            config=Config(
+                signature_version="s3v4",
+                s3={"addressing_style": self._addressing_style},
+            ),
+        )
+
+    def _full_key(self, key: str) -> str:
+        safe_key = _normalise_key(key)
+        if not self._prefix:
+            return safe_key
+        return f"{self._prefix}/{safe_key}"
+
+    def _build_uri(self, key: str) -> str:
+        full_key = self._full_key(key)
+        base_url = self._public_base_url or self._endpoint_url
+        if base_url:
+            return f"{base_url}/{self._bucket}/{full_key}"
+        return f"s3://{self._bucket}/{full_key}"
+
+    def put_bytes(
+        self,
+        key: str,
+        data: bytes,
+        *,
+        content_type: str | None = None,
+        metadata: Mapping[str, str] | None = None,
+    ) -> BlobRef:
+        full_key = self._full_key(key)
+        put_kwargs: dict[str, Any] = {
+            "Bucket": self._bucket,
+            "Key": full_key,
+            "Body": data,
+        }
+        if content_type:
+            put_kwargs["ContentType"] = content_type
+        if metadata:
+            put_kwargs["Metadata"] = dict(metadata)
+
+        self._client.put_object(**put_kwargs)
+
+        return BlobRef(
+            backend="s3",
+            key=_normalise_key(key),
+            uri=self._build_uri(key),
+            content_type=content_type,
+            size_bytes=len(data),
+            metadata=dict(metadata) if metadata else None,
+        )
+
+    def get_bytes(self, key: str) -> bytes:
+        full_key = self._full_key(key)
+        response = self._client.get_object(Bucket=self._bucket, Key=full_key)
+        body = response.get("Body")
+        if hasattr(body, "read"):
+            return bytes(body.read())
+        raise RuntimeError("S3 get_object response did not include a readable Body")
+
+    def exists(self, key: str) -> bool:
+        full_key = self._full_key(key)
+        try:
+            self._client.head_object(Bucket=self._bucket, Key=full_key)
+        except Exception as exc:
+            response = getattr(exc, "response", {}) or {}
+            error = response.get("Error", {}) if isinstance(response, dict) else {}
+            status = (
+                (response.get("ResponseMetadata", {}) or {}).get("HTTPStatusCode")
+                if isinstance(response, dict)
+                else None
+            )
+            code = str(error.get("Code") or "").strip()
+            if status == 404 or code in {"404", "NoSuchKey", "NotFound"}:
+                return False
+            raise
+        return True
+
+    def delete(self, key: str) -> None:
+        full_key = self._full_key(key)
+        self._client.delete_object(Bucket=self._bucket, Key=full_key)
+
+    def list(self, prefix: str = "") -> list[str]:
+        safe_prefix = _normalise_key(prefix) if prefix else ""
+        full_prefix = self._full_key(safe_prefix) if safe_prefix else self._prefix
+        if full_prefix and not full_prefix.endswith("/"):
+            full_prefix = full_prefix + "/"
+
+        paginator = self._client.get_paginator("list_objects_v2")
+        pages = paginator.paginate(
+            Bucket=self._bucket,
+            Prefix=full_prefix or "",
+        )
+
+        keys: list[str] = []
+        for page in pages:
+            for obj in page.get("Contents") or []:
+                name = obj.get("Key")
+                if not name or not isinstance(name, str):
+                    continue
+
+                if self._prefix:
+                    store_prefix = self._prefix + "/"
+                    if name.startswith(store_prefix):
+                        name = name[len(store_prefix) :]
+
+                keys.append(_normalise_key(name))
+
+        keys.sort()
+        return keys
+
+
+class FailoverBlobStore:
+    """Primary/secondary blob store wrapper for transport failover.
+
+    This is intended for cases where the same underlying object namespace can be
+    reached via two protocols, such as Catalyst Swift and Catalyst's
+    S3-compatible interface.
+    """
+
+    def __init__(
+        self,
+        *,
+        primary: BlobStore,
+        secondary: BlobStore,
+        primary_name: str,
+        secondary_name: str,
+    ):
+        self._primary = primary
+        self._secondary = secondary
+        self._primary_name = primary_name
+        self._secondary_name = secondary_name
+        self._failed_over = False
+
+    def _should_fail_over(self, exc: Exception) -> bool:
+        message = str(exc).strip().lower()
+        if not message:
+            return False
+
+        network_markers = (
+            "timed out",
+            "timeout",
+            "connection",
+            "connect failure",
+            "max retries exceeded",
+            "temporary failure",
+            "name or service not known",
+            "keystone",
+            "auth/tokens",
+            ":5000",
+            "cloud was not found",
+            "discovery failure",
+            "service unavailable",
+            "unauthorized",
+        )
+        not_found_markers = (
+            "not found",
+            "404",
+            "nosuchkey",
+            "no such key",
+            "notfound",
+        )
+        if any(marker in message for marker in not_found_markers):
+            return False
+        return any(marker in message for marker in network_markers)
+
+    def _run(self, op_name: str, *args: Any, **kwargs: Any):
+        if self._failed_over:
+            return getattr(self._secondary, op_name)(*args, **kwargs)
+
+        try:
+            return getattr(self._primary, op_name)(*args, **kwargs)
+        except Exception as exc:
+            if not self._should_fail_over(exc):
+                raise
+            self._failed_over = True
+            return getattr(self._secondary, op_name)(*args, **kwargs)
+
+    def put_bytes(
+        self,
+        key: str,
+        data: bytes,
+        *,
+        content_type: str | None = None,
+        metadata: Mapping[str, str] | None = None,
+    ) -> BlobRef:
+        return self._run(
+            "put_bytes",
+            key,
+            data,
+            content_type=content_type,
+            metadata=metadata,
+        )
+
+    def get_bytes(self, key: str) -> bytes:
+        return self._run("get_bytes", key)
+
+    def exists(self, key: str) -> bool:
+        return self._run("exists", key)
+
+    def delete(self, key: str) -> None:
+        self._run("delete", key)
+
+    def list(self, prefix: str = "") -> list[str]:
+        return self._run("list", prefix)
+
+
+def _build_s3_blob_store_from_env() -> S3BlobStore:
+    bucket = _first_non_empty_env("VON_S3_BUCKET", "VON_SWIFT_CONTAINER")
+    if not bucket:
+        raise ValueError(
+            "VON_S3_BUCKET is required when backend=s3. "
+            "If you are targeting the same Catalyst container as Swift, "
+            "VON_SWIFT_CONTAINER may be reused."
+        )
+
+    endpoint_url = _first_non_empty_env("VON_S3_ENDPOINT_URL")
+    if not endpoint_url:
+        raise ValueError("VON_S3_ENDPOINT_URL is required for S3-compatible access")
+
+    access_key_id = _first_non_empty_env("VON_S3_ACCESS_KEY_ID", "AWS_ACCESS_KEY_ID")
+    secret_access_key = _first_non_empty_env(
+        "VON_S3_SECRET_ACCESS_KEY",
+        "AWS_SECRET_ACCESS_KEY",
+    )
+    if not access_key_id or not secret_access_key:
+        raise ValueError(
+            "S3-compatible access requires credentials via AWS_ACCESS_KEY_ID and "
+            "AWS_SECRET_ACCESS_KEY (or VON_S3_ACCESS_KEY_ID / "
+            "VON_S3_SECRET_ACCESS_KEY)."
+        )
+
+    prefix = _first_non_empty_env("VON_S3_PREFIX", "VON_SWIFT_PREFIX") or ""
+    public_base_url = _first_non_empty_env("VON_S3_PUBLIC_BASE_URL")
+    region_name = (
+        _first_non_empty_env(
+            "VON_S3_REGION_NAME",
+            "AWS_REGION",
+            "AWS_DEFAULT_REGION",
+            "OS_REGION_NAME",
+        )
+        or "us-east-1"
+    )
+    session_token = _first_non_empty_env("VON_S3_SESSION_TOKEN", "AWS_SESSION_TOKEN")
+    addressing_style = _first_non_empty_env("VON_S3_ADDRESSING_STYLE") or "path"
+
+    return S3BlobStore(
+        bucket=bucket,
+        endpoint_url=endpoint_url,
+        prefix=prefix,
+        public_base_url=public_base_url,
+        region_name=region_name,
+        access_key_id=access_key_id,
+        secret_access_key=secret_access_key,
+        session_token=session_token,
+        addressing_style=addressing_style,
+    )
+
+
+def _swift_s3_failover_enabled() -> bool:
+    value = os.environ.get("VON_SWIFT_S3_FAILOVER_ENABLE")
+    if value is None:
+        return True
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _s3_failover_config_present() -> bool:
+    return bool(
+        _first_non_empty_env("VON_S3_ENDPOINT_URL")
+        and _first_non_empty_env("VON_S3_BUCKET", "VON_SWIFT_CONTAINER")
+        and _first_non_empty_env("VON_S3_ACCESS_KEY_ID", "AWS_ACCESS_KEY_ID")
+        and _first_non_empty_env("VON_S3_SECRET_ACCESS_KEY", "AWS_SECRET_ACCESS_KEY")
+    )
+
+
 def get_blob_store_from_env() -> BlobStore:
     backend = (os.environ.get("VON_BLOB_STORE_BACKEND") or "local").strip().lower()
 
@@ -404,14 +753,34 @@ def get_blob_store_from_env() -> BlobStore:
         public_base_url = os.environ.get("VON_SWIFT_PUBLIC_BASE_URL")
         cloud = os.environ.get("OS_CLOUD")
 
-        return SwiftBlobStore(
-            container=container,
-            prefix=prefix,
-            public_base_url=public_base_url,
-            cloud=cloud,
-        )
+        swift_kwargs = {
+            "container": container,
+            "prefix": prefix,
+            "public_base_url": public_base_url,
+            "cloud": cloud,
+        }
+
+        if _swift_s3_failover_enabled() and _s3_failover_config_present():
+            try:
+                primary = SwiftBlobStore(**swift_kwargs)
+            except Exception as exc:
+                if "not found" not in str(exc).strip().lower():
+                    return _build_s3_blob_store_from_env()
+                raise
+            secondary = _build_s3_blob_store_from_env()
+            return FailoverBlobStore(
+                primary=primary,
+                secondary=secondary,
+                primary_name="swift",
+                secondary_name="s3",
+            )
+
+        return SwiftBlobStore(**swift_kwargs)
+
+    if backend == "s3":
+        return _build_s3_blob_store_from_env()
 
     raise ValueError(
-        "Unsupported VON_BLOB_STORE_BACKEND. Expected 'local' or 'swift'. "
+        "Unsupported VON_BLOB_STORE_BACKEND. Expected 'local', 'swift', or 's3'. "
         f"Got: {backend!r}"
     )

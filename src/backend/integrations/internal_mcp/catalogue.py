@@ -23798,7 +23798,7 @@ def build_default_catalogue() -> MethodCatalogue:
             output_schema=_download_paper_output_schema(),
             category="write",
             timeout_sec=60.0,
-            description="Download PDF of an arXiv paper, then store it in the configured blob store (local or OpenStack Swift). The external arXiv tool writes into a local cache directory; this tool returns both the local cache file_path and a durable storage.uri and may register a #V#computer_file_copy when authenticated. Use when user asks to download/save/fetch a paper. This tool does not materialise the scholarly-paper concept.",
+            description="Download PDF of an arXiv paper, then store it in the configured blob store (local, OpenStack Swift, or S3-compatible object storage). The external arXiv tool writes into a local cache directory; this tool returns both the local cache file_path and a durable storage.uri and may register a #V#computer_file_copy when authenticated. Use when user asks to download/save/fetch a paper. This tool does not materialise the scholarly-paper concept.",
         ),
         MethodDefinition(
             name="finalise_cached_paper",
