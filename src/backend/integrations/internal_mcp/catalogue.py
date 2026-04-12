@@ -9126,6 +9126,161 @@ def _turn_execution_failure_mode_observed_action(item: Mapping[str, Any]) -> str
     )
 
 
+def _extract_turn_execution_workflow_candidate_id(raw_value: Any) -> str | None:
+    if not isinstance(raw_value, Mapping):
+        return None
+    for key in (
+        "workflow_id",
+        "selected_workflow_id",
+        "concept_id",
+        "candidate_workflow_id",
+    ):
+        value = raw_value.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _summarise_turn_execution_tool_invocations(
+    raw_tool_invocations: Any,
+    *,
+    max_items: int = 5,
+) -> list[dict[str, Any]]:
+    if not isinstance(raw_tool_invocations, list):
+        return []
+
+    summary: list[dict[str, Any]] = []
+    for raw_entry in raw_tool_invocations:
+        if not isinstance(raw_entry, Mapping):
+            continue
+        tool_name = None
+        for key in ("tool", "tool_name", "method"):
+            value = raw_entry.get(key)
+            if isinstance(value, str) and value.strip():
+                tool_name = value.strip()
+                break
+        status = raw_entry.get("status")
+        status_text = status.strip() if isinstance(status, str) and status.strip() else None
+
+        if tool_name is None and status_text is None:
+            continue
+
+        entry: dict[str, Any] = {}
+        if tool_name is not None:
+            entry["tool"] = tool_name
+        if status_text is not None:
+            entry["status"] = status_text
+        summary.append(entry)
+        if len(summary) >= max_items:
+            break
+
+    return summary
+
+
+def _extract_turn_execution_tool_invocation_summary(
+    item: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    existing_summary = item.get("tool_invocation_summary")
+    if isinstance(existing_summary, list):
+        return _summarise_turn_execution_tool_invocations(existing_summary)
+
+    execution_raw = item.get("execution")
+    execution = execution_raw if isinstance(execution_raw, Mapping) else {}
+    return _summarise_turn_execution_tool_invocations(
+        execution.get("tool_invocations")
+    )
+
+
+def _extract_turn_execution_selector_intended_workflow_id(
+    item: Mapping[str, Any],
+) -> str | None:
+    workflow_routing_diagnostics_raw = item.get("workflow_routing_diagnostics")
+    workflow_routing_diagnostics = (
+        workflow_routing_diagnostics_raw
+        if isinstance(workflow_routing_diagnostics_raw, Mapping)
+        else {}
+    )
+    selector_raw = workflow_routing_diagnostics.get("selector")
+    selector = selector_raw if isinstance(selector_raw, Mapping) else {}
+
+    for candidate in (
+        selector.get("selected_model_candidate"),
+        selector.get("selection_metadata"),
+    ):
+        workflow_id = _extract_turn_execution_workflow_candidate_id(candidate)
+        if workflow_id:
+            return workflow_id
+
+    model_attempts_raw = selector.get("model_attempts")
+    model_attempts = model_attempts_raw if isinstance(model_attempts_raw, list) else []
+    for raw_attempt in model_attempts:
+        if not isinstance(raw_attempt, Mapping):
+            continue
+        for candidate in (
+            raw_attempt,
+            raw_attempt.get("selected"),
+            raw_attempt.get("response"),
+        ):
+            workflow_id = _extract_turn_execution_workflow_candidate_id(candidate)
+            if workflow_id:
+                return workflow_id
+
+    return None
+
+
+def _extract_turn_execution_dispatch_workflow_id(
+    item: Mapping[str, Any],
+) -> str | None:
+    workflow_routing_diagnostics_raw = item.get("workflow_routing_diagnostics")
+    workflow_routing_diagnostics = (
+        workflow_routing_diagnostics_raw
+        if isinstance(workflow_routing_diagnostics_raw, Mapping)
+        else {}
+    )
+    dispatch_raw = workflow_routing_diagnostics.get("dispatch")
+    dispatch = dispatch_raw if isinstance(dispatch_raw, Mapping) else {}
+    dispatch_workflow_id = dispatch.get("dispatch_workflow_id")
+    if isinstance(dispatch_workflow_id, str) and dispatch_workflow_id.strip():
+        return dispatch_workflow_id.strip()
+    selected_workflow_id = item.get("selected_workflow_id")
+    if isinstance(selected_workflow_id, str) and selected_workflow_id.strip():
+        return selected_workflow_id.strip()
+    return None
+
+
+def _has_turn_execution_selector_dispatch_divergence(item: Mapping[str, Any]) -> bool:
+    selector_workflow_id = _extract_turn_execution_selector_intended_workflow_id(item)
+    dispatch_workflow_id = _extract_turn_execution_dispatch_workflow_id(item)
+    if not selector_workflow_id or not dispatch_workflow_id:
+        return False
+    return selector_workflow_id != dispatch_workflow_id
+
+
+def _has_turn_execution_weak_follow_up_action(item: Mapping[str, Any]) -> bool:
+    tool_summary = _extract_turn_execution_tool_invocation_summary(item)
+    tool_names = [
+        str(entry.get("tool")).strip().lower()
+        for entry in tool_summary
+        if isinstance(entry, Mapping)
+        and isinstance(entry.get("tool"), str)
+        and str(entry.get("tool")).strip()
+    ]
+    if not tool_names:
+        return False
+    return all(tool_name == "concept_exists" for tool_name in tool_names)
+
+
+def _build_turn_execution_replay_case_diagnostic_flags(
+    item: Mapping[str, Any],
+) -> list[str]:
+    flags: list[str] = []
+    if _has_turn_execution_selector_dispatch_divergence(item):
+        flags.append("selector_dispatch_divergence")
+    if _has_turn_execution_weak_follow_up_action(item):
+        flags.append("weak_follow_up_action")
+    return flags
+
+
 def _build_turn_execution_case_id(request_id: Any, index: int) -> str:
     if isinstance(request_id, str) and request_id.strip():
         cleaned_chars: list[str] = []
@@ -9215,6 +9370,12 @@ def _build_turn_execution_replay_case(
         else "unknown"
     )
     request_id = item.get("request_id")
+    selector_intended_workflow_id = _extract_turn_execution_selector_intended_workflow_id(
+        item
+    )
+    dispatch_workflow_id = _extract_turn_execution_dispatch_workflow_id(item)
+    tool_invocation_summary = _extract_turn_execution_tool_invocation_summary(item)
+    diagnostic_flags = _build_turn_execution_replay_case_diagnostic_flags(item)
     return {
         "case_id": _build_turn_execution_case_id(request_id, index),
         "request_id": request_id,
@@ -9230,6 +9391,7 @@ def _build_turn_execution_replay_case(
             "postcondition_satisfied": True,
             "no_false_success": True,
         },
+        "diagnostic_flags": diagnostic_flags,
         "evidence": {
             "decision": item.get("decision"),
             "decision_reason": item.get("decision_reason"),
@@ -9242,6 +9404,15 @@ def _build_turn_execution_replay_case(
                 else []
             ),
             "prompt_preview": item.get("prompt_preview"),
+            "selector_intended_workflow_id": selector_intended_workflow_id,
+            "dispatch_workflow_id": dispatch_workflow_id,
+            "selector_dispatch_divergence": (
+                bool(selector_intended_workflow_id)
+                and bool(dispatch_workflow_id)
+                and selector_intended_workflow_id != dispatch_workflow_id
+            ),
+            "tool_invocation_summary": tool_invocation_summary,
+            "weak_follow_up_action": _has_turn_execution_weak_follow_up_action(item),
         },
         "triage": _build_turn_execution_case_triage(
             item,
@@ -9581,6 +9752,12 @@ def _build_turn_execution_benchmark_signals(
     retry_metrics = retry_metrics_raw if isinstance(retry_metrics_raw, Mapping) else {}
     user_metrics_raw = metrics.get("user_imposition_metrics")
     user_metrics = user_metrics_raw if isinstance(user_metrics_raw, Mapping) else {}
+    action_quality_metrics_raw = metrics.get("action_quality_metrics")
+    action_quality_metrics = (
+        action_quality_metrics_raw
+        if isinstance(action_quality_metrics_raw, Mapping)
+        else {}
+    )
 
     signals: list[dict[str, Any]] = []
 
@@ -9655,6 +9832,34 @@ def _build_turn_execution_benchmark_signals(
             "max_follow_up_turn_rate_pct": max_follow_up_rate_pct,
             "baseline_follow_up_turn_rate_pct": baseline_follow_up_rate_pct,
             "regression_tolerance_pct": round(tolerance, 2),
+        },
+    )
+
+    weak_follow_up_with_divergence_count = int(
+        action_quality_metrics.get("weak_follow_up_with_selector_dispatch_divergence_count")
+        or 0
+    )
+    weak_follow_up_request_ids_raw = action_quality_metrics.get(
+        "weak_follow_up_with_selector_dispatch_divergence_request_ids"
+    )
+    weak_follow_up_request_ids = (
+        [
+            str(request_id).strip()
+            for request_id in weak_follow_up_request_ids_raw
+            if isinstance(request_id, str) and request_id.strip()
+        ]
+        if isinstance(weak_follow_up_request_ids_raw, list)
+        else []
+    )
+    _add_signal(
+        signal_id="likely_failure_cases_avoid_selector_dispatch_divergence_with_weak_follow_up",
+        dimension="action_quality",
+        title="Likely-failure turns avoid weak follow-up action after selector/dispatch divergence",
+        passed=weak_follow_up_with_divergence_count == 0,
+        details={
+            "observed_case_count": weak_follow_up_with_divergence_count,
+            "expected_case_count": 0,
+            "request_ids": weak_follow_up_request_ids,
         },
     )
 
@@ -10501,6 +10706,26 @@ def _turn_execution_build_benchmark(**kwargs):
         if str(item.get("selected_workflow_id") or "").strip()
         == "#V#tool_calling_workflow"
     )
+    selector_dispatch_divergence_count = 0
+    weak_follow_up_action_count = 0
+    weak_follow_up_with_selector_dispatch_divergence_count = 0
+    weak_follow_up_with_selector_dispatch_divergence_request_ids: list[str] = []
+    for item in likely_items:
+        selector_dispatch_divergence = _has_turn_execution_selector_dispatch_divergence(
+            item
+        )
+        weak_follow_up_action = _has_turn_execution_weak_follow_up_action(item)
+        if selector_dispatch_divergence:
+            selector_dispatch_divergence_count += 1
+        if weak_follow_up_action:
+            weak_follow_up_action_count += 1
+        if selector_dispatch_divergence and weak_follow_up_action:
+            weak_follow_up_with_selector_dispatch_divergence_count += 1
+            request_id = item.get("request_id")
+            if isinstance(request_id, str) and request_id.strip():
+                weak_follow_up_with_selector_dispatch_divergence_request_ids.append(
+                    request_id.strip()
+                )
     bounded_loop_stop_reasons = {
         "attempt_budget_exhausted",
         "elapsed_budget_exhausted",
@@ -10606,6 +10831,30 @@ def _turn_execution_build_benchmark(**kwargs):
             "likely_failure_tool_workflow_rate_pct": _format_turn_execution_rate(
                 likely_failure_tool_workflow_count, likely_failure_count
             ),
+        },
+        "action_quality_metrics": {
+            "selector_dispatch_divergence_count": selector_dispatch_divergence_count,
+            "selector_dispatch_divergence_rate_pct": _format_turn_execution_rate(
+                selector_dispatch_divergence_count, likely_failure_count
+            ),
+            "weak_follow_up_action_count": weak_follow_up_action_count,
+            "weak_follow_up_action_rate_pct": _format_turn_execution_rate(
+                weak_follow_up_action_count, likely_failure_count
+            ),
+            "weak_follow_up_with_selector_dispatch_divergence_count": (
+                weak_follow_up_with_selector_dispatch_divergence_count
+            ),
+            "weak_follow_up_with_selector_dispatch_divergence_rate_pct": (
+                _format_turn_execution_rate(
+                    weak_follow_up_with_selector_dispatch_divergence_count,
+                    likely_failure_count,
+                )
+            ),
+            "weak_follow_up_with_selector_dispatch_divergence_request_ids": list(
+                dict.fromkeys(
+                    weak_follow_up_with_selector_dispatch_divergence_request_ids
+                )
+            )[:10],
         },
         "gate_metrics": {
             "false_success_count": false_success_count,
@@ -16476,6 +16725,14 @@ def _rag_list_indexed(**kwargs):
                 state_by_chat_session_id=rag_indexing_state_map,
                 lookup_warning=rag_indexing_lookup_warning,
             )
+            execution_payload = (
+                doc.get("execution") if isinstance(doc.get("execution"), dict) else {}
+            )
+            tool_invocations = (
+                execution_payload.get("tool_invocations")
+                if isinstance(execution_payload, Mapping)
+                else None
+            )
 
             items.append(
                 {
@@ -16519,6 +16776,9 @@ def _rag_list_indexed(**kwargs):
                     "escalation_signal": escalation_signal,
                     "escalation_reason": escalation_reason,
                     "critic_summary": critic_summary,
+                    "tool_invocation_summary": _summarise_turn_execution_tool_invocations(
+                        tool_invocations
+                    ),
                     "rag_indexing_state": rag_indexing_state,
                     "identifier_binding": {
                         "mode": "turn_execution_record_projection",
@@ -17212,6 +17472,14 @@ def _rag_get_item(**kwargs):
             state_by_chat_session_id=rag_indexing_state_map,
             lookup_warning=rag_indexing_lookup_warning,
         )
+        execution_payload = (
+            doc.get("execution") if isinstance(doc.get("execution"), dict) else {}
+        )
+        tool_invocations = (
+            execution_payload.get("tool_invocations")
+            if isinstance(execution_payload, Mapping)
+            else None
+        )
 
         payload = {
             "collection": collection,
@@ -17235,6 +17503,9 @@ def _rag_get_item(**kwargs):
             "execution_correctness": execution_correctness,
             "workflow_routing_diagnostics": workflow_routing_diagnostics,
             "prompt_preview": prompt_payload.get("preview"),
+            "tool_invocation_summary": _summarise_turn_execution_tool_invocations(
+                tool_invocations
+            ),
             "required_effects": required_effects,
             "postcondition_checks": postcondition_checks,
             "critic": critic_payload,

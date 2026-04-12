@@ -389,6 +389,71 @@ def _build_hesitancy_trace_docs() -> list[dict[str, Any]]:
     ]
 
 
+def _build_corrective_evidence_failure_docs(
+    *,
+    follow_up_tool: str,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "request_id": "req-corr-1",
+            "session_id": "chat-corr-1",
+            "namespace": "#V#user@org",
+            "created_at_utc": "2026-04-12T07:44:21Z",
+            "completion_gate": {
+                "decision": "partial",
+                "decision_reason": "Workflow misrouted and stronger verification was not executed.",
+                "safe_to_claim_completion": False,
+                "requires_follow_up": True,
+                "blocking_effect_ids": ["effect_corr_1"],
+            },
+            "required_effects": [{"effect_id": "effect_corr_1", "status": "satisfied"}],
+            "workflow_selection": {
+                "selected_workflow_id": "#V#chat_assistant_workflow",
+                "selector_verdict": "rag_default",
+            },
+            "workflow_routing_diagnostics": {
+                "selector": {
+                    "selected_model_candidate": {
+                        "concept_id": "#V#specialised_vontology_search_workflow"
+                    }
+                },
+                "dispatch": {
+                    "dispatch_workflow_id": "#V#chat_assistant_workflow",
+                    "dispatch_terminal_status": "follow_up_required",
+                },
+            },
+            "execution": {
+                "tool_invocations": [
+                    {
+                        "tool": follow_up_tool,
+                        "status": "ok",
+                    }
+                ]
+            },
+            "prompt": {
+                "preview": "Yuchen Su for example is an instance of #V#current_uo_asail_ph_d_student"
+            },
+            "critic": {"summary": {"not_verified_count": 1}},
+            "final_response": {
+                "completion_claim_detected": False,
+                "completion_claim_validated": False,
+            },
+            "execution_correctness": {
+                "overall_outcome": "tool_or_workflow_misrouting",
+                "failure_mode": "mutation_failed_or_blocked",
+                "likely_failure_to_act": True,
+                "metric_labels": {
+                    "successful_completion": False,
+                    "false_success": False,
+                    "unresolved_follow_up_needed": True,
+                    "tool_or_workflow_misrouting": True,
+                    "abstain_escalate_no_safe_route": False,
+                },
+            },
+        }
+    ]
+
+
 def _build_dashboard_trace_docs() -> list[dict[str, Any]]:
     return [
         {
@@ -1838,6 +1903,131 @@ def test_turn_execution_build_benchmark_hesitancy_signals_detect_plain_response_
     summary = payload.get("benchmark_signal_summary")
     assert isinstance(summary, dict)
     assert summary.get("fail_count", 0) >= 1
+
+
+def test_turn_execution_build_benchmark_retains_corrective_evidence_replay_flags(
+    monkeypatch,
+):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    _install_minimal_imposition_profile_loader(monkeypatch)
+    coll = _TurnExecutionCollection(
+        _build_corrective_evidence_failure_docs(follow_up_tool="concept_exists")
+    )
+    monkeypatch.setattr(
+        "src.backend.db.connection_manager.get_db",
+        lambda: _DB({"turn_execution_records": coll}),
+    )
+
+    result = cat._turn_execution_build_benchmark(
+        namespace="#V#user@org",
+        limit=20,
+        offset=0,
+        max_cases=5,
+    )
+
+    assert result["success"] is True
+    replay_cases = result.get("replay_cases")
+    assert isinstance(replay_cases, list)
+    assert len(replay_cases) == 1
+    replay_case = replay_cases[0]
+    assert "selector_dispatch_divergence" in replay_case.get("diagnostic_flags", [])
+    assert "weak_follow_up_action" in replay_case.get("diagnostic_flags", [])
+
+    evidence = replay_case.get("evidence")
+    assert isinstance(evidence, dict)
+    assert (
+        evidence.get("selector_intended_workflow_id")
+        == "#V#specialised_vontology_search_workflow"
+    )
+    assert evidence.get("dispatch_workflow_id") == "#V#chat_assistant_workflow"
+    assert evidence.get("selector_dispatch_divergence") is True
+    assert evidence.get("weak_follow_up_action") is True
+    tool_summary = evidence.get("tool_invocation_summary")
+    assert isinstance(tool_summary, list)
+    assert tool_summary[0]["tool"] == "concept_exists"
+
+    action_quality_metrics = result.get("metrics", {}).get("action_quality_metrics")
+    assert isinstance(action_quality_metrics, dict)
+    assert action_quality_metrics.get("selector_dispatch_divergence_count") == 1
+    assert action_quality_metrics.get("weak_follow_up_action_count") == 1
+    assert (
+        action_quality_metrics.get(
+            "weak_follow_up_with_selector_dispatch_divergence_count"
+        )
+        == 1
+    )
+
+
+def test_turn_execution_build_benchmark_corrective_evidence_signal_changes_with_stronger_follow_up(
+    monkeypatch,
+):
+    _install_minimal_imposition_profile_loader(monkeypatch)
+    gateway = _build_gateway()
+
+    weak_coll = _TurnExecutionCollection(
+        _build_corrective_evidence_failure_docs(follow_up_tool="concept_exists")
+    )
+    monkeypatch.setattr(
+        "src.backend.db.connection_manager.get_db",
+        lambda: _DB({"turn_execution_records": weak_coll}),
+    )
+    weak_payload = gateway.invoke(
+        "turn_execution_build_benchmark",
+        {
+            "namespace": "#V#user@org",
+            "limit": 20,
+            "offset": 0,
+            "max_cases": 5,
+        },
+    ).payload
+
+    weak_signals = weak_payload.get("benchmark_signals")
+    assert isinstance(weak_signals, list)
+    weak_signal_by_id = {
+        signal.get("signal_id"): signal
+        for signal in weak_signals
+        if isinstance(signal, dict)
+    }
+    assert (
+        weak_signal_by_id[
+            "likely_failure_cases_avoid_selector_dispatch_divergence_with_weak_follow_up"
+        ]["status"]
+        == "fail"
+    )
+
+    strong_coll = _TurnExecutionCollection(
+        _build_corrective_evidence_failure_docs(
+            follow_up_tool="fetch_concept_content"
+        )
+    )
+    monkeypatch.setattr(
+        "src.backend.db.connection_manager.get_db",
+        lambda: _DB({"turn_execution_records": strong_coll}),
+    )
+    strong_payload = gateway.invoke(
+        "turn_execution_build_benchmark",
+        {
+            "namespace": "#V#user@org",
+            "limit": 20,
+            "offset": 0,
+            "max_cases": 5,
+        },
+    ).payload
+
+    strong_signals = strong_payload.get("benchmark_signals")
+    assert isinstance(strong_signals, list)
+    strong_signal_by_id = {
+        signal.get("signal_id"): signal
+        for signal in strong_signals
+        if isinstance(signal, dict)
+    }
+    assert (
+        strong_signal_by_id[
+            "likely_failure_cases_avoid_selector_dispatch_divergence_with_weak_follow_up"
+        ]["status"]
+        == "pass"
+    )
 
 
 def test_turn_execution_build_selector_benchmark_gateway_e2e():
