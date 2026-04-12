@@ -607,8 +607,15 @@ except Exception:
     print("[]")
     raise SystemExit(0)
 
-target = os.path.normcase(os.path.normpath(sys.argv[1]))
-exclude_pid = int(sys.argv[2]) if len(sys.argv) > 2 else 0
+args = sys.argv[1:]
+if args and args[0] == "--":
+    args = args[1:]
+if not args:
+    print("[]")
+    raise SystemExit(0)
+
+target = os.path.normcase(os.path.normpath(args[0]))
+exclude_pid = int(args[1]) if len(args) > 1 else 0
 current_pid = os.getpid()
 target_fragment = target.lower().replace("\\", "/")
 target_name = os.path.basename(target).lower()
