@@ -82,6 +82,31 @@ if (-not (Get-Command Write-LauncherLog -ErrorAction SilentlyContinue)) {
     }
 }
 
+function Apply-LauncherSwitchCompatibility {
+    param(
+        [string]$RawInvocationLine = $MyInvocation.Line,
+        [string[]]$RemainingArgs = $ExtraArgs
+    )
+
+    if ((-not $script:ForceBrowser) -and (($RemainingArgs -contains '--ForceBrowser') -or ($RawInvocationLine -match '(^|\s)--ForceBrowser(?:\s|$)'))) {
+        $script:ForceBrowser = $true
+    }
+    if ((-not $script:NoBrowser) -and (($RemainingArgs -contains '--NoBrowser') -or ($RawInvocationLine -match '(^|\s)--NoBrowser(?:\s|$)'))) {
+        $script:NoBrowser = $true
+    }
+    if ((-not $script:ChromeBeta) -and (($RemainingArgs -contains '--ChromeBeta') -or ($RawInvocationLine -match '(^|\s)--ChromeBeta(?:\s|$)'))) {
+        $script:ChromeBeta = $true
+    }
+}
+
+function ConvertTo-PowerShellSingleQuotedLiteral {
+    param([AllowNull()][string]$Value)
+    if ($null -eq $Value) { return "''" }
+    return "'" + ($Value -replace "'", "''") + "'"
+}
+
+Apply-LauncherSwitchCompatibility
+
 function Set-EnvFromDotEnv {
     param([string]$EnvPath)
     if (-not $EnvPath) { return }
@@ -471,6 +496,10 @@ else {
 
 # Sentinel file to ensure we open the browser only once automatically
 $BrowserSentinel = Join-Path $RunDir 'browser_opened_once'
+$WorkflowPurityPidFile = Join-Path $RunDir 'workflow_purity_check.pid'
+$WorkflowPurityResultFile = Join-Path $RunDir 'workflow_purity_check_last_result.json'
+$WorkflowPurityReportedFile = Join-Path $RunDir 'workflow_purity_check_last_reported.txt'
+$WorkflowPurityRunnerScript = Join-Path $RunDir 'workflow_purity_runner.ps1'
 
 # PID & log paths (port included for future multi-instance separation)
 $PidFile = Join-Path $RunDir "von_${Port}.pid"
@@ -1727,6 +1756,22 @@ function Get-ActualServerPort {
     return $null
 }
 
+function Get-CurrentPowerShellExecutable {
+    try {
+        $current = Get-Process -Id $PID -ErrorAction Stop
+        if ($current.Path) { return $current.Path }
+    }
+    catch { }
+
+    $pwsh = Get-Command pwsh -ErrorAction SilentlyContinue
+    if ($pwsh -and $pwsh.Source) { return $pwsh.Source }
+
+    $powershell = Get-Command powershell -ErrorAction SilentlyContinue
+    if ($powershell -and $powershell.Source) { return $powershell.Source }
+
+    return $null
+}
+
 function Get-RecordedPortFromPidFile {
     param(
         [string]$Path = $PidFile,
@@ -1750,8 +1795,8 @@ function Open-VonBrowserIfNeeded {
     param([int]$TargetPort = $Port)
 
     $shouldOpen = $false
-    if ($ForceBrowser) { $shouldOpen = $true }
-    elseif (-not (Test-Path $BrowserSentinel)) { $shouldOpen = $true }
+    if ($script:ForceBrowser) { $shouldOpen = $true }
+    elseif (-not (Test-Path $script:BrowserSentinel)) { $shouldOpen = $true }
 
     if (-not $shouldOpen) {
         Write-LauncherLog "Browser already opened previously (use -ForceBrowser to open again)."
@@ -1772,7 +1817,7 @@ function Open-VonBrowserIfNeeded {
             "${env:LocalAppData}\Google\Chrome\Application\chrome.exe"
         )
         # If -ChromeBeta is set, only try Beta; otherwise try Beta first then stable
-        if ($ChromeBeta) {
+        if ($script:ChromeBeta) {
             $chromePaths = $chromeBetaPaths
         }
         else {
@@ -1792,8 +1837,8 @@ function Open-VonBrowserIfNeeded {
             # Fallback to default browser if Chrome not found
             Start-Process $url | Out-Null
         }
-        if (-not (Test-Path $BrowserSentinel)) { Set-Content $BrowserSentinel (Get-Date).ToString('o') }
-        if ($ForceBrowser) { Write-LauncherLog "Opened browser (forced): $browserUsed" } else { Write-LauncherLog "Opened browser (first launch): $browserUsed" }
+        if (-not (Test-Path $script:BrowserSentinel)) { Set-Content $script:BrowserSentinel (Get-Date).ToString('o') }
+        if ($script:ForceBrowser) { Write-LauncherLog "Opened browser (forced): $browserUsed" } else { Write-LauncherLog "Opened browser (first launch): $browserUsed" }
         return $true
     }
     catch {
@@ -1802,13 +1847,84 @@ function Open-VonBrowserIfNeeded {
     }
 }
 
+function Report-WorkflowPurityCheckStatus {
+    if (Test-Path $script:WorkflowPurityPidFile) {
+        $pidContent = Get-Content $script:WorkflowPurityPidFile -Raw -ErrorAction SilentlyContinue
+        if ($pidContent -match 'PID=([0-9]+)') {
+            $runningPid = [int]$Matches[1]
+            if (Get-Process -Id $runningPid -ErrorAction SilentlyContinue) {
+                Write-LauncherLog "Workflow purity check still running from a previous start (PID=$runningPid)."
+                return
+            }
+        }
+        Remove-Item $script:WorkflowPurityPidFile -Force -ErrorAction SilentlyContinue
+    }
+
+    if (-not (Test-Path $script:WorkflowPurityResultFile)) { return }
+
+    try {
+        $result = Get-Content $script:WorkflowPurityResultFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        Write-LauncherLog "WARN: Failed to read workflow purity result receipt: $($_.Exception.Message)"
+        return
+    }
+
+    $completedAtUtc = ''
+    if ($null -ne $result.completed_at_utc) {
+        if ($result.completed_at_utc -is [datetime]) {
+            $completedAtUtc = $result.completed_at_utc.ToUniversalTime().ToString('o')
+        }
+        else {
+            $completedAtUtc = [string]$result.completed_at_utc
+        }
+    }
+    $resultExitCode = if ($null -ne $result.exit_code) { [int]$result.exit_code } else { 0 }
+    $resultStatus = if ($null -ne $result.status) { [string]$result.status } else { '' }
+    $completionKey = "{0}|{1}|{2}" -f $completedAtUtc, $resultExitCode, $resultStatus
+    $lastReported = ''
+    if (Test-Path $script:WorkflowPurityReportedFile) {
+        $lastReported = (Get-Content $script:WorkflowPurityReportedFile -Raw -ErrorAction SilentlyContinue).Trim()
+    }
+    if ($completionKey -eq $lastReported) { return }
+
+    if ($resultExitCode -eq 0) {
+        Set-Content $script:WorkflowPurityReportedFile $completionKey
+        return
+    }
+
+    Write-LauncherLog "WARN: Previous workflow purity check failed (status=$resultStatus exit=$resultExitCode)."
+    if ($result.log_path -or $result.err_log_path) {
+        Write-LauncherLog "WARN: Review purity logs: $($result.log_path) ; stderr: $($result.err_log_path)"
+    }
+    if ($result.message) {
+        Write-LauncherLog "[purity-check:last] $($result.message)"
+    }
+
+    $previewLines = @()
+    foreach ($path in @($result.log_path, $result.err_log_path)) {
+        if (-not $path) { continue }
+        if (-not (Test-Path $path)) { continue }
+        try {
+            foreach ($line in (Get-Content $path -ErrorAction Stop | Where-Object { $_ -and $_.Trim() } | Select-Object -First 5)) {
+                $previewLines += [string]$line
+            }
+        }
+        catch { }
+    }
+    foreach ($line in ($previewLines | Select-Object -Unique -First 5)) {
+        Write-LauncherLog "[purity-check:last] $line"
+    }
+
+    Set-Content $script:WorkflowPurityReportedFile $completionKey
+}
+
 function Start-WorkflowPurityCheckNonBlocking {
-    $purityScript = Join-Path $Root 'scripts/check_workflow_purity.py'
+    $purityScript = Join-Path $script:Root 'scripts/check_workflow_purity.py'
     if (-not (Test-Path $purityScript)) { return $false }
 
-    $purityPidFile = Join-Path $RunDir 'workflow_purity_check.pid'
-    if (Test-Path $purityPidFile) {
-        $pidContent = Get-Content $purityPidFile -Raw -ErrorAction SilentlyContinue
+    if (Test-Path $script:WorkflowPurityPidFile) {
+        $pidContent = Get-Content $script:WorkflowPurityPidFile -Raw -ErrorAction SilentlyContinue
         if ($pidContent -match 'PID=([0-9]+)') {
             $existingPid = [int]$Matches[1]
             if (Get-Process -Id $existingPid -ErrorAction SilentlyContinue) {
@@ -1816,14 +1932,15 @@ function Start-WorkflowPurityCheckNonBlocking {
                 return $false
             }
         }
-        Remove-Item $purityPidFile -Force -ErrorAction SilentlyContinue
+        Remove-Item $script:WorkflowPurityPidFile -Force -ErrorAction SilentlyContinue
     }
 
-    $pdm = if (Test-Path (Join-Path $Root '.venv\Scripts\pdm.exe')) { Join-Path $Root '.venv\Scripts\pdm.exe' } else { 'pdm' }
-    $venvPython = Join-Path $Root '.venv\Scripts\python.exe'
+    $pdm = if (Test-Path (Join-Path $script:Root '.venv\Scripts\pdm.exe')) { Join-Path $script:Root '.venv\Scripts\pdm.exe' } else { 'pdm' }
+    $venvPython = Join-Path $script:Root '.venv\Scripts\python.exe'
     $purityTimestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-    $purityLog = Join-Path $LogsDir "workflow_purity_${purityTimestamp}.log"
+    $purityLog = Join-Path $script:LogsDir "workflow_purity_${purityTimestamp}.log"
     $purityErrLog = "$purityLog.err"
+    $powerShellExe = Get-CurrentPowerShellExecutable
 
     $purityExe = $null
     $purityArgs = @()
@@ -1838,10 +1955,80 @@ function Start-WorkflowPurityCheckNonBlocking {
         $purityArgs = @('run', 'python', $purityScript, '--quiet')
     }
 
+    if (-not $powerShellExe) {
+        Write-LauncherLog "WARN: Could not resolve PowerShell executable for workflow purity runner."
+        return $false
+    }
+
+    $purityArgLiteral = if ($purityArgs.Count -gt 0) {
+        "@(" + (($purityArgs | ForEach-Object { ConvertTo-PowerShellSingleQuotedLiteral $_ }) -join ', ') + ")"
+    }
+    else {
+        "@()"
+    }
+    $wrapperContent = @"
+`$ErrorActionPreference = 'Stop'
+`$purityExe = $(ConvertTo-PowerShellSingleQuotedLiteral $purityExe)
+`$purityArgs = $purityArgLiteral
+`$workingDirectory = $(ConvertTo-PowerShellSingleQuotedLiteral $script:Root)
+`$purityLog = $(ConvertTo-PowerShellSingleQuotedLiteral $purityLog)
+`$purityErrLog = $(ConvertTo-PowerShellSingleQuotedLiteral $purityErrLog)
+`$resultFile = $(ConvertTo-PowerShellSingleQuotedLiteral $script:WorkflowPurityResultFile)
+`$pidFile = $(ConvertTo-PowerShellSingleQuotedLiteral $script:WorkflowPurityPidFile)
+`$startedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
+`$exitCode = -1
+`$status = 'failed_to_launch'
+`$message = `$null
+try {
+    if (Test-Path `$purityLog) { Remove-Item `$purityLog -Force -ErrorAction SilentlyContinue }
+    if (Test-Path `$purityErrLog) { Remove-Item `$purityErrLog -Force -ErrorAction SilentlyContinue }
+    Push-Location `$workingDirectory
     try {
-        $proc = Start-Process -FilePath $purityExe -ArgumentList $purityArgs -WorkingDirectory $Root -PassThru -WindowStyle Hidden -RedirectStandardOutput $purityLog -RedirectStandardError $purityErrLog
+        & `$purityExe @purityArgs 1> `$purityLog 2> `$purityErrLog
+        if (`$null -ne `$LASTEXITCODE) {
+            `$exitCode = [int]`$LASTEXITCODE
+        }
+        elseif (`$?) {
+            `$exitCode = 0
+        }
+        else {
+            `$exitCode = 1
+        }
+    }
+    finally {
+        Pop-Location
+    }
+    if (`$exitCode -eq 0) {
+        `$status = 'passed'
+    }
+    else {
+        `$status = 'failed'
+    }
+}
+catch {
+    `$message = `$_.Exception.Message
+}
+finally {
+    `$completedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
+    `$result = [ordered]@{
+        started_at_utc = `$startedAtUtc
+        completed_at_utc = `$completedAtUtc
+        exit_code = `$exitCode
+        status = `$status
+        log_path = `$purityLog
+        err_log_path = `$purityErrLog
+        message = `$message
+    }
+    `$result | ConvertTo-Json -Depth 5 | Set-Content `$resultFile -Encoding UTF8
+    Remove-Item `$pidFile -Force -ErrorAction SilentlyContinue
+}
+"@
+
+    try {
+        Set-Content -Path $script:WorkflowPurityRunnerScript -Value $wrapperContent -Encoding UTF8
+        $proc = Start-Process -FilePath $powerShellExe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script:WorkflowPurityRunnerScript) -WorkingDirectory $script:Root -PassThru -WindowStyle Hidden
         $startIso = (Get-Date).ToString('o')
-        Set-Content $purityPidFile "PID=$($proc.Id)`nSTART=$startIso"
+        Set-Content $script:WorkflowPurityPidFile "PID=$($proc.Id)`nSTART=$startIso"
         Write-LauncherLog "Started workflow purity check in background (PID=$($proc.Id), mode=$launchMode). Logs: $purityLog ; stderr: $purityErrLog"
         return $true
     }
@@ -1854,7 +2041,7 @@ function Start-WorkflowPurityCheckNonBlocking {
 function Invoke-VonHealthyStartFollowUps {
     param([int]$TargetPort = $Port)
 
-    if (-not $NoBrowser) {
+    if (-not $script:NoBrowser) {
         Open-VonBrowserIfNeeded -TargetPort $TargetPort | Out-Null
     }
     Start-WorkflowPurityCheckNonBlocking | Out-Null
@@ -1962,6 +2149,7 @@ function Sync-PidFileToListener {
 function Start-VonServer {
     param([switch]$RestartTakeover)
     # was Start-Von
+    Report-WorkflowPurityCheckStatus
     # Set production database name first (before any checks)
     # This ensures we default to production database and only throw if user explicitly wants test mode
     if (-not $env:VON_DB_NAME -or $env:VON_DB_NAME -eq 'test_von_db') {
@@ -1980,7 +2168,7 @@ function Start-VonServer {
     if ($existing) {
         $existingPort = Get-RecordedPortFromPidFile -FallbackPort $Port
         Write-LauncherLog "Already running (PID=$($existing.Id)). Use .\run.ps1 stop or restart."
-        if (-not $NoBrowser) {
+        if (-not $script:NoBrowser) {
             Open-VonBrowserIfNeeded -TargetPort $existingPort | Out-Null
         }
         return
@@ -2002,7 +2190,7 @@ function Start-VonServer {
         if (-not $currentPidInFile) {
             Write-LauncherLog ("Port {0} already in use by PID={1}; assuming server already running (untracked)." -f $Port, $listener.Id)
             Write-PidFile $listener.Id
-            if (-not $NoBrowser) {
+            if (-not $script:NoBrowser) {
                 Open-VonBrowserIfNeeded -TargetPort $Port | Out-Null
             }
             return
@@ -2010,7 +2198,7 @@ function Start-VonServer {
         elseif ($currentPidInFile -ne $listener.Id) {
             Write-LauncherLog ("Port {0} owned by PID={1} but PID file had PID={2}; updating PID file to listener." -f $Port, $listener.Id, $currentPidInFile)
             Write-PidFile $listener.Id
-            if (-not $NoBrowser) {
+            if (-not $script:NoBrowser) {
                 Open-VonBrowserIfNeeded -TargetPort $Port | Out-Null
             }
             return
