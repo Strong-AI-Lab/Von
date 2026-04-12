@@ -1966,6 +1966,20 @@ describe('thinking activity history normalisation', () => {
                     }
                 ]
             },
+            workflow_selection: {
+                selected_workflow_id: '#V#tool_calling_workflow',
+                selected_workflow_name: 'Tool calling workflow',
+                selector_verdict: 'tool_seeking',
+                selector_source: 'selector'
+            },
+            workflow_routing_diagnostics: {
+                schema_version: 'workflow_routing_diagnostics.v1',
+                selected_workflow_id: '#V#tool_calling_workflow',
+                dispatch: {
+                    dispatch_workflow_id: '#V#tool_calling_workflow',
+                    dispatch_terminal_status: 'completed'
+                }
+            },
             phase_history: [{ phase: 'completion_gate' }],
             progress_events: [{ stage: 'completion_gate', status: 'completed' }],
             activity_history: [{ label: 'Completion gate', state: 'success' }],
@@ -1985,35 +1999,54 @@ describe('thinking activity history normalisation', () => {
         expect(request.latestProgress).toEqual(diagnostics.latest_progress);
         expect(request.workflowStagePath).toEqual(diagnostics.workflow_stage_path);
         expect(request.workflowDiscovery).toEqual(diagnostics.workflow_discovery);
+        expect(request.workflowSelection).toEqual(diagnostics.workflow_selection);
+        expect(request.workflowRoutingDiagnostics).toEqual(diagnostics.workflow_routing_diagnostics);
         expect(request.phaseHistory).toEqual(diagnostics.phase_history);
         expect(request.progressEvents).toEqual(diagnostics.progress_events);
         expect(request.activityHistory).toEqual(diagnostics.activity_history);
         expect(request.stageDiagnostics).toEqual(diagnostics.stage_diagnostics);
     });
 
-    test('prefers backend elapsed time and preserves workflow routing diagnostics', () => {
+    test('prefers backend elapsed time and preserves canonical workflow selection and routing diagnostics', () => {
         const diagnosticsPayload = __testOnly_buildThinkingDiagnosticsPayload({
             clientRequestId: 'req-routing',
             promptRaw: 'Run the meeting invitation test',
             thinkingStartedAtMs: Date.now() - 20000,
-            latestProgress: {
-                elapsed_ms: 85641,
-                workflow_routing_diagnostics: {
-                    schema_version: 'workflow_routing_diagnostics.v1',
-                    selector: {
-                        prompt: { text: 'Select workflow', char_count: 15 },
-                        response: { text: '#V#tool_calling_workflow', char_count: 24 },
-                        fallback_used: true,
-                        primary_fallback_failure_kind: 'provider_unreachable'
-                    }
+            workflowSelection: {
+                selected_workflow_id: '#V#tool_calling_workflow',
+                selector_verdict: 'tool_seeking',
+                selector_source: 'selector'
+            },
+            workflowRoutingDiagnostics: {
+                schema_version: 'workflow_routing_diagnostics.v1',
+                selected_workflow_id: '#V#tool_calling_workflow',
+                dispatch: {
+                    dispatch_workflow_id: '#V#tool_calling_workflow'
+                },
+                selector: {
+                    prompt: { text: 'Select workflow', char_count: 15 },
+                    response: { text: '#V#tool_calling_workflow', char_count: 24 },
+                    fallback_used: true,
+                    primary_fallback_failure_kind: 'provider_unreachable'
                 }
+            },
+            latestProgress: {
+                elapsed_ms: 85641
             }
         });
 
         expect(diagnosticsPayload.elapsed_ms).toBe(85641);
+        expect(diagnosticsPayload.workflow_selection).toEqual(
+            expect.objectContaining({
+                selected_workflow_id: '#V#tool_calling_workflow',
+                selector_verdict: 'tool_seeking',
+                selector_source: 'selector'
+            })
+        );
         expect(diagnosticsPayload.workflow_routing_diagnostics).toEqual(
             expect.objectContaining({
                 schema_version: 'workflow_routing_diagnostics.v1',
+                selected_workflow_id: '#V#tool_calling_workflow',
                 selector: expect.objectContaining({
                     fallback_used: true,
                     primary_fallback_failure_kind: 'provider_unreachable'
@@ -2399,6 +2432,100 @@ describe('thinking activity history normalisation', () => {
         expect(html).toContain('No direct workflow match found');
         expect(html).toContain('Finalising response');
         expect(html).toContain('Assembling the final response payload.');
+    });
+
+    test('preserves selected custom workflow identity through finalising render stages', () => {
+        const html = __testOnly_renderThinkingCardBodyHTML({
+            workflowStagePath: {
+                workflow_id: '#V#chat_narration_workflow',
+                workflow_id_source: 'mapped_stage_consensus',
+                path: [
+                    { stage_id: 'workflow_dispatch_prepare', stage_label: 'Workflow dispatch preparation' },
+                    { stage_id: 'screen_backfill', stage_label: 'Screen backfill' },
+                    { stage_id: 'narration', stage_label: 'Narration rendering' },
+                    { stage_id: 'response_finalising', stage_label: 'Finalising response' }
+                ]
+            },
+            workflowDiscovery: {
+                match_count: 1,
+                matches: [
+                    {
+                        concept_id: '#V#arxiv_paper_representation_workflow',
+                        name: 'Arxiv paper representation workflow'
+                    }
+                ]
+            },
+            workflowSelection: {
+                selected_workflow_id: '#V#arxiv_paper_representation_workflow',
+                selector_verdict: 'rag_selected',
+                selector_source: 'selector'
+            },
+            workflowRoutingDiagnostics: {
+                schema_version: 'workflow_routing_diagnostics.v1',
+                selected_workflow_id: '#V#arxiv_paper_representation_workflow',
+                dispatch: {
+                    selected_execution_mode: 'custom_workflow',
+                    dispatch_workflow_id: '#V#arxiv_paper_representation_workflow',
+                    dispatch_terminal_status: 'completed'
+                }
+            },
+            stageDiagnostics: [
+                {
+                    stage_id: 'workflow_dispatch_prepare',
+                    stage_label: 'Workflow dispatch preparation',
+                    latest_result_summary: 'Preparing workflow dispatch',
+                    latest_subtask: 'Load workflow launch contract'
+                },
+                {
+                    stage_id: 'screen_backfill',
+                    stage_label: 'Screen backfill',
+                    latest_result_summary: 'Preparing workflow dispatch',
+                    response_transformation: {
+                        status: 'fallback_success',
+                        source_path: 'response_text',
+                        output_summary: {
+                            applied: true,
+                            presenter_format: 'screen_backfill_from_response_with_operational_summary_v1'
+                        }
+                    }
+                },
+                {
+                    stage_id: 'narration',
+                    stage_label: 'Narration rendering',
+                    latest_result_summary: 'Preparing workflow dispatch',
+                    response_transformation: {
+                        status: 'fallback_success',
+                        source_path: 'screen_text_fallback',
+                        output_summary: {
+                            applied: true,
+                            presenter_format: 'narration_fallback_v1'
+                        }
+                    }
+                },
+                {
+                    stage_id: 'response_finalising',
+                    stage_label: 'Finalising response',
+                    latest_result_summary: 'Assembling the final response payload.'
+                }
+            ],
+            latestProgress: {
+                phase: 'response_finalising',
+                status: 'heartbeat',
+                result_summary: 'Assembling the final response payload.'
+            }
+        });
+
+        expect(html).toContain(
+            'Preparing Arxiv paper representation workflow (#V#arxiv_paper_representation_workflow) for dispatch'
+        );
+        expect(html).toContain(
+            'Preparing the on-screen response from the drafted reply · Workflow: Arxiv paper representation workflow (#V#arxiv_paper_representation_workflow)'
+        );
+        expect(html).toContain(
+            'Preparing spoken narration from the prepared screen response · Workflow: Arxiv paper representation workflow (#V#arxiv_paper_representation_workflow)'
+        );
+        expect(html).toContain('Routing rationale');
+        expect(html).not.toContain('Preparing workflow dispatch</summary>');
     });
 
     test('dispatches concept selection from thinking card workflow links', () => {

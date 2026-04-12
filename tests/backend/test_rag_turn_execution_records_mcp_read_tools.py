@@ -1151,6 +1151,10 @@ def test_turn_execution_get_diagnostics_reconstructs_from_projection(monkeypatch
     assert result["source_system"] == "mongo.turn_execution_records"
     assert result["reconstruction"]["lossy"] is True
     assert result["tool_call_count"] == 1
+    assert result["workflow_selection"] == {
+        "selected_workflow_id": "#V#tool_calling_workflow",
+        "workflow_discovery": {"match_count": 1},
+    }
     assert result["workflow_stage_path"]["schema_version"] == (
         "conversation_turn_stage_path.v1"
     )
