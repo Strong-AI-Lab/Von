@@ -33,7 +33,6 @@ from ...languagemodels.llm_interface import (
     get_llm_client,
 )
 from ...integrations.internal_mcp import ProgressTracker, ToolCallParsingError
-from ...integrations.internal_mcp.orchestrator import InternalMCPChatOrchestrator
 from ...services import chat_history_service
 from ...services.background_task_service import background_task_registry
 from ...services.window_session_context_service import (
@@ -1634,6 +1633,22 @@ def _build_turn_execution_stage_diagnostics(
             ),
             "llm_exchange_record_count": int(
                 authority_summary["llm_exchange_record_count"]
+            ),
+            "llm_exchange_entry_types": list(
+                authority_summary["llm_exchange_entry_types"]
+            ),
+            "llm_exchange_summaries": [
+                dict(entry)
+                for entry in authority_summary["llm_exchange_summaries"]
+                if isinstance(entry, Mapping)
+            ],
+            "llm_exchange_summary_truncated_count": int(
+                authority_summary["llm_exchange_summary_truncated_count"]
+            ),
+            "latest_llm_exchange": (
+                dict(authority_summary["latest_llm_exchange"])
+                if isinstance(authority_summary["latest_llm_exchange"], Mapping)
+                else None
             ),
             "missing_recorded_llm_input": bool(
                 authority_summary["missing_recorded_llm_input"]
@@ -14004,14 +14019,17 @@ def _handle_orchestrator_missing_fallback(
     from ...integrations.internal_mcp.orchestrator import (
         InternalMCPChatOrchestrator,
     )
-    from flask import current_app
-    
+
     # Heuristic for provider inference if needed
     def _infer_provider(model: str | None) -> str:
-        if not model: return "unknown"
-        if "gpt" in model.lower(): return "openai"
-        if "claude" in model.lower(): return "anthropic"
-        if "gemini" in model.lower(): return "google"
+        if not model:
+            return "unknown"
+        if "gpt" in model.lower():
+            return "openai"
+        if "claude" in model.lower():
+            return "anthropic"
+        if "gemini" in model.lower():
+            return "google"
         return "unknown"
 
     orchestrator_status = current_app.config.get(
@@ -14110,8 +14128,7 @@ def _perform_legacy_spoken_backfill(
 ):
     """Perform legacy spoken backfill logic extracted from generate()."""
     import time
-    from flask import current_app
-    
+
     def _coerce_spoken_text(text: object) -> str | None:
         if not text:
             return None
@@ -14126,8 +14143,6 @@ def _perform_legacy_spoken_backfill(
     spoken_backfill_suppression_reason = None
     spoken_backfill_applied = False
     spoken_backfill_error_class = None
-    spoken_backfill_source = None
-    spoken_backfill_model_id = None
     spoken_backfill_second_pass_reason = None
     spoken_backfill_started_perf = time.perf_counter()
 
@@ -14182,13 +14197,9 @@ def _perform_legacy_spoken_backfill(
                 )
                 narration_user = f'User: {prompt_text}\n\nContent: {screen_text}'
                 narration_response = _llm_generate_spoken_backfill(llm_client, narration_system, narration_user, model_name)
-                spoken_backfill_source = 'llm_synthesis'
-                spoken_backfill_model_id = model_name
                 spoken_fallback = _coerce_spoken_text(narration_response)
                 if not spoken_fallback:
                     spoken_fallback = _coerce_spoken_text(screen_text)
-                    if spoken_fallback:
-                        spoken_backfill_source = 'screen_text_fallback'
                 if spoken_fallback:
                     base_channels = dict(presenter_channels) if isinstance(presenter_channels, dict) else {}
                     base_channels['screen'] = screen_text

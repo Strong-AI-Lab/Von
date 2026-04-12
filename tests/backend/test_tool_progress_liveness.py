@@ -1785,6 +1785,17 @@ def test_turn_execution_diagnostics_clear_stale_selector_prompt_failure_after_su
     assert workflow_dispatch.get("dispatch_terminal_failure_reason") == (
         "workflow_launch_input_resolution_failed"
     )
+    assert workflow_dispatch.get("llm_exchange_record_count") == 2
+    assert workflow_dispatch.get("llm_exchange_entry_types") == [
+        "workflow_selector_prompt",
+        "workflow_selector",
+    ]
+    assert workflow_dispatch.get("latest_llm_exchange", {}).get("entry_type") == (
+        "workflow_selector"
+    )
+    assert workflow_dispatch.get("latest_llm_exchange", {}).get(
+        "response_preview", {}
+    ).get("text") == selected_workflow_id
 
     activity_history = diagnostics.get("activity_history")
     assert isinstance(activity_history, list)

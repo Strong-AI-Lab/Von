@@ -77,6 +77,7 @@ const CONVERSATION_INFO_COPY_BUTTON_LABEL = 'ℹ';
 const CONVERSATION_INFO_COPY_BUTTON_TITLE_READY = 'Copy conversation info as JSON';
 const CONVERSATION_INFO_COPY_BUTTON_TITLE_DISABLED = 'Conversation info is not available yet';
 const CONVERSATION_INFO_EXPORT_SCHEMA_VERSION = 'conversation_info_export.v1';
+const CONVERSATION_TELEMETRY_ACCESS_SCHEMA_VERSION = 'conversation_telemetry_access.v1';
 const CONVERSATION_LLM_TELEMETRY_SCHEMA_VERSION = 'conversation_llm_telemetry.v1';
 const CONVERSATION_LLM_TELEMETRY_LOCATOR_SCHEMA_VERSION = 'conversation_llm_telemetry_locator.v1';
 const TURN_TELEMETRY_LOCATOR_SCHEMA_VERSION = 'turn_telemetry_locator.v1';
@@ -23966,6 +23967,50 @@ function buildChatHistoryAccessArgs({ sessionId, historyIndex = undefined } = {}
     };
 }
 
+function buildConversationTelemetrySessionMcpAccess(
+    sessionId,
+    namespaceContext = buildConversationTelemetryNamespaceContext()
+) {
+    const cleanSessionId = typeof sessionId === 'string' && sessionId.trim()
+        ? sessionId.trim()
+        : null;
+    if (!cleanSessionId) {
+        return {};
+    }
+
+    return {
+        conversation_telemetry_get_locator: buildMcpToolAccess(
+            'conversation_telemetry_get_locator',
+            {
+                session_id: cleanSessionId,
+                namespace: namespaceContext.namespace || null,
+                user_concept_id: namespaceContext.user_id || null,
+                organisation_concept_id: namespaceContext.org_id || null
+            },
+            'Fetch the authoritative server-side conversation telemetry locator.'
+        ),
+        chat_history_get_segments: buildMcpToolAccess(
+            'chat_history_get_segments',
+            {
+                session_id: cleanSessionId,
+                namespace: namespaceContext.namespace || null,
+                user_concept_id: namespaceContext.user_id || null,
+                organisation_concept_id: namespaceContext.org_id || null,
+                include_debug: true
+            },
+            'Fetch the stored transcript segments and embedded debug payloads for this session.'
+        ),
+        turn_execution_list: buildMcpToolAccess(
+            'turn_execution_list',
+            {
+                session_id: cleanSessionId,
+                namespace: namespaceContext.namespace || null
+            },
+            'List turn-execution records for this conversation.'
+        )
+    };
+}
+
 function buildThinkingDiagnosticsLocatorPayload(request) {
     if (!request || typeof request !== 'object') {
         return null;
@@ -24268,32 +24313,6 @@ function hasConversationInfoContext() {
     return Array.isArray(transcriptTurns) && transcriptTurns.length > 0;
 }
 
-async function hydrateConversationTelemetryLocatorEntries() {
-    const hydrationPromises = [];
-
-    for (const [turnId, debugData] of llmDebugData.entries()) {
-        if (!debugData || typeof debugData !== 'object') {
-            continue;
-        }
-        if (hasLlmDebugPayload(debugData)) {
-            continue;
-        }
-
-        const historyLocation = cloneConversationHistoryLocation(debugData.history_location);
-        if (!historyLocation?.session_id || historyLocation.history_index === undefined || historyLocation.history_index === null) {
-            continue;
-        }
-
-        hydrationPromises.push(loadLlmDebugDataForTurn(turnId));
-    }
-
-    if (hydrationPromises.length === 0) {
-        return;
-    }
-
-    await Promise.allSettled(hydrationPromises);
-}
-
 async function fetchConversationTelemetryLocatorPayload(sessionId) {
     const cleanSessionId = typeof sessionId === 'string' ? sessionId.trim() : '';
     if (!cleanSessionId) {
@@ -24486,39 +24505,6 @@ function buildConversationLlmTelemetryLocatorPayload() {
         return turnPayload;
     });
 
-    const mcpAccess = {};
-    if (sessionId) {
-        mcpAccess.conversation_telemetry_get_locator = buildMcpToolAccess(
-            'conversation_telemetry_get_locator',
-            {
-                session_id: sessionId,
-                namespace: namespaceContext.namespace || null,
-                user_concept_id: namespaceContext.user_id || null,
-                organisation_concept_id: namespaceContext.org_id || null
-            },
-            'Fetch the authoritative server-side conversation telemetry locator.'
-        );
-        mcpAccess.chat_history_get_segments = buildMcpToolAccess(
-            'chat_history_get_segments',
-            {
-                session_id: sessionId,
-                namespace: namespaceContext.namespace || null,
-                user_concept_id: namespaceContext.user_id || null,
-                organisation_concept_id: namespaceContext.org_id || null,
-                include_debug: true
-            },
-            'Fetch the stored transcript segments and embedded debug payloads for this session.'
-        );
-        mcpAccess.turn_execution_list = buildMcpToolAccess(
-            'turn_execution_list',
-            {
-                session_id: sessionId,
-                namespace: namespaceContext.namespace || null
-            },
-            'List turn-execution records for this conversation.'
-        );
-    }
-
     return {
         schema_version: CONVERSATION_LLM_TELEMETRY_LOCATOR_SCHEMA_VERSION,
         generated_at_utc: new Date().toISOString(),
@@ -24537,8 +24523,105 @@ function buildConversationLlmTelemetryLocatorPayload() {
             turns_with_unavailable_locator_fields_count: turnsWithUnavailableLocatorFieldsCount,
             ordering: 'timestamp_then_turn_id'
         },
-        mcp_access: mcpAccess,
+        mcp_access: buildConversationTelemetrySessionMcpAccess(sessionId, namespaceContext),
         turns
+    };
+}
+
+function buildConversationTelemetryAccessPayload({ locatorPayload = null } = {}) {
+    if (!hasConversationInfoContext()) {
+        return null;
+    }
+
+    const localLocatorPayload = buildConversationLlmTelemetryLocatorPayload();
+    const authoritativeLocator = (
+        locatorPayload && typeof locatorPayload === 'object'
+            ? locatorPayload
+            : null
+    );
+    const basePayload = authoritativeLocator || localLocatorPayload;
+    if (!basePayload || typeof basePayload !== 'object') {
+        return null;
+    }
+
+    const baseMetadata = (basePayload.metadata && typeof basePayload.metadata === 'object')
+        ? basePayload.metadata
+        : {};
+    const sessionId = typeof basePayload.session_id === 'string' && basePayload.session_id.trim()
+        ? basePayload.session_id.trim()
+        : (typeof activeChatSessionId === 'string' && activeChatSessionId.trim()
+            ? activeChatSessionId.trim()
+            : null);
+    const sessionName = typeof basePayload.session_name === 'string' && basePayload.session_name.trim()
+        ? basePayload.session_name.trim()
+        : (typeof activeChatSessionName === 'string' && activeChatSessionName.trim()
+            ? activeChatSessionName.trim()
+            : null);
+    const namespaceContext = (
+        basePayload.namespace_context && typeof basePayload.namespace_context === 'object'
+    )
+        ? {
+            namespace: basePayload.namespace_context.namespace || null,
+            user_id: basePayload.namespace_context.user_id || null,
+            org_id: basePayload.namespace_context.org_id || null
+        }
+        : buildConversationTelemetryNamespaceContext();
+
+    return {
+        schema_version: CONVERSATION_TELEMETRY_ACCESS_SCHEMA_VERSION,
+        generated_at_utc: new Date().toISOString(),
+        session_id: sessionId,
+        session_name: sessionName,
+        namespace_context: namespaceContext,
+        metadata: {
+            total_turns: Number.isFinite(Number(baseMetadata.total_turns))
+                ? Math.max(0, Math.round(Number(baseMetadata.total_turns)))
+                : 0,
+            llm_debug_turn_count: Number.isFinite(Number(baseMetadata.llm_debug_turn_count))
+                ? Math.max(0, Math.round(Number(baseMetadata.llm_debug_turn_count)))
+                : llmDebugData.size,
+            transcript_turn_count: Number.isFinite(Number(baseMetadata.transcript_turn_count))
+                ? Math.max(0, Math.round(Number(baseMetadata.transcript_turn_count)))
+                : (Array.isArray(transcriptTurns) ? transcriptTurns.length : 0),
+            assistant_transcript_turn_count: Number.isFinite(Number(baseMetadata.assistant_transcript_turn_count))
+                ? Math.max(0, Math.round(Number(baseMetadata.assistant_transcript_turn_count)))
+                : countAssistantTranscriptTurns(),
+            has_partial_telemetry: baseMetadata.has_partial_telemetry === true,
+            missing_turn_telemetry_count: Number.isFinite(Number(baseMetadata.missing_turn_telemetry_count))
+                ? Math.max(0, Math.round(Number(baseMetadata.missing_turn_telemetry_count)))
+                : 0,
+            turns_with_history_location_count: Number.isFinite(Number(baseMetadata.turns_with_history_location_count))
+                ? Math.max(0, Math.round(Number(baseMetadata.turns_with_history_location_count)))
+                : null,
+            turns_with_request_id_count: Number.isFinite(Number(baseMetadata.turns_with_request_id_count))
+                ? Math.max(0, Math.round(Number(baseMetadata.turns_with_request_id_count)))
+                : null,
+            turns_with_unavailable_locator_fields_count: Number.isFinite(
+                Number(baseMetadata.turns_with_unavailable_locator_fields_count)
+            )
+                ? Math.max(0, Math.round(Number(baseMetadata.turns_with_unavailable_locator_fields_count)))
+                : null,
+            authoritative_locator_available: !!authoritativeLocator,
+            access_payload_source: authoritativeLocator ? 'authoritative_locator' : 'local_context_summary',
+            locator_schema_version: authoritativeLocator?.schema_version || null,
+            locator_generated_at_utc: authoritativeLocator?.generated_at_utc || null
+        },
+        mcp_access: buildConversationTelemetrySessionMcpAccess(sessionId, namespaceContext),
+        agent_instructions: {
+            summary: (
+                'This payload is an MCP access envelope for the conversation, not the '
+                + 'authoritative per-turn locator.'
+            ),
+            steps: [
+                'Call conversation_telemetry_get_locator first to fetch the authoritative per-turn locator for this session.',
+                'Call chat_history_get_segments with include_debug=true to retrieve transcript segments and embedded llm_debug payloads.',
+                'Call turn_execution_list to inspect persisted turn-execution records and request_id coverage.'
+            ],
+            notes: [
+                'Treat the server locator as authoritative when history_location or request_id matters.',
+                'Use the session_id and namespace_context in this payload to scope those MCP calls.'
+            ]
+        }
     };
 }
 
@@ -24655,11 +24738,8 @@ function refreshConversationInfoCopyButtonState() {
 }
 
 async function copyConversationInfoToClipboard(button = null) {
-    let payload = await fetchConversationTelemetryLocatorPayload(activeChatSessionId);
-    if (!payload) {
-        await hydrateConversationTelemetryLocatorEntries();
-        payload = buildConversationLlmTelemetryLocatorPayload();
-    }
+    const locatorPayload = await fetchConversationTelemetryLocatorPayload(activeChatSessionId);
+    const payload = buildConversationTelemetryAccessPayload({ locatorPayload });
     if (!payload) {
         showToast('No conversation info is available yet.', 'info');
         refreshConversationInfoCopyButtonState();
@@ -24997,6 +25077,9 @@ export function __testOnly_buildConversationLlmTelemetryPayload() {
 }
 export function __testOnly_buildConversationLlmTelemetryLocatorPayload() {
     return buildConversationLlmTelemetryLocatorPayload();
+}
+export function __testOnly_buildConversationTelemetryAccessPayload(options = {}) {
+    return buildConversationTelemetryAccessPayload(options);
 }
 export function __testOnly_buildConversationTelemetryExportPayload() {
     return buildConversationTelemetryExportPayload();

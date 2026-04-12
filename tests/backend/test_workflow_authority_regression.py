@@ -252,6 +252,117 @@ def test_build_stage_authority_summary_counts_inappropriate_decisions() -> None:
     assert "prompt_semantic_inference" in summary["python_decision_sources"]
 
 
+def test_build_stage_authority_summary_preserves_bounded_llm_exchange_summaries() -> None:
+    from src.backend.services.python_decision_authority_service import (
+        build_stage_authority_summary,
+    )
+
+    entries = [
+        {
+            "type": "workflow_selector_prompt",
+            "prompt_id": "#V#chat_turn_classifier_prompt",
+            "requested_prompt_ids": ["#V#chat_turn_classifier_prompt"],
+            "prompt": {"text": "Select workflow", "char_count": 15},
+            "candidate_list": {
+                "text": "- #V#tool_calling_workflow",
+                "char_count": 24,
+            },
+            "candidate_entries": [
+                {
+                    "concept_id": "#V#chat_assistant_workflow",
+                    "candidate_source": "selector_default",
+                },
+                {
+                    "concept_id": "#V#tool_calling_workflow",
+                    "candidate_source": "selector_default",
+                },
+            ],
+        },
+        {
+            "type": "workflow_model_policy_stage",
+            "stage": "workflow_dispatch",
+            "policy_stage": "classifier",
+            "request": {
+                "prompt": {"text": "Select workflow", "char_count": 15},
+                "context_message_count": 1,
+            },
+            "selected": {
+                "provider": "openai",
+                "model": "gpt-5-mini",
+                "model_resolved": "gpt-5-mini",
+            },
+            "fallback_used": True,
+            "fallback_attempt_count": 2,
+            "failure_count": 1,
+            "fallback_attempts": [
+                {
+                    "attempt_no": 1,
+                    "provider": "ollama",
+                    "model": "granite3.3:2b",
+                    "status": "failed",
+                    "failure_kind": "provider_unreachable",
+                },
+                {
+                    "attempt_no": 2,
+                    "provider": "openai",
+                    "model": "gpt-5-mini",
+                    "status": "succeeded",
+                    "response": {
+                        "text": "#V#tool_calling_workflow",
+                        "char_count": 24,
+                    },
+                },
+            ],
+            "errors": [
+                {
+                    "failure_kind": "provider_unreachable",
+                    "error": "connection refused",
+                }
+            ],
+        },
+        {
+            "type": "workflow_selector",
+            "workflow_id": "#V#tool_calling_workflow",
+            "verdict": "rag_selected",
+            "selection_source": "selector",
+            "response": {
+                "text": "#V#tool_calling_workflow",
+                "char_count": 24,
+            },
+            "selection_metadata": {
+                "selection_resolution": "candidate_label_exact_match",
+            },
+        },
+    ]
+
+    summary = build_stage_authority_summary(
+        stage_id="workflow_dispatch",
+        aux_entries=entries,
+    )
+
+    assert summary["llm_exchange_record_count"] == 3
+    assert summary["llm_exchange_entry_types"] == [
+        "workflow_selector_prompt",
+        "workflow_model_policy_stage",
+        "workflow_selector",
+    ]
+    assert summary["llm_exchange_summary_truncated_count"] == 0
+    assert summary["llm_exchange_summaries"][0]["prompt_id"] == (
+        "#V#chat_turn_classifier_prompt"
+    )
+    assert summary["llm_exchange_summaries"][1]["selected_model"] == "gpt-5-mini"
+    assert summary["llm_exchange_summaries"][1]["failure_kinds"] == [
+        "provider_unreachable"
+    ]
+    assert summary["llm_exchange_summaries"][1]["response_preview"]["text"] == (
+        "#V#tool_calling_workflow"
+    )
+    assert summary["latest_llm_exchange"]["entry_type"] == "workflow_selector"
+    assert summary["latest_llm_exchange"]["response_preview"]["text"] == (
+        "#V#tool_calling_workflow"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Category 3: Capability regression — arXiv and analytical prompts
 # ---------------------------------------------------------------------------

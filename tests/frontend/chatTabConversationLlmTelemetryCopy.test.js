@@ -99,18 +99,26 @@ describe('chat conversation info copy control', () => {
         expect(navigator.clipboard.writeText).toHaveBeenCalledTimes(1);
 
         const copiedPayload = JSON.parse(navigator.clipboard.writeText.mock.calls[0][0]);
-        expect(copiedPayload.schema_version).toBe('conversation_llm_telemetry_locator.v1');
+        expect(copiedPayload.schema_version).toBe('conversation_telemetry_access.v1');
         expect(copiedPayload.session_id).toBe('session-pre-first-response');
         expect(copiedPayload.session_name).toBe('Dino 2');
         expect(copiedPayload.metadata).toEqual(expect.objectContaining({
             total_turns: 0,
             llm_debug_turn_count: 0,
-            transcript_turn_count: 0
+            transcript_turn_count: 0,
+            authoritative_locator_available: false,
+            access_payload_source: 'local_context_summary'
         }));
         expect(copiedPayload.mcp_access).toEqual(expect.objectContaining({
             conversation_telemetry_get_locator: expect.any(Object),
             chat_history_get_segments: expect.any(Object),
             turn_execution_list: expect.any(Object)
+        }));
+        expect(copiedPayload.turns).toBeUndefined();
+        expect(copiedPayload.agent_instructions).toEqual(expect.objectContaining({
+            summary: expect.any(String),
+            steps: expect.any(Array),
+            notes: expect.any(Array)
         }));
         expect(showToast).toHaveBeenCalledWith('Copied conversation info JSON.', 'success');
     });
@@ -151,16 +159,21 @@ describe('chat conversation info copy control', () => {
 
         const copiedText = navigator.clipboard.writeText.mock.calls[0][0];
         const copiedPayload = JSON.parse(copiedText);
-        expect(copiedPayload.schema_version).toBe('conversation_llm_telemetry_locator.v1');
+        expect(copiedPayload.schema_version).toBe('conversation_telemetry_access.v1');
         expect(copiedPayload.session_id).toBe('session-with-telemetry');
         expect(copiedPayload.session_name).toBe('Telemetry Session');
-        expect(copiedPayload.turns).toHaveLength(2);
-        expect(copiedPayload.turns.map((turn) => turn.turn_id)).toEqual(['a-100', 'a-200']);
+        expect(copiedPayload.metadata).toEqual(expect.objectContaining({
+            total_turns: 2,
+            llm_debug_turn_count: 2,
+            authoritative_locator_available: false,
+            access_payload_source: 'local_context_summary'
+        }));
         expect(copiedPayload.mcp_access).toEqual(expect.objectContaining({
             conversation_telemetry_get_locator: expect.any(Object),
             chat_history_get_segments: expect.any(Object),
             turn_execution_list: expect.any(Object)
         }));
+        expect(copiedPayload.turns).toBeUndefined();
         expect(showToast).toHaveBeenCalledWith(
             'Copied conversation info JSON.',
             'success'

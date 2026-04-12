@@ -55,6 +55,7 @@ import {
     __testOnly_resetChatConceptMetaCaches,
     __testOnly_createChatSession,
     __testOnly_buildConversationLlmTelemetryLocatorPayload,
+    __testOnly_buildConversationTelemetryAccessPayload,
     __testOnly_buildConversationLlmTelemetryPayload,
     __testOnly_buildConversationTelemetryExportPayload,
     __testOnly_copyConversationInfoToClipboard,
@@ -6028,8 +6029,7 @@ describe('conversation LLM telemetry clipboard export', () => {
         }
     });
 
-    test('hydrates history placeholders before copying locator JSON', async () => {
-        const timestampMs = 1743760923456;
+    test('copies an access envelope without hydrating turn-level locator state', async () => {
         const writeText = jest.fn().mockResolvedValue(undefined);
         Object.assign(navigator, {
             clipboard: { writeText }
@@ -6045,20 +6045,7 @@ describe('conversation LLM telemetry clipboard export', () => {
                     })
                 });
             }
-            expect(parsed.pathname).toBe('/von/history/debug');
-            expect(parsed.searchParams.get('session_id')).toBe('session-1684');
-            expect(parsed.searchParams.get('history_index')).toBe('12');
-            return Promise.resolve({
-                ok: true,
-                status: 200,
-                json: async () => ({
-                    success: true,
-                    llm_debug_data: {
-                        timestamp: timestampMs,
-                        request_id: 'req-1684-hydrated'
-                    }
-                })
-            });
+            throw new Error(`Unexpected fetch: ${parsed.pathname}`);
         });
 
         __testOnly_setTranscriptTurns([
@@ -6076,30 +6063,60 @@ describe('conversation LLM telemetry clipboard export', () => {
         const copiedPayload = JSON.parse(writeText.mock.calls[0][0]);
 
         expect(copied).toBe(true);
-        expect(global.fetch).toHaveBeenCalledTimes(2);
+        expect(global.fetch).toHaveBeenCalledTimes(1);
         expect(copiedPayload.metadata).toMatchObject({
             assistant_transcript_turn_count: 1,
-            has_partial_telemetry: false,
+            has_partial_telemetry: true,
             missing_turn_telemetry_count: 0,
-            turns_with_unavailable_locator_fields_count: 0
+            turns_with_unavailable_locator_fields_count: 1,
+            authoritative_locator_available: false,
+            access_payload_source: 'local_context_summary'
         });
-        expect(copiedPayload.turns[0]).toMatchObject({
-            sequence: 1,
-            turn_id: 'history-assistant-12',
-            timestamp_utc: new Date(timestampMs).toISOString(),
-            history_location: {
-                session_id: 'session-1684',
-                history_index: 12
-            },
-            request_id: 'req-1684-hydrated'
-        });
+        expect(copiedPayload.turns).toBeUndefined();
     });
 
-    test('copies compact locator JSON to the clipboard instead of the full telemetry blob', async () => {
+    test('copies a conversation telemetry access envelope to the clipboard instead of the full telemetry blob', async () => {
         const timestampMs = 1743760800000;
         const writeText = jest.fn().mockResolvedValue(undefined);
         Object.assign(navigator, {
             clipboard: { writeText }
+        });
+        global.fetch = jest.fn().mockResolvedValue({
+            ok: true,
+            status: 200,
+            json: async () => ({
+                schema_version: 'conversation_llm_telemetry_locator.v1',
+                generated_at_utc: '2026-04-04T19:03:45.963Z',
+                session_id: 'session-1684',
+                session_name: 'Session 1684',
+                namespace_context: {
+                    namespace: '#V#michael_witbrock',
+                    user_id: '#V#michael_witbrock',
+                    org_id: '#V#university_of_auckland_strong_ai_lab'
+                },
+                metadata: {
+                    total_turns: 1,
+                    llm_debug_turn_count: 1,
+                    transcript_turn_count: 0,
+                    assistant_transcript_turn_count: 0,
+                    has_partial_telemetry: false,
+                    missing_turn_telemetry_count: 0,
+                    turns_with_history_location_count: 1,
+                    turns_with_request_id_count: 1,
+                    turns_with_unavailable_locator_fields_count: 0,
+                    ordering: 'history_index'
+                },
+                turns: [
+                    {
+                        turn_id: 'assistant-1743760800000',
+                        request_id: 'req-1684-copy',
+                        history_location: {
+                            session_id: 'session-1684',
+                            history_index: 9
+                        }
+                    }
+                ]
+            })
         });
 
         setLlmDebugDataForTurn('assistant-1743760800000', {
@@ -6119,17 +6136,46 @@ describe('conversation LLM telemetry clipboard export', () => {
 
         const copied = await __testOnly_copyConversationInfoToClipboard();
         const copiedPayload = JSON.parse(writeText.mock.calls[0][0]);
+        const accessPayload = __testOnly_buildConversationTelemetryAccessPayload({
+            locatorPayload: {
+                schema_version: 'conversation_llm_telemetry_locator.v1',
+                generated_at_utc: '2026-04-04T19:03:45.963Z',
+                session_id: 'session-1684',
+                session_name: 'Session 1684',
+                namespace_context: {
+                    namespace: '#V#michael_witbrock',
+                    user_id: '#V#michael_witbrock',
+                    org_id: '#V#university_of_auckland_strong_ai_lab'
+                },
+                metadata: {
+                    total_turns: 1,
+                    llm_debug_turn_count: 1,
+                    transcript_turn_count: 0,
+                    assistant_transcript_turn_count: 0,
+                    has_partial_telemetry: false,
+                    missing_turn_telemetry_count: 0,
+                    turns_with_history_location_count: 1,
+                    turns_with_request_id_count: 1,
+                    turns_with_unavailable_locator_fields_count: 0
+                }
+            }
+        });
         const fullPayload = __testOnly_buildConversationTelemetryExportPayload();
 
         expect(copied).toBe(true);
         expect(writeText).toHaveBeenCalledTimes(1);
-        expect(copiedPayload.schema_version).toBe('conversation_llm_telemetry_locator.v1');
-        expect(copiedPayload.turns[0].request_id).toBe('req-1684-copy');
-        expect(copiedPayload.turns[0].history_location).toEqual({
-            session_id: 'session-1684',
-            history_index: 9
-        });
-        expect(copiedPayload.turns[0].debug_data).toBeUndefined();
+        expect(copiedPayload.schema_version).toBe('conversation_telemetry_access.v1');
+        expect(copiedPayload.metadata.authoritative_locator_available).toBe(true);
+        expect(copiedPayload.metadata.access_payload_source).toBe('authoritative_locator');
+        expect(copiedPayload.turns).toBeUndefined();
+        expect(copiedPayload.agent_instructions.steps).toHaveLength(3);
+        expect(copiedPayload).toEqual(expect.objectContaining({
+            session_id: accessPayload.session_id,
+            session_name: accessPayload.session_name,
+            namespace_context: accessPayload.namespace_context,
+            mcp_access: accessPayload.mcp_access,
+            agent_instructions: accessPayload.agent_instructions
+        }));
         expect(fullPayload.conversation_locator.turns[0].debug_data).toBeUndefined();
         expect(fullPayload.detailed_turn_telemetry.turns[0].debug_data).toBeTruthy();
         expect(fullPayload.detailed_turn_telemetry.turns[0].debug_data.tool_invocations).toBeTruthy();
