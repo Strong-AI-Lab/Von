@@ -89,7 +89,6 @@ from ...workflows.engine import (
     WorkflowExecutor,
     WorkflowResult,
 )
-from ...workflows.metadata_validation import validate_state_metadata_pre_action
 from ...workflows.plan_state_runtime import WORKFLOW_COMPLETION_GATE_KEY
 from ...workflows.terminal_success_contracts import (
     evaluate_workflow_terminal_success_contract,
@@ -99,7 +98,6 @@ from ...workflows.workflow_launch_input_contracts import (
 )
 from ...workflows.vontology_loader import load_workflow_definition_from_vontology
 from ...workflows.launch_contracts import evaluate_launch_contract
-from ...services.model_registry_service import get_model_registry_snapshot
 from ...workflows.workflow_selector import WorkflowSelector
 from ...workflows.durable.registry_factory import (
     get_shared_durable_action_registry,
@@ -955,6 +953,94 @@ def _derive_workflow_selection_rationale(
     if explicit:
         return f"routing_source:{source}:{explicit}"
     return f"routing_source:{source}"
+
+
+def _build_selector_safe_general_fallback_payload(
+    *,
+    selected_workflow_id: str | None,
+    selector_verdict: str | None,
+    selection_metadata: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Return bounded fallback metadata when selector intent was non-generic.
+
+    The selector may name a concrete non-default workflow that is not actually
+    eligible for selection from the current candidate set. Python should not
+    reinterpret that as an affirmative choice of the generic chat workflow.
+    Instead, preserve the non-default intent and hand off to the safe general
+    tool workflow.
+    """
+
+    selected_workflow_id_text = (
+        str(selected_workflow_id).strip()
+        if isinstance(selected_workflow_id, str) and str(selected_workflow_id).strip()
+        else None
+    )
+    if selected_workflow_id_text != CHAT_ASSISTANT_WORKFLOW_ID:
+        return None
+
+    selector_verdict_text = (
+        str(selector_verdict).strip().lower()
+        if isinstance(selector_verdict, str) and str(selector_verdict).strip()
+        else ""
+    )
+    if selector_verdict_text != "rag_default":
+        return None
+
+    metadata = (
+        {
+            str(key): value
+            for key, value in selection_metadata.items()
+            if isinstance(key, str)
+        }
+        if isinstance(selection_metadata, Mapping)
+        else {}
+    )
+    selection_resolution = (
+        str(metadata.get("selection_resolution") or "").strip().lower()
+    )
+    if selection_resolution != "default_workflow_fallback_unmatched_candidate":
+        return None
+
+    requested_candidate_workflow_id = (
+        str(
+            metadata.get("unmatched_candidate_workflow_id")
+            or metadata.get("requested_candidate_workflow_id")
+            or ""
+        ).strip()
+        or None
+    )
+    if not requested_candidate_workflow_id:
+        return None
+    if requested_candidate_workflow_id in {
+        CHAT_ASSISTANT_WORKFLOW_ID,
+        CHAT_NARRATION_WORKFLOW_ID,
+        TOOL_CALLING_WORKFLOW_ID,
+    }:
+        return None
+
+    return {
+        "requested_candidate_workflow_id": requested_candidate_workflow_id,
+        "selection_resolution": selection_resolution,
+        "raw_candidate_label": (
+            str(metadata.get("raw_candidate_label") or "").strip() or None
+        ),
+    }
+
+
+def _describe_tool_pipeline_override_reason(reason: str) -> str:
+    clean_reason = str(reason or "").strip()
+    if clean_reason == "selector_unmatched_candidate_requires_safe_general_fallback":
+        return (
+            "Selector proposed a concrete non-default workflow that was not "
+            "eligible from the current candidate set, so the safe general tool "
+            "workflow was selected instead."
+        )
+    if clean_reason == "selected_custom_workflow_launchability_requires_safe_general_fallback":
+        return (
+            "The selected specialised workflow could not launch from the current "
+            "turn inputs, so the safe general tool workflow was selected instead."
+        )
+    return clean_reason or "Safe general tool workflow selected by override."
 
 
 @dataclass(frozen=True)
@@ -21258,6 +21344,7 @@ class InternalMCPChatOrchestrator:
             record_llm_call = _noop_record_llm_call
 
         selected_workflow_id = CHAT_ASSISTANT_WORKFLOW_ID
+        selector_selection_metadata: dict[str, Any] = {}
         if env.user_namespace and self._workflow_selector.enabled():
             selector_prompt = self._workflow_selector.prepare_selection_prompt(
                 turn_text=prompt_text,
@@ -21306,37 +21393,99 @@ class InternalMCPChatOrchestrator:
                         )
                     ),
                 )
+            selector_selection_metadata = (
+                {
+                    str(key): value
+                    for key, value in selector_selection.selection_metadata.items()
+                    if isinstance(key, str)
+                }
+                if isinstance(selector_selection.selection_metadata, Mapping)
+                else {}
+            )
             if (
                 isinstance(selector_selection.workflow_id, str)
                 and selector_selection.workflow_id.strip()
             ):
                 selected_workflow_id = selector_selection.workflow_id.strip()
-            routing_info = WorkflowRoutingInfo(
-                workflow_id=selected_workflow_id,
-                verdict=selector_selection.verdict,
-                prompt_id=selector_selection.prompt_id,
-                discovered_workflow_ids=selector_selection.discovered_workflow_ids,
-                source=(
-                    selector_selection.selection_source
-                    if isinstance(selector_selection.selection_source, str)
-                    and selector_selection.selection_source.strip()
-                    else "selector"
-                ),
-                confidence_score=selector_selection.confidence_score,
-                reasoning=selector_selection.reasoning,
-                selection_rationale=_derive_workflow_selection_rationale(
+            selector_safe_general_fallback_payload = (
+                _build_selector_safe_general_fallback_payload(
                     selected_workflow_id=selected_workflow_id,
                     selector_verdict=selector_selection.verdict,
-                    selector_source=(
+                    selection_metadata=selector_selection_metadata,
+                )
+            )
+            if selector_safe_general_fallback_payload is not None:
+                selected_workflow_id = TOOL_CALLING_WORKFLOW_ID
+                selector_reasoning = (
+                    "Selector proposed a concrete non-default workflow that was "
+                    "not eligible from the current candidate set, so the safe "
+                    "general tool workflow was selected instead."
+                )
+                aux_llm_calls.append(
+                    annotate_python_decision_event(
+                        {
+                            "type": "workflow_selector_override",
+                            "reason": "selector_unmatched_candidate_requires_safe_general_fallback",
+                            "selected_workflow_id": TOOL_CALLING_WORKFLOW_ID,
+                            "prior_selected_workflow_id": CHAT_ASSISTANT_WORKFLOW_ID,
+                            "prior_selector_verdict": selector_selection.verdict,
+                            **selector_safe_general_fallback_payload,
+                        },
+                        stage="workflow_dispatch",
+                        component="internal_mcp_orchestrator",
+                        function="_action_turn_execution_route",
+                        decision_class="workflow_selector_override",
+                        decision_source="workflow_launchability_check",
+                        changed_outcome=True,
+                        reason_code=(
+                            "selector_unmatched_candidate_requires_safe_general_fallback"
+                        ),
+                        possible_inappropriate_python_code_use=False,
+                    )
+                )
+                routing_info = WorkflowRoutingInfo(
+                    workflow_id=selected_workflow_id,
+                    verdict="tool_contract_override",
+                    prompt_id=selector_selection.prompt_id,
+                    discovered_workflow_ids=selector_selection.discovered_workflow_ids,
+                    source="selector_override",
+                    confidence_score=selector_selection.confidence_score,
+                    reasoning=selector_reasoning,
+                    selection_rationale=_derive_workflow_selection_rationale(
+                        selected_workflow_id=selected_workflow_id,
+                        selector_verdict="tool_contract_override",
+                        selector_source="selector_override",
+                        candidate_workflow_ids=selector_selection.discovered_workflow_ids,
+                        explicit_reasoning=selector_reasoning,
+                    ),
+                )
+            else:
+                routing_info = WorkflowRoutingInfo(
+                    workflow_id=selected_workflow_id,
+                    verdict=selector_selection.verdict,
+                    prompt_id=selector_selection.prompt_id,
+                    discovered_workflow_ids=selector_selection.discovered_workflow_ids,
+                    source=(
                         selector_selection.selection_source
                         if isinstance(selector_selection.selection_source, str)
                         and selector_selection.selection_source.strip()
                         else "selector"
                     ),
-                    candidate_workflow_ids=selector_selection.discovered_workflow_ids,
-                    explicit_reasoning=selector_selection.reasoning,
-                ),
-            )
+                    confidence_score=selector_selection.confidence_score,
+                    reasoning=selector_selection.reasoning,
+                    selection_rationale=_derive_workflow_selection_rationale(
+                        selected_workflow_id=selected_workflow_id,
+                        selector_verdict=selector_selection.verdict,
+                        selector_source=(
+                            selector_selection.selection_source
+                            if isinstance(selector_selection.selection_source, str)
+                            and selector_selection.selection_source.strip()
+                            else "selector"
+                        ),
+                        candidate_workflow_ids=selector_selection.discovered_workflow_ids,
+                        explicit_reasoning=selector_selection.reasoning,
+                    ),
+                )
         else:
             routing_info = WorkflowRoutingInfo(
                 workflow_id=selected_workflow_id,
@@ -21369,6 +21518,11 @@ class InternalMCPChatOrchestrator:
                 "selected_workflow_trace": {
                     "selected_workflow_id": selected_workflow_id,
                     "workflow_routing": asdict(routing_info),
+                    "selector_selection_metadata": (
+                        dict(selector_selection_metadata)
+                        if isinstance(selector_selection_metadata, Mapping)
+                        else {}
+                    ),
                     "selector_candidate_ids": [
                         str(item.get("concept_id"))
                         for item in selector_candidate_matches
@@ -22392,8 +22546,26 @@ class InternalMCPChatOrchestrator:
             prompt_tokens = usage.get("prompt_tokens")
             completion_tokens = usage.get("completion_tokens")
             total_tokens = usage.get("total_tokens")
+            selector_override_entry = next(
+                (
+                    {
+                        str(key): value
+                        for key, value in entry.items()
+                        if isinstance(key, str)
+                    }
+                    for entry in reversed(tuple(result.aux_llm_calls))
+                    if isinstance(entry, Mapping)
+                    and entry.get("type") == "workflow_selector_override"
+                ),
+                None,
+            )
             outcome_payload = {
                 "selected_workflow_id": (
+                    routing_info.workflow_id
+                    if isinstance(routing_info, WorkflowRoutingInfo)
+                    else None
+                ),
+                "effective_dispatch_workflow_id": (
                     routing_info.workflow_id
                     if isinstance(routing_info, WorkflowRoutingInfo)
                     else None
@@ -22424,7 +22596,12 @@ class InternalMCPChatOrchestrator:
                     and entry.get("status") == "applied"
                     for entry in result.aux_llm_calls
                 ),
+                "selector_override_applied": isinstance(
+                    selector_override_entry, Mapping
+                ),
             }
+            if isinstance(selector_override_entry, Mapping):
+                outcome_payload["selector_override"] = selector_override_entry
             if safe_outcome == "follow_up_required":
                 outcome_payload["completion_gate_requires_follow_up"] = True
 
@@ -23347,6 +23524,7 @@ class InternalMCPChatOrchestrator:
 
         routing_info: WorkflowRoutingInfo | None = None
         selection_experience_id: str | None = None
+        selector_selection_metadata: dict[str, Any] = {}
         def _resolve_selected_workflow_name(workflow_id: str | None) -> str | None:
             clean_workflow_id = (
                 workflow_id.strip()
@@ -23586,6 +23764,15 @@ class InternalMCPChatOrchestrator:
                 )
                 if selector_selection.workflow_id:
                     selected_workflow_id = selector_selection.workflow_id
+                selector_selection_metadata = (
+                    {
+                        str(key): value
+                        for key, value in selector_selection.selection_metadata.items()
+                        if isinstance(key, str)
+                    }
+                    if isinstance(selector_selection.selection_metadata, Mapping)
+                    else {}
+                )
                 selection_rationale = _derive_workflow_selection_rationale(
                     selected_workflow_id=selector_selection.workflow_id,
                     selector_verdict=selector_selection.verdict,
@@ -23811,6 +23998,7 @@ class InternalMCPChatOrchestrator:
                     pass  # Best-effort; never block routing.
             except Exception as exc:
                 selected_workflow_id = CHAT_ASSISTANT_WORKFLOW_ID
+                selector_selection_metadata = {"selector_error": str(exc)}
                 routing_info = WorkflowRoutingInfo(
                     workflow_id=CHAT_ASSISTANT_WORKFLOW_ID,
                     verdict="selector_exception",
@@ -28302,6 +28490,7 @@ class InternalMCPChatOrchestrator:
             reason: str,
             excluded_selector_verdicts: Sequence[str],
             extra_payload: Mapping[str, Any] | None = None,
+            reasoning_text: str | None = None,
         ) -> None:
             nonlocal selected_workflow_id
             nonlocal selected_workflow_id_text
@@ -28337,6 +28526,11 @@ class InternalMCPChatOrchestrator:
                 prompt_id = routing_info.prompt_id
                 discovered_workflow_ids = routing_info.discovered_workflow_ids
                 routing_duration_ms = routing_info.routing_duration_ms
+            resolved_reasoning = (
+                reasoning_text.strip()
+                if isinstance(reasoning_text, str) and reasoning_text.strip()
+                else _describe_tool_pipeline_override_reason(reason)
+            )
             routing_info = WorkflowRoutingInfo(
                 workflow_id=TOOL_CALLING_WORKFLOW_ID,
                 verdict="tool_contract_override",
@@ -28344,8 +28538,8 @@ class InternalMCPChatOrchestrator:
                 discovered_workflow_ids=discovered_workflow_ids,
                 routing_duration_ms=routing_duration_ms,
                 source="selector_override",
-                reasoning=reason,
-                selection_rationale=reason,
+                reasoning=resolved_reasoning,
+                selection_rationale=resolved_reasoning,
             )
 
             override_payload: dict[str, Any] = {
@@ -28394,6 +28588,20 @@ class InternalMCPChatOrchestrator:
                         TOOL_CALLING_WORKFLOW_ID
                     ),
                 )
+
+        selector_safe_general_fallback_payload = (
+            _build_selector_safe_general_fallback_payload(
+                selected_workflow_id=selected_workflow_id_text,
+                selector_verdict=selector_verdict or None,
+                selection_metadata=selector_selection_metadata,
+            )
+        )
+        if selector_safe_general_fallback_payload is not None:
+            _force_tool_pipeline_routing(
+                reason="selector_unmatched_candidate_requires_safe_general_fallback",
+                excluded_selector_verdicts=[selector_verdict or "rag_default"],
+                extra_payload=selector_safe_general_fallback_payload,
+            )
 
         def _build_custom_workflow_dispatch_data(
             workflow_id_override: str | None = None,

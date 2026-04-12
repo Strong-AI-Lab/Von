@@ -97,6 +97,7 @@ class WorkflowSelector:
     _JSON_CONFIDENCE_KEYS = ("confidence", "confidence_score", "score")
     _JSON_REASONING_KEYS = ("reasoning", "reason", "explanation", "rationale")
     _CANDIDATE_BOUNDARY_STRIP = " \t\r\n`'\".,;:!?()[]{}<>"
+    _WORKFLOW_CONCEPT_ID_PATTERN = re.compile(r"#v#[a-z0-9_]+", flags=re.IGNORECASE)
     _REASONING_SELECTION_CUES = (
         "best fit is",
         "best match is",
@@ -788,6 +789,15 @@ class WorkflowSelector:
                 "structured_selection_detected", False
             ),
         }
+        requested_candidate_workflow_id = self._resolve_requested_candidate_workflow_id(
+            raw_response=raw_response,
+            raw_candidate_label=label,
+            candidate_entries=candidate_entries,
+        )
+        if requested_candidate_workflow_id:
+            selection_metadata["requested_candidate_workflow_id"] = (
+                requested_candidate_workflow_id
+            )
 
         # Match against candidate workflow IDs.
         label_lower = label.lower()
@@ -812,7 +822,21 @@ class WorkflowSelector:
                 # Ultimate fallback to default workflow.
                 workflow_id = self._default_workflow_id
                 verdict = "rag_default"
-                selection_metadata["selection_resolution"] = "default_workflow_fallback"
+                if (
+                    requested_candidate_workflow_id
+                    and requested_candidate_workflow_id.lower()
+                    != self._default_workflow_id.lower()
+                ):
+                    selection_metadata["selection_resolution"] = (
+                        "default_workflow_fallback_unmatched_candidate"
+                    )
+                    selection_metadata["unmatched_candidate_workflow_id"] = (
+                        requested_candidate_workflow_id
+                    )
+                else:
+                    selection_metadata["selection_resolution"] = (
+                        "default_workflow_fallback"
+                    )
                 # Lower confidence for fallback selections.
                 if confidence_score > 0.0:
                     confidence_score = min(confidence_score, 0.3)
@@ -1010,6 +1034,58 @@ class WorkflowSelector:
                 value = parsed.get(key)
                 if isinstance(value, str) and value.strip():
                     return value
+        return None
+
+    @classmethod
+    def _extract_any_workflow_concept_id(cls, value: Any) -> str | None:
+        raw_text = str(value or "").strip()
+        if not raw_text:
+            return None
+        match = cls._WORKFLOW_CONCEPT_ID_PATTERN.search(raw_text)
+        if not match:
+            return None
+        concept_id = match.group(0).strip()
+        if not concept_id:
+            return None
+        if concept_id.lower().startswith("#v#"):
+            return "#V#" + concept_id[3:]
+        return concept_id
+
+    @classmethod
+    def _resolve_requested_candidate_workflow_id(
+        cls,
+        *,
+        raw_response: Any,
+        raw_candidate_label: str,
+        candidate_entries: Sequence[Mapping[str, Any]] | None,
+    ) -> str | None:
+        entry_lookup = cls._candidate_entry_lookup(candidate_entries)
+        entry_id_lookup = {
+            concept_id.lower(): concept_id for concept_id in entry_lookup.keys()
+        }
+
+        for surface in (
+            cls._extract_json_candidate(str(raw_response or "")),
+            raw_candidate_label,
+            str(raw_response or ""),
+        ):
+            concept_id = cls._extract_any_workflow_concept_id(surface)
+            if concept_id:
+                matched_workflow_id = entry_id_lookup.get(concept_id.lower())
+                if matched_workflow_id:
+                    return matched_workflow_id
+
+        normalised_label = cls._normalise_reasoning_surface(raw_candidate_label)
+        if not normalised_label:
+            return None
+
+        for workflow_id, entry in entry_lookup.items():
+            aliases = cls._candidate_reasoning_aliases(
+                workflow_id=workflow_id,
+                entry=entry,
+            )
+            if normalised_label in aliases:
+                return workflow_id
         return None
 
     @classmethod

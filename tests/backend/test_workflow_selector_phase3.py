@@ -282,6 +282,84 @@ class TestSelectionConfidenceReasoning:
         assert result.confidence_score == 0.0
         assert result.reasoning == ""
 
+    def test_fallback_records_unmatched_candidate_workflow_id(self):
+        selector = _build_selector(default_workflow_id=_CHAT_WORKFLOW)
+        excluded_workflow_id = "#V#specialised_vontology_search_workflow"
+        result = selector.resolve_selection(
+            raw_response=json.dumps(
+                {
+                    "workflow_id": excluded_workflow_id,
+                    "confidence": 0.88,
+                    "reasoning": "This specialised workflow best matches the request.",
+                }
+            ),
+            prompt_id=None,
+            prompt_used="test",
+            discovered_workflow_ids=[_CHAT_WORKFLOW, _TOOL_WORKFLOW],
+            candidate_entries=[
+                {
+                    "concept_id": excluded_workflow_id,
+                    "name": "Specialised Vontology Search Workflow",
+                    "candidate_source": "workflow_discovery",
+                    "routing_eligible": False,
+                },
+                {
+                    "concept_id": _CHAT_WORKFLOW,
+                    "name": "Chat Assistant Workflow",
+                    "candidate_source": "selector_default",
+                },
+                {
+                    "concept_id": _TOOL_WORKFLOW,
+                    "name": "Tool Calling Workflow",
+                    "candidate_source": "selector_default",
+                },
+            ],
+        )
+
+        assert result.workflow_id == _CHAT_WORKFLOW
+        assert result.verdict == "rag_default"
+        assert result.selection_metadata.get("selection_resolution") == (
+            "default_workflow_fallback_unmatched_candidate"
+        )
+        assert result.selection_metadata.get("requested_candidate_workflow_id") == (
+            excluded_workflow_id
+        )
+        assert result.selection_metadata.get("unmatched_candidate_workflow_id") == (
+            excluded_workflow_id
+        )
+
+    def test_fallback_ignores_non_workflow_concept_mentions(self):
+        selector = _build_selector(default_workflow_id=_CHAT_WORKFLOW)
+        result = selector.resolve_selection(
+            raw_response=(
+                "I cannot identify a workflow here; perhaps inspect #V#yuchen_su "
+                "manually."
+            ),
+            prompt_id=None,
+            prompt_used="test",
+            discovered_workflow_ids=[_CHAT_WORKFLOW, _TOOL_WORKFLOW],
+            candidate_entries=[
+                {
+                    "concept_id": _CHAT_WORKFLOW,
+                    "name": "Chat Assistant Workflow",
+                    "candidate_source": "selector_default",
+                },
+                {
+                    "concept_id": _TOOL_WORKFLOW,
+                    "name": "Tool Calling Workflow",
+                    "candidate_source": "selector_default",
+                },
+            ],
+        )
+
+        assert result.workflow_id == _CHAT_WORKFLOW
+        assert result.verdict == "rag_default"
+        assert result.selection_metadata.get("selection_resolution") == (
+            "default_workflow_fallback"
+        )
+        assert "requested_candidate_workflow_id" not in result.selection_metadata
+        assert "unmatched_candidate_workflow_id" not in result.selection_metadata
+
     def test_generic_builtin_selection_derives_disqualifying_reason_from_candidate_evidence(
         self,
     ):

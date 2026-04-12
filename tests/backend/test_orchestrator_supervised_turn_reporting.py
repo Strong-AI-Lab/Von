@@ -6,7 +6,10 @@ from typing import Any, cast
 from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
 )
-from src.backend.workflows.definitions import CHAT_ASSISTANT_WORKFLOW_ID
+from src.backend.workflows.definitions import (
+    CHAT_ASSISTANT_WORKFLOW_ID,
+    TOOL_CALLING_WORKFLOW_ID,
+)
 from orchestrator_test_harness import build_db_independent_orchestrator
 
 
@@ -25,7 +28,7 @@ class _DummyGateway:
 def test_supervised_turn_preserves_gate_reported_response_when_follow_up_is_required(
     monkeypatch,
 ) -> None:
-    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, None))
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _DummyGateway()))
     expected_response = (
         "Execution status: mutation may have run but verification is inconclusive."
     )
@@ -64,7 +67,7 @@ def test_supervised_turn_preserves_gate_reported_response_when_follow_up_is_requ
 def test_supervised_turn_still_fails_closed_without_gate_reported_response(
     monkeypatch,
 ) -> None:
-    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, None))
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _DummyGateway()))
     monkeypatch.setattr(
         orchestrator,
         "execute_workflow",
@@ -93,7 +96,7 @@ def test_supervised_turn_still_fails_closed_without_gate_reported_response(
 def test_supervised_turn_leaves_missing_discovery_unset_for_workflow_owned_routing(
     monkeypatch,
 ) -> None:
-    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, None))
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _DummyGateway()))
     captured: dict[str, Any] = {}
 
     def _execute_workflow(*args, **kwargs):
@@ -207,10 +210,103 @@ def test_turn_execution_route_discovers_when_prefilled_payload_is_empty(
     ]
 
 
+def test_turn_execution_route_preserves_non_default_selector_intent_with_safe_general_fallback(
+    monkeypatch,
+) -> None:
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
+        gateway=cast(Any, _DummyGateway()),
+        selector_enabled=True,
+    )
+    excluded_workflow_id = "#V#specialised_vontology_search_workflow"
+    aux_llm_calls: list[dict[str, Any]] = []
+
+    llm = SimpleNamespace(
+        generate=lambda prompt, context=None, model=None: (
+            '{"workflow_id":"#V#specialised_vontology_search_workflow",'
+            '"confidence":0.93,'
+            '"reasoning":"The specialised workflow best matches this request."}'
+        )
+    )
+
+    result = orchestrator._action_turn_execution_route(
+        SimpleNamespace(
+            data={
+                "user_prompt": "Look up the represented student concept and inspect its relations.",
+                "workflow_discovery_result": {
+                    "matches": [
+                        {
+                            "concept_id": excluded_workflow_id,
+                            "name": "Specialised Vontology Search Workflow",
+                            "description": "Inspect represented concepts and relations.",
+                            "routing_eligible": False,
+                            "routing_exclusion_reason": "missing_authoritative_purpose",
+                            "is_executable": True,
+                            "executability_reason": "executable_now",
+                            "candidate_source": "workflow_discovery",
+                        }
+                    ],
+                    "candidates": [
+                        {
+                            "concept_id": excluded_workflow_id,
+                            "name": "Specialised Vontology Search Workflow",
+                            "description": "Inspect represented concepts and relations.",
+                            "routing_eligible": False,
+                            "routing_exclusion_reason": "missing_authoritative_purpose",
+                            "is_executable": True,
+                            "executability_reason": "executable_now",
+                            "candidate_source": "workflow_discovery",
+                        }
+                    ],
+                    "match_count": 1,
+                },
+                "workflow_discovery": None,
+                "policy_state": SimpleNamespace(
+                    enabled=False,
+                    policy=None,
+                    policy_id=None,
+                    predicate_id=None,
+                    errors=(),
+                ),
+                "registry_snapshot": None,
+                "llm_calls": [],
+                "aux_llm_calls": aux_llm_calls,
+            },
+            environment=SimpleNamespace(
+                user_namespace="#V#user",
+                llm_client=llm,
+                model="test-model",
+            ),
+        )
+    )
+
+    assert result.status == "success"
+    assert result.outputs["selected_workflow_id"] == TOOL_CALLING_WORKFLOW_ID
+    assert result.outputs["workflow_routing"]["workflow_id"] == TOOL_CALLING_WORKFLOW_ID
+    assert result.outputs["workflow_routing"]["verdict"] == "tool_contract_override"
+    assert result.outputs["workflow_routing"]["source"] == "selector_override"
+    assert (
+        result.outputs["selected_workflow_trace"]["selector_selection_metadata"][
+            "unmatched_candidate_workflow_id"
+        ]
+        == excluded_workflow_id
+    )
+    override_entry = next(
+        entry
+        for entry in aux_llm_calls
+        if isinstance(entry, dict)
+        and entry.get("type") == "workflow_selector_override"
+        and entry.get("reason")
+        == "selector_unmatched_candidate_requires_safe_general_fallback"
+    )
+    assert override_entry["selected_workflow_id"] == TOOL_CALLING_WORKFLOW_ID
+    assert override_entry["requested_candidate_workflow_id"] == excluded_workflow_id
+
+
 def test_execute_selected_promotes_child_result_snapshot_into_completion_report(
     monkeypatch,
 ) -> None:
-    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, None))
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _DummyGateway()))
     monkeypatch.setattr(
         orchestrator,
         "execute_workflow",

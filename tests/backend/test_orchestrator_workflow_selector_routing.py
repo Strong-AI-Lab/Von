@@ -31,6 +31,7 @@ from src.backend.integrations.internal_mcp.orchestrator import (
     WorkflowRoutingInfo,
     _ModelCandidate,
 )
+import src.backend.services.workflow_selection_experience as selection_experience_module
 from src.backend.services.paper_representation_workflow_vontology_service import (
     ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
     bootstrap_canonical_paper_representation_workflows,
@@ -2945,6 +2946,281 @@ def test_selector_receives_discovered_workflows(monkeypatch):
     # and we fall through to tool-calling.  The response should come from the
     # plan handler (second LLM call).
     assert "Falling back" in result.response_text or result.response_text
+
+
+def test_selector_unmatched_non_default_candidate_uses_safe_general_tool_fallback(
+    monkeypatch,
+):
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    excluded_workflow_id = "#V#specialised_vontology_search_workflow"
+    executed_workflow_ids: list[str] = []
+    recovery_requests: list[Mapping[str, Any]] = []
+
+    def _execute_workflow(workflow_id: str, **_kwargs: Any):
+        executed_workflow_ids.append(workflow_id)
+        if workflow_id == TOOL_CALLING_WORKFLOW_ID:
+            return SimpleNamespace(
+                data={
+                    "final_response": "Executed via safe general tool workflow.",
+                    "tool_messages": [],
+                    "invocations": [],
+                    "iteration_count": 1,
+                },
+                final_state="complete",
+                completed=True,
+            )
+        if workflow_id == WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID:
+            recovery_requests.append(dict(_kwargs))
+            return SimpleNamespace(
+                data={
+                    "workflow_gap_final_response_text": (
+                        "Recovered through workflow-gap analysis."
+                    ),
+                    "workflow_gap_final_extra_messages": [],
+                    "workflow_gap_final_tool_invocations": [],
+                    "workflow_gap_recovery_outcome": (
+                        "candidate_retried_successfully"
+                    ),
+                    "workflow_gap_candidate_workflow_id": excluded_workflow_id,
+                },
+                final_state="complete",
+                completed=True,
+            )
+        raise AssertionError(f"Unexpected workflow execution: {workflow_id}")
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
+
+    llm = _CapturingLLM(
+        [
+            json.dumps(
+                {
+                    "workflow_id": excluded_workflow_id,
+                    "confidence": 0.94,
+                    "reasoning": (
+                        "The specialised Vontology search workflow is the best fit "
+                        "for this request."
+                    ),
+                }
+            )
+        ]
+    )
+
+    result = orchestrator.run(
+        prompt="Find the represented student record and inspect the concept links.",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+        workflow_discovery_result={
+            "matches": [
+                {
+                    "concept_id": excluded_workflow_id,
+                    "name": "Specialised Vontology Search Workflow",
+                    "description": "Inspect represented concepts and relations.",
+                    "routing_eligible": False,
+                    "routing_exclusion_reason": "missing_authoritative_purpose",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "candidate_source": "workflow_discovery",
+                    "relevance_score": 0.97,
+                    "confidence_score": 0.97,
+                }
+            ],
+            "candidates": [
+                {
+                    "concept_id": excluded_workflow_id,
+                    "name": "Specialised Vontology Search Workflow",
+                    "description": "Inspect represented concepts and relations.",
+                    "routing_eligible": False,
+                    "routing_exclusion_reason": "missing_authoritative_purpose",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "candidate_source": "workflow_discovery",
+                    "relevance_score": 0.97,
+                    "confidence_score": 0.97,
+                }
+            ],
+            "match_count": 1,
+        },
+    )
+
+    assert executed_workflow_ids == [
+        TOOL_CALLING_WORKFLOW_ID,
+        WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
+    ]
+    assert result.response_text == "Recovered through workflow-gap analysis."
+    assert result.workflow_routing is not None
+    assert result.workflow_routing.workflow_id == TOOL_CALLING_WORKFLOW_ID
+    assert result.workflow_routing.verdict == "tool_contract_override"
+    assert result.workflow_routing.source == "selector_override"
+    assert (
+        "safe general tool workflow"
+        in (result.workflow_routing.reasoning or "").lower()
+    )
+
+    selector_entry = next(
+        entry
+        for entry in result.aux_llm_calls
+        if isinstance(entry, dict) and entry.get("type") == "workflow_selector"
+    )
+    assert selector_entry["workflow_id"] == CHAT_ASSISTANT_WORKFLOW_ID
+    assert selector_entry["selection_metadata"]["selection_resolution"] == (
+        "default_workflow_fallback_unmatched_candidate"
+    )
+    assert (
+        selector_entry["selection_metadata"]["unmatched_candidate_workflow_id"]
+        == excluded_workflow_id
+    )
+
+    override_entry = next(
+        entry
+        for entry in result.aux_llm_calls
+        if isinstance(entry, dict)
+        and entry.get("type") == "workflow_selector_override"
+        and entry.get("reason")
+        == "selector_unmatched_candidate_requires_safe_general_fallback"
+    )
+    assert override_entry["selected_workflow_id"] == TOOL_CALLING_WORKFLOW_ID
+    assert override_entry["requested_candidate_workflow_id"] == excluded_workflow_id
+
+    recovery_entry = next(
+        entry
+        for entry in result.aux_llm_calls
+        if isinstance(entry, dict) and entry.get("type") == "workflow_gap_recovery"
+    )
+    assert recovery_entry["status"] == "applied"
+    assert recovery_entry["candidate_workflow_id"] == excluded_workflow_id
+    assert recovery_requests
+    assert (
+        recovery_requests[0]["data"]["workflow_gap_base_response_text"]
+        == "Executed via safe general tool workflow."
+    )
+    assert recovery_requests[0]["data"]["workflow_gap_selected_execution_mode"] == (
+        "tool_pipeline"
+    )
+
+
+def test_selector_safe_general_fallback_finalises_selection_experience_with_override_truth(
+    monkeypatch,
+):
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    excluded_workflow_id = "#V#specialised_vontology_search_workflow"
+    captured_finalise: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        selection_experience_module,
+        "record_selection_experience",
+        lambda **_kwargs: SimpleNamespace(experience_id="exp-selector-override"),
+    )
+
+    def _capture_finalise(**kwargs: Any):
+        captured_finalise.update(kwargs)
+        return None
+
+    monkeypatch.setattr(
+        selection_experience_module,
+        "finalise_selection_experience",
+        _capture_finalise,
+    )
+
+    def _execute_workflow(workflow_id: str, **_kwargs: Any):
+        if workflow_id == TOOL_CALLING_WORKFLOW_ID:
+            return SimpleNamespace(
+                data={
+                    "final_response": "Executed via safe general tool workflow.",
+                    "tool_messages": [],
+                    "invocations": [],
+                    "iteration_count": 1,
+                },
+                final_state="complete",
+                completed=True,
+            )
+        if workflow_id == WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID:
+            return SimpleNamespace(
+                data={
+                    "workflow_gap_final_response_text": (
+                        "Recovered through workflow-gap analysis."
+                    ),
+                    "workflow_gap_final_extra_messages": [],
+                    "workflow_gap_final_tool_invocations": [],
+                    "workflow_gap_recovery_outcome": (
+                        "candidate_retried_successfully"
+                    ),
+                    "workflow_gap_candidate_workflow_id": excluded_workflow_id,
+                },
+                final_state="complete",
+                completed=True,
+            )
+        raise AssertionError(f"Unexpected workflow execution: {workflow_id}")
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
+
+    result = orchestrator.run(
+        prompt="Find the represented student record and inspect the concept links.",
+        context=[],
+        llm_client=_CapturingLLM(
+            [
+                json.dumps(
+                    {
+                        "workflow_id": excluded_workflow_id,
+                        "confidence": 0.94,
+                        "reasoning": (
+                            "The specialised Vontology search workflow is the best fit "
+                            "for this request."
+                        ),
+                    }
+                )
+            ]
+        ),
+        model=None,
+        user_namespace="#V#user",
+        workflow_discovery_result={
+            "matches": [
+                {
+                    "concept_id": excluded_workflow_id,
+                    "name": "Specialised Vontology Search Workflow",
+                    "description": "Inspect represented concepts and relations.",
+                    "routing_eligible": False,
+                    "routing_exclusion_reason": "missing_authoritative_purpose",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "candidate_source": "workflow_discovery",
+                    "relevance_score": 0.97,
+                    "confidence_score": 0.97,
+                }
+            ],
+            "candidates": [
+                {
+                    "concept_id": excluded_workflow_id,
+                    "name": "Specialised Vontology Search Workflow",
+                    "description": "Inspect represented concepts and relations.",
+                    "routing_eligible": False,
+                    "routing_exclusion_reason": "missing_authoritative_purpose",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "candidate_source": "workflow_discovery",
+                    "relevance_score": 0.97,
+                    "confidence_score": 0.97,
+                }
+            ],
+            "match_count": 1,
+        },
+        turn_id="turn-selector-override",
+    )
+
+    assert result.response_text == "Recovered through workflow-gap analysis."
+    assert captured_finalise["experience_id"] == "exp-selector-override"
+    outcome_metadata = captured_finalise["outcome_metadata"]
+    assert outcome_metadata["selected_workflow_id"] == TOOL_CALLING_WORKFLOW_ID
+    assert outcome_metadata["effective_dispatch_workflow_id"] == TOOL_CALLING_WORKFLOW_ID
+    assert outcome_metadata["selector_override_applied"] is True
+    assert outcome_metadata["workflow_gap_recovery_applied"] is True
+    assert outcome_metadata["selector_override"]["reason"] == (
+        "selector_unmatched_candidate_requires_safe_general_fallback"
+    )
+    assert outcome_metadata["selector_override"]["requested_candidate_workflow_id"] == (
+        excluded_workflow_id
+    )
 
 
 def test_non_executable_discovered_workflow_filtered_by_default(monkeypatch):
