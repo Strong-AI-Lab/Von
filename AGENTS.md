@@ -152,7 +152,8 @@ Verify all of the following:
 4. Preserve user-authored text exactly unless the user explicitly asked to rename or normalise it.
 5. Use canonical ontology predicates rather than ad-hoc structural relationship fields when predicate concepts exist.
 6. Keep types and individuals cleanly separated.
-7. Record chosen canonical concept IDs in Jira for ontology-shaping work.
+7. Distinguish carefully between predicate types and predicate instances. `#V#binary_predicate` is a type of predicate, so it is a type-level concept. Concrete predicates such as `#V#hasSubprocedure`, `#V#hasInstance`, and most domain predicates are instances of `#V#predicate` (and may also be instances of a specialised predicate type such as `#V#binary_predicate`). Do not create persisted predicate concepts as types under `#V#predicate` unless you are intentionally defining a new predicate subtype. If the concept is meant to be used as an actual relationship, it should usually be an instance of `#V#predicate`, not a type of it.
+8. Record chosen canonical concept IDs in Jira for ontology-shaping work.
 
 ## 7. Task lifecycle discipline
 
@@ -171,6 +172,7 @@ Verify all of the following:
 - use existing canonical helpers and pathways before adding new ones
 - run targeted tests as you go
 - keep changes minimal but systemic where a shared fix is clearly better than a point fix
+- do not treat unrelated local changes as automatic exclusions from a commit; if they appear consistent with the branch direction, do not weaken task correctness, and do not conflict with explicit user intent, it is acceptable to bundle them rather than spend disproportionate effort separating them mechanically
 
 ### 7.3 Before saying the task is done
 
