@@ -1501,6 +1501,8 @@ def _extract_response_transformation_event_summary(
             continue
         if _progress_str(raw_event.get("transform_name")) != transform_name:
             continue
+        input_summary_raw = raw_event.get("input_summary")
+        output_summary_raw = raw_event.get("output_summary")
         matched_event = {
             "transform_name": _progress_str(raw_event.get("transform_name")),
             "status": _progress_str(raw_event.get("status")),
@@ -1510,13 +1512,11 @@ def _extract_response_transformation_event_summary(
             "suppression_reason": _progress_str(raw_event.get("suppression_reason")),
             "error_class": _progress_str(raw_event.get("error_class")),
             "input_summary": (
-                dict(raw_event.get("input_summary"))
-                if isinstance(raw_event.get("input_summary"), Mapping)
-                else {}
+                dict(input_summary_raw) if isinstance(input_summary_raw, Mapping) else {}
             ),
             "output_summary": (
-                dict(raw_event.get("output_summary"))
-                if isinstance(raw_event.get("output_summary"), Mapping)
+                dict(output_summary_raw)
+                if isinstance(output_summary_raw, Mapping)
                 else {}
             ),
         }
@@ -1845,6 +1845,77 @@ def _build_turn_execution_stage_diagnostics(
     return stage_diagnostics
 
 
+def _build_turn_execution_mcp_access(
+    *,
+    request_id: str,
+    session_id: str | None,
+    namespace: str | None,
+    history_owner_user_id: str | None,
+    organisation_concept_id: str | None,
+) -> dict[str, Any]:
+    from ...services.conversation_scope_binding_service import (
+        build_conversation_scope_binding,
+    )
+
+    def _tool_call_descriptor(
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        *,
+        purpose: str | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "tool_name": tool_name,
+            "arguments": {
+                key: value for key, value in arguments.items() if value is not None
+            },
+        }
+        if isinstance(purpose, str) and purpose.strip():
+            payload["purpose"] = purpose.strip()
+        return payload
+
+    access: dict[str, Any] = {
+        "turn_execution_get_diagnostics": _tool_call_descriptor(
+            "turn_execution_get_diagnostics",
+            {"request_id": request_id, "namespace": namespace},
+            purpose="Fetch the persisted full turn-execution diagnostics payload.",
+        ),
+        "turn_execution_get": _tool_call_descriptor(
+            "turn_execution_get",
+            {"request_id": request_id, "namespace": namespace},
+            purpose="Fetch the projected turn-execution record for this request.",
+        ),
+    }
+
+    if isinstance(session_id, str) and session_id.strip():
+        conversation_ref = build_conversation_scope_binding(
+            chat_session_id=session_id,
+            history_owner_user_id=history_owner_user_id,
+            read_namespace=namespace,
+            organisation_concept_id=organisation_concept_id,
+        )
+        access["conversation_telemetry_get_locator"] = _tool_call_descriptor(
+            "conversation_telemetry_get_locator",
+            {
+                "conversation_ref": conversation_ref,
+                "namespace": namespace,
+                "organisation_concept_id": organisation_concept_id,
+            },
+            purpose="Fetch the compact conversation locator for the surrounding chat session.",
+        )
+        access["chat_history_get_segments"] = _tool_call_descriptor(
+            "chat_history_get_segments",
+            {
+                "conversation_ref": conversation_ref,
+                "namespace": namespace,
+                "include_debug": True,
+                "organisation_concept_id": organisation_concept_id,
+            },
+            purpose="Fetch the stored transcript segments and embedded debug payloads for this session.",
+        )
+
+    return access
+
+
 def _build_turn_execution_diagnostics(
     *,
     request_id: str | None,
@@ -1859,6 +1930,7 @@ def _build_turn_execution_diagnostics(
     response_transformations: Mapping[str, Any] | None = None,
     critic_verdict: Mapping[str, Any] | None = None,
     completion_gate_verdict: Mapping[str, Any] | None = None,
+    mcp_access: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     code_version_details = get_runtime_code_version_info()
 
@@ -2029,6 +2101,9 @@ def _build_turn_execution_diagnostics(
         "workflow_stage_path": workflow_stage_path,
         "stage_diagnostics": stage_diagnostics,
         "timing_breakdown": timing_breakdown,
+        "mcp_access": (
+            dict(mcp_access) if isinstance(mcp_access, Mapping) else None
+        ),
     }
 
 
@@ -7249,49 +7324,64 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 progress_scope_key=progress_scope_key,
             )
 
+        effective_request_user_id = (
+            user_concept_id if isinstance(user_concept_id, str) and user_concept_id.strip() else request_user_id
+        )
+        effective_request_org_id = (
+            org_concept_id if isinstance(org_concept_id, str) and org_concept_id.strip() else request_org_id
+        )
+
         # Try to get user name from concept if user_id provided
-        if request_user_id:
+        if effective_request_user_id:
             try:
                 from ...services.concept_service import get_concept_by_concept_id
 
-                user_concept = get_concept_by_concept_id(request_user_id)
+                user_concept = get_concept_by_concept_id(effective_request_user_id)
                 if user_concept:
-                    user_name = user_concept.get("name") or request_user_id
+                    user_name = user_concept.get("name") or effective_request_user_id
                     system_message_parts.append(
-                        f"Current user: {user_name} ({request_user_id})"
+                        f"Current user: {user_name} ({effective_request_user_id})"
                     )
                     current_app.logger.info(
-                        f"User context: {user_name} ({request_user_id})"
+                        f"User context: {user_name} ({effective_request_user_id})"
                     )
                 else:
-                    system_message_parts.append(f"Current user ID: {request_user_id}")
+                    system_message_parts.append(
+                        f"Current user ID: {effective_request_user_id}"
+                    )
             except Exception as e:
                 current_app.logger.warning(
-                    f"Could not fetch user concept {request_user_id}: {e}"
+                    f"Could not fetch user concept {effective_request_user_id}: {e}"
                 )
-                system_message_parts.append(f"Current user ID: {request_user_id}")
+                system_message_parts.append(
+                    f"Current user ID: {effective_request_user_id}"
+                )
 
         # Try to get organization name from concept if org_id provided
-        if request_org_id:
+        if effective_request_org_id:
             try:
                 from ...services.concept_service import get_concept_by_concept_id
 
-                org_concept = get_concept_by_concept_id(request_org_id)
+                org_concept = get_concept_by_concept_id(effective_request_org_id)
                 if org_concept:
-                    org_name = org_concept.get("name") or request_org_id
+                    org_name = org_concept.get("name") or effective_request_org_id
                     system_message_parts.append(
-                        f"Organization: {org_name} ({request_org_id})"
+                        f"Organization: {org_name} ({effective_request_org_id})"
                     )
                     current_app.logger.info(
-                        f"Organization context: {org_name} ({request_org_id})"
+                        f"Organization context: {org_name} ({effective_request_org_id})"
                     )
                 else:
-                    system_message_parts.append(f"Organization ID: {request_org_id}")
+                    system_message_parts.append(
+                        f"Organization ID: {effective_request_org_id}"
+                    )
             except Exception as e:
                 current_app.logger.warning(
-                    f"Could not fetch org concept {request_org_id}: {e}"
+                    f"Could not fetch org concept {effective_request_org_id}: {e}"
                 )
-                system_message_parts.append(f"Organization ID: {request_org_id}")
+                system_message_parts.append(
+                    f"Organization ID: {effective_request_org_id}"
+                )
 
         # Add language preference if provided
         if request_language and request_language != "en-NZ":
@@ -8384,6 +8474,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 conversation_turn_instance_created_new = None
 
         orchestrator_result = None
+        orchestrator_input_context = enhanced_context
         if orchestrator is None:
             response_text = _handle_orchestrator_missing_fallback(
                 llm_client=llm_client,
@@ -8445,9 +8536,10 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
                 # JVNAUTOSCI-1768: Consolidated entry point. Discovery now happens inside the workflow.
                 orchestrator_start_perf = time.perf_counter()
+                orchestrator_input_context = list(context or [])
                 orchestrator_result = orchestrator.execute_conversation_turn_supervised(
                     prompt=prompt_text,
-                    context=enhanced_context,
+                    context=orchestrator_input_context,
                     llm_client=llm_client,
                     model=model_name,
                     user_namespace=user_namespace,
@@ -9789,9 +9881,11 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             if callable(build_augmented):
                 try:
                     sent_context_for_stats = build_augmented(
-                        enhanced_context,
+                        orchestrator_input_context,
                         user_namespace=user_namespace,
                         auxiliary_system_prompt=dynamic_instructions,
+                        user_concept_id=user_concept_id,
+                        org_concept_id=org_concept_id,
                     )
                 except Exception:
                     sent_context_for_stats = enhanced_context
@@ -10201,6 +10295,13 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         tool_progress_snapshot = _snapshot_tool_progress_for_request(
             progress_scope_key, request_id
         )
+        turn_execution_mcp_access = _build_turn_execution_mcp_access(
+            request_id=request_id,
+            session_id=session_id,
+            namespace=user_namespace,
+            history_owner_user_id=history_user_id,
+            organisation_concept_id=org_concept_id,
+        )
         turn_execution_diagnostics = _build_turn_execution_diagnostics(
             request_id=request_id,
             prompt_text=prompt_text,
@@ -10240,6 +10341,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 )
                 else None
             ),
+            mcp_access=turn_execution_mcp_access,
         )
 
         workflow_use_episodes = [

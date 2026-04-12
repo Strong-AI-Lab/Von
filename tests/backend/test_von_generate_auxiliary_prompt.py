@@ -14,9 +14,21 @@ class _CapturingLLM:
 class _CapturingOrchestrator:
     def __init__(self):
         self.calls = []
+        self.build_augmented_calls = []
 
     def run(self, **kwargs):
         return self.execute_conversation_turn_supervised(**kwargs)
+
+    def _build_augmented_context(self, context, **kwargs):
+        self.build_augmented_calls.append(
+            {"context": list(context or []), **kwargs}
+        )
+        return [
+            {
+                "role": "system",
+                "content": "Authenticated context ready for LLM execution.",
+            }
+        ] + list(context or [])
 
     def execute_conversation_turn_supervised(self, **kwargs):
         self.calls.append(kwargs)
@@ -161,6 +173,42 @@ def test_generate_passes_auxiliary_prompt_to_orchestrator(app):
     assert orchestrator.calls, "expected orchestrator.run() to be called"
     call = orchestrator.calls[0]
     assert call.get("auxiliary_system_prompt") == "Please be terse."
+
+
+def test_generate_supervised_path_reports_actual_sent_context_and_mcp_access(app):
+    orchestrator = _CapturingOrchestrator()
+    app.config["INTERNAL_MCP_ORCHESTRATOR"] = orchestrator
+    app.config["INTERNAL_MCP_GATEWAY"] = object()
+
+    client = app.test_client()
+    resp = client.post("/von/generate", json={"prompt": "Who am I?"})
+    if resp.status_code != 200:
+        raise AssertionError(
+            f"Unexpected status {resp.status_code}: {resp.get_json() or resp.get_data(as_text=True)}"
+        )
+
+    assert orchestrator.calls, "expected orchestrator execution"
+    assert orchestrator.calls[0].get("context") == []
+
+    assert orchestrator.build_augmented_calls, "expected sent-context reconstruction"
+    build_call = orchestrator.build_augmented_calls[0]
+    assert build_call.get("user_concept_id") == "#V#michael_witbrock"
+    assert build_call.get("user_namespace") == "#V#michael_witbrock"
+    assert build_call.get("auxiliary_system_prompt") == "Please be terse."
+
+    body = resp.get_json()
+    llm_debug = body["llm_debug"]
+    sent_stats = llm_debug["context_stats"]["sent_to_llm"]
+    assert sent_stats["by_role"]["system"] == 1
+
+    diagnostics = llm_debug["turn_execution_diagnostics"]
+    mcp_access = diagnostics["mcp_access"]
+    assert "turn_execution_get_diagnostics" in mcp_access
+    assert "chat_history_get_segments" in mcp_access
+    assert (
+        mcp_access["turn_execution_get_diagnostics"]["arguments"]["request_id"]
+        == body["request_id"]
+    )
 
 
 def test_generate_includes_auxiliary_prompt_without_orchestrator(app):

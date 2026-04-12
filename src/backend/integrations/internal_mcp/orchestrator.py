@@ -8908,6 +8908,8 @@ class InternalMCPChatOrchestrator:
         user_namespace: str | None = None,
         auxiliary_system_prompt: str | None = None,
         preferred_language: str | None = None,
+        user_concept_id: str | None = None,
+        org_concept_id: str | None = None,
     ) -> str:
         """Build system instruction emphasizing immediate tool invocation behaviour.
 
@@ -8931,6 +8933,46 @@ class InternalMCPChatOrchestrator:
 
         max_invocations = int(getattr(self, "_max_tool_invocations", 0))
         batch_cap = int(getattr(self, "_tool_batch_cap", 4))
+
+        identity_lines: list[str] = []
+
+        def _resolve_concept_label(concept_id: str) -> str | None:
+            try:
+                from ...services.concept_service import get_concept_by_concept_id
+
+                concept = get_concept_by_concept_id(concept_id)
+            except Exception:
+                concept = None
+            if not isinstance(concept, Mapping):
+                return None
+            name = concept.get("name")
+            if isinstance(name, str) and name.strip():
+                return name.strip()
+            return None
+
+        if isinstance(user_concept_id, str) and user_concept_id.strip():
+            resolved_user_id = user_concept_id.strip()
+            resolved_user_label = _resolve_concept_label(resolved_user_id)
+            if resolved_user_label:
+                identity_lines.append(
+                    f"CURRENT USER CONTEXT: {resolved_user_label} ({resolved_user_id})"
+                )
+            else:
+                identity_lines.append(
+                    f"CURRENT USER CONTEXT: {resolved_user_id}"
+                )
+
+        if isinstance(org_concept_id, str) and org_concept_id.strip():
+            resolved_org_id = org_concept_id.strip()
+            resolved_org_label = _resolve_concept_label(resolved_org_id)
+            if resolved_org_label:
+                identity_lines.append(
+                    f"CURRENT ORGANISATION CONTEXT: {resolved_org_label} ({resolved_org_id})"
+                )
+            else:
+                identity_lines.append(
+                    f"CURRENT ORGANISATION CONTEXT: {resolved_org_id}"
+                )
 
         base_message, base_prompt_concept_id = (
             self._load_base_system_prompt_from_vontology(
@@ -9012,6 +9054,11 @@ class InternalMCPChatOrchestrator:
         base_message = self._inject_prompt_variable(
             base_message, key="listing", value=listing
         )
+        if identity_lines:
+            base_message = (
+                f"{base_message.rstrip()}\n\n"
+                + "\n".join(identity_lines)
+            )
         if "INTERNAL EXECUTION GUARDRAILS:" not in base_message:
             base_message = (
                 f"{base_message.rstrip()}\n\n"
@@ -18409,6 +18456,8 @@ class InternalMCPChatOrchestrator:
         auxiliary_system_prompt: str | None = None,
         preflight_message: str | None = None,
         preferred_language: str | None = None,
+        user_concept_id: str | None = None,
+        org_concept_id: str | None = None,
     ) -> List[Mapping[str, Any]]:
         base: List[Mapping[str, Any]] = []
         if context:
@@ -18437,6 +18486,8 @@ class InternalMCPChatOrchestrator:
             user_namespace=user_namespace,
             auxiliary_system_prompt=auxiliary_system_prompt,
             preferred_language=preferred_language,
+            user_concept_id=user_concept_id,
+            org_concept_id=org_concept_id,
         )
 
         if presenter_protocol:
@@ -21727,6 +21778,14 @@ class InternalMCPChatOrchestrator:
             org_concept_id=org_concept_id,
             user_namespace=user_namespace,
         )
+        augmented_context = self._build_augmented_context(
+            context,
+            user_namespace=user_namespace,
+            auxiliary_system_prompt=auxiliary_system_prompt,
+            preferred_language=preferred_language,
+            user_concept_id=user_concept_id,
+            org_concept_id=org_concept_id,
+        )
 
         def _model_for_stage(stage: str) -> Optional[str]:
             return self._select_model_for_stage(
@@ -21757,7 +21816,7 @@ class InternalMCPChatOrchestrator:
             "prompt": prompt,
             "user_prompt": prompt,
             "prompt_for_requirements": prompt,
-            "augmented_context": list(context or []),
+            "augmented_context": list(augmented_context),
             "conversation_context": list(context or []),
             "workflow_discovery_result": (
                 dict(workflow_discovery_result)
@@ -22900,6 +22959,8 @@ class InternalMCPChatOrchestrator:
                 auxiliary_system_prompt=auxiliary_system_prompt,
                 preflight_message=preflight.message,
                 preferred_language=preferred_language,
+                user_concept_id=user_concept_id,
+                org_concept_id=org_concept_id,
             ),
         )
 
