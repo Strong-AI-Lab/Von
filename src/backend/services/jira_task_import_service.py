@@ -10,6 +10,9 @@ designed for:
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import math
 import re
 import uuid
 from datetime import datetime, timezone
@@ -30,9 +33,13 @@ from .task_management_service import (
     TASK_METADATA_KEY_EXTERNAL_REFERENCES,
     TASK_METADATA_KEY_ORGANISATION,
     TASK_SPECIFICATION_TYPE_ID,
+    add_task_attachment,
+    add_task_comment,
+    add_task_worklog,
     create_task,
     find_task_by_external_reference,
     link_tasks,
+    record_task_history_event,
     set_task_epic,
     set_task_parent,
     update_task_fields,
@@ -85,6 +92,15 @@ _JIRA_PRIORITY_TO_VON_PRIORITY = {
 
 def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _normalise_optional_text(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
 def _extract_plain_text(value: Any) -> str | None:
     if isinstance(value, str):
         cleaned = value.strip()
@@ -399,6 +415,154 @@ def _extract_status_history(issue: Mapping[str, Any]) -> tuple[list[Dict[str, An
     if not result:
         return [], "jira_status_history_not_present"
     return result, None
+
+
+def _extract_issue_comments(issue: Mapping[str, Any]) -> list[Dict[str, Any]]:
+    fields = _extract_issue_fields(issue)
+    raw_comment = fields.get("comment") or issue.get("comment")
+    if isinstance(raw_comment, Mapping):
+        raw_comments = raw_comment.get("comments")
+    elif isinstance(raw_comment, list):
+        raw_comments = raw_comment
+    else:
+        raw_comments = None
+    if not isinstance(raw_comments, list):
+        return []
+
+    result: list[Dict[str, Any]] = []
+    for raw in raw_comments:
+        if not isinstance(raw, Mapping):
+            continue
+        body = _extract_plain_text(raw.get("body"))
+        if not isinstance(body, str) or not body.strip():
+            continue
+        comment_id = (
+            str(raw.get("id")).strip()
+            if raw.get("id") is not None and str(raw.get("id")).strip()
+            else None
+        )
+        result.append(
+            {
+                "comment_id": comment_id,
+                "body": body.strip(),
+                "created_at": _normalise_datetime_or_date(raw.get("created")),
+                "updated_at": _normalise_datetime_or_date(raw.get("updated")),
+                "author": (
+                    _extract_jira_participant(raw.get("author"))
+                    if isinstance(raw.get("author"), Mapping)
+                    else None
+                ),
+            }
+        )
+    return result
+
+
+def _extract_issue_attachments(issue: Mapping[str, Any]) -> list[Dict[str, Any]]:
+    fields = _extract_issue_fields(issue)
+    raw_attachments = fields.get("attachment") or issue.get("attachment")
+    if not isinstance(raw_attachments, list):
+        return []
+
+    result: list[Dict[str, Any]] = []
+    for raw in raw_attachments:
+        if not isinstance(raw, Mapping):
+            continue
+        attachment_id = (
+            str(raw.get("id")).strip()
+            if raw.get("id") is not None and str(raw.get("id")).strip()
+            else None
+        )
+        filename = (
+            str(raw.get("filename")).strip()
+            if raw.get("filename") is not None and str(raw.get("filename")).strip()
+            else None
+        )
+        if not filename:
+            continue
+        size_raw = raw.get("size")
+        size_bytes: int | None = None
+        if isinstance(size_raw, int):
+            size_bytes = size_raw
+        elif isinstance(size_raw, str) and size_raw.strip().isdigit():
+            size_bytes = int(size_raw.strip())
+        result.append(
+            {
+                "attachment_id": attachment_id,
+                "filename": filename,
+                "content_url": _normalise_optional_text(raw.get("content")),
+                "thumbnail_url": _normalise_optional_text(raw.get("thumbnail")),
+                "mime_type": _normalise_optional_text(
+                    raw.get("mimeType") or raw.get("contentType")
+                ),
+                "size_bytes": size_bytes,
+                "created_at": _normalise_datetime_or_date(raw.get("created")),
+                "author": (
+                    _extract_jira_participant(raw.get("author"))
+                    if isinstance(raw.get("author"), Mapping)
+                    else None
+                ),
+                "content_base64": _normalise_optional_text(raw.get("content_base64")),
+            }
+        )
+    return result
+
+
+def _extract_issue_worklog(issue: Mapping[str, Any]) -> list[Dict[str, Any]]:
+    fields = _extract_issue_fields(issue)
+    raw_worklog = fields.get("worklog") or issue.get("worklog")
+    if isinstance(raw_worklog, Mapping):
+        raw_entries = raw_worklog.get("worklogs")
+    elif isinstance(raw_worklog, list):
+        raw_entries = raw_worklog
+    else:
+        raw_entries = None
+    if not isinstance(raw_entries, list):
+        return []
+
+    result: list[Dict[str, Any]] = []
+    for raw in raw_entries:
+        if not isinstance(raw, Mapping):
+            continue
+        worklog_id = (
+            str(raw.get("id")).strip()
+            if raw.get("id") is not None and str(raw.get("id")).strip()
+            else None
+        )
+        time_spent_seconds = raw.get("timeSpentSeconds")
+        seconds_value = (
+            time_spent_seconds if isinstance(time_spent_seconds, int) else None
+        )
+        if seconds_value is None and isinstance(time_spent_seconds, str):
+            cleaned = time_spent_seconds.strip()
+            if cleaned.isdigit():
+                seconds_value = int(cleaned)
+        result.append(
+            {
+                "worklog_id": worklog_id,
+                "time_spent_seconds": seconds_value,
+                "comment": _extract_plain_text(raw.get("comment")),
+                "created_at": _normalise_datetime_or_date(raw.get("created")),
+                "started_at": _normalise_datetime_or_date(raw.get("started")),
+                "author": (
+                    _extract_jira_participant(raw.get("author"))
+                    if isinstance(raw.get("author"), Mapping)
+                    else None
+                ),
+            }
+        )
+    return result
+
+
+def _normalise_positive_minutes_from_seconds(value: Any) -> int | None:
+    if not isinstance(value, int) or value <= 0:
+        return None
+    return max(1, int(math.ceil(value / 60.0)))
+
+
+def _build_import_signature(prefix: str, *parts: Any) -> str:
+    joined = "|".join("" if part is None else str(part) for part in parts)
+    digest = hashlib.sha1(joined.encode("utf-8")).hexdigest()
+    return f"{prefix}:{digest[:16]}"
 
 
 def _extract_issue_fields(issue: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -891,6 +1055,464 @@ def _issue_reference_payload(
     return payload
 
 
+def _existing_imported_activity_checkpoint(
+    existing_task: Mapping[str, Any] | None,
+) -> dict[str, set[str]]:
+    external_references = (
+        existing_task.get("external_references")
+        if isinstance(existing_task, Mapping)
+        else None
+    )
+    jira_reference = (
+        external_references.get(_JIRA_SOURCE_SYSTEM)
+        if isinstance(external_references, Mapping)
+        else None
+    )
+    imported_activity = (
+        jira_reference.get("imported_activity")
+        if isinstance(jira_reference, Mapping)
+        else None
+    )
+
+    def _extract_set(key: str) -> set[str]:
+        values = imported_activity.get(key) if isinstance(imported_activity, Mapping) else None
+        if not isinstance(values, list):
+            return set()
+        return {
+            str(value).strip()
+            for value in values
+            if isinstance(value, str) and str(value).strip()
+        }
+
+    return {
+        "comment_ids": _extract_set("comment_ids"),
+        "attachment_ids": _extract_set("attachment_ids"),
+        "worklog_ids": _extract_set("worklog_ids"),
+        "status_history_signatures": _extract_set("status_history_signatures"),
+    }
+
+
+def _jira_source_entry(
+    *,
+    issue_key: str,
+    external_id: str | None,
+    created_at: str | None = None,
+    content_url: str | None = None,
+    extra: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "source_system": _JIRA_SOURCE_SYSTEM,
+        "issue_key": issue_key,
+    }
+    if isinstance(external_id, str) and external_id.strip():
+        payload["external_id"] = external_id.strip()
+    if isinstance(created_at, str) and created_at.strip():
+        payload["created_at"] = created_at.strip()
+    if isinstance(content_url, str) and content_url.strip():
+        payload["content_url"] = content_url.strip()
+    if isinstance(extra, Mapping):
+        for key, value in extra.items():
+            if value is None:
+                continue
+            payload[str(key)] = value
+    return payload
+
+
+def _materialise_jira_issue_activity(
+    *,
+    task_concept_id: str,
+    issue_key: str,
+    raw_issue: Mapping[str, Any],
+    actor_concept_id: str | None,
+    organisation_concept_id: str | None,
+    namespace: str | None,
+    participant_map: Mapping[str, str],
+    participant_account_cache: Dict[str, str],
+    participant_email_cache: Dict[str, str],
+    auto_resolve_participants: bool,
+    create_missing_participant_concepts: bool,
+    dry_run: bool,
+    existing_activity_checkpoint: dict[str, set[str]],
+) -> tuple[dict[str, list[str]], list[str], list[Dict[str, str]]]:
+    imported_activity = {
+        key: sorted(set(values)) for key, values in existing_activity_checkpoint.items()
+    }
+    mapped_fields: list[str] = []
+    dropped_fields: list[Dict[str, str]] = []
+
+    def _resolve_participant(raw_participant: Mapping[str, Any] | None) -> dict[str, Any]:
+        return _ensure_jira_participant_concept(
+            raw_participant=raw_participant,
+            account_id_to_concept_id=participant_map,
+            account_cache=participant_account_cache,
+            email_cache=participant_email_cache,
+            actor_concept_id=actor_concept_id,
+            organisation_concept_id=organisation_concept_id,
+            allow_lookup=bool(auto_resolve_participants),
+            allow_create=(
+                bool(auto_resolve_participants)
+                and bool(create_missing_participant_concepts)
+                and not dry_run
+            ),
+        )
+
+    comments = _extract_issue_comments(raw_issue)
+    imported_comment = False
+    for comment in comments:
+        raw_comment_id = comment.get("comment_id")
+        if isinstance(raw_comment_id, str):
+            comment_id = raw_comment_id
+        else:
+            comment_id = _build_import_signature(
+                "jira_comment",
+                issue_key,
+                comment.get("created_at"),
+                comment.get("body"),
+            )
+        if comment_id in existing_activity_checkpoint["comment_ids"]:
+            continue
+        imported_comment = True
+        if dry_run:
+            imported_activity["comment_ids"].append(comment_id)
+            continue
+        author_resolution = _resolve_participant(
+            comment.get("author") if isinstance(comment.get("author"), Mapping) else None
+        )
+        author_concept_id = (
+            author_resolution.get("concept_id")
+            if isinstance(author_resolution.get("concept_id"), str)
+            else None
+        )
+        try:
+            add_task_comment(
+                task_concept_id,
+                body=str(comment.get("body")),
+                author_concept_id=author_concept_id,
+                created_at=(
+                    comment.get("created_at")
+                    if isinstance(comment.get("created_at"), str)
+                    else None
+                ),
+                source=_jira_source_entry(
+                    issue_key=issue_key,
+                    external_id=comment_id,
+                    created_at=(
+                        comment.get("created_at")
+                        if isinstance(comment.get("created_at"), str)
+                        else None
+                    ),
+                ),
+            )
+            imported_activity["comment_ids"].append(comment_id)
+        except Exception as exc:
+            dropped_fields.append(
+                {
+                    "field": "comments",
+                    "reason": f"jira_comment_import_failed:{comment_id}:{type(exc).__name__}:{exc}",
+                }
+            )
+    if imported_comment:
+        mapped_fields.append("comments")
+
+    attachments = _extract_issue_attachments(raw_issue)
+    imported_attachment = False
+    for attachment in attachments:
+        raw_attachment_id = attachment.get("attachment_id")
+        if isinstance(raw_attachment_id, str):
+            attachment_id = raw_attachment_id
+        else:
+            attachment_id = _build_import_signature(
+                "jira_attachment",
+                issue_key,
+                attachment.get("filename"),
+                attachment.get("created_at"),
+                attachment.get("size_bytes"),
+            )
+        if attachment_id in existing_activity_checkpoint["attachment_ids"]:
+            continue
+        imported_attachment = True
+        if dry_run:
+            imported_activity["attachment_ids"].append(attachment_id)
+            continue
+        author_resolution = _resolve_participant(
+            attachment.get("author")
+            if isinstance(attachment.get("author"), Mapping)
+            else None
+        )
+        author_concept_id = (
+            author_resolution.get("concept_id")
+            if isinstance(author_resolution.get("concept_id"), str)
+            else None
+        )
+        attachment_uri = (
+            attachment.get("content_url")
+            if isinstance(attachment.get("content_url"), str)
+            else None
+        )
+        file_copy_concept_id: str | None = None
+        content_base64 = (
+            attachment.get("content_base64")
+            if isinstance(attachment.get("content_base64"), str)
+            else None
+        )
+        if content_base64:
+            try:
+                attachment_bytes = base64.b64decode(content_base64, validate=True)
+                from .computer_file_copy_service import import_bytes_file_copy
+
+                file_copy_result = import_bytes_file_copy(
+                    data=attachment_bytes,
+                    user_concept_id=actor_concept_id or "",
+                    organisation_concept_id=organisation_concept_id,
+                    namespace=namespace,
+                    original_filename=str(attachment.get("filename")),
+                    content_type=(
+                        attachment.get("mime_type")
+                        if isinstance(attachment.get("mime_type"), str)
+                        else None
+                    ),
+                    source_system="jira_attachment",
+                    source_identifier=attachment_id,
+                    source_uri=attachment_uri,
+                    metadata={"jira_issue_key": issue_key},
+                )
+                if file_copy_result.get("success") is True:
+                    concept_id_value = file_copy_result.get("concept_id")
+                    if isinstance(concept_id_value, str) and concept_id_value.strip():
+                        file_copy_concept_id = concept_id_value.strip()
+                    storage = file_copy_result.get("storage")
+                    if isinstance(storage, Mapping):
+                        storage_uri = storage.get("uri")
+                        if isinstance(storage_uri, str) and storage_uri.strip():
+                            attachment_uri = storage_uri.strip()
+                else:
+                    dropped_fields.append(
+                        {
+                            "field": "attachments",
+                            "reason": (
+                                "jira_attachment_blob_import_failed:"
+                                f"{attachment_id}:{file_copy_result.get('error')}"
+                            ),
+                        }
+                    )
+            except Exception as exc:
+                dropped_fields.append(
+                    {
+                        "field": "attachments",
+                        "reason": (
+                            "jira_attachment_blob_import_failed:"
+                            f"{attachment_id}:{type(exc).__name__}:{exc}"
+                        ),
+                    }
+                )
+        try:
+            add_task_attachment(
+                task_concept_id,
+                filename=str(attachment.get("filename")),
+                uri=attachment_uri or f"jira://attachment/{attachment_id}",
+                media_type=(
+                    attachment.get("mime_type")
+                    if isinstance(attachment.get("mime_type"), str)
+                    else None
+                ),
+                size_bytes=(
+                    attachment.get("size_bytes")
+                    if isinstance(attachment.get("size_bytes"), int)
+                    else None
+                ),
+                added_by_concept_id=author_concept_id,
+                created_at=(
+                    attachment.get("created_at")
+                    if isinstance(attachment.get("created_at"), str)
+                    else None
+                ),
+                source=_jira_source_entry(
+                    issue_key=issue_key,
+                    external_id=attachment_id,
+                    created_at=(
+                        attachment.get("created_at")
+                        if isinstance(attachment.get("created_at"), str)
+                        else None
+                    ),
+                    content_url=(
+                        attachment.get("content_url")
+                        if isinstance(attachment.get("content_url"), str)
+                        else None
+                    ),
+                ),
+                file_copy_concept_id=file_copy_concept_id,
+            )
+            imported_activity["attachment_ids"].append(attachment_id)
+        except Exception as exc:
+            dropped_fields.append(
+                {
+                    "field": "attachments",
+                    "reason": (
+                        "jira_attachment_metadata_import_failed:"
+                        f"{attachment_id}:{type(exc).__name__}:{exc}"
+                    ),
+                }
+            )
+    if imported_attachment:
+        mapped_fields.append("attachments")
+
+    worklog_entries = _extract_issue_worklog(raw_issue)
+    imported_worklog = False
+    for worklog in worklog_entries:
+        raw_worklog_id = worklog.get("worklog_id")
+        if isinstance(raw_worklog_id, str):
+            worklog_id = raw_worklog_id
+        else:
+            worklog_id = _build_import_signature(
+                "jira_worklog",
+                issue_key,
+                worklog.get("created_at"),
+                worklog.get("started_at"),
+                worklog.get("time_spent_seconds"),
+            )
+        if worklog_id in existing_activity_checkpoint["worklog_ids"]:
+            continue
+        imported_worklog = True
+        imported_activity["worklog_ids"].append(worklog_id)
+        minutes = _normalise_positive_minutes_from_seconds(
+            worklog.get("time_spent_seconds")
+        )
+        if minutes is None:
+            dropped_fields.append(
+                {
+                    "field": "worklog",
+                    "reason": f"jira_worklog_duration_missing:{worklog_id}",
+                }
+            )
+            continue
+        if dry_run:
+            continue
+        author_resolution = _resolve_participant(
+            worklog.get("author") if isinstance(worklog.get("author"), Mapping) else None
+        )
+        author_concept_id = (
+            author_resolution.get("concept_id")
+            if isinstance(author_resolution.get("concept_id"), str)
+            else None
+        )
+        try:
+            add_task_worklog(
+                task_concept_id,
+                time_spent_minutes=minutes,
+                author_concept_id=author_concept_id,
+                comment=(
+                    worklog.get("comment")
+                    if isinstance(worklog.get("comment"), str)
+                    else None
+                ),
+                started_at=(
+                    worklog.get("started_at")
+                    if isinstance(worklog.get("started_at"), str)
+                    else None
+                ),
+                created_at=(
+                    worklog.get("created_at")
+                    if isinstance(worklog.get("created_at"), str)
+                    else None
+                ),
+                source=_jira_source_entry(
+                    issue_key=issue_key,
+                    external_id=worklog_id,
+                    created_at=(
+                        worklog.get("created_at")
+                        if isinstance(worklog.get("created_at"), str)
+                        else None
+                    ),
+                ),
+            )
+        except Exception as exc:
+            dropped_fields.append(
+                {
+                    "field": "worklog",
+                    "reason": (
+                        "jira_worklog_import_failed:"
+                        f"{worklog_id}:{type(exc).__name__}:{exc}"
+                    ),
+                }
+            )
+    if imported_worklog:
+        mapped_fields.append("worklog")
+
+    status_history, _warning = _extract_status_history(raw_issue)
+    imported_status_history = False
+    for history_row in status_history:
+        signature: str = _build_import_signature(
+            "jira_status_history",
+            issue_key,
+            history_row.get("changed_at"),
+            history_row.get("from_status"),
+            history_row.get("to_status"),
+            history_row.get("author_account_id"),
+            history_row.get("author_display_name"),
+        )
+        if signature in existing_activity_checkpoint["status_history_signatures"]:
+            continue
+        imported_status_history = True
+        imported_activity["status_history_signatures"].append(signature)
+        if dry_run:
+            continue
+        author_resolution = _resolve_participant(
+            {
+                "accountId": history_row.get("author_account_id"),
+                "displayName": history_row.get("author_display_name"),
+            }
+        )
+        author_concept_id = (
+            author_resolution.get("concept_id")
+            if isinstance(author_resolution.get("concept_id"), str)
+            else None
+        )
+        try:
+            record_task_history_event(
+                task_concept_id,
+                event_type="task_status_transition_imported",
+                actor_concept_id=author_concept_id,
+                event_timestamp=(
+                    history_row.get("changed_at")
+                    if isinstance(history_row.get("changed_at"), str)
+                    else None
+                ),
+                details={
+                    "source_system": _JIRA_SOURCE_SYSTEM,
+                    "issue_key": issue_key,
+                    "from_status": history_row.get("from_status"),
+                    "to_status": history_row.get("to_status"),
+                    "author_account_id": history_row.get("author_account_id"),
+                    "author_display_name": history_row.get("author_display_name"),
+                    "import_signature": signature,
+                },
+            )
+        except Exception as exc:
+            dropped_fields.append(
+                {
+                    "field": "status_history",
+                    "reason": (
+                        "jira_status_history_import_failed:"
+                        f"{signature}:{type(exc).__name__}:{exc}"
+                    ),
+                }
+            )
+    if imported_status_history:
+        mapped_fields.append("status_history.imported")
+
+    imported_activity = {
+        key: sorted(
+            {
+                str(value).strip()
+                for value in values
+                if isinstance(value, str) and str(value).strip()
+            }
+        )
+        for key, values in imported_activity.items()
+    }
+    return imported_activity, mapped_fields, dropped_fields
+
+
 def _resolve_existing_task_id(
     *,
     jira_issue_key: str,
@@ -1249,6 +1871,7 @@ def import_jira_issues_to_tasks(
     dry_run: bool = True,
     actor_concept_id: str | None = None,
     organisation_concept_id: str | None = None,
+    namespace: str | None = None,
     assignee_account_id_to_concept_id: Mapping[str, str] | None = None,
     jira_account_id_to_concept_id: Mapping[str, str] | None = None,
     update_existing: bool = True,
@@ -1262,6 +1885,7 @@ def import_jira_issues_to_tasks(
         dry_run: Preview-only mode. No writes are performed.
         actor_concept_id: Optional Von concept id of the importing actor.
         organisation_concept_id: Optional organisation scope for created tasks.
+        namespace: Optional namespace scope for blob-backed attachment imports.
         assignee_account_id_to_concept_id: Optional map from Jira accountId to
             Von concept ids for assignee linkage (legacy alias for
             jira_account_id_to_concept_id).
@@ -1601,10 +2225,25 @@ def import_jira_issues_to_tasks(
         elif status_history:
             mapped_fields.append("status_history")
 
-        existing_task_id = _resolve_existing_task_id(
-            jira_issue_key=issue_key,
+        existing_task = find_task_by_external_reference(
+            source_system=_JIRA_SOURCE_SYSTEM,
+            external_id=issue_key,
             organisation_concept_id=organisation_concept_id,
-            cache=existing_cache,
+        )
+        existing_task_id = (
+            existing_task.get("task_concept_id")
+            if isinstance(existing_task, Mapping)
+            and isinstance(existing_task.get("task_concept_id"), str)
+            else _resolve_existing_task_id(
+                jira_issue_key=issue_key,
+                organisation_concept_id=organisation_concept_id,
+                cache=existing_cache,
+            )
+        )
+        existing_task_id_str = (
+            existing_task_id.strip()
+            if isinstance(existing_task_id, str) and existing_task_id.strip()
+            else None
         )
 
         task_id: str | None = None
@@ -1641,8 +2280,8 @@ def import_jira_issues_to_tasks(
             update_fields_payload["backlog_rank"] = rank_value
 
         try:
-            if existing_task_id:
-                task_id = existing_task_id
+            if existing_task_id_str is not None:
+                task_id = existing_task_id_str
                 if dry_run:
                     action = "would_update"
                     summary["would_update"] += 1
@@ -1656,48 +2295,6 @@ def import_jira_issues_to_tasks(
                     summary["updated"] += 1
                 else:
                     action = "skipped_existing"
-                if not dry_run:
-                    reference_payload = _issue_reference_payload(
-                        raw_issue,
-                        issue_key=issue_key,
-                        labels=labels,
-                        component_names=component_names,
-                        fix_version_names=fix_version_names,
-                        sprint_values=sprint_values,
-                        rank_value=rank_value,
-                        status_history=status_history,
-                        parent_issue_key=parent_issue_key,
-                        epic_issue_key=epic_issue_key,
-                        link_summaries=issue_links,
-                        assignee=(
-                            assignee_resolution.get("participant")
-                            if isinstance(assignee_resolution, Mapping)
-                            else None
-                        ),
-                        creator=(
-                            creator_resolution.get("participant")
-                            if isinstance(creator_resolution, Mapping)
-                            else None
-                        ),
-                        reporter=(
-                            reporter_resolution.get("participant")
-                            if isinstance(reporter_resolution, Mapping)
-                            else None
-                        ),
-                        watcher_participants=watcher_participants,
-                        watcher_count=watcher_count,
-                        assignee_concept_id=assignee_concept_id,
-                        creator_concept_id=creator_concept_id,
-                        reporter_concept_id=reporter_concept_id,
-                        watcher_concept_ids=watcher_concept_ids,
-                    )
-                    upsert_task_external_reference(
-                        task_id,
-                        source_system=_JIRA_SOURCE_SYSTEM,
-                        external_id=issue_key,
-                        reference_payload=reference_payload,
-                        actor_concept_id=actor_concept_id,
-                    )
             else:
                 if dry_run:
                     task_id = f"planned:{issue_key}"
@@ -1724,50 +2321,83 @@ def import_jira_issues_to_tasks(
                         fields=update_fields_payload,
                         actor_concept_id=actor_concept_id,
                     )
-                    reference_payload = _issue_reference_payload(
-                        raw_issue,
-                        issue_key=issue_key,
-                        labels=labels,
-                        component_names=component_names,
-                        fix_version_names=fix_version_names,
-                        sprint_values=sprint_values,
-                        rank_value=rank_value,
-                        status_history=status_history,
-                        parent_issue_key=parent_issue_key,
-                        epic_issue_key=epic_issue_key,
-                        link_summaries=issue_links,
-                        assignee=(
-                            assignee_resolution.get("participant")
-                            if isinstance(assignee_resolution, Mapping)
-                            else None
-                        ),
-                        creator=(
-                            creator_resolution.get("participant")
-                            if isinstance(creator_resolution, Mapping)
-                            else None
-                        ),
-                        reporter=(
-                            reporter_resolution.get("participant")
-                            if isinstance(reporter_resolution, Mapping)
-                            else None
-                        ),
-                        watcher_participants=watcher_participants,
-                        watcher_count=watcher_count,
-                        assignee_concept_id=assignee_concept_id,
-                        creator_concept_id=creator_concept_id,
-                        reporter_concept_id=reporter_concept_id,
-                        watcher_concept_ids=watcher_concept_ids,
-                    )
-                    upsert_task_external_reference(
-                        task_id,
-                        source_system=_JIRA_SOURCE_SYSTEM,
-                        external_id=issue_key,
-                        reference_payload=reference_payload,
-                        actor_concept_id=actor_concept_id,
-                    )
                     action = "created"
                     summary["created"] += 1
                     existing_cache[issue_key] = task_id
+
+            activity_checkpoint = _existing_imported_activity_checkpoint(existing_task)
+            if isinstance(task_id, str) and task_id:
+                imported_activity, mapped_activity_fields, dropped_activity_fields = (
+                    _materialise_jira_issue_activity(
+                        task_concept_id=task_id,
+                        issue_key=issue_key,
+                        raw_issue=raw_issue,
+                        actor_concept_id=actor_concept_id,
+                        organisation_concept_id=organisation_concept_id,
+                        namespace=namespace,
+                        participant_map=participant_map,
+                        participant_account_cache=participant_account_cache,
+                        participant_email_cache=participant_email_cache,
+                        auto_resolve_participants=bool(auto_resolve_participants),
+                        create_missing_participant_concepts=bool(
+                            create_missing_participant_concepts
+                        ),
+                        dry_run=dry_run,
+                        existing_activity_checkpoint=activity_checkpoint,
+                    )
+                )
+                for field_name in mapped_activity_fields:
+                    if field_name not in mapped_fields:
+                        mapped_fields.append(field_name)
+                dropped_fields.extend(dropped_activity_fields)
+            else:
+                imported_activity = {
+                    key: sorted(values) for key, values in activity_checkpoint.items()
+                }
+
+            if not dry_run and isinstance(task_id, str) and task_id and not task_id.startswith("planned:"):
+                reference_payload = _issue_reference_payload(
+                    raw_issue,
+                    issue_key=issue_key,
+                    labels=labels,
+                    component_names=component_names,
+                    fix_version_names=fix_version_names,
+                    sprint_values=sprint_values,
+                    rank_value=rank_value,
+                    status_history=status_history,
+                    parent_issue_key=parent_issue_key,
+                    epic_issue_key=epic_issue_key,
+                    link_summaries=issue_links,
+                    assignee=(
+                        assignee_resolution.get("participant")
+                        if isinstance(assignee_resolution, Mapping)
+                        else None
+                    ),
+                    creator=(
+                        creator_resolution.get("participant")
+                        if isinstance(creator_resolution, Mapping)
+                        else None
+                    ),
+                    reporter=(
+                        reporter_resolution.get("participant")
+                        if isinstance(reporter_resolution, Mapping)
+                        else None
+                    ),
+                    watcher_participants=watcher_participants,
+                    watcher_count=watcher_count,
+                    assignee_concept_id=assignee_concept_id,
+                    creator_concept_id=creator_concept_id,
+                    reporter_concept_id=reporter_concept_id,
+                    watcher_concept_ids=watcher_concept_ids,
+                )
+                reference_payload["imported_activity"] = imported_activity
+                upsert_task_external_reference(
+                    task_id,
+                    source_system=_JIRA_SOURCE_SYSTEM,
+                    external_id=issue_key,
+                    reference_payload=reference_payload,
+                    actor_concept_id=actor_concept_id,
+                )
         except Exception as exc:
             action = "error"
             summary["errors"] += 1

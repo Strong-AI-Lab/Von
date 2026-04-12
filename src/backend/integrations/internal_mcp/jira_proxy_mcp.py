@@ -91,6 +91,17 @@ class JiraMCPProxy:
     async def get_watchers(self, *, issue_key: str) -> Dict[str, Any]:
         return await self._call("jira_get_watchers", {"issue_key": issue_key})
 
+    async def get_attachment_content(
+        self,
+        *,
+        attachment_id: str,
+        max_size_bytes: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        arguments: Dict[str, Any] = {"attachment_id": attachment_id}
+        if isinstance(max_size_bytes, int):
+            arguments["max_size_bytes"] = max_size_bytes
+        return await self._call("jira_get_attachment_content", arguments)
+
     async def get_transitions(self, *, issue_key: str) -> Dict[str, Any]:
         return await self._call("jira_get_transitions", {"issue_key": issue_key})
 

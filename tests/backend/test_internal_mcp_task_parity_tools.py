@@ -258,9 +258,30 @@ def test_task_import_jira_issues_gateway_reuses_seeded_issue_documents(monkeypat
                         },
                         "status": {"name": "To Do"},
                         "priority": {"name": "Medium"},
+                        "labels": [],
                         "project": {"key": "JVNAUTOSCI", "name": "JVNAUTOSCI Project"},
+                        "duedate": None,
+                        "startdate": None,
+                        "assignee": None,
+                        "creator": None,
+                        "reporter": None,
+                        "parent": None,
                         "issuelinks": [],
+                        "components": [],
+                        "fixVersions": [],
+                        "customfield_10020": None,
+                        "customfield_10019": None,
+                        "customfield_10027": None,
+                        "customfield_10014": None,
+                        "customfield_10008": None,
+                        "issuetype": {"name": "Task"},
+                        "created": "2026-04-01T00:00:00.000+0000",
+                        "updated": "2026-04-01T00:00:00.000+0000",
+                        "comment": {"comments": []},
+                        "attachment": [],
+                        "worklog": {"worklogs": []},
                     },
+                    "changelog": {"histories": []},
                 }
             ],
             "dry_run": True,
@@ -269,6 +290,128 @@ def test_task_import_jira_issues_gateway_reuses_seeded_issue_documents(monkeypat
     assert payload.get("success") is True
     assert payload.get("summary", {}).get("total_issues") == 1
     assert fetched_issue_keys == []
+    _assert_schema_conformance(gateway, "task_import_jira_issues", payload)
+
+
+def test_task_import_jira_issues_gateway_hydrates_seeded_docs_for_activity_import(
+    monkeypatch,
+):
+    gateway = _build_gateway()
+    captured_import_kwargs: dict[str, object] = {}
+
+    class _FakeProxy:
+        async def get_issue(self, *, issue_key: str, fields=None, expand=None):  # noqa: ARG002
+            return {
+                "key": issue_key,
+                "fields": {
+                    "summary": "Hydrated issue",
+                    "description": {
+                        "type": "doc",
+                        "version": 1,
+                        "content": [
+                            {
+                                "type": "paragraph",
+                                "content": [{"type": "text", "text": "Desc"}],
+                            }
+                        ],
+                    },
+                    "status": {"name": "To Do"},
+                    "priority": {"name": "Medium"},
+                    "project": {"key": "JVNAUTOSCI", "name": "JVNAUTOSCI Project"},
+                    "comment": {
+                        "comments": [
+                            {
+                                "id": "10001",
+                                "body": {
+                                    "type": "doc",
+                                    "version": 1,
+                                    "content": [
+                                        {
+                                            "type": "paragraph",
+                                            "content": [{"type": "text", "text": "Comment"}],
+                                        }
+                                    ],
+                                },
+                            }
+                        ]
+                    },
+                    "attachment": [
+                        {
+                            "id": "20001",
+                            "filename": "spec.pdf",
+                            "size": 3,
+                            "mimeType": "application/pdf",
+                        }
+                    ],
+                    "worklog": {"worklogs": []},
+                    "issuelinks": [],
+                },
+                "changelog": {"histories": []},
+            }
+
+        async def get_watchers(self, *, issue_key: str):  # noqa: ARG002
+            return {"watchCount": 0, "watchers": []}
+
+        async def get_attachment_content(self, *, attachment_id: str, max_size_bytes=None):  # noqa: ARG002
+            return {
+                "success": True,
+                "attachment_id": attachment_id,
+                "content_base64": "cGRm",
+                "content_type": "application/pdf",
+                "size_bytes": 3,
+            }
+
+        async def get_myself(self):
+            return {"accountId": "jira-current-user"}
+
+    async def _fake_get_jira_proxy():
+        return _FakeProxy()
+
+    def _fake_import_jira_issues_to_tasks(**kwargs):
+        captured_import_kwargs.update(kwargs)
+        issues = kwargs.get("issues")
+        issue_count = len(issues) if isinstance(issues, list) else 0
+        return {
+            "success": True,
+            "dry_run": bool(kwargs.get("dry_run")),
+            "summary": {"total_issues": issue_count},
+            "issues": [
+                {
+                    "jira_issue_key": "JVNAUTOSCI-3005",
+                    "action": "created",
+                    "mapped_fields": ["summary->title"],
+                    "dropped_fields": [],
+                    "relation_results": [],
+                }
+            ],
+        }
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.jira_proxy_mcp.get_jira_proxy",
+        _fake_get_jira_proxy,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.jira_task_import_service.import_jira_issues_to_tasks",
+        _fake_import_jira_issues_to_tasks,
+    )
+
+    payload = gateway.invoke(
+        "task_import_jira_issues",
+        {
+            "issue_keys": [{"key": "JVNAUTOSCI-3005", "fields": {"summary": "Seeded issue"}}],
+            "dry_run": False,
+            "sync_source_labels": False,
+            "namespace": "#V#current_user",
+        },
+    ).payload
+
+    assert payload.get("success") is True
+    imported_issues = captured_import_kwargs.get("issues")
+    assert isinstance(imported_issues, list)
+    attachment_rows = imported_issues[0].get("fields", {}).get("attachment")
+    assert isinstance(attachment_rows, list)
+    assert attachment_rows[0].get("content_base64") == "cGRm"
+    assert imported_issues[0].get("changelog") == {"histories": []}
     _assert_schema_conformance(gateway, "task_import_jira_issues", payload)
 
 

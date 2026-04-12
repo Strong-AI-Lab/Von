@@ -60,6 +60,12 @@ DEFAULT_JIRA_TASK_MIGRATION_FIELDS = [
     "customfield_10027",
     "customfield_10014",
     "customfield_10008",
+    "issuetype",
+    "created",
+    "updated",
+    "comment",
+    "attachment",
+    "worklog",
 ]
 
 

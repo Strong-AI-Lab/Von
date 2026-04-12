@@ -533,11 +533,13 @@ def _append_task_history_event(
     actor_concept_id: str | None = None,
     details: Dict[str, Any] | None = None,
     touch_updated_at: bool = True,
+    event_timestamp: str | None = None,
 ) -> Dict[str, Any]:
+    timestamp = _parse_datetime(event_timestamp)
     event = {
         "event_id": f"event_{uuid.uuid4().hex[:12]}",
         "event_type": event_type,
-        "timestamp": _now().isoformat(),
+        "timestamp": (timestamp or _now()).isoformat(),
         "actor_concept_id": _normalise_optional_concept_id(actor_concept_id),
         "details": details or {},
     }
@@ -2644,17 +2646,22 @@ def add_task_comment(
     *,
     body: str,
     author_concept_id: str | None = None,
+    created_at: str | None = None,
+    source: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
     task_concept_id, _ = _get_task_doc(task_concept_id)
     if not isinstance(body, str) or not body.strip():
         raise InvalidTaskDataError("Comment body must be a non-empty string")
 
+    created_at_value = _isoformat(_parse_datetime(created_at)) or _now().isoformat()
     comment = {
         "comment_id": f"comment_{uuid.uuid4().hex[:12]}",
         "body": body.strip(),
         "author_concept_id": _normalise_optional_concept_id(author_concept_id),
-        "created_at": _now().isoformat(),
+        "created_at": created_at_value,
     }
+    if isinstance(source, Mapping):
+        comment["source"] = dict(source)
     _append_task_metadata_entry(
         task_concept_id=task_concept_id,
         metadata_key=TASK_METADATA_KEY_COMMENTS,
@@ -2667,6 +2674,7 @@ def add_task_comment(
             actor_concept_id=author_concept_id,
             details={"comment_id": comment["comment_id"]},
             touch_updated_at=False,
+            event_timestamp=created_at_value,
         )
     except Exception as e:
         logger.debug("Failed to append comment history event: %s", e)
@@ -2711,6 +2719,9 @@ def add_task_attachment(
     size_bytes: int | None = None,
     added_by_concept_id: str | None = None,
     note: str | None = None,
+    created_at: str | None = None,
+    source: Mapping[str, Any] | None = None,
+    file_copy_concept_id: str | None = None,
 ) -> Dict[str, Any]:
     task_concept_id, _ = _get_task_doc(task_concept_id)
     if not isinstance(filename, str) or not filename.strip():
@@ -2718,6 +2729,7 @@ def add_task_attachment(
     if not isinstance(uri, str) or not uri.strip():
         raise InvalidTaskDataError("uri is required")
 
+    created_at_value = _isoformat(_parse_datetime(created_at)) or _now().isoformat()
     attachment = {
         "attachment_id": f"attachment_{uuid.uuid4().hex[:12]}",
         "filename": filename.strip(),
@@ -2728,8 +2740,13 @@ def add_task_attachment(
         ),
         "note": note.strip() if isinstance(note, str) and note.strip() else None,
         "added_by_concept_id": _normalise_optional_concept_id(added_by_concept_id),
-        "created_at": _now().isoformat(),
+        "created_at": created_at_value,
     }
+    if isinstance(source, Mapping):
+        attachment["source"] = dict(source)
+    normalised_file_copy_concept_id = _normalise_optional_concept_id(file_copy_concept_id)
+    if isinstance(normalised_file_copy_concept_id, str):
+        attachment["file_copy_concept_id"] = normalised_file_copy_concept_id
     _append_task_metadata_entry(
         task_concept_id=task_concept_id,
         metadata_key=TASK_METADATA_KEY_ATTACHMENTS,
@@ -2745,6 +2762,7 @@ def add_task_attachment(
                 "filename": attachment["filename"],
             },
             touch_updated_at=False,
+            event_timestamp=created_at_value,
         )
     except Exception as e:
         logger.debug("Failed to append attachment history event: %s", e)
@@ -2787,20 +2805,25 @@ def add_task_worklog(
     author_concept_id: str | None = None,
     comment: str | None = None,
     started_at: str | None = None,
+    created_at: str | None = None,
+    source: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
     task_concept_id, _ = _get_task_doc(task_concept_id)
     if not isinstance(time_spent_minutes, int) or time_spent_minutes <= 0:
         raise InvalidTaskDataError("time_spent_minutes must be a positive integer")
 
     started = _parse_datetime(started_at) if started_at else None
+    created_at_value = _isoformat(_parse_datetime(created_at)) or _now().isoformat()
     entry = {
         "worklog_id": f"worklog_{uuid.uuid4().hex[:12]}",
         "time_spent_minutes": time_spent_minutes,
         "author_concept_id": _normalise_optional_concept_id(author_concept_id),
         "comment": comment.strip() if isinstance(comment, str) and comment.strip() else None,
         "started_at": _isoformat(started) or _now().isoformat(),
-        "created_at": _now().isoformat(),
+        "created_at": created_at_value,
     }
+    if isinstance(source, Mapping):
+        entry["source"] = dict(source)
     _append_task_metadata_entry(
         task_concept_id=task_concept_id,
         metadata_key=TASK_METADATA_KEY_WORKLOG,
@@ -2816,10 +2839,31 @@ def add_task_worklog(
                 "time_spent_minutes": time_spent_minutes,
             },
             touch_updated_at=False,
+            event_timestamp=created_at_value,
         )
     except Exception as e:
         logger.debug("Failed to append worklog history event: %s", e)
     return entry
+
+
+def record_task_history_event(
+    task_concept_id: str,
+    *,
+    event_type: str,
+    actor_concept_id: str | None = None,
+    details: Dict[str, Any] | None = None,
+    event_timestamp: str | None = None,
+) -> Dict[str, Any]:
+    task_concept_id, _ = _get_task_doc(task_concept_id)
+    if not isinstance(event_type, str) or not event_type.strip():
+        raise InvalidTaskDataError("event_type is required")
+    return _append_task_history_event(
+        task_concept_id=task_concept_id,
+        event_type=event_type.strip(),
+        actor_concept_id=actor_concept_id,
+        details=details,
+        event_timestamp=event_timestamp,
+    )
 
 
 def list_task_worklog(
@@ -3672,6 +3716,7 @@ __all__ = [
     "add_task_worklog",
     "list_task_worklog",
     "get_task_history",
+    "record_task_history_event",
     "update_task_fields",
     "find_task_by_external_reference",
     "upsert_task_external_reference",

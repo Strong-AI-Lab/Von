@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from typing import Any, Dict
 
 from src.backend.services import jira_task_import_service as import_service
@@ -510,3 +511,208 @@ def test_list_imported_jira_issue_keys_scans_repository_with_org_and_legacy_scop
         "metadata.organisation_concept_id": "#V#sail_org"
     } in captured_queries[0]["$or"]
     assert {"metadata.organisation_concept_id": None} in captured_queries[0]["$or"]
+
+
+def test_import_jira_issues_materialises_activity_and_blob_backed_attachments(monkeypatch):
+    external_refs: list[dict[str, Any]] = []
+    comment_calls: list[dict[str, Any]] = []
+    attachment_calls: list[dict[str, Any]] = []
+    worklog_calls: list[dict[str, Any]] = []
+    history_calls: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        import_service,
+        "find_task_by_external_reference",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        import_service,
+        "create_task",
+        lambda **_kwargs: {"task_concept_id": "#V#task_imported_activity"},
+    )
+    monkeypatch.setattr(
+        import_service,
+        "update_task_fields",
+        lambda *_args, **_kwargs: {"task": {"task_concept_id": "#V#task_imported_activity"}},
+    )
+    monkeypatch.setattr(import_service, "set_task_parent", lambda *_a, **_k: {})
+    monkeypatch.setattr(import_service, "set_task_epic", lambda *_a, **_k: {})
+    monkeypatch.setattr(import_service, "link_tasks", lambda *_a, **_k: {})
+    monkeypatch.setattr(
+        import_service,
+        "add_task_comment",
+        lambda task_concept_id, **kwargs: comment_calls.append(
+            {"task_concept_id": task_concept_id, **kwargs}
+        )
+        or {"comment_id": "comment_1"},
+    )
+    monkeypatch.setattr(
+        import_service,
+        "add_task_attachment",
+        lambda task_concept_id, **kwargs: attachment_calls.append(
+            {"task_concept_id": task_concept_id, **kwargs}
+        )
+        or {"attachment_id": "attachment_1"},
+    )
+    monkeypatch.setattr(
+        import_service,
+        "add_task_worklog",
+        lambda task_concept_id, **kwargs: worklog_calls.append(
+            {"task_concept_id": task_concept_id, **kwargs}
+        )
+        or {"worklog_id": "worklog_1"},
+    )
+    monkeypatch.setattr(
+        import_service,
+        "record_task_history_event",
+        lambda task_concept_id, **kwargs: history_calls.append(
+            {"task_concept_id": task_concept_id, **kwargs}
+        )
+        or {"event_id": "event_1"},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.computer_file_copy_service.import_bytes_file_copy",
+        lambda **_kwargs: {
+            "success": True,
+            "concept_id": "#V#computer_file_copy_jira_attachment_1",
+            "storage": {"uri": "s3://bucket/jira/JVNAUTOSCI-2700/spec.pdf"},
+        },
+    )
+
+    def _fake_upsert_task_external_reference(
+        task_concept_id: str,
+        *,
+        reference_payload: dict[str, Any],
+        **_kwargs,
+    ):
+        external_refs.append(
+            {"task_concept_id": task_concept_id, "reference_payload": reference_payload}
+        )
+        return {"task_concept_id": task_concept_id}
+
+    monkeypatch.setattr(
+        import_service,
+        "upsert_task_external_reference",
+        _fake_upsert_task_external_reference,
+    )
+
+    issue = _jira_issue(
+        "JVNAUTOSCI-2700",
+        creator_account_id="jira-creator-1",
+        extra_fields={
+            "comment": {
+                "comments": [
+                    {
+                        "id": "10001",
+                        "created": "2026-04-01T10:00:00.000+0000",
+                        "author": {
+                            "accountId": "jira-commenter-1",
+                            "displayName": "Commenter One",
+                        },
+                        "body": {
+                            "type": "doc",
+                            "version": 1,
+                            "content": [
+                                {
+                                    "type": "paragraph",
+                                    "content": [{"type": "text", "text": "Imported Jira comment"}],
+                                }
+                            ],
+                        },
+                    }
+                ]
+            },
+            "attachment": [
+                {
+                    "id": "20001",
+                    "filename": "spec.pdf",
+                    "size": 3,
+                    "mimeType": "application/pdf",
+                    "content": "https://example.atlassian.net/attachment/20001",
+                    "created": "2026-04-01T10:05:00.000+0000",
+                    "author": {
+                        "accountId": "jira-attacher-1",
+                        "displayName": "Attacher One",
+                    },
+                    "content_base64": base64.b64encode(b"pdf").decode("ascii"),
+                }
+            ],
+            "worklog": {
+                "worklogs": [
+                    {
+                        "id": "30001",
+                        "timeSpentSeconds": 90,
+                        "started": "2026-04-01T09:30:00.000+0000",
+                        "created": "2026-04-01T10:10:00.000+0000",
+                        "comment": {
+                            "type": "doc",
+                            "version": 1,
+                            "content": [
+                                {
+                                    "type": "paragraph",
+                                    "content": [{"type": "text", "text": "Imported Jira worklog"}],
+                                }
+                            ],
+                        },
+                        "author": {
+                            "accountId": "jira-worker-1",
+                            "displayName": "Worker One",
+                        },
+                    }
+                ]
+            },
+        },
+    )
+    issue["changelog"] = {
+        "histories": [
+            {
+                "created": "2026-04-01T09:00:00.000+0000",
+                "author": {
+                    "accountId": "jira-commenter-1",
+                    "displayName": "Commenter One",
+                },
+                "items": [
+                    {
+                        "field": "status",
+                        "fromString": "To Do",
+                        "toString": "In Progress",
+                    }
+                ],
+            }
+        ]
+    }
+
+    report = import_service.import_jira_issues_to_tasks(
+        issues=[issue],
+        dry_run=False,
+        actor_concept_id="#V#michael_witbrock",
+        organisation_concept_id="#V#sail_org",
+        namespace="#V#michael_witbrock@sail_org",
+        jira_account_id_to_concept_id={
+            "jira-creator-1": "#V#person_creator",
+            "jira-commenter-1": "#V#person_commenter",
+            "jira-attacher-1": "#V#person_attacher",
+            "jira-worker-1": "#V#person_worker",
+        },
+    )
+
+    assert report["success"] is True
+    assert comment_calls and comment_calls[0]["body"] == "Imported Jira comment"
+    assert comment_calls[0]["author_concept_id"] == "#V#person_commenter"
+    assert attachment_calls and attachment_calls[0]["file_copy_concept_id"] == (
+        "#V#computer_file_copy_jira_attachment_1"
+    )
+    assert attachment_calls[0]["uri"] == "s3://bucket/jira/JVNAUTOSCI-2700/spec.pdf"
+    assert worklog_calls and worklog_calls[0]["time_spent_minutes"] == 2
+    assert history_calls and history_calls[0]["event_type"] == "task_status_transition_imported"
+    issue_row = report["issues"][0]
+    assert "comments" in issue_row["mapped_fields"]
+    assert "attachments" in issue_row["mapped_fields"]
+    assert "worklog" in issue_row["mapped_fields"]
+    assert "status_history.imported" in issue_row["mapped_fields"]
+    assert external_refs
+    imported_activity = external_refs[0]["reference_payload"]["imported_activity"]
+    assert imported_activity["comment_ids"] == ["10001"]
+    assert imported_activity["attachment_ids"] == ["20001"]
+    assert imported_activity["worklog_ids"] == ["30001"]
+    assert len(imported_activity["status_history_signatures"]) == 1

@@ -21023,6 +21023,164 @@ def _task_search(**kwargs):
         return make_error_response("UNEXPECTED_ERROR", f"Unexpected error: {exc}")
 
 
+_JIRA_TASK_IMPORT_DETAIL_FIELDS: tuple[str, ...] = (
+    "summary",
+    "description",
+    "status",
+    "priority",
+    "labels",
+    "project",
+    "duedate",
+    "startdate",
+    "assignee",
+    "creator",
+    "reporter",
+    "parent",
+    "issuelinks",
+    "components",
+    "fixVersions",
+    "customfield_10020",
+    "customfield_10019",
+    "customfield_10027",
+    "customfield_10014",
+    "customfield_10008",
+    "issuetype",
+    "created",
+    "updated",
+    "comment",
+    "attachment",
+    "worklog",
+)
+
+
+def _jira_issue_doc_needs_detail_hydration(issue_doc: Mapping[str, Any]) -> bool:
+    fields = issue_doc.get("fields")
+    if not isinstance(fields, Mapping):
+        return True
+    for field_name in _JIRA_TASK_IMPORT_DETAIL_FIELDS:
+        if field_name not in fields:
+            return True
+    return not isinstance(issue_doc.get("changelog"), Mapping)
+
+
+def _merge_jira_issue_doc(
+    base_issue_doc: Mapping[str, Any],
+    detail_issue_doc: Mapping[str, Any],
+) -> dict[str, Any]:
+    merged = dict(base_issue_doc)
+
+    merged_fields: dict[str, Any] = {}
+    base_fields = base_issue_doc.get("fields")
+    if isinstance(base_fields, Mapping):
+        merged_fields.update(dict(base_fields))
+    detail_fields = detail_issue_doc.get("fields")
+    if isinstance(detail_fields, Mapping):
+        merged_fields.update(dict(detail_fields))
+    if merged_fields:
+        merged["fields"] = merged_fields
+
+    for key in ("id", "self"):
+        if key in detail_issue_doc:
+            merged[key] = detail_issue_doc.get(key)
+
+    for optional_key in ("watchers", "watcher", "watches", "changelog"):
+        optional_value = detail_issue_doc.get(optional_key)
+        if isinstance(optional_value, Mapping):
+            merged[optional_key] = dict(optional_value)
+        elif isinstance(optional_value, list):
+            merged[optional_key] = list(optional_value)
+
+    return merged
+
+
+async def _jira_get_issue_with_optional_expand(
+    proxy: Any,
+    *,
+    issue_key: str,
+    fields: list[str] | None = None,
+    expand: list[str] | None = None,
+) -> dict[str, Any]:
+    try:
+        return await proxy.get_issue(
+            issue_key=issue_key,
+            fields=fields,
+            expand=expand,
+        )
+    except TypeError as exc:
+        if "expand" not in str(exc):
+            raise
+        return await proxy.get_issue(
+            issue_key=issue_key,
+            fields=fields,
+        )
+
+
+async def _embed_jira_attachment_content(
+    *,
+    proxy: Any,
+    issue_doc: Mapping[str, Any],
+    fetch_errors: list[dict[str, str]],
+    max_size_bytes: int,
+) -> dict[str, Any]:
+    hydrated_issue_doc = dict(issue_doc)
+    fields_value = issue_doc.get("fields")
+    fields = dict(fields_value) if isinstance(fields_value, Mapping) else {}
+    attachments_raw = fields.get("attachment")
+    attachments = attachments_raw if isinstance(attachments_raw, list) else []
+    hydrated_attachments: list[Any] = []
+    issue_key = issue_doc.get("key")
+    issue_key_text = issue_key.strip() if isinstance(issue_key, str) else "(unknown)"
+
+    for attachment in attachments:
+        if not isinstance(attachment, Mapping):
+            hydrated_attachments.append(attachment)
+            continue
+        hydrated_attachment = dict(attachment)
+        attachment_id = hydrated_attachment.get("id")
+        if (
+            isinstance(attachment_id, str)
+            and attachment_id.strip()
+            and not hydrated_attachment.get("content_base64")
+        ):
+            try:
+                attachment_payload = await proxy.get_attachment_content(
+                    attachment_id=attachment_id.strip(),
+                    max_size_bytes=max_size_bytes,
+                )
+                if isinstance(attachment_payload, Mapping):
+                    if attachment_payload.get("success") is True:
+                        content_base64 = attachment_payload.get("content_base64")
+                        if isinstance(content_base64, str) and content_base64.strip():
+                            hydrated_attachment["content_base64"] = content_base64.strip()
+                    else:
+                        fetch_errors.append(
+                            {
+                                "issue_key": issue_key_text,
+                                "error": (
+                                    "jira_get_attachment_content_failed:"
+                                    f"{attachment_id.strip()}:"
+                                    f"{attachment_payload.get('error')}"
+                                ),
+                            }
+                        )
+            except Exception as exc:
+                fetch_errors.append(
+                    {
+                        "issue_key": issue_key_text,
+                        "error": (
+                            "jira_get_attachment_content_failed:"
+                            f"{attachment_id.strip()}:"
+                            f"{type(exc).__name__}:{exc}"
+                        ),
+                    }
+                )
+        hydrated_attachments.append(hydrated_attachment)
+
+    fields["attachment"] = hydrated_attachments
+    hydrated_issue_doc["fields"] = fields
+    return hydrated_issue_doc
+
+
 def _clone_seeded_jira_issue_doc(
     raw_issue: Mapping[str, Any],
     *,
@@ -21279,6 +21437,7 @@ def _task_import_jira_issues(**kwargs):
                             discovered_keys.append(cleaned)
 
         issue_docs: list[dict[str, Any]] = []
+        attachment_max_size_bytes = _jira_attachment_max_size_bytes()
         for issue_key in discovered_keys:
             seeded_issue_doc = seeded_issue_docs.get(issue_key)
             issue_doc: dict[str, Any] | None = None
@@ -21288,9 +21447,32 @@ def _task_import_jira_issues(**kwargs):
                 raw_fields = issue_doc.get("fields")
                 if isinstance(raw_fields, Mapping):
                     issue_doc["fields"] = dict(raw_fields)
+                if _jira_issue_doc_needs_detail_hydration(issue_doc):
+                    try:
+                        fetched_issue_doc = await _jira_get_issue_with_optional_expand(
+                            proxy,
+                            issue_key=issue_key,
+                            fields=list(_JIRA_TASK_IMPORT_DETAIL_FIELDS),
+                            expand=["changelog"],
+                        )
+                    except Exception as exc:
+                        fetch_errors.append(
+                            {
+                                "issue_key": issue_key,
+                                "error": f"{type(exc).__name__}: {exc}",
+                            }
+                        )
+                        continue
+                    if isinstance(fetched_issue_doc, Mapping):
+                        issue_doc = _merge_jira_issue_doc(issue_doc, fetched_issue_doc)
             else:
                 try:
-                    fetched_issue_doc = await proxy.get_issue(issue_key=issue_key)
+                    fetched_issue_doc = await _jira_get_issue_with_optional_expand(
+                        proxy,
+                        issue_key=issue_key,
+                        fields=list(_JIRA_TASK_IMPORT_DETAIL_FIELDS),
+                        expand=["changelog"],
+                    )
                 except Exception as exc:
                     fetch_errors.append(
                         {
@@ -21336,6 +21518,26 @@ def _task_import_jira_issues(**kwargs):
                         }
                     )
             issue_docs.append(issue_doc)
+
+            if not dry_run:
+                try:
+                    issue_doc = await _embed_jira_attachment_content(
+                        proxy=proxy,
+                        issue_doc=issue_doc,
+                        fetch_errors=fetch_errors,
+                        max_size_bytes=attachment_max_size_bytes,
+                    )
+                except Exception as exc:
+                    fetch_errors.append(
+                        {
+                            "issue_key": resolved_key.strip(),
+                            "error": (
+                                "jira_attachment_embed_failed:"
+                                f"{type(exc).__name__}:{exc}"
+                            ),
+                        }
+                    )
+            issue_docs[-1] = issue_doc
 
         return {
             "issues": issue_docs,
@@ -21393,6 +21595,7 @@ def _task_import_jira_issues(**kwargs):
         dry_run=dry_run,
         actor_concept_id=actor_concept_id,
         organisation_concept_id=organisation_concept_id,
+        namespace=namespace_value,
         assignee_account_id_to_concept_id=assignee_map,
         jira_account_id_to_concept_id=participant_map,
         update_existing=_coerce_bool_input(

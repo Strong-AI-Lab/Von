@@ -25,6 +25,10 @@ from src.backend.services.task_management_service import (
     create_task,
     get_task,
     find_task_by_external_reference,
+    add_task_attachment,
+    add_task_comment,
+    add_task_worklog,
+    record_task_history_event,
     upsert_task_external_reference,
     update_task_status,
     update_task_fields,
@@ -1202,4 +1206,77 @@ class TestTaskExternalReferences:
                 "external_id"
             ]
             == "JVNAUTOSCI-888"
+        )
+
+
+class TestImportedTaskActivity:
+    @patch("src.backend.services.task_management_service._get_task_doc")
+    @patch("src.backend.services.task_management_service.ConceptsRepository")
+    def test_comment_attachment_and_worklog_preserve_source_metadata(
+        self,
+        mock_repo: MagicMock,
+        mock_get_task_doc: MagicMock,
+    ) -> None:
+        mock_get_task_doc.return_value = ("#V#task_1", {})
+
+        add_task_comment(
+            "#V#task_1",
+            body="Imported comment",
+            author_concept_id="#V#user_commenter",
+            created_at="2026-04-01T10:00:00Z",
+            source={"source_system": "jira", "external_id": "10001"},
+        )
+        add_task_attachment(
+            "#V#task_1",
+            filename="spec.pdf",
+            uri="s3://bucket/spec.pdf",
+            added_by_concept_id="#V#user_attacher",
+            created_at="2026-04-01T10:05:00Z",
+            source={"source_system": "jira", "external_id": "20001"},
+            file_copy_concept_id="#V#computer_file_copy_1",
+        )
+        add_task_worklog(
+            "#V#task_1",
+            time_spent_minutes=2,
+            author_concept_id="#V#user_worker",
+            created_at="2026-04-01T10:10:00Z",
+            started_at="2026-04-01T09:30:00Z",
+            source={"source_system": "jira", "external_id": "30001"},
+        )
+        record_task_history_event(
+            "#V#task_1",
+            event_type="task_status_transition_imported",
+            actor_concept_id="#V#user_commenter",
+            event_timestamp="2026-04-01T09:00:00Z",
+            details={"source_system": "jira", "external_id": "history-1"},
+        )
+
+        update_payloads = [
+            call.args[1]
+            for call in mock_repo.update_one.call_args_list
+            if len(call.args) >= 2 and isinstance(call.args[1], dict)
+        ]
+        pushed_entries = [
+            payload.get("$push", {})
+            for payload in update_payloads
+            if isinstance(payload.get("$push"), dict)
+        ]
+        assert any(
+            entry.get("metadata.comments", {}).get("source", {}).get("external_id") == "10001"
+            for entry in pushed_entries
+        )
+        assert any(
+            entry.get("metadata.attachments", {})
+            .get("file_copy_concept_id")
+            == "#V#computer_file_copy_1"
+            for entry in pushed_entries
+        )
+        assert any(
+            entry.get("metadata.worklog", {}).get("source", {}).get("external_id") == "30001"
+            for entry in pushed_entries
+        )
+        assert any(
+            entry.get("metadata.task_history", {}).get("timestamp")
+            == "2026-04-01T09:00:00+00:00"
+            for entry in pushed_entries
         )

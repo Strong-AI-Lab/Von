@@ -167,6 +167,71 @@ def _request_json(
     return {"success": False, "error": "Jira request failed after retries"}
 
 
+def _request_bytes(url: str) -> Dict[str, Any]:
+    max_attempts = 3
+    delay_sec = 0.5
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            resp = requests.get(
+                url,
+                headers={
+                    "Authorization": HEADERS["Authorization"],
+                    "Accept": "*/*",
+                },
+                timeout=60,
+            )
+
+            if resp.ok:
+                return {
+                    "success": True,
+                    "status_code": resp.status_code,
+                    "url": url,
+                    "content": resp.content,
+                    "content_type": resp.headers.get("Content-Type"),
+                    "content_length": resp.headers.get("Content-Length"),
+                }
+
+            if resp.status_code == 429 and attempt < max_attempts:
+                retry_after_header = resp.headers.get("Retry-After")
+                retry_after_sec: float | None = None
+                if retry_after_header:
+                    try:
+                        retry_after_sec = float(retry_after_header)
+                    except Exception:
+                        retry_after_sec = None
+                sleep_for = (
+                    retry_after_sec if retry_after_sec is not None else delay_sec
+                )
+                time.sleep(max(0.1, min(sleep_for, 10.0)))
+                delay_sec = min(delay_sec * 2.0, 8.0)
+                continue
+
+            response_text = None
+            try:
+                response_text = resp.text
+            except Exception:
+                response_text = None
+
+            error: Dict[str, Any] = {
+                "success": False,
+                "status_code": resp.status_code,
+                "url": url,
+                "error": f"Jira API HTTP {resp.status_code}",
+            }
+            if response_text:
+                error["response"] = response_text[:2000]
+            return error
+        except requests.exceptions.RequestException as exc:
+            if attempt < max_attempts:
+                time.sleep(max(0.1, min(delay_sec, 8.0)))
+                delay_sec = min(delay_sec * 2.0, 8.0)
+                continue
+            return {"success": False, "error": f"Jira request failed: {exc}"}
+
+    return {"success": False, "error": "Jira request failed after retries"}
+
+
 def jira_get(endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
     url = f"{JIRA_BASE_URL}/rest/api/3/{endpoint}"
     return _request_json("GET", url, params=params)
@@ -273,6 +338,85 @@ def jira_add_attachment(
             return {"success": False, "error": f"Jira request failed: {exc}"}
 
     return {"success": False, "error": "Jira request failed after retries"}
+
+
+def jira_get_attachment_content(
+    *,
+    attachment_id: str,
+    max_size_bytes: int = 10 * 1024 * 1024,
+) -> Dict[str, Any]:
+    """Fetch Jira attachment metadata and base64-encoded bytes."""
+
+    metadata = jira_get(f"attachment/{attachment_id}")
+    if not isinstance(metadata, dict) or metadata.get("success") is False:
+        return {
+            "success": False,
+            "attachment_id": attachment_id,
+            "error": (
+                metadata.get("error")
+                if isinstance(metadata, dict)
+                else "attachment_metadata_fetch_failed"
+            ),
+            "metadata": metadata if isinstance(metadata, dict) else None,
+        }
+
+    size_raw = metadata.get("size")
+    size_bytes: int | None = None
+    if isinstance(size_raw, int):
+        size_bytes = size_raw
+    elif isinstance(size_raw, str) and size_raw.strip().isdigit():
+        size_bytes = int(size_raw.strip())
+    if isinstance(size_bytes, int) and size_bytes > max_size_bytes:
+        return {
+            "success": False,
+            "attachment_id": attachment_id,
+            "error": "attachment_too_large",
+            "size_bytes": size_bytes,
+            "max_size_bytes": max_size_bytes,
+            "metadata": metadata,
+        }
+
+    content_result = _request_bytes(
+        f"{JIRA_BASE_URL}/rest/api/3/attachment/content/{attachment_id}"
+    )
+    if content_result.get("success") is not True:
+        return {
+            "success": False,
+            "attachment_id": attachment_id,
+            "error": content_result.get("error") or "attachment_content_fetch_failed",
+            "metadata": metadata,
+        }
+
+    raw_content = content_result.get("content")
+    if not isinstance(raw_content, (bytes, bytearray)):
+        return {
+            "success": False,
+            "attachment_id": attachment_id,
+            "error": "attachment_content_missing",
+            "metadata": metadata,
+        }
+
+    content_bytes = bytes(raw_content)
+    if len(content_bytes) > max_size_bytes:
+        return {
+            "success": False,
+            "attachment_id": attachment_id,
+            "error": "attachment_too_large",
+            "size_bytes": len(content_bytes),
+            "max_size_bytes": max_size_bytes,
+            "metadata": metadata,
+        }
+
+    return {
+        "success": True,
+        "attachment_id": attachment_id,
+        "filename": metadata.get("filename"),
+        "size_bytes": size_bytes if isinstance(size_bytes, int) else len(content_bytes),
+        "content_type": metadata.get("mimeType")
+        or content_result.get("content_type"),
+        "content_base64": base64.b64encode(content_bytes).decode("ascii"),
+        "metadata": metadata,
+    }
 
 
 # ---------------------------------------------------------
@@ -604,6 +748,24 @@ async def list_tools() -> List[types.Tool]:
             },
         ),
         types.Tool(
+            name="jira_get_attachment_content",
+            description="Fetch Jira attachment bytes and return base64 content plus metadata.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "attachment_id": {
+                        "type": "string",
+                        "description": "Jira attachment ID.",
+                    },
+                    "max_size_bytes": {
+                        "type": "integer",
+                        "description": "Optional maximum attachment size to fetch.",
+                    },
+                },
+                "required": ["attachment_id"],
+            },
+        ),
+        types.Tool(
             name="jira_get_transitions",
             description="List available workflow transitions for a Jira issue.",
             inputSchema={
@@ -810,6 +972,25 @@ async def call_tool(
     elif name == "jira_get_watchers":
         issue_key = arguments["issue_key"]
         result = jira_get(f"issue/{issue_key}/watchers")
+        text = json.dumps(result, indent=2)
+        return [types.TextContent(type="text", text=text)]
+
+    elif name == "jira_get_attachment_content":
+        attachment_id = arguments["attachment_id"]
+        raw_max_size = arguments.get("max_size_bytes")
+        if isinstance(raw_max_size, (int, str)):
+            try:
+                max_size_bytes = int(raw_max_size)
+            except ValueError:
+                max_size_bytes = 10 * 1024 * 1024
+        else:
+            max_size_bytes = 10 * 1024 * 1024
+        if max_size_bytes <= 0:
+            max_size_bytes = 10 * 1024 * 1024
+        result = jira_get_attachment_content(
+            attachment_id=str(attachment_id),
+            max_size_bytes=max_size_bytes,
+        )
         text = json.dumps(result, indent=2)
         return [types.TextContent(type="text", text=text)]
 
