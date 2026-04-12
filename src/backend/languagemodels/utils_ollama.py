@@ -6,11 +6,13 @@ import logging
 import re
 import requests
 
+from .model_defaults import DEFAULT_OLLAMA_MODEL
+
 
 logger = logging.getLogger(__name__)
 
 
-def ollama_generate(prompt: str, context=None, model: str = "granite3.3:2b") -> str:
+def ollama_generate(prompt: str, context=None, model: str = DEFAULT_OLLAMA_MODEL) -> str:
     """
     Generate a response using the Ollama LLM.
     """
@@ -102,10 +104,10 @@ if __name__ == "__main__":
         model_names = list_local_ollama_models()
         print(f"Extracted model names: {model_names}")
 
-        # Check for the presence of 'granite3.3:2b'
-        if "granite3.3:2b" in model_names:
-            print("Model 'granite3.3:2b' is available.")
+        # Check for the presence of the configured default Ollama model
+        if DEFAULT_OLLAMA_MODEL in model_names:
+            print(f"Model '{DEFAULT_OLLAMA_MODEL}' is available.")
         else:
-            print("Model 'granite3.3:2b' is not available.")
+            print(f"Model '{DEFAULT_OLLAMA_MODEL}' is not available.")
     except Exception as e:
         print(f"Error during list_local_ollama_models test: {e}")

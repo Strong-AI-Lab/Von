@@ -10254,6 +10254,27 @@ class InternalMCPChatOrchestrator:
         if not model:
             return None
 
+        # Resolve the special token "default" to the configured default for
+        # each provider, so policy JSON can say e.g. "ollama:default" without
+        # hardcoding a specific model name.
+        if model == "default":
+            from src.backend.languagemodels.model_defaults import (
+                DEFAULT_GEMINI_MODEL,
+                DEFAULT_OLLAMA_MODEL,
+                DEFAULT_OPENAI_MODEL,
+            )
+
+            _provider_defaults: dict[str | None, str] = {
+                "ollama": DEFAULT_OLLAMA_MODEL,
+                "openai": DEFAULT_OPENAI_MODEL,
+                "gemini": DEFAULT_GEMINI_MODEL,
+            }
+            resolved = _provider_defaults.get(provider)
+            if resolved:
+                model = resolved
+            else:
+                return None
+
         return _ModelCandidate(
             provider=provider,
             model=model,

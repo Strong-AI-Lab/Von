@@ -72,6 +72,24 @@ This document supports JVNAUTOSCI-994 (subtask of JVNAUTOSCI-993) and JVNAUTOSCI
 - `buttonify`
 
 ## Policy JSON schema (draft)
+
+Model references in policy JSON use the format `provider:model_name`.
+The special token `active_llm` refers to whatever the orchestrator's active
+LLM client is (resolved from user/org settings → environment default).
+
+Default model names are no longer hardcoded.  They are resolved at startup from
+environment variables (see `src/backend/languagemodels/model_defaults.py`):
+
+| Variable | Fallback |
+|---|---|
+| `VON_DEFAULT_OLLAMA_MODEL` | `gemma4:26b` |
+| `VON_DEFAULT_OPENAI_MODEL` | `gpt-4.1-mini` |
+| `VON_DEFAULT_GEMINI_MODEL` | `gemini-2.0-flash` |
+
+When writing policy JSON, prefer `active_llm` for stages that should follow
+the user's primary model selection, and use explicit `provider:model` strings
+only when a stage genuinely requires a specific model.
+
 ```json
 {
   "policy_id": "#V#default_workflow_model_policy",
@@ -80,21 +98,21 @@ This document supports JVNAUTOSCI-994 (subtask of JVNAUTOSCI-993) and JVNAUTOSCI
   "stages": {
     "planner": {
       "primary": "active_llm",
-      "fallback": ["ollama:granite3.3:2b"],
+      "fallback": ["ollama:default"],
       "constraints": {"local_only": false}
     },
     "tool_call": {
       "primary": "active_llm",
-      "fallback": ["ollama:granite3.3:2b"],
+      "fallback": ["ollama:default"],
       "constraints": {"local_only": false}
     },
     "tool_recovery": {
-      "primary": "ollama:granite3.3:2b",
+      "primary": "ollama:default",
       "fallback": ["active_llm"],
       "constraints": {"local_only": true}
     },
     "classifier": {
-      "primary": "ollama:granite3.3:2b",
+      "primary": "ollama:default",
       "fallback": ["active_llm"],
       "constraints": {"local_only": true}
     },
@@ -105,21 +123,21 @@ This document supports JVNAUTOSCI-994 (subtask of JVNAUTOSCI-993) and JVNAUTOSCI
     },
     "screen_backfill": {
       "primary": "active_llm",
-      "fallback": ["ollama:granite3.3:2b"],
+      "fallback": ["ollama:default"],
       "constraints": {"local_only": false}
     },
     "narration": {
       "primary": "active_llm",
-      "fallback": ["ollama:granite3.3:2b"],
+      "fallback": ["ollama:default"],
       "constraints": {"local_only": false}
     },
     "summariser": {
       "primary": "active_llm",
-      "fallback": ["ollama:granite3.3:2b"],
+      "fallback": ["ollama:default"],
       "constraints": {"local_only": false}
     },
     "buttonify": {
-      "primary": "ollama:granite3.3:2b",
+      "primary": "ollama:default",
       "fallback": ["active_llm"],
       "constraints": {"local_only": true}
     }

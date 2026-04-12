@@ -160,6 +160,11 @@ _apply_dotenv_overrides(
         "GITHUB_VON_TOKEN",
         "GITHUB_TOKEN",
         "GH_TOKEN",
+        # Default model overrides — allow .env to control which models are
+        # used when no user/org settings specify a preference.
+        "VON_DEFAULT_OLLAMA_MODEL",
+        "VON_DEFAULT_OPENAI_MODEL",
+        "VON_DEFAULT_GEMINI_MODEL",
     }
 )
 
@@ -247,7 +252,7 @@ def main():
     parser.add_argument("--debug", action="store_true", help="Enable Flask debug mode.")
     # Add arguments for LLM client configuration if needed (e.g., API keys, host)
     # parser.add_argument("--llm-host", default="http://localhost:11434", help="Ollama host URL.")
-    # parser.add_argument("--llm-model", default="granite3.3:2b", help="Default LLM model.")
+    # parser.add_argument("--llm-model", help="Default LLM model (see VON_DEFAULT_OLLAMA_MODEL env var).")
     args = parser.parse_args()
 
     # Check if the port is already in use, and if so, increment until a free port is found

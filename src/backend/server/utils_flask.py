@@ -1065,9 +1065,11 @@ def create_flask_app(
     app.config.setdefault("PEOPLE", [])
     app.config.setdefault("CONTEXT", [])
     # Consider making the default model configurable or deriving it from the client
+    from ..languagemodels.model_defaults import DEFAULT_OLLAMA_MODEL
+
     app.config.setdefault(
-        "MODEL", "granite3.3:2b"
-    )  # Keep default for now, but be aware
+        "MODEL", DEFAULT_OLLAMA_MODEL
+    )
 
     @app.context_processor
     def inject_feature_flags():

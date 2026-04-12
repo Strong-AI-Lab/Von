@@ -20,6 +20,11 @@ import requests
 
 from ..services.llm_api_key_resolution import get_gemini_api_key
 from ..services.settings_service import get_openai_env_var, resolve_llm_setting
+from .model_defaults import (
+    DEFAULT_GEMINI_MODEL,
+    DEFAULT_OLLAMA_MODEL,
+    DEFAULT_OPENAI_MODEL,
+)
 from .structured_tool_calling import (
     LLMClientConfig,
     LLMResponse,
@@ -563,7 +568,7 @@ class OllamaClient(LLMInterface):
     """Client for interacting with local Ollama models."""
 
     def __init__(
-        self, host: Optional[str] = None, default_model: str = "granite3.3:2b"
+        self, host: Optional[str] = None, default_model: str = DEFAULT_OLLAMA_MODEL
     ):
         _ollama_mod = _import_ollama()
         if _ollama_mod is None:
@@ -954,7 +959,7 @@ class OllamaClient(LLMInterface):
 class OpenAIClient(LLMInterface):
     """Client for interacting with the OpenAI API."""
 
-    DEFAULT_MODEL = "gpt-3.5-turbo"
+    DEFAULT_MODEL = DEFAULT_OPENAI_MODEL
 
     def __init__(
         self,
@@ -1278,7 +1283,7 @@ class GeminiClient(LLMInterface):
     """Client for interacting with the Google Gemini API."""
 
     def __init__(
-        self, api_key: Optional[str] = None, default_model: str = "gemini-pro"
+        self, api_key: Optional[str] = None, default_model: str = DEFAULT_GEMINI_MODEL
     ):
         if genai is None:
             raise ImportError(
