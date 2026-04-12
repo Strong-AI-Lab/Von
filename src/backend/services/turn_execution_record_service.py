@@ -467,7 +467,7 @@ def _custom_workflow_execution_progress_observed(
 ) -> bool:
     if not isinstance(custom_workflow_execution, Mapping):
         return False
-    return any(
+    if any(
         _safe_non_negative_int(custom_workflow_execution.get(field_name)) > 0
         for field_name in (
             "action_started_count",
@@ -476,6 +476,16 @@ def _custom_workflow_execution_progress_observed(
             "durable_side_effect_count",
             "terminal_effect_count",
         )
+    ):
+        return True
+    observed = custom_workflow_execution.get("observed") is True
+    if not observed:
+        return False
+    return bool(
+        _safe_str(custom_workflow_execution.get("terminal_status"))
+        or _safe_str(custom_workflow_execution.get("final_state"))
+        or _safe_str(custom_workflow_execution.get("error"))
+        or isinstance(custom_workflow_execution.get("completed"), bool)
     )
 
 
@@ -556,6 +566,10 @@ def _derive_execution_signal_completion_blocker(
         else "tool_execution"
     )
     custom_workflow_execution = execution_summary.get("custom_workflow_execution")
+    custom_workflow_execution_observed = bool(
+        isinstance(custom_workflow_execution, Mapping)
+        and custom_workflow_execution.get("observed") is True
+    )
     terminal_success_evaluation = (
         custom_workflow_execution.get("terminal_success_evaluation")
         if isinstance(custom_workflow_execution, Mapping)
@@ -572,7 +586,12 @@ def _derive_execution_signal_completion_blocker(
             _custom_workflow_execution_progress_observed(custom_workflow_execution)
         )
 
-    if effect_type == "workflow_execution" and dispatch_event_count <= 0:
+    if (
+        effect_type == "workflow_execution"
+        and dispatch_event_count <= 0
+        and not custom_workflow_execution_observed
+        and not dispatch_terminal_status
+    ):
         if not failure_codes:
             failure_codes.append("custom_workflow_dispatch_not_started")
         decision_reason = (
@@ -1509,6 +1528,7 @@ def _build_custom_workflow_execution_summary(
     dispatch_terminal_final_state: str,
     dispatch_terminal_failing_state_id: str,
     dispatch_terminal_failing_action_id: str,
+    selected_workflow_trace: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     workflow_execution_entries = _collect_aux_entries(
         aux_llm_calls,
@@ -1544,6 +1564,41 @@ def _build_custom_workflow_execution_summary(
     )
     if not isinstance(summary_payload, Mapping):
         summary_payload = {}
+
+    trace_payload = (
+        dict(selected_workflow_trace)
+        if isinstance(selected_workflow_trace, Mapping)
+        else {}
+    )
+    trace_completed = trace_payload.get("child_workflow_completed")
+    if not isinstance(trace_completed, bool):
+        trace_completed = None
+    trace_final_state = _safe_str(trace_payload.get("child_workflow_final_state")) or ""
+    trace_error = _safe_str(trace_payload.get("child_workflow_error")) or ""
+    trace_completion_report_source = (
+        _safe_str(trace_payload.get("completion_report_source")) or ""
+    )
+    trace_result_snapshot = (
+        dict(cast(Mapping[str, Any], trace_payload.get("child_result_snapshot")))
+        if isinstance(trace_payload.get("child_result_snapshot"), Mapping)
+        else None
+    )
+    trace_observed = bool(
+        isinstance(trace_completed, bool)
+        or trace_final_state
+        or trace_error
+        or trace_completion_report_source
+        or trace_result_snapshot
+    )
+    trace_terminal_status = ""
+    if isinstance(trace_completed, bool):
+        trace_terminal_status = "completed" if trace_completed else "failed"
+    elif trace_error:
+        trace_terminal_status = "failed"
+    elif trace_final_state:
+        trace_terminal_status = (
+            "completed" if trace_final_state.lower() == "completed" else "failed"
+        )
 
     terminal_effects = _normalise_workflow_execution_terminal_effects(
         summary_payload.get("terminal_effects")
@@ -1592,6 +1647,8 @@ def _build_custom_workflow_execution_summary(
         entry_completed = selected_entry.get("completed")
         if isinstance(entry_completed, bool):
             completed_value = entry_completed
+    if not isinstance(completed_value, bool) and isinstance(trace_completed, bool):
+        completed_value = trace_completed
     if not isinstance(completed_value, bool):
         completed_value = (
             dispatch_terminal_completed
@@ -1602,6 +1659,8 @@ def _build_custom_workflow_execution_summary(
     final_state = _safe_str(summary_payload.get("final_state"))
     if not final_state and isinstance(selected_entry, Mapping):
         final_state = _safe_str(selected_entry.get("final_state"))
+    if not final_state:
+        final_state = trace_final_state
     if not final_state:
         final_state = _safe_str(dispatch_terminal_final_state)
 
@@ -1614,10 +1673,12 @@ def _build_custom_workflow_execution_summary(
     if not first_failing_action_id:
         first_failing_action_id = _safe_str(dispatch_terminal_failing_action_id)
 
-    observed = selected_entry is not None
+    observed = selected_entry is not None or trace_observed
     workflow_id = _safe_str(summary_payload.get("workflow_id"))
     if not workflow_id and isinstance(selected_entry, Mapping):
         workflow_id = _safe_str(selected_entry.get("workflow_id"))
+    if not workflow_id:
+        workflow_id = _safe_str(trace_payload.get("selected_workflow_id"))
     if not workflow_id:
         workflow_id = _safe_str(dispatch_workflow_id) or _safe_str(selected_workflow_id)
 
@@ -1632,8 +1693,13 @@ def _build_custom_workflow_execution_summary(
             if isinstance(summary_payload.get("effective_completed"), bool)
             else None
         ),
-        "terminal_status": _safe_str(summary_payload.get("terminal_status")),
+        "terminal_status": _safe_str(summary_payload.get("terminal_status"))
+        or trace_terminal_status
+        or None,
         "final_state": final_state,
+        "error": trace_error or None,
+        "completion_report_source": trace_completion_report_source or None,
+        "result_snapshot": trace_result_snapshot,
         "completion_gate_safe_to_claim_completion": (
             summary_payload.get("completion_gate_safe_to_claim_completion")
             if isinstance(
@@ -2909,6 +2975,7 @@ def _summarise_tool_execution_context(
     turn_execution_diagnostics: Mapping[str, Any] | None,
     aux_llm_calls: Sequence[Mapping[str, Any]] | None,
     serialised_invocations: Sequence[Mapping[str, Any]],
+    selected_workflow_trace: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     selected_workflow_id = (
         _safe_str(workflow_routing.get("workflow_id"))
@@ -3191,7 +3258,26 @@ def _summarise_tool_execution_context(
         dispatch_terminal_final_state=dispatch_terminal_final_state,
         dispatch_terminal_failing_state_id=dispatch_terminal_failing_state_id,
         dispatch_terminal_failing_action_id=dispatch_terminal_failing_action_id,
+        selected_workflow_trace=selected_workflow_trace,
     )
+    if isinstance(custom_workflow_execution, Mapping):
+        fallback_terminal_status = _safe_str(
+            custom_workflow_execution.get("terminal_status")
+        )
+        if fallback_terminal_status and not dispatch_terminal_status:
+            dispatch_terminal_status = fallback_terminal_status
+        fallback_final_state = _safe_str(custom_workflow_execution.get("final_state"))
+        if fallback_final_state and not dispatch_terminal_final_state:
+            dispatch_terminal_final_state = fallback_final_state
+        fallback_error = _safe_str(custom_workflow_execution.get("error"))
+        if fallback_error and not dispatch_terminal_failure_detail:
+            dispatch_terminal_failure_detail = fallback_error
+        if (
+            fallback_error
+            and (dispatch_terminal_status or "").lower() == "failed"
+            and not dispatch_terminal_failure_reason
+        ):
+            dispatch_terminal_failure_reason = "child_workflow_failed"
 
     failure_codes: list[str] = []
     worker_unavailable_with_tool_expectation = (
@@ -5114,6 +5200,7 @@ def build_turn_execution_record(
         ),
         aux_llm_calls=aux_llm_calls,
         serialised_invocations=serialised_invocations,
+        selected_workflow_trace=selected_workflow_trace,
     )
     workflow_routing_diagnostics = build_workflow_routing_diagnostics(
         workflow_discovery=workflow_discovery,

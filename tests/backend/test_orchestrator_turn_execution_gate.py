@@ -1130,6 +1130,39 @@ def test_execution_signal_blocker_returns_none_when_no_tools_planned() -> None:
     assert result is None
 
 
+def test_execution_signal_blocker_respects_selected_workflow_trace_fallback() -> None:
+    """Observed child-workflow evidence should prevent a false 'dispatch never started' blocker."""
+    result = _derive_execution_signal_completion_blocker(
+        execution_summary={
+            "selected_execution_mode": "custom_workflow",
+            "dispatch_event_count": 0,
+            "dispatch_terminal_status": "failed",
+            "dispatch_terminal_failure_reason": "child_workflow_failed",
+            "dispatch_terminal_failure_detail": (
+                "arxiv_mcp_server_missing_file_path"
+            ),
+            "planned_count": 0,
+            "executed_count": 0,
+            "successful_invocation_count": 0,
+            "failed_invocation_count": 0,
+            "blocked_invocation_count": 0,
+            "failure_codes": [],
+            "custom_workflow_execution": {
+                "observed": True,
+                "completed": False,
+                "terminal_status": "failed",
+                "final_state": "failed",
+                "error": "arxiv_mcp_server_missing_file_path",
+            },
+        },
+    )
+
+    assert isinstance(result, dict)
+    assert result.get("decision") == "failed"
+    assert result.get("decision_reason") == "arxiv_mcp_server_missing_file_path"
+    assert result.get("failure_code") == "child_workflow_failed"
+
+
 def test_execution_signal_blocker_normalises_mixed_case_terminal_failure_code() -> None:
     """Inserted dispatch failure codes should be canonical lowercase values."""
     result = _derive_execution_signal_completion_blocker(

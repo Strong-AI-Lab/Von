@@ -192,6 +192,56 @@ def test_tool_execution_summary_marks_missing_dispatch_boundary_after_custom_sel
     assert summary["custom_workflow_execution"]["observed"] is False
 
 
+def test_custom_workflow_summary_uses_selected_workflow_trace_when_dispatch_events_missing() -> None:
+    summary = _summarise_tool_execution_context(
+        workflow_routing={
+            "workflow_id": "#V#arxiv_paper_representation_workflow",
+            "verdict": "rag_selected",
+        },
+        turn_execution_diagnostics={
+            "latest_progress": {
+                "counters": {"tools_started": 0, "tools_completed": 0},
+                "diagnostic_events": [],
+            }
+        },
+        aux_llm_calls=[
+            {
+                "type": "workflow_selector",
+                "workflow_id": "#V#arxiv_paper_representation_workflow",
+                "verdict": "rag_selected",
+            }
+        ],
+        serialised_invocations=[],
+        selected_workflow_trace={
+            "selected_workflow_id": "#V#arxiv_paper_representation_workflow",
+            "child_workflow_completed": False,
+            "child_workflow_final_state": "failed",
+            "child_workflow_error": "arxiv_mcp_server_missing_file_path",
+            "completion_report_source": "child_completion_report",
+        },
+    )
+
+    assert summary["dispatch_terminal_status"] == "failed"
+    assert summary["dispatch_terminal_failure_reason"] == "child_workflow_failed"
+    assert (
+        summary["dispatch_terminal_failure_detail"]
+        == "arxiv_mcp_server_missing_file_path"
+    )
+    assert "custom_workflow_dispatch_not_started" not in list(
+        summary.get("failure_codes") or []
+    )
+    assert summary["last_successful_boundary"] == "workflow_terminal"
+    assert summary["zero_tool_reason_code"] == (
+        "custom_workflow_failed_before_tool_invocation"
+    )
+    assert summary["custom_workflow_execution"]["observed"] is True
+    assert summary["custom_workflow_execution"]["final_state"] == "failed"
+    assert (
+        summary["custom_workflow_execution"]["completion_report_source"]
+        == "child_completion_report"
+    )
+
+
 def test_tool_execution_summary_preserves_local_handoff_failure_reason() -> None:
     summary = _summarise_tool_execution_context(
         workflow_routing={
@@ -652,6 +702,76 @@ def test_turn_execution_record_keeps_custom_workflow_execution_consistent_across
             "artefact_ids": ["#V#wf_new"],
         }
     ]
+
+
+def test_turn_record_uses_selected_workflow_trace_for_supervised_custom_failure() -> None:
+    record = build_turn_execution_record(
+        request_id="req-selected-trace-failure",
+        session_id="session-selected-trace-failure",
+        namespace="#V#user",
+        user_id="#V#user",
+        org_id="#V#org",
+        prompt_text="https://arxiv.org/abs/2603.18678",
+        response_text=(
+            "I couldn't complete that request because the authoritative "
+            "conversation-turn workflow failed."
+        ),
+        interaction_timestamp_utc="2026-04-12T02:24:06Z",
+        workflow_routing={
+            "workflow_id": "#V#arxiv_paper_representation_workflow",
+            "verdict": "rag_selected",
+            "source": "selector",
+        },
+        tool_invocations=[],
+        turn_execution_diagnostics={
+            "latest_progress": {
+                "counters": {"tools_started": 0, "tools_completed": 0},
+                "diagnostic_events": [],
+            }
+        },
+        aux_llm_calls=[
+            {
+                "type": "workflow_selector",
+                "workflow_id": "#V#arxiv_paper_representation_workflow",
+                "verdict": "rag_selected",
+            }
+        ],
+        selected_workflow_trace={
+            "selected_workflow_id": "#V#arxiv_paper_representation_workflow",
+            "child_workflow_completed": False,
+            "child_workflow_final_state": "failed",
+            "child_workflow_error": "arxiv_mcp_server_missing_file_path",
+            "completion_report_source": "child_completion_report",
+        },
+        completion_report={
+            "response_text": (
+                "arXiv download succeeded but no file path was returned by "
+                "arxiv-mcp-server"
+            )
+        },
+    )
+
+    summary = record["execution"]["summary"]
+    assert summary["dispatch_terminal_status"] == "failed"
+    assert summary["dispatch_terminal_failure_reason"] == "child_workflow_failed"
+    assert (
+        summary["dispatch_terminal_failure_detail"]
+        == "arxiv_mcp_server_missing_file_path"
+    )
+    assert summary["custom_workflow_execution"]["observed"] is True
+
+    workflow_effects = [
+        effect
+        for effect in record["required_effects"]
+        if effect.get("effect_type") == "workflow_execution"
+    ]
+    assert workflow_effects
+    assert workflow_effects[0]["status"] == "not_satisfied"
+    assert record["completion_gate"]["decision"] in {"failed", "partial"}
+    assert (
+        record["execution"]["selected_workflow_trace"]["child_workflow_error"]
+        == "arxiv_mcp_server_missing_file_path"
+    )
 
 
 def test_build_workflow_routing_diagnostics_preserves_selector_exchange_and_dispatch_events() -> None:
