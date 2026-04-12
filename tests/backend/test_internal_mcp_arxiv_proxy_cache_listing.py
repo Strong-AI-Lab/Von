@@ -198,3 +198,45 @@ def test_arxiv_list_papers_includes_durable_blob_store_objects(monkeypatch, tmp_
     cached = papers["2506.16596v2"]
     assert cached.get("file_path")
     assert cached.get("size_bytes")
+
+
+def test_arxiv_list_papers_builds_s3_uris_for_durable_objects(monkeypatch, tmp_path):
+    from src.backend.integrations.internal_mcp.arxiv_proxy_mcp import (
+        ArxivMCPProxy,
+        ArxivProxyConfig,
+    )
+
+    monkeypatch.setenv("VON_ARXIV_INCLUDE_DURABLE_LISTING", "1")
+    monkeypatch.setenv("VON_BLOB_STORE_BACKEND", "swift")
+    monkeypatch.setenv("VON_SWIFT_CONTAINER", "von-artifacts")
+    monkeypatch.setenv(
+        "VON_S3_ENDPOINT_URL", "https://object-storage.nz-por-1.catalystcloud.io"
+    )
+    monkeypatch.setenv("VON_S3_BUCKET", "von-artifacts")
+    monkeypatch.setenv("VON_S3_PREFIX", "von")
+
+    cache_dir = tmp_path / "arxiv_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    class S3BlobStore:
+        def list(self, prefix=""):
+            assert prefix == "arxiv/papers"
+            return ["arxiv/papers/2412.02730.pdf"]
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.arxiv_proxy_mcp.get_blob_store_from_env",
+        lambda: S3BlobStore(),
+    )
+
+    proxy = ArxivMCPProxy(ArxivProxyConfig(storage_path=cache_dir))
+    result = asyncio.run(proxy.list_papers())
+
+    assert result["success"] is True
+    assert result["total_papers"] == 1
+    paper = result["papers"][0]
+    assert paper["storage"]["backend"] == "s3"
+    assert paper["storage"]["key"] == "arxiv/papers/2412.02730.pdf"
+    assert paper["storage"]["uri"] == (
+        "https://object-storage.nz-por-1.catalystcloud.io/"
+        "von-artifacts/von/arxiv/papers/2412.02730.pdf"
+    )

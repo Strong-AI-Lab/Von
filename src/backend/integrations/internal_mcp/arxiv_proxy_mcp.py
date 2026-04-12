@@ -369,7 +369,7 @@ class ArxivMCPProxy:
             entry["file_path"] = str(path)
             entry["size_bytes"] = path.stat().st_size
 
-        # 2) Durable listing (blob store - local or Swift).
+        # 2) Durable listing (blob store - local, Swift, or S3-compatible).
         # Included by default; set VON_ARXIV_INCLUDE_DURABLE_LISTING=0 to opt out.
         env_value = os.environ.get("VON_ARXIV_INCLUDE_DURABLE_LISTING")
         env_configured = True
@@ -460,6 +460,8 @@ def _infer_blob_backend(blob_store: Any) -> str:
     name = getattr(blob_store, "__class__", type("x", (), {})).__name__
     if name == "SwiftBlobStore":
         return "swift"
+    if name == "S3BlobStore":
+        return "s3"
     if name == "LocalBlobStore":
         return "local"
     return (os.environ.get("VON_BLOB_STORE_BACKEND") or "local").strip().lower()
@@ -490,6 +492,32 @@ def _build_blob_uri(blob_store: Any, *, backend: str, key: str) -> str | None:
         if public_base_url:
             return f"{public_base_url}/{container}/{full_key}"
         return f"swift://{container}/{full_key}"
+
+    if backend == "s3":
+        bucket = (
+            (os.environ.get("VON_S3_BUCKET") or "").strip()
+            or (os.environ.get("VON_SWIFT_CONTAINER") or "").strip()
+        )
+        if not bucket:
+            return None
+        prefix = (
+            (os.environ.get("VON_S3_PREFIX") or "").strip("/")
+            or (os.environ.get("VON_SWIFT_PREFIX") or "").strip("/")
+        )
+        public_base_url = os.environ.get("VON_S3_PUBLIC_BASE_URL")
+        public_base_url = public_base_url.rstrip("/") if public_base_url else None
+        endpoint_url = os.environ.get("VON_S3_ENDPOINT_URL")
+        endpoint_url = endpoint_url.rstrip("/") if endpoint_url else None
+
+        full_key = _normalise_key_for_uri(key)
+        if prefix:
+            full_key = f"{prefix}/{full_key}"
+
+        if public_base_url:
+            return f"{public_base_url}/{bucket}/{full_key}"
+        if endpoint_url:
+            return f"{endpoint_url}/{bucket}/{full_key}"
+        return f"s3://{bucket}/{full_key}"
 
     return None
 

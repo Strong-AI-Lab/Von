@@ -357,7 +357,7 @@ def get_arxiv_proxy() -> ArxivMCPProxy:
 
             workspace_root = Path(__file__).parent.parent.parent.parent.parent
             # This is a cache directory for the external arxiv-mcp-server. The durable
-            # storage location is the blob store (local or Swift).
+            # storage location is the blob store (local, Swift, or S3-compatible).
             storage_path = workspace_root / "data" / "arxiv_cache"
 
             # Allow override via environment variable

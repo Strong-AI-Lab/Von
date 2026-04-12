@@ -56,6 +56,59 @@ def test_fetch_file_copy_bytes_returns_data(monkeypatch):
     assert info.size_bytes == 11
 
 
+def test_fetch_file_copy_bytes_returns_data_for_s3_backed_file_copy(monkeypatch):
+    from src.backend.services.computer_file_copy_service import fetch_file_copy_bytes
+
+    concept_id = "#V#uploaded_file_copy_s3"
+
+    monkeypatch.setattr(
+        "src.backend.db.repositories.concepts_repository.ConceptsRepository.find_one",
+        lambda filter_doc, projection=None: (
+            {"concept_id": concept_id, "name": "notes.txt"}
+            if (filter_doc or {}).get("concept_id") == concept_id
+            else None
+        ),
+    )
+
+    text_values = {
+        "#V#has_blob_key": "uploads/user/abc/notes.txt",
+        "#V#has_blob_backend": "s3",
+        "#V#has_blob_uri": (
+            "https://object-storage.nz-por-1.catalystcloud.io/"
+            "von-artifacts/uploads/user/abc/notes.txt"
+        ),
+        "#V#has_mime_type": "text/plain",
+        "#V#has_original_filename": "notes.txt",
+        "#V#has_size_bytes": "11",
+    }
+
+    def fake_get_texts_for_concept(subject_concept_id, predicate=None, **kwargs):
+        if subject_concept_id != concept_id or predicate not in text_values:
+            return []
+        return [{"text": text_values[predicate]}]
+
+    monkeypatch.setattr(
+        "src.backend.services.text_value_service.get_texts_for_concept",
+        fake_get_texts_for_concept,
+    )
+
+    class _FakeStore:
+        def get_bytes(self, key):
+            assert key == text_values["#V#has_blob_key"]
+            return b"hello world"
+
+    monkeypatch.setattr(
+        "src.backend.services.blob_store.get_blob_store_from_env",
+        lambda: _FakeStore(),
+    )
+
+    result = fetch_file_copy_bytes(file_copy_concept_id=concept_id)
+
+    assert result["success"] is True
+    assert result["data"] == b"hello world"
+    assert result["info"].blob_backend == "s3"
+
+
 def test_fetch_file_copy_bytes_not_found(monkeypatch):
     from src.backend.services.computer_file_copy_service import fetch_file_copy_bytes
 

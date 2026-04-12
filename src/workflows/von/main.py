@@ -138,6 +138,21 @@ _apply_dotenv_overrides(
         "VON_BROWSER_TEST_PSEUDOUSER_EMAIL",
         "VON_BROWSER_TEST_PSEUDOUSER_CONCEPT_ID",
         "VON_BROWSER_TEST_ORGANISATION_CONCEPT_ID",
+        "VON_S3_BUCKET",
+        "VON_S3_PREFIX",
+        "VON_S3_ENDPOINT_URL",
+        "VON_S3_PUBLIC_BASE_URL",
+        "VON_S3_REGION_NAME",
+        "VON_S3_ADDRESSING_STYLE",
+        "VON_SWIFT_S3_FAILOVER_ENABLE",
+        "VON_S3_ACCESS_KEY_ID",
+        "VON_S3_SECRET_ACCESS_KEY",
+        "VON_S3_SESSION_TOKEN",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_REGION",
+        "AWS_DEFAULT_REGION",
         # GitHub proxy tokens — override early so _build_github_env() always
         # resolves from .env rather than relying on inherited shell env
         # (VS Code may set GITHUB_TOKEN to its own Copilot auth token).
