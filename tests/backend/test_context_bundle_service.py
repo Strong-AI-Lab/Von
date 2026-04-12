@@ -248,3 +248,37 @@ def test_build_reconstructed_workspace_backfills_report_text_and_receipts_and_pe
         persisted_state["state"]["workspace_state"]["workspace_fingerprint"]
         == workspace["workspace_fingerprint"]
     )
+
+
+def test_ensure_canonical_context_bundle_ontology_repairs_missing_parent_links(
+    monkeypatch,
+) -> None:
+    add_calls: list[tuple[str, str, str]] = []
+
+    monkeypatch.setattr(
+        svc,
+        "_get_concept_or_none",
+        lambda concept_id: (
+            {"concept_id": concept_id, "relationships": {"is_a_type_of": []}}
+            if concept_id == "#V#has_context_bundle"
+            else {"concept_id": concept_id, "relationships": {"is_a_type_of": ["#V#thing"]}}
+        ),
+    )
+    monkeypatch.setattr(svc, "_ensure_text_description", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        svc,
+        "add_relationship",
+        lambda source_id, predicate, target: add_calls.append(
+            (source_id, predicate, target)
+        )
+        or {"success": True},
+    )
+
+    result = svc.ensure_canonical_context_bundle_ontology(
+        concept_ids=["#V#has_context_bundle"],
+        create_missing_concepts=True,
+    )
+
+    assert result["success"] is True
+    assert ("#V#has_context_bundle", "is_an_instance_of", "#V#predicate") in add_calls
+    assert result["counts"]["repaired_parent_links"] == 1

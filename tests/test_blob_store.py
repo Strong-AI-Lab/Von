@@ -12,6 +12,7 @@ from src.backend.services.blob_store import (
     SwiftBlobStore,
     _normalise_key,
     get_blob_store_from_env,
+    resolve_blob_store_backend_from_env,
 )
 
 
@@ -55,9 +56,60 @@ def test_local_blob_store_put_get_exists_delete_and_list(tmp_path: Path):
 def test_get_blob_store_from_env_defaults_to_local(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("VON_BLOB_STORE_BACKEND", raising=False)
     monkeypatch.delenv("VON_BLOB_STORE_LOCAL_ROOT", raising=False)
+    monkeypatch.delenv("VON_SWIFT_CONTAINER", raising=False)
+    monkeypatch.delenv("OS_CLOUD", raising=False)
+    monkeypatch.delenv("OS_AUTH_URL", raising=False)
+    monkeypatch.delenv("OS_USERNAME", raising=False)
+    monkeypatch.delenv("OS_PASSWORD", raising=False)
+    monkeypatch.delenv("OS_PROJECT_NAME", raising=False)
+    monkeypatch.delenv("VON_S3_ENDPOINT_URL", raising=False)
+    monkeypatch.delenv("VON_S3_BUCKET", raising=False)
+    monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
+    monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
 
     store = get_blob_store_from_env()
     assert isinstance(store, LocalBlobStore)
+
+
+def test_resolve_blob_store_backend_from_env_prefers_swift_when_remote_config_present(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.delenv("VON_BLOB_STORE_BACKEND", raising=False)
+    monkeypatch.setenv("VON_SWIFT_CONTAINER", "von-artifacts")
+    monkeypatch.setenv("OS_CLOUD", "catalyst")
+
+    assert resolve_blob_store_backend_from_env() == "swift"
+
+
+def test_get_blob_store_from_env_prefers_remote_failover_when_backend_unset(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.delenv("VON_BLOB_STORE_BACKEND", raising=False)
+    monkeypatch.setenv("VON_SWIFT_CONTAINER", "von-artifacts")
+    monkeypatch.setenv("OS_CLOUD", "catalyst")
+    monkeypatch.setenv(
+        "VON_S3_ENDPOINT_URL", "https://object-storage.nz-por-1.catalystcloud.io"
+    )
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "demo-key")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "demo-secret")
+
+    class _SwiftSentinel:
+        pass
+
+    class _S3Sentinel:
+        pass
+
+    monkeypatch.setattr(
+        "src.backend.services.blob_store.SwiftBlobStore",
+        lambda **kwargs: _SwiftSentinel(),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.blob_store._build_s3_blob_store_from_env",
+        lambda: _S3Sentinel(),
+    )
+
+    store = get_blob_store_from_env()
+    assert isinstance(store, FailoverBlobStore)
 
 
 def test_get_blob_store_from_env_swift_requires_container(

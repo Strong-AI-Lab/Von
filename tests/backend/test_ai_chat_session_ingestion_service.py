@@ -60,6 +60,22 @@ def test_copilot_adapter_warns_when_required_root_missing(tmp_path):
     assert any("required root missing" in warning for warning in warnings)
 
 
+def test_gemini_adapter_discovers_pb_sessions(tmp_path):
+    from src.backend.services.ai_chat_session_ingestion_service import GeminiSessionAdapter
+
+    session_file = tmp_path / "6b32763d-1789-47cb-8c42-bfe8493c192f.pb"
+    session_file.write_bytes(b"gemini-session")
+
+    adapter = GeminiSessionAdapter(roots=[tmp_path])
+    records, warnings = adapter.discover()
+
+    assert warnings == []
+    assert len(records) == 1
+    assert records[0].environment == "gemini"
+    assert records[0].source_session_id == "6b32763d-1789-47cb-8c42-bfe8493c192f"
+    assert records[0].title == session_file.name
+
+
 def test_run_new_record_counts_created_mutation(monkeypatch, tmp_path):
     from src.backend.services.ai_chat_session_ingestion_service import (
         AIChatSessionIngestionService,
@@ -524,6 +540,15 @@ def test_apply_new_returns_storage_and_alignment_telemetry(monkeypatch, tmp_path
     monkeypatch.setattr(service, "_update_document_metadata", lambda **_kwargs: None)
     monkeypatch.setattr(service, "_is_document_file_link_aligned", lambda *_args: True)
     monkeypatch.setattr(service, "_is_document_type_aligned", lambda *_args: True)
+    monkeypatch.setattr(
+        service,
+        "_ensure_requested_context_links",
+        lambda _document_concept_id: {
+            "context_links_aligned": True,
+            "attached_context_bundle_ids": ["#V#bundle_test"],
+            "attached_context_dossier_ids": ["#V#dossier_test"],
+        },
+    )
 
     result = service._apply_new(record, record.document_concept_id)
 
@@ -533,3 +558,80 @@ def test_apply_new_returns_storage_and_alignment_telemetry(monkeypatch, tmp_path
     assert result["storage_key"] == "imports/key"
     assert result["ontology_links_aligned"] is True
     assert result["ontology_type_aligned"] is True
+    assert result["context_links_aligned"] is True
+    assert result["attached_context_bundle_ids"] == ["#V#bundle_test"]
+    assert result["attached_context_dossier_ids"] == ["#V#dossier_test"]
+
+
+def test_classify_record_requires_repair_when_requested_context_missing(
+    monkeypatch, tmp_path
+):
+    from src.backend.services.ai_chat_session_ingestion_service import (
+        AIChatSessionIngestionService,
+    )
+
+    record = _record(tmp_path=tmp_path)
+    service = AIChatSessionIngestionService(
+        user_concept_id="#V#user_test",
+        adapters=[],
+        context_bundle_ids=["#V#bundle_test"],
+    )
+
+    existing_doc = {
+        "concept_id": record.document_concept_id,
+        "relationships": {
+            "#V#propositional_information_thing_has_computer_file": ["#V#file_old"]
+        },
+        "attributes": {
+            "source_content_sha256": record.content_sha256,
+            "current_file_copy_concept_id": "#V#file_old",
+        },
+    }
+    monkeypatch.setattr(service, "_get_concept", lambda _concept_id: existing_doc)
+
+    decision = service._classify_record(record)
+
+    assert decision.action == "repair"
+    assert decision.reason == "requested_context_links_missing"
+
+
+def test_run_unchanged_record_writes_backup_copy(monkeypatch, tmp_path):
+    from src.backend.services.ai_chat_session_ingestion_service import (
+        AIChatSessionIngestionService,
+        SessionDecision,
+    )
+
+    record = _record(tmp_path=tmp_path)
+    backup_root = tmp_path / "backups"
+
+    class _Adapter:
+        environment = "codex"
+
+        def discover(self):
+            return [record], []
+
+    service = AIChatSessionIngestionService(
+        user_concept_id="#V#user_test",
+        adapters=[_Adapter()],
+        backup_root=backup_root,
+    )
+
+    monkeypatch.setattr(service, "ensure_ontology_types", lambda: [])
+    monkeypatch.setattr(
+        service,
+        "_classify_record",
+        lambda _rec: SessionDecision(
+            action="unchanged",
+            reason="content_hash_match",
+            record=_rec,
+            document_concept_id=_rec.document_concept_id,
+        ),
+    )
+
+    result = service.run(dry_run=False)
+
+    assert result.success is True
+    entry = result.records[0]
+    assert entry["backup_attempted"] is True
+    assert entry["backup_written"] is True
+    assert Path(entry["backup_path"]).exists()

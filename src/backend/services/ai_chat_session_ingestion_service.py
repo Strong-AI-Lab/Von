@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import re
+import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,6 +12,11 @@ from typing import Any, Callable, Protocol, Sequence
 
 from . import concept_service
 from .computer_file_copy_service import import_local_file_copy
+from .context_bundle_contracts import (
+    HAS_CONTEXT_BUNDLE_PREDICATE_ID,
+    HAS_CONTEXT_DOSSIER_PREDICATE_ID,
+)
+from .context_bundle_service import ensure_canonical_context_bundle_ontology
 from .relationship_removal_service import remove_relationship
 from .relationship_write_service import add_relationship
 
@@ -29,6 +35,7 @@ BASE_DOCUMENT_TYPE_ID = "#V#ai_assisted_programming_chat_session_document"
 BASE_FILE_COPY_TYPE_ID = "#V#ai_assisted_programming_chat_session_file_copy"
 
 COPILOT_DEFAULT_ROOT = Path(r"W:\Microsoft Copilot Chat Files")
+GEMINI_DEFAULT_ROOT = Path.home() / ".gemini" / "antigravity" / "conversations"
 
 
 @dataclass(frozen=True)
@@ -57,6 +64,14 @@ ENVIRONMENT_CONFIGS: dict[str, EnvironmentOntologyConfig] = {
         document_type_name="Copilot Chat Session Document",
         file_copy_type_id="#V#copilot_chat_session_file_copy",
         file_copy_type_name="Copilot Chat Session File Copy",
+    ),
+    "gemini": EnvironmentOntologyConfig(
+        environment="gemini",
+        source_system="gemini_chat_session",
+        document_type_id="#V#gemini_chat_session_document",
+        document_type_name="Gemini Chat Session Document",
+        file_copy_type_id="#V#gemini_chat_session_file_copy",
+        file_copy_type_name="Gemini Chat Session File Copy",
     ),
     "claude_code": EnvironmentOntologyConfig(
         environment="claude_code",
@@ -306,6 +321,40 @@ class CopilotSessionAdapter(_FileAdapterBase):
         )
 
 
+class GeminiSessionAdapter(_FileAdapterBase):
+    environment = "gemini"
+    patterns = ("*.pb", "*.json", "*.jsonl", "*.md", "*.txt")
+    required = False
+    _session_file_id = re.compile(
+        r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
+        re.IGNORECASE,
+    )
+
+    def __init__(self, roots: Sequence[Path] | None = None) -> None:
+        self.roots = tuple(roots or (GEMINI_DEFAULT_ROOT,))
+
+    def _build_session_id(self, path: Path) -> str:
+        match = self._session_file_id.search(path.name)
+        if match:
+            return match.group(1).lower()
+        return super()._build_session_id(path)
+
+    def _record_from_file(self, path: Path) -> SessionRecord:
+        record = super()._record_from_file(path)
+        return SessionRecord(
+            environment=record.environment,
+            source_session_id=record.source_session_id,
+            canonical_source_path=record.canonical_source_path,
+            source_uri=record.source_uri,
+            source_modified_at_utc=record.source_modified_at_utc,
+            source_size_bytes=record.source_size_bytes,
+            content_sha256=record.content_sha256,
+            local_path=record.local_path,
+            title=path.name,
+            metadata={"extension": path.suffix.lower()},
+        )
+
+
 class GenericSessionAdapter(_FileAdapterBase):
     required = False
 
@@ -387,6 +436,9 @@ class AIChatSessionIngestionService:
         *,
         user_concept_id: str,
         adapters: Sequence[SessionSourceAdapter] | None = None,
+        context_bundle_ids: Sequence[str] = (),
+        context_dossier_ids: Sequence[str] = (),
+        backup_root: Path | None = None,
     ) -> None:
         if not isinstance(user_concept_id, str) or not user_concept_id.strip():
             raise ValueError("user_concept_id is required")
@@ -394,12 +446,20 @@ class AIChatSessionIngestionService:
         self.adapters = (
             list(adapters) if adapters is not None else self._default_adapters()
         )
+        self.context_bundle_ids = self._normalise_concept_ids(context_bundle_ids)
+        self.context_dossier_ids = self._normalise_concept_ids(context_dossier_ids)
+        self.backup_root = (
+            backup_root.expanduser().resolve()
+            if isinstance(backup_root, Path)
+            else None
+        )
 
     @staticmethod
     def _default_adapters() -> list[SessionSourceAdapter]:
         return [
             CodexSessionAdapter(),
             CopilotSessionAdapter(),
+            GeminiSessionAdapter(),
             GenericSessionAdapter(
                 environment="claude_code",
                 roots=(
@@ -424,6 +484,20 @@ class AIChatSessionIngestionService:
                 name_tokens=("chat", "session", "conversation", "history"),
             ),
         ]
+
+    @staticmethod
+    def _normalise_concept_ids(values: Sequence[str]) -> tuple[str, ...]:
+        output: list[str] = []
+        seen: set[str] = set()
+        for raw in values:
+            if not isinstance(raw, str):
+                continue
+            cleaned = raw.strip()
+            if not cleaned or cleaned in seen:
+                continue
+            seen.add(cleaned)
+            output.append(cleaned)
+        return tuple(output)
 
     def ensure_ontology_types(self) -> list[str]:
         warnings: list[str] = []
@@ -508,6 +582,155 @@ class AIChatSessionIngestionService:
                 warnings.append(f"missing_required_ontology_concept:{concept_id}")
         return warnings
 
+    def _planned_backup_path(self, record: SessionRecord) -> Path | None:
+        if self.backup_root is None:
+            return None
+        filename = Path(record.local_path).name or "session.bin"
+        safe_filename = re.sub(r"[^A-Za-z0-9._-]+", "_", filename).strip("._")
+        if not safe_filename:
+            safe_filename = "session.bin"
+        return (
+            self.backup_root
+            / record.environment
+            / record.source_session_id
+            / record.content_sha256
+            / safe_filename
+        )
+
+    def _backup_record_file(self, record: SessionRecord) -> dict[str, Any]:
+        backup_path = self._planned_backup_path(record)
+        if backup_path is None:
+            return {
+                "backup_attempted": False,
+                "backup_written": False,
+                "backup_reused_existing": False,
+                "backup_path": None,
+                "backup_metadata_path": None,
+            }
+
+        backup_path.parent.mkdir(parents=True, exist_ok=True)
+        metadata_path = backup_path.with_suffix(backup_path.suffix + ".metadata.json")
+        source_path = Path(record.local_path)
+        reused_existing = False
+        written = False
+        if backup_path.exists():
+            try:
+                existing_hash = _sha256_file(backup_path)
+            except Exception:
+                existing_hash = None
+            if existing_hash == record.content_sha256:
+                reused_existing = True
+            else:
+                shutil.copy2(source_path, backup_path)
+                written = True
+        else:
+            shutil.copy2(source_path, backup_path)
+            written = True
+
+        metadata_payload = {
+            "schema_version": "ai_chat_session_backup.v1",
+            "environment": record.environment,
+            "source_session_id": record.source_session_id,
+            "source_path": record.canonical_source_path,
+            "source_uri": record.source_uri,
+            "source_modified_at_utc": record.source_modified_at_utc,
+            "source_size_bytes": record.source_size_bytes,
+            "content_sha256": record.content_sha256,
+            "document_concept_id": record.document_concept_id,
+            "title": record.title,
+            "backed_up_at_utc": _utc_now_iso(),
+        }
+        metadata_path.write_text(
+            json.dumps(metadata_payload, indent=2, ensure_ascii=True),
+            encoding="utf-8",
+        )
+        return {
+            "backup_attempted": True,
+            "backup_written": written,
+            "backup_reused_existing": reused_existing,
+            "backup_path": str(backup_path),
+            "backup_metadata_path": str(metadata_path),
+        }
+
+    @staticmethod
+    def _relationship_targets(concept_doc: dict[str, Any], predicate: str) -> list[str]:
+        relationships = concept_doc.get("relationships")
+        if not isinstance(relationships, dict):
+            return []
+        raw = relationships.get(predicate)
+        if raw is None and predicate.startswith("#V#"):
+            raw = relationships.get(predicate[3:])
+        if isinstance(raw, str):
+            return [raw]
+        if isinstance(raw, list):
+            return [item for item in raw if isinstance(item, str) and item.strip()]
+        return []
+
+    def _context_links_aligned(self, concept_doc: dict[str, Any]) -> bool:
+        if self.context_bundle_ids:
+            linked_bundle_ids = set(
+                self._relationship_targets(concept_doc, HAS_CONTEXT_BUNDLE_PREDICATE_ID)
+            )
+            if any(bundle_id not in linked_bundle_ids for bundle_id in self.context_bundle_ids):
+                return False
+        if self.context_dossier_ids:
+            linked_dossier_ids = set(
+                self._relationship_targets(concept_doc, HAS_CONTEXT_DOSSIER_PREDICATE_ID)
+            )
+            if any(
+                dossier_id not in linked_dossier_ids
+                for dossier_id in self.context_dossier_ids
+            ):
+                return False
+        return True
+
+    def _ensure_requested_context_links(
+        self, document_concept_id: str
+    ) -> dict[str, Any]:
+        if self.context_bundle_ids or self.context_dossier_ids:
+            ensure_canonical_context_bundle_ontology(
+                concept_ids=(
+                    [HAS_CONTEXT_BUNDLE_PREDICATE_ID] if self.context_bundle_ids else []
+                )
+                + (
+                    [HAS_CONTEXT_DOSSIER_PREDICATE_ID]
+                    if self.context_dossier_ids
+                    else []
+                ),
+                create_missing_concepts=True,
+            )
+
+        for bundle_id in self.context_bundle_ids:
+            result = add_relationship(
+                document_concept_id,
+                HAS_CONTEXT_BUNDLE_PREDICATE_ID,
+                bundle_id,
+            )
+            if not result.get("success"):
+                raise RuntimeError(
+                    f"failed_attach_context_bundle:{document_concept_id}:{bundle_id}:{result}"
+                )
+
+        for dossier_id in self.context_dossier_ids:
+            result = add_relationship(
+                document_concept_id,
+                HAS_CONTEXT_DOSSIER_PREDICATE_ID,
+                dossier_id,
+            )
+            if not result.get("success"):
+                raise RuntimeError(
+                    f"failed_attach_context_dossier:{document_concept_id}:{dossier_id}:{result}"
+                )
+
+        refreshed = self._get_concept(document_concept_id)
+        return {
+            "attached_context_bundle_ids": list(self.context_bundle_ids),
+            "attached_context_dossier_ids": list(self.context_dossier_ids),
+            "context_links_aligned": bool(
+                isinstance(refreshed, dict) and self._context_links_aligned(refreshed)
+            ),
+        }
+
     def run(
         self,
         *,
@@ -572,6 +795,9 @@ class AIChatSessionIngestionService:
 
         for idx, decision in enumerate(decisions, start=1):
             if decision.action == "unchanged":
+                backup_info = (
+                    self._backup_record_file(decision.record) if not dry_run else {}
+                )
                 counters.skipped += 1
                 result_entry = {
                     "environment": decision.record.environment,
@@ -583,7 +809,14 @@ class AIChatSessionIngestionService:
                     "storage_object_written": False,
                     "ontology_links_aligned": True,
                     "ontology_type_aligned": True,
+                    "context_links_aligned": True,
+                    "attached_context_bundle_ids": list(self.context_bundle_ids),
+                    "attached_context_dossier_ids": list(self.context_dossier_ids),
+                    "planned_backup_path": str(self._planned_backup_path(decision.record))
+                    if dry_run and self._planned_backup_path(decision.record)
+                    else None,
                 }
+                result_entry.update(backup_info)
                 record_results.append(result_entry)
                 self._emit_record_processed_progress(
                     progress_callback=progress_callback,
@@ -607,6 +840,12 @@ class AIChatSessionIngestionService:
                     "storage_object_written": False,
                     "ontology_links_aligned": None,
                     "ontology_type_aligned": None,
+                    "context_links_aligned": None,
+                    "attached_context_bundle_ids": list(self.context_bundle_ids),
+                    "attached_context_dossier_ids": list(self.context_dossier_ids),
+                    "planned_backup_path": str(self._planned_backup_path(decision.record))
+                    if self._planned_backup_path(decision.record)
+                    else None,
                 }
                 record_results.append(result_entry)
                 self._emit_record_processed_progress(
@@ -619,6 +858,8 @@ class AIChatSessionIngestionService:
                     counters=counters,
                 )
                 continue
+
+            backup_info = self._backup_record_file(decision.record)
 
             if decision.action == "new":
                 applied = self._apply_new(decision.record, decision.document_concept_id)
@@ -650,6 +891,7 @@ class AIChatSessionIngestionService:
                 "reason": decision.reason,
             }
             result_entry.update(applied)
+            result_entry.update(backup_info)
             record_results.append(result_entry)
             self._emit_record_processed_progress(
                 progress_callback=progress_callback,
@@ -763,6 +1005,19 @@ class AIChatSessionIngestionService:
                 "storage_uri": result_entry.get("storage_uri"),
                 "ontology_links_aligned": result_entry.get("ontology_links_aligned"),
                 "ontology_type_aligned": result_entry.get("ontology_type_aligned"),
+                "context_links_aligned": result_entry.get("context_links_aligned"),
+                "attached_context_bundle_ids": result_entry.get(
+                    "attached_context_bundle_ids"
+                ),
+                "attached_context_dossier_ids": result_entry.get(
+                    "attached_context_dossier_ids"
+                ),
+                "backup_written": result_entry.get("backup_written"),
+                "backup_reused_existing": result_entry.get(
+                    "backup_reused_existing"
+                ),
+                "backup_path": result_entry.get("backup_path")
+                or result_entry.get("planned_backup_path"),
                 "counters": self._counters_to_dict(counters),
             },
         )
@@ -832,7 +1087,7 @@ class AIChatSessionIngestionService:
 
     def _repair_context_for_existing_document(
         self, concept_doc: dict[str, Any]
-    ) -> dict[str, str] | None:
+    ) -> dict[str, str | None] | None:
         linked_ids = self._linked_file_copy_ids(concept_doc)
         canonical_linked_ids = self._linked_file_copy_ids_for_predicate(
             concept_doc, PRED_DOC_HAS_FILE
@@ -875,6 +1130,17 @@ class AIChatSessionIngestionService:
                 "file_copy_concept_id": linked_ids[0],
             }
 
+        if not self._context_links_aligned(concept_doc):
+            preferred = (
+                current_file_copy_id
+                if current_file_copy_id and current_file_copy_id in linked_ids
+                else (linked_ids[0] if linked_ids else current_file_copy_id)
+            )
+            return {
+                "reason": "requested_context_links_missing",
+                "file_copy_concept_id": preferred,
+            }
+
         return None
 
     def _apply_new(self, record: SessionRecord, document_concept_id: str) -> dict[str, Any]:
@@ -914,6 +1180,7 @@ class AIChatSessionIngestionService:
             previous_file_copy_concept_ids=[],
             source_system=cfg.source_system,
         )
+        context_alignment = self._ensure_requested_context_links(document_concept_id)
         return {
             "success": True,
             "file_copy_concept_id": file_copy_concept_id,
@@ -928,6 +1195,7 @@ class AIChatSessionIngestionService:
             "ontology_type_aligned": self._is_document_type_aligned(
                 document_concept_id, cfg.document_type_id
             ),
+            **context_alignment,
         }
 
     def _apply_update(self, record: SessionRecord, document_concept_id: str) -> dict[str, Any]:
@@ -966,6 +1234,7 @@ class AIChatSessionIngestionService:
             previous_file_copy_concept_ids=old_file_copy_ids,
             source_system=cfg.source_system,
         )
+        context_alignment = self._ensure_requested_context_links(document_concept_id)
 
         return {
             "success": True,
@@ -981,6 +1250,7 @@ class AIChatSessionIngestionService:
             "ontology_type_aligned": self._is_document_type_aligned(
                 document_concept_id, cfg.document_type_id
             ),
+            **context_alignment,
         }
 
     def _apply_repair(
@@ -1021,6 +1291,7 @@ class AIChatSessionIngestionService:
             previous_file_copy_concept_ids=previous_ids,
             source_system=cfg.source_system,
         )
+        context_alignment = self._ensure_requested_context_links(document_concept_id)
 
         return {
             "success": True,
@@ -1036,6 +1307,7 @@ class AIChatSessionIngestionService:
             "ontology_type_aligned": self._is_document_type_aligned(
                 document_concept_id, cfg.document_type_id
             ),
+            **context_alignment,
         }
 
     def _import_record_file(
@@ -1286,10 +1558,16 @@ def run_ingestion(
     limit: int | None = None,
     adapters: Sequence[SessionSourceAdapter] | None = None,
     progress_callback: ProgressCallback | None = None,
+    context_bundle_ids: Sequence[str] = (),
+    context_dossier_ids: Sequence[str] = (),
+    backup_root: Path | None = None,
 ) -> dict[str, Any]:
     service = AIChatSessionIngestionService(
         user_concept_id=user_concept_id,
         adapters=adapters,
+        context_bundle_ids=context_bundle_ids,
+        context_dossier_ids=context_dossier_ids,
+        backup_root=backup_root,
     )
     result = service.run(
         dry_run=dry_run,
@@ -1304,8 +1582,10 @@ def run_ingestion(
 __all__ = [
     "AIChatSessionIngestionService",
     "COPILOT_DEFAULT_ROOT",
+    "GEMINI_DEFAULT_ROOT",
     "SessionRecord",
     "SyncResult",
+    "GeminiSessionAdapter",
     "run_ingestion",
     "stable_document_concept_id",
 ]

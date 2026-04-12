@@ -154,7 +154,7 @@ _CANONICAL_CONTEXT_ONTOLOGY_BLUEPRINTS: tuple[dict[str, Any], ...] = (
         "name": "Has Context Bundle",
         "description": "Links a concept, workflow, or dossier to an attached context bundle.",
         "parent_concept_ids": ["#V#predicate"],
-        "create_as_instance": False,
+        "create_as_instance": True,
     },
     {
         "concept_id": CONTEXT_BUNDLE_EXTENDS_PREDICATE_ID,
@@ -163,28 +163,28 @@ _CANONICAL_CONTEXT_ONTOLOGY_BLUEPRINTS: tuple[dict[str, Any], ...] = (
             "Links a context bundle to a more general bundle it inherits from."
         ),
         "parent_concept_ids": ["#V#predicate"],
-        "create_as_instance": False,
+        "create_as_instance": True,
     },
     {
         "concept_id": HAS_CONTEXT_FACET_PREDICATE_ID,
         "name": "Has Context Facet",
         "description": "Links a bundle or dossier to one of its bounded context facets.",
         "parent_concept_ids": ["#V#predicate"],
-        "create_as_instance": False,
+        "create_as_instance": True,
     },
     {
         "concept_id": HAS_CONTEXT_DOSSIER_PREDICATE_ID,
         "name": "Has Context Dossier",
         "description": "Links a subject concept or workflow to a reconstructed dossier.",
         "parent_concept_ids": ["#V#predicate"],
-        "create_as_instance": False,
+        "create_as_instance": True,
     },
     {
         "concept_id": HAS_REPORT_REVISION_PREDICATE_ID,
         "name": "Has Report Revision",
         "description": "Links a dossier to one of its bounded report revisions.",
         "parent_concept_ids": ["#V#predicate"],
-        "create_as_instance": False,
+        "create_as_instance": True,
     },
     {
         "concept_id": CITES_EVIDENCE_RECEIPT_PREDICATE_ID,
@@ -194,7 +194,7 @@ _CANONICAL_CONTEXT_ONTOLOGY_BLUEPRINTS: tuple[dict[str, Any], ...] = (
             "receipts it depends on."
         ),
         "parent_concept_ids": ["#V#predicate"],
-        "create_as_instance": False,
+        "create_as_instance": True,
     },
 )
 
@@ -453,6 +453,7 @@ def ensure_canonical_context_bundle_ontology(
     )
     created_ids: list[str] = []
     persisted_ids: list[str] = []
+    repaired_parent_link_ids: list[str] = []
     missing_ids: list[str] = []
     unknown_ids: list[str] = []
     errors: dict[str, str] = {}
@@ -491,6 +492,31 @@ def ensure_canonical_context_bundle_ontology(
                 errors[concept_id] = f"create_failed:{exc}"
                 continue
 
+        relation_kind = (
+            "is_an_instance_of"
+            if bool(blueprint.get("create_as_instance", False))
+            else "is_a_type_of"
+        )
+        expected_parent_ids = _normalise_strings(blueprint.get("parent_concept_ids"))
+        current_parent_ids = set(_list_relationship_targets(concept, relation_kind))
+        for parent_id in expected_parent_ids:
+            if parent_id in current_parent_ids:
+                continue
+            try:
+                add_relationship(
+                    source_id=concept_id,
+                    predicate=relation_kind,
+                    target=parent_id,
+                )
+                repaired_parent_link_ids.append(
+                    f"{concept_id}->{relation_kind}->{parent_id}"
+                )
+            except Exception as exc:
+                errors[concept_id] = (
+                    f"parent_link_failed:{relation_kind}:{parent_id}:{exc}"
+                )
+                break
+
         try:
             _ensure_text_description(
                 concept_id,
@@ -506,6 +532,7 @@ def ensure_canonical_context_bundle_ontology(
         "canonical_concept_ids": list(canonical_context_bundle_concept_ids()),
         "created_concept_ids": created_ids,
         "persisted_concept_ids": persisted_ids,
+        "repaired_parent_links": repaired_parent_link_ids,
         "missing_concept_ids": missing_ids,
         "unknown_concept_ids": unknown_ids,
         "errors_by_concept_id": errors,
@@ -513,6 +540,7 @@ def ensure_canonical_context_bundle_ontology(
             "requested": len(requested),
             "created": len(created_ids),
             "persisted": len(persisted_ids),
+            "repaired_parent_links": len(repaired_parent_link_ids),
             "missing": len(missing_ids),
             "unknown": len(unknown_ids),
             "errors": len(errors),

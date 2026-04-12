@@ -206,3 +206,54 @@ def test_import_bytes_file_copy_persists_typing(monkeypatch):
     assert result["typing_result"]["detected_type_concept_ids"] == [
         "#V#mspowerpoint_pptx_computer_file_copy"
     ]
+
+
+def test_import_bytes_file_copy_reuses_existing_concept_without_reupload(monkeypatch):
+    from src.backend.services import computer_file_copy_service as svc
+
+    class _Existing:
+        concept_id = "#V#existing_file_copy"
+        type_concept_id = "#V#computer_file_copy"
+        uploaded_at = "2026-01-01T00:00:00+00:00"
+
+    monkeypatch.setattr(
+        "src.backend.services.computer_file_copy_service.find_existing_computer_file_copy_instance",
+        lambda **_kwargs: _Existing(),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.computer_file_copy_service.resolve_file_copy_blob_info",
+        lambda **_kwargs: svc.FileCopyBlobInfo(
+            concept_id="#V#existing_file_copy",
+            blob_key="imports/user/hash/notes.txt",
+            blob_backend="s3",
+            blob_uri="s3://bucket/imports/user/hash/notes.txt",
+            content_type="text/plain",
+            original_filename="notes.txt",
+            size_bytes=11,
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.computer_file_copy_service.build_file_copy_artifact_record",
+        lambda **_kwargs: {"artifact_id": "#V#existing_file_copy"},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.blob_uploads.put_bytes_durable",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("should_not_upload")),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.computer_file_copy_service.create_computer_file_copy_instance",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("should_not_create")),
+    )
+
+    result = svc.import_bytes_file_copy(
+        data=b"hello world",
+        user_concept_id="#V#user",
+        original_filename="notes.txt",
+        content_type="text/plain",
+    )
+
+    assert result["success"] is True
+    assert result["concept_id"] == "#V#existing_file_copy"
+    assert result["reused_existing"] is True
+    assert result["storage"]["backend"] == "s3"
+    assert result["storage"]["key"] == "imports/user/hash/notes.txt"

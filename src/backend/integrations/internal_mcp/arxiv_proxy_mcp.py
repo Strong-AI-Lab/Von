@@ -14,7 +14,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, List
 
-from src.backend.services.blob_store import get_blob_store_from_env
+from src.backend.services.blob_store import (
+    get_blob_store_from_env,
+    resolve_blob_store_backend_from_env,
+)
 from src.backend.services.blob_uploads import BlobUploadError, put_bytes_durable
 
 from mcp.client.stdio import StdioServerParameters, stdio_client
@@ -464,7 +467,11 @@ def _infer_blob_backend(blob_store: Any) -> str:
         return "s3"
     if name == "LocalBlobStore":
         return "local"
-    return (os.environ.get("VON_BLOB_STORE_BACKEND") or "local").strip().lower()
+    if hasattr(blob_store, "_failed_over") and getattr(blob_store, "_failed_over", False):
+        return str(getattr(blob_store, "_secondary_name", "s3")).strip().lower()
+    if hasattr(blob_store, "_primary_name"):
+        return str(getattr(blob_store, "_primary_name", "swift")).strip().lower()
+    return resolve_blob_store_backend_from_env()
 
 
 def _build_blob_uri(blob_store: Any, *, backend: str, key: str) -> str | None:

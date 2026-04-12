@@ -727,11 +727,9 @@ def fetch_file_copy_bytes(
 
     if info.blob_backend:
         try:
-            import os
+            from .blob_store import resolve_blob_store_backend_from_env
 
-            env_backend = (
-                (os.environ.get("VON_BLOB_STORE_BACKEND") or "local").strip().lower()
-            )
+            env_backend = resolve_blob_store_backend_from_env()
             if info.blob_backend.strip().lower() != env_backend and logger is not None:
                 logger.warning(
                     "[file_copy] Blob backend mismatch for %s: concept=%s env=%s",
@@ -1088,6 +1086,43 @@ def import_bytes_file_copy(
         else f"imports/{user_slug}/{sha256}/{safe_filename}"
     )
 
+    existing = find_existing_computer_file_copy_instance(
+        user_concept_id=effective_user_concept_id,
+        blob_key=resolved_blob_key,
+        type_concept_id=type_concept_id,
+        sha256=sha256,
+    )
+    if existing is not None:
+        existing_info = resolve_file_copy_blob_info(
+            file_copy_concept_id=existing.concept_id
+        )
+        artifact_record = build_file_copy_artifact_record(
+            file_copy_concept_id=existing.concept_id
+        )
+        storage_payload = {
+            "backend": getattr(existing_info, "blob_backend", None),
+            "key": getattr(existing_info, "blob_key", resolved_blob_key),
+            "uri": getattr(existing_info, "blob_uri", None),
+            "content_type": getattr(existing_info, "content_type", content_type),
+            "size_bytes": getattr(existing_info, "size_bytes", size_bytes),
+            "metadata": None,
+        }
+        return {
+            "success": True,
+            "concept_id": existing.concept_id,
+            "type_concept_id": existing.type_concept_id,
+            "uploaded_at": existing.uploaded_at,
+            "storage": storage_payload,
+            "artifact_record": artifact_record,
+            "typing": {
+                "success": True,
+                "typing_persisted": False,
+                "status": "reused_existing",
+            },
+            "typing_result": None,
+            "reused_existing": True,
+        }
+
     persisted_metadata: dict[str, Any] = dict(metadata or {})
     persisted_metadata.update(
         {
@@ -1203,6 +1238,7 @@ def import_bytes_file_copy(
         "artifact_record": artifact_record,
         "typing": typing_persist_result,
         "typing_result": typing_result,
+        "reused_existing": False,
     }
 
 

@@ -46,6 +46,19 @@ def _first_non_empty_env(*names: str) -> str | None:
     return None
 
 
+def _swift_config_present() -> bool:
+    if not _first_non_empty_env("VON_SWIFT_CONTAINER"):
+        return False
+    if _first_non_empty_env("OS_CLOUD"):
+        return True
+    return bool(
+        _first_non_empty_env("OS_AUTH_URL")
+        and _first_non_empty_env("OS_USERNAME")
+        and _first_non_empty_env("OS_PASSWORD")
+        and _first_non_empty_env("OS_PROJECT_NAME")
+    )
+
+
 def _normalise_key(key: str) -> str:
     key = key.strip().replace("\\", "/")
     if not key:
@@ -732,8 +745,19 @@ def _s3_failover_config_present() -> bool:
     )
 
 
+def resolve_blob_store_backend_from_env() -> str:
+    explicit = _first_non_empty_env("VON_BLOB_STORE_BACKEND")
+    if explicit:
+        return explicit.strip().lower()
+    if _swift_config_present():
+        return "swift"
+    if _s3_failover_config_present():
+        return "s3"
+    return "local"
+
+
 def get_blob_store_from_env() -> BlobStore:
-    backend = (os.environ.get("VON_BLOB_STORE_BACKEND") or "local").strip().lower()
+    backend = resolve_blob_store_backend_from_env()
 
     if backend == "local":
         root = os.environ.get("VON_BLOB_STORE_LOCAL_ROOT")
