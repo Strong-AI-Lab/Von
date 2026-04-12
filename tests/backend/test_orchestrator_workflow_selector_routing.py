@@ -31,11 +31,19 @@ from src.backend.integrations.internal_mcp.orchestrator import (
     WorkflowRoutingInfo,
     _ModelCandidate,
 )
+from src.backend.services.paper_representation_workflow_vontology_service import (
+    ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+    bootstrap_canonical_paper_representation_workflows,
+)
+from src.backend.services.workflow_discovery_service import (
+    invalidate_workflow_discovery_executability_caches,
+)
 from src.backend.workflows import (
     WorkflowActionInvocation,
     WorkflowDefinition,
     WorkflowRegistration,
     WorkflowStateSpec,
+    workflow_concept_authority_service as authority_service,
 )
 from src.backend.workflows.definitions import (
     CHAT_ASSISTANT_WORKFLOW_ID,
@@ -43,6 +51,7 @@ from src.backend.workflows.definitions import (
     TOOL_CALLING_WORKFLOW_ID,
     TODO_REFRESH_WORKFLOW_ID,
 )
+from src.backend.workflows.vontology_loader import load_workflow_definition_from_vontology
 from src.backend.workflows.workflow_gap_workflow_contracts import (
     WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
 )
@@ -92,6 +101,26 @@ class _CapturingLLM:
         if not self._responses:
             raise AssertionError("LLM called more times than expected")
         return self._responses.pop(0)
+
+
+@pytest.fixture
+def _reset_mock_db(monkeypatch: pytest.MonkeyPatch) -> Any:
+    monkeypatch.setenv("VON_USE_MOCK_DB", "1")
+    authority_service.clear_workflow_type_resolution_cache()
+
+    from src.backend.db.mongo_client import get_db
+
+    db = get_db()
+    if db is not None:
+        for collection_name in ("concepts", "text_relations", "text_values"):
+            try:
+                db.drop_collection(collection_name)
+            except Exception:
+                pass
+    invalidate_workflow_discovery_executability_caches()
+    yield
+    invalidate_workflow_discovery_executability_caches()
+    authority_service.clear_workflow_type_resolution_cache()
 
 
 def _build_orchestrator(
@@ -6197,6 +6226,142 @@ def test_explicit_arxiv_representation_request_selects_representation_workflow_o
     assert "routing eligible" in candidate_list_text
     assert "executable" in candidate_list_text
     assert selector_entry.get("workflow_id") == selected_workflow_id
+
+
+def test_bare_arxiv_url_with_authoritative_definition_stays_launchable(
+    _reset_mock_db: Any,
+    monkeypatch,
+):
+    bootstrap_canonical_paper_representation_workflows()
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    selected_workflow_id = ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
+
+    authoritative_definition = load_workflow_definition_from_vontology(
+        selected_workflow_id
+    )
+    assert authoritative_definition is not None
+    assert authoritative_definition.metadata.get("launch_contract") == {
+        "schema_version": "launch_contract.v1",
+        "preconditions": [
+            {
+                "type": "context_key_present",
+                "key": "prompt",
+                "required": True,
+            }
+        ],
+    }
+    assert authoritative_definition.metadata.get("launch_contract_source") == (
+        "text_relation:#V#has_launch_contract"
+    )
+    assert authoritative_definition.metadata.get("launch_input_contract", {}).get(
+        "required_inputs"
+    ) == ["prompt"]
+
+    orchestrator._workflow_registry.register_or_replace(
+        WorkflowRegistration(
+            workflow_id=selected_workflow_id,
+            definition=authoritative_definition,
+            purpose=(
+                "Canonical arXiv wrapper workflow that normalises an arXiv source, "
+                "fetches authoritative metadata, and delegates to scholarly-paper "
+                "representation."
+            ),
+            source="authoritative_vontology_test",
+        )
+    )
+
+    executed_workflow_ids: list[str] = []
+
+    def _execute_workflow(workflow_id: str, **_kwargs: Any):
+        executed_workflow_ids.append(workflow_id)
+        if workflow_id != selected_workflow_id:
+            raise AssertionError(f"Unexpected workflow execution: {workflow_id}")
+        return SimpleNamespace(
+            data={
+                "response_text": "Executed via authoritative arXiv representation workflow."
+            },
+            final_state="complete",
+            completed=True,
+        )
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
+
+    result = orchestrator.run(
+        prompt="https://arxiv.org/abs/2411.04983",
+        context=[],
+        llm_client=_CapturingLLM(
+            [
+                json.dumps(
+                    {
+                        "workflow_id": selected_workflow_id,
+                        "confidence": 0.99,
+                        "reasoning": (
+                            "A bare arXiv URL should use the specialised arXiv "
+                            "representation workflow, and the authoritative launch "
+                            "metadata is satisfied by the prompt."
+                        ),
+                    }
+                )
+            ]
+        ),
+        model=None,
+        user_namespace="#V#user",
+        workflow_discovery_result={
+            "matches": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Arxiv Paper Representation Workflow",
+                    "description": (
+                        "Canonical arXiv wrapper workflow that normalises an arXiv "
+                        "source, fetches authoritative metadata, and delegates to "
+                        "scholarly-paper representation."
+                    ),
+                    "match_source": "capability_index",
+                    "confidence_score": 1.0,
+                    "relevance_score": 1.0,
+                    "routing_eligible": True,
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "candidate_source": "workflow_discovery",
+                }
+            ],
+            "candidates": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Arxiv Paper Representation Workflow",
+                    "description": (
+                        "Canonical arXiv wrapper workflow that normalises an arXiv "
+                        "source, fetches authoritative metadata, and delegates to "
+                        "scholarly-paper representation."
+                    ),
+                    "match_source": "capability_index",
+                    "confidence_score": 1.0,
+                    "relevance_score": 1.0,
+                    "routing_eligible": True,
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "candidate_source": "workflow_discovery",
+                }
+            ],
+            "match_count": 1,
+        },
+    )
+
+    assert result.workflow_routing is not None
+    assert result.workflow_routing.workflow_id == selected_workflow_id
+    assert result.workflow_routing.verdict == "rag_selected"
+    assert result.workflow_routing.source == "selector"
+    assert result.response_text == (
+        "Executed via authoritative arXiv representation workflow."
+    )
+    assert executed_workflow_ids == [selected_workflow_id]
+    assert not any(
+        isinstance(entry, dict)
+        and entry.get("type") == "workflow_selector_override"
+        and entry.get("reason")
+        == "selected_custom_workflow_launchability_requires_safe_general_fallback"
+        for entry in result.aux_llm_calls
+    )
 
 
 def test_bare_arxiv_url_excludes_testing_workflow_before_selector_and_routes_to_representation_workflow(

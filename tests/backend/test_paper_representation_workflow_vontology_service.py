@@ -23,7 +23,11 @@ from src.backend.services.paper_representation_workflow_vontology_service import
 from src.backend.services.workflow_discovery_service import (
     invalidate_workflow_discovery_executability_caches,
 )
-from src.backend.services.text_value_service import upsert_singleton_text_relation
+from src.backend.services.text_value_service import (
+    delete_text_relation,
+    get_texts_for_concept,
+    upsert_singleton_text_relation,
+)
 from src.backend.workflows.action_registry import WorkflowEnvironment
 from src.backend.workflows import workflow_concept_authority_service as authority_service
 from src.backend.workflows.durable import registry_factory
@@ -31,6 +35,7 @@ from src.backend.workflows.engine import WorkflowExecutor
 from src.backend.workflows.vontology_loader import (
     load_workflow_definition_from_vontology,
     resolve_workflow_discovery_exemplars,
+    resolve_workflow_launch_contract,
     resolve_workflow_launch_input_contract,
     resolve_workflow_publication_lifecycle,
     resolve_workflow_routing_profile,
@@ -84,6 +89,19 @@ def _upsert_workflow_json_text(
         context={"source": "test_paper_representation_workflow_vontology_service"},
         garbage_collect=True,
     )
+
+
+def _delete_workflow_text_relations(
+    *,
+    workflow_id: str,
+    predicate: str,
+) -> None:
+    rows = get_texts_for_concept(workflow_id, predicate=predicate, limit=20)
+    assert rows, {"workflow_id": workflow_id, "predicate": predicate}
+    for row in rows:
+        relation_id = str((row or {}).get("relation_id") or "").strip()
+        assert relation_id, {"workflow_id": workflow_id, "predicate": predicate}
+        delete_text_relation(workflow_id, relation_id, garbage_collect=True)
 
 
 def _live_acceptance_enabled(*, batch: bool = False) -> bool:
@@ -351,6 +369,16 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
     )
     assert isinstance(arxiv_terminal_contract, dict)
     assert arxiv_terminal_contract.get("success_statuses") == ["completed"]
+    explicit_launch_contract = arxiv_definition.metadata.get("launch_contract")
+    assert isinstance(explicit_launch_contract, dict)
+    assert explicit_launch_contract.get("schema_version") == "launch_contract.v1"
+    assert explicit_launch_contract.get("preconditions") == [
+        {
+            "type": "context_key_present",
+            "key": "prompt",
+            "required": True,
+        }
+    ]
     arxiv_launch_contract = arxiv_definition.metadata.get("launch_input_contract")
     assert isinstance(arxiv_launch_contract, dict)
     assert arxiv_launch_contract.get("schema_version") == (
@@ -362,6 +390,11 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
     )
     assert resolved_launch_contract == arxiv_launch_contract
     assert resolved_launch_source.startswith("text_relation:")
+    resolved_explicit_launch_contract, resolved_explicit_launch_source = (
+        resolve_workflow_launch_contract(ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID)
+    )
+    assert resolved_explicit_launch_contract == explicit_launch_contract
+    assert resolved_explicit_launch_source.startswith("text_relation:")
     input_mappings = arxiv_launch_contract.get("input_mappings")
     assert isinstance(input_mappings, list)
     assert any(
@@ -385,6 +418,18 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         and item.get("required") is False
         for item in input_mappings
     )
+    launch_input_rows = get_texts_for_concept(
+        ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+        predicate="#V#hasWorkflowLaunchInputContractJson",
+        limit=5,
+    )
+    explicit_launch_rows = get_texts_for_concept(
+        ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+        predicate="#V#has_launch_contract",
+        limit=5,
+    )
+    assert launch_input_rows
+    assert explicit_launch_rows
     routing_profile, routing_source = resolve_workflow_routing_profile(
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
     )
@@ -783,6 +828,84 @@ def test_bootstrap_repairs_explicit_unpublished_lifecycle(
         "concept_data",
         "text_relation:#V#hasWorkflowLifecycleJson",
     }
+
+
+def test_bootstrap_repairs_missing_required_launch_metadata_surfaces(
+    _reset_mock_db: Any,
+) -> None:
+    bootstrap_canonical_paper_representation_workflows()
+
+    _delete_workflow_text_relations(
+        workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+        predicate="#V#hasWorkflowLaunchInputContractJson",
+    )
+    _delete_workflow_text_relations(
+        workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+        predicate="#V#has_launch_contract",
+    )
+    invalidate_workflow_discovery_executability_caches()
+
+    broken_launch_input_contract, broken_launch_input_source = (
+        resolve_workflow_launch_input_contract(ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID)
+    )
+    broken_explicit_launch_contract, broken_explicit_launch_source = (
+        resolve_workflow_launch_contract(ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID)
+    )
+    assert broken_launch_input_contract is None
+    assert broken_launch_input_source == "none"
+    assert broken_explicit_launch_contract is None
+    assert broken_explicit_launch_source == "none"
+
+    repair_report = bootstrap_canonical_paper_representation_workflows()
+    preflight = repair_report.get("materialisation_preflight") or {}
+    publication = repair_report.get("publication") or {}
+
+    assert preflight.get("drift_detected") is True
+    assert ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID in (
+        preflight.get("drift_workflow_ids") or []
+    )
+    assert "required_authority_surface_missing" in (
+        preflight.get("issue_codes") or []
+    )
+    workflow_status = (
+        (preflight.get("workflow_status_by_id") or {}).get(
+            ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
+        )
+        or {}
+    )
+    assert workflow_status.get("status") == "required_authority_surface_missing"
+    assert sorted(workflow_status.get("missing_authority_surfaces") or []) == [
+        "launch_contract",
+        "launch_input_contract",
+    ]
+    assert publication.get("materialisation_status") == "repaired_from_repo_seed"
+    assert ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID in (
+        publication.get("published_workflow_ids") or []
+    )
+
+    repaired_definition = load_workflow_definition_from_vontology(
+        ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
+    )
+    assert repaired_definition is not None
+    assert repaired_definition.metadata.get("launch_contract") == {
+        "schema_version": "launch_contract.v1",
+        "preconditions": [
+            {
+                "type": "context_key_present",
+                "key": "prompt",
+                "required": True,
+            }
+        ],
+    }
+    assert repaired_definition.metadata.get("launch_input_contract", {}).get(
+        "required_inputs"
+    ) == ["prompt"]
+    assert repaired_definition.metadata.get("launch_contract_source") == (
+        "text_relation:#V#has_launch_contract"
+    )
+    assert repaired_definition.metadata.get("launch_input_contract_source") == (
+        "text_relation:#V#hasWorkflowLaunchInputContractJson"
+    )
 
 
 def test_export_refreshes_paper_repo_seed_bundle_from_authority(

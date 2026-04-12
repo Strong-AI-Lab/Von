@@ -6,7 +6,7 @@ import copy
 import json
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from . import concept_service
 from .text_value_service import upsert_singleton_text_relation
@@ -19,6 +19,8 @@ from ..workflows.static_input_binding_utils import stable_static_input_bindings
 from ..workflows.vontology_loader import (
     build_workflow_process_graph,
     load_workflow_definition_from_vontology,
+    resolve_workflow_launch_contract,
+    resolve_workflow_launch_input_contract,
     resolve_workflow_publication_lifecycle,
 )
 from ..workflows.workflow_definition_identity_service import (
@@ -26,6 +28,8 @@ from ..workflows.workflow_definition_identity_service import (
 )
 
 _WORKFLOW_STEP_TYPE_ID = "#V#workflow_step"
+_REQUIRED_AUTHORITY_SURFACE_LAUNCH_CONTRACT = "launch_contract"
+_REQUIRED_AUTHORITY_SURFACE_LAUNCH_INPUT_CONTRACT = "launch_input_contract"
 
 
 def _stable_state_metadata_subset(state: Any) -> dict[str, Any]:
@@ -137,6 +141,50 @@ def _step_concept_id_by_state(
         for step, step_concept_id in zip(spec.steps, ordered_ids)
         if str(getattr(step, "state_id", "") or "").strip() and step_concept_id
     }
+
+
+def _bundle_declares_explicit_launch_contract(
+    relation_specs: Sequence[Mapping[str, Any]] | None,
+) -> bool:
+    for relation_spec in relation_specs or ():
+        if not isinstance(relation_spec, Mapping):
+            continue
+        predicate = str(relation_spec.get("predicate") or "").strip()
+        if predicate in ("#V#has_launch_contract", "has_launch_contract"):
+            return True
+    return False
+
+
+def _resolve_missing_required_authority_surfaces(
+    *,
+    workflow_id: str,
+    workflow_text_relations: Mapping[str, Sequence[Mapping[str, Any]]] | None,
+    workflow_launch_input_contracts: Mapping[str, Mapping[str, Any]] | None,
+) -> list[str]:
+    missing_surfaces: list[str] = []
+
+    if workflow_id in (workflow_launch_input_contracts or {}):
+        launch_input_contract, _launch_input_source = (
+            resolve_workflow_launch_input_contract(workflow_id)
+        )
+        if not isinstance(launch_input_contract, dict):
+            missing_surfaces.append(
+                _REQUIRED_AUTHORITY_SURFACE_LAUNCH_INPUT_CONTRACT
+            )
+
+    relation_specs = (
+        workflow_text_relations.get(workflow_id)
+        if isinstance(workflow_text_relations, Mapping)
+        else ()
+    )
+    if _bundle_declares_explicit_launch_contract(relation_specs):
+        launch_contract, _launch_contract_source = resolve_workflow_launch_contract(
+            workflow_id
+        )
+        if not isinstance(launch_contract, dict):
+            missing_surfaces.append(_REQUIRED_AUTHORITY_SURFACE_LAUNCH_CONTRACT)
+
+    return missing_surfaces
 
 
 def _resolve_loaded_state_entry(
@@ -698,6 +746,8 @@ def _validate_existing_materialisation(
     target_workflow_ids: tuple[str, ...],
     supported_action_ids: tuple[str, ...],
     publication_specs: dict[str, Any],
+    workflow_text_relations: dict[str, tuple[dict[str, Any], ...]] | None = None,
+    workflow_launch_input_contracts: dict[str, Mapping[str, Any]] | None = None,
 ) -> tuple[bool, dict[str, dict[str, Any]], dict[str, Any]]:
     if not target_workflow_ids:
         return (
@@ -798,6 +848,20 @@ def _validate_existing_materialisation(
             workflow_status_by_id[workflow_id] = workflow_status
             continue
 
+        missing_authority_surfaces = _resolve_missing_required_authority_surfaces(
+            workflow_id=workflow_id,
+            workflow_text_relations=workflow_text_relations,
+            workflow_launch_input_contracts=workflow_launch_input_contracts,
+        )
+        if missing_authority_surfaces:
+            workflow_status["status"] = "required_authority_surface_missing"
+            workflow_status["issue_code"] = "required_authority_surface_missing"
+            workflow_status["missing_authority_surfaces"] = list(
+                missing_authority_surfaces
+            )
+            workflow_status_by_id[workflow_id] = workflow_status
+            continue
+
         workflow_status_by_id[workflow_id] = workflow_status
 
         snapshot_status: dict[str, Any] = {
@@ -890,7 +954,11 @@ def bootstrap_repo_seed_workflow_bundle(
     publication_purposes = dict(bundle.get("publication_purposes") or {})
     workflow_type_ids = dict(bundle.get("workflow_type_ids") or {})
     workflow_text_relations = dict(bundle.get("workflow_text_relations") or {})
-    workflow_launch_contracts = dict(bundle.get("workflow_launch_contracts") or {})
+    workflow_launch_input_contracts = dict(
+        bundle.get("workflow_launch_input_contracts")
+        or bundle.get("workflow_launch_contracts")
+        or {}
+    )
     step_text_relations = dict(bundle.get("step_text_relations") or {})
     supported_action_ids = tuple(bundle.get("supported_action_ids") or ())
     requested_workflow_ids = tuple(
@@ -920,9 +988,9 @@ def bootstrap_repo_seed_workflow_bundle(
             for workflow_id, relation_specs in workflow_text_relations.items()
             if workflow_id in allowed_ids
         }
-        workflow_launch_contracts = {
+        workflow_launch_input_contracts = {
             workflow_id: contract
-            for workflow_id, contract in workflow_launch_contracts.items()
+            for workflow_id, contract in workflow_launch_input_contracts.items()
             if workflow_id in allowed_ids
         }
     target_workflow_ids = tuple(publication_specs.keys())
@@ -931,6 +999,8 @@ def bootstrap_repo_seed_workflow_bundle(
             target_workflow_ids=target_workflow_ids,
             supported_action_ids=supported_action_ids,
             publication_specs=publication_specs,
+            workflow_text_relations=workflow_text_relations,
+            workflow_launch_input_contracts=workflow_launch_input_contracts,
         )
     )
     authority_contract = {
@@ -1028,13 +1098,15 @@ def bootstrap_repo_seed_workflow_bundle(
                         managed_by=managed_by,
                     )
 
-                launch_contract = workflow_launch_contracts.get(workflow_id)
-                if isinstance(launch_contract, dict):
+                launch_input_contract = workflow_launch_input_contracts.get(
+                    workflow_id
+                )
+                if isinstance(launch_input_contract, dict):
                     upsert_singleton_text_relation(
                         subject_concept_id=workflow_id,
                         predicate="#V#hasWorkflowLaunchInputContractJson",
                         text=json.dumps(
-                            launch_contract,
+                            launch_input_contract,
                             ensure_ascii=True,
                             sort_keys=True,
                         ),

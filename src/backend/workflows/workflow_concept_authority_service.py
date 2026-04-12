@@ -776,7 +776,7 @@ def _load_repo_seed_workflow_bundle_cached(
     publication_purposes: dict[str, str] = {}
     workflow_type_ids: dict[str, tuple[str, ...]] = {}
     workflow_text_relations: dict[str, tuple[dict[str, Any], ...]] = {}
-    workflow_launch_contracts: dict[str, Mapping[str, Any]] = {}
+    workflow_launch_input_contracts: dict[str, Mapping[str, Any]] = {}
     step_text_relations: dict[str, tuple[dict[str, Any], ...]] = {}
 
     for item in workflows_payload:
@@ -824,9 +824,11 @@ def _load_repo_seed_workflow_bundle_cached(
         if workflow_text_specs:
             workflow_text_relations[workflow_id] = tuple(workflow_text_specs)
 
-        launch_contract = item.get("launch_input_contract")
-        if isinstance(launch_contract, Mapping):
-            workflow_launch_contracts[workflow_id] = dict(launch_contract)
+        launch_input_contract = item.get("launch_input_contract")
+        if isinstance(launch_input_contract, Mapping):
+            workflow_launch_input_contracts[workflow_id] = dict(
+                launch_input_contract
+            )
 
         raw_step_notes = item.get("step_notes")
         if isinstance(raw_step_notes, Mapping):
@@ -862,7 +864,7 @@ def _load_repo_seed_workflow_bundle_cached(
         "publication_purposes": publication_purposes,
         "workflow_type_ids": workflow_type_ids,
         "workflow_text_relations": workflow_text_relations,
-        "workflow_launch_contracts": workflow_launch_contracts,
+        "workflow_launch_input_contracts": workflow_launch_input_contracts,
         "step_text_relations": step_text_relations,
     }
 

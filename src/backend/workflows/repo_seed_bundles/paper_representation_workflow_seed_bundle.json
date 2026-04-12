@@ -488,7 +488,7 @@
         {
           "predicate": "#V#has_launch_contract",
           "language": "en-NZ",
-          "text": "{\"schema_version\":\"launch_contract.v1\",\"preconditions\":[{\"type\":\"context_key_present\",\"key\":\"file_copy_concept_id\",\"required\":true}]}"
+          "text": "{\"schema_version\":\"launch_contract.v1\",\"preconditions\":[{\"type\":\"context_key_present\",\"key\":\"prompt\",\"required\":true}]}"
         }
       ],
       "launch_input_contract": {
