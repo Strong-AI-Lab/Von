@@ -41,7 +41,7 @@ from .durable.registry_factory import (
     get_shared_durable_action_registry,
     get_shared_workflow_registry_read_only,
 )
-from .durable.models import ScheduleType, WorkflowInstanceStatus, WorkflowSchedule
+from .durable.models import WorkflowInstanceStatus, WorkflowSchedule
 from .durable.startup import get_instance_manager
 from .trace_store import list_recent_workflow_execution_traces
 from .vontology_loader import (

@@ -5,7 +5,7 @@ subsuming legacy procedural checks (JVNAUTOSCI-1818).
 """
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
 logger = logging.getLogger(__name__)

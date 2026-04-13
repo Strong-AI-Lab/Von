@@ -17,9 +17,6 @@ from ..action_registry import (
     WorkflowActionResult,
     WorkflowActionRequest,
 )
-from ..execution_contracts import (
-    WORKFLOW_STEP_RESULT_ENVELOPE_SCHEMA_VERSION,
-)
 from .turn_execution_runtime_support import (
     run_turn_execution_completion_gate,
     run_turn_execution_critic,

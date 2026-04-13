@@ -10,7 +10,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from flask import Blueprint, jsonify, request, session
 
-from ...db.repositories.concepts_repository import ConceptsRepository
 from ...db.transient_errors import is_transient_mongo_error
 from ...security.access_control import get_effective_user_concept_id
 from ...services.workflow_episode_service import (

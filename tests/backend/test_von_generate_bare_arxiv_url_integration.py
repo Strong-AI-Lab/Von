@@ -190,7 +190,9 @@ def _make_app(
     if callable(workflow_discovery_result):
         discovery_handler = workflow_discovery_result
     else:
-        discovery_handler = lambda *_args, **_kwargs: workflow_discovery_result
+        def discovery_handler(*_args, **_kwargs):
+            return workflow_discovery_result
+
     monkeypatch.setattr(
         "src.backend.services.workflow_discovery_service.discover_workflows_for_turn",
         discovery_handler,

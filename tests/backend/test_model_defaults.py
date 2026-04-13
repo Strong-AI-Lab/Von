@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import os
 from typing import Any, Mapping, cast
-from unittest import mock
 
 import pytest
 
