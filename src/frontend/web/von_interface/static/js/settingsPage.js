@@ -48,10 +48,8 @@ import {
 } from './utils/userPreferenceBootstrap.js';
 import {
   clearStoredOllamaSelection,
-  getLocalPremiumModelUseEnabled,
-  getStoredOllamaSelection,
+  getEffectiveLocalModelPreference,
   getStoredOpenAiSelectedModel,
-  hasLocalPremiumModelUsePreference,
   setLocalPremiumModelUseEnabled,
   setStoredOllamaSelection,
   setStoredOpenAiSelectedModel,
@@ -2264,13 +2262,10 @@ async function loadAndDisplaySettings() {
       currentOpenAIModel,
     } = resolveDisplayedProviderModels(settings);
     currentResolvedLlm = effectiveLlm || null;
-    const storedOllamaSelection = getStoredOllamaSelection();
-    const currentOllamaModel = storedOllamaSelection?.value || null;
-    const storedOpenAiModel = getStoredOpenAiSelectedModel();
-    const preferredOpenAiModel = currentOpenAIModel || storedOpenAiModel || null;
-    const openAiPremiumEnabled = getLocalPremiumModelUseEnabled(
-      !hasLocalPremiumModelUsePreference() && !!preferredOpenAiModel,
-    );
+    const localModelPreference = getEffectiveLocalModelPreference();
+    const currentOllamaModel = localModelPreference.ollamaSelection?.value || null;
+    const preferredOpenAiModel = currentOpenAIModel || localModelPreference.openaiModel || null;
+    const openAiPremiumEnabled = localModelPreference.activeSource === 'openai';
 
     // Load and display Ollama hosts first
     await loadAndRenderOllamaHosts();

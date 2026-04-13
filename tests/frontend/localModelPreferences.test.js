@@ -8,6 +8,7 @@ describe('local model preferences', () => {
 
     test('prefers the selected premium model when premium use is enabled locally', async () => {
         const {
+            getStoredLocalModelPreference,
             resolveLocalRequestedLlm,
             setLocalPremiumModelUseEnabled,
             setStoredOpenAiSelectedModel,
@@ -16,6 +17,12 @@ describe('local model preferences', () => {
         setStoredOpenAiSelectedModel('gpt-5.4-mini');
         setLocalPremiumModelUseEnabled(true);
 
+        expect(getStoredLocalModelPreference()).toEqual({
+            schemaVersion: 'localModelPreference.v1',
+            activeSource: 'openai',
+            openaiModel: 'gpt-5.4-mini',
+            ollamaSelection: null,
+        });
         expect(resolveLocalRequestedLlm()).toEqual({
             provider: 'openai',
             model: 'gpt-5.4-mini',
@@ -25,6 +32,7 @@ describe('local model preferences', () => {
 
     test('prefers the locally selected Ollama model when premium use is disabled locally', async () => {
         const {
+            getStoredLocalModelPreference,
             resolveLocalRequestedLlm,
             setLocalPremiumModelUseEnabled,
             setStoredOllamaSelection,
@@ -37,6 +45,16 @@ describe('local model preferences', () => {
         });
         setLocalPremiumModelUseEnabled(false);
 
+        expect(getStoredLocalModelPreference()).toEqual({
+            schemaVersion: 'localModelPreference.v1',
+            activeSource: 'ollama',
+            openaiModel: null,
+            ollamaSelection: {
+                value: 'http://localhost:11434:llama3.1:8b',
+                model: 'llama3.1:8b',
+                host: 'http://localhost:11434',
+            },
+        });
         expect(resolveLocalRequestedLlm()).toEqual({
             provider: 'ollama',
             model: 'llama3.1:8b',
@@ -47,6 +65,120 @@ describe('local model preferences', () => {
 
     test('treats a stored Ollama selection as an active local override even when the legacy premium flag is absent', async () => {
         const {
+            getStoredLocalModelPreference,
+            resolveLocalRequestedLlm,
+            setStoredOllamaSelection,
+        } = await import('../../src/frontend/web/von_interface/static/js/utils/localModelPreferences.js');
+
+        setStoredOllamaSelection({
+            value: 'http://localhost:11434:llama3.1:8b',
+            model: 'llama3.1:8b',
+            host: 'http://localhost:11434',
+        });
+
+        expect(getStoredLocalModelPreference()).toEqual({
+            schemaVersion: 'localModelPreference.v1',
+            activeSource: 'ollama',
+            openaiModel: null,
+            ollamaSelection: {
+                value: 'http://localhost:11434:llama3.1:8b',
+                model: 'llama3.1:8b',
+                host: 'http://localhost:11434',
+            },
+        });
+        expect(resolveLocalRequestedLlm()).toEqual({
+            provider: 'ollama',
+            model: 'llama3.1:8b',
+            host: 'http://localhost:11434',
+            requestModel: 'ollama:llama3.1:8b',
+        });
+    });
+
+    test('does not activate a stored premium model until premium use is enabled locally', async () => {
+        const {
+            getStoredLocalModelPreference,
+            resolveLocalRequestedLlm,
+            setStoredOpenAiSelectedModel,
+        } = await import('../../src/frontend/web/von_interface/static/js/utils/localModelPreferences.js');
+
+        setStoredOpenAiSelectedModel('gpt-5.4-mini');
+
+        expect(getStoredLocalModelPreference()).toEqual({
+            schemaVersion: 'localModelPreference.v1',
+            activeSource: null,
+            openaiModel: 'gpt-5.4-mini',
+            ollamaSelection: null,
+        });
+        expect(resolveLocalRequestedLlm()).toBeNull();
+    });
+
+    test('migrates legacy premium-openai state into the canonical local model preference', async () => {
+        const {
+            getStoredLocalModelPreference,
+            resolveLocalRequestedLlm,
+        } = await import('../../src/frontend/web/von_interface/static/js/utils/localModelPreferences.js');
+
+        localStorage.setItem('von:openaiSelectedModel', 'gpt-5.4-mini');
+        localStorage.setItem('von:premiumModelUseEnabled', 'true');
+
+        expect(getStoredLocalModelPreference()).toEqual({
+            schemaVersion: 'localModelPreference.v1',
+            activeSource: 'openai',
+            openaiModel: 'gpt-5.4-mini',
+            ollamaSelection: null,
+        });
+        expect(JSON.parse(localStorage.getItem('von:localModelPreference'))).toEqual({
+            schemaVersion: 'localModelPreference.v1',
+            activeSource: 'openai',
+            openaiModel: 'gpt-5.4-mini',
+            ollamaSelection: null,
+        });
+        expect(resolveLocalRequestedLlm()).toEqual({
+            provider: 'openai',
+            model: 'gpt-5.4-mini',
+            requestModel: 'openai:gpt-5.4-mini',
+        });
+    });
+
+    test('migrates legacy ollama state without the premium flag into canonical ollama-active state', async () => {
+        const {
+            getEffectiveLocalModelPreference,
+            resolveLocalRequestedLlm,
+        } = await import('../../src/frontend/web/von_interface/static/js/utils/localModelPreferences.js');
+
+        localStorage.setItem('von:ollamaSelection', JSON.stringify({
+            value: 'http://localhost:11434:llama3.1:8b',
+            model: 'llama3.1:8b',
+            host: 'http://localhost:11434',
+        }));
+
+        expect(getEffectiveLocalModelPreference()).toEqual({
+            schemaVersion: 'localModelPreference.v1',
+            activeSource: 'ollama',
+            openaiModel: null,
+            ollamaSelection: {
+                value: 'http://localhost:11434:llama3.1:8b',
+                model: 'llama3.1:8b',
+                host: 'http://localhost:11434',
+            },
+            requestedLlm: {
+                provider: 'ollama',
+                model: 'llama3.1:8b',
+                host: 'http://localhost:11434',
+                requestModel: 'ollama:llama3.1:8b',
+            },
+        });
+        expect(resolveLocalRequestedLlm()).toEqual({
+            provider: 'ollama',
+            model: 'llama3.1:8b',
+            host: 'http://localhost:11434',
+            requestModel: 'ollama:llama3.1:8b',
+        });
+    });
+
+    test('footer overlay and request-model resolution derive from the same canonical local preference', async () => {
+        const {
+            applyLocalModelPreferenceOverlay,
             resolveLocalRequestedLlm,
             setStoredOllamaSelection,
         } = await import('../../src/frontend/web/von_interface/static/js/utils/localModelPreferences.js');
@@ -63,16 +195,14 @@ describe('local model preferences', () => {
             host: 'http://localhost:11434',
             requestModel: 'ollama:llama3.1:8b',
         });
-    });
 
-    test('does not activate a stored premium model until premium use is enabled locally', async () => {
-        const {
-            resolveLocalRequestedLlm,
-            setStoredOpenAiSelectedModel,
-        } = await import('../../src/frontend/web/von_interface/static/js/utils/localModelPreferences.js');
-
-        setStoredOpenAiSelectedModel('gpt-5.4-mini');
-
-        expect(resolveLocalRequestedLlm()).toBeNull();
+        expect(applyLocalModelPreferenceOverlay({ resolved_llm: null })).toEqual({
+            resolved_llm: null,
+            active_llm: {
+                provider: 'ollama',
+                model: 'llama3.1:8b',
+                host: 'http://localhost:11434',
+            },
+        });
     });
 });

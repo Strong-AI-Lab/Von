@@ -1,6 +1,8 @@
+const LS_LOCAL_MODEL_PREFERENCE = 'von:localModelPreference';
 const LS_OPENAI_SELECTED_MODEL = 'von:openaiSelectedModel';
 const LS_OLLAMA_SELECTION = 'von:ollamaSelection';
 const LS_PREMIUM_MODEL_USE_ENABLED = 'von:premiumModelUseEnabled';
+const LOCAL_MODEL_PREFERENCE_SCHEMA = 'localModelPreference.v1';
 
 function readStoredJson(key) {
   try {
@@ -22,127 +24,283 @@ function writeStoredJson(key, value) {
   }
 }
 
-export function hasLocalPremiumModelUsePreference() {
+function readStoredString(key) {
   try {
-    return localStorage.getItem(LS_PREMIUM_MODEL_USE_ENABLED) !== null;
-  } catch {
-    return false;
-  }
-}
-
-export function getLocalPremiumModelUseEnabled(defaultValue = false) {
-  try {
-    const stored = localStorage.getItem(LS_PREMIUM_MODEL_USE_ENABLED);
-    if (stored === null) return !!defaultValue;
-    return stored === 'true';
-  } catch {
-    return !!defaultValue;
-  }
-}
-
-export function setLocalPremiumModelUseEnabled(enabled) {
-  try {
-    localStorage.setItem(LS_PREMIUM_MODEL_USE_ENABLED, enabled ? 'true' : 'false');
-  } catch {
-    // Ignore localStorage failures.
-  }
-}
-
-export function getStoredOpenAiSelectedModel() {
-  try {
-    return String(localStorage.getItem(LS_OPENAI_SELECTED_MODEL) || '').trim();
+    return String(localStorage.getItem(key) || '').trim();
   } catch {
     return '';
   }
 }
 
-export function setStoredOpenAiSelectedModel(modelName) {
+function normaliseActiveSource(value) {
+  return value === 'openai' || value === 'ollama' ? value : null;
+}
+
+function normaliseModelName(value) {
+  const trimmed = String(value || '').trim();
+  return trimmed || null;
+}
+
+function normaliseOllamaSelection(selection) {
+  if (!selection || typeof selection !== 'object') return null;
+
+  const value = normaliseModelName(selection.value);
+  const model = normaliseModelName(selection.model);
+  const host = normaliseModelName(selection.host);
+
+  if (!value && !model) return null;
+
+  return {
+    value,
+    model,
+    host,
+  };
+}
+
+function buildCanonicalLocalModelPreference({
+  activeSource = null,
+  openaiModel = null,
+  ollamaSelection = null,
+} = {}) {
+  const canonical = {
+    schemaVersion: LOCAL_MODEL_PREFERENCE_SCHEMA,
+    activeSource: normaliseActiveSource(activeSource),
+    openaiModel: normaliseModelName(openaiModel),
+    ollamaSelection: normaliseOllamaSelection(ollamaSelection),
+  };
+
+  if (!canonical.activeSource && !canonical.openaiModel && !canonical.ollamaSelection) {
+    return null;
+  }
+
+  return canonical;
+}
+
+function cloneLocalModelPreference(preference) {
+  if (!preference) return null;
+  return {
+    schemaVersion: preference.schemaVersion || LOCAL_MODEL_PREFERENCE_SCHEMA,
+    activeSource: preference.activeSource || null,
+    openaiModel: preference.openaiModel || null,
+    ollamaSelection: preference.ollamaSelection
+      ? { ...preference.ollamaSelection }
+      : null,
+  };
+}
+
+function normaliseStoredLocalModelPreference(stored) {
+  if (!stored || typeof stored !== 'object') return null;
+
+  return buildCanonicalLocalModelPreference({
+    activeSource: stored.activeSource ?? stored.active_source ?? null,
+    openaiModel: stored.openaiModel ?? stored.openai_model ?? null,
+    ollamaSelection: stored.ollamaSelection ?? stored.ollama_selection ?? null,
+  });
+}
+
+function readLegacyLocalModelPreference() {
+  const openaiModel = normaliseModelName(readStoredString(LS_OPENAI_SELECTED_MODEL));
+  const ollamaSelection = normaliseOllamaSelection(readStoredJson(LS_OLLAMA_SELECTION));
+
+  let activeSource = null;
   try {
-    const trimmed = String(modelName || '').trim();
-    if (trimmed) {
-      localStorage.setItem(LS_OPENAI_SELECTED_MODEL, trimmed);
+    const stored = localStorage.getItem(LS_PREMIUM_MODEL_USE_ENABLED);
+    if (stored === 'true') activeSource = 'openai';
+    if (stored === 'false') activeSource = 'ollama';
+  } catch {
+    activeSource = null;
+  }
+
+  if (!activeSource && ollamaSelection) {
+    activeSource = 'ollama';
+  }
+
+  return buildCanonicalLocalModelPreference({
+    activeSource,
+    openaiModel,
+    ollamaSelection,
+  });
+}
+
+function mirrorLegacyKeys(preference) {
+  try {
+    const openaiModel = preference?.openaiModel || null;
+    if (openaiModel) {
+      localStorage.setItem(LS_OPENAI_SELECTED_MODEL, openaiModel);
     } else {
       localStorage.removeItem(LS_OPENAI_SELECTED_MODEL);
+    }
+
+    if (preference?.ollamaSelection) {
+      localStorage.setItem(
+        LS_OLLAMA_SELECTION,
+        JSON.stringify(preference.ollamaSelection),
+      );
+    } else {
+      localStorage.removeItem(LS_OLLAMA_SELECTION);
+    }
+
+    if (preference?.activeSource === 'openai') {
+      localStorage.setItem(LS_PREMIUM_MODEL_USE_ENABLED, 'true');
+    } else if (preference?.activeSource === 'ollama') {
+      localStorage.setItem(LS_PREMIUM_MODEL_USE_ENABLED, 'false');
+    } else {
+      localStorage.removeItem(LS_PREMIUM_MODEL_USE_ENABLED);
     }
   } catch {
     // Ignore localStorage failures.
   }
 }
 
-export function getStoredOllamaSelection() {
-  const stored = readStoredJson(LS_OLLAMA_SELECTION);
-  if (!stored || typeof stored !== 'object') return null;
+function persistLocalModelPreference(preference) {
+  const canonical = buildCanonicalLocalModelPreference(preference || {});
+  writeStoredJson(LS_LOCAL_MODEL_PREFERENCE, canonical);
+  mirrorLegacyKeys(canonical);
+  return canonical;
+}
 
-  const value = String(stored.value || '').trim();
-  const model = String(stored.model || '').trim();
-  const host = String(stored.host || '').trim();
-
-  if (!value && !model) return null;
+function buildOpenAiRequestedLlm(modelName) {
+  const model = normaliseModelName(modelName);
+  if (!model) return null;
 
   return {
-    value: value || null,
-    model: model || null,
-    host: host || null,
+    provider: 'openai',
+    model,
+    requestModel: `openai:${model}`,
   };
-}
-
-export function setStoredOllamaSelection(selection) {
-  if (!selection || typeof selection !== 'object') {
-    writeStoredJson(LS_OLLAMA_SELECTION, null);
-    return;
-  }
-
-  const value = String(selection.value || '').trim();
-  const model = String(selection.model || '').trim();
-  const host = String(selection.host || '').trim();
-
-  if (!value && !model) {
-    writeStoredJson(LS_OLLAMA_SELECTION, null);
-    return;
-  }
-
-  writeStoredJson(LS_OLLAMA_SELECTION, {
-    value: value || null,
-    model: model || null,
-    host: host || null,
-  });
-}
-
-export function clearStoredOllamaSelection() {
-  writeStoredJson(LS_OLLAMA_SELECTION, null);
 }
 
 function buildOllamaRequestedLlm(ollamaSelection) {
-  if (!ollamaSelection?.model) return null;
+  const selection = normaliseOllamaSelection(ollamaSelection);
+  if (!selection?.model) return null;
 
   return {
     provider: 'ollama',
-    model: ollamaSelection.model,
-    host: ollamaSelection.host || null,
-    requestModel: `ollama:${ollamaSelection.model}`,
+    model: selection.model,
+    host: selection.host || null,
+    requestModel: `ollama:${selection.model}`,
   };
 }
 
-export function resolveLocalRequestedLlm() {
-  if (!hasLocalPremiumModelUsePreference()) {
-    // A persisted Ollama selection is itself an explicit local-model choice.
-    // Older browser state may predate the machine-local premium toggle key.
-    return buildOllamaRequestedLlm(getStoredOllamaSelection());
+function buildEffectiveLocalModelPreference(preference) {
+  const canonical = cloneLocalModelPreference(preference)
+    || buildCanonicalLocalModelPreference();
+
+  if (!canonical) {
+    return {
+      schemaVersion: LOCAL_MODEL_PREFERENCE_SCHEMA,
+      activeSource: null,
+      openaiModel: null,
+      ollamaSelection: null,
+      requestedLlm: null,
+    };
   }
 
-  if (getLocalPremiumModelUseEnabled(false)) {
-    const openaiModel = getStoredOpenAiSelectedModel();
-    if (openaiModel) {
-      return {
-        provider: 'openai',
-        model: openaiModel,
-        requestModel: `openai:${openaiModel}`,
-      };
-    }
+  let requestedLlm = null;
+  if (canonical.activeSource === 'openai') {
+    requestedLlm = buildOpenAiRequestedLlm(canonical.openaiModel);
+  } else if (canonical.activeSource === 'ollama') {
+    requestedLlm = buildOllamaRequestedLlm(canonical.ollamaSelection);
+  }
+
+  return {
+    ...canonical,
+    requestedLlm,
+  };
+}
+
+export function getStoredLocalModelPreference() {
+  const stored = normaliseStoredLocalModelPreference(
+    readStoredJson(LS_LOCAL_MODEL_PREFERENCE),
+  );
+  if (stored) {
+    return stored;
+  }
+
+  const migrated = readLegacyLocalModelPreference();
+  if (!migrated) {
     return null;
   }
 
-  return buildOllamaRequestedLlm(getStoredOllamaSelection());
+  persistLocalModelPreference(migrated);
+  return migrated;
+}
+
+export function getEffectiveLocalModelPreference() {
+  return buildEffectiveLocalModelPreference(getStoredLocalModelPreference());
+}
+
+export function hasLocalPremiumModelUsePreference() {
+  return getEffectiveLocalModelPreference().activeSource === 'openai';
+}
+
+export function getLocalPremiumModelUseEnabled(defaultValue = false) {
+  const effective = getEffectiveLocalModelPreference();
+  if (!effective.activeSource) return !!defaultValue;
+  return effective.activeSource === 'openai';
+}
+
+export function setLocalPremiumModelUseEnabled(enabled) {
+  const stored = getStoredLocalModelPreference();
+  const next = cloneLocalModelPreference(stored) || {
+    schemaVersion: LOCAL_MODEL_PREFERENCE_SCHEMA,
+    activeSource: null,
+    openaiModel: null,
+    ollamaSelection: null,
+  };
+  next.activeSource = enabled ? 'openai' : 'ollama';
+  persistLocalModelPreference(next);
+}
+
+export function getStoredOpenAiSelectedModel() {
+  return getEffectiveLocalModelPreference().openaiModel || '';
+}
+
+export function setStoredOpenAiSelectedModel(modelName) {
+  const stored = getStoredLocalModelPreference();
+  const next = cloneLocalModelPreference(stored) || {
+    schemaVersion: LOCAL_MODEL_PREFERENCE_SCHEMA,
+    activeSource: null,
+    openaiModel: null,
+    ollamaSelection: null,
+  };
+  next.openaiModel = normaliseModelName(modelName);
+  persistLocalModelPreference(next);
+}
+
+export function getStoredOllamaSelection() {
+  return getEffectiveLocalModelPreference().ollamaSelection || null;
+}
+
+export function setStoredOllamaSelection(selection) {
+  const stored = getStoredLocalModelPreference();
+  const next = cloneLocalModelPreference(stored) || {
+    schemaVersion: LOCAL_MODEL_PREFERENCE_SCHEMA,
+    activeSource: null,
+    openaiModel: null,
+    ollamaSelection: null,
+  };
+  next.ollamaSelection = normaliseOllamaSelection(selection);
+  if (next.ollamaSelection && !next.activeSource) {
+    next.activeSource = 'ollama';
+  }
+  persistLocalModelPreference(next);
+}
+
+export function clearStoredOllamaSelection() {
+  const stored = getStoredLocalModelPreference();
+  if (!stored) return;
+
+  const next = cloneLocalModelPreference(stored);
+  next.ollamaSelection = null;
+  if (next.activeSource === 'ollama') {
+    next.activeSource = null;
+  }
+  persistLocalModelPreference(next);
+}
+
+export function resolveLocalRequestedLlm() {
+  return getEffectiveLocalModelPreference().requestedLlm;
 }
 
 export function applyLocalModelPreferenceOverlay(settings) {
