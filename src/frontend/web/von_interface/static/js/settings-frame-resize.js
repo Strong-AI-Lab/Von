@@ -99,6 +99,11 @@ document.addEventListener('DOMContentLoaded', () => {
       sendHeightToParent(true); // Pass true to force update
     }
   });
+
+  document.addEventListener('von:settings-layout-changed', () => {
+    debugLog('Settings layout changed event received - forcing recalculation');
+    sendHeightToParent(true);
+  });
   
   // Initial height calculation with a single attempt
   setTimeout(() => {

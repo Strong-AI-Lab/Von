@@ -100,43 +100,288 @@ let __vonIsAdminOrOwner = false;
 let __canPersistWriteConservatism = false;
 let availableGmailProfiles = [];
 
+const SETTINGS_CONCERN_ORDER = Object.freeze([
+  'identity',
+  'conversations',
+  'models',
+  'vontology',
+  'runtime',
+  'maintenance',
+]);
+
+const SETTINGS_CONCERN_CONFIG = Object.freeze({
+  identity: Object.freeze({
+    summary: 'User auth, browser-scoped identity preferences, organisation context, and the current paper recommendation surfaces.',
+    sectionIds: Object.freeze([
+      'current-user-settings',
+      'current-organisation-settings',
+    ]),
+    anchorIds: Object.freeze([
+      'current-user-settings',
+      'paperRecommendationProfileSection',
+      'paperRecommendationReviewSection',
+      'current-organisation-settings',
+    ]),
+  }),
+  conversations: Object.freeze({
+    summary: 'Conversation history visibility and speech preferences used by the Conversations tab.',
+    sectionIds: Object.freeze([
+      'conversation-history-settings',
+      'speech-settings',
+    ]),
+    anchorIds: Object.freeze([
+      'conversation-history-settings',
+      'speech-settings',
+    ]),
+  }),
+  models: Object.freeze({
+    summary: 'Choose the active OpenAI and Ollama model surfaces, including premium enablement and host selection.',
+    sectionIds: Object.freeze([
+      'premium-model-settings',
+      'ollima-settings',
+    ]),
+    anchorIds: Object.freeze([
+      'premium-model-settings',
+      'ollima-settings',
+    ]),
+  }),
+  vontology: Object.freeze({
+    summary: 'Control Vontology preload behaviour, background task visibility, and concept cartouche rendering.',
+    sectionIds: Object.freeze([
+      'vontology-performance',
+    ]),
+    anchorIds: Object.freeze([
+      'vontology-performance',
+    ]),
+  }),
+  runtime: Object.freeze({
+    summary: 'Inspect server runtime details and the operational tool, Gmail, and Jira guardrail surfaces.',
+    sectionIds: Object.freeze([
+      'server-runtime-overview',
+      'agent-configuration',
+    ]),
+    anchorIds: Object.freeze([
+      'server-runtime-overview',
+      'agent-configuration',
+    ]),
+  }),
+  maintenance: Object.freeze({
+    summary: 'Database visibility, ontology maintenance, deprecation telemetry, and server control operations.',
+    sectionIds: Object.freeze([
+      'database-info',
+      'ontology-maintenance',
+      'deprecation-metrics',
+      'server-controls',
+    ]),
+    anchorIds: Object.freeze([
+      'database-info',
+      'ontology-maintenance',
+      'deprecation-metrics',
+      'server-controls',
+    ]),
+  }),
+});
+
+const SETTINGS_ANCHOR_LABELS = Object.freeze({
+  'current-user-settings': 'User',
+  paperRecommendationProfileSection: 'Paper profile',
+  paperRecommendationReviewSection: 'Paper review',
+  'current-organisation-settings': 'Organisation',
+  'conversation-history-settings': 'History',
+  'speech-settings': 'Speech',
+  'premium-model-settings': 'OpenAI',
+  'ollima-settings': 'Ollama',
+  'vontology-performance': 'Vontology UI',
+  'server-runtime-overview': 'Server runtime',
+  'agent-configuration': 'Agent tools',
+  'database-info': 'Database',
+  'ontology-maintenance': 'Ontology',
+  'deprecation-metrics': 'Metrics',
+  'server-controls': 'Server control',
+});
+
+function isKnownSettingsConcernId(concernId) {
+  return Object.prototype.hasOwnProperty.call(SETTINGS_CONCERN_CONFIG, concernId);
+}
+
+function getSettingsConcernConfig(concernId) {
+  return isKnownSettingsConcernId(concernId)
+    ? SETTINGS_CONCERN_CONFIG[concernId]
+    : SETTINGS_CONCERN_CONFIG[SETTINGS_CONCERN_ORDER[0]];
+}
+
+function getSettingsTopLevelSections() {
+  return Array.from(document.querySelectorAll('.settings-container > section[data-settings-concern]'));
+}
+
+function getSettingsConcernButtons() {
+  return Array.from(document.querySelectorAll('[data-settings-concern-tab]'));
+}
+
+function getSettingsConcernForSectionTarget(sectionId) {
+  const targetId = String(sectionId || '').trim();
+  if (!targetId) return SETTINGS_CONCERN_ORDER[0];
+
+  for (const concernId of SETTINGS_CONCERN_ORDER) {
+    const config = getSettingsConcernConfig(concernId);
+    if (config.sectionIds.includes(targetId) || config.anchorIds.includes(targetId)) {
+      return concernId;
+    }
+  }
+
+  return SETTINGS_CONCERN_ORDER[0];
+}
+
+function getSettingsAnchorLabel(anchorId) {
+  const explicitLabel = SETTINGS_ANCHOR_LABELS[anchorId];
+  if (explicitLabel) return explicitLabel;
+
+  const target = document.getElementById(anchorId);
+  const heading = target?.querySelector('h2, h3');
+  const text = String(heading?.textContent || '').trim();
+  return text || anchorId;
+}
+
+function notifySettingsLayoutChanged() {
+  try {
+    document.dispatchEvent(new Event('von:settings-layout-changed'));
+  } catch { }
+}
+
+function updateSettingsConcernSummary(concernId) {
+  const summaryElement = document.getElementById('settingsConcernSummary');
+  if (!summaryElement) return;
+  summaryElement.textContent = getSettingsConcernConfig(concernId).summary;
+}
+
+function focusElementIfPossible(element) {
+  if (!element || typeof element.focus !== 'function') return;
+  try {
+    element.focus();
+  } catch { }
+}
+
+function focusFirstInteractiveElement(container) {
+  if (!container) return null;
+  return container.querySelector('button, select, input, textarea, [href], [tabindex]:not([tabindex="-1"])');
+}
+
+function focusSettingsSection(sectionId, options = {}) {
+  const targetId = String(sectionId || '').trim();
+  if (!targetId) {
+    return { concernId: SETTINGS_CONCERN_ORDER[0], target: null };
+  }
+
+  const concernId = setActiveSettingsConcern(
+    getSettingsConcernForSectionTarget(targetId),
+    { notifyLayout: options.notifyLayout !== false },
+  );
+  const target = document.getElementById(targetId);
+  if (target) {
+    target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  if (options.focusSelector || options.focusInteractive) {
+    setTimeout(() => {
+      const focusTarget = options.focusSelector
+        ? document.querySelector(options.focusSelector)
+        : focusFirstInteractiveElement(target);
+      focusElementIfPossible(focusTarget);
+    }, 250);
+  }
+
+  return { concernId, target };
+}
+
+function renderSettingsSectionRail(concernId) {
+  const rail = document.getElementById('settingsSectionRail');
+  if (!rail) return;
+
+  rail.innerHTML = '';
+  const { anchorIds } = getSettingsConcernConfig(concernId);
+  for (const anchorId of anchorIds) {
+    const anchorTarget = document.getElementById(anchorId);
+    if (!anchorTarget) continue;
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'settings-section-link';
+    button.dataset.settingsSectionTarget = anchorId;
+    button.textContent = getSettingsAnchorLabel(anchorId);
+    button.addEventListener('click', () => {
+      focusSettingsSection(anchorId, { notifyLayout: false });
+    });
+    rail.appendChild(button);
+  }
+
+  rail.hidden = rail.childElementCount === 0;
+}
+
+function setActiveSettingsConcern(concernId, options = {}) {
+  const resolvedConcernId = isKnownSettingsConcernId(concernId)
+    ? concernId
+    : SETTINGS_CONCERN_ORDER[0];
+
+  for (const button of getSettingsConcernButtons()) {
+    const isActive = button.dataset.settingsConcernTab === resolvedConcernId;
+    button.classList.toggle('is-active', isActive);
+    button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+  }
+
+  for (const section of getSettingsTopLevelSections()) {
+    const isActive = section.dataset.settingsConcern === resolvedConcernId;
+    section.hidden = !isActive;
+    section.classList.toggle('is-active-settings-section', isActive);
+    section.setAttribute('aria-hidden', isActive ? 'false' : 'true');
+  }
+
+  updateSettingsConcernSummary(resolvedConcernId);
+  renderSettingsSectionRail(resolvedConcernId);
+
+  if (options.notifyLayout !== false) {
+    notifySettingsLayoutChanged();
+  }
+
+  return resolvedConcernId;
+}
+
+function initialiseSettingsConcernNavigation() {
+  const buttons = getSettingsConcernButtons();
+  if (!buttons.length) return;
+
+  for (const button of buttons) {
+    button.addEventListener('click', () => {
+      setActiveSettingsConcern(button.dataset.settingsConcernTab);
+      focusElementIfPossible(button);
+    });
+  }
+
+  const initialHashTarget = window.location.hash ? window.location.hash.slice(1) : '';
+  const initialConcernId = initialHashTarget
+    ? getSettingsConcernForSectionTarget(initialHashTarget)
+    : SETTINGS_CONCERN_ORDER[0];
+
+  setActiveSettingsConcern(initialConcernId, { notifyLayout: false });
+}
+
 function _focusCurrentUserSettingsSection() {
   try {
-    const section = document.getElementById('current-user-settings');
-    const authContainer = document.getElementById('authenticationStatus');
-    const target = section || authContainer;
-    if (target) {
-      target.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }
-
-    setTimeout(() => {
-      try {
-        const loginButton = document.querySelector('#authenticationStatus button');
-        if (loginButton && typeof loginButton.focus === 'function') {
-          loginButton.focus();
-        }
-      } catch { }
-    }, 250);
+    focusSettingsSection('current-user-settings', {
+      focusSelector: '#authenticationStatus button',
+    });
   } catch { }
 }
 
 function _focusModelSettingsSection() {
   try {
-    const section = document.getElementById('premium-model-settings') || document.getElementById('ollima-settings');
-    if (section) {
-      section.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }
+    focusSettingsSection('premium-model-settings');
 
     setTimeout(() => {
-      try {
-        const focusTarget =
-          document.getElementById('globalModelSelect')
-          || document.getElementById('openaiModelSelect')
-          || section?.querySelector('select, input, button');
-        if (focusTarget && typeof focusTarget.focus === 'function') {
-          focusTarget.focus();
-        }
-      } catch { }
+      const focusTarget =
+        document.getElementById('globalModelSelect')
+        || document.getElementById('openaiModelSelect')
+        || document.getElementById('premium-model-settings')?.querySelector('select, input, button');
+      focusElementIfPossible(focusTarget);
     }, 250);
   } catch { }
 }
@@ -1599,6 +1844,30 @@ export async function __testOnly_syncInitialScopedSelections(overrides = {}) {
   await syncInitialScopedSelections(overrides);
 }
 
+export function __testOnly_getSettingsConcernForSectionTarget(sectionId) {
+  return getSettingsConcernForSectionTarget(sectionId);
+}
+
+export function __testOnly_setActiveSettingsConcern(concernId, options = {}) {
+  return setActiveSettingsConcern(concernId, options);
+}
+
+export function __testOnly_getVisibleSettingsSectionIds() {
+  return getSettingsTopLevelSections()
+    .filter(section => !section.hidden)
+    .map(section => section.id);
+}
+
+export function __testOnly_getSettingsSectionRailTargets(concernId) {
+  return getSettingsConcernConfig(concernId)
+    .anchorIds
+    .filter(anchorId => Boolean(document.getElementById(anchorId)));
+}
+
+export function __testOnly_initialiseSettingsConcernNavigation() {
+  initialiseSettingsConcernNavigation();
+}
+
 function isSettingsRuntimePanelVisible() {
   try {
     const frameEl = window.frameElement;
@@ -1826,6 +2095,7 @@ function applyStoredSelection(selectId, stored, fallbackSelected = true) {
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
+  initialiseSettingsConcernNavigation();
   setupRuntimeSection();
   setupBackgroundTaskSection();
   // Initialize all settings sections

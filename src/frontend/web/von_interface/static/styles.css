@@ -10506,6 +10506,139 @@ body.settings-body {
     gap: 2rem;
 }
 
+.settings-shell-header {
+    position: relative;
+    overflow: hidden;
+    padding: 1.5rem 1.75rem;
+    border-radius: 18px;
+    border: 1px solid #d9e7de;
+    background:
+        radial-gradient(circle at top right, rgba(22, 163, 74, 0.12), transparent 32%),
+        linear-gradient(135deg, #f5fbf7 0%, #fbf8ef 100%);
+    box-shadow: 0 10px 25px rgba(15, 23, 42, 0.06);
+}
+
+.settings-shell-kicker {
+    margin: 0 0 0.4rem;
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: #166534;
+}
+
+.settings-shell-header h1 {
+    margin: 0;
+    font-size: 2rem;
+    line-height: 1.1;
+    color: #1f2937;
+}
+
+.settings-shell-summary {
+    max-width: 62rem;
+    margin: 0.75rem 0 0;
+    font-size: 1rem;
+    line-height: 1.55;
+    color: #475569;
+}
+
+.settings-concern-nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    align-items: center;
+    padding: 0.75rem;
+    border-radius: 16px;
+    border: 1px solid #d8e2eb;
+    background: linear-gradient(180deg, #f8fafc 0%, #eef6f3 100%);
+}
+
+.settings-concern-tab,
+.settings-section-link {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: auto !important;
+    min-width: 0;
+    margin-bottom: 0 !important;
+    border-radius: 999px !important;
+    border: 1px solid #bfd4c5 !important;
+    background: rgba(255, 255, 255, 0.92) !important;
+    color: #1f2937 !important;
+    font-weight: 700 !important;
+    letter-spacing: 0.01em;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
+    transition: transform 0.12s ease, box-shadow 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+}
+
+.settings-concern-tab:hover,
+.settings-section-link:hover {
+    transform: translateY(-1px);
+    border-color: #7ab08d !important;
+    box-shadow: 0 6px 12px rgba(15, 23, 42, 0.08);
+}
+
+.settings-concern-tab.is-active {
+    border-color: #166534 !important;
+    background: linear-gradient(135deg, #14532d 0%, #1d7f46 100%) !important;
+    color: #f8fafc !important;
+}
+
+.settings-concern-tab:focus-visible,
+.settings-section-link:focus-visible {
+    outline: 3px solid rgba(22, 101, 52, 0.2);
+    outline-offset: 2px;
+}
+
+.settings-concern-summary {
+    margin-top: -1rem;
+    font-size: 0.98rem;
+    line-height: 1.5;
+    color: #52606f;
+}
+
+.settings-section-rail {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.65rem;
+    margin-top: -1rem;
+    padding: 0.9rem 1rem;
+    border-radius: 14px;
+    border: 1px solid #e2e8f0;
+    background: #fffdf6;
+}
+
+.settings-section-rail[hidden] {
+    display: none !important;
+}
+
+.settings-section-link {
+    padding: 0.6rem 0.95rem !important;
+    border-color: #d6dde8 !important;
+    background: #ffffff !important;
+    color: #334155 !important;
+}
+
+.settings-container > section[hidden] {
+    display: none !important;
+}
+
+.settings-container > section.is-active-settings-section {
+    animation: settings-section-fade-in 0.18s ease;
+}
+
+@keyframes settings-section-fade-in {
+    from {
+        opacity: 0;
+        transform: translateY(4px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
 .runtime-overview {
     display: flex;
     flex-direction: column;
@@ -10761,6 +10894,37 @@ body.settings-body {
     color: #666;
     margin-top: 0;
     margin-bottom: 4px;
+}
+
+@media (max-width: 900px) {
+    .settings-container {
+        padding: 1rem;
+    }
+
+    .settings-shell-header {
+        padding: 1.25rem;
+    }
+
+    .settings-shell-header h1 {
+        font-size: 1.7rem;
+    }
+}
+
+@media (max-width: 640px) {
+    .settings-concern-tab {
+        flex: 1 1 calc(50% - 0.75rem);
+        justify-content: center;
+    }
+
+    .settings-section-rail {
+        gap: 0.5rem;
+        padding: 0.75rem;
+    }
+
+    .settings-section-link {
+        flex: 1 1 calc(50% - 0.5rem);
+        justify-content: center;
+    }
 }
 
 .settings-subsection-compact {
