@@ -14573,6 +14573,14 @@ function _getSessionMetaById(sessionId) {
     return sessionTabsCache.find((session) => String(session?.session_id || '') === String(sessionId || '')) || null;
 }
 
+function _getMostRecentSessionMeta(sessions = sessionTabsCache) {
+    if (!Array.isArray(sessions)) return null;
+    return sessions.find((session) => {
+        const sid = typeof session?.session_id === 'string' ? session.session_id.trim() : '';
+        return Boolean(sid);
+    }) || null;
+}
+
 function _sessionHasNamespace(session) {
     const ns = session?.namespace;
     return typeof ns === 'string' && ns.trim().length > 0;
@@ -16144,28 +16152,46 @@ async function refreshChatSessionTabs() {
         const activeSessionId = (typeof data?.active_session_id === 'string' && data.active_session_id.trim())
             ? data.active_session_id.trim()
             : null;
-
-        if (activeSessionId) {
-            const activeSession = normalisedSessions.find(
-                s => (typeof s?.session_id === 'string') && s.session_id === activeSessionId
-            );
-            activeChatSessionOwnerId = activeSession?.shared_owner_user_id || null;
+        let localActiveSessionId = normaliseHistorySessionId(activeChatSessionId);
+        const localActiveSession = localActiveSessionId
+            ? normalisedSessions.find(
+                s => (typeof s?.session_id === 'string') && s.session_id === localActiveSessionId
+            )
+            : null;
+        if (localActiveSessionId && !localActiveSession) {
+            setActiveChatSession(null, null);
+            localActiveSessionId = null;
         }
 
-        // Only adopt server's active_session_id if we don't already have a local selection.
-        // This prevents race conditions where the user clicks a tab but the server response
-        // from a concurrent refresh overwrites their selection.
-        if (activeSessionId && !activeChatSessionId) {
-            const activeSession = normalisedSessions.find(
+        const serverActiveSession = activeSessionId
+            ? normalisedSessions.find(
                 s => (typeof s?.session_id === 'string') && s.session_id === activeSessionId
-            );
-            setActiveChatSession(activeSessionId, activeSession?.session_name);
+            )
+            : null;
+        const fallbackSession = (!localActiveSessionId && !activeSessionId)
+            ? _getMostRecentSessionMeta(normalisedSessions)
+            : null;
+        const adoptedSession = serverActiveSession || fallbackSession;
+        const adoptedSessionId = (typeof adoptedSession?.session_id === 'string' && adoptedSession.session_id.trim())
+            ? adoptedSession.session_id.trim()
+            : null;
+
+        if (serverActiveSession) {
+            activeChatSessionOwnerId = serverActiveSession.shared_owner_user_id || null;
         }
 
-        renderChatSessionTabs(normalisedSessions, activeChatSessionId || activeSessionId);
+        // Only repair empty local selection from the server or most-recent list.
+        // This preserves explicit user selection while still recovering startup/no-active state.
+        if (!localActiveSessionId && adoptedSessionId) {
+            setActiveChatSession(adoptedSessionId, adoptedSession?.session_name);
+            localActiveSessionId = adoptedSessionId;
+            activeChatSessionOwnerId = adoptedSession?.shared_owner_user_id || null;
+        }
+
+        renderChatSessionTabs(normalisedSessions, localActiveSessionId || activeSessionId);
         syncSharedConversationStreams();
 
-        const sidForMeta = activeChatSessionId || activeSessionId;
+        const sidForMeta = localActiveSessionId || activeSessionId;
         if (sidForMeta) {
             void loadChatSessionLinks(sidForMeta, { force: false });
         }
@@ -16822,6 +16848,80 @@ async function createChatSession(sessionName) {
 
     scheduleChatSessionTabsRefresh(true);
     return data;
+}
+
+async function ensurePromptTargetChatSession(options = {}) {
+    let targetSessionId = normaliseHistorySessionId(
+        options?.sessionId ?? activeChatSessionId
+    );
+    let targetSessionName = (typeof options?.sessionName === 'string' && options.sessionName.trim())
+        ? options.sessionName.trim()
+        : activeChatSessionName;
+
+    if (targetSessionId) {
+        return { sessionId: targetSessionId, sessionName: targetSessionName };
+    }
+
+    await refreshChatSessionTabs();
+
+    targetSessionId = normaliseHistorySessionId(activeChatSessionId);
+    targetSessionName = (typeof activeChatSessionName === 'string' && activeChatSessionName.trim())
+        ? activeChatSessionName.trim()
+        : targetSessionName;
+    if (targetSessionId) {
+        if (displayedHistorySessionId !== targetSessionId) {
+            const switchResult = await switchToChatSession(targetSessionId);
+            if (switchResult?.ok) {
+                const switchedSessionId = normaliseHistorySessionId(
+                    switchResult?.data?.session_id ?? targetSessionId
+                );
+                if (switchedSessionId) {
+                    targetSessionId = switchedSessionId;
+                }
+                if (
+                    typeof switchResult?.data?.session_name === 'string'
+                    && switchResult.data.session_name.trim()
+                ) {
+                    targetSessionName = switchResult.data.session_name.trim();
+                }
+            }
+        }
+        return { sessionId: targetSessionId, sessionName: targetSessionName };
+    }
+
+    const recentSession = _getMostRecentSessionMeta();
+    const recentSessionId = normaliseHistorySessionId(recentSession?.session_id);
+    if (recentSessionId) {
+        const switchResult = await switchToChatSession(recentSessionId);
+        if (switchResult?.ok) {
+            return {
+                sessionId: normaliseHistorySessionId(
+                    switchResult?.data?.session_id ?? recentSessionId
+                ) || recentSessionId,
+                sessionName: (
+                    typeof switchResult?.data?.session_name === 'string'
+                    && switchResult.data.session_name.trim()
+                )
+                    ? switchResult.data.session_name.trim()
+                    : recentSession?.session_name || targetSessionName || null
+            };
+        }
+    }
+
+    const createdSession = await createChatSession(targetSessionName);
+    const createdSessionId = normaliseHistorySessionId(
+        createdSession?.session_id ?? activeChatSessionId
+    );
+    const createdSessionName = (
+        typeof createdSession?.session_name === 'string'
+        && createdSession.session_name.trim()
+    )
+        ? createdSession.session_name.trim()
+        : targetSessionName;
+    if (!createdSessionId) {
+        throw new Error('Unable to create a chat session for this prompt.');
+    }
+    return { sessionId: createdSessionId, sessionName: createdSessionName };
 }
 
 async function renameChatSession(sessionId, sessionName) {
@@ -21024,17 +21124,7 @@ async function handleOrgSwitchForChatTab(_detail) {
             new_session: activeChatSessionId,
             previous_session: previousSessionId
         });
-        void loadRecentChatPair({
-            scrollToBottom: true,
-            preserveScroll: false,
-            showResetNotice: false,
-            forceScrollToBottom: true
-        }).then(() => loadChatHistory({
-            segments: 1,
-            scrollToBottom: false,
-            preserveScroll: true,
-            showResetNotice: false
-        })).catch(() => { });
+        void switchToChatSession(activeChatSessionId);
     } else if (!activeChatSessionId) {
         // No sessions in new org - clear the loading message
         if (scrollableField) {
@@ -21535,20 +21625,29 @@ export function initializeChatTab() {
     // Render non-trigger (#V\u200B#...) concept tokens as cartouches in the prompt.
     initializePromptCartoucheOverlay(promptInput);
 
-    void loadRecentChatPair({
-        scrollToBottom: true,
-        preserveScroll: false,
-        showResetNotice: false,
-        forceScrollToBottom: true
-    }).then(() => loadChatHistory({
-        segments: 1,
-        scrollToBottom: false,
-        preserveScroll: true,
-        showResetNotice: false
-    })).then(() => {
+    void Promise.allSettled([
+        loadRecentChatPair({
+            scrollToBottom: true,
+            preserveScroll: false,
+            showResetNotice: false,
+            forceScrollToBottom: true
+        }).then(() => loadChatHistory({
+            segments: 1,
+            scrollToBottom: false,
+            preserveScroll: true,
+            showResetNotice: false
+        })),
+        refreshChatSessionTabs()
+    ]).then(async () => {
+        if (activeChatSessionId && activeChatSessionId !== displayedHistorySessionId) {
+            try {
+                await switchToChatSession(activeChatSessionId);
+            } catch (_) {
+                // Leave the current transcript visible if startup activation follow-up fails.
+            }
+        }
         updateScrollToEndButtonVisibility();
     }).catch(() => { });
-    void refreshChatSessionTabs();
     void refreshToolUseDuringThinkingSetting();
     console.log("Chat tab initialized successfully");
 }
@@ -22320,8 +22419,8 @@ async function handleSendPrompt(options = {}) {
     }
 
     const fromQueue = options && options.fromQueue === true;
-    const targetSessionId = normaliseHistorySessionId(options?.sessionId ?? activeChatSessionId);
-    const targetSessionName = (typeof options?.sessionName === 'string' && options.sessionName.trim())
+    let targetSessionId = normaliseHistorySessionId(options?.sessionId ?? activeChatSessionId);
+    let targetSessionName = (typeof options?.sessionName === 'string' && options.sessionName.trim())
         ? options.sessionName.trim()
         : activeChatSessionName;
     const hasPromptOverride = options && typeof options.promptOverride === 'string';
@@ -22358,6 +22457,31 @@ async function handleSendPrompt(options = {}) {
             alert('Please enter a prompt.');
         }
         return;
+    }
+
+    if (!targetSessionId) {
+        try {
+            const ensuredTarget = await ensurePromptTargetChatSession({
+                sessionId: targetSessionId,
+                sessionName: targetSessionName
+            });
+            targetSessionId = normaliseHistorySessionId(ensuredTarget?.sessionId);
+            targetSessionName = (typeof ensuredTarget?.sessionName === 'string' && ensuredTarget.sessionName.trim())
+                ? ensuredTarget.sessionName.trim()
+                : targetSessionName;
+        } catch (error) {
+            console.error('Unable to prepare a conversation session for send:', error);
+            if (!fromQueue) {
+                alert('Unable to prepare a conversation for this prompt.');
+            }
+            return;
+        }
+        if (!targetSessionId) {
+            if (!fromQueue) {
+                alert('Unable to prepare a conversation for this prompt.');
+            }
+            return;
+        }
     }
 
     // Refresh setting in the background; default is enabled.

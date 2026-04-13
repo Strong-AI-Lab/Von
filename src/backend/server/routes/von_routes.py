@@ -5978,6 +5978,97 @@ def _resolve_generate_namespace_context(
     return report
 
 
+def _set_active_chat_session_for_request(
+    *,
+    session_id: str,
+    user_concept_id: str | None,
+    window_session_id: str | None,
+) -> None:
+    cleaned_session_id = (
+        session_id.strip() if isinstance(session_id, str) and session_id.strip() else None
+    )
+    if not cleaned_session_id:
+        return
+
+    if isinstance(window_session_id, str) and window_session_id.strip():
+        from ...services.window_session_context_service import set_window_chat_session
+
+        set_window_chat_session(
+            window_session_id.strip(),
+            cleaned_session_id,
+            user_concept_id,
+        )
+
+    session["session_id"] = cleaned_session_id
+    session.modified = True
+
+
+def _ensure_generate_conversation_session(
+    *,
+    request_conversation_session_id: str | None,
+    effective_context: Mapping[str, Any] | None,
+    user_concept_id: str | None,
+    user_namespace: str | None,
+    org_concept_id: str | None,
+    role_in_org: str | None,
+    window_session_id: str | None,
+) -> tuple[str, str | None, bool]:
+    explicit_session_candidate = (
+        request_conversation_session_id
+        if isinstance(request_conversation_session_id, str)
+        else None
+    )
+    explicit_session_id = (
+        explicit_session_candidate.strip() if explicit_session_candidate else None
+    )
+    if explicit_session_id:
+        return explicit_session_id, None, False
+
+    effective = effective_context if isinstance(effective_context, Mapping) else {}
+    active_window_session_candidate = effective.get("chat_session_id")
+    active_window_session_id = (
+        active_window_session_candidate.strip()
+        if isinstance(active_window_session_candidate, str)
+        and active_window_session_candidate.strip()
+        else None
+    )
+    if active_window_session_id:
+        return active_window_session_id, None, False
+
+    if isinstance(user_concept_id, str) and user_concept_id.strip():
+        created_session_id = str(uuid.uuid4())
+        created_session = chat_history_service.create_chat_session(
+            user_id=user_concept_id,
+            session_id=created_session_id,
+            session_name=None,
+            namespace=user_namespace,
+            organisation_concept_id=org_concept_id,
+            role_in_org=role_in_org,
+        )
+        _set_active_chat_session_for_request(
+            session_id=created_session_id,
+            user_concept_id=user_concept_id,
+            window_session_id=window_session_id,
+        )
+        created_session_name_candidate = (
+            created_session.get("session_name")
+            if isinstance(created_session, Mapping)
+            else None
+        )
+        created_session_name = (
+            created_session_name_candidate.strip()
+            if isinstance(created_session_name_candidate, str)
+            and created_session_name_candidate.strip()
+            else None
+        )
+        return created_session_id, created_session_name, True
+
+    if "session_id" not in session:
+        session["session_id"] = str(uuid.uuid4())
+    session.modified = True
+    return str(session["session_id"]), None, False
+
+
 def _maybe_handle_prompt_introspection_fastpath(
     *,
     prompt_text: str,
@@ -6925,19 +7016,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         org_concept_id = None
         effective = {}
 
-    # JVNAUTOSCI-1011: Get session_id from window context (or flask session fallback).
-    # This ensures each browser window uses its own active chat session.
-    session_id = request_conversation_session_id or effective.get("chat_session_id")
-    if not session_id:
-        # Fallback to flask session for legacy clients
-        if "session_id" not in session:
-            session["session_id"] = str(uuid.uuid4())
-        session_id = session["session_id"]
-
-    history_owner_user_id, shared_invite = _resolve_shared_conversation_owner(
-        user_concept_id=user_concept_id, session_id=session_id
-    )
-    history_user_id = history_owner_user_id or user_concept_id
     role_in_org = effective.get("role") if isinstance(effective, dict) else None
 
     namespace_resolution = _resolve_generate_namespace_context(
@@ -6996,6 +7074,25 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             "[NAMESPACE] No effective namespace resolved for user_concept_id=%s",
             user_concept_id,
         )
+
+    session_id, created_conversation_session_name, created_conversation_session = (
+        _ensure_generate_conversation_session(
+            request_conversation_session_id=request_conversation_session_id,
+            effective_context=effective if isinstance(effective, Mapping) else {},
+            user_concept_id=user_concept_id,
+            user_namespace=user_namespace if isinstance(user_namespace, str) else None,
+            org_concept_id=(
+                org_concept_id if isinstance(org_concept_id, str) else None
+            ),
+            role_in_org=role_in_org if isinstance(role_in_org, str) else None,
+            window_session_id=window_session_id,
+        )
+    )
+
+    history_owner_user_id, shared_invite = _resolve_shared_conversation_owner(
+        user_concept_id=user_concept_id, session_id=session_id
+    )
+    history_user_id = history_owner_user_id or user_concept_id
 
     if history_user_id:
         if show_tool_use_progress:
@@ -10571,6 +10668,10 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         return jsonify(
             {
                 "request_id": request_id,
+                "session_id": session_id,
+                "conversation_session_id": session_id,
+                "conversation_session_name": created_conversation_session_name,
+                "conversation_session_created": created_conversation_session,
                 "response": response_text,
                 "response_channels": (
                     {
@@ -12871,8 +12972,11 @@ def create_chat_session():
             role_in_org=effective.get("role"),
         )
 
-        session["session_id"] = session_id
-        session.modified = True
+        _set_active_chat_session_for_request(
+            session_id=session_id,
+            user_concept_id=user_concept_id,
+            window_session_id=window_session_id,
+        )
 
         try:
             current_app.config["CONTEXT"] = []

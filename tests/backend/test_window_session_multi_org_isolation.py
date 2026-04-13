@@ -361,12 +361,13 @@ class TestCreateChatSessionUsesWindowContext:
         created_sessions: list[dict] = []
 
         import src.backend.services.chat_history_service as chat_history_service
+        import src.backend.services.window_session_context_service as wscs
 
         def capture_create(*args, **kwargs):
             created_sessions.append(kwargs.copy())
             # Return a mock result
             return {
-                "session_id": "new_session",
+                "session_id": kwargs.get("session_id", "new_session"),
                 "session_name": kwargs.get("session_name", "New Session"),
             }
 
@@ -393,6 +394,8 @@ class TestCreateChatSessionUsesWindowContext:
         )
 
         assert resp.status_code == 200
+        payload = resp.get_json()
+        assert isinstance(payload, dict)
 
         # Verify the session was created with the window's namespace
         assert len(created_sessions) == 1
@@ -404,6 +407,58 @@ class TestCreateChatSessionUsesWindowContext:
             created_sessions[0].get("organisation_concept_id")
             == "university_of_auckland_strong_ai_lab"
         )
+        window_ctx = wscs.get_window_context(window_a)
+        assert window_ctx is not None
+        assert window_ctx.chat_session_id == payload["session_id"]
+
+        monkeypatch.setattr(
+            "src.backend.security.access_control.get_effective_user_concept_id",
+            lambda: "#V#michael_witbrock",
+        )
+        monkeypatch.setattr(
+            chat_history_service,
+            "get_chat_history_session_summaries",
+            lambda *args, **kwargs: [
+                {
+                    "session_id": payload["session_id"],
+                    "session_name": payload["session_name"],
+                    "last_message_at": "2026-04-13T06:00:00Z",
+                    "namespace": "#V#michael_witbrock@university_of_auckland_strong_ai_lab",
+                }
+            ],
+        )
+        monkeypatch.setattr(
+            chat_history_service,
+            "has_chat_history_session",
+            lambda user_id, session_id, namespace=None: session_id == payload["session_id"],
+        )
+
+        import src.backend.services.shared_conversation_service as shared_conversation_service
+
+        monkeypatch.setattr(
+            shared_conversation_service,
+            "list_accepted_invites_for_user",
+            lambda **kwargs: [],
+        )
+        monkeypatch.setattr(
+            shared_conversation_service,
+            "list_outgoing_accepted_invites_for_user",
+            lambda **kwargs: [],
+        )
+        monkeypatch.setattr(
+            shared_conversation_service,
+            "resolve_conversation_owner",
+            lambda **kwargs: None,
+        )
+
+        history_resp = client.get(
+            "/von/history/sessions?limit=50&summary=light",
+            headers={"X-Von-Window-Session": window_a},
+        )
+
+        assert history_resp.status_code == 200
+        history_payload = history_resp.get_json()
+        assert history_payload["active_session_id"] == payload["session_id"]
 
 
 class TestChatSessionLinksUsesWindowContext:

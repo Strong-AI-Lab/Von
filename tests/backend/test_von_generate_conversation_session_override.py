@@ -162,3 +162,86 @@ def test_generate_rejects_non_string_conversation_session_id(monkeypatch):
     body = resp.get_json()
     assert isinstance(body, dict)
     assert body["error"] == "invalid_conversation_session_id"
+
+
+def test_generate_creates_and_binds_chat_session_when_window_scope_has_no_active_session(
+    monkeypatch,
+):
+    history_calls: list[dict[str, object]] = []
+    orchestrator = _CapturingOrchestrator()
+    app = _make_app(monkeypatch, history_calls)
+    app.config["INTERNAL_MCP_ORCHESTRATOR"] = orchestrator
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.get_effective_context",
+        lambda window_session_id, session_snapshot, user_concept_id: {
+            "organisation_id": "#V#org",
+            "chat_session_id": None,
+            "role": "member",
+            "namespace": "#V#user@org",
+            "source": "window_session",
+        },
+    )
+
+    created_calls: list[dict[str, object]] = []
+    bound_sessions: list[tuple[str, str, str | None]] = []
+
+    def _fake_create_chat_session(**kwargs):
+        created_calls.append(dict(kwargs))
+        return {
+            "session_id": str(kwargs["session_id"]),
+            "session_name": "Chat 2026-04-13 18:30",
+            "namespace": kwargs.get("namespace"),
+        }
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.chat_history_service.create_chat_session",
+        _fake_create_chat_session,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.window_session_context_service.set_window_chat_session",
+        lambda window_session_id, chat_session_id, user_id=None: bound_sessions.append(
+            (str(window_session_id), str(chat_session_id), user_id)
+        ),
+    )
+
+    client = app.test_client()
+    resp = client.post(
+        "/von/generate",
+        json={"prompt": "Hello from a fresh chat tab"},
+        headers={"X-Von-Window-Session": "window-identity"},
+    )
+
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    assert isinstance(body, dict)
+    assert isinstance(body.get("conversation_session_id"), str)
+    assert body["conversation_session_id"]
+    assert body["session_id"] == body["conversation_session_id"]
+    assert body["conversation_session_created"] is True
+    assert body["conversation_session_name"] == "Chat 2026-04-13 18:30"
+
+    assert orchestrator.calls, "expected orchestrator.run() to be called"
+    assert (
+        orchestrator.calls[0]["conversation_session_id"]
+        == body["conversation_session_id"]
+    )
+    assert history_calls, "expected chat history writes"
+    assert all(
+        call.get("session_id") == body["conversation_session_id"]
+        for call in history_calls
+    )
+
+    assert created_calls == [
+        {
+            "user_id": "#V#user",
+            "session_id": body["conversation_session_id"],
+            "session_name": None,
+            "namespace": "#V#user@org",
+            "organisation_concept_id": "#V#org",
+            "role_in_org": "member",
+        }
+    ]
+    assert bound_sessions == [
+        ("window-identity", body["conversation_session_id"], "#V#user")
+    ]

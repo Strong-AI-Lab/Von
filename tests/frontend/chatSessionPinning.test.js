@@ -18,6 +18,9 @@ jest.mock('../../src/frontend/web/von_interface/static/js/domUtils.js', () => ({
 
 describe('chat session pinning', () => {
     beforeEach(() => {
+        const recentTimestamp = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+        const olderRecentTimestamp = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
         document.body.innerHTML = `
             <div id="chatSessionTabs"></div>
             <div id="chatSessionMetadata"></div>
@@ -48,15 +51,15 @@ describe('chat session pinning', () => {
                             {
                                 session_id: 's1',
                                 session_name: 'Recent session',
-                                last_message_at: '2026-02-17T09:00:00Z',
-                                created_at: '2026-02-17T09:00:00Z',
+                                last_message_at: recentTimestamp,
+                                created_at: recentTimestamp,
                                 message_count: 4,
                             },
                             {
                                 session_id: 's2',
                                 session_name: 'Priority session',
-                                last_message_at: '2026-02-10T09:00:00Z',
-                                created_at: '2026-02-10T09:00:00Z',
+                                last_message_at: olderRecentTimestamp,
+                                created_at: olderRecentTimestamp,
                                 message_count: 2,
                             },
                         ],

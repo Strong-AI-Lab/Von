@@ -4,6 +4,7 @@ import {
     __testOnly_buildDiagnosticsExportRequestPayload,
     __testOnly_buildWorkflowMonitorExportPayload,
     __testOnly_loadChatHistory,
+    __testOnly_refreshChatSessionTabs,
     __testOnly_refreshAvailableWorkflowDefinitions,
     __testOnly_refreshWorkflowStatusSnapshot,
     __testOnly_resetHistoryUiState,
@@ -4168,6 +4169,137 @@ describe('chat session composer state', () => {
         expect(generateBodies[0].conversation_session_id).toBe('session-1');
         expect(generateBodies[1].conversation_session_id).toBe('session-2');
         expect(document.getElementById('scrollableField').textContent).not.toContain('queued for session 2');
+    });
+
+    test('refresh adopts the most recent session when startup state has no active conversation', async () => {
+        global.fetch = jest.fn((url) => {
+            if (typeof url === 'string' && url.startsWith('/von/history/sessions')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        authenticated: true,
+                        active_session_id: null,
+                        sessions: [
+                            {
+                                session_id: 'session-recent',
+                                session_name: 'Most recent',
+                                message_count: 4,
+                                last_message_at: '2026-04-13T05:00:00Z'
+                            },
+                            {
+                                session_id: 'session-older',
+                                session_name: 'Older',
+                                message_count: 2,
+                                last_message_at: '2026-04-10T05:00:00Z'
+                            }
+                        ]
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/api/session/chat_session_links')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ session_links: {} })
+                });
+            }
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        await expect(__testOnly_refreshChatSessionTabs()).resolves.toBeUndefined();
+
+        const activeTab = document.querySelector(
+            '.chat-session-tab[data-session-id="session-recent"]'
+        );
+        expect(activeTab).not.toBeNull();
+        expect(activeTab.classList.contains('is-active')).toBe(true);
+    });
+
+    test('first send without an active conversation creates a real session before generate', async () => {
+        const promptInput = document.getElementById('promptInput');
+        initializePromptCartoucheOverlay(promptInput);
+        promptInput.value = 'First prompt in a fresh window';
+
+        const createBodies = [];
+        const generateBodies = [];
+
+        global.fetch = jest.fn((url, options = {}) => {
+            if (typeof url === 'string' && url.startsWith('/api/settings/')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ show_tool_use_during_thinking: true })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history/sessions')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        authenticated: true,
+                        active_session_id: null,
+                        sessions: []
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/api/session/create_chat_session')) {
+                createBodies.push(JSON.parse(options.body || '{}'));
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        session_id: 'session-created-first-send',
+                        session_name: 'Chat 2026-04-13 18:30',
+                        history: []
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/api/session/chat_session_links')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ session_links: {} })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/progress/')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        status: 'completed',
+                        phase: 'tool_execute',
+                        phase_label: 'Executing tools',
+                        result_summary: 'Completed'
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        history_length: 1,
+                        session_count: 1,
+                        authenticated: true
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                generateBodies.push(JSON.parse(options.body || '{}'));
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        response: 'Created session response',
+                        session_id: 'session-created-first-send',
+                        conversation_session_id: 'session-created-first-send',
+                        conversation_session_name: 'Chat 2026-04-13 18:30',
+                        llm_debug: { model: 'gpt-5.2' }
+                    })
+                });
+            }
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        await expect(sendMessage()).resolves.toBeUndefined();
+
+        expect(createBodies).toHaveLength(1);
+        expect(generateBodies).toHaveLength(1);
+        expect(generateBodies[0].conversation_session_id).toBe(
+            'session-created-first-send'
+        );
     });
 
     test('creating a new chat session clears the composer overlay as well as the textarea value', async () => {
