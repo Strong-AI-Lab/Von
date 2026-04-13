@@ -95,6 +95,9 @@ function Set-VSCode {
         $settings = @{}
         $settings["python.defaultInterpreterPath"] = ".venv\Scripts\python.exe"
         $settings["terminal.integrated.defaultProfile.windows"] = "PowerShell"
+        $settings["terminal.integrated.env.windows"] = @{
+            PYTHONPATH = '${workspaceFolder}'
+        }
         $settings | ConvertTo-Json -Depth 10 | Set-Content -Path $settingsFile
         Write-Host "Created $settingsFile" -ForegroundColor Green
     }
@@ -119,6 +122,22 @@ function Set-VSCode {
         # Set / update targeted keys
         $settings["python.defaultInterpreterPath"] = ".venv\Scripts\python.exe"
         $settings["terminal.integrated.defaultProfile.windows"] = "PowerShell"
+        $terminalEnv = @{}
+        if ($settings.ContainsKey("terminal.integrated.env.windows") -and $settings["terminal.integrated.env.windows"]) {
+            $existingTerminalEnv = $settings["terminal.integrated.env.windows"]
+            if ($existingTerminalEnv -is [System.Management.Automation.PSCustomObject]) {
+                $existingTerminalEnv.PSObject.Properties | ForEach-Object {
+                    $terminalEnv[$_.Name] = $_.Value
+                }
+            }
+            elseif ($existingTerminalEnv -is [hashtable]) {
+                $existingTerminalEnv.GetEnumerator() | ForEach-Object {
+                    $terminalEnv[$_.Key] = $_.Value
+                }
+            }
+        }
+        $terminalEnv["PYTHONPATH"] = '${workspaceFolder}'
+        $settings["terminal.integrated.env.windows"] = $terminalEnv
 
         $settings | ConvertTo-Json -Depth 10 | Set-Content -Path $settingsFile
         Write-Host "VS Code settings updated successfully." -ForegroundColor Green
