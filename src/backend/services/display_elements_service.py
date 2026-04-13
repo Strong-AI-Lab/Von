@@ -6,9 +6,9 @@ display elements so rendering decisions are explicit and inspectable.
 
 from __future__ import annotations
 
-import math
-from typing import Any, Mapping, Sequence
 import re
+import math
+from typing import Any, Callable, Mapping, Sequence
 
 DISPLAY_ELEMENT_SCHEMA_VERSION = "turn_display_elements_v1"
 
@@ -758,6 +758,1255 @@ def _validate_task_links(
             )
 
 
+def _validate_text_block_payload(
+    *,
+    payload: Mapping[str, Any],
+    label: str,
+    errors: list[str],
+) -> None:
+    text_value = payload.get("text")
+    if not isinstance(text_value, str) or not text_value.strip():
+        errors.append(f"{label}.payload.text must be a non-empty string")
+
+
+def _validate_json_block_payload(
+    *,
+    payload: Mapping[str, Any],
+    label: str,
+    errors: list[str],
+) -> None:
+    fence = payload.get("fence")
+    if not isinstance(fence, str) or not fence.strip():
+        errors.append(f"{label}.payload.fence must be a non-empty string")
+    elif "```json" not in fence.lower():
+        errors.append(f"{label}.payload.fence must be a fenced JSON block")
+
+
+def _validate_table_payload(
+    *,
+    payload: Mapping[str, Any],
+    label: str,
+    errors: list[str],
+) -> None:
+    columns = payload.get("columns")
+    if not isinstance(columns, list) or not columns:
+        errors.append(f"{label}.payload.columns must be a non-empty list")
+        columns = []
+
+    valid_column_ids: set[str] = set()
+    for column_index, column in enumerate(columns):
+        column_label = f"{label}.payload.columns[{column_index}]"
+        if not isinstance(column, Mapping):
+            errors.append(f"{column_label} must be a mapping")
+            continue
+        column_id = column.get("column_id")
+        if not isinstance(column_id, str) or not column_id.strip():
+            errors.append(f"{column_label}.column_id must be a non-empty string")
+            continue
+        valid_column_ids.add(column_id)
+
+        column_name = column.get("label")
+        if not isinstance(column_name, str) or not column_name.strip():
+            errors.append(f"{column_label}.label must be a non-empty string")
+        data_type = column.get("data_type")
+        if not isinstance(data_type, str) or not data_type.strip():
+            errors.append(f"{column_label}.data_type must be a non-empty string")
+
+    _validate_table_column_visibility(
+        payload=payload,
+        label=label,
+        valid_column_ids=valid_column_ids,
+        errors=errors,
+    )
+
+    rows = payload.get("rows")
+    if not isinstance(rows, list):
+        errors.append(f"{label}.payload.rows must be a list")
+        rows = []
+
+    for row_index, row in enumerate(rows):
+        row_label = f"{label}.payload.rows[{row_index}]"
+        if not isinstance(row, Mapping):
+            errors.append(f"{row_label} must be a mapping")
+            continue
+        row_id = row.get("row_id")
+        if not isinstance(row_id, str) or not row_id.strip():
+            errors.append(f"{row_label}.row_id must be a non-empty string")
+
+        cells = row.get("cells")
+        if not isinstance(cells, list):
+            errors.append(f"{row_label}.cells must be a list")
+            continue
+        if columns and len(cells) != len(columns):
+            errors.append(
+                f"{row_label}.cells count {len(cells)} does not match column count {len(columns)}"
+            )
+
+        for cell_index, cell in enumerate(cells):
+            cell_label = f"{row_label}.cells[{cell_index}]"
+            if not isinstance(cell, Mapping):
+                errors.append(f"{cell_label} must be a mapping")
+                continue
+            column_id = cell.get("column_id")
+            if (
+                not isinstance(column_id, str)
+                or not column_id.strip()
+                or (valid_column_ids and column_id not in valid_column_ids)
+            ):
+                errors.append(
+                    f"{cell_label}.column_id must reference a declared column"
+                )
+            value_type = cell.get("value_type")
+            if not isinstance(value_type, str) or not value_type.strip():
+                errors.append(f"{cell_label}.value_type must be a non-empty string")
+
+
+def _validate_relation_truth_state_payload(
+    *,
+    payload: Mapping[str, Any],
+    label: str,
+    errors: list[str],
+) -> None:
+    title = payload.get("title")
+    if not isinstance(title, str) or not title.strip():
+        errors.append(f"{label}.payload.title must be a non-empty string")
+
+    groups = payload.get("groups")
+    if not isinstance(groups, list) or not groups:
+        errors.append(f"{label}.payload.groups must be a non-empty list")
+        groups = []
+
+    for group_index, group in enumerate(groups):
+        group_label = f"{label}.payload.groups[{group_index}]"
+        if not isinstance(group, Mapping):
+            errors.append(f"{group_label} must be a mapping")
+            continue
+
+        group_name = group.get("label")
+        if not isinstance(group_name, str) or not group_name.strip():
+            errors.append(f"{group_label}.label must be a non-empty string")
+
+        group_status = group.get("status")
+        if (
+            not isinstance(group_status, str)
+            or group_status.strip() not in RELATION_TRUTH_STATE_GROUP_STATUSES
+        ):
+            errors.append(
+                f"{group_label}.status must be one of {sorted(RELATION_TRUTH_STATE_GROUP_STATUSES)}"
+            )
+
+        assertions = group.get("assertions")
+        if not isinstance(assertions, list) or not assertions:
+            errors.append(f"{group_label}.assertions must be a non-empty list")
+            assertions = []
+
+        for assertion_index, assertion in enumerate(assertions):
+            assertion_label = f"{group_label}.assertions[{assertion_index}]"
+            if not isinstance(assertion, Mapping):
+                errors.append(f"{assertion_label} must be a mapping")
+                continue
+
+            assertion_id = assertion.get("assertion_id")
+            if assertion_id is not None and (
+                not isinstance(assertion_id, str) or not assertion_id.strip()
+            ):
+                errors.append(
+                    f"{assertion_label}.assertion_id must be a non-empty string when provided"
+                )
+
+            for relation_key in ("arg1", "predicate", "arg2"):
+                value = assertion.get(relation_key)
+                if not isinstance(value, str) or not value.strip():
+                    errors.append(
+                        f"{assertion_label}.{relation_key} must be a non-empty string"
+                    )
+
+            is_asserted = assertion.get("is_asserted")
+            if not isinstance(is_asserted, bool):
+                errors.append(f"{assertion_label}.is_asserted must be a boolean")
+
+
+def _validate_relation_graph_view_payload(
+    *,
+    payload: Mapping[str, Any],
+    label: str,
+    errors: list[str],
+) -> None:
+    nodes = payload.get("nodes")
+    if not isinstance(nodes, list) or not nodes:
+        errors.append(f"{label}.payload.nodes must be a non-empty list")
+        nodes = []
+    if isinstance(nodes, list) and len(nodes) > RELATION_GRAPH_MAX_NODES:
+        errors.append(
+            f"{label}.payload.nodes exceeds max size {RELATION_GRAPH_MAX_NODES}"
+        )
+
+    valid_node_ids: set[str] = set()
+    for node_index, node in enumerate(nodes):
+        node_label = f"{label}.payload.nodes[{node_index}]"
+        if not isinstance(node, Mapping):
+            errors.append(f"{node_label} must be a mapping")
+            continue
+
+        node_id = node.get("node_id")
+        if not isinstance(node_id, str) or not node_id.strip():
+            errors.append(f"{node_label}.node_id must be a non-empty string")
+            continue
+        if node_id in valid_node_ids:
+            errors.append(f"{node_label}.node_id must be unique")
+            continue
+        valid_node_ids.add(node_id)
+
+        display_label = node.get("label")
+        if not isinstance(display_label, str) or not display_label.strip():
+            errors.append(f"{node_label}.label must be a non-empty string")
+
+        node_kind = node.get("node_kind")
+        if not isinstance(node_kind, str) or not node_kind.strip():
+            errors.append(f"{node_label}.node_kind must be a non-empty string")
+
+        group = node.get("group")
+        if group is not None and (not isinstance(group, str) or not group.strip()):
+            errors.append(
+                f"{node_label}.group must be a non-empty string when provided"
+            )
+
+        _validate_task_links(
+            links=node.get("task_links"),
+            label=f"{node_label}.task_links",
+            errors=errors,
+        )
+
+    edges = payload.get("edges")
+    if not isinstance(edges, list):
+        errors.append(f"{label}.payload.edges must be a list")
+        edges = []
+    if isinstance(edges, list) and len(edges) > RELATION_GRAPH_MAX_EDGES:
+        errors.append(
+            f"{label}.payload.edges exceeds max size {RELATION_GRAPH_MAX_EDGES}"
+        )
+
+    seen_edge_ids: set[str] = set()
+    for edge_index, edge in enumerate(edges):
+        edge_label = f"{label}.payload.edges[{edge_index}]"
+        if not isinstance(edge, Mapping):
+            errors.append(f"{edge_label} must be a mapping")
+            continue
+
+        edge_id = edge.get("edge_id")
+        if not isinstance(edge_id, str) or not edge_id.strip():
+            errors.append(f"{edge_label}.edge_id must be a non-empty string")
+        elif edge_id in seen_edge_ids:
+            errors.append(f"{edge_label}.edge_id must be unique")
+        else:
+            seen_edge_ids.add(edge_id)
+
+        source_node_id = edge.get("source")
+        if not isinstance(source_node_id, str) or not source_node_id.strip():
+            errors.append(f"{edge_label}.source must be a non-empty string")
+        elif valid_node_ids and source_node_id not in valid_node_ids:
+            errors.append(f"{edge_label}.source must reference a declared node")
+
+        target_node_id = edge.get("target")
+        if not isinstance(target_node_id, str) or not target_node_id.strip():
+            errors.append(f"{edge_label}.target must be a non-empty string")
+        elif valid_node_ids and target_node_id not in valid_node_ids:
+            errors.append(f"{edge_label}.target must reference a declared node")
+
+        predicate = edge.get("predicate")
+        if not isinstance(predicate, str) or not predicate.strip():
+            errors.append(f"{edge_label}.predicate must be a non-empty string")
+
+        direction = edge.get("direction")
+        if direction is not None:
+            if not isinstance(direction, str) or direction.strip() not in (
+                RELATION_GRAPH_ALLOWED_DIRECTIONS
+            ):
+                errors.append(
+                    f"{edge_label}.direction must be one of {sorted(RELATION_GRAPH_ALLOWED_DIRECTIONS)} when provided"
+                )
+
+        weight = edge.get("weight")
+        if weight is not None and isinstance(weight, bool):
+            errors.append(f"{edge_label}.weight must be numeric when provided")
+        elif weight is not None and not isinstance(weight, (int, float)):
+            errors.append(f"{edge_label}.weight must be numeric when provided")
+
+    layout_hint = payload.get("layout_hint")
+    if layout_hint is not None and (
+        not isinstance(layout_hint, str) or not layout_hint.strip()
+    ):
+        errors.append(
+            f"{label}.payload.layout_hint must be a non-empty string when provided"
+        )
+
+    focus_node_id = payload.get("focus_node_id")
+    if focus_node_id is not None:
+        if not isinstance(focus_node_id, str) or not focus_node_id.strip():
+            errors.append(
+                f"{label}.payload.focus_node_id must be a non-empty string when provided"
+            )
+        elif valid_node_ids and focus_node_id not in valid_node_ids:
+            errors.append(
+                f"{label}.payload.focus_node_id must reference a declared node"
+            )
+
+
+def _validate_hierarchy_view_payload(
+    *,
+    payload: Mapping[str, Any],
+    label: str,
+    errors: list[str],
+) -> None:
+    nodes = payload.get("nodes")
+    if not isinstance(nodes, list) or not nodes:
+        errors.append(f"{label}.payload.nodes must be a non-empty list")
+        nodes = []
+    if isinstance(nodes, list) and len(nodes) > HIERARCHY_MAX_NODES:
+        errors.append(f"{label}.payload.nodes exceeds max size {HIERARCHY_MAX_NODES}")
+
+    valid_node_ids: set[str] = set()
+    for node_index, node in enumerate(nodes):
+        node_label = f"{label}.payload.nodes[{node_index}]"
+        if not isinstance(node, Mapping):
+            errors.append(f"{node_label} must be a mapping")
+            continue
+
+        node_id = node.get("node_id")
+        if not isinstance(node_id, str) or not node_id.strip():
+            errors.append(f"{node_label}.node_id must be a non-empty string")
+            continue
+        if node_id in valid_node_ids:
+            errors.append(f"{node_label}.node_id must be unique")
+            continue
+        valid_node_ids.add(node_id)
+
+        display_label = node.get("label")
+        if not isinstance(display_label, str) or not display_label.strip():
+            errors.append(f"{node_label}.label must be a non-empty string")
+
+        node_kind = node.get("node_kind")
+        if node_kind is not None and (
+            not isinstance(node_kind, str) or not node_kind.strip()
+        ):
+            errors.append(
+                f"{node_label}.node_kind must be a non-empty string when provided"
+            )
+
+        for count_key in ("parent_count", "child_count"):
+            count_value = node.get(count_key)
+            if count_value is None:
+                continue
+            if isinstance(count_value, bool) or not isinstance(count_value, int):
+                errors.append(
+                    f"{node_label}.{count_key} must be a non-negative integer when provided"
+                )
+                continue
+            if count_value < 0:
+                errors.append(
+                    f"{node_label}.{count_key} must be a non-negative integer when provided"
+                )
+
+    edges = payload.get("edges")
+    if not isinstance(edges, list):
+        errors.append(f"{label}.payload.edges must be a list")
+        edges = []
+    if isinstance(edges, list) and len(edges) > HIERARCHY_MAX_EDGES:
+        errors.append(f"{label}.payload.edges exceeds max size {HIERARCHY_MAX_EDGES}")
+
+    seen_edge_ids: set[str] = set()
+    for edge_index, edge in enumerate(edges):
+        edge_label = f"{label}.payload.edges[{edge_index}]"
+        if not isinstance(edge, Mapping):
+            errors.append(f"{edge_label} must be a mapping")
+            continue
+
+        edge_id = edge.get("edge_id")
+        if not isinstance(edge_id, str) or not edge_id.strip():
+            errors.append(f"{edge_label}.edge_id must be a non-empty string")
+        elif edge_id in seen_edge_ids:
+            errors.append(f"{edge_label}.edge_id must be unique")
+        else:
+            seen_edge_ids.add(edge_id)
+
+        parent_node_id = edge.get("parent_node_id")
+        if not isinstance(parent_node_id, str) or not parent_node_id.strip():
+            errors.append(f"{edge_label}.parent_node_id must be a non-empty string")
+        elif valid_node_ids and parent_node_id not in valid_node_ids:
+            errors.append(
+                f"{edge_label}.parent_node_id must reference a declared node"
+            )
+
+        child_node_id = edge.get("child_node_id")
+        if not isinstance(child_node_id, str) or not child_node_id.strip():
+            errors.append(f"{edge_label}.child_node_id must be a non-empty string")
+        elif valid_node_ids and child_node_id not in valid_node_ids:
+            errors.append(
+                f"{edge_label}.child_node_id must reference a declared node"
+            )
+
+        predicate = edge.get("predicate")
+        if predicate is not None and (
+            not isinstance(predicate, str) or not predicate.strip()
+        ):
+            errors.append(
+                f"{edge_label}.predicate must be a non-empty string when provided"
+            )
+
+        branch_kind = edge.get("branch_kind")
+        if branch_kind is not None:
+            if (
+                not isinstance(branch_kind, str)
+                or branch_kind.strip() not in HIERARCHY_EDGE_BRANCH_KINDS
+            ):
+                errors.append(
+                    f"{edge_label}.branch_kind must be one of {sorted(HIERARCHY_EDGE_BRANCH_KINDS)} when provided"
+                )
+
+    focus_node_id = payload.get("focus_node_id")
+    if focus_node_id is not None:
+        if not isinstance(focus_node_id, str) or not focus_node_id.strip():
+            errors.append(
+                f"{label}.payload.focus_node_id must be a non-empty string when provided"
+            )
+        elif valid_node_ids and focus_node_id not in valid_node_ids:
+            errors.append(
+                f"{label}.payload.focus_node_id must reference a declared node"
+            )
+
+    root_node_ids = payload.get("root_node_ids")
+    if root_node_ids is not None:
+        if not isinstance(root_node_ids, list):
+            errors.append(f"{label}.payload.root_node_ids must be a list")
+        else:
+            for root_index, root_node_id in enumerate(root_node_ids):
+                root_label = f"{label}.payload.root_node_ids[{root_index}]"
+                if not isinstance(root_node_id, str) or not root_node_id.strip():
+                    errors.append(f"{root_label} must be a non-empty string")
+                    continue
+                if valid_node_ids and root_node_id not in valid_node_ids:
+                    errors.append(f"{root_label} must reference a declared node")
+
+    expansion = payload.get("expansion")
+    if expansion is not None:
+        if not isinstance(expansion, Mapping):
+            errors.append(f"{label}.payload.expansion must be a mapping")
+        else:
+            for key in ("show_parents", "show_children", "show_siblings"):
+                flag = expansion.get(key)
+                if flag is not None and not isinstance(flag, bool):
+                    errors.append(
+                        f"{label}.payload.expansion.{key} must be a boolean when provided"
+                    )
+
+            max_depth = expansion.get("max_depth")
+            if max_depth is not None:
+                if isinstance(max_depth, bool) or not isinstance(max_depth, int):
+                    errors.append(
+                        f"{label}.payload.expansion.max_depth must be an integer between 1 and {HIERARCHY_MAX_DEPTH} when provided"
+                    )
+                elif max_depth < 1 or max_depth > HIERARCHY_MAX_DEPTH:
+                    errors.append(
+                        f"{label}.payload.expansion.max_depth must be an integer between 1 and {HIERARCHY_MAX_DEPTH} when provided"
+                    )
+
+
+def _validate_chart_view_payload(
+    *,
+    payload: Mapping[str, Any],
+    label: str,
+    errors: list[str],
+) -> None:
+    chart_type_raw = payload.get("chart_type")
+    if not isinstance(chart_type_raw, str) or not chart_type_raw.strip():
+        errors.append(
+            f"{label}.payload.chart_type must be one of {sorted(CHART_ALLOWED_TYPES)}"
+        )
+    else:
+        chart_type = chart_type_raw.strip().lower()
+        if chart_type not in CHART_ALLOWED_TYPES:
+            errors.append(
+                f"{label}.payload.chart_type must be one of {sorted(CHART_ALLOWED_TYPES)}"
+            )
+
+    series = payload.get("series")
+    if not isinstance(series, list) or not series:
+        errors.append(f"{label}.payload.series must be a non-empty list")
+        series = []
+    if isinstance(series, list) and len(series) > CHART_MAX_SERIES:
+        errors.append(f"{label}.payload.series exceeds max size {CHART_MAX_SERIES}")
+
+    seen_series_ids: set[str] = set()
+    total_points = 0
+    for series_index, series_entry in enumerate(series):
+        series_label = f"{label}.payload.series[{series_index}]"
+        if not isinstance(series_entry, Mapping):
+            errors.append(f"{series_label} must be a mapping")
+            continue
+
+        series_id = series_entry.get("series_id")
+        if not isinstance(series_id, str) or not series_id.strip():
+            errors.append(f"{series_label}.series_id must be a non-empty string")
+        elif series_id in seen_series_ids:
+            errors.append(f"{series_label}.series_id must be unique")
+        else:
+            seen_series_ids.add(series_id)
+
+        series_name = series_entry.get("label")
+        if not isinstance(series_name, str) or not series_name.strip():
+            errors.append(f"{series_label}.label must be a non-empty string")
+
+        points = series_entry.get("points")
+        if not isinstance(points, list) or not points:
+            errors.append(f"{series_label}.points must be a non-empty list")
+            points = []
+        if isinstance(points, list) and len(points) > CHART_MAX_POINTS_PER_SERIES:
+            errors.append(
+                f"{series_label}.points exceeds max size {CHART_MAX_POINTS_PER_SERIES}"
+            )
+
+        total_points += len(points)
+        for point_index, point in enumerate(points):
+            point_label = f"{series_label}.points[{point_index}]"
+            if not isinstance(point, Mapping):
+                errors.append(f"{point_label} must be a mapping")
+                continue
+
+            x_value = point.get("x")
+            x_is_valid = (
+                isinstance(x_value, str) and bool(x_value.strip())
+            ) or (
+                isinstance(x_value, (int, float))
+                and not isinstance(x_value, bool)
+                and not math.isnan(float(x_value))
+                and not math.isinf(float(x_value))
+            )
+            if not x_is_valid:
+                errors.append(
+                    f"{point_label}.x must be a non-empty string or finite number"
+                )
+
+            y_value = _normalise_float(point.get("y"))
+            if y_value is None:
+                errors.append(f"{point_label}.y must be a finite number")
+
+            point_meta = point.get("meta")
+            if point_meta is not None and not isinstance(point_meta, Mapping):
+                errors.append(f"{point_label}.meta must be a mapping when provided")
+
+            _validate_task_links(
+                links=point.get("task_links"),
+                label=f"{point_label}.task_links",
+                errors=errors,
+            )
+
+        _validate_task_links(
+            links=series_entry.get("task_links"),
+            label=f"{series_label}.task_links",
+            errors=errors,
+        )
+
+    if total_points > CHART_MAX_TOTAL_POINTS:
+        errors.append(
+            f"{label}.payload.series total points exceeds max size {CHART_MAX_TOTAL_POINTS}"
+        )
+
+    for axis_key in ("x_axis", "y_axis", "units"):
+        axis_value = payload.get(axis_key)
+        if axis_value is not None and (
+            not isinstance(axis_value, str) or not axis_value.strip()
+        ):
+            errors.append(
+                f"{label}.payload.{axis_key} must be a non-empty string when provided"
+            )
+
+    stacked = payload.get("stacked")
+    if stacked is not None and not isinstance(stacked, bool):
+        errors.append(f"{label}.payload.stacked must be a boolean when provided")
+
+    legend = payload.get("legend")
+    if legend is not None and not isinstance(legend, bool):
+        errors.append(f"{label}.payload.legend must be a boolean when provided")
+
+    _validate_task_links(
+        links=payload.get("task_links"),
+        label=f"{label}.payload.task_links",
+        errors=errors,
+    )
+
+
+def _validate_location_view_payload(
+    *,
+    payload: Mapping[str, Any],
+    label: str,
+    errors: list[str],
+) -> None:
+    points = payload.get("points")
+    if not isinstance(points, list) or not points:
+        errors.append(f"{label}.payload.points must be a non-empty list")
+        points = []
+    if isinstance(points, list) and len(points) > LOCATION_MAX_POINTS:
+        errors.append(f"{label}.payload.points exceeds max size {LOCATION_MAX_POINTS}")
+
+    seen_point_ids: set[str] = set()
+    for point_index, point in enumerate(points):
+        point_label = f"{label}.payload.points[{point_index}]"
+        if not isinstance(point, Mapping):
+            errors.append(f"{point_label} must be a mapping")
+            continue
+
+        point_id = point.get("point_id")
+        if not isinstance(point_id, str) or not point_id.strip():
+            errors.append(f"{point_label}.point_id must be a non-empty string")
+        elif point_id in seen_point_ids:
+            errors.append(f"{point_label}.point_id must be unique")
+        else:
+            seen_point_ids.add(point_id)
+
+        display_label = point.get("label")
+        if not isinstance(display_label, str) or not display_label.strip():
+            errors.append(f"{point_label}.label must be a non-empty string")
+
+        latitude = _normalise_float(point.get("latitude"))
+        longitude = _normalise_float(point.get("longitude"))
+        has_coordinates = latitude is not None and longitude is not None
+        has_partial_coordinates = (latitude is None) != (longitude is None)
+        if has_partial_coordinates:
+            errors.append(
+                f"{point_label} must provide both latitude and longitude when either coordinate is present"
+            )
+        if latitude is not None and (
+            latitude < LOCATION_LATITUDE_MIN or latitude > LOCATION_LATITUDE_MAX
+        ):
+            errors.append(
+                f"{point_label}.latitude must be between {LOCATION_LATITUDE_MIN:g} and {LOCATION_LATITUDE_MAX:g}"
+            )
+        if longitude is not None and (
+            longitude < LOCATION_LONGITUDE_MIN or longitude > LOCATION_LONGITUDE_MAX
+        ):
+            errors.append(
+                f"{point_label}.longitude must be between {LOCATION_LONGITUDE_MIN:g} and {LOCATION_LONGITUDE_MAX:g}"
+            )
+
+        address = point.get("address")
+        has_address = isinstance(address, str) and bool(address.strip())
+        if address is not None and not has_address:
+            errors.append(
+                f"{point_label}.address must be a non-empty string when provided"
+            )
+        if not has_coordinates and not has_address:
+            errors.append(
+                f"{point_label} must provide at least one spatial anchor (coordinates or address)"
+            )
+
+        description = point.get("description")
+        if description is not None and (
+            not isinstance(description, str) or not description.strip()
+        ):
+            errors.append(
+                f"{point_label}.description must be a non-empty string when provided"
+            )
+
+        confidence = point.get("confidence")
+        if confidence is not None:
+            confidence_value = _normalise_float(confidence)
+            if confidence_value is None:
+                errors.append(
+                    f"{point_label}.confidence must be numeric when provided"
+                )
+            elif confidence_value < 0.0 or confidence_value > 1.0:
+                errors.append(
+                    f"{point_label}.confidence must be between 0 and 1 when provided"
+                )
+
+        _validate_task_links(
+            links=point.get("task_links"),
+            label=f"{point_label}.task_links",
+            errors=errors,
+        )
+
+    viewport = payload.get("viewport")
+    if viewport is not None:
+        if not isinstance(viewport, Mapping):
+            errors.append(f"{label}.payload.viewport must be a mapping")
+        else:
+            centre_lat_raw = (
+                viewport.get("centre_lat")
+                if "centre_lat" in viewport
+                else viewport.get("center_lat")
+            )
+            centre_lon_raw = (
+                viewport.get("centre_lon")
+                if "centre_lon" in viewport
+                else viewport.get("center_lon")
+            )
+            centre_lat = _normalise_float(centre_lat_raw)
+            centre_lon = _normalise_float(centre_lon_raw)
+            has_centre_lat = centre_lat_raw is not None
+            has_centre_lon = centre_lon_raw is not None
+            has_partial_centre = has_centre_lat != has_centre_lon
+            if has_partial_centre:
+                errors.append(
+                    f"{label}.payload.viewport must provide both centre_lat and centre_lon when either is present"
+                )
+            if has_centre_lat and centre_lat is None:
+                errors.append(
+                    f"{label}.payload.viewport.centre_lat must be numeric when provided"
+                )
+            if has_centre_lon and centre_lon is None:
+                errors.append(
+                    f"{label}.payload.viewport.centre_lon must be numeric when provided"
+                )
+            if centre_lat is not None and (
+                centre_lat < LOCATION_LATITUDE_MIN
+                or centre_lat > LOCATION_LATITUDE_MAX
+            ):
+                errors.append(
+                    f"{label}.payload.viewport.centre_lat must be between {LOCATION_LATITUDE_MIN:g} and {LOCATION_LATITUDE_MAX:g} when provided"
+                )
+            if centre_lon is not None and (
+                centre_lon < LOCATION_LONGITUDE_MIN
+                or centre_lon > LOCATION_LONGITUDE_MAX
+            ):
+                errors.append(
+                    f"{label}.payload.viewport.centre_lon must be between {LOCATION_LONGITUDE_MIN:g} and {LOCATION_LONGITUDE_MAX:g} when provided"
+                )
+
+            zoom = viewport.get("zoom")
+            if zoom is not None:
+                if isinstance(zoom, bool) or not isinstance(zoom, int):
+                    errors.append(
+                        f"{label}.payload.viewport.zoom must be an integer between {LOCATION_VIEWPORT_MIN_ZOOM} and {LOCATION_VIEWPORT_MAX_ZOOM} when provided"
+                    )
+                elif (
+                    zoom < LOCATION_VIEWPORT_MIN_ZOOM
+                    or zoom > LOCATION_VIEWPORT_MAX_ZOOM
+                ):
+                    errors.append(
+                        f"{label}.payload.viewport.zoom must be an integer between {LOCATION_VIEWPORT_MIN_ZOOM} and {LOCATION_VIEWPORT_MAX_ZOOM} when provided"
+                    )
+
+    map_provider_hint = payload.get("map_provider_hint")
+    if map_provider_hint is not None and (
+        not isinstance(map_provider_hint, str) or not map_provider_hint.strip()
+    ):
+        errors.append(
+            f"{label}.payload.map_provider_hint must be a non-empty string when provided"
+        )
+
+
+def _validate_timeline_payload(
+    *,
+    payload: Mapping[str, Any],
+    label: str,
+    errors: list[str],
+) -> None:
+    items = payload.get("items")
+    if not isinstance(items, list) or not items:
+        errors.append(f"{label}.payload.items must be a non-empty list")
+        items = []
+
+    for item_index, item in enumerate(items):
+        item_label = f"{label}.payload.items[{item_index}]"
+        if not isinstance(item, Mapping):
+            errors.append(f"{item_label} must be a mapping")
+            continue
+
+        item_id = item.get("item_id")
+        if not isinstance(item_id, str) or not item_id.strip():
+            errors.append(f"{item_label}.item_id must be a non-empty string")
+
+        display_label = item.get("label")
+        if not isinstance(display_label, str) or not display_label.strip():
+            errors.append(f"{item_label}.label must be a non-empty string")
+
+        start_at = item.get("start_at")
+        end_at = item.get("end_at")
+        has_start_at = isinstance(start_at, str) and bool(start_at.strip())
+        has_end_at = isinstance(end_at, str) and bool(end_at.strip())
+        if start_at is not None and not has_start_at:
+            errors.append(
+                f"{item_label}.start_at must be a non-empty string when provided"
+            )
+        if end_at is not None and not has_end_at:
+            errors.append(
+                f"{item_label}.end_at must be a non-empty string when provided"
+            )
+        if not has_start_at and not has_end_at:
+            errors.append(
+                f"{item_label} must provide at least one temporal anchor (start_at or end_at)"
+            )
+
+        status = item.get("status")
+        if status is not None and (
+            not isinstance(status, str) or not status.strip()
+        ):
+            errors.append(
+                f"{item_label}.status must be a non-empty string when provided"
+            )
+        _validate_task_links(
+            links=item.get("task_links"),
+            label=f"{item_label}.task_links",
+            errors=errors,
+        )
+
+
+def _validate_calendar_view_payload(
+    *,
+    payload: Mapping[str, Any],
+    label: str,
+    errors: list[str],
+) -> None:
+    items = payload.get("items")
+    if not isinstance(items, list) or not items:
+        errors.append(f"{label}.payload.items must be a non-empty list")
+        items = []
+
+    for item_index, item in enumerate(items):
+        item_label = f"{label}.payload.items[{item_index}]"
+        if not isinstance(item, Mapping):
+            errors.append(f"{item_label} must be a mapping")
+            continue
+
+        item_id = item.get("item_id")
+        if not isinstance(item_id, str) or not item_id.strip():
+            errors.append(f"{item_label}.item_id must be a non-empty string")
+
+        title = item.get("title")
+        label_value = item.get("label")
+        has_title = (isinstance(title, str) and bool(title.strip())) or (
+            isinstance(label_value, str) and bool(label_value.strip())
+        )
+        if not has_title:
+            errors.append(f"{item_label}.title must be a non-empty string")
+
+        start_at = item.get("start_at")
+        end_at = item.get("end_at")
+        has_start_at = isinstance(start_at, str) and bool(start_at.strip())
+        has_end_at = isinstance(end_at, str) and bool(end_at.strip())
+        if start_at is not None and not has_start_at:
+            errors.append(
+                f"{item_label}.start_at must be a non-empty string when provided"
+            )
+        if end_at is not None and not has_end_at:
+            errors.append(
+                f"{item_label}.end_at must be a non-empty string when provided"
+            )
+        if not has_start_at and not has_end_at:
+            errors.append(
+                f"{item_label} must provide at least one temporal anchor (start_at or end_at)"
+            )
+
+        all_day = item.get("all_day")
+        if all_day is not None and not isinstance(all_day, bool):
+            errors.append(f"{item_label}.all_day must be a boolean when provided")
+
+        for field_name in ("status", "timezone", "description"):
+            field_value = item.get(field_name)
+            if field_value is None:
+                continue
+            if not isinstance(field_value, str) or not field_value.strip():
+                errors.append(
+                    f"{item_label}.{field_name} must be a non-empty string when provided"
+                )
+
+        _validate_task_links(
+            links=item.get("task_links"),
+            label=f"{item_label}.task_links",
+            errors=errors,
+        )
+
+    default_granularity = payload.get("default_granularity")
+    if default_granularity is not None and (
+        not isinstance(default_granularity, str)
+        or default_granularity.strip() not in CALENDAR_ALLOWED_GRANULARITIES
+    ):
+        errors.append(
+            f"{label}.payload.default_granularity must be one of {sorted(CALENDAR_ALLOWED_GRANULARITIES)} when provided"
+        )
+
+    focus_date = payload.get("focus_date")
+    if focus_date is not None and (
+        not isinstance(focus_date, str) or not focus_date.strip()
+    ):
+        errors.append(
+            f"{label}.payload.focus_date must be a non-empty string when provided"
+        )
+
+
+def _validate_document_view_payload(
+    *,
+    payload: Mapping[str, Any],
+    label: str,
+    errors: list[str],
+) -> None:
+    documents = payload.get("documents")
+    if not isinstance(documents, list) or not documents:
+        errors.append(f"{label}.payload.documents must be a non-empty list")
+        documents = []
+
+    for document_index, document in enumerate(documents):
+        document_label = f"{label}.payload.documents[{document_index}]"
+        if not isinstance(document, Mapping):
+            errors.append(f"{document_label} must be a mapping")
+            continue
+
+        document_id = document.get("document_id")
+        if not isinstance(document_id, str) or not document_id.strip():
+            errors.append(f"{document_label}.document_id must be a non-empty string")
+
+        title = document.get("title")
+        if not isinstance(title, str) or not title.strip():
+            errors.append(f"{document_label}.title must be a non-empty string")
+
+        source_uri = document.get("source_uri")
+        has_source_uri = isinstance(source_uri, str) and bool(source_uri.strip())
+        if source_uri is not None and not has_source_uri:
+            errors.append(
+                f"{document_label}.source_uri must be a non-empty string when provided"
+            )
+
+        source_label = document.get("source_label")
+        has_source_label = isinstance(source_label, str) and bool(
+            source_label.strip()
+        )
+        if source_label is not None and not has_source_label:
+            errors.append(
+                f"{document_label}.source_label must be a non-empty string when provided"
+            )
+        if not has_source_uri and not has_source_label:
+            errors.append(
+                f"{document_label} must provide provenance (source_uri or source_label)"
+            )
+
+        updated_at = document.get("updated_at")
+        if updated_at is not None and (
+            not isinstance(updated_at, str) or not updated_at.strip()
+        ):
+            errors.append(
+                f"{document_label}.updated_at must be a non-empty string when provided"
+            )
+
+        sections = document.get("sections")
+        if not isinstance(sections, list) or not sections:
+            errors.append(f"{document_label}.sections must be a non-empty list")
+            sections = []
+
+        for section_index, section in enumerate(sections):
+            section_label = f"{document_label}.sections[{section_index}]"
+            if not isinstance(section, Mapping):
+                errors.append(f"{section_label} must be a mapping")
+                continue
+
+            section_id = section.get("section_id")
+            if not isinstance(section_id, str) or not section_id.strip():
+                errors.append(f"{section_label}.section_id must be a non-empty string")
+
+            heading = section.get("heading")
+            if not isinstance(heading, str) or not heading.strip():
+                errors.append(f"{section_label}.heading must be a non-empty string")
+
+            excerpt = section.get("excerpt")
+            if not isinstance(excerpt, str) or not excerpt.strip():
+                errors.append(f"{section_label}.excerpt must be a non-empty string")
+                excerpt_value = ""
+            else:
+                excerpt_value = excerpt.strip()
+                if len(excerpt_value) > DOCUMENT_SECTION_EXCERPT_MAX_CHARS:
+                    errors.append(
+                        f"{section_label}.excerpt must be {DOCUMENT_SECTION_EXCERPT_MAX_CHARS} chars or less"
+                    )
+
+            excerpt_truncated = section.get("excerpt_truncated")
+            if excerpt_truncated is not None and not isinstance(
+                excerpt_truncated, bool
+            ):
+                errors.append(
+                    f"{section_label}.excerpt_truncated must be a boolean when provided"
+                )
+            elif excerpt_truncated and not excerpt_value.endswith(
+                DOCUMENT_EXCERPT_TRUNCATION_MARKER
+            ):
+                errors.append(
+                    f"{section_label}.excerpt must include explicit truncation marker when excerpt_truncated is true"
+                )
+
+            excerpt_original_char_count = section.get("excerpt_original_char_count")
+            if excerpt_original_char_count is not None:
+                if not isinstance(excerpt_original_char_count, int):
+                    errors.append(
+                        f"{section_label}.excerpt_original_char_count must be an integer when provided"
+                    )
+                elif excerpt_original_char_count <= 0:
+                    errors.append(
+                        f"{section_label}.excerpt_original_char_count must be positive when provided"
+                    )
+                elif excerpt_value and excerpt_original_char_count < len(excerpt_value):
+                    errors.append(
+                        f"{section_label}.excerpt_original_char_count must be >= excerpt length"
+                    )
+
+            citation = section.get("citation")
+            if citation is not None and (
+                not isinstance(citation, str) or not citation.strip()
+            ):
+                errors.append(
+                    f"{section_label}.citation must be a non-empty string when provided"
+                )
+
+            diff_summary = section.get("diff_summary")
+            if diff_summary is not None:
+                if not isinstance(diff_summary, str) or not diff_summary.strip():
+                    errors.append(
+                        f"{section_label}.diff_summary must be a non-empty string when provided"
+                    )
+                elif len(diff_summary.strip()) > DOCUMENT_SECTION_DIFF_SUMMARY_MAX_CHARS:
+                    errors.append(
+                        f"{section_label}.diff_summary must be {DOCUMENT_SECTION_DIFF_SUMMARY_MAX_CHARS} chars or less"
+                    )
+
+            _validate_task_links(
+                links=section.get("task_links"),
+                label=f"{section_label}.task_links",
+                errors=errors,
+            )
+
+
+def _validate_task_view_payload(
+    *,
+    payload: Mapping[str, Any],
+    label: str,
+    errors: list[str],
+) -> None:
+    tasks = payload.get("tasks")
+    if not isinstance(tasks, list) or not tasks:
+        errors.append(f"{label}.payload.tasks must be a non-empty list")
+        tasks = []
+
+    for task_index, task in enumerate(tasks):
+        task_label = f"{label}.payload.tasks[{task_index}]"
+        if not isinstance(task, Mapping):
+            errors.append(f"{task_label} must be a mapping")
+            continue
+
+        task_id = task.get("task_id")
+        task_concept_id = task.get("task_concept_id")
+        fallback_id = task.get("id")
+        has_task_id = (
+            isinstance(task_id, str) and bool(task_id.strip())
+        ) or (
+            isinstance(task_concept_id, str) and bool(task_concept_id.strip())
+        ) or (isinstance(fallback_id, str) and bool(fallback_id.strip()))
+        if not has_task_id:
+            errors.append(
+                f"{task_label} must provide a non-empty task identifier (task_id, task_concept_id, or id)"
+            )
+
+        title = task.get("title")
+        label_value = task.get("label")
+        has_title = (isinstance(title, str) and bool(title.strip())) or (
+            isinstance(label_value, str) and bool(label_value.strip())
+        )
+        if not has_title:
+            errors.append(
+                f"{task_label} must provide a non-empty title (title or label)"
+            )
+
+        for field_name in (
+            "status",
+            "priority",
+            "due_date",
+            "assignee",
+            "description",
+        ):
+            field_value = task.get(field_name)
+            if field_value is None:
+                continue
+            if not isinstance(field_value, str) or not field_value.strip():
+                errors.append(
+                    f"{task_label}.{field_name} must be a non-empty string when provided"
+                )
+
+        _validate_task_links(
+            links=task.get("task_links"),
+            label=f"{task_label}.task_links",
+            errors=errors,
+        )
+
+
+def _validate_kanban_view_payload(
+    *,
+    payload: Mapping[str, Any],
+    label: str,
+    errors: list[str],
+) -> None:
+    columns = payload.get("columns")
+    if not isinstance(columns, list) or not columns:
+        errors.append(f"{label}.payload.columns must be a non-empty list")
+        columns = []
+
+    valid_column_ids: set[str] = set()
+    for column_index, column in enumerate(columns):
+        column_label = f"{label}.payload.columns[{column_index}]"
+        if not isinstance(column, Mapping):
+            errors.append(f"{column_label} must be a mapping")
+            continue
+
+        column_id = column.get("column_id")
+        if not isinstance(column_id, str) or not column_id.strip():
+            errors.append(f"{column_label}.column_id must be a non-empty string")
+            continue
+        if column_id in valid_column_ids:
+            errors.append(f"{column_label}.column_id must be unique")
+            continue
+        valid_column_ids.add(column_id)
+
+        column_name = column.get("label")
+        if not isinstance(column_name, str) or not column_name.strip():
+            errors.append(f"{column_label}.label must be a non-empty string")
+
+        order = column.get("order")
+        if order is not None and not isinstance(order, int):
+            errors.append(f"{column_label}.order must be an integer when provided")
+
+        wip_limit = column.get("wip_limit")
+        if wip_limit is not None and (
+            not isinstance(wip_limit, int) or wip_limit <= 0
+        ):
+            errors.append(
+                f"{column_label}.wip_limit must be a positive integer when provided"
+            )
+
+    cards = payload.get("cards")
+    if not isinstance(cards, list):
+        errors.append(f"{label}.payload.cards must be a list")
+        cards = []
+
+    seen_card_ids: set[str] = set()
+    for card_index, card in enumerate(cards):
+        card_label = f"{label}.payload.cards[{card_index}]"
+        if not isinstance(card, Mapping):
+            errors.append(f"{card_label} must be a mapping")
+            continue
+
+        card_id = card.get("card_id")
+        if not isinstance(card_id, str) or not card_id.strip():
+            errors.append(f"{card_label}.card_id must be a non-empty string")
+        elif card_id in seen_card_ids:
+            errors.append(f"{card_label}.card_id must be unique")
+        else:
+            seen_card_ids.add(card_id)
+
+        title = card.get("title")
+        if not isinstance(title, str) or not title.strip():
+            errors.append(f"{card_label}.title must be a non-empty string")
+
+        column_id = card.get("column_id")
+        if not isinstance(column_id, str) or not column_id.strip():
+            errors.append(f"{card_label}.column_id must be a non-empty string")
+        elif valid_column_ids and column_id not in valid_column_ids:
+            errors.append(f"{card_label}.column_id must reference a declared column")
+
+        for field_name in ("priority", "assignee", "due_date", "description"):
+            field_value = card.get(field_name)
+            if field_value is None:
+                continue
+            if not isinstance(field_value, str) or not field_value.strip():
+                errors.append(
+                    f"{card_label}.{field_name} must be a non-empty string when provided"
+                )
+
+        _validate_task_links(
+            links=card.get("task_links"),
+            label=f"{card_label}.task_links",
+            errors=errors,
+        )
+
+
+def _validate_workflow_view_payload(
+    *,
+    payload: Mapping[str, Any],
+    label: str,
+    errors: list[str],
+) -> None:
+    nodes = payload.get("nodes")
+    if not isinstance(nodes, list) or not nodes:
+        errors.append(f"{label}.payload.nodes must be a non-empty list")
+        nodes = []
+
+    valid_node_ids: set[str] = set()
+    for node_index, node in enumerate(nodes):
+        node_label = f"{label}.payload.nodes[{node_index}]"
+        if not isinstance(node, Mapping):
+            errors.append(f"{node_label} must be a mapping")
+            continue
+        node_id = node.get("node_id")
+        if not isinstance(node_id, str) or not node_id.strip():
+            errors.append(f"{node_label}.node_id must be a non-empty string")
+            continue
+        valid_node_ids.add(node_id)
+
+        display_label = node.get("label")
+        if not isinstance(display_label, str) or not display_label.strip():
+            errors.append(f"{node_label}.label must be a non-empty string")
+
+        status = node.get("status")
+        if status is not None and (
+            not isinstance(status, str) or not status.strip()
+        ):
+            errors.append(
+                f"{node_label}.status must be a non-empty string when provided"
+            )
+        _validate_task_links(
+            links=node.get("task_links"),
+            label=f"{node_label}.task_links",
+            errors=errors,
+        )
+
+    edges = payload.get("edges")
+    if edges is not None and not isinstance(edges, list):
+        errors.append(f"{label}.payload.edges must be a list when provided")
+        edges = []
+    if isinstance(edges, list):
+        for edge_index, edge in enumerate(edges):
+            edge_label = f"{label}.payload.edges[{edge_index}]"
+            if not isinstance(edge, Mapping):
+                errors.append(f"{edge_label} must be a mapping")
+                continue
+            source_node_id = edge.get("source_node_id")
+            target_node_id = edge.get("target_node_id")
+            if not isinstance(source_node_id, str) or not source_node_id.strip():
+                errors.append(f"{edge_label}.source_node_id must be a non-empty string")
+            elif valid_node_ids and source_node_id not in valid_node_ids:
+                errors.append(
+                    f"{edge_label}.source_node_id must reference a declared node"
+                )
+            if not isinstance(target_node_id, str) or not target_node_id.strip():
+                errors.append(f"{edge_label}.target_node_id must be a non-empty string")
+            elif valid_node_ids and target_node_id not in valid_node_ids:
+                errors.append(
+                    f"{edge_label}.target_node_id must reference a declared node"
+                )
+
+
+_DISPLAY_ELEMENT_PAYLOAD_VALIDATORS: dict[str, Callable[..., None]] = {
+    "calendar_view": _validate_calendar_view_payload,
+    "chart_view": _validate_chart_view_payload,
+    "document_view": _validate_document_view_payload,
+    "hierarchy_view": _validate_hierarchy_view_payload,
+    "json_block": _validate_json_block_payload,
+    "kanban_view": _validate_kanban_view_payload,
+    "location_view": _validate_location_view_payload,
+    "relation_graph_view": _validate_relation_graph_view_payload,
+    "relation_truth_state": _validate_relation_truth_state_payload,
+    "table": _validate_table_payload,
+    "task_view": _validate_task_view_payload,
+    "text_block": _validate_text_block_payload,
+    "timeline": _validate_timeline_payload,
+    "workflow_view": _validate_workflow_view_payload,
+}
+
+
 def validate_turn_display_elements(
     contract: Mapping[str, Any] | None,
 ) -> tuple[bool, list[str]]:
@@ -817,1220 +2066,14 @@ def validate_turn_display_elements(
                 errors=errors,
             )
 
-        if element_type == "text_block":
-            text_value = payload.get("text")
-            if not isinstance(text_value, str) or not text_value.strip():
-                errors.append(f"{label}.payload.text must be a non-empty string")
-        elif element_type == "json_block":
-            fence = payload.get("fence")
-            if not isinstance(fence, str) or not fence.strip():
-                errors.append(f"{label}.payload.fence must be a non-empty string")
-            elif "```json" not in fence.lower():
-                errors.append(f"{label}.payload.fence must be a fenced JSON block")
-        elif element_type == "table":
-            columns = payload.get("columns")
-            if not isinstance(columns, list) or not columns:
-                errors.append(f"{label}.payload.columns must be a non-empty list")
-                columns = []
-
-            valid_column_ids: set[str] = set()
-            for column_index, column in enumerate(columns):
-                column_label = f"{label}.payload.columns[{column_index}]"
-                if not isinstance(column, Mapping):
-                    errors.append(f"{column_label} must be a mapping")
-                    continue
-                column_id = column.get("column_id")
-                if not isinstance(column_id, str) or not column_id.strip():
-                    errors.append(f"{column_label}.column_id must be a non-empty string")
-                    continue
-                valid_column_ids.add(column_id)
-
-                column_name = column.get("label")
-                if not isinstance(column_name, str) or not column_name.strip():
-                    errors.append(f"{column_label}.label must be a non-empty string")
-                data_type = column.get("data_type")
-                if not isinstance(data_type, str) or not data_type.strip():
-                    errors.append(f"{column_label}.data_type must be a non-empty string")
-
-            _validate_table_column_visibility(
+        validator = _DISPLAY_ELEMENT_PAYLOAD_VALIDATORS.get(str(element_type))
+        if validator is not None:
+            validator(
                 payload=payload,
                 label=label,
-                valid_column_ids=valid_column_ids,
                 errors=errors,
             )
-
-            rows = payload.get("rows")
-            if not isinstance(rows, list):
-                errors.append(f"{label}.payload.rows must be a list")
-                rows = []
-
-            for row_index, row in enumerate(rows):
-                row_label = f"{label}.payload.rows[{row_index}]"
-                if not isinstance(row, Mapping):
-                    errors.append(f"{row_label} must be a mapping")
-                    continue
-                row_id = row.get("row_id")
-                if not isinstance(row_id, str) or not row_id.strip():
-                    errors.append(f"{row_label}.row_id must be a non-empty string")
-
-                cells = row.get("cells")
-                if not isinstance(cells, list):
-                    errors.append(f"{row_label}.cells must be a list")
-                    continue
-                if columns and len(cells) != len(columns):
-                    errors.append(
-                        f"{row_label}.cells count {len(cells)} does not match column count {len(columns)}"
-                    )
-
-                for cell_index, cell in enumerate(cells):
-                    cell_label = f"{row_label}.cells[{cell_index}]"
-                    if not isinstance(cell, Mapping):
-                        errors.append(f"{cell_label} must be a mapping")
-                        continue
-                    column_id = cell.get("column_id")
-                    if (
-                        not isinstance(column_id, str)
-                        or not column_id.strip()
-                        or (valid_column_ids and column_id not in valid_column_ids)
-                    ):
-                        errors.append(
-                            f"{cell_label}.column_id must reference a declared column"
-                        )
-                    value_type = cell.get("value_type")
-                    if not isinstance(value_type, str) or not value_type.strip():
-                        errors.append(f"{cell_label}.value_type must be a non-empty string")
-        elif element_type == "relation_truth_state":
-            title = payload.get("title")
-            if not isinstance(title, str) or not title.strip():
-                errors.append(
-                    f"{label}.payload.title must be a non-empty string"
-                )
-
-            groups = payload.get("groups")
-            if not isinstance(groups, list) or not groups:
-                errors.append(f"{label}.payload.groups must be a non-empty list")
-                groups = []
-
-            for group_index, group in enumerate(groups):
-                group_label = f"{label}.payload.groups[{group_index}]"
-                if not isinstance(group, Mapping):
-                    errors.append(f"{group_label} must be a mapping")
-                    continue
-
-                group_name = group.get("label")
-                if not isinstance(group_name, str) or not group_name.strip():
-                    errors.append(f"{group_label}.label must be a non-empty string")
-
-                group_status = group.get("status")
-                if (
-                    not isinstance(group_status, str)
-                    or group_status.strip() not in RELATION_TRUTH_STATE_GROUP_STATUSES
-                ):
-                    errors.append(
-                        f"{group_label}.status must be one of {sorted(RELATION_TRUTH_STATE_GROUP_STATUSES)}"
-                    )
-
-                assertions = group.get("assertions")
-                if not isinstance(assertions, list) or not assertions:
-                    errors.append(
-                        f"{group_label}.assertions must be a non-empty list"
-                    )
-                    assertions = []
-
-                for assertion_index, assertion in enumerate(assertions):
-                    assertion_label = (
-                        f"{group_label}.assertions[{assertion_index}]"
-                    )
-                    if not isinstance(assertion, Mapping):
-                        errors.append(f"{assertion_label} must be a mapping")
-                        continue
-
-                    assertion_id = assertion.get("assertion_id")
-                    if assertion_id is not None and (
-                        not isinstance(assertion_id, str) or not assertion_id.strip()
-                    ):
-                        errors.append(
-                            f"{assertion_label}.assertion_id must be a non-empty string when provided"
-                        )
-
-                    for relation_key in ("arg1", "predicate", "arg2"):
-                        value = assertion.get(relation_key)
-                        if not isinstance(value, str) or not value.strip():
-                            errors.append(
-                                f"{assertion_label}.{relation_key} must be a non-empty string"
-                            )
-
-                    is_asserted = assertion.get("is_asserted")
-                    if not isinstance(is_asserted, bool):
-                        errors.append(
-                            f"{assertion_label}.is_asserted must be a boolean"
-                        )
-        elif element_type == "relation_graph_view":
-            nodes = payload.get("nodes")
-            if not isinstance(nodes, list) or not nodes:
-                errors.append(f"{label}.payload.nodes must be a non-empty list")
-                nodes = []
-            if isinstance(nodes, list) and len(nodes) > RELATION_GRAPH_MAX_NODES:
-                errors.append(
-                    f"{label}.payload.nodes exceeds max size {RELATION_GRAPH_MAX_NODES}"
-                )
-
-            valid_node_ids: set[str] = set()
-            for node_index, node in enumerate(nodes):
-                node_label = f"{label}.payload.nodes[{node_index}]"
-                if not isinstance(node, Mapping):
-                    errors.append(f"{node_label} must be a mapping")
-                    continue
-
-                node_id = node.get("node_id")
-                if not isinstance(node_id, str) or not node_id.strip():
-                    errors.append(f"{node_label}.node_id must be a non-empty string")
-                    continue
-                if node_id in valid_node_ids:
-                    errors.append(f"{node_label}.node_id must be unique")
-                    continue
-                valid_node_ids.add(node_id)
-
-                display_label = node.get("label")
-                if not isinstance(display_label, str) or not display_label.strip():
-                    errors.append(f"{node_label}.label must be a non-empty string")
-
-                node_kind = node.get("node_kind")
-                if not isinstance(node_kind, str) or not node_kind.strip():
-                    errors.append(f"{node_label}.node_kind must be a non-empty string")
-
-                group = node.get("group")
-                if group is not None and (
-                    not isinstance(group, str) or not group.strip()
-                ):
-                    errors.append(
-                        f"{node_label}.group must be a non-empty string when provided"
-                    )
-
-                _validate_task_links(
-                    links=node.get("task_links"),
-                    label=f"{node_label}.task_links",
-                    errors=errors,
-                )
-
-            edges = payload.get("edges")
-            if not isinstance(edges, list):
-                errors.append(f"{label}.payload.edges must be a list")
-                edges = []
-            if isinstance(edges, list) and len(edges) > RELATION_GRAPH_MAX_EDGES:
-                errors.append(
-                    f"{label}.payload.edges exceeds max size {RELATION_GRAPH_MAX_EDGES}"
-                )
-
-            seen_edge_ids: set[str] = set()
-            for edge_index, edge in enumerate(edges):
-                edge_label = f"{label}.payload.edges[{edge_index}]"
-                if not isinstance(edge, Mapping):
-                    errors.append(f"{edge_label} must be a mapping")
-                    continue
-
-                edge_id = edge.get("edge_id")
-                if not isinstance(edge_id, str) or not edge_id.strip():
-                    errors.append(f"{edge_label}.edge_id must be a non-empty string")
-                elif edge_id in seen_edge_ids:
-                    errors.append(f"{edge_label}.edge_id must be unique")
-                else:
-                    seen_edge_ids.add(edge_id)
-
-                source_node_id = edge.get("source")
-                if not isinstance(source_node_id, str) or not source_node_id.strip():
-                    errors.append(f"{edge_label}.source must be a non-empty string")
-                elif valid_node_ids and source_node_id not in valid_node_ids:
-                    errors.append(
-                        f"{edge_label}.source must reference a declared node"
-                    )
-
-                target_node_id = edge.get("target")
-                if not isinstance(target_node_id, str) or not target_node_id.strip():
-                    errors.append(f"{edge_label}.target must be a non-empty string")
-                elif valid_node_ids and target_node_id not in valid_node_ids:
-                    errors.append(
-                        f"{edge_label}.target must reference a declared node"
-                    )
-
-                predicate = edge.get("predicate")
-                if not isinstance(predicate, str) or not predicate.strip():
-                    errors.append(f"{edge_label}.predicate must be a non-empty string")
-
-                direction = edge.get("direction")
-                if direction is not None:
-                    if not isinstance(direction, str) or direction.strip() not in (
-                        RELATION_GRAPH_ALLOWED_DIRECTIONS
-                    ):
-                        errors.append(
-                            f"{edge_label}.direction must be one of {sorted(RELATION_GRAPH_ALLOWED_DIRECTIONS)} when provided"
-                        )
-
-                weight = edge.get("weight")
-                if weight is not None and isinstance(weight, bool):
-                    errors.append(
-                        f"{edge_label}.weight must be numeric when provided"
-                    )
-                elif weight is not None and not isinstance(weight, (int, float)):
-                    errors.append(
-                        f"{edge_label}.weight must be numeric when provided"
-                    )
-
-            layout_hint = payload.get("layout_hint")
-            if layout_hint is not None and (
-                not isinstance(layout_hint, str) or not layout_hint.strip()
-            ):
-                errors.append(
-                    f"{label}.payload.layout_hint must be a non-empty string when provided"
-                )
-
-            focus_node_id = payload.get("focus_node_id")
-            if focus_node_id is not None:
-                if not isinstance(focus_node_id, str) or not focus_node_id.strip():
-                    errors.append(
-                        f"{label}.payload.focus_node_id must be a non-empty string when provided"
-                    )
-                elif valid_node_ids and focus_node_id not in valid_node_ids:
-                    errors.append(
-                        f"{label}.payload.focus_node_id must reference a declared node"
-                    )
-        elif element_type == "hierarchy_view":
-            nodes = payload.get("nodes")
-            if not isinstance(nodes, list) or not nodes:
-                errors.append(f"{label}.payload.nodes must be a non-empty list")
-                nodes = []
-            if isinstance(nodes, list) and len(nodes) > HIERARCHY_MAX_NODES:
-                errors.append(
-                    f"{label}.payload.nodes exceeds max size {HIERARCHY_MAX_NODES}"
-                )
-
-            valid_node_ids: set[str] = set()
-            for node_index, node in enumerate(nodes):
-                node_label = f"{label}.payload.nodes[{node_index}]"
-                if not isinstance(node, Mapping):
-                    errors.append(f"{node_label} must be a mapping")
-                    continue
-
-                node_id = node.get("node_id")
-                if not isinstance(node_id, str) or not node_id.strip():
-                    errors.append(f"{node_label}.node_id must be a non-empty string")
-                    continue
-                if node_id in valid_node_ids:
-                    errors.append(f"{node_label}.node_id must be unique")
-                    continue
-                valid_node_ids.add(node_id)
-
-                display_label = node.get("label")
-                if not isinstance(display_label, str) or not display_label.strip():
-                    errors.append(f"{node_label}.label must be a non-empty string")
-
-                node_kind = node.get("node_kind")
-                if node_kind is not None and (
-                    not isinstance(node_kind, str) or not node_kind.strip()
-                ):
-                    errors.append(
-                        f"{node_label}.node_kind must be a non-empty string when provided"
-                    )
-
-                for count_key in ("parent_count", "child_count"):
-                    count_value = node.get(count_key)
-                    if count_value is None:
-                        continue
-                    if isinstance(count_value, bool) or not isinstance(count_value, int):
-                        errors.append(
-                            f"{node_label}.{count_key} must be a non-negative integer when provided"
-                        )
-                        continue
-                    if count_value < 0:
-                        errors.append(
-                            f"{node_label}.{count_key} must be a non-negative integer when provided"
-                        )
-
-            edges = payload.get("edges")
-            if not isinstance(edges, list):
-                errors.append(f"{label}.payload.edges must be a list")
-                edges = []
-            if isinstance(edges, list) and len(edges) > HIERARCHY_MAX_EDGES:
-                errors.append(
-                    f"{label}.payload.edges exceeds max size {HIERARCHY_MAX_EDGES}"
-                )
-
-            seen_edge_ids: set[str] = set()
-            for edge_index, edge in enumerate(edges):
-                edge_label = f"{label}.payload.edges[{edge_index}]"
-                if not isinstance(edge, Mapping):
-                    errors.append(f"{edge_label} must be a mapping")
-                    continue
-
-                edge_id = edge.get("edge_id")
-                if not isinstance(edge_id, str) or not edge_id.strip():
-                    errors.append(f"{edge_label}.edge_id must be a non-empty string")
-                elif edge_id in seen_edge_ids:
-                    errors.append(f"{edge_label}.edge_id must be unique")
-                else:
-                    seen_edge_ids.add(edge_id)
-
-                parent_node_id = edge.get("parent_node_id")
-                if not isinstance(parent_node_id, str) or not parent_node_id.strip():
-                    errors.append(
-                        f"{edge_label}.parent_node_id must be a non-empty string"
-                    )
-                elif valid_node_ids and parent_node_id not in valid_node_ids:
-                    errors.append(
-                        f"{edge_label}.parent_node_id must reference a declared node"
-                    )
-
-                child_node_id = edge.get("child_node_id")
-                if not isinstance(child_node_id, str) or not child_node_id.strip():
-                    errors.append(
-                        f"{edge_label}.child_node_id must be a non-empty string"
-                    )
-                elif valid_node_ids and child_node_id not in valid_node_ids:
-                    errors.append(
-                        f"{edge_label}.child_node_id must reference a declared node"
-                    )
-
-                predicate = edge.get("predicate")
-                if predicate is not None and (
-                    not isinstance(predicate, str) or not predicate.strip()
-                ):
-                    errors.append(
-                        f"{edge_label}.predicate must be a non-empty string when provided"
-                    )
-
-                branch_kind = edge.get("branch_kind")
-                if branch_kind is not None:
-                    if (
-                        not isinstance(branch_kind, str)
-                        or branch_kind.strip() not in HIERARCHY_EDGE_BRANCH_KINDS
-                    ):
-                        errors.append(
-                            f"{edge_label}.branch_kind must be one of {sorted(HIERARCHY_EDGE_BRANCH_KINDS)} when provided"
-                        )
-
-            focus_node_id = payload.get("focus_node_id")
-            if focus_node_id is not None:
-                if not isinstance(focus_node_id, str) or not focus_node_id.strip():
-                    errors.append(
-                        f"{label}.payload.focus_node_id must be a non-empty string when provided"
-                    )
-                elif valid_node_ids and focus_node_id not in valid_node_ids:
-                    errors.append(
-                        f"{label}.payload.focus_node_id must reference a declared node"
-                    )
-
-            root_node_ids = payload.get("root_node_ids")
-            if root_node_ids is not None:
-                if not isinstance(root_node_ids, list):
-                    errors.append(f"{label}.payload.root_node_ids must be a list")
-                else:
-                    for root_index, root_node_id in enumerate(root_node_ids):
-                        root_label = f"{label}.payload.root_node_ids[{root_index}]"
-                        if (
-                            not isinstance(root_node_id, str)
-                            or not root_node_id.strip()
-                        ):
-                            errors.append(
-                                f"{root_label} must be a non-empty string"
-                            )
-                            continue
-                        if valid_node_ids and root_node_id not in valid_node_ids:
-                            errors.append(
-                                f"{root_label} must reference a declared node"
-                            )
-
-            expansion = payload.get("expansion")
-            if expansion is not None:
-                if not isinstance(expansion, Mapping):
-                    errors.append(f"{label}.payload.expansion must be a mapping")
-                else:
-                    for key in ("show_parents", "show_children", "show_siblings"):
-                        flag = expansion.get(key)
-                        if flag is not None and not isinstance(flag, bool):
-                            errors.append(
-                                f"{label}.payload.expansion.{key} must be a boolean when provided"
-                            )
-
-                    max_depth = expansion.get("max_depth")
-                    if max_depth is not None:
-                        if isinstance(max_depth, bool) or not isinstance(max_depth, int):
-                            errors.append(
-                                f"{label}.payload.expansion.max_depth must be an integer between 1 and {HIERARCHY_MAX_DEPTH} when provided"
-                            )
-                        elif max_depth < 1 or max_depth > HIERARCHY_MAX_DEPTH:
-                            errors.append(
-                                f"{label}.payload.expansion.max_depth must be an integer between 1 and {HIERARCHY_MAX_DEPTH} when provided"
-                            )
-        elif element_type == "chart_view":
-            chart_type_raw = payload.get("chart_type")
-            if not isinstance(chart_type_raw, str) or not chart_type_raw.strip():
-                errors.append(
-                    f"{label}.payload.chart_type must be one of {sorted(CHART_ALLOWED_TYPES)}"
-                )
-            else:
-                chart_type = chart_type_raw.strip().lower()
-                if chart_type not in CHART_ALLOWED_TYPES:
-                    errors.append(
-                        f"{label}.payload.chart_type must be one of {sorted(CHART_ALLOWED_TYPES)}"
-                    )
-
-            series = payload.get("series")
-            if not isinstance(series, list) or not series:
-                errors.append(f"{label}.payload.series must be a non-empty list")
-                series = []
-            if isinstance(series, list) and len(series) > CHART_MAX_SERIES:
-                errors.append(
-                    f"{label}.payload.series exceeds max size {CHART_MAX_SERIES}"
-                )
-
-            seen_series_ids: set[str] = set()
-            total_points = 0
-            for series_index, series_entry in enumerate(series):
-                series_label = f"{label}.payload.series[{series_index}]"
-                if not isinstance(series_entry, Mapping):
-                    errors.append(f"{series_label} must be a mapping")
-                    continue
-
-                series_id = series_entry.get("series_id")
-                if not isinstance(series_id, str) or not series_id.strip():
-                    errors.append(
-                        f"{series_label}.series_id must be a non-empty string"
-                    )
-                elif series_id in seen_series_ids:
-                    errors.append(f"{series_label}.series_id must be unique")
-                else:
-                    seen_series_ids.add(series_id)
-
-                series_name = series_entry.get("label")
-                if not isinstance(series_name, str) or not series_name.strip():
-                    errors.append(f"{series_label}.label must be a non-empty string")
-
-                points = series_entry.get("points")
-                if not isinstance(points, list) or not points:
-                    errors.append(f"{series_label}.points must be a non-empty list")
-                    points = []
-                if isinstance(points, list) and len(points) > CHART_MAX_POINTS_PER_SERIES:
-                    errors.append(
-                        f"{series_label}.points exceeds max size {CHART_MAX_POINTS_PER_SERIES}"
-                    )
-
-                total_points += len(points)
-                for point_index, point in enumerate(points):
-                    point_label = f"{series_label}.points[{point_index}]"
-                    if not isinstance(point, Mapping):
-                        errors.append(f"{point_label} must be a mapping")
-                        continue
-
-                    x_value = point.get("x")
-                    x_is_valid = (
-                        isinstance(x_value, str)
-                        and bool(x_value.strip())
-                    ) or (
-                        isinstance(x_value, (int, float))
-                        and not isinstance(x_value, bool)
-                        and not math.isnan(float(x_value))
-                        and not math.isinf(float(x_value))
-                    )
-                    if not x_is_valid:
-                        errors.append(
-                            f"{point_label}.x must be a non-empty string or finite number"
-                        )
-
-                    y_value = _normalise_float(point.get("y"))
-                    if y_value is None:
-                        errors.append(
-                            f"{point_label}.y must be a finite number"
-                        )
-
-                    point_meta = point.get("meta")
-                    if point_meta is not None and not isinstance(point_meta, Mapping):
-                        errors.append(
-                            f"{point_label}.meta must be a mapping when provided"
-                        )
-
-                    _validate_task_links(
-                        links=point.get("task_links"),
-                        label=f"{point_label}.task_links",
-                        errors=errors,
-                    )
-
-                _validate_task_links(
-                    links=series_entry.get("task_links"),
-                    label=f"{series_label}.task_links",
-                    errors=errors,
-                )
-
-            if total_points > CHART_MAX_TOTAL_POINTS:
-                errors.append(
-                    f"{label}.payload.series total points exceeds max size {CHART_MAX_TOTAL_POINTS}"
-                )
-
-            for axis_key in ("x_axis", "y_axis", "units"):
-                axis_value = payload.get(axis_key)
-                if axis_value is not None and (
-                    not isinstance(axis_value, str) or not axis_value.strip()
-                ):
-                    errors.append(
-                        f"{label}.payload.{axis_key} must be a non-empty string when provided"
-                    )
-
-            stacked = payload.get("stacked")
-            if stacked is not None and not isinstance(stacked, bool):
-                errors.append(f"{label}.payload.stacked must be a boolean when provided")
-
-            legend = payload.get("legend")
-            if legend is not None and not isinstance(legend, bool):
-                errors.append(f"{label}.payload.legend must be a boolean when provided")
-
-            _validate_task_links(
-                links=payload.get("task_links"),
-                label=f"{label}.payload.task_links",
-                errors=errors,
-            )
-        elif element_type == "location_view":
-            points = payload.get("points")
-            if not isinstance(points, list) or not points:
-                errors.append(f"{label}.payload.points must be a non-empty list")
-                points = []
-            if isinstance(points, list) and len(points) > LOCATION_MAX_POINTS:
-                errors.append(
-                    f"{label}.payload.points exceeds max size {LOCATION_MAX_POINTS}"
-                )
-
-            seen_point_ids: set[str] = set()
-            for point_index, point in enumerate(points):
-                point_label = f"{label}.payload.points[{point_index}]"
-                if not isinstance(point, Mapping):
-                    errors.append(f"{point_label} must be a mapping")
-                    continue
-
-                point_id = point.get("point_id")
-                if not isinstance(point_id, str) or not point_id.strip():
-                    errors.append(f"{point_label}.point_id must be a non-empty string")
-                elif point_id in seen_point_ids:
-                    errors.append(f"{point_label}.point_id must be unique")
-                else:
-                    seen_point_ids.add(point_id)
-
-                display_label = point.get("label")
-                if not isinstance(display_label, str) or not display_label.strip():
-                    errors.append(f"{point_label}.label must be a non-empty string")
-
-                latitude = _normalise_float(point.get("latitude"))
-                longitude = _normalise_float(point.get("longitude"))
-                has_coordinates = latitude is not None and longitude is not None
-                has_partial_coordinates = (latitude is None) != (longitude is None)
-                if has_partial_coordinates:
-                    errors.append(
-                        f"{point_label} must provide both latitude and longitude when either coordinate is present"
-                    )
-                if latitude is not None and (
-                    latitude < LOCATION_LATITUDE_MIN
-                    or latitude > LOCATION_LATITUDE_MAX
-                ):
-                    errors.append(
-                        f"{point_label}.latitude must be between {LOCATION_LATITUDE_MIN:g} and {LOCATION_LATITUDE_MAX:g}"
-                    )
-                if longitude is not None and (
-                    longitude < LOCATION_LONGITUDE_MIN
-                    or longitude > LOCATION_LONGITUDE_MAX
-                ):
-                    errors.append(
-                        f"{point_label}.longitude must be between {LOCATION_LONGITUDE_MIN:g} and {LOCATION_LONGITUDE_MAX:g}"
-                    )
-
-                address = point.get("address")
-                has_address = isinstance(address, str) and bool(address.strip())
-                if address is not None and not has_address:
-                    errors.append(
-                        f"{point_label}.address must be a non-empty string when provided"
-                    )
-                if not has_coordinates and not has_address:
-                    errors.append(
-                        f"{point_label} must provide at least one spatial anchor (coordinates or address)"
-                    )
-
-                description = point.get("description")
-                if description is not None and (
-                    not isinstance(description, str) or not description.strip()
-                ):
-                    errors.append(
-                        f"{point_label}.description must be a non-empty string when provided"
-                    )
-
-                confidence = point.get("confidence")
-                if confidence is not None:
-                    confidence_value = _normalise_float(confidence)
-                    if confidence_value is None:
-                        errors.append(
-                            f"{point_label}.confidence must be numeric when provided"
-                        )
-                    elif confidence_value < 0.0 or confidence_value > 1.0:
-                        errors.append(
-                            f"{point_label}.confidence must be between 0 and 1 when provided"
-                        )
-
-                _validate_task_links(
-                    links=point.get("task_links"),
-                    label=f"{point_label}.task_links",
-                    errors=errors,
-                )
-
-            viewport = payload.get("viewport")
-            if viewport is not None:
-                if not isinstance(viewport, Mapping):
-                    errors.append(f"{label}.payload.viewport must be a mapping")
-                else:
-                    centre_lat_raw = (
-                        viewport.get("centre_lat")
-                        if "centre_lat" in viewport
-                        else viewport.get("center_lat")
-                    )
-                    centre_lon_raw = (
-                        viewport.get("centre_lon")
-                        if "centre_lon" in viewport
-                        else viewport.get("center_lon")
-                    )
-                    centre_lat = _normalise_float(centre_lat_raw)
-                    centre_lon = _normalise_float(centre_lon_raw)
-                    has_centre_lat = centre_lat_raw is not None
-                    has_centre_lon = centre_lon_raw is not None
-                    has_partial_centre = has_centre_lat != has_centre_lon
-                    if has_partial_centre:
-                        errors.append(
-                            f"{label}.payload.viewport must provide both centre_lat and centre_lon when either is present"
-                        )
-                    if has_centre_lat and centre_lat is None:
-                        errors.append(
-                            f"{label}.payload.viewport.centre_lat must be numeric when provided"
-                        )
-                    if has_centre_lon and centre_lon is None:
-                        errors.append(
-                            f"{label}.payload.viewport.centre_lon must be numeric when provided"
-                        )
-                    if centre_lat is not None and (
-                        centre_lat < LOCATION_LATITUDE_MIN
-                        or centre_lat > LOCATION_LATITUDE_MAX
-                    ):
-                        errors.append(
-                            f"{label}.payload.viewport.centre_lat must be between {LOCATION_LATITUDE_MIN:g} and {LOCATION_LATITUDE_MAX:g} when provided"
-                        )
-                    if centre_lon is not None and (
-                        centre_lon < LOCATION_LONGITUDE_MIN
-                        or centre_lon > LOCATION_LONGITUDE_MAX
-                    ):
-                        errors.append(
-                            f"{label}.payload.viewport.centre_lon must be between {LOCATION_LONGITUDE_MIN:g} and {LOCATION_LONGITUDE_MAX:g} when provided"
-                        )
-
-                    zoom = viewport.get("zoom")
-                    if zoom is not None:
-                        if isinstance(zoom, bool) or not isinstance(zoom, int):
-                            errors.append(
-                                f"{label}.payload.viewport.zoom must be an integer between {LOCATION_VIEWPORT_MIN_ZOOM} and {LOCATION_VIEWPORT_MAX_ZOOM} when provided"
-                            )
-                        elif (
-                            zoom < LOCATION_VIEWPORT_MIN_ZOOM
-                            or zoom > LOCATION_VIEWPORT_MAX_ZOOM
-                        ):
-                            errors.append(
-                                f"{label}.payload.viewport.zoom must be an integer between {LOCATION_VIEWPORT_MIN_ZOOM} and {LOCATION_VIEWPORT_MAX_ZOOM} when provided"
-                            )
-
-            map_provider_hint = payload.get("map_provider_hint")
-            if map_provider_hint is not None and (
-                not isinstance(map_provider_hint, str) or not map_provider_hint.strip()
-            ):
-                errors.append(
-                    f"{label}.payload.map_provider_hint must be a non-empty string when provided"
-                )
-        elif element_type == "timeline":
-            items = payload.get("items")
-            if not isinstance(items, list) or not items:
-                errors.append(f"{label}.payload.items must be a non-empty list")
-                items = []
-
-            for item_index, item in enumerate(items):
-                item_label = f"{label}.payload.items[{item_index}]"
-                if not isinstance(item, Mapping):
-                    errors.append(f"{item_label} must be a mapping")
-                    continue
-
-                item_id = item.get("item_id")
-                if not isinstance(item_id, str) or not item_id.strip():
-                    errors.append(f"{item_label}.item_id must be a non-empty string")
-
-                display_label = item.get("label")
-                if not isinstance(display_label, str) or not display_label.strip():
-                    errors.append(f"{item_label}.label must be a non-empty string")
-
-                start_at = item.get("start_at")
-                end_at = item.get("end_at")
-                has_start_at = isinstance(start_at, str) and bool(start_at.strip())
-                has_end_at = isinstance(end_at, str) and bool(end_at.strip())
-                if start_at is not None and not has_start_at:
-                    errors.append(
-                        f"{item_label}.start_at must be a non-empty string when provided"
-                    )
-                if end_at is not None and not has_end_at:
-                    errors.append(
-                        f"{item_label}.end_at must be a non-empty string when provided"
-                    )
-                if not has_start_at and not has_end_at:
-                    errors.append(
-                        f"{item_label} must provide at least one temporal anchor (start_at or end_at)"
-                    )
-
-                status = item.get("status")
-                if status is not None and (
-                    not isinstance(status, str) or not status.strip()
-                ):
-                    errors.append(
-                        f"{item_label}.status must be a non-empty string when provided"
-                    )
-                _validate_task_links(
-                    links=item.get("task_links"),
-                    label=f"{item_label}.task_links",
-                    errors=errors,
-                )
-        elif element_type == "calendar_view":
-            items = payload.get("items")
-            if not isinstance(items, list) or not items:
-                errors.append(f"{label}.payload.items must be a non-empty list")
-                items = []
-
-            for item_index, item in enumerate(items):
-                item_label = f"{label}.payload.items[{item_index}]"
-                if not isinstance(item, Mapping):
-                    errors.append(f"{item_label} must be a mapping")
-                    continue
-
-                item_id = item.get("item_id")
-                if not isinstance(item_id, str) or not item_id.strip():
-                    errors.append(f"{item_label}.item_id must be a non-empty string")
-
-                title = item.get("title")
-                label_value = item.get("label")
-                has_title = (
-                    (isinstance(title, str) and bool(title.strip()))
-                    or (
-                        isinstance(label_value, str)
-                        and bool(label_value.strip())
-                    )
-                )
-                if not has_title:
-                    errors.append(
-                        f"{item_label}.title must be a non-empty string"
-                    )
-
-                start_at = item.get("start_at")
-                end_at = item.get("end_at")
-                has_start_at = isinstance(start_at, str) and bool(start_at.strip())
-                has_end_at = isinstance(end_at, str) and bool(end_at.strip())
-                if start_at is not None and not has_start_at:
-                    errors.append(
-                        f"{item_label}.start_at must be a non-empty string when provided"
-                    )
-                if end_at is not None and not has_end_at:
-                    errors.append(
-                        f"{item_label}.end_at must be a non-empty string when provided"
-                    )
-                if not has_start_at and not has_end_at:
-                    errors.append(
-                        f"{item_label} must provide at least one temporal anchor (start_at or end_at)"
-                    )
-
-                all_day = item.get("all_day")
-                if all_day is not None and not isinstance(all_day, bool):
-                    errors.append(
-                        f"{item_label}.all_day must be a boolean when provided"
-                    )
-
-                for field_name in ("status", "timezone", "description"):
-                    field_value = item.get(field_name)
-                    if field_value is None:
-                        continue
-                    if not isinstance(field_value, str) or not field_value.strip():
-                        errors.append(
-                            f"{item_label}.{field_name} must be a non-empty string when provided"
-                        )
-
-                _validate_task_links(
-                    links=item.get("task_links"),
-                    label=f"{item_label}.task_links",
-                    errors=errors,
-                )
-
-            default_granularity = payload.get("default_granularity")
-            if default_granularity is not None and (
-                not isinstance(default_granularity, str)
-                or default_granularity.strip() not in CALENDAR_ALLOWED_GRANULARITIES
-            ):
-                errors.append(
-                    f"{label}.payload.default_granularity must be one of {sorted(CALENDAR_ALLOWED_GRANULARITIES)} when provided"
-                )
-
-            focus_date = payload.get("focus_date")
-            if focus_date is not None and (
-                not isinstance(focus_date, str) or not focus_date.strip()
-            ):
-                errors.append(
-                    f"{label}.payload.focus_date must be a non-empty string when provided"
-                )
-        elif element_type == "document_view":
-            documents = payload.get("documents")
-            if not isinstance(documents, list) or not documents:
-                errors.append(f"{label}.payload.documents must be a non-empty list")
-                documents = []
-
-            for document_index, document in enumerate(documents):
-                document_label = f"{label}.payload.documents[{document_index}]"
-                if not isinstance(document, Mapping):
-                    errors.append(f"{document_label} must be a mapping")
-                    continue
-
-                document_id = document.get("document_id")
-                if not isinstance(document_id, str) or not document_id.strip():
-                    errors.append(
-                        f"{document_label}.document_id must be a non-empty string"
-                    )
-
-                title = document.get("title")
-                if not isinstance(title, str) or not title.strip():
-                    errors.append(f"{document_label}.title must be a non-empty string")
-
-                source_uri = document.get("source_uri")
-                has_source_uri = isinstance(source_uri, str) and bool(source_uri.strip())
-                if source_uri is not None and not has_source_uri:
-                    errors.append(
-                        f"{document_label}.source_uri must be a non-empty string when provided"
-                    )
-
-                source_label = document.get("source_label")
-                has_source_label = isinstance(source_label, str) and bool(
-                    source_label.strip()
-                )
-                if source_label is not None and not has_source_label:
-                    errors.append(
-                        f"{document_label}.source_label must be a non-empty string when provided"
-                    )
-                if not has_source_uri and not has_source_label:
-                    errors.append(
-                        f"{document_label} must provide provenance (source_uri or source_label)"
-                    )
-
-                updated_at = document.get("updated_at")
-                if updated_at is not None and (
-                    not isinstance(updated_at, str) or not updated_at.strip()
-                ):
-                    errors.append(
-                        f"{document_label}.updated_at must be a non-empty string when provided"
-                    )
-
-                sections = document.get("sections")
-                if not isinstance(sections, list) or not sections:
-                    errors.append(
-                        f"{document_label}.sections must be a non-empty list"
-                    )
-                    sections = []
-
-                for section_index, section in enumerate(sections):
-                    section_label = f"{document_label}.sections[{section_index}]"
-                    if not isinstance(section, Mapping):
-                        errors.append(f"{section_label} must be a mapping")
-                        continue
-
-                    section_id = section.get("section_id")
-                    if not isinstance(section_id, str) or not section_id.strip():
-                        errors.append(
-                            f"{section_label}.section_id must be a non-empty string"
-                        )
-
-                    heading = section.get("heading")
-                    if not isinstance(heading, str) or not heading.strip():
-                        errors.append(
-                            f"{section_label}.heading must be a non-empty string"
-                        )
-
-                    excerpt = section.get("excerpt")
-                    if not isinstance(excerpt, str) or not excerpt.strip():
-                        errors.append(
-                            f"{section_label}.excerpt must be a non-empty string"
-                        )
-                        excerpt_value = ""
-                    else:
-                        excerpt_value = excerpt.strip()
-                        if len(excerpt_value) > DOCUMENT_SECTION_EXCERPT_MAX_CHARS:
-                            errors.append(
-                                f"{section_label}.excerpt must be {DOCUMENT_SECTION_EXCERPT_MAX_CHARS} chars or less"
-                            )
-
-                    excerpt_truncated = section.get("excerpt_truncated")
-                    if excerpt_truncated is not None and not isinstance(
-                        excerpt_truncated, bool
-                    ):
-                        errors.append(
-                            f"{section_label}.excerpt_truncated must be a boolean when provided"
-                        )
-                    elif excerpt_truncated and not excerpt_value.endswith(
-                        DOCUMENT_EXCERPT_TRUNCATION_MARKER
-                    ):
-                        errors.append(
-                            f"{section_label}.excerpt must include explicit truncation marker when excerpt_truncated is true"
-                        )
-
-                    excerpt_original_char_count = section.get(
-                        "excerpt_original_char_count"
-                    )
-                    if excerpt_original_char_count is not None:
-                        if not isinstance(excerpt_original_char_count, int):
-                            errors.append(
-                                f"{section_label}.excerpt_original_char_count must be an integer when provided"
-                            )
-                        elif excerpt_original_char_count <= 0:
-                            errors.append(
-                                f"{section_label}.excerpt_original_char_count must be positive when provided"
-                            )
-                        elif excerpt_value and excerpt_original_char_count < len(
-                            excerpt_value
-                        ):
-                            errors.append(
-                                f"{section_label}.excerpt_original_char_count must be >= excerpt length"
-                            )
-
-                    citation = section.get("citation")
-                    if citation is not None and (
-                        not isinstance(citation, str) or not citation.strip()
-                    ):
-                        errors.append(
-                            f"{section_label}.citation must be a non-empty string when provided"
-                        )
-
-                    diff_summary = section.get("diff_summary")
-                    if diff_summary is not None:
-                        if not isinstance(diff_summary, str) or not diff_summary.strip():
-                            errors.append(
-                                f"{section_label}.diff_summary must be a non-empty string when provided"
-                            )
-                        elif (
-                            len(diff_summary.strip())
-                            > DOCUMENT_SECTION_DIFF_SUMMARY_MAX_CHARS
-                        ):
-                            errors.append(
-                                f"{section_label}.diff_summary must be {DOCUMENT_SECTION_DIFF_SUMMARY_MAX_CHARS} chars or less"
-                            )
-
-                    _validate_task_links(
-                        links=section.get("task_links"),
-                        label=f"{section_label}.task_links",
-                        errors=errors,
-                    )
-        elif element_type == "task_view":
-            tasks = payload.get("tasks")
-            if not isinstance(tasks, list) or not tasks:
-                errors.append(f"{label}.payload.tasks must be a non-empty list")
-                tasks = []
-
-            for task_index, task in enumerate(tasks):
-                task_label = f"{label}.payload.tasks[{task_index}]"
-                if not isinstance(task, Mapping):
-                    errors.append(f"{task_label} must be a mapping")
-                    continue
-
-                task_id = task.get("task_id")
-                task_concept_id = task.get("task_concept_id")
-                fallback_id = task.get("id")
-                has_task_id = (
-                    isinstance(task_id, str) and bool(task_id.strip())
-                ) or (
-                    isinstance(task_concept_id, str) and bool(task_concept_id.strip())
-                ) or (
-                    isinstance(fallback_id, str) and bool(fallback_id.strip())
-                )
-                if not has_task_id:
-                    errors.append(
-                        f"{task_label} must provide a non-empty task identifier (task_id, task_concept_id, or id)"
-                    )
-
-                title = task.get("title")
-                label_value = task.get("label")
-                has_title = (
-                    isinstance(title, str) and bool(title.strip())
-                ) or (
-                    isinstance(label_value, str) and bool(label_value.strip())
-                )
-                if not has_title:
-                    errors.append(
-                        f"{task_label} must provide a non-empty title (title or label)"
-                    )
-
-                for field_name in (
-                    "status",
-                    "priority",
-                    "due_date",
-                    "assignee",
-                    "description",
-                ):
-                    field_value = task.get(field_name)
-                    if field_value is None:
-                        continue
-                    if not isinstance(field_value, str) or not field_value.strip():
-                        errors.append(
-                            f"{task_label}.{field_name} must be a non-empty string when provided"
-                        )
-
-                _validate_task_links(
-                    links=task.get("task_links"),
-                    label=f"{task_label}.task_links",
-                    errors=errors,
-                )
-        elif element_type == "kanban_view":
-            columns = payload.get("columns")
-            if not isinstance(columns, list) or not columns:
-                errors.append(f"{label}.payload.columns must be a non-empty list")
-                columns = []
-
-            valid_column_ids: set[str] = set()
-            for column_index, column in enumerate(columns):
-                column_label = f"{label}.payload.columns[{column_index}]"
-                if not isinstance(column, Mapping):
-                    errors.append(f"{column_label} must be a mapping")
-                    continue
-
-                column_id = column.get("column_id")
-                if not isinstance(column_id, str) or not column_id.strip():
-                    errors.append(f"{column_label}.column_id must be a non-empty string")
-                    continue
-                if column_id in valid_column_ids:
-                    errors.append(f"{column_label}.column_id must be unique")
-                    continue
-                valid_column_ids.add(column_id)
-
-                column_name = column.get("label")
-                if not isinstance(column_name, str) or not column_name.strip():
-                    errors.append(f"{column_label}.label must be a non-empty string")
-
-                order = column.get("order")
-                if order is not None and not isinstance(order, int):
-                    errors.append(
-                        f"{column_label}.order must be an integer when provided"
-                    )
-
-                wip_limit = column.get("wip_limit")
-                if wip_limit is not None and (
-                    not isinstance(wip_limit, int) or wip_limit <= 0
-                ):
-                    errors.append(
-                        f"{column_label}.wip_limit must be a positive integer when provided"
-                    )
-
-            cards = payload.get("cards")
-            if not isinstance(cards, list):
-                errors.append(f"{label}.payload.cards must be a list")
-                cards = []
-
-            seen_card_ids: set[str] = set()
-            for card_index, card in enumerate(cards):
-                card_label = f"{label}.payload.cards[{card_index}]"
-                if not isinstance(card, Mapping):
-                    errors.append(f"{card_label} must be a mapping")
-                    continue
-
-                card_id = card.get("card_id")
-                if not isinstance(card_id, str) or not card_id.strip():
-                    errors.append(f"{card_label}.card_id must be a non-empty string")
-                elif card_id in seen_card_ids:
-                    errors.append(f"{card_label}.card_id must be unique")
-                else:
-                    seen_card_ids.add(card_id)
-
-                title = card.get("title")
-                if not isinstance(title, str) or not title.strip():
-                    errors.append(f"{card_label}.title must be a non-empty string")
-
-                column_id = card.get("column_id")
-                if not isinstance(column_id, str) or not column_id.strip():
-                    errors.append(f"{card_label}.column_id must be a non-empty string")
-                elif valid_column_ids and column_id not in valid_column_ids:
-                    errors.append(
-                        f"{card_label}.column_id must reference a declared column"
-                    )
-
-                for field_name in ("priority", "assignee", "due_date", "description"):
-                    field_value = card.get(field_name)
-                    if field_value is None:
-                        continue
-                    if not isinstance(field_value, str) or not field_value.strip():
-                        errors.append(
-                            f"{card_label}.{field_name} must be a non-empty string when provided"
-                        )
-
-                _validate_task_links(
-                    links=card.get("task_links"),
-                    label=f"{card_label}.task_links",
-                    errors=errors,
-                )
-        elif element_type == "workflow_view":
-            nodes = payload.get("nodes")
-            if not isinstance(nodes, list) or not nodes:
-                errors.append(f"{label}.payload.nodes must be a non-empty list")
-                nodes = []
-
-            valid_node_ids: set[str] = set()
-            for node_index, node in enumerate(nodes):
-                node_label = f"{label}.payload.nodes[{node_index}]"
-                if not isinstance(node, Mapping):
-                    errors.append(f"{node_label} must be a mapping")
-                    continue
-                node_id = node.get("node_id")
-                if not isinstance(node_id, str) or not node_id.strip():
-                    errors.append(f"{node_label}.node_id must be a non-empty string")
-                    continue
-                valid_node_ids.add(node_id)
-
-                display_label = node.get("label")
-                if not isinstance(display_label, str) or not display_label.strip():
-                    errors.append(f"{node_label}.label must be a non-empty string")
-
-                status = node.get("status")
-                if status is not None and (
-                    not isinstance(status, str) or not status.strip()
-                ):
-                    errors.append(f"{node_label}.status must be a non-empty string when provided")
-                _validate_task_links(
-                    links=node.get("task_links"),
-                    label=f"{node_label}.task_links",
-                    errors=errors,
-                )
-
-            edges = payload.get("edges")
-            if edges is not None and not isinstance(edges, list):
-                errors.append(f"{label}.payload.edges must be a list when provided")
-                edges = []
-            if isinstance(edges, list):
-                for edge_index, edge in enumerate(edges):
-                    edge_label = f"{label}.payload.edges[{edge_index}]"
-                    if not isinstance(edge, Mapping):
-                        errors.append(f"{edge_label} must be a mapping")
-                        continue
-                    source_node_id = edge.get("source_node_id")
-                    target_node_id = edge.get("target_node_id")
-                    if not isinstance(source_node_id, str) or not source_node_id.strip():
-                        errors.append(
-                            f"{edge_label}.source_node_id must be a non-empty string"
-                        )
-                    elif valid_node_ids and source_node_id not in valid_node_ids:
-                        errors.append(
-                            f"{edge_label}.source_node_id must reference a declared node"
-                        )
-                    if not isinstance(target_node_id, str) or not target_node_id.strip():
-                        errors.append(
-                            f"{edge_label}.target_node_id must be a non-empty string"
-                        )
-                    elif valid_node_ids and target_node_id not in valid_node_ids:
-                        errors.append(
-                            f"{edge_label}.target_node_id must reference a declared node"
-                        )
+            continue
 
     return len(errors) == 0, errors
 
@@ -3177,6 +3220,98 @@ def _normalise_supplied_screen_relation_truth_states(
     return normalised, dropped_count
 
 
+def _normalise_supplied_screen_family(
+    raw_elements: Sequence[Mapping[str, Any]] | None,
+    *,
+    normaliser: Callable[
+        [Sequence[Mapping[str, Any]] | None], tuple[list[dict[str, Any]], int]
+    ],
+    reason_codes: list[str],
+    supplied_reason_code: str,
+    dropped_reason_code: str,
+) -> list[dict[str, Any]]:
+    normalised, dropped_count = normaliser(raw_elements)
+    if normalised:
+        reason_codes.append(supplied_reason_code)
+    if dropped_count:
+        reason_codes.append(dropped_reason_code)
+    return normalised
+
+
+def _build_structured_screen_specs(
+    *,
+    supplied_specs: Sequence[Mapping[str, Any]],
+    default_source: str,
+    index_key: str,
+    default_element_id_prefix: str,
+    default_intent: str,
+    default_constraints: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    structured_specs: list[dict[str, Any]] = []
+    for index, spec in enumerate(supplied_specs, start=1):
+        provenance = dict(spec.get("provenance") or {})
+        provenance.setdefault("source", default_source)
+        provenance.setdefault(index_key, index)
+        structured_specs.append(
+            {
+                "element_id": spec.get("element_id")
+                or f"{default_element_id_prefix}_{index}",
+                "order": spec.get("order"),
+                "intent": spec.get("intent") or default_intent,
+                "payload": spec.get("payload") or {},
+                "constraints": spec.get("constraints") or dict(default_constraints),
+                "provenance": provenance,
+            }
+        )
+    return structured_specs
+
+
+def _collect_explicit_structured_orders(
+    *spec_groups: Sequence[Mapping[str, Any]],
+) -> set[int]:
+    used_orders: set[int] = set()
+    for spec_group in spec_groups:
+        for spec in spec_group:
+            order = spec.get("order")
+            if isinstance(order, int):
+                used_orders.add(int(order))
+    return used_orders
+
+
+def _emit_structured_screen_elements(
+    *,
+    elements: list[dict[str, Any]],
+    specs: Sequence[Mapping[str, Any]],
+    element_type: str,
+    default_order_start: int,
+    used_ids: set[str],
+    used_orders: set[int],
+) -> None:
+    next_default_order = default_order_start
+    for spec in specs:
+        order = spec.get("order") if isinstance(spec.get("order"), int) else None
+        if order is None:
+            while next_default_order in used_orders:
+                next_default_order += 1
+            order = next_default_order
+            used_orders.add(order)
+            next_default_order += 1
+
+        element_id = _next_unique_element_id(str(spec["element_id"]), used_ids)
+        elements.append(
+            {
+                "element_id": element_id,
+                "element_type": element_type,
+                "channel": "screen",
+                "order": int(order),
+                "intent": str(spec["intent"]),
+                "payload": dict(spec["payload"]),
+                "constraints": dict(spec["constraints"]),
+                "provenance": dict(spec["provenance"]),
+            }
+        )
+
+
 def build_turn_display_elements(
     *,
     response_text: str | None,
@@ -3314,126 +3449,103 @@ def build_turn_display_elements(
             }
         )
 
-    supplied_screen_tables, supplied_tables_dropped = _normalise_supplied_screen_tables(
-        screen_table_elements
+    supplied_screen_tables = _normalise_supplied_screen_family(
+        screen_table_elements,
+        normaliser=_normalise_supplied_screen_tables,
+        reason_codes=reason_codes,
+        supplied_reason_code="screen_structured_tables_supplied",
+        dropped_reason_code="screen_structured_tables_invalid_dropped",
     )
-    if supplied_screen_tables:
-        reason_codes.append("screen_structured_tables_supplied")
-    if supplied_tables_dropped:
-        reason_codes.append("screen_structured_tables_invalid_dropped")
-
-    supplied_screen_workflows, supplied_workflows_dropped = (
-        _normalise_supplied_screen_workflows(screen_workflow_elements)
+    supplied_screen_workflows = _normalise_supplied_screen_family(
+        screen_workflow_elements,
+        normaliser=_normalise_supplied_screen_workflows,
+        reason_codes=reason_codes,
+        supplied_reason_code="screen_structured_workflows_supplied",
+        dropped_reason_code="screen_structured_workflows_invalid_dropped",
     )
-    if supplied_screen_workflows:
-        reason_codes.append("screen_structured_workflows_supplied")
-    if supplied_workflows_dropped:
-        reason_codes.append("screen_structured_workflows_invalid_dropped")
-
-    supplied_screen_task_views, supplied_task_views_dropped = (
-        _normalise_supplied_screen_task_views(screen_task_view_elements)
+    supplied_screen_task_views = _normalise_supplied_screen_family(
+        screen_task_view_elements,
+        normaliser=_normalise_supplied_screen_task_views,
+        reason_codes=reason_codes,
+        supplied_reason_code="screen_structured_task_views_supplied",
+        dropped_reason_code="screen_structured_task_views_invalid_dropped",
     )
-    if supplied_screen_task_views:
-        reason_codes.append("screen_structured_task_views_supplied")
-    if supplied_task_views_dropped:
-        reason_codes.append("screen_structured_task_views_invalid_dropped")
-
-    supplied_screen_calendar_views, supplied_calendar_views_dropped = (
-        _normalise_supplied_screen_calendar_views(screen_calendar_elements)
+    supplied_screen_calendar_views = _normalise_supplied_screen_family(
+        screen_calendar_elements,
+        normaliser=_normalise_supplied_screen_calendar_views,
+        reason_codes=reason_codes,
+        supplied_reason_code="screen_structured_calendar_views_supplied",
+        dropped_reason_code="screen_structured_calendar_views_invalid_dropped",
     )
-    if supplied_screen_calendar_views:
-        reason_codes.append("screen_structured_calendar_views_supplied")
-    if supplied_calendar_views_dropped:
-        reason_codes.append("screen_structured_calendar_views_invalid_dropped")
-
-    supplied_screen_chart_views, supplied_chart_views_dropped = (
-        _normalise_supplied_screen_chart_views(screen_chart_elements)
+    supplied_screen_chart_views = _normalise_supplied_screen_family(
+        screen_chart_elements,
+        normaliser=_normalise_supplied_screen_chart_views,
+        reason_codes=reason_codes,
+        supplied_reason_code="screen_structured_chart_views_supplied",
+        dropped_reason_code="screen_structured_chart_views_invalid_dropped",
     )
-    if supplied_screen_chart_views:
-        reason_codes.append("screen_structured_chart_views_supplied")
-    if supplied_chart_views_dropped:
-        reason_codes.append("screen_structured_chart_views_invalid_dropped")
-
-    supplied_screen_location_views, supplied_location_views_dropped = (
-        _normalise_supplied_screen_location_views(screen_location_elements)
+    supplied_screen_location_views = _normalise_supplied_screen_family(
+        screen_location_elements,
+        normaliser=_normalise_supplied_screen_location_views,
+        reason_codes=reason_codes,
+        supplied_reason_code="screen_structured_location_views_supplied",
+        dropped_reason_code="screen_structured_location_views_invalid_dropped",
     )
-    if supplied_screen_location_views:
-        reason_codes.append("screen_structured_location_views_supplied")
-    if supplied_location_views_dropped:
-        reason_codes.append("screen_structured_location_views_invalid_dropped")
-
-    supplied_screen_document_views, supplied_document_views_dropped = (
-        _normalise_supplied_screen_document_views(screen_document_elements)
+    supplied_screen_document_views = _normalise_supplied_screen_family(
+        screen_document_elements,
+        normaliser=_normalise_supplied_screen_document_views,
+        reason_codes=reason_codes,
+        supplied_reason_code="screen_structured_document_views_supplied",
+        dropped_reason_code="screen_structured_document_views_invalid_dropped",
     )
-    if supplied_screen_document_views:
-        reason_codes.append("screen_structured_document_views_supplied")
-    if supplied_document_views_dropped:
-        reason_codes.append("screen_structured_document_views_invalid_dropped")
-
-    supplied_screen_kanban_views, supplied_kanban_views_dropped = (
-        _normalise_supplied_screen_kanban_views(screen_kanban_elements)
+    supplied_screen_kanban_views = _normalise_supplied_screen_family(
+        screen_kanban_elements,
+        normaliser=_normalise_supplied_screen_kanban_views,
+        reason_codes=reason_codes,
+        supplied_reason_code="screen_structured_kanban_views_supplied",
+        dropped_reason_code="screen_structured_kanban_views_invalid_dropped",
     )
-    if supplied_screen_kanban_views:
-        reason_codes.append("screen_structured_kanban_views_supplied")
-    if supplied_kanban_views_dropped:
-        reason_codes.append("screen_structured_kanban_views_invalid_dropped")
-
-    supplied_screen_timelines, supplied_timelines_dropped = (
-        _normalise_supplied_screen_timelines(screen_timeline_elements)
+    supplied_screen_timelines = _normalise_supplied_screen_family(
+        screen_timeline_elements,
+        normaliser=_normalise_supplied_screen_timelines,
+        reason_codes=reason_codes,
+        supplied_reason_code="screen_structured_timelines_supplied",
+        dropped_reason_code="screen_structured_timelines_invalid_dropped",
     )
-    if supplied_screen_timelines:
-        reason_codes.append("screen_structured_timelines_supplied")
-    if supplied_timelines_dropped:
-        reason_codes.append("screen_structured_timelines_invalid_dropped")
-
-    supplied_screen_hierarchy_views, supplied_hierarchy_views_dropped = (
-        _normalise_supplied_screen_hierarchy_views(screen_hierarchy_elements)
+    supplied_screen_hierarchy_views = _normalise_supplied_screen_family(
+        screen_hierarchy_elements,
+        normaliser=_normalise_supplied_screen_hierarchy_views,
+        reason_codes=reason_codes,
+        supplied_reason_code="screen_structured_hierarchy_views_supplied",
+        dropped_reason_code="screen_structured_hierarchy_views_invalid_dropped",
     )
-    if supplied_screen_hierarchy_views:
-        reason_codes.append("screen_structured_hierarchy_views_supplied")
-    if supplied_hierarchy_views_dropped:
-        reason_codes.append("screen_structured_hierarchy_views_invalid_dropped")
-
-    supplied_screen_relation_graph_views, supplied_relation_graph_views_dropped = (
-        _normalise_supplied_screen_relation_graph_views(
-            screen_relation_graph_elements
-        )
+    supplied_screen_relation_graph_views = _normalise_supplied_screen_family(
+        screen_relation_graph_elements,
+        normaliser=_normalise_supplied_screen_relation_graph_views,
+        reason_codes=reason_codes,
+        supplied_reason_code="screen_structured_relation_graph_views_supplied",
+        dropped_reason_code="screen_structured_relation_graph_views_invalid_dropped",
     )
-    if supplied_screen_relation_graph_views:
-        reason_codes.append("screen_structured_relation_graph_views_supplied")
-    if supplied_relation_graph_views_dropped:
-        reason_codes.append("screen_structured_relation_graph_views_invalid_dropped")
-
-    supplied_screen_relation_truth_states, supplied_relation_truth_states_dropped = (
-        _normalise_supplied_screen_relation_truth_states(
-            screen_relation_truth_state_elements
-        )
+    supplied_screen_relation_truth_states = _normalise_supplied_screen_family(
+        screen_relation_truth_state_elements,
+        normaliser=_normalise_supplied_screen_relation_truth_states,
+        reason_codes=reason_codes,
+        supplied_reason_code="screen_structured_relation_truth_states_supplied",
+        dropped_reason_code="screen_structured_relation_truth_states_invalid_dropped",
     )
-    if supplied_screen_relation_truth_states:
-        reason_codes.append("screen_structured_relation_truth_states_supplied")
-    if supplied_relation_truth_states_dropped:
-        reason_codes.append("screen_structured_relation_truth_states_invalid_dropped")
 
-    table_specs: list[dict[str, Any]] = []
-    for index, spec in enumerate(supplied_screen_tables, start=1):
-        provenance = dict(spec.get("provenance") or {})
-        provenance.setdefault("source", "screen_structured_table")
-        provenance.setdefault("table_index", index)
-        table_specs.append(
-            {
-                "element_id": spec.get("element_id") or f"screen_structured_table_{index}",
-                "order": spec.get("order"),
-                "intent": spec.get("intent") or "structured_tabular_view",
-                "payload": spec.get("payload") or {},
-                "constraints": spec.get("constraints")
-                or {
-                    "supports_sort": True,
-                    "supports_filter": True,
-                    "supports_pagination": True,
-                },
-                "provenance": provenance,
-            }
-        )
+    table_specs = _build_structured_screen_specs(
+        supplied_specs=supplied_screen_tables,
+        default_source="screen_structured_table",
+        index_key="table_index",
+        default_element_id_prefix="screen_structured_table",
+        default_intent="structured_tabular_view",
+        default_constraints={
+            "supports_sort": True,
+            "supports_filter": True,
+            "supports_pagination": True,
+        },
+    )
 
     markdown_tables = extract_markdown_tables(effective_screen)
     for index, table_payload in enumerate(markdown_tables, start=1):
@@ -3458,545 +3570,243 @@ def build_turn_display_elements(
     if markdown_tables:
         reason_codes.append("screen_markdown_tables_detected")
 
-    workflow_specs: list[dict[str, Any]] = []
-    for index, spec in enumerate(supplied_screen_workflows, start=1):
-        provenance = dict(spec.get("provenance") or {})
-        provenance.setdefault("source", "screen_structured_workflow")
-        provenance.setdefault("workflow_index", index)
-        workflow_specs.append(
-            {
-                "element_id": spec.get("element_id")
-                or f"screen_structured_workflow_{index}",
-                "order": spec.get("order"),
-                "intent": spec.get("intent") or "structured_workflow_view",
-                "payload": spec.get("payload") or {},
-                "constraints": spec.get("constraints")
-                or {
-                    "supports_node_links": True,
-                    "supports_task_navigation": True,
-                },
-                "provenance": provenance,
-            }
-        )
+    workflow_specs = _build_structured_screen_specs(
+        supplied_specs=supplied_screen_workflows,
+        default_source="screen_structured_workflow",
+        index_key="workflow_index",
+        default_element_id_prefix="screen_structured_workflow",
+        default_intent="structured_workflow_view",
+        default_constraints={
+            "supports_node_links": True,
+            "supports_task_navigation": True,
+        },
+    )
+    task_view_specs = _build_structured_screen_specs(
+        supplied_specs=supplied_screen_task_views,
+        default_source="screen_structured_task_view",
+        index_key="task_view_index",
+        default_element_id_prefix="screen_structured_task_view",
+        default_intent="structured_task_view",
+        default_constraints={
+            "supports_task_links": True,
+            "supports_status_badges": True,
+        },
+    )
+    calendar_specs = _build_structured_screen_specs(
+        supplied_specs=supplied_screen_calendar_views,
+        default_source="screen_structured_calendar_view",
+        index_key="calendar_index",
+        default_element_id_prefix="screen_structured_calendar_view",
+        default_intent="structured_calendar_view",
+        default_constraints={
+            "supports_task_links": True,
+            "supports_granularity_switch": True,
+        },
+    )
+    chart_specs = _build_structured_screen_specs(
+        supplied_specs=supplied_screen_chart_views,
+        default_source="screen_structured_chart_view",
+        index_key="chart_view_index",
+        default_element_id_prefix="screen_structured_chart_view",
+        default_intent="structured_chart_view",
+        default_constraints={
+            "supports_legend_toggle": True,
+            "supports_series_comparison": True,
+        },
+    )
 
-    task_view_specs: list[dict[str, Any]] = []
-    for index, spec in enumerate(supplied_screen_task_views, start=1):
-        provenance = dict(spec.get("provenance") or {})
-        provenance.setdefault("source", "screen_structured_task_view")
-        provenance.setdefault("task_view_index", index)
-        task_view_specs.append(
-            {
-                "element_id": spec.get("element_id")
-                or f"screen_structured_task_view_{index}",
-                "order": spec.get("order"),
-                "intent": spec.get("intent") or "structured_task_view",
-                "payload": spec.get("payload") or {},
-                "constraints": spec.get("constraints")
-                or {
-                    "supports_task_links": True,
-                    "supports_status_badges": True,
-                },
-                "provenance": provenance,
-            }
-        )
-
-    calendar_specs: list[dict[str, Any]] = []
-    for index, spec in enumerate(supplied_screen_calendar_views, start=1):
-        provenance = dict(spec.get("provenance") or {})
-        provenance.setdefault("source", "screen_structured_calendar_view")
-        provenance.setdefault("calendar_index", index)
-        calendar_specs.append(
-            {
-                "element_id": spec.get("element_id")
-                or f"screen_structured_calendar_view_{index}",
-                "order": spec.get("order"),
-                "intent": spec.get("intent") or "structured_calendar_view",
-                "payload": spec.get("payload") or {},
-                "constraints": spec.get("constraints")
-                or {
-                    "supports_task_links": True,
-                    "supports_granularity_switch": True,
-                },
-                "provenance": provenance,
-            }
-        )
-
-    chart_specs: list[dict[str, Any]] = []
-    for index, spec in enumerate(supplied_screen_chart_views, start=1):
-        provenance = dict(spec.get("provenance") or {})
-        provenance.setdefault("source", "screen_structured_chart_view")
-        provenance.setdefault("chart_view_index", index)
-        chart_specs.append(
-            {
-                "element_id": spec.get("element_id")
-                or f"screen_structured_chart_view_{index}",
-                "order": spec.get("order"),
-                "intent": spec.get("intent") or "structured_chart_view",
-                "payload": spec.get("payload") or {},
-                "constraints": spec.get("constraints")
-                or {
-                    "supports_legend_toggle": True,
-                    "supports_series_comparison": True,
-                },
-                "provenance": provenance,
-            }
-        )
-
-    location_specs: list[dict[str, Any]] = []
-    for index, spec in enumerate(supplied_screen_location_views, start=1):
-        provenance = dict(spec.get("provenance") or {})
-        provenance.setdefault("source", "screen_structured_location_view")
-        provenance.setdefault("location_view_index", index)
-        location_specs.append(
-            {
-                "element_id": spec.get("element_id")
-                or f"screen_structured_location_view_{index}",
-                "order": spec.get("order"),
-                "intent": spec.get("intent") or "structured_location_view",
-                "payload": spec.get("payload") or {},
-                "constraints": spec.get("constraints")
-                or {
-                    "supports_geospatial_plot": True,
-                    "supports_address_fallback": True,
-                    "supports_external_map_links": True,
-                },
-                "provenance": provenance,
-            }
-        )
-
-    document_specs: list[dict[str, Any]] = []
-    for index, spec in enumerate(supplied_screen_document_views, start=1):
-        provenance = dict(spec.get("provenance") or {})
-        provenance.setdefault("source", "screen_structured_document_view")
-        provenance.setdefault("document_view_index", index)
-        document_specs.append(
-            {
-                "element_id": spec.get("element_id")
-                or f"screen_structured_document_view_{index}",
-                "order": spec.get("order"),
-                "intent": spec.get("intent") or "structured_document_view",
-                "payload": spec.get("payload") or {},
-                "constraints": spec.get("constraints")
-                or {
-                    "supports_section_links": True,
-                    "supports_citation_links": True,
-                    "supports_excerpt_expand": True,
-                },
-                "provenance": provenance,
-            }
-        )
-
-    kanban_specs: list[dict[str, Any]] = []
-    for index, spec in enumerate(supplied_screen_kanban_views, start=1):
-        provenance = dict(spec.get("provenance") or {})
-        provenance.setdefault("source", "screen_structured_kanban_view")
-        provenance.setdefault("kanban_index", index)
-        kanban_specs.append(
-            {
-                "element_id": spec.get("element_id")
-                or f"screen_structured_kanban_view_{index}",
-                "order": spec.get("order"),
-                "intent": spec.get("intent") or "structured_kanban_view",
-                "payload": spec.get("payload") or {},
-                "constraints": spec.get("constraints")
-                or {
-                    "supports_column_grouping": True,
-                    "supports_task_links": True,
-                },
-                "provenance": provenance,
-            }
-        )
-
-    timeline_specs: list[dict[str, Any]] = []
-    for index, spec in enumerate(supplied_screen_timelines, start=1):
-        provenance = dict(spec.get("provenance") or {})
-        provenance.setdefault("source", "screen_structured_timeline")
-        provenance.setdefault("timeline_index", index)
-        timeline_specs.append(
-            {
-                "element_id": spec.get("element_id")
-                or f"screen_structured_timeline_{index}",
-                "order": spec.get("order"),
-                "intent": spec.get("intent") or "structured_timeline_view",
-                "payload": spec.get("payload") or {},
-                "constraints": spec.get("constraints")
-                or {
-                    "supports_item_links": True,
-                    "supports_relative_time": True,
-                },
-                "provenance": provenance,
-            }
-        )
-
-    hierarchy_specs: list[dict[str, Any]] = []
-    for index, spec in enumerate(supplied_screen_hierarchy_views, start=1):
-        provenance = dict(spec.get("provenance") or {})
-        provenance.setdefault("source", "screen_structured_hierarchy_view")
-        provenance.setdefault("hierarchy_index", index)
-        hierarchy_specs.append(
-            {
-                "element_id": spec.get("element_id")
-                or f"screen_structured_hierarchy_view_{index}",
-                "order": spec.get("order"),
-                "intent": spec.get("intent") or "hierarchy_view",
-                "payload": spec.get("payload") or {},
-                "constraints": spec.get("constraints")
-                or {
-                    "supports_neighbourhood_toggle": True,
-                    "supports_focus_navigation": True,
-                },
-                "provenance": provenance,
-            }
-        )
-
-    relation_graph_specs: list[dict[str, Any]] = []
-    for index, spec in enumerate(supplied_screen_relation_graph_views, start=1):
-        provenance = dict(spec.get("provenance") or {})
-        provenance.setdefault("source", "screen_structured_relation_graph_view")
-        provenance.setdefault("relation_graph_index", index)
-        relation_graph_specs.append(
-            {
-                "element_id": spec.get("element_id")
-                or f"screen_structured_relation_graph_view_{index}",
-                "order": spec.get("order"),
-                "intent": spec.get("intent") or "relation_graph_view",
-                "payload": spec.get("payload") or {},
-                "constraints": spec.get("constraints")
-                or {
-                    "supports_pan_zoom": True,
-                    "supports_clickthrough": True,
-                },
-                "provenance": provenance,
-            }
-        )
-
-    relation_truth_state_specs: list[dict[str, Any]] = []
-    for index, spec in enumerate(supplied_screen_relation_truth_states, start=1):
-        provenance = dict(spec.get("provenance") or {})
-        provenance.setdefault("source", "screen_structured_relation_truth_state")
-        provenance.setdefault("relation_truth_state_index", index)
-        relation_truth_state_specs.append(
-            {
-                "element_id": spec.get("element_id")
-                or f"screen_structured_relation_truth_state_{index}",
-                "order": spec.get("order"),
-                "intent": spec.get("intent") or "truth_state_relation_view",
-                "payload": spec.get("payload") or {},
-                "constraints": spec.get("constraints")
-                or {
-                    "supports_compact_cartouches": True,
-                    "supports_assertion_variants": True,
-                },
-                "provenance": provenance,
-            }
-        )
+    location_specs = _build_structured_screen_specs(
+        supplied_specs=supplied_screen_location_views,
+        default_source="screen_structured_location_view",
+        index_key="location_view_index",
+        default_element_id_prefix="screen_structured_location_view",
+        default_intent="structured_location_view",
+        default_constraints={
+            "supports_geospatial_plot": True,
+            "supports_address_fallback": True,
+            "supports_external_map_links": True,
+        },
+    )
+    document_specs = _build_structured_screen_specs(
+        supplied_specs=supplied_screen_document_views,
+        default_source="screen_structured_document_view",
+        index_key="document_view_index",
+        default_element_id_prefix="screen_structured_document_view",
+        default_intent="structured_document_view",
+        default_constraints={
+            "supports_section_links": True,
+            "supports_citation_links": True,
+            "supports_excerpt_expand": True,
+        },
+    )
+    kanban_specs = _build_structured_screen_specs(
+        supplied_specs=supplied_screen_kanban_views,
+        default_source="screen_structured_kanban_view",
+        index_key="kanban_index",
+        default_element_id_prefix="screen_structured_kanban_view",
+        default_intent="structured_kanban_view",
+        default_constraints={
+            "supports_column_grouping": True,
+            "supports_task_links": True,
+        },
+    )
+    timeline_specs = _build_structured_screen_specs(
+        supplied_specs=supplied_screen_timelines,
+        default_source="screen_structured_timeline",
+        index_key="timeline_index",
+        default_element_id_prefix="screen_structured_timeline",
+        default_intent="structured_timeline_view",
+        default_constraints={
+            "supports_item_links": True,
+            "supports_relative_time": True,
+        },
+    )
+    hierarchy_specs = _build_structured_screen_specs(
+        supplied_specs=supplied_screen_hierarchy_views,
+        default_source="screen_structured_hierarchy_view",
+        index_key="hierarchy_index",
+        default_element_id_prefix="screen_structured_hierarchy_view",
+        default_intent="hierarchy_view",
+        default_constraints={
+            "supports_neighbourhood_toggle": True,
+            "supports_focus_navigation": True,
+        },
+    )
+    relation_graph_specs = _build_structured_screen_specs(
+        supplied_specs=supplied_screen_relation_graph_views,
+        default_source="screen_structured_relation_graph_view",
+        index_key="relation_graph_index",
+        default_element_id_prefix="screen_structured_relation_graph_view",
+        default_intent="relation_graph_view",
+        default_constraints={
+            "supports_pan_zoom": True,
+            "supports_clickthrough": True,
+        },
+    )
+    relation_truth_state_specs = _build_structured_screen_specs(
+        supplied_specs=supplied_screen_relation_truth_states,
+        default_source="screen_structured_relation_truth_state",
+        index_key="relation_truth_state_index",
+        default_element_id_prefix="screen_structured_relation_truth_state",
+        default_intent="truth_state_relation_view",
+        default_constraints={
+            "supports_compact_cartouches": True,
+            "supports_assertion_variants": True,
+        },
+    )
 
     used_ids: set[str] = set()
-    used_orders = {
-        int(spec["order"])
-        for spec in [
-            *table_specs,
-            *workflow_specs,
-            *task_view_specs,
-            *chart_specs,
-            *calendar_specs,
-            *location_specs,
-            *document_specs,
-            *kanban_specs,
-            *timeline_specs,
-            *hierarchy_specs,
-            *relation_graph_specs,
-            *relation_truth_state_specs,
-        ]
-        if isinstance(spec.get("order"), int)
-    }
-    next_table_order = 16
-    for spec in table_specs:
-        order = spec.get("order") if isinstance(spec.get("order"), int) else None
-        if order is None:
-            while next_table_order in used_orders:
-                next_table_order += 1
-            order = next_table_order
-            used_orders.add(order)
-            next_table_order += 1
+    used_orders = _collect_explicit_structured_orders(
+        table_specs,
+        workflow_specs,
+        task_view_specs,
+        chart_specs,
+        calendar_specs,
+        location_specs,
+        document_specs,
+        kanban_specs,
+        timeline_specs,
+        hierarchy_specs,
+        relation_graph_specs,
+        relation_truth_state_specs,
+    )
+    _emit_structured_screen_elements(
+        elements=elements,
+        specs=table_specs,
+        element_type="table",
+        default_order_start=16,
+        used_ids=used_ids,
+        used_orders=used_orders,
+    )
+    _emit_structured_screen_elements(
+        elements=elements,
+        specs=timeline_specs,
+        element_type="timeline",
+        default_order_start=36,
+        used_ids=used_ids,
+        used_orders=used_orders,
+    )
+    _emit_structured_screen_elements(
+        elements=elements,
+        specs=chart_specs,
+        element_type="chart_view",
+        default_order_start=37,
+        used_ids=used_ids,
+        used_orders=used_orders,
+    )
+    _emit_structured_screen_elements(
+        elements=elements,
+        specs=calendar_specs,
+        element_type="calendar_view",
+        default_order_start=38,
+        used_ids=used_ids,
+        used_orders=used_orders,
+    )
+    _emit_structured_screen_elements(
+        elements=elements,
+        specs=location_specs,
+        element_type="location_view",
+        default_order_start=39,
+        used_ids=used_ids,
+        used_orders=used_orders,
+    )
+    _emit_structured_screen_elements(
+        elements=elements,
+        specs=document_specs,
+        element_type="document_view",
+        default_order_start=40,
+        used_ids=used_ids,
+        used_orders=used_orders,
+    )
 
-        element_id = _next_unique_element_id(str(spec["element_id"]), used_ids)
-        elements.append(
-            {
-                "element_id": element_id,
-                "element_type": "table",
-                "channel": "screen",
-                "order": int(order),
-                "intent": str(spec["intent"]),
-                "payload": dict(spec["payload"]),
-                "constraints": dict(spec["constraints"]),
-                "provenance": dict(spec["provenance"]),
-            }
-        )
-
-    next_timeline_order = 36
-    for spec in timeline_specs:
-        order = spec.get("order") if isinstance(spec.get("order"), int) else None
-        if order is None:
-            while next_timeline_order in used_orders:
-                next_timeline_order += 1
-            order = next_timeline_order
-            used_orders.add(order)
-            next_timeline_order += 1
-
-        element_id = _next_unique_element_id(str(spec["element_id"]), used_ids)
-        elements.append(
-            {
-                "element_id": element_id,
-                "element_type": "timeline",
-                "channel": "screen",
-                "order": int(order),
-                "intent": str(spec["intent"]),
-                "payload": dict(spec["payload"]),
-                "constraints": dict(spec["constraints"]),
-                "provenance": dict(spec["provenance"]),
-            }
-        )
-
-    next_chart_order = 37
-    for spec in chart_specs:
-        order = spec.get("order") if isinstance(spec.get("order"), int) else None
-        if order is None:
-            while next_chart_order in used_orders:
-                next_chart_order += 1
-            order = next_chart_order
-            used_orders.add(order)
-            next_chart_order += 1
-
-        element_id = _next_unique_element_id(str(spec["element_id"]), used_ids)
-        elements.append(
-            {
-                "element_id": element_id,
-                "element_type": "chart_view",
-                "channel": "screen",
-                "order": int(order),
-                "intent": str(spec["intent"]),
-                "payload": dict(spec["payload"]),
-                "constraints": dict(spec["constraints"]),
-                "provenance": dict(spec["provenance"]),
-            }
-        )
-
-    next_calendar_order = 38
-    for spec in calendar_specs:
-        order = spec.get("order") if isinstance(spec.get("order"), int) else None
-        if order is None:
-            while next_calendar_order in used_orders:
-                next_calendar_order += 1
-            order = next_calendar_order
-            used_orders.add(order)
-            next_calendar_order += 1
-
-        element_id = _next_unique_element_id(str(spec["element_id"]), used_ids)
-        elements.append(
-            {
-                "element_id": element_id,
-                "element_type": "calendar_view",
-                "channel": "screen",
-                "order": int(order),
-                "intent": str(spec["intent"]),
-                "payload": dict(spec["payload"]),
-                "constraints": dict(spec["constraints"]),
-                "provenance": dict(spec["provenance"]),
-            }
-        )
-
-    next_location_order = 39
-    for spec in location_specs:
-        order = spec.get("order") if isinstance(spec.get("order"), int) else None
-        if order is None:
-            while next_location_order in used_orders:
-                next_location_order += 1
-            order = next_location_order
-            used_orders.add(order)
-            next_location_order += 1
-
-        element_id = _next_unique_element_id(str(spec["element_id"]), used_ids)
-        elements.append(
-            {
-                "element_id": element_id,
-                "element_type": "location_view",
-                "channel": "screen",
-                "order": int(order),
-                "intent": str(spec["intent"]),
-                "payload": dict(spec["payload"]),
-                "constraints": dict(spec["constraints"]),
-                "provenance": dict(spec["provenance"]),
-            }
-        )
-
-    next_document_order = 40
-    for spec in document_specs:
-        order = spec.get("order") if isinstance(spec.get("order"), int) else None
-        if order is None:
-            while next_document_order in used_orders:
-                next_document_order += 1
-            order = next_document_order
-            used_orders.add(order)
-            next_document_order += 1
-
-        element_id = _next_unique_element_id(str(spec["element_id"]), used_ids)
-        elements.append(
-            {
-                "element_id": element_id,
-                "element_type": "document_view",
-                "channel": "screen",
-                "order": int(order),
-                "intent": str(spec["intent"]),
-                "payload": dict(spec["payload"]),
-                "constraints": dict(spec["constraints"]),
-                "provenance": dict(spec["provenance"]),
-            }
-        )
-
-    next_workflow_order = 26
-    for spec in workflow_specs:
-        order = spec.get("order") if isinstance(spec.get("order"), int) else None
-        if order is None:
-            while next_workflow_order in used_orders:
-                next_workflow_order += 1
-            order = next_workflow_order
-            used_orders.add(order)
-            next_workflow_order += 1
-
-        element_id = _next_unique_element_id(str(spec["element_id"]), used_ids)
-        elements.append(
-            {
-                "element_id": element_id,
-                "element_type": "workflow_view",
-                "channel": "screen",
-                "order": int(order),
-                "intent": str(spec["intent"]),
-                "payload": dict(spec["payload"]),
-                "constraints": dict(spec["constraints"]),
-                "provenance": dict(spec["provenance"]),
-            }
-        )
-
-    next_task_view_order = 31
-    for spec in task_view_specs:
-        order = spec.get("order") if isinstance(spec.get("order"), int) else None
-        if order is None:
-            while next_task_view_order in used_orders:
-                next_task_view_order += 1
-            order = next_task_view_order
-            used_orders.add(order)
-            next_task_view_order += 1
-
-        element_id = _next_unique_element_id(str(spec["element_id"]), used_ids)
-        elements.append(
-            {
-                "element_id": element_id,
-                "element_type": "task_view",
-                "channel": "screen",
-                "order": int(order),
-                "intent": str(spec["intent"]),
-                "payload": dict(spec["payload"]),
-                "constraints": dict(spec["constraints"]),
-                "provenance": dict(spec["provenance"]),
-            }
-        )
-
-    next_kanban_order = 33
-    for spec in kanban_specs:
-        order = spec.get("order") if isinstance(spec.get("order"), int) else None
-        if order is None:
-            while next_kanban_order in used_orders:
-                next_kanban_order += 1
-            order = next_kanban_order
-            used_orders.add(order)
-            next_kanban_order += 1
-
-        element_id = _next_unique_element_id(str(spec["element_id"]), used_ids)
-        elements.append(
-            {
-                "element_id": element_id,
-                "element_type": "kanban_view",
-                "channel": "screen",
-                "order": int(order),
-                "intent": str(spec["intent"]),
-                "payload": dict(spec["payload"]),
-                "constraints": dict(spec["constraints"]),
-                "provenance": dict(spec["provenance"]),
-            }
-        )
-
-    next_relation_graph_order = 43
-    for spec in relation_graph_specs:
-        order = spec.get("order") if isinstance(spec.get("order"), int) else None
-        if order is None:
-            while next_relation_graph_order in used_orders:
-                next_relation_graph_order += 1
-            order = next_relation_graph_order
-            used_orders.add(order)
-            next_relation_graph_order += 1
-
-        element_id = _next_unique_element_id(str(spec["element_id"]), used_ids)
-        elements.append(
-            {
-                "element_id": element_id,
-                "element_type": "relation_graph_view",
-                "channel": "screen",
-                "order": int(order),
-                "intent": str(spec["intent"]),
-                "payload": dict(spec["payload"]),
-                "constraints": dict(spec["constraints"]),
-                "provenance": dict(spec["provenance"]),
-            }
-        )
-
-    next_hierarchy_order = 42
-    for spec in hierarchy_specs:
-        order = spec.get("order") if isinstance(spec.get("order"), int) else None
-        if order is None:
-            while next_hierarchy_order in used_orders:
-                next_hierarchy_order += 1
-            order = next_hierarchy_order
-            used_orders.add(order)
-            next_hierarchy_order += 1
-
-        element_id = _next_unique_element_id(str(spec["element_id"]), used_ids)
-        elements.append(
-            {
-                "element_id": element_id,
-                "element_type": "hierarchy_view",
-                "channel": "screen",
-                "order": int(order),
-                "intent": str(spec["intent"]),
-                "payload": dict(spec["payload"]),
-                "constraints": dict(spec["constraints"]),
-                "provenance": dict(spec["provenance"]),
-            }
-        )
-
-    next_relation_truth_state_order = 41
-    for spec in relation_truth_state_specs:
-        order = spec.get("order") if isinstance(spec.get("order"), int) else None
-        if order is None:
-            while next_relation_truth_state_order in used_orders:
-                next_relation_truth_state_order += 1
-            order = next_relation_truth_state_order
-            used_orders.add(order)
-            next_relation_truth_state_order += 1
-
-        element_id = _next_unique_element_id(str(spec["element_id"]), used_ids)
-        elements.append(
-            {
-                "element_id": element_id,
-                "element_type": "relation_truth_state",
-                "channel": "screen",
-                "order": int(order),
-                "intent": str(spec["intent"]),
-                "payload": dict(spec["payload"]),
-                "constraints": dict(spec["constraints"]),
-                "provenance": dict(spec["provenance"]),
-            }
-        )
+    _emit_structured_screen_elements(
+        elements=elements,
+        specs=workflow_specs,
+        element_type="workflow_view",
+        default_order_start=26,
+        used_ids=used_ids,
+        used_orders=used_orders,
+    )
+    _emit_structured_screen_elements(
+        elements=elements,
+        specs=task_view_specs,
+        element_type="task_view",
+        default_order_start=31,
+        used_ids=used_ids,
+        used_orders=used_orders,
+    )
+    _emit_structured_screen_elements(
+        elements=elements,
+        specs=kanban_specs,
+        element_type="kanban_view",
+        default_order_start=33,
+        used_ids=used_ids,
+        used_orders=used_orders,
+    )
+    _emit_structured_screen_elements(
+        elements=elements,
+        specs=relation_graph_specs,
+        element_type="relation_graph_view",
+        default_order_start=43,
+        used_ids=used_ids,
+        used_orders=used_orders,
+    )
+    _emit_structured_screen_elements(
+        elements=elements,
+        specs=hierarchy_specs,
+        element_type="hierarchy_view",
+        default_order_start=42,
+        used_ids=used_ids,
+        used_orders=used_orders,
+    )
+    _emit_structured_screen_elements(
+        elements=elements,
+        specs=relation_truth_state_specs,
+        element_type="relation_truth_state",
+        default_order_start=41,
+        used_ids=used_ids,
+        used_orders=used_orders,
+    )
 
     # Emit elements in the same deterministic order signalled by `order`.
     # This keeps downstream renderers and regressions aligned on one sequence.
