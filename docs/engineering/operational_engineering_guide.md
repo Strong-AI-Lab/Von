@@ -173,7 +173,24 @@ See:
 - `docs/engineering/atlassian_mcp_recovery_runbook.md`
 - `docs/engineering/jira_components_taxonomy.md`
 
-### 6.3 Conversation-scoped evidence tools
+### 6.3 Conversation-turn context authority
+
+- Treat the accumulated turn context as a shared runtime object, not as a thin
+  prompt fragment rebuilt independently for each stage.
+- Default to generous shared context for selector, planner, tool-use, and
+  response stages. If a stage needs extra instructions or evidence, add them.
+  If a stage truly needs a reduced context, justify and validate that
+  reduction explicitly.
+- Do not confuse debug metadata such as concept references, prompt skeletons,
+  or stored descriptors with the actual messages sent to the model.
+- When a stage adds or removes context, emit machine-readable lineage telemetry
+  that captures the base context summary, the stage-local delta, and the final
+  effective context.
+- If behaviour differs between a direct-response path and a supervised
+  workflow-turn path, inspect whether they are building different effective
+  contexts before patching routing or answer logic.
+
+### 6.4 Conversation-scoped evidence tools
 
 - For conversation-scoped MCP read tools, do not expose raw `session_id`
   fields in model-facing `mcp_access` descriptors when an authoritative
@@ -191,7 +208,7 @@ See:
   registry and regenerate `src/backend/mcp_server/vontology_mcp.json` so the
   stdio surface, manifest, and handler contracts stay in sync.
 
-### 6.4 Scheduled monitoring workflows
+### 6.5 Scheduled monitoring workflows
 
 - When adding recurring monitoring or regression detection for workflow or turn
   surfaces, prefer the full authority pattern:
@@ -205,7 +222,7 @@ See:
   fail-closed enforcement. Do not encode the monitoring policy itself in Python
   cron-like logic if a durable workflow can express it.
 
-### 6.5 GitHub
+### 6.6 GitHub
 
 - Prefer Von's internal GitHub MCP proxy and its guardrails for GitHub access.
 - Keep write behaviour fail-closed and allow-list aware.
@@ -214,7 +231,7 @@ See:
 
 - `docs/engineering/github_internal_mcp_runbook.md`
 
-### 6.6 Vontology and MCP field notes
+### 6.7 Vontology and MCP field notes
 
 - Prefer `upsert_singleton_text_relation` for canonical singleton text
   predicates rather than repeatedly appending parallel values.
@@ -301,6 +318,10 @@ For local browser acceptance work, the implemented pseudouser path from
 - restart Von;
 - use the Settings-tab `Browser Test Login` control on a `localhost` /
   `127.0.0.1` session to establish the representative user-view fixture.
+- before trying to log in, check the Settings authentication area for the
+  browser-test mode status line. It now reports whether the feature is
+  available, disabled, or blocked by non-localhost conditions, and it shows the
+  configured pseudouser identity that will be used.
 
 ### 7.6 Env-gated live arXiv acceptance
 
@@ -344,6 +365,14 @@ Compact DRY checklist:
 Inspect the authoritative prompt, workflow definition, routing metadata, and
 rendered inputs before starting code-first diagnosis. In Von, the explanation
 for behaviour often lives in those artefacts rather than in Python.
+
+Also check:
+
+- the actual context sent to the model at the stage that behaved badly, not
+  only the visible prompt fragment
+- any context-lineage telemetry showing what was inherited vs added vs reduced
+- whether the user-facing answer was built from result content or from workflow
+  bookkeeping, completion narration, or renderer diagnostics
 
 ### 9.2 A direct test passes but the real tool fails
 

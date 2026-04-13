@@ -22,6 +22,7 @@
                 <button onclick="testPopupMessage()" class="btn-secondary ml-2">Test
                     Popup</button>
             </div>
+            <div id="browserTestModeStatus" class="settings-note mt-2" aria-live="polite"></div>
 
             <p class="settings-note"><strong>Note:</strong> User, Organisation and Language selections are stored only
                 in this browser (localStorage) and are not saved on the server.</p>
@@ -925,6 +926,58 @@
             }
         }
 
+        function escapeBrowserTestHtml(value) {
+            return String(value ?? '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function renderBrowserTestModeStatus(authStatus) {
+            const container = document.getElementById('browserTestModeStatus');
+            if (!container) return;
+
+            const browserTestMode = authStatus?.browser_test_mode || {};
+            const statusLabel = browserTestMode.status_label
+                || (browserTestMode.available
+                    ? 'Available'
+                    : (browserTestMode.configured ? 'Configured but unavailable' : 'Disabled'));
+            const identityLabel = browserTestMode.identity_label
+                || ((browserTestMode.display_name || browserTestMode.email)
+                    ? `${browserTestMode.display_name || 'Browser Test User'}${browserTestMode.email ? ` <${browserTestMode.email}>` : ''}`
+                    : '');
+            const identityPrefix = browserTestMode.uses_default_identity
+                ? 'Default pseudouser'
+                : 'Configured pseudouser';
+
+            const lines = [
+                `<div><strong>Browser test mode:</strong> ${escapeBrowserTestHtml(statusLabel)}</div>`,
+            ];
+
+            if (identityLabel) {
+                lines.push(`<div>${escapeBrowserTestHtml(identityPrefix)}: ${escapeBrowserTestHtml(identityLabel)}</div>`);
+            }
+            if (browserTestMode.user_concept_id) {
+                lines.push(`<div>User concept: <code>${escapeBrowserTestHtml(browserTestMode.user_concept_id)}</code></div>`);
+            }
+            if (browserTestMode.organisation_concept_id) {
+                lines.push(`<div>Organisation: <code>${escapeBrowserTestHtml(browserTestMode.organisation_concept_id)}</code></div>`);
+            }
+            if (authStatus?.auth_provider === 'browser_test_fixture') {
+                lines.push('<div>Browser test fixture session is active in this tab.</div>');
+            }
+            if (browserTestMode.reason) {
+                lines.push(`<div>Unavailable reason: ${escapeBrowserTestHtml(browserTestMode.reason)}</div>`);
+            }
+            if (browserTestMode.setup_hint) {
+                lines.push(`<div>${escapeBrowserTestHtml(browserTestMode.setup_hint)}</div>`);
+            }
+
+            container.innerHTML = lines.join('');
+        }
+
         // Update authentication display based on status
         async function updateAuthenticationDisplay(authStatus) {
             const authContainer = document.getElementById('authenticationStatus');
@@ -980,6 +1033,8 @@
                     ${browserTestButtonHtml}
                 `;
             }
+
+            renderBrowserTestModeStatus(authStatus);
 
             try {
                 document.dispatchEvent(new CustomEvent('authStatusChanged', { detail: authStatus || {} }));

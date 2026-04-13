@@ -28,8 +28,12 @@ def test_auth_status_includes_browser_test_mode_descriptor(monkeypatch, app_clie
         lambda: {
             "configured": True,
             "available": True,
+            "status": "available",
+            "status_label": "Available",
             "display_name": "Zhan von Witbrock",
             "email": "zhanvonwitbrock@gmail.com",
+            "identity_label": "Zhan von Witbrock <zhanvonwitbrock@gmail.com>",
+            "setup_hint": "Browser-test auth is available on localhost.",
             "fixture_id": "browser_user_view.v1",
         },
     )
@@ -40,6 +44,8 @@ def test_auth_status_includes_browser_test_mode_descriptor(monkeypatch, app_clie
     payload = response.get_json()
     assert payload["authenticated"] is False
     assert payload["browser_test_mode"]["available"] is True
+    assert payload["browser_test_mode"]["status"] == "available"
+    assert payload["browser_test_mode"]["identity_label"] == "Zhan von Witbrock <zhanvonwitbrock@gmail.com>"
     assert payload["browser_test_mode"]["fixture_id"] == "browser_user_view.v1"
 
 

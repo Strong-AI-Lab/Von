@@ -117,6 +117,9 @@ Important:
 - restart Von so the launcher picks the values up from `.env`;
 - open the Settings tab in a browser served directly from `localhost` or
   `127.0.0.1`;
+- confirm the Settings authentication area reports the browser-test mode
+  status, target pseudouser identity, and any unavailable reason before trying
+  to log in;
 - use the `Browser Test Login` control in the authentication area.
 
 This route is intentionally:
@@ -149,6 +152,15 @@ Repeated use is designed to be stable rather than destructive:
   refresh;
 - unread fixture messages are reset to unread so the Messages pane remains
   useful for acceptance checks.
+
+If the `Browser Test Login` button is missing, do not assume the feature is
+absent. Check the status line in the Settings authentication area first. The
+running app should now report whether browser-test auth is:
+
+- available;
+- disabled because `VON_BROWSER_TEST_AUTH_ENABLED` is off; or
+- configured but unavailable because the current browser/request is not a local
+  `localhost` / `127.0.0.1` session.
 
 ## 7. What a Good User-View Fixture Should Cover
 

@@ -286,3 +286,72 @@ def test_login_browser_test_user_handles_existing_counterpart_name_variants(
     assert "#V#browser_test_paper_scout" in sender_ids
     assert result["fixture"]["counterparts"][0]["name"] == "Workflow Reviewer Existing Alias"
     assert result["fixture"]["counterparts"][1]["name"] == "Paper Scout Existing Alias"
+
+
+def test_describe_browser_test_mode_surfaces_disabled_setup_hint_and_default_identity(
+    monkeypatch,
+):
+    for key in (
+        "VON_BROWSER_TEST_AUTH_ENABLED",
+        "VON_BROWSER_TEST_PSEUDOUSER_NAME",
+        "VON_BROWSER_TEST_PSEUDOUSER_EMAIL",
+        "VON_BROWSER_TEST_PSEUDOUSER_CONCEPT_ID",
+        "VON_BROWSER_TEST_ORGANISATION_CONCEPT_ID",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    monkeypatch.setattr(
+        service,
+        "browser_test_auth_allowed_for_request",
+        lambda: (False, "Browser-test auth is disabled"),
+    )
+
+    payload = service.describe_browser_test_mode()
+
+    assert payload["configured"] is False
+    assert payload["available"] is False
+    assert payload["status"] == "disabled"
+    assert payload["status_label"] == "Disabled"
+    assert payload["identity_source"] == "default"
+    assert payload["uses_default_identity"] is True
+    assert payload["email"] == "zhanvonwitbrock@gmail.com"
+    assert "VON_BROWSER_TEST_AUTH_ENABLED=1" in payload["setup_hint"]
+    assert payload["requires_restart"] is True
+
+
+def test_describe_browser_test_mode_surfaces_configured_identity_and_availability(
+    monkeypatch,
+):
+    monkeypatch.setenv("VON_BROWSER_TEST_AUTH_ENABLED", "1")
+    monkeypatch.setenv("VON_BROWSER_TEST_PSEUDOUSER_NAME", "Codex Browser Test")
+    monkeypatch.setenv(
+        "VON_BROWSER_TEST_PSEUDOUSER_EMAIL",
+        "codex-browser-fixture@strongailab.invalid",
+    )
+    monkeypatch.setenv(
+        "VON_BROWSER_TEST_PSEUDOUSER_CONCEPT_ID",
+        "#V#codex_browser_fixture",
+    )
+    monkeypatch.setenv(
+        "VON_BROWSER_TEST_ORGANISATION_CONCEPT_ID",
+        "#V#university_of_auckland_strong_ai_lab",
+    )
+    monkeypatch.setattr(
+        service,
+        "browser_test_auth_allowed_for_request",
+        lambda: (True, None),
+    )
+
+    payload = service.describe_browser_test_mode()
+
+    assert payload["configured"] is True
+    assert payload["available"] is True
+    assert payload["status"] == "available"
+    assert payload["status_label"] == "Available"
+    assert payload["identity_source"] == "env_configured"
+    assert payload["uses_default_identity"] is False
+    assert payload["display_name"] == "Codex Browser Test"
+    assert payload["email"] == "codex-browser-fixture@strongailab.invalid"
+    assert payload["identity_label"] == "Codex Browser Test <codex-browser-fixture@strongailab.invalid>"
+    assert "Browser Test Login" in payload["setup_hint"]
+    assert payload["enabled_env_present"] is True

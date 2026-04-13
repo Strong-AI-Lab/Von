@@ -45,6 +45,13 @@ from ..services.window_session_context_service import (
 _BROWSER_TEST_FIXTURE_ID = "browser_user_view.v1"
 _LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 _LOOPBACK_REMOTES = {"127.0.0.1", "::1", "localhost", ""}
+_BROWSER_TEST_ENV_KEYS = (
+    "VON_BROWSER_TEST_AUTH_ENABLED",
+    "VON_BROWSER_TEST_PSEUDOUSER_NAME",
+    "VON_BROWSER_TEST_PSEUDOUSER_EMAIL",
+    "VON_BROWSER_TEST_PSEUDOUSER_CONCEPT_ID",
+    "VON_BROWSER_TEST_ORGANISATION_CONCEPT_ID",
+)
 
 
 @dataclass(frozen=True)
@@ -66,6 +73,54 @@ def _truthy_env(name: str, default: bool = False) -> bool:
     if value in {"0", "false", "no", "off", "n"}:
         return False
     return default
+
+
+def _trimmed_env(name: str) -> str:
+    return str(os.getenv(name) or "").strip()
+
+
+def _browser_test_identity_source() -> str:
+    explicit_identity = any(
+        _trimmed_env(name)
+        for name in (
+            "VON_BROWSER_TEST_PSEUDOUSER_NAME",
+            "VON_BROWSER_TEST_PSEUDOUSER_EMAIL",
+            "VON_BROWSER_TEST_PSEUDOUSER_CONCEPT_ID",
+            "VON_BROWSER_TEST_ORGANISATION_CONCEPT_ID",
+        )
+    )
+    return "env_configured" if explicit_identity else "default"
+
+
+def _browser_test_identity_label(config: "BrowserTestAuthConfig") -> str:
+    return f"{config.pseudouser_name} <{config.pseudouser_email}>"
+
+
+def _browser_test_setup_hint(
+    config: "BrowserTestAuthConfig",
+    *,
+    available: bool,
+    reason: str | None,
+) -> str:
+    if available:
+        return (
+            "Browser-test auth is available on localhost. Use Browser Test Login "
+            f"to sign in as {_browser_test_identity_label(config)}."
+        )
+    if not config.enabled:
+        return (
+            "Set VON_BROWSER_TEST_AUTH_ENABLED=1 in your local environment or .env, "
+            "then restart Von to enable Browser Test Login on localhost."
+        )
+    if reason:
+        return (
+            f"Browser-test auth is configured, but unavailable here: {reason}. "
+            "Use a localhost or 127.0.0.1 browser session from the local machine."
+        )
+    return (
+        "Browser-test auth is configured but unavailable. Use a localhost "
+        "browser session from the local machine."
+    )
 
 
 def _slugify(value: str) -> str:
@@ -134,21 +189,45 @@ def browser_test_auth_allowed_for_request() -> tuple[bool, str | None]:
 def describe_browser_test_mode() -> dict[str, Any]:
     config = get_browser_test_auth_config()
     available, reason = browser_test_auth_allowed_for_request()
+    identity_source = _browser_test_identity_source()
+    status = (
+        "available"
+        if available
+        else ("disabled" if not config.enabled else "configured_unavailable")
+    )
+    status_label = (
+        "Available"
+        if available
+        else ("Disabled" if not config.enabled else "Configured but unavailable")
+    )
     payload: dict[str, Any] = {
         "configured": config.enabled,
         "available": available,
         "reason": None if available else reason,
+        "status": status,
+        "status_label": status_label,
+        "identity_source": identity_source,
+        "identity_label": _browser_test_identity_label(config),
+        "uses_default_identity": identity_source == "default",
+        "localhost_only": True,
+        "requires_restart": True,
+        "setup_hint": _browser_test_setup_hint(
+            config,
+            available=available,
+            reason=reason,
+        ),
+        "env_keys": list(_BROWSER_TEST_ENV_KEYS),
+        "enabled_env_present": bool(_trimmed_env("VON_BROWSER_TEST_AUTH_ENABLED")),
     }
-    if config.enabled:
-        payload.update(
-            {
-                "display_name": config.pseudouser_name,
-                "email": config.pseudouser_email,
-                "user_concept_id": config.pseudouser_concept_id,
-                "organisation_concept_id": config.organisation_concept_id,
-                "fixture_id": _BROWSER_TEST_FIXTURE_ID,
-            }
-        )
+    payload.update(
+        {
+            "display_name": config.pseudouser_name,
+            "email": config.pseudouser_email,
+            "user_concept_id": config.pseudouser_concept_id,
+            "organisation_concept_id": config.organisation_concept_id,
+            "fixture_id": _BROWSER_TEST_FIXTURE_ID,
+        }
+    )
     return payload
 
 
