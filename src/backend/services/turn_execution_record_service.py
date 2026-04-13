@@ -1896,6 +1896,27 @@ def _normalise_llm_request(value: Any) -> dict[str, Any] | None:
             if entry:
                 context_messages.append(entry)
 
+    raw_context_summary = value.get("context_summary")
+    context_summary = (
+        {
+            str(key): nested_value
+            for key, nested_value in raw_context_summary.items()
+            if isinstance(key, str)
+        }
+        if isinstance(raw_context_summary, Mapping)
+        else None
+    )
+    raw_context_lineage = value.get("context_lineage")
+    context_lineage = (
+        {
+            str(key): nested_value
+            for key, nested_value in raw_context_lineage.items()
+            if isinstance(key, str)
+        }
+        if isinstance(raw_context_lineage, Mapping)
+        else None
+    )
+
     payload: dict[str, Any] = {
         "prompt": (
             dict(raw_prompt)
@@ -1906,6 +1927,8 @@ def _normalise_llm_request(value: Any) -> dict[str, Any] | None:
         "context_message_count": _safe_non_negative_int(
             value.get("context_message_count")
         ),
+        "context_summary": context_summary,
+        "context_lineage": context_lineage,
         "tool_names": _dedupe_string_sequence(value.get("tool_names") or []),
         "tool_count": _safe_non_negative_int(value.get("tool_count")),
         "workflow_action_id": _safe_str(value.get("workflow_action_id")),
@@ -2245,6 +2268,34 @@ def build_workflow_routing_diagnostics(
     selector_model_request = _normalise_llm_request(
         selector_model_policy_entry.get("request")
     )
+    selector_context_summary = (
+        {
+            str(key): value
+            for key, value in selector_model_request.get("context_summary", {}).items()
+            if isinstance(key, str)
+        }
+        if isinstance(selector_model_request, Mapping)
+        and isinstance(selector_model_request.get("context_summary"), Mapping)
+        else None
+    )
+    selector_context_lineage = (
+        {
+            str(key): value
+            for key, value in selector_model_request.get("context_lineage", {}).items()
+            if isinstance(key, str)
+        }
+        if isinstance(selector_model_request, Mapping)
+        and isinstance(selector_model_request.get("context_lineage"), Mapping)
+        else (
+            {
+                str(key): value
+                for key, value in selector_entry.get("context_lineage", {}).items()
+                if isinstance(key, str)
+            }
+            if isinstance(selector_entry.get("context_lineage"), Mapping)
+            else None
+        )
+    )
     selected_model_candidate = (
         {
             str(key): value
@@ -2475,6 +2526,8 @@ def build_workflow_routing_diagnostics(
                 else None
             ),
             "model_request": selector_model_request,
+            "context_summary": selector_context_summary,
+            "context_lineage": selector_context_lineage,
             "selected_model_candidate": selected_model_candidate,
             "fallback_used": bool(selector_model_policy_entry.get("fallback_used")),
             "fallback_attempt_count": _safe_non_negative_int(

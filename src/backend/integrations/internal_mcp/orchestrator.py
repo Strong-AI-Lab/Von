@@ -8761,6 +8761,149 @@ class InternalMCPChatOrchestrator:
             )
         return limited
 
+    @staticmethod
+    def _build_context_text_capture(
+        value: Any,
+        *,
+        max_preview_chars: int | None = None,
+    ) -> dict[str, Any] | None:
+        if value is None:
+            return None
+        text = value if isinstance(value, str) else str(value)
+        capture: dict[str, Any] = {"text": text, "char_count": len(text)}
+        if (
+            isinstance(max_preview_chars, int)
+            and max_preview_chars > 0
+            and len(text) > max_preview_chars
+        ):
+            capture["preview"] = text[:max_preview_chars]
+            capture["preview_truncated"] = True
+        return capture
+
+    @classmethod
+    def _summarise_context_messages_for_telemetry(
+        cls,
+        messages: Sequence[Mapping[str, Any]] | None,
+    ) -> dict[str, Any] | None:
+        if not messages:
+            return None
+
+        role_counts: dict[str, int] = {}
+        total_content_chars = 0
+        message_count = 0
+        leading_system_message_count = 0
+        still_leading_system = True
+
+        for message in messages:
+            if not isinstance(message, Mapping):
+                continue
+            role = str(message.get("role") or "").strip() or "unknown"
+            role_counts[role] = role_counts.get(role, 0) + 1
+            content = message.get("content")
+            if isinstance(content, str):
+                total_content_chars += len(content)
+            elif content is not None:
+                total_content_chars += len(str(content))
+            if still_leading_system and role == "system":
+                leading_system_message_count += 1
+            else:
+                still_leading_system = False
+            message_count += 1
+
+        return {
+            "message_count": message_count,
+            "leading_system_message_count": leading_system_message_count,
+            "role_counts": role_counts,
+            "total_content_chars": total_content_chars,
+        }
+
+    @classmethod
+    def _summarise_added_context_messages_for_telemetry(
+        cls,
+        messages: Sequence[Mapping[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        summaries: list[dict[str, Any]] = []
+        for message in messages or ():
+            if not isinstance(message, Mapping):
+                continue
+            summary: dict[str, Any] = {}
+            role = message.get("role")
+            if isinstance(role, str) and role.strip():
+                summary["role"] = role.strip()
+            content_capture = cls._build_context_text_capture(
+                message.get("content"),
+                max_preview_chars=240,
+            )
+            if isinstance(content_capture, Mapping):
+                if "preview" in content_capture:
+                    summary["content_preview"] = content_capture.get("preview")
+                    summary["content_preview_truncated"] = bool(
+                        content_capture.get("preview_truncated")
+                    )
+                summary["content_char_count"] = content_capture.get("char_count")
+            name = message.get("name")
+            if isinstance(name, str) and name.strip():
+                summary["name"] = name.strip()
+            tool_call_id = message.get("tool_call_id")
+            if isinstance(tool_call_id, str) and tool_call_id.strip():
+                summary["tool_call_id"] = tool_call_id.strip()
+            if summary:
+                summaries.append(summary)
+        return summaries
+
+    def _build_stage_llm_context(
+        self,
+        *,
+        base_context: Sequence[Mapping[str, Any]] | None,
+        stage: str,
+        base_context_source: str,
+        stage_messages: Sequence[Mapping[str, Any]] | None = None,
+        max_chars: int | None = None,
+    ) -> tuple[list[Mapping[str, Any]], dict[str, Any]]:
+        base_messages: list[Mapping[str, Any]] = [
+            dict(message)
+            for message in (base_context or ())
+            if isinstance(message, Mapping)
+        ]
+        stage_added_messages: list[Mapping[str, Any]] = [
+            dict(message)
+            for message in (stage_messages or ())
+            if isinstance(message, Mapping)
+        ]
+
+        leading_system, remainder = self._split_leading_system_messages(base_messages)
+        combined_messages = [
+            *leading_system,
+            *stage_added_messages,
+            *remainder,
+        ]
+        stage_context = self._limit_context_for_llm(
+            combined_messages,
+            max_chars=max_chars,
+        )
+        context_lineage: dict[str, Any] = {
+            "stage": stage,
+            "base_context_source": base_context_source,
+            "insertion_strategy": "after_leading_system",
+            "base_context_summary": self._summarise_context_messages_for_telemetry(
+                base_messages
+            ),
+            "stage_added_message_count": len(stage_added_messages),
+            "stage_added_messages": self._summarise_added_context_messages_for_telemetry(
+                stage_added_messages
+            )
+            or None,
+            "stage_context_summary": self._summarise_context_messages_for_telemetry(
+                stage_context
+            ),
+            "trimmed": len(stage_context) < len(combined_messages),
+        }
+        return stage_context, {
+            key: value
+            for key, value in context_lineage.items()
+            if value not in (None, [], {})
+        }
+
     def _truncate_nested_for_llm(
         self, value: Any, *, max_string_chars: int, max_list_items: int = 50
     ) -> Any:
@@ -11476,6 +11619,7 @@ class InternalMCPChatOrchestrator:
         aux_log: list[Mapping[str, Any]],
         record_llm_call: Callable[..., Any],
         emit_progress: Callable[[Mapping[str, Any]], None] | None = None,
+        context_telemetry: Mapping[str, Any] | None = None,
     ) -> tuple[str, Optional[str], Mapping[str, Any]]:
         candidate_stage = policy_stage or stage
 
@@ -11495,6 +11639,7 @@ class InternalMCPChatOrchestrator:
         request_telemetry = self._build_llm_request_telemetry(
             prompt=prompt,
             context=context,
+            context_telemetry=context_telemetry,
         )
 
         for attempt_no, candidate in enumerate(candidates, start=1):
@@ -11770,13 +11915,8 @@ class InternalMCPChatOrchestrator:
         tool_definitions: Sequence[ToolDefinition] | None = None,
         workflow_action_id: str | None = None,
         required_prompt_tools: Sequence[str] = (),
+        context_telemetry: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        def _capture_text(value: Any) -> dict[str, Any] | None:
-            if value is None:
-                return None
-            text = value if isinstance(value, str) else str(value)
-            return {"text": text, "char_count": len(text)}
-
         context_messages: list[dict[str, Any]] = []
         for message in context or ():
             if not isinstance(message, Mapping):
@@ -11785,7 +11925,9 @@ class InternalMCPChatOrchestrator:
             role = message.get("role")
             if isinstance(role, str) and role.strip():
                 entry["role"] = role.strip()
-            content_capture = _capture_text(message.get("content"))
+            content_capture = InternalMCPChatOrchestrator._build_context_text_capture(
+                message.get("content")
+            )
             if content_capture is not None:
                 entry["content"] = content_capture
             name = message.get("name")
@@ -11804,9 +11946,12 @@ class InternalMCPChatOrchestrator:
                 tool_names.append(tool_name.strip())
 
         payload: dict[str, Any] = {
-            "prompt": _capture_text(prompt),
+            "prompt": InternalMCPChatOrchestrator._build_context_text_capture(prompt),
             "context_messages": context_messages or None,
             "context_message_count": len(context_messages),
+            "context_summary": InternalMCPChatOrchestrator._summarise_context_messages_for_telemetry(
+                context
+            ),
             "tool_names": tool_names or None,
             "tool_count": len(tool_names),
         }
@@ -11819,6 +11964,12 @@ class InternalMCPChatOrchestrator:
         ]
         if required_tools:
             payload["required_prompt_tools"] = required_tools
+        if isinstance(context_telemetry, Mapping) and context_telemetry:
+            payload["context_lineage"] = {
+                str(key): value
+                for key, value in context_telemetry.items()
+                if isinstance(key, str)
+            }
         return {key: value for key, value in payload.items() if value is not None}
 
     def _run_llm_with_tools_fallbacks(
@@ -11841,6 +11992,7 @@ class InternalMCPChatOrchestrator:
         workflow_action_id: str | None = None,
         method_catalogue: Mapping[str, Any] | None = None,
         required_prompt_tools: Sequence[str] = (),
+        context_telemetry: Mapping[str, Any] | None = None,
     ) -> tuple[LLMResponse, Optional[str], Mapping[str, Any]]:
         candidates = self._stage_model_candidates(
             stage=stage,
@@ -11861,6 +12013,7 @@ class InternalMCPChatOrchestrator:
             tool_definitions=tool_definitions,
             workflow_action_id=workflow_action_id,
             required_prompt_tools=required_prompt_tools,
+            context_telemetry=context_telemetry,
         )
 
         for attempt_no, candidate in enumerate(candidates, start=1):
@@ -21251,6 +21404,11 @@ class InternalMCPChatOrchestrator:
         if not isinstance(aux_llm_calls, list):
             aux_llm_calls = []
             data["aux_llm_calls"] = aux_llm_calls
+        augmented_context = data.get("augmented_context")
+        if not isinstance(augmented_context, Sequence) or isinstance(
+            augmented_context, (str, bytes, bytearray)
+        ):
+            augmented_context = []
         record_llm_call = data.get("record_llm_call")
         emit_progress = data.get("emit_progress")
 
@@ -21262,6 +21420,7 @@ class InternalMCPChatOrchestrator:
 
         selected_workflow_id = CHAT_ASSISTANT_WORKFLOW_ID
         selector_selection_metadata: dict[str, Any] = {}
+        selector_context_telemetry: dict[str, Any] | None = None
         if env.user_namespace and self._workflow_selector.enabled():
             selector_prompt = self._workflow_selector.prepare_selection_prompt(
                 turn_text=prompt_text,
@@ -21274,12 +21433,30 @@ class InternalMCPChatOrchestrator:
                     )
                 )
             else:
+                selector_context, selector_context_telemetry = (
+                    self._build_stage_llm_context(
+                        base_context=cast(
+                            Sequence[Mapping[str, Any]],
+                            augmented_context,
+                        ),
+                        stage="workflow_dispatch",
+                        base_context_source="augmented_context",
+                        stage_messages=(
+                            [
+                                {
+                                    "role": "system",
+                                    "content": selector_prompt.prompt_text,
+                                }
+                            ]
+                        ),
+                    )
+                )
                 selector_response_text, _classifier_model, _selector_candidate = (
                     self._run_llm_with_fallbacks(
                         stage="workflow_dispatch",
                         policy_stage="classifier",
                         prompt="Select workflow",
-                        context=[{"role": "system", "content": selector_prompt.prompt_text}],
+                        context=selector_context,
                         default_client=env.llm_client,
                         default_model=default_model,
                         policy_state=policy_state,
@@ -21294,6 +21471,7 @@ class InternalMCPChatOrchestrator:
                             if callable(emit_progress)
                             else None
                         ),
+                        context_telemetry=selector_context_telemetry,
                     )
                 )
                 selector_selection = self._workflow_selector.resolve_selection(
@@ -21450,6 +21628,11 @@ class InternalMCPChatOrchestrator:
                         for item in excluded_discovered_matches
                         if isinstance(item.get("concept_id"), str)
                     ],
+                    "selector_context_lineage": (
+                        dict(selector_context_telemetry)
+                        if isinstance(selector_context_telemetry, Mapping)
+                        else None
+                    ),
                     "workflow_discovery_result": workflow_discovery_result,
                 },
             }
@@ -23387,6 +23570,7 @@ class InternalMCPChatOrchestrator:
                 },
             )
             selector_start = time.perf_counter()
+            selector_context_telemetry: dict[str, Any] | None = None
             selector_prompt = self._workflow_selector.prepare_selection_prompt(
                 turn_text=prompt,
                 discovered_workflows=selector_candidate_matches or None,
@@ -23423,6 +23607,7 @@ class InternalMCPChatOrchestrator:
                 "continuation_context": _build_text_telemetry(
                     selector_prompt.continuation_routing_context_text
                 ),
+                "context_lineage": None,
                 "candidate_entries": _copy_mapping_sequence(
                     selector_prompt.candidate_entries
                 ),
@@ -23533,17 +23718,36 @@ class InternalMCPChatOrchestrator:
                     )
                 else:
                     selector_prompt_text = selector_prompt.prompt_text
+                    selector_context, selector_context_telemetry = (
+                        self._build_stage_llm_context(
+                            base_context=augmented_context,
+                            stage="workflow_dispatch",
+                            base_context_source="augmented_context",
+                            stage_messages=(
+                                [
+                                    {
+                                        "role": "system",
+                                        "content": selector_prompt_text,
+                                    }
+                                ]
+                            ),
+                        )
+                    )
+                    selector_prompt_payload["context_lineage"] = (
+                        dict(selector_context_telemetry)
+                        if isinstance(selector_context_telemetry, Mapping)
+                        else None
+                    )
+                    if trace_enabled and trace is not None:
+                        trace.metadata["workflow_selector_prompt"] = dict(
+                            selector_prompt_payload
+                        )
                     selector_response_text, classifier_model, selector_candidate = (
                         self._run_llm_with_fallbacks(
                             stage="workflow_dispatch",
                             policy_stage="classifier",
                             prompt="Select workflow",
-                            context=[
-                                {
-                                    "role": "system",
-                                    "content": selector_prompt_text,
-                                }
-                            ],
+                            context=selector_context,
                             default_client=llm_client,
                             default_model=model,
                             policy_state=policy_state,
@@ -23554,6 +23758,7 @@ class InternalMCPChatOrchestrator:
                             aux_log=aux_llm_calls,
                             record_llm_call=_record_llm_call,
                             emit_progress=_emit_selector_progress,
+                            context_telemetry=selector_context_telemetry,
                         )
                     )
                     selector_selection = self._workflow_selector.resolve_selection(
@@ -23651,6 +23856,14 @@ class InternalMCPChatOrchestrator:
                         "candidate_list": _build_text_telemetry(
                             selector_prompt.candidate_list_text
                         ),
+                        "continuation_context": _build_text_telemetry(
+                            selector_prompt.continuation_routing_context_text
+                        ),
+                        "context_lineage": (
+                            dict(selector_context_telemetry)
+                            if isinstance(selector_context_telemetry, Mapping)
+                            else None
+                        ),
                         "response": _build_text_telemetry(
                             selector_selection.raw_response
                         ),
@@ -23723,6 +23936,14 @@ class InternalMCPChatOrchestrator:
                         ),
                         "candidate_list": _build_text_telemetry(
                             selector_prompt.candidate_list_text
+                        ),
+                        "continuation_context": _build_text_telemetry(
+                            selector_prompt.continuation_routing_context_text
+                        ),
+                        "context_lineage": (
+                            dict(selector_context_telemetry)
+                            if isinstance(selector_context_telemetry, Mapping)
+                            else None
                         ),
                         "response": _build_text_telemetry(
                             selector_selection.raw_response

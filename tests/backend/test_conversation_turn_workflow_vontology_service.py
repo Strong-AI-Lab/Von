@@ -24,6 +24,7 @@ from src.backend.workflows import (
 )
 from src.backend.workflows.vontology_loader import load_workflow_definition_from_vontology
 
+SELECTOR_PROMPT_CONCEPT_ID = "#V#chat_turn_classifier_prompt"
 NARRATION_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_narrate_completion_report"
 RECOVERY_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_recovery_decision"
 
@@ -53,7 +54,20 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     report = _ensure_conversation_turn_prompt_support()
 
     assert report.get("success") is True
-    assert report.get("seeded_prompt_count") == 2
+    assert report.get("seeded_prompt_count") == 3
+
+    selector_rows = get_texts_for_concept(
+        SELECTOR_PROMPT_CONCEPT_ID,
+        predicate="hasContent",
+        limit=5,
+    )
+    selector_text = next(
+        ((row or {}).get("text") for row in selector_rows if (row or {}).get("text")),
+        "",
+    )
+    assert isinstance(selector_text, str)
+    assert "full turn context as LLM context messages" in selector_text
+    assert "Do not assume the current request is standalone" in selector_text
 
     prompt_rows = get_texts_for_concept(
         NARRATION_PROMPT_CONCEPT_ID,
@@ -240,6 +254,12 @@ def test_turn_and_episode_prompt_authority_resolve_on_live_surface(
         predicate="hasContent",
         limit=5,
     )
+    selector_rows = get_texts_for_concept(
+        SELECTOR_PROMPT_CONCEPT_ID,
+        predicate="hasContent",
+        limit=5,
+    )
+    assert any((row or {}).get("text") for row in selector_rows)
     assert any((row or {}).get("text") for row in narration_rows)
     assert any((row or {}).get("text") for row in recovery_rows)
     assert any((row or {}).get("text") for row in episode_rows)
