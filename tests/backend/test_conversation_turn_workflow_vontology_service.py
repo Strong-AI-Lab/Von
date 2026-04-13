@@ -25,6 +25,7 @@ from src.backend.workflows import (
 from src.backend.workflows.vontology_loader import load_workflow_definition_from_vontology
 
 NARRATION_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_narrate_completion_report"
+RECOVERY_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_recovery_decision"
 
 
 @pytest.fixture
@@ -52,7 +53,7 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     report = _ensure_conversation_turn_prompt_support()
 
     assert report.get("success") is True
-    assert report.get("seeded_prompt_count") == 1
+    assert report.get("seeded_prompt_count") == 2
 
     prompt_rows = get_texts_for_concept(
         NARRATION_PROMPT_CONCEPT_ID,
@@ -67,6 +68,20 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     assert isinstance(prompt_text, str)
     assert "narrate the results of a workflow execution" in prompt_text
     assert "operationally truthful and concise" in prompt_text
+
+    recovery_rows = get_texts_for_concept(
+        RECOVERY_PROMPT_CONCEPT_ID,
+        predicate="hasContent",
+        limit=5,
+    )
+    recovery_text = next(
+        ((row or {}).get("text") for row in recovery_rows if (row or {}).get("text")),
+        "",
+    )
+    assert isinstance(recovery_text, str)
+    assert "recovery-decision policy" in recovery_text
+    assert "`decision`" in recovery_text
+    assert "`\"retry_execution\"` or `\"respond_with_follow_up\"`" in recovery_text
 
 
 def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_links(
@@ -140,17 +155,40 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     completion_gate_action = completion_gate.actions[0]
     assert completion_gate_action.action_id == "turn_execution.completion_gate"
 
-    failed_step_id = authority_service._step_concept_id(
+    recovery_decision_step_id = authority_service._step_concept_id(
         workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
-        state_id="failed",
+        state_id="recovery_decision",
     )
+    recovery_decision = turn_definition.states[recovery_decision_step_id]
+    recovery_action = recovery_decision.actions[0]
+    assert recovery_action.action_id == "llm.action"
+    assert recovery_action.validation_policy == {"output_format": "json_value"}
+    recovery_prompt_contract = recovery_action.prompt_contract
+    assert isinstance(recovery_prompt_contract, dict)
+    assert recovery_prompt_contract.get("resolved_prompt_concept_id") == (
+        RECOVERY_PROMPT_CONCEPT_ID
+    )
+
     completed_step_id = authority_service._step_concept_id(
         workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
         state_id="completed",
     )
+    execution_step_id = authority_service._step_concept_id(
+        workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+        state_id="execution",
+    )
+    recovery_follow_up_step_id = authority_service._step_concept_id(
+        workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+        state_id="apply_recovery_follow_up",
+    )
     transition_targets = {transition.to_state for transition in completion_gate.transitions}
-    assert failed_step_id in transition_targets
+    assert execution_step_id in transition_targets
+    assert recovery_decision_step_id in transition_targets
     assert completed_step_id in transition_targets
+    recovery_transition_targets = {
+        transition.to_state for transition in recovery_decision.transitions
+    }
+    assert recovery_follow_up_step_id in recovery_transition_targets
 
     narration_step_id = authority_service._step_concept_id(
         workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
@@ -184,12 +222,18 @@ def test_turn_and_episode_prompt_authority_resolve_on_live_surface(
         predicate="hasContent",
         limit=5,
     )
+    recovery_rows = get_texts_for_concept(
+        RECOVERY_PROMPT_CONCEPT_ID,
+        predicate="hasContent",
+        limit=5,
+    )
     episode_rows = get_texts_for_concept(
         EPISODE_EVALUATION_PROMPT_CONCEPT_ID,
         predicate="hasContent",
         limit=5,
     )
     assert any((row or {}).get("text") for row in narration_rows)
+    assert any((row or {}).get("text") for row in recovery_rows)
     assert any((row or {}).get("text") for row in episode_rows)
 
     episode_definition = load_workflow_definition_from_vontology(

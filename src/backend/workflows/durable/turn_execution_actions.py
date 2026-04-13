@@ -17,7 +17,9 @@ from ..action_registry import (
     WorkflowActionResult,
     WorkflowActionRequest,
 )
+from ..subworkflow_contracts import WORKFLOW_SUBWORKFLOW_FAILURE_MODE_CAPTURE
 from .turn_execution_runtime_support import (
+    build_turn_execution_selected_workflow_outputs,
     run_turn_execution_completion_gate,
     run_turn_execution_critic,
 )
@@ -71,15 +73,34 @@ def _build_turn_execution_execute_selected_handler() -> Any:
         """Execute the selected capability workflow with supervision."""
         from .registry_factory import get_shared_durable_action_registry
 
-        selected_workflow_id = request.data.get("selected_workflow_id")
+        selected_workflow_id_raw = request.data.get("selected_workflow_id")
+        selected_workflow_id = (
+            str(selected_workflow_id_raw).strip()
+            if isinstance(selected_workflow_id_raw, str)
+            and str(selected_workflow_id_raw).strip()
+            else None
+        )
         if not selected_workflow_id:
-            return WorkflowActionResult(
-                status="failed",
-                error="turn_execution_no_workflow_selected",
+            outputs = build_turn_execution_selected_workflow_outputs(
+                selected_workflow_id=None,
+                child_completed=False,
+                final_state="no_selected_workflow",
+                failure_detail="turn_execution_no_workflow_selected",
+                child_outputs={},
+                child_result_snapshot={},
+                selected_workflow_trace=request.data.get("selected_workflow_trace"),
+                workflow_routing=request.data.get("workflow_routing"),
+                workflow_discovery=(
+                    request.data.get("workflow_discovery_result")
+                    if isinstance(request.data.get("workflow_discovery_result"), Mapping)
+                    else request.data.get("workflow_discovery")
+                ),
             )
+            return WorkflowActionResult(outputs=outputs)
 
         subworkflow_inputs = {
             "workflow_id": selected_workflow_id,
+            "failure_mode": WORKFLOW_SUBWORKFLOW_FAILURE_MODE_CAPTURE,
             **{
                 str(key): value
                 for key, value in request.data.items()
@@ -95,33 +116,62 @@ def _build_turn_execution_execute_selected_handler() -> Any:
             workflow_id=request.workflow_id,
             workflow_state_id=request.workflow_state_id,
         )
-        if not subworkflow_result.ok:
-            return subworkflow_result
+        child_payload: dict[str, Any] = {}
+        child_completed = False
+        child_final_state: str | None = None
+        child_error: str | None = None
 
-        child_result = subworkflow_result.outputs.get("result")
-        child_payload = dict(child_result) if isinstance(child_result, Mapping) else {}
-        completion_report = child_payload.get("completion_report")
-        if not isinstance(completion_report, Mapping):
-            response_text = child_payload.get("response_text")
-            if not isinstance(response_text, str) or not response_text.strip():
-                response_text = child_payload.get("final_response")
-            completion_report = {
-                "schema_version": "conversation_turn_selected_workflow_result.v1",
-                "workflow_id": selected_workflow_id,
-                "response_text": (
-                    response_text.strip()
-                    if isinstance(response_text, str) and response_text.strip()
+        if subworkflow_result.ok:
+            child_result = subworkflow_result.outputs.get("result")
+            child_payload = dict(child_result) if isinstance(child_result, Mapping) else {}
+            invocation = subworkflow_result.outputs.get("subworkflow_invocation")
+            invocation_payload = (
+                dict(invocation) if isinstance(invocation, Mapping) else {}
+            )
+            child_completed = not bool(
+                subworkflow_result.outputs.get("child_workflow_failed")
+            )
+            child_final_state = (
+                str(invocation_payload.get("child_final_state")).strip()
+                if isinstance(invocation_payload.get("child_final_state"), str)
+                and str(invocation_payload.get("child_final_state")).strip()
+                else None
+            )
+            child_error = (
+                str(subworkflow_result.outputs.get("subworkflow_error")).strip()
+                if isinstance(subworkflow_result.outputs.get("subworkflow_error"), str)
+                and str(subworkflow_result.outputs.get("subworkflow_error")).strip()
+                else (
+                    str(invocation_payload.get("child_error")).strip()
+                    if isinstance(invocation_payload.get("child_error"), str)
+                    and str(invocation_payload.get("child_error")).strip()
                     else None
-                ),
-            }
-        outputs = {
-            "selected_workflow_id": selected_workflow_id,
-            "completion_report": dict(completion_report),
-        }
-        if isinstance(child_payload.get("final_response"), str):
-            outputs["final_response"] = child_payload.get("final_response")
-        if isinstance(child_payload.get("current_response"), str):
-            outputs["current_response"] = child_payload.get("current_response")
+                )
+            )
+        else:
+            child_error = (
+                str(subworkflow_result.error).strip()
+                if isinstance(subworkflow_result.error, str)
+                and str(subworkflow_result.error).strip()
+                else "selected_workflow_execution_failed"
+            )
+            child_final_state = "subworkflow_invocation_failed"
+
+        outputs = build_turn_execution_selected_workflow_outputs(
+            selected_workflow_id=selected_workflow_id,
+            child_completed=child_completed,
+            final_state=child_final_state,
+            failure_detail=child_error,
+            child_outputs=child_payload,
+            child_result_snapshot=child_payload,
+            selected_workflow_trace=request.data.get("selected_workflow_trace"),
+            workflow_routing=request.data.get("workflow_routing"),
+            workflow_discovery=(
+                request.data.get("workflow_discovery_result")
+                if isinstance(request.data.get("workflow_discovery_result"), Mapping)
+                else request.data.get("workflow_discovery")
+            ),
+        )
         return WorkflowActionResult(outputs=outputs)
     return _handle
 

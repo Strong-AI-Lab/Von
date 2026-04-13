@@ -57,6 +57,144 @@ def _normalise_string_list(raw_values: Any) -> list[str]:
     return normalised
 
 
+def build_turn_execution_selected_workflow_outputs(
+    *,
+    selected_workflow_id: str | None,
+    child_completed: bool,
+    final_state: str | None,
+    failure_detail: str | None,
+    child_outputs: Mapping[str, Any] | None,
+    rendered_child_response_text: str | None = None,
+    child_result_snapshot: Mapping[str, Any] | None = None,
+    selected_workflow_trace: Mapping[str, Any] | None = None,
+    workflow_routing: Mapping[str, Any] | None = None,
+    workflow_discovery: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the master-turn context payload for one selected workflow outcome.
+
+    Keep this shaping logic shared between the interactive orchestrator path and
+    the durable action registry so the conversation-turn workflow sees the same
+    completion-report surface in both environments.
+    """
+
+    clean_selected_workflow_id = _safe_str(selected_workflow_id)
+    child_outputs_map = (
+        dict(child_outputs) if isinstance(child_outputs, Mapping) else {}
+    )
+    rendered_response = _safe_str(rendered_child_response_text)
+    child_snapshot = (
+        dict(child_result_snapshot)
+        if isinstance(child_result_snapshot, Mapping)
+        else None
+    )
+
+    completion_report = child_outputs_map.get("completion_report")
+    completion_report_source = "child_completion_report"
+    if not isinstance(completion_report, Mapping):
+        summary_payload = child_outputs_map.get("workflow_execution_summary")
+        if isinstance(summary_payload, Mapping):
+            completion_report = dict(summary_payload)
+            completion_report_source = "workflow_execution_summary"
+        else:
+            response_preview = (
+                rendered_response
+                or _safe_str(child_outputs_map.get("response_text"))
+                or _safe_str(child_outputs_map.get("final_response"))
+                or _safe_str(child_outputs_map.get("current_response"))
+            )
+            completion_report = {
+                "schema_version": "conversation_turn_selected_workflow_result.v1",
+                "workflow_id": clean_selected_workflow_id,
+                "completed": bool(child_completed),
+                "final_state": _safe_str(final_state),
+                "error": _safe_str(failure_detail),
+                "response_text": response_preview,
+            }
+            completion_report_source = "synthetic_selected_workflow_summary"
+
+    completion_report_map = dict(completion_report)
+    if rendered_response:
+        completion_report_map.setdefault("response_text", rendered_response)
+    if child_snapshot:
+        completion_report_map.setdefault("result_snapshot", dict(child_snapshot))
+        for key, value in child_snapshot.items():
+            if isinstance(key, str) and key not in completion_report_map:
+                completion_report_map[key] = value
+
+    final_response = (
+        rendered_response
+        or _safe_str(child_outputs_map.get("final_response"))
+        or _safe_str(child_outputs_map.get("response_text"))
+    )
+    current_response = (
+        rendered_response
+        or _safe_str(child_outputs_map.get("current_response"))
+        or final_response
+    )
+    response_text = rendered_response or _safe_str(child_outputs_map.get("response_text"))
+
+    outputs: dict[str, Any] = {
+        "completion_report": completion_report_map,
+        "selected_workflow_trace": {
+            **(
+                {
+                    str(key): value
+                    for key, value in selected_workflow_trace.items()
+                    if isinstance(key, str)
+                }
+                if isinstance(selected_workflow_trace, Mapping)
+                else {}
+            ),
+            "selected_workflow_id": clean_selected_workflow_id,
+            "child_workflow_completed": bool(child_completed),
+            "child_workflow_final_state": _safe_str(final_state),
+            "child_workflow_error": _safe_str(failure_detail),
+            "completion_report_source": completion_report_source,
+            "child_result_snapshot": child_snapshot,
+        },
+        "workflow_routing": (
+            {
+                str(key): value
+                for key, value in workflow_routing.items()
+                if isinstance(key, str)
+            }
+            if isinstance(workflow_routing, Mapping)
+            else None
+        ),
+        "workflow_discovery_result": (
+            {
+                str(key): value
+                for key, value in workflow_discovery.items()
+                if isinstance(key, str)
+            }
+            if isinstance(workflow_discovery, Mapping)
+            else {}
+        ),
+        "workflow_discovery": (
+            {
+                str(key): value
+                for key, value in workflow_discovery.items()
+                if isinstance(key, str)
+            }
+            if isinstance(workflow_discovery, Mapping)
+            else {}
+        ),
+        "selected_workflow_completed": bool(child_completed),
+        "selected_workflow_child_failed": not bool(child_completed),
+        "selected_workflow_final_state": _safe_str(final_state),
+        "selected_workflow_error": _safe_str(failure_detail),
+    }
+    if clean_selected_workflow_id:
+        outputs["selected_workflow_id"] = clean_selected_workflow_id
+    if final_response:
+        outputs["final_response"] = final_response
+    if current_response:
+        outputs["current_response"] = current_response
+    if response_text:
+        outputs["response_text"] = response_text
+    return outputs
+
+
 def run_turn_execution_critic(
     request: Any,
     *,

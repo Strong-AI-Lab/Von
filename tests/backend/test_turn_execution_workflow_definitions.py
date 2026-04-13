@@ -87,6 +87,9 @@ def test_conversation_turn_workflow_uses_deterministic_critic_and_gate() -> None
     assert "narration" in workflow.states
     assert "critic" in workflow.states
     assert "completion_gate" in workflow.states
+    assert "recovery_decision" in workflow.states
+    assert "apply_recovery_retry" in workflow.states
+    assert "apply_recovery_follow_up" in workflow.states
     assert "failed" in workflow.states
 
     narration = workflow.states["narration"]
@@ -106,12 +109,51 @@ def test_conversation_turn_workflow_uses_deterministic_critic_and_gate() -> None
     completion_gate = workflow.states["completion_gate"]
     assert completion_gate.actions[0].action_id == "turn_execution.completion_gate"
     assert any(
-        t.to_state == "failed" and t.reason == "follow_up_required"
+        t.to_state == "execution"
+        and t.reason == "completion_gate_repeat_iteration"
+        for t in completion_gate.transitions
+    )
+    assert any(
+        t.to_state == "recovery_decision" and t.reason == "follow_up_required"
         for t in completion_gate.transitions
     )
     assert any(
         t.to_state == "completed" and t.reason == "completion_gate_decided"
         for t in completion_gate.transitions
+    )
+
+    recovery_decision = workflow.states["recovery_decision"]
+    recovery_action = recovery_decision.actions[0]
+    assert recovery_action.action_id == "llm.action"
+    assert recovery_action.execution_mode == WORKFLOW_STEP_EXECUTION_MODE_LLM
+    assert recovery_action.validation_policy == {"output_format": "json_value"}
+    prompt_contract = recovery_action.prompt_contract
+    assert isinstance(prompt_contract, dict)
+    assert prompt_contract.get("requested_prompt_concept_ids") == [
+        "#V#prompt_turn_execution_recovery_decision"
+    ]
+    assert any(
+        t.to_state == "apply_recovery_retry" and t.reason == "retry_execution"
+        for t in recovery_decision.transitions
+    )
+    assert any(
+        t.to_state == "apply_recovery_follow_up"
+        and t.reason == "respond_with_follow_up"
+        for t in recovery_decision.transitions
+    )
+
+    recovery_retry = workflow.states["apply_recovery_retry"]
+    assert recovery_retry.actions[0].action_id == "workflow_control.context_set"
+    assert any(
+        t.to_state == "execution" and t.reason == "recovery_retry_prepared"
+        for t in recovery_retry.transitions
+    )
+
+    recovery_follow_up = workflow.states["apply_recovery_follow_up"]
+    assert recovery_follow_up.actions[0].action_id == "workflow_control.context_set"
+    assert any(
+        t.to_state == "failed" and t.reason == "recovery_follow_up_ready"
+        for t in recovery_follow_up.transitions
     )
 
 

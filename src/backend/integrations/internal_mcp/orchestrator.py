@@ -104,6 +104,7 @@ from ...workflows.durable.registry_factory import (
     get_shared_workflow_registry_read_only,
 )
 from ...workflows.durable.turn_execution_runtime_support import (
+    build_turn_execution_selected_workflow_outputs,
     run_turn_execution_completion_gate,
     run_turn_execution_critic,
 )
@@ -21546,183 +21547,84 @@ class InternalMCPChatOrchestrator:
 
         data = request.data
         env = request.environment
-        selected_workflow_id = data.get("selected_workflow_id")
-        if not isinstance(selected_workflow_id, str) or not selected_workflow_id.strip():
-            return WorkflowActionResult(
-                status="failed",
-                error="turn_execution_no_workflow_selected",
-            )
-        selected_workflow_id = selected_workflow_id.strip()
-
-        child_result = self.execute_workflow(
-            selected_workflow_id,
-            data=dict(data),
-            llm_client=env.llm_client,
-            model=getattr(env, "model", None),
-            user_namespace=env.user_namespace,
-            auxiliary_system_prompt=getattr(env, "auxiliary_system_prompt", None),
-            trace=request.trace,
-            environment=env,
-            conversation_session_id=data.get("conversation_session_id"),
-            turn_id=data.get("turn_id"),
-            episode_source="conversation_turn_selected_workflow",
-        )
-        if child_result is None:
-            return WorkflowActionResult(
-                status="failed",
-                error=f"selected_workflow_definition_not_found:{selected_workflow_id}",
-            )
-
-        child_outputs = (
-            dict(child_result.data)
-            if isinstance(getattr(child_result, "data", None), Mapping)
-            else {}
-        )
-        rendered_child_response_text = self._render_custom_workflow_response_text(
-            workflow_id=selected_workflow_id,
-            workflow_result=child_result,
-        )
-        completed = _workflow_result_effective_completed(child_result)
-        final_state = (
-            str(child_result.final_state).strip()
-            if isinstance(getattr(child_result, "final_state", None), str)
+        selected_workflow_id = (
+            data.get("selected_workflow_id").strip()
+            if isinstance(data.get("selected_workflow_id"), str)
+            and data.get("selected_workflow_id").strip()
             else None
         )
-        failure_detail = _extract_explicit_workflow_failure_detail(child_result) or (
-            child_result.error if isinstance(child_result.error, str) else None
-        )
+        child_outputs: dict[str, Any] = {}
+        rendered_child_response_text: str | None = None
+        completed = False
+        final_state: str | None = None
+        failure_detail: str | None = None
+        child_result_snapshot: Mapping[str, Any] | None = None
 
-        completion_report = child_outputs.get("completion_report")
-        completion_report_source = "child_completion_report"
-        if not isinstance(completion_report, Mapping):
-            summary_payload = child_outputs.get("workflow_execution_summary")
-            if isinstance(summary_payload, Mapping):
-                completion_report = dict(summary_payload)
-                completion_report_source = "workflow_execution_summary"
+        if selected_workflow_id:
+            child_result = self.execute_workflow(
+                selected_workflow_id,
+                data=dict(data),
+                llm_client=env.llm_client,
+                model=getattr(env, "model", None),
+                user_namespace=env.user_namespace,
+                auxiliary_system_prompt=getattr(env, "auxiliary_system_prompt", None),
+                trace=request.trace,
+                environment=env,
+                conversation_session_id=data.get("conversation_session_id"),
+                turn_id=data.get("turn_id"),
+                episode_source="conversation_turn_selected_workflow",
+            )
+            if child_result is None:
+                failure_detail = (
+                    f"selected_workflow_definition_not_found:{selected_workflow_id}"
+                )
+                final_state = "definition_not_found"
             else:
-                response_preview = rendered_child_response_text
-                if not isinstance(response_preview, str) or not response_preview.strip():
-                    response_preview = child_outputs.get("response_text")
-                if not isinstance(response_preview, str) or not response_preview.strip():
-                    response_preview = child_outputs.get("final_response")
-                completion_report = {
-                    "schema_version": "conversation_turn_selected_workflow_result.v1",
-                    "workflow_id": selected_workflow_id,
-                    "completed": completed,
-                    "final_state": final_state,
-                    "error": failure_detail,
-                    "response_text": (
-                        response_preview.strip()
-                        if isinstance(response_preview, str) and response_preview.strip()
-                        else None
-                    ),
-                }
-                completion_report_source = "synthetic_selected_workflow_summary"
-        child_result_snapshot = _build_workflow_execution_aux_result_snapshot(child_result)
-        if isinstance(completion_report, Mapping):
-            completion_report = dict(completion_report)
-            if (
-                isinstance(rendered_child_response_text, str)
-                and rendered_child_response_text.strip()
-            ):
-                completion_report.setdefault(
-                    "response_text",
-                    rendered_child_response_text.strip(),
-                )
-            if isinstance(child_result_snapshot, Mapping) and child_result_snapshot:
-                completion_report.setdefault("result_snapshot", dict(child_result_snapshot))
-                for key, value in child_result_snapshot.items():
-                    if isinstance(key, str) and key not in completion_report:
-                        completion_report[key] = value
-
-        final_response = rendered_child_response_text
-        if not isinstance(final_response, str) or not final_response.strip():
-            final_response = child_outputs.get("final_response")
-        if not isinstance(final_response, str) or not final_response.strip():
-            final_response = child_outputs.get("response_text")
-        current_response = rendered_child_response_text
-        if not isinstance(current_response, str) or not current_response.strip():
-            current_response = child_outputs.get("current_response")
-        if not isinstance(current_response, str) or not current_response.strip():
-            current_response = final_response
-
-        outputs: dict[str, Any] = {
-            "selected_workflow_id": selected_workflow_id,
-            "completion_report": dict(completion_report),
-            "selected_workflow_trace": {
-                **(
-                    dict(data.get("selected_workflow_trace"))
-                    if isinstance(data.get("selected_workflow_trace"), Mapping)
+                child_outputs = (
+                    dict(child_result.data)
+                    if isinstance(getattr(child_result, "data", None), Mapping)
                     else {}
-                ),
-                "selected_workflow_id": selected_workflow_id,
-                "child_workflow_completed": completed,
-                "child_workflow_final_state": final_state,
-                "child_workflow_error": failure_detail,
-                "completion_report_source": completion_report_source,
-                "child_result_snapshot": (
-                    dict(child_result_snapshot)
-                    if isinstance(child_result_snapshot, Mapping)
+                )
+                rendered_child_response_text = self._render_custom_workflow_response_text(
+                    workflow_id=selected_workflow_id,
+                    workflow_result=child_result,
+                )
+                completed = _workflow_result_effective_completed(child_result)
+                final_state = (
+                    str(child_result.final_state).strip()
+                    if isinstance(getattr(child_result, "final_state", None), str)
                     else None
-                ),
-            },
-            "workflow_routing": (
-                dict(data.get("workflow_routing"))
-                if isinstance(data.get("workflow_routing"), Mapping)
-                else None
-            ),
-            "workflow_discovery_result": (
-                dict(data.get("workflow_discovery_result"))
-                if isinstance(data.get("workflow_discovery_result"), Mapping)
-                else (
-                    dict(data.get("workflow_discovery"))
-                    if isinstance(data.get("workflow_discovery"), Mapping)
-                    else {}
                 )
-            ),
-            "workflow_discovery": (
-                dict(data.get("workflow_discovery_result"))
-                if isinstance(data.get("workflow_discovery_result"), Mapping)
-                else (
-                    dict(data.get("workflow_discovery"))
-                    if isinstance(data.get("workflow_discovery"), Mapping)
-                    else {}
+                failure_detail = _extract_explicit_workflow_failure_detail(
+                    child_result
+                ) or (
+                    child_result.error
+                    if isinstance(child_result.error, str)
+                    else None
                 )
+                child_result_snapshot = _build_workflow_execution_aux_result_snapshot(
+                    child_result
+                )
+        else:
+            failure_detail = "turn_execution_no_workflow_selected"
+            final_state = "no_selected_workflow"
+
+        outputs = build_turn_execution_selected_workflow_outputs(
+            selected_workflow_id=selected_workflow_id,
+            child_completed=completed,
+            final_state=final_state,
+            failure_detail=failure_detail,
+            child_outputs=child_outputs,
+            rendered_child_response_text=rendered_child_response_text,
+            child_result_snapshot=child_result_snapshot,
+            selected_workflow_trace=data.get("selected_workflow_trace"),
+            workflow_routing=data.get("workflow_routing"),
+            workflow_discovery=(
+                data.get("workflow_discovery_result")
+                if isinstance(data.get("workflow_discovery_result"), Mapping)
+                else data.get("workflow_discovery")
             ),
-        }
-        if isinstance(final_response, str) and final_response.strip():
-            outputs["final_response"] = final_response
-        if isinstance(current_response, str) and current_response.strip():
-            outputs["current_response"] = current_response
-        response_text = rendered_child_response_text
-        if not isinstance(response_text, str) or not response_text.strip():
-            response_text = child_outputs.get("response_text")
-        if isinstance(response_text, str) and response_text.strip():
-            outputs["response_text"] = response_text
-
-        if not completed:
-            return WorkflowActionResult(
-                status="failed",
-                error=(
-                    failure_detail
-                    or f"selected_workflow_failed:{selected_workflow_id}"
-                ),
-                outputs=outputs,
-            )
-
-        if (
-            not isinstance(outputs.get("response_text"), str)
-            and not isinstance(outputs.get("final_response"), str)
-            and not isinstance(outputs.get("completion_report"), Mapping)
-        ):
-            return WorkflowActionResult(
-                status="failed",
-                error=(
-                    "selected_workflow_missing_required_outputs:"
-                    f"{selected_workflow_id}"
-                ),
-                outputs=outputs,
-            )
+        )
         return WorkflowActionResult(outputs=outputs)
 
     def execute_conversation_turn_supervised(
