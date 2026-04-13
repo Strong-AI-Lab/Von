@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from src.backend.services import paper_recommendation_delivery_service as service
 
 
@@ -75,10 +77,13 @@ def test_deliver_paper_recommendation_messages_creates_digest_message(monkeypatc
         def __init__(self, text: str):
             self.text = text
 
+    rendered_prompt_calls: list[dict[str, Any]] = []
     monkeypatch.setattr(
         service,
         "render_authoritative_prompt",
         lambda **kwargs: (
+            rendered_prompt_calls.append(dict(kwargs))
+            or
             _RenderedPrompt(
                 f"Hello {kwargs['variables']['recipient_display_name']}\n\n"
                 f"{kwargs['variables']['recommendation_items']}"
@@ -87,7 +92,7 @@ def test_deliver_paper_recommendation_messages_creates_digest_message(monkeypatc
         ),
     )
 
-    created_messages: list[dict[str, object]] = []
+    created_messages: list[dict[str, Any]] = []
     monkeypatch.setattr(
         service,
         "create_message",
@@ -122,6 +127,12 @@ def test_deliver_paper_recommendation_messages_creates_digest_message(monkeypatc
         "#V#assertion_1",
         "#V#assertion_2",
     ]
+    assert created_messages[0]["metadata"]["recommendation_subject_concept_id"] == (
+        "#V#michael_witbrock"
+    )
+    assert "Open this recommendation message to review usefulness" in (
+        rendered_prompt_calls[0]["variables"]["review_hint"]
+    )
     assert linked_assertions == [
         (
             "#V#assertion_1",

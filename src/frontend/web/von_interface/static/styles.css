@@ -3482,6 +3482,107 @@ body {
     text-align: right;
 }
 
+.message-recommendation-panel {
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px solid rgba(148, 163, 184, 0.35);
+}
+
+.message-recommendation-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 6px;
+}
+
+.message-recommendation-label {
+    font-size: 0.82rem;
+    font-weight: 600;
+}
+
+.message-recommendation-toggle-btn {
+    border: 1px solid #cbd5e1;
+    background: #f8fafc;
+    color: #0f172a;
+    border-radius: 999px;
+    padding: 4px 10px;
+    font-size: 0.78rem;
+    cursor: pointer;
+}
+
+.message-recommendation-note,
+.message-recommendation-status,
+.message-recommendation-summary {
+    font-size: 0.8rem;
+    line-height: 1.4;
+}
+
+.message-recommendation-status {
+    margin-top: 8px;
+}
+
+.message-recommendation-review {
+    margin-top: 8px;
+}
+
+.message-recommendation-feedback {
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px solid #e2e8f0;
+}
+
+.message-recommendation-feedback-controls {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    margin-top: 8px;
+}
+
+.message-recommendation-feedback-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 0.82rem;
+    color: #334155;
+}
+
+.message-recommendation-feedback-field select,
+.message-recommendation-feedback-field textarea {
+    width: 100%;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    padding: 7px 8px;
+    background: #fff;
+    color: #0f172a;
+    font-size: 0.82rem;
+    box-sizing: border-box;
+}
+
+.message-recommendation-feedback-field-wide {
+    grid-column: 1 / -1;
+}
+
+.message-recommendation-actions {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 10px;
+}
+
+.message-bubble.sent .message-recommendation-panel {
+    border-top-color: rgba(255, 255, 255, 0.35);
+}
+
+.message-bubble.sent .message-recommendation-toggle-btn {
+    background: rgba(255, 255, 255, 0.95);
+}
+
+@media (max-width: 640px) {
+    .message-recommendation-feedback-controls {
+        grid-template-columns: 1fr;
+    }
+}
+
 .message-empty-state {
     display: flex;
     flex-direction: column;
@@ -4354,6 +4455,10 @@ button:hover {
     border-radius: 10px;
     padding: 10px 10px;
     background: #fafafa;
+}
+
+.concept-recommendation-panel {
+    margin-top: 12px;
 }
 
 .speech-settings-title {

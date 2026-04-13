@@ -24,8 +24,6 @@ function renderSettingsNavigationFixture() {
             <section id="current-user-settings" data-settings-concern="identity">
                 <h2>Current User Configuration</h2>
                 <div id="authenticationStatus"><button type="button">Login</button></div>
-                <section id="paperRecommendationProfileSection"><h3>Paper Recommendation Profile</h3></section>
-                <section id="paperRecommendationReviewSection"><h3>Paper Recommendation Review</h3></section>
             </section>
             <section id="current-organisation-settings" data-settings-concern="identity">
                 <h2>Current Organisation Configuration</h2>
@@ -86,8 +84,8 @@ describe('settings concern navigation', () => {
         sessionStorage.clear();
     });
 
-    test('maps nested paper review surface to the identity concern', () => {
-        expect(__testOnly_getSettingsConcernForSectionTarget('paperRecommendationReviewSection')).toBe('identity');
+    test('maps the current-user surface to the identity concern', () => {
+        expect(__testOnly_getSettingsConcernForSectionTarget('current-user-settings')).toBe('identity');
         expect(__testOnly_getSettingsConcernForSectionTarget('premium-model-settings')).toBe('models');
     });
 
@@ -101,13 +99,11 @@ describe('settings concern navigation', () => {
         expect(document.getElementById('settingsConcernSummary').textContent).toContain('browser-scoped identity preferences');
         expect(__testOnly_getSettingsSectionRailTargets('identity')).toEqual([
             'current-user-settings',
-            'paperRecommendationProfileSection',
-            'paperRecommendationReviewSection',
             'current-organisation-settings',
         ]);
 
         const railLabels = Array.from(document.querySelectorAll('#settingsSectionRail button')).map((button) => button.textContent.trim());
-        expect(railLabels).toEqual(['User', 'Paper profile', 'Paper review', 'Organisation']);
+        expect(railLabels).toEqual(['User', 'Organisation']);
     });
 
     test('model focus message reveals the models concern and focuses a model selector', () => {

@@ -756,6 +756,44 @@ def load_materialised_paper_recommendations(
             if isinstance(evaluation.get("rationale_generation"), Mapping)
             else {}
         )
+        paper_representation = (
+            dict(evaluation.get("paper_representation") or {})
+            if isinstance(evaluation.get("paper_representation"), Mapping)
+            else {}
+        )
+        provenance = (
+            dict(evaluation.get("provenance") or {})
+            if isinstance(evaluation.get("provenance"), Mapping)
+            else {}
+        )
+        evidence = (
+            list(evaluation.get("evidence") or [])
+            if isinstance(evaluation.get("evidence"), Sequence)
+            and not isinstance(evaluation.get("evidence"), (str, bytes, bytearray))
+            else []
+        )
+        representation_failures = (
+            list(evaluation.get("representation_failures") or [])
+            if isinstance(evaluation.get("representation_failures"), Sequence)
+            and not isinstance(
+                evaluation.get("representation_failures"),
+                (str, bytes, bytearray),
+            )
+            else []
+        )
+        raw_rationale = evaluation.get("rationale")
+        if isinstance(raw_rationale, Sequence) and not isinstance(
+            raw_rationale, (str, bytes, bytearray)
+        ):
+            rationale_items = [
+                _safe_str(item)
+                for item in raw_rationale
+                if _safe_str(item)
+            ]
+            rationale_text = "\n".join(rationale_items)
+        else:
+            rationale_text = _safe_str(raw_rationale)
+            rationale_items = [rationale_text] if rationale_text else []
         rationale_summary = _safe_str(evaluation.get("rationale_summary"))
         if not rationale_summary and not rationale_generation:
             rationale_summary = _load_latest_text(assertion_id, "hasDescription") or ""
@@ -763,12 +801,24 @@ def load_materialised_paper_recommendations(
             "assertion_concept_id": assertion_id,
             "paper_concept_id": paper_concept_id,
             "paper_title": paper_title,
+            "status": _safe_str(evaluation.get("status")) or "ranked",
             "score": float(evaluation.get("score") or 0.0),
             "active": active,
+            "recommendation_tier": _safe_str(evaluation.get("recommendation_tier"))
+            or ("recommended" if active else "inactive"),
             "delivered_message_ids": delivered_message_ids,
             "rationale_summary": rationale_summary,
-            "rationale": _safe_str(evaluation.get("rationale")),
+            "rationale": rationale_items,
+            "rationale_text": rationale_text,
+            "evidence": evidence,
             "rationale_generation": rationale_generation,
+            "paper_representation": paper_representation,
+            "provenance": provenance,
+            "skip_reason": _safe_str(evaluation.get("skip_reason")) or None,
+            "representation_failures": representation_failures,
+            "subject_profile_concept_id": (
+                _safe_str(evaluation.get("subject_profile_concept_id")) or None
+            ),
             "evaluation": dict(evaluation),
         }
         rows.append(row)

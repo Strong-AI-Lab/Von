@@ -23,6 +23,12 @@ from ...services.message_service import (
     get_message_threads_for_user,
     search_messages,
 )
+from ...services.paper_recommendation_review_service import (
+    build_message_linked_paper_recommendation_review,
+)
+from ...services.paper_recommendation_vontology_service import (
+    record_paper_recommendation_feedback,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -51,6 +57,23 @@ def _normalise_recipient_ids(value: Any) -> list[str]:
         if lowered in seen:
             continue
         seen.add(lowered)
+        result.append(concept_id)
+    return result
+
+
+def _normalise_concept_id_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        concept_id = _normalise_concept_id(item)
+        if not isinstance(concept_id, str):
+            continue
+        fingerprint = concept_id.casefold()
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
         result.append(concept_id)
     return result
 
@@ -93,6 +116,44 @@ def _get_current_org_concept_id(user_concept_id: Optional[str]) -> Optional[str]
             pass
 
     return _normalise_concept_id(session.get("organisation_concept_id"))
+
+
+def _get_message_metadata(message_doc: Any) -> dict[str, Any]:
+    concept_data = message_doc.get("concept_data") if isinstance(message_doc, dict) else {}
+    metadata = concept_data.get("metadata") if isinstance(concept_data, dict) else {}
+    return dict(metadata) if isinstance(metadata, dict) else {}
+
+
+def _resolve_recommendation_subject_id(
+    *,
+    message_doc: dict[str, Any],
+    current_user_concept_id: str | None,
+) -> Optional[str]:
+    metadata = _get_message_metadata(message_doc)
+    subject_id = _normalise_concept_id(metadata.get("recommendation_subject_concept_id"))
+    if subject_id:
+        return subject_id
+    if current_user_concept_id:
+        return _normalise_concept_id(current_user_concept_id)
+
+    relationships = message_doc.get("relationships") if isinstance(message_doc, dict) else {}
+    recipient_ids = _normalise_concept_id_list(
+        relationships.get("#V#has_recipient") if isinstance(relationships, dict) else []
+    )
+    return recipient_ids[0] if recipient_ids else None
+
+
+def _resolve_message_recommendation_assertion_ids(message_doc: dict[str, Any]) -> list[str]:
+    metadata = _get_message_metadata(message_doc)
+    return _normalise_concept_id_list(metadata.get("recommendation_assertion_ids"))
+
+
+def _is_paper_recommendation_message(message_doc: dict[str, Any]) -> bool:
+    metadata = _get_message_metadata(message_doc)
+    return (
+        str(metadata.get("delivery_channel") or "").strip()
+        == "paper_recommendation_message"
+    )
 
 
 def _authorise_sender_and_recipients_for_org(
@@ -248,6 +309,107 @@ def get_single_message(message_id: str) -> ResponseReturnValue:
     message["_id"] = str(message.get("_id", ""))
 
     return jsonify(message), 200
+
+
+@message_bp.route("/<message_id>/paper_recommendation_review", methods=["GET"])
+def get_message_paper_recommendation_review(message_id: str) -> ResponseReturnValue:
+    """Inspect already delivered paper recommendations linked to one message."""
+
+    user_id = _get_current_user_concept_id()
+    if not user_id:
+        return jsonify({"error": "Authentication required"}), 401
+
+    message = get_message(message_id)
+    if not message:
+        return jsonify({"error": "Message not found"}), 404
+    if not _is_paper_recommendation_message(message):
+        return jsonify({"error": "Message is not a paper recommendation message"}), 400
+
+    assertion_ids = _resolve_message_recommendation_assertion_ids(message)
+    if not assertion_ids:
+        return jsonify({"error": "Message has no recommendation assertions"}), 400
+
+    subject_id = _resolve_recommendation_subject_id(
+        message_doc=message,
+        current_user_concept_id=user_id,
+    )
+    if not subject_id:
+        return jsonify({"error": "Recommendation subject is unavailable"}), 400
+
+    try:
+        payload = build_message_linked_paper_recommendation_review(
+            subject_concept_id=subject_id,
+            assertion_concept_ids=assertion_ids,
+            message_concept_id=message_id,
+            trigger_source="message_opened",
+        )
+        return jsonify(payload), 200
+    except Exception as e:
+        _log.error(
+            "Failed to build message-linked paper recommendation review for %s: %s",
+            message_id,
+            e,
+        )
+        return jsonify({"error": "Failed to build recommendation review"}), 500
+
+
+@message_bp.route("/<message_id>/paper_recommendation_feedback", methods=["POST"])
+def post_message_paper_recommendation_feedback(message_id: str) -> ResponseReturnValue:
+    """Record feedback about one delivered paper recommendation from a message."""
+
+    user_id = _get_current_user_concept_id()
+    if not user_id:
+        return jsonify({"error": "Authentication required"}), 401
+
+    message = get_message(message_id)
+    if not message:
+        return jsonify({"error": "Message not found"}), 404
+    if not _is_paper_recommendation_message(message):
+        return jsonify({"error": "Message is not a paper recommendation message"}), 400
+
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"error": "JSON object body required"}), 400
+
+    message_assertion_ids = _resolve_message_recommendation_assertion_ids(message)
+    explicit_assertion_id = _normalise_concept_id(data.get("assertion_concept_id"))
+    assertion_id = explicit_assertion_id
+    if not assertion_id and len(message_assertion_ids) == 1:
+        assertion_id = message_assertion_ids[0]
+    if not assertion_id:
+        return jsonify({"error": "assertion_concept_id is required"}), 400
+    if assertion_id not in message_assertion_ids:
+        return jsonify({"error": "assertion_concept_id is not linked to this message"}), 400
+
+    subject_id = _resolve_recommendation_subject_id(
+        message_doc=message,
+        current_user_concept_id=user_id,
+    )
+    if not subject_id:
+        return jsonify({"error": "Recommendation subject is unavailable"}), 400
+
+    try:
+        payload = record_paper_recommendation_feedback(
+            actor_user_concept_id=user_id,
+            subject_concept_id=subject_id,
+            assertion_concept_id=assertion_id,
+            paper_concept_id=_normalise_concept_id(data.get("paper_concept_id")),
+            recommendation_usefulness=data.get("recommendation_usefulness"),
+            explanation_usefulness=data.get("explanation_usefulness"),
+            feedback_text=data.get("feedback_text"),
+            capture_surface="message_panel.paper_recommendation",
+            organisation_concept_id=_get_current_org_concept_id(user_id),
+        )
+        return jsonify(payload), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        _log.error(
+            "Failed to record paper recommendation feedback for %s: %s",
+            message_id,
+            e,
+        )
+        return jsonify({"error": "Failed to record recommendation feedback"}), 500
 
 
 @message_bp.route("/", methods=["GET"])

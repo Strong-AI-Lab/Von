@@ -1,7 +1,7 @@
 import {
-  __testOnly_buildRecommendationReviewRequest,
-  __testOnly_renderRecommendationReviewPayload,
-} from '../settingsPage.js';
+  buildRecommendationReviewRequest,
+  renderRecommendationReviewPayload,
+} from '../components/paperRecommendationUi.js';
 
 describe('settingsPage recommendation review helpers', () => {
   beforeEach(() => {
@@ -23,7 +23,14 @@ describe('settingsPage recommendation review helpers', () => {
     document.getElementById('recommendationCandidateLimitInput').value = '40';
     document.getElementById('recommendationIncludeAllCandidatesToggle').checked = true;
 
-    expect(__testOnly_buildRecommendationReviewRequest()).toEqual({
+    expect(
+      buildRecommendationReviewRequest({
+        candidatePaperConceptIds: document.getElementById('recommendationCandidatePaperIdsInput').value,
+        candidateLimit: document.getElementById('recommendationCandidateLimitInput').value,
+        includeAllCandidates: document.getElementById('recommendationIncludeAllCandidatesToggle').checked,
+        triggerSource: 'manual_review',
+      }),
+    ).toEqual({
       candidate_paper_concept_ids: [
         '#V#paper_causal_science',
         '#V#paper_graph_methods',
@@ -35,43 +42,47 @@ describe('settingsPage recommendation review helpers', () => {
   });
 
   test('renders rationale and provenance for ranked review results', () => {
-    __testOnly_renderRecommendationReviewPayload({
-      success: true,
-      authoritative_review_surface: 'settings_tab',
-      external_channels_authoritative: false,
-      trigger: { trigger_source: 'manual_review', label: 'Manual review' },
-      candidate_selection: {
-        source: 'represented_scholarly_articles',
-        candidate_count: 1,
-      },
-      recommendation_report: {
+    renderRecommendationReviewPayload({
+      summaryElement: document.getElementById('recommendationReviewSummary'),
+      containerElement: document.getElementById('recommendationReviewResults'),
+      payload: {
         success: true,
-        results: [
-          {
-            paper_concept_id: '#V#paper_causal_science',
-            paper_title: 'Causal Models for Scientific Discovery',
-            status: 'ranked',
-            score: 0.88,
-            recommendation_tier: 'strong',
-            rationale_summary: 'Matches stated interests: causal reasoning.',
-            rationale: ['Matches stated interests: causal reasoning.'],
-            evidence: [
-              {
-                evidence_type: 'interest_term_match',
-                profile_value: 'causal reasoning',
-                matched_paper_text: 'Causal reasoning for science',
-                paper_reference_id: 'rel-summary-1',
-              },
-            ],
-            paper_representation: {
-              publication_date: '2026-03-14',
-            },
-            provenance: {
+        authoritative_review_surface: 'settings_tab',
+        external_channels_authoritative: false,
+        trigger: { trigger_source: 'manual_review', label: 'Manual review' },
+        candidate_selection: {
+          source: 'represented_scholarly_articles',
+          candidate_count: 1,
+        },
+        recommendation_report: {
+          success: true,
+          results: [
+            {
               paper_concept_id: '#V#paper_causal_science',
-              author_concept_ids: ['#V#judea_pearl'],
+              paper_title: 'Causal Models for Scientific Discovery',
+              status: 'ranked',
+              score: 0.88,
+              recommendation_tier: 'strong',
+              rationale_summary: 'Matches stated interests: causal reasoning.',
+              rationale: ['Matches stated interests: causal reasoning.'],
+              evidence: [
+                {
+                  evidence_type: 'interest_term_match',
+                  profile_value: 'causal reasoning',
+                  matched_paper_text: 'Causal reasoning for science',
+                  paper_reference_id: 'rel-summary-1',
+                },
+              ],
+              paper_representation: {
+                publication_date: '2026-03-14',
+              },
+              provenance: {
+                paper_concept_id: '#V#paper_causal_science',
+                author_concept_ids: ['#V#judea_pearl'],
+              },
             },
-          },
-        ],
+          ],
+        },
       },
     });
 
@@ -86,32 +97,36 @@ describe('settingsPage recommendation review helpers', () => {
   });
 
   test('renders explicit unavailable-rationale text instead of a paper summary fallback', () => {
-    __testOnly_renderRecommendationReviewPayload({
-      success: true,
-      authoritative_review_surface: 'settings_tab',
-      external_channels_authoritative: false,
-      trigger: { trigger_source: 'manual_review', label: 'Manual review' },
-      candidate_selection: {
-        source: 'represented_scholarly_articles',
-        candidate_count: 1,
-      },
-      recommendation_report: {
+    renderRecommendationReviewPayload({
+      summaryElement: document.getElementById('recommendationReviewSummary'),
+      containerElement: document.getElementById('recommendationReviewResults'),
+      payload: {
         success: true,
-        results: [
-          {
-            paper_concept_id: '#V#paper_sparse',
-            paper_title: 'Sparse Metadata Paper',
-            status: 'ranked',
-            score: 0.41,
-            recommendation_tier: 'inactive',
-            rationale_generation: {
-              status: 'unavailable',
+        authoritative_review_surface: 'settings_tab',
+        external_channels_authoritative: false,
+        trigger: { trigger_source: 'manual_review', label: 'Manual review' },
+        candidate_selection: {
+          source: 'represented_scholarly_articles',
+          candidate_count: 1,
+        },
+        recommendation_report: {
+          success: true,
+          results: [
+            {
+              paper_concept_id: '#V#paper_sparse',
+              paper_title: 'Sparse Metadata Paper',
+              status: 'ranked',
+              score: 0.41,
+              recommendation_tier: 'inactive',
+              rationale_generation: {
+                status: 'unavailable',
+              },
+              paper_representation: {
+                summary_excerpt: 'A generic paper summary that should not appear as the rationale.',
+              },
             },
-            paper_representation: {
-              summary_excerpt: 'A generic paper summary that should not appear as the rationale.',
-            },
-          },
-        ],
+          ],
+        },
       },
     });
 

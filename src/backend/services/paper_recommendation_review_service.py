@@ -2,11 +2,12 @@
 
 This keeps the review surface separate from recommendation materialisation:
 
-- semantic evaluation/materialisation stays in ``paper_recommendation_ranking_service``
-- this service chooses a bounded candidate pool and adds trigger metadata
-
-The settings tab is the first authoritative review surface. External channels
-can reuse this payload later, but they are not authoritative.
+- semantic evaluation/materialisation stays in
+  ``paper_recommendation_ranking_service`` and
+  ``paper_recommendation_materialisation_service``
+- this service chooses a bounded candidate pool and adds review-surface metadata
+- delivered recommendation messages can inspect existing materialised assertions
+  without rerunning ranking
 """
 
 from __future__ import annotations
@@ -17,6 +18,8 @@ from typing import Any, Iterable, Mapping, Sequence
 
 REVIEW_SURFACE_ID = "settings.paper_recommendation_review.v1"
 REVIEW_SURFACE_LABEL = "Settings tab paper recommendation review"
+MESSAGE_REVIEW_SURFACE_ID = "message_panel.paper_recommendation_review.v1"
+MESSAGE_REVIEW_SURFACE_LABEL = "Message panel paper recommendation review"
 SCHOLARLY_ARTICLE_TYPE_ID = "#V#scholarly_article"
 DEFAULT_CANDIDATE_LIMIT = 25
 MAX_CANDIDATE_LIMIT = 100
@@ -50,6 +53,15 @@ _SUPPORTED_TRIGGER_POINTS = {
         ),
         "active": True,
     },
+    "message_opened": {
+        "trigger_source": "message_opened",
+        "label": "Message opened",
+        "description": (
+            "Inspect already delivered materialised recommendations from the "
+            "recommendation message itself."
+        ),
+        "active": True,
+    },
 }
 
 
@@ -76,6 +88,22 @@ def get_texts_for_concept(
 def build_paper_recommendations(**kwargs):
     from .paper_recommendation_ranking_service import (
         build_paper_recommendations as _impl,
+    )
+
+    return _impl(**kwargs)
+
+
+def load_materialised_paper_recommendations(**kwargs):
+    from .paper_recommendation_vontology_service import (
+        load_materialised_paper_recommendations as _impl,
+    )
+
+    return _impl(**kwargs)
+
+
+def list_paper_recommendation_feedback(**kwargs):
+    from .paper_recommendation_vontology_service import (
+        list_paper_recommendation_feedback as _impl,
     )
 
     return _impl(**kwargs)
@@ -115,11 +143,73 @@ def _normalise_candidate_ids(raw_value: Sequence[str] | str | None) -> list[str]
     return candidate_ids
 
 
+def _normalise_assertion_ids(raw_value: Sequence[str] | str | None) -> list[str]:
+    return _normalise_candidate_ids(raw_value)
+
+
 def _normalise_trigger_source(value: Any) -> dict[str, Any]:
     cleaned = _safe_text(value).lower()
     if cleaned in _SUPPORTED_TRIGGER_POINTS:
         return dict(_SUPPORTED_TRIGGER_POINTS[cleaned])
     return dict(_SUPPORTED_TRIGGER_POINTS["manual_review"])
+
+
+def _feedback_lookup(assertion_concept_ids: Sequence[str]) -> dict[str, dict[str, Any]]:
+    lookup: dict[str, dict[str, Any]] = {}
+    for assertion_id in assertion_concept_ids:
+        clean_assertion_id = _safe_text(assertion_id)
+        if not clean_assertion_id:
+            continue
+        report = list_paper_recommendation_feedback(
+            assertion_concept_id=clean_assertion_id,
+            limit=5,
+        )
+        rows = report.get("feedback") if isinstance(report, Mapping) else []
+        if not isinstance(rows, Sequence) or not rows:
+            continue
+        latest = rows[0]
+        if not isinstance(latest, Mapping):
+            continue
+        latest_payload = latest.get("feedback_payload")
+        lookup[clean_assertion_id] = {
+            "count": len(rows),
+            "latest_feedback": dict(latest_payload)
+            if isinstance(latest_payload, Mapping)
+            else None,
+            "feedback_concept_id": _safe_text(latest.get("feedback_concept_id")) or None,
+        }
+    return lookup
+
+
+def _augment_recommendation_rows_with_feedback(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    feedback_lookup: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    augmented_rows: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        assertion_id = _safe_text(row.get("assertion_concept_id"))
+        feedback = feedback_lookup.get(assertion_id) if assertion_id else None
+        enriched = dict(row.items())
+        if isinstance(feedback, Mapping):
+            latest_feedback = feedback.get("latest_feedback")
+            enriched["feedback_count"] = int(feedback.get("count") or 0)
+            enriched["latest_feedback"] = (
+                dict(latest_feedback.items())
+                if isinstance(latest_feedback, Mapping)
+                else None
+            )
+            enriched["feedback_concept_id"] = (
+                _safe_text(feedback.get("feedback_concept_id")) or None
+            )
+        else:
+            enriched["feedback_count"] = 0
+            enriched["latest_feedback"] = None
+            enriched["feedback_concept_id"] = None
+        augmented_rows.append(enriched)
+    return augmented_rows
 
 
 def _parse_publication_date(value: Any) -> tuple[int, float]:
@@ -250,11 +340,91 @@ def build_paper_recommendation_review(
     }
 
 
+def build_message_linked_paper_recommendation_review(
+    *,
+    subject_concept_id: str,
+    assertion_concept_ids: Sequence[str] | str | None,
+    message_concept_id: str | None = None,
+    trigger_source: str | None = None,
+) -> dict[str, Any]:
+    """Build a review payload for recommendations already delivered in one message."""
+
+    target_subject_id = _safe_text(subject_concept_id)
+    resolved_trigger = _normalise_trigger_source(trigger_source or "message_opened")
+    resolved_assertion_ids = _normalise_assertion_ids(assertion_concept_ids)
+    feedback_lookup = _feedback_lookup(resolved_assertion_ids)
+
+    materialised = load_materialised_paper_recommendations(
+        subject_concept_id=target_subject_id,
+        include_inactive=True,
+        limit=max(len(resolved_assertion_ids) * 2, DEFAULT_CANDIDATE_LIMIT),
+    )
+    raw_materialised_rows = (
+        materialised.get("recommendations")
+        if isinstance(materialised, Mapping)
+        else []
+    )
+    materialised_rows = (
+        raw_materialised_rows if isinstance(raw_materialised_rows, Sequence) else []
+    )
+    materialised_index = {
+        _safe_text(row.get("assertion_concept_id")): dict(row.items())
+        for row in materialised_rows
+        if isinstance(row, Mapping) and _safe_text(row.get("assertion_concept_id"))
+    }
+
+    ordered_rows = [
+        materialised_index[assertion_id]
+        for assertion_id in resolved_assertion_ids
+        if assertion_id in materialised_index
+    ]
+    recommendation_rows = _augment_recommendation_rows_with_feedback(
+        ordered_rows,
+        feedback_lookup=feedback_lookup,
+    )
+    report_success = bool(recommendation_rows)
+    report_message = None
+    if not report_success:
+        report_message = (
+            "No materialised recommendation rows could be resolved for this "
+            "message."
+        )
+
+    return {
+        "success": report_success,
+        "review_surface_id": MESSAGE_REVIEW_SURFACE_ID,
+        "review_surface_label": MESSAGE_REVIEW_SURFACE_LABEL,
+        "authoritative_review_surface": "message_panel",
+        "external_channels_authoritative": False,
+        "subject_concept_id": target_subject_id,
+        "message_concept_id": _safe_text(message_concept_id) or None,
+        "trigger": resolved_trigger,
+        "supported_trigger_points": [
+            dict(item) for item in _SUPPORTED_TRIGGER_POINTS.values()
+        ],
+        "candidate_selection": {
+            "source": "message_assertion_ids",
+            "candidate_count": len(resolved_assertion_ids),
+            "assertion_count": len(resolved_assertion_ids),
+            "assertion_concept_ids": list(resolved_assertion_ids),
+        },
+        "recommendation_report": {
+            "success": report_success,
+            "message": report_message,
+            "source": "materialised_assertions",
+            "results": recommendation_rows,
+        },
+    }
+
+
 __all__ = [
     "DEFAULT_CANDIDATE_LIMIT",
     "MAX_CANDIDATE_LIMIT",
+    "MESSAGE_REVIEW_SURFACE_ID",
+    "MESSAGE_REVIEW_SURFACE_LABEL",
     "REVIEW_SURFACE_ID",
     "REVIEW_SURFACE_LABEL",
     "SCHOLARLY_ARTICLE_TYPE_ID",
+    "build_message_linked_paper_recommendation_review",
     "build_paper_recommendation_review",
 ]

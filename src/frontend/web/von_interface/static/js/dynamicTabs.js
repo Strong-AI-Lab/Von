@@ -3026,6 +3026,15 @@ async function adaptIndividualConceptTabUI(conceptId, suffix) {
 
         // Ensure unified description UI (reuse type description section & logic for individuals)
         await ensureUnifiedDescriptionSection(conceptId, suffix);
+        try {
+            const { ensureRecommendationProfilePanelForConceptTab } = await import('./components/paperRecommendationProfilePanel.js');
+            await ensureRecommendationProfilePanelForConceptTab({
+                conceptId,
+                suffix,
+            });
+        } catch (profileErr) {
+            console.warn('[dynamicTabs] Unable to initialise recommendation profile panel', profileErr);
+        }
         // Multi-note section
         await populateNotesSection(conceptId, suffix);
         // Multi-content section
@@ -4710,9 +4719,9 @@ async function populateNotesSection(conceptId, suffix) {
                 // Smart render note text (detect markdown)
                 const noteText = n.text || '';
                 const isMarkdown = detectMarkdown(noteText);
-                let displayHtml; let safeText; let truncated = false;
+                let displayHtml; let safeText;
                 safeText = escapeHtml(noteText);
-                truncated = safeText.length > 800;
+                const truncated = safeText.length > 800;
                 displayHtml = truncated ? safeText.slice(0, 800) + '…' : safeText || '<i>(empty)</i>';
                 const viewClasses = isMarkdown ? 'note-view concept-text-view markdown-rendered' : 'note-view concept-text-view';
                 const expandHiddenClass = truncated ? '' : ' text-action-hidden';
@@ -5080,9 +5089,9 @@ async function populateContentSection(conceptId, suffix) {
                 // Smart render content text (detect markdown)
                 const contentText = c.text || '';
                 const isMarkdown = detectMarkdown(contentText);
-                let displayHtml; let safeText; let truncated = false;
+                let displayHtml; let safeText;
                 safeText = escapeHtml(contentText);
-                truncated = safeText.length > 1000;
+                const truncated = safeText.length > 1000;
                 displayHtml = truncated ? safeText.slice(0, 1000) + '…' : safeText || '<i>(empty)</i>';
                 const viewClasses = isMarkdown ? 'content-view concept-text-view markdown-rendered' : 'content-view concept-text-view';
                 const expandHiddenClass = truncated ? '' : ' text-action-hidden';

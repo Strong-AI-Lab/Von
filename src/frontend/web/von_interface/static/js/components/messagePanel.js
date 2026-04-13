@@ -9,6 +9,10 @@ import { getJson, postJson } from '../apiService.js';
 import { hydrateConceptCartouchesInRoot } from '../utils/selectConceptByIdHandler.js';
 import { cartouchifyElementText } from '../utils/textDecorator.js';
 import { showToast } from '../utils/toast.js';
+import {
+    clearRecommendationReviewResults,
+    renderRecommendationReviewPayload,
+} from './paperRecommendationUi.js';
 
 // Message panel state
 let _messagesContainer = null;
@@ -347,6 +351,196 @@ async function loadConversation(userId) {
     }
 }
 
+function isPaperRecommendationMessage(message) {
+    const metadata = message?.concept_data?.metadata || {};
+    return metadata?.delivery_channel === 'paper_recommendation_message'
+        && Array.isArray(metadata?.recommendation_assertion_ids)
+        && metadata.recommendation_assertion_ids.length > 0;
+}
+
+function findRecommendationPanel(messageId) {
+    return Array.from(
+        _messagesContainer?.querySelectorAll('[data-message-recommendation-panel]') || [],
+    ).find((panel) => panel.dataset.messageId === messageId) || null;
+}
+
+function formatFeedbackSummary(latestFeedback) {
+    if (!latestFeedback || typeof latestFeedback !== 'object') {
+        return 'Record whether the recommendation and its explanation were useful.';
+    }
+    const recommendation = String(latestFeedback.recommendation_usefulness || '').trim();
+    const explanation = String(latestFeedback.explanation_usefulness || '').trim();
+    const note = String(latestFeedback.free_text_feedback || '').trim();
+    const bits = [];
+    if (recommendation) bits.push(`Recommendation: ${recommendation.replace(/_/g, ' ')}`);
+    if (explanation) bits.push(`Explanation: ${explanation.replace(/_/g, ' ')}`);
+    if (note) bits.push(`Note: ${note}`);
+    return bits.length
+        ? `Latest feedback: ${bits.join(' | ')}`
+        : 'Record whether the recommendation and its explanation were useful.';
+}
+
+async function submitMessageRecommendationFeedback({ messageId, row }) {
+    const panel = findRecommendationPanel(messageId);
+    if (!panel) return;
+    const card = Array.from(panel.querySelectorAll('.recommendation-review-card')).find(
+        (candidate) => candidate.dataset.assertionConceptId === row?.assertion_concept_id,
+    );
+    if (!card) return;
+
+    const recommendationSelect = card.querySelector('[data-feedback-field="recommendation_usefulness"]');
+    const explanationSelect = card.querySelector('[data-feedback-field="explanation_usefulness"]');
+    const noteInput = card.querySelector('[data-feedback-field="feedback_text"]');
+    const recommendation_usefulness = recommendationSelect?.value || '';
+    const explanation_usefulness = explanationSelect?.value || '';
+    const feedback_text = noteInput?.value?.trim() || '';
+
+    if (!recommendation_usefulness && !explanation_usefulness && !feedback_text) {
+        showToast('Choose feedback or add a note before submitting', 'warning');
+        return;
+    }
+
+    const submitButton = card.querySelector('[data-feedback-submit]');
+    if (submitButton) submitButton.disabled = true;
+    try {
+        await postJson(
+            `/api/messages/${encodeURIComponent(messageId)}/paper_recommendation_feedback`,
+            {
+                assertion_concept_id: row?.assertion_concept_id,
+                paper_concept_id: row?.paper_concept_id,
+                recommendation_usefulness: recommendation_usefulness || undefined,
+                explanation_usefulness: explanation_usefulness || undefined,
+                feedback_text: feedback_text || undefined,
+            },
+        );
+        showToast('Recommendation feedback saved', 'success');
+        panel.dataset.reviewLoaded = 'false';
+        await loadMessageRecommendationReview(messageId, { forceReload: true });
+    } catch (err) {
+        console.error('[messagePanel] Failed to save recommendation feedback:', err);
+        showToast('Failed to save recommendation feedback', 'error');
+    } finally {
+        if (submitButton) submitButton.disabled = false;
+    }
+}
+
+function appendMessageRecommendationFeedbackControls({ card, row, messageId }) {
+    if (!card || !row?.assertion_concept_id) return;
+
+    card.dataset.assertionConceptId = row.assertion_concept_id;
+    const latestFeedback = row?.latest_feedback || {};
+
+    const section = document.createElement('div');
+    section.className = 'message-recommendation-feedback';
+
+    const summary = document.createElement('div');
+    summary.className = 'speech-settings-note';
+    summary.textContent = formatFeedbackSummary(latestFeedback);
+    section.appendChild(summary);
+
+    const controls = document.createElement('div');
+    controls.className = 'message-recommendation-feedback-controls';
+    controls.innerHTML = `
+        <label class="message-recommendation-feedback-field">
+            <span>Recommendation</span>
+            <select data-feedback-field="recommendation_usefulness">
+                <option value="">Not set</option>
+                <option value="useful">Useful</option>
+                <option value="partly_useful">Partly useful</option>
+                <option value="not_useful">Not useful</option>
+            </select>
+        </label>
+        <label class="message-recommendation-feedback-field">
+            <span>Explanation</span>
+            <select data-feedback-field="explanation_usefulness">
+                <option value="">Not set</option>
+                <option value="useful">Useful</option>
+                <option value="partly_useful">Partly useful</option>
+                <option value="not_useful">Not useful</option>
+            </select>
+        </label>
+        <label class="message-recommendation-feedback-field message-recommendation-feedback-field-wide">
+            <span>Note</span>
+            <textarea rows="2" data-feedback-field="feedback_text" placeholder="Optional note about usefulness or explanation quality"></textarea>
+        </label>
+    `;
+    section.appendChild(controls);
+
+    const recommendationSelect = controls.querySelector('[data-feedback-field="recommendation_usefulness"]');
+    const explanationSelect = controls.querySelector('[data-feedback-field="explanation_usefulness"]');
+    const noteInput = controls.querySelector('[data-feedback-field="feedback_text"]');
+    if (recommendationSelect) recommendationSelect.value = latestFeedback?.recommendation_usefulness || '';
+    if (explanationSelect) explanationSelect.value = latestFeedback?.explanation_usefulness || '';
+    if (noteInput) noteInput.value = latestFeedback?.free_text_feedback || '';
+
+    const actions = document.createElement('div');
+    actions.className = 'message-recommendation-actions';
+    const submitButton = document.createElement('button');
+    submitButton.type = 'button';
+    submitButton.className = 'btn btn-secondary btn-sm';
+    submitButton.textContent = row?.feedback_count > 0 ? 'Update feedback' : 'Submit feedback';
+    submitButton.dataset.feedbackSubmit = '1';
+    submitButton.addEventListener('click', () => {
+        void submitMessageRecommendationFeedback({ messageId, row });
+    });
+    actions.appendChild(submitButton);
+    section.appendChild(actions);
+
+    card.appendChild(section);
+}
+
+async function loadMessageRecommendationReview(messageId, { forceReload = false } = {}) {
+    const panel = findRecommendationPanel(messageId);
+    if (!panel) return;
+
+    const summaryElement = panel.querySelector('[data-message-recommendation-summary]');
+    const resultsElement = panel.querySelector('[data-message-recommendation-results]');
+    const statusElement = panel.querySelector('[data-message-recommendation-status]');
+    const reviewBody = panel.querySelector('[data-message-recommendation-review]');
+    const toggleButton = panel.querySelector('[data-message-recommendation-toggle]');
+    if (!summaryElement || !resultsElement || !statusElement || !reviewBody || !toggleButton) return;
+
+    if (!forceReload && panel.dataset.reviewLoaded === 'true') {
+        reviewBody.classList.toggle('hidden');
+        toggleButton.textContent = reviewBody.classList.contains('hidden')
+            ? 'Review recommendations'
+            : 'Hide review';
+        return;
+    }
+
+    reviewBody.classList.remove('hidden');
+    toggleButton.textContent = 'Hide review';
+    statusElement.textContent = 'Loading recommendation review...';
+    clearRecommendationReviewResults(summaryElement, resultsElement, 'Loading recommendation review...');
+
+    try {
+        const payload = await getJson(
+            `/api/messages/${encodeURIComponent(messageId)}/paper_recommendation_review`,
+        );
+        renderRecommendationReviewPayload({
+            summaryElement,
+            containerElement: resultsElement,
+            payload,
+            cardEnhancer: ({ card, row }) => {
+                appendMessageRecommendationFeedbackControls({ card, row, messageId });
+            },
+        });
+        panel.dataset.reviewLoaded = 'true';
+        statusElement.textContent = payload?.success
+            ? 'Recommendation review ready.'
+            : String(payload?.recommendation_report?.message || 'Recommendation review returned diagnostics.');
+    } catch (err) {
+        console.error('[messagePanel] Failed to load recommendation review:', err);
+        panel.dataset.reviewLoaded = 'false';
+        clearRecommendationReviewResults(
+            summaryElement,
+            resultsElement,
+            'Recommendation review is unavailable for this message.',
+        );
+        statusElement.textContent = 'Failed to load recommendation review.';
+    }
+}
+
 /**
  * Render messages in the conversation view.
  */
@@ -371,6 +565,7 @@ async function renderMessages() {
         const senderId = msg.relationships?.['#V#has_sender']?.[0] || '';
         const content = msg.concept_data?.content_fallback || '';
         const timestamp = msg.created_at ? new Date(msg.created_at) : null;
+        const isRecommendationMessage = isPaperRecommendationMessage(msg);
 
         // Determine if this is a sent or received message
         // For now, compare with the other user in conversation
@@ -379,6 +574,26 @@ async function renderMessages() {
         html += `
             <div class="message-bubble ${isSent ? 'sent' : 'received'}">
                 <div class="message-content">${escapeHtml(content)}</div>
+                ${isRecommendationMessage ? `
+                <div class="message-recommendation-panel" data-message-recommendation-panel="1" data-message-id="${escapeHtml(msg.concept_id || '')}">
+                    <div class="message-recommendation-header">
+                        <span class="message-recommendation-label">Paper recommendations</span>
+                        <button type="button" class="message-recommendation-toggle-btn" data-message-recommendation-toggle="1">
+                            Review recommendations
+                        </button>
+                    </div>
+                    <div class="message-recommendation-note">
+                        Inspect the delivered recommendation cards here and record feedback directly on the message.
+                    </div>
+                    <div class="message-recommendation-status" data-message-recommendation-status></div>
+                    <div class="message-recommendation-review hidden" data-message-recommendation-review>
+                        <div class="runtime-hint message-recommendation-summary" data-message-recommendation-summary>
+                            Open the review to inspect recommendation rationale and provenance.
+                        </div>
+                        <div class="recommendation-review-results" data-message-recommendation-results></div>
+                    </div>
+                </div>
+                ` : ''}
                 <div class="message-meta">
                     <span class="message-time">${timestamp ? formatTime(timestamp) : ''}</span>
                 </div>
@@ -393,6 +608,15 @@ async function renderMessages() {
     messageContentEls.forEach((messageContentEl, index) => {
         const content = _currentMessages[index]?.concept_data?.content_fallback || '';
         cartouchifyElementText(messageContentEl, content);
+    });
+    contentEl.querySelectorAll('[data-message-recommendation-toggle]').forEach((button) => {
+        button.addEventListener('click', () => {
+            const panel = button.closest('[data-message-recommendation-panel]');
+            const messageId = panel?.dataset?.messageId;
+            if (messageId) {
+                void loadMessageRecommendationReview(messageId);
+            }
+        });
     });
     await hydrateConceptCartouchesInRoot(contentEl);
 

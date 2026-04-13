@@ -149,3 +149,41 @@ def test_upsert_paper_recommendation_profile_normalises_fields_before_write(
     assert stored_profile["updated_at"]
     assert mirrored["subject_concept_id"] == "#V#lu_yunli"
     assert result["generic_subject_profile"]["success"] is True
+
+
+def test_load_paper_recommendation_profile_returns_blank_overlay_without_creating_profile(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        service,
+        "resolve_or_create_paper_recommendation_profile_concept_id",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        service,
+        "load_concept",
+        lambda _concept_id: None,
+    )
+    monkeypatch.setattr(
+        service,
+        "get_concept_by_concept_id",
+        lambda concept_id: {
+            "concept_id": concept_id,
+            "name": "Strong AI Lab",
+            "relationships": {},
+        },
+    )
+
+    payload = service.load_paper_recommendation_profile(
+        subject_concept_id="#V#strong_ai_lab",
+        create_if_missing=False,
+    )
+
+    assert payload["success"] is True
+    assert payload["subject_concept_id"] == "#V#strong_ai_lab"
+    assert payload["profile_concept_id"] == (
+        "#V#paper_recommendation_profile_for_strong_ai_lab"
+    )
+    assert payload["profile"]["subject_concept_id"] == "#V#strong_ai_lab"
+    assert payload["diagnostics"]["profile_exists"] is False
+    assert payload["diagnostics"]["profile_materialised"] is False

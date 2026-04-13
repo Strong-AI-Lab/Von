@@ -1,7 +1,7 @@
-"""Vontology-backed paper recommendation profiles for person concepts.
+"""Vontology-backed paper recommendation profiles for recommendation subjects.
 
 This service keeps recommendation-specific profile state small and explicit:
-the broad predicate extent around a person remains the substrate, while the
+the broad predicate extent around a subject remains the substrate, while the
 profile captures the stable, inspectable preference overlay that later
 recommendation/ranking workflows can read directly.
 """
@@ -74,19 +74,33 @@ def _normalise_string_list(value: Any) -> list[str]:
     return _dedupe_casefold([str(item) for item in value if isinstance(item, str)])
 
 
-def _build_profile_concept_id(user_concept_id: str) -> str:
-    user_suffix = _safe_str(user_concept_id)
-    if user_suffix.startswith("#V#"):
-        user_suffix = user_suffix[3:]
-    user_suffix = user_suffix or "unknown_user"
-    return f"#V#paper_recommendation_profile_for_{user_suffix}"
+def _normalise_subject_concept_id(
+    *,
+    subject_concept_id: str | None = None,
+    user_concept_id: str | None = None,
+) -> str:
+    subject_id = _safe_str(subject_concept_id) or _safe_str(user_concept_id)
+    if not subject_id:
+        raise ValueError("subject_concept_id is required")
+    return subject_id
 
 
-def _profile_display_name(user_doc: Mapping[str, Any], user_concept_id: str) -> str:
-    display_name = _safe_str(user_doc.get("name")) or _safe_str(user_concept_id)
+def _build_profile_concept_id(subject_concept_id: str) -> str:
+    subject_suffix = _safe_str(subject_concept_id)
+    if subject_suffix.startswith("#V#"):
+        subject_suffix = subject_suffix[3:]
+    subject_suffix = subject_suffix or "unknown_subject"
+    return f"#V#paper_recommendation_profile_for_{subject_suffix}"
+
+
+def _profile_display_name(
+    subject_doc: Mapping[str, Any],
+    subject_concept_id: str,
+) -> str:
+    display_name = _safe_str(subject_doc.get("name")) or _safe_str(subject_concept_id)
     if display_name.startswith("#V#"):
         display_name = display_name[3:].replace("_", " ").strip()
-    return f"Paper recommendation profile for {display_name or 'user'}"
+    return f"Paper recommendation profile for {display_name or 'subject'}"
 
 
 def _ensure_type_concept(*, concept_id: str, name: str, description: str) -> None:
@@ -140,7 +154,7 @@ def ensure_paper_recommendation_profile_primitives() -> dict[str, Any]:
             concept_id=PAPER_RECOMMENDATION_PROFILE_TYPE_ID,
             name="Paper recommendation profile",
             description=(
-                "A per-person profile capturing explicit preferences and guidance "
+                "A recommendation-subject profile capturing explicit preferences and guidance "
                 "for paper recommendation workflows."
             ),
         )
@@ -193,8 +207,8 @@ def _resolve_related_concept_summaries(concept_ids: Sequence[str]) -> list[dict[
     return summaries
 
 
-def _derived_context_for_user(user_doc: Mapping[str, Any]) -> dict[str, Any]:
-    relationships = dict(user_doc.get("relationships") or {})
+def _derived_context_for_subject(subject_doc: Mapping[str, Any]) -> dict[str, Any]:
+    relationships = dict(subject_doc.get("relationships") or {})
     research_interest_ids = normalise_relationship_targets(
         relationships.get(RESEARCH_INTEREST_PREDICATE_ID)
     )
@@ -211,13 +225,15 @@ def _derived_context_for_user(user_doc: Mapping[str, Any]) -> dict[str, Any]:
 
 def _empty_profile(
     *,
-    user_concept_id: str,
+    subject_concept_id: str,
     profile_concept_id: str,
 ) -> dict[str, Any]:
     return {
         "schema_version": PROFILE_SCHEMA_VERSION,
         "profile_id": _safe_str(profile_concept_id) or profile_concept_id,
-        "owner_person_concept_id": user_concept_id,
+        "subject_concept_id": subject_concept_id,
+        "owner_subject_concept_id": subject_concept_id,
+        "owner_person_concept_id": subject_concept_id,
         "profile_concept_id": profile_concept_id,
         "project_description": "",
         "stated_interest_terms": [],
@@ -232,11 +248,11 @@ def _empty_profile(
 def _normalise_profile_payload(
     raw_profile: Mapping[str, Any] | None,
     *,
-    user_concept_id: str,
+    subject_concept_id: str,
     profile_concept_id: str,
 ) -> dict[str, Any]:
     base = _empty_profile(
-        user_concept_id=user_concept_id,
+        subject_concept_id=subject_concept_id,
         profile_concept_id=profile_concept_id,
     )
     if not isinstance(raw_profile, Mapping):
@@ -260,19 +276,25 @@ def _normalise_profile_payload(
     return base
 
 
-def _load_user_doc(user_concept_id: str) -> Mapping[str, Any]:
-    concept_doc = get_concept_by_concept_id(user_concept_id)
+def _load_subject_doc(subject_concept_id: str) -> Mapping[str, Any]:
+    concept_doc = get_concept_by_concept_id(subject_concept_id)
     if not isinstance(concept_doc, Mapping):
-        raise ConceptNotFoundError(f"User concept not found: {user_concept_id}")
+        raise ConceptNotFoundError(f"Subject concept not found: {subject_concept_id}")
     return concept_doc
 
 
 def resolve_or_create_paper_recommendation_profile_concept_id(
     *,
-    user_concept_id: str,
+    subject_concept_id: str | None = None,
+    user_concept_id: str | None = None,
     create_if_missing: bool = False,
 ) -> str | None:
-    """Resolve the linked profile concept for a user, optionally creating it."""
+    """Resolve the linked profile concept for a subject, optionally creating it."""
+
+    subject_id = _normalise_subject_concept_id(
+        subject_concept_id=subject_concept_id,
+        user_concept_id=user_concept_id,
+    )
 
     ensure_report = ensure_paper_recommendation_profile_primitives()
     if not ensure_report.get("success"):
@@ -280,8 +302,8 @@ def resolve_or_create_paper_recommendation_profile_concept_id(
             f"Failed to ensure recommendation profile primitives: {ensure_report.get('error')}"
         )
 
-    user_doc = _load_user_doc(user_concept_id)
-    relationships = dict(user_doc.get("relationships") or {})
+    subject_doc = _load_subject_doc(subject_id)
+    relationships = dict(subject_doc.get("relationships") or {})
     linked_profile_ids = normalise_relationship_targets(
         relationships.get(PAPER_RECOMMENDATION_PROFILE_LINK_PREDICATE_ID)
     )
@@ -295,7 +317,7 @@ def resolve_or_create_paper_recommendation_profile_concept_id(
         )
         return candidate_id
 
-    stable_profile_id = _build_profile_concept_id(user_concept_id)
+    stable_profile_id = _build_profile_concept_id(subject_id)
     stable_profile_doc = load_concept(stable_profile_id)
     if stable_profile_doc is not None:
         ensure_instance_typing(
@@ -303,7 +325,7 @@ def resolve_or_create_paper_recommendation_profile_concept_id(
             type_ids=(PAPER_RECOMMENDATION_PROFILE_TYPE_ID,),
         )
         add_relationship(
-            source_id=user_concept_id,
+            source_id=subject_id,
             predicate=PAPER_RECOMMENDATION_PROFILE_LINK_PREDICATE_ID,
             target=stable_profile_id,
         )
@@ -313,7 +335,7 @@ def resolve_or_create_paper_recommendation_profile_concept_id(
         return None
 
     concept_service.create_concept(
-        name=_profile_display_name(user_doc, user_concept_id),
+        name=_profile_display_name(subject_doc, subject_id),
         concept_id=stable_profile_id,
         description=(
             "User-editable paper recommendation profile used by recommendation "
@@ -323,7 +345,7 @@ def resolve_or_create_paper_recommendation_profile_concept_id(
         create_as_instance=True,
     )
     add_relationship(
-        source_id=user_concept_id,
+        source_id=subject_id,
         predicate=PAPER_RECOMMENDATION_PROFILE_LINK_PREDICATE_ID,
         target=stable_profile_id,
     )
@@ -332,58 +354,61 @@ def resolve_or_create_paper_recommendation_profile_concept_id(
 
 def load_paper_recommendation_profile(
     *,
-    user_concept_id: str,
+    subject_concept_id: str | None = None,
+    user_concept_id: str | None = None,
     create_if_missing: bool = False,
 ) -> dict[str, Any]:
-    """Load one user's paper recommendation profile plus derived context."""
+    """Load one subject's paper recommendation profile plus derived context."""
 
-    user_doc = _load_user_doc(user_concept_id)
-    profile_concept_id = resolve_or_create_paper_recommendation_profile_concept_id(
+    subject_id = _normalise_subject_concept_id(
+        subject_concept_id=subject_concept_id,
         user_concept_id=user_concept_id,
+    )
+    subject_doc = _load_subject_doc(subject_id)
+    profile_concept_id = resolve_or_create_paper_recommendation_profile_concept_id(
+        subject_concept_id=subject_id,
         create_if_missing=create_if_missing,
     )
+    profile_materialised = bool(profile_concept_id)
     if not profile_concept_id:
-        return {
-            "success": False,
-            "user_concept_id": user_concept_id,
-            "error": "profile_not_found",
-        }
+        profile_concept_id = _build_profile_concept_id(subject_id)
 
     loaded_profile: dict[str, Any] | None = None
     source_predicate: str | None = None
-    for predicate in _PROFILE_TEXT_PREDICATES:
-        texts = get_texts_for_concept(
-            subject_concept_id=profile_concept_id,
-            predicate=predicate,
-            limit=10,
-        )
-        for row in texts:
-            raw_text = _safe_str((row or {}).get("text"))
-            if not raw_text:
-                continue
-            try:
-                parsed = json.loads(raw_text)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(parsed, Mapping):
-                loaded_profile = _normalise_profile_payload(
-                    parsed,
-                    user_concept_id=user_concept_id,
-                    profile_concept_id=profile_concept_id,
-                )
-                source_predicate = predicate
+    if profile_materialised:
+        for predicate in _PROFILE_TEXT_PREDICATES:
+            texts = get_texts_for_concept(
+                subject_concept_id=profile_concept_id,
+                predicate=predicate,
+                limit=10,
+            )
+            for row in texts:
+                raw_text = _safe_str((row or {}).get("text"))
+                if not raw_text:
+                    continue
+                try:
+                    parsed = json.loads(raw_text)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(parsed, Mapping):
+                    loaded_profile = _normalise_profile_payload(
+                        parsed,
+                        subject_concept_id=subject_id,
+                        profile_concept_id=profile_concept_id,
+                    )
+                    source_predicate = predicate
+                    break
+            if loaded_profile is not None:
                 break
-        if loaded_profile is not None:
-            break
 
     if loaded_profile is None:
         loaded_profile = _empty_profile(
-            user_concept_id=user_concept_id,
+            subject_concept_id=subject_id,
             profile_concept_id=profile_concept_id,
         )
-        if create_if_missing:
+        if create_if_missing and profile_materialised:
             upsert_result = upsert_paper_recommendation_profile(
-                user_concept_id=user_concept_id,
+                subject_concept_id=subject_id,
                 recommendation_profile=loaded_profile,
             )
             if isinstance(upsert_result.get("profile"), Mapping):
@@ -392,20 +417,23 @@ def load_paper_recommendation_profile(
 
     return {
         "success": True,
-        "user_concept_id": user_concept_id,
+        "subject_concept_id": subject_id,
+        "user_concept_id": subject_id,
         "profile_concept_id": profile_concept_id,
         "profile": loaded_profile,
-        "derived_context": _derived_context_for_user(user_doc),
+        "derived_context": _derived_context_for_subject(subject_doc),
         "diagnostics": {
             "source_predicate": source_predicate,
             "profile_exists": bool(source_predicate),
+            "profile_materialised": profile_materialised,
         },
     }
 
 
 def upsert_paper_recommendation_profile(
     *,
-    user_concept_id: str,
+    subject_concept_id: str | None = None,
+    user_concept_id: str | None = None,
     recommendation_profile: Mapping[str, Any] | None,
     language: str = "en-NZ",
     policy: str = "replace_others",
@@ -413,20 +441,25 @@ def upsert_paper_recommendation_profile(
     provenance: Mapping[str, Any] | None = None,
     context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Persist one user's paper recommendation profile."""
+    """Persist one subject's paper recommendation profile."""
+
+    subject_id = _normalise_subject_concept_id(
+        subject_concept_id=subject_concept_id,
+        user_concept_id=user_concept_id,
+    )
 
     profile_concept_id = resolve_or_create_paper_recommendation_profile_concept_id(
-        user_concept_id=user_concept_id,
+        subject_concept_id=subject_id,
         create_if_missing=True,
     )
     if not profile_concept_id:
         raise RuntimeError(
-            f"Could not resolve or create profile concept for {user_concept_id}"
+            f"Could not resolve or create profile concept for {subject_id}"
         )
 
     normalised_profile = _normalise_profile_payload(
         recommendation_profile,
-        user_concept_id=user_concept_id,
+        subject_concept_id=subject_id,
         profile_concept_id=profile_concept_id,
     )
     normalised_profile["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -447,7 +480,7 @@ def upsert_paper_recommendation_profile(
         garbage_collect=garbage_collect,
     )
     generic_profile_result = persist_subject_paper_matching_profile(
-        subject_concept_id=user_concept_id,
+        subject_concept_id=subject_id,
         profile=normalised_profile,
         provenance=dict(provenance) if isinstance(provenance, Mapping) else None,
         context=dict(context) if isinstance(context, Mapping) else None,
@@ -455,7 +488,8 @@ def upsert_paper_recommendation_profile(
 
     return {
         "success": True,
-        "user_concept_id": user_concept_id,
+        "subject_concept_id": subject_id,
+        "user_concept_id": subject_id,
         "profile_concept_id": profile_concept_id,
         "profile": normalised_profile,
         "text_relation": result,

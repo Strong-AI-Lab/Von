@@ -323,8 +323,9 @@ def _render_delivery_message(
             ),
             "recommendation_items": recommendation_items,
             "review_hint": (
-                "Review these in Settings -> Paper Recommendations, where you can also "
-                "record feedback about usefulness and explanation quality."
+                "Open this recommendation message to review usefulness and "
+                "explanation quality, and update the relevant concept tab profile "
+                "when you want to steer future recommendations."
             ),
             "trigger_source": _safe_str(trigger_source) or "paper_recommendation_refresh",
         },
@@ -459,6 +460,7 @@ def deliver_paper_recommendation_messages(
                 "delivery_channel": "paper_recommendation_message",
                 "intent": "paper_recommendation",
                 "trigger_source": _safe_str(trigger_source) or "paper_recommendation_refresh",
+                "recommendation_subject_concept_id": subject_id,
                 "recommendation_assertion_ids": assertion_ids,
                 "recommendation_paper_concept_ids": paper_ids,
                 "recommendation_count": len(recommendations),

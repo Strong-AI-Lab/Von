@@ -1,4 +1,4 @@
-import { __testOnly_buildRecommendationProfilePayload } from '../settingsPage.js';
+import { buildRecommendationProfilePayload } from '../components/paperRecommendationUi.js';
 
 describe('settingsPage recommendation profile payload builder', () => {
   beforeEach(() => {
@@ -20,7 +20,16 @@ describe('settingsPage recommendation profile payload builder', () => {
     document.getElementById('recommendationPreferredVenuesInput').value = 'NeurIPS, neurips, Nature Machine Intelligence';
     document.getElementById('recommendationProfileNotesInput').value = '  Prefer papers with strong explanations ';
 
-    expect(__testOnly_buildRecommendationProfilePayload()).toEqual({
+    expect(
+      buildRecommendationProfilePayload({
+        projectDescription: document.getElementById('recommendationProjectDescriptionInput').value,
+        statedInterestTerms: document.getElementById('recommendationInterestTermsInput').value,
+        negativeInterestTerms: document.getElementById('recommendationNegativeTermsInput').value,
+        preferredAuthors: document.getElementById('recommendationPreferredAuthorsInput').value,
+        preferredVenues: document.getElementById('recommendationPreferredVenuesInput').value,
+        notes: document.getElementById('recommendationProfileNotesInput').value,
+      }),
+    ).toEqual({
       project_description: '  Scientific discovery support ',
       stated_interest_terms: ['knowledge graphs', 'causal reasoning'],
       negative_interest_terms: ['benchmarking', 'toy tasks'],

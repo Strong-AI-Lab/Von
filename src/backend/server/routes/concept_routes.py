@@ -3,6 +3,7 @@ from flask.typing import ResponseReturnValue
 import json
 from datetime import datetime
 import datetime as dt
+from typing import Any
 from ...services import concept_service  # Import concept_service
 from ...services.window_session_context_service import get_effective_context
 from ...services.concept_service import (
@@ -22,6 +23,13 @@ from ...services.text_value_service import (
 from ...services.rag_text_relation_change_hook_service import (
     maybe_delete_text_relation_doc_from_rag,
     maybe_sync_concept_text_relations_to_rag,
+)
+from ...services.paper_recommendation_profile_vontology_service import (
+    load_paper_recommendation_profile,
+    upsert_paper_recommendation_profile,
+)
+from ...services.paper_recommendation_workflow_vontology_service import (
+    request_paper_recommendation_refresh,
 )
 from ...vontology.utils_vontology import (
     get_concept_notes,
@@ -60,6 +68,123 @@ def _get_request_namespace() -> str | None:
         return user_concept_id.strip()
 
     return None
+
+
+def _get_effective_request_context() -> dict[str, Any]:
+    window_session_id = request.headers.get("X-Von-Window-Session")
+    user_concept_id = session.get("user_concept_id")
+    effective = get_effective_context(window_session_id, dict(session), user_concept_id)
+    return dict(effective) if isinstance(effective, dict) else {}
+
+
+def _normalise_concept_id(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    return cleaned if cleaned.startswith("#V#") else f"#V#{cleaned}"
+
+
+def _get_current_user_concept_id() -> str | None:
+    effective = _get_effective_request_context()
+    return _normalise_concept_id(effective.get("user_id")) or _normalise_concept_id(
+        session.get("user_concept_id")
+    )
+
+
+def _get_current_org_concept_id() -> str | None:
+    effective = _get_effective_request_context()
+    return _normalise_concept_id(
+        effective.get("organisation_id")
+    ) or _normalise_concept_id(session.get("organisation_concept_id"))
+
+
+def _is_admin_or_owner_session() -> bool:
+    effective = _get_effective_request_context()
+    role = effective.get("role") or session.get("role_in_org")
+    return isinstance(role, str) and role.strip().lower() in {"admin", "owner"}
+
+
+def _can_edit_subject_recommendation_profile(subject_concept_id: str) -> bool:
+    subject_id = _normalise_concept_id(subject_concept_id)
+    if not subject_id:
+        return False
+    current_user_id = _get_current_user_concept_id()
+    current_org_id = _get_current_org_concept_id()
+    if current_user_id == subject_id:
+        return True
+    if current_org_id == subject_id:
+        return True
+    return _is_admin_or_owner_session()
+
+
+@concept_bp.route("/<string:concept_id>/paper_recommendation_profile", methods=["GET"])
+def get_concept_recommendation_profile(concept_id: str) -> ResponseReturnValue:
+    """Return a subject-owned paper recommendation profile for one concept."""
+
+    try:
+        payload = load_paper_recommendation_profile(
+            subject_concept_id=concept_id,
+            create_if_missing=False,
+        )
+        payload["permissions"] = {
+            "can_edit": _can_edit_subject_recommendation_profile(concept_id),
+        }
+        return jsonify(payload), 200
+    except ConceptNotFoundError:
+        return jsonify({"error": "Concept not found"}), 404
+    except Exception as e:
+        current_app.logger.error(
+            "Failed to load paper recommendation profile for %s: %s",
+            concept_id,
+            e,
+            exc_info=True,
+        )
+        return jsonify({"error": "Failed to load paper recommendation profile"}), 500
+
+
+@concept_bp.route("/<string:concept_id>/paper_recommendation_profile", methods=["POST"])
+def set_concept_recommendation_profile(concept_id: str) -> ResponseReturnValue:
+    """Persist a subject-owned paper recommendation profile for one concept."""
+
+    if not _can_edit_subject_recommendation_profile(concept_id):
+        return jsonify({"error": "Forbidden"}), 403
+
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"error": "JSON object body required"}), 400
+
+    current_user_id = _get_current_user_concept_id()
+
+    try:
+        payload = upsert_paper_recommendation_profile(
+            subject_concept_id=concept_id,
+            recommendation_profile=data,
+            provenance={"source": "concept_routes.paper_recommendation_profile"},
+            context={"path": "concept_routes.paper_recommendation_profile"},
+        )
+        payload["permissions"] = {"can_edit": True}
+        payload["recommendation_refresh"] = request_paper_recommendation_refresh(
+            target_subject_concept_ids=[concept_id],
+            trigger_source="concept_routes.paper_recommendation_profile",
+            user_id=current_user_id or concept_id,
+            event_payload={
+                "subject_concept_id": concept_id,
+                "source": "concept_routes.paper_recommendation_profile",
+            },
+        )
+        return jsonify(payload), 200
+    except ConceptNotFoundError:
+        return jsonify({"error": "Concept not found"}), 404
+    except Exception as e:
+        current_app.logger.error(
+            "Failed to save paper recommendation profile for %s: %s",
+            concept_id,
+            e,
+            exc_info=True,
+        )
+        return jsonify({"error": "Failed to save paper recommendation profile"}), 500
 
 
 @concept_bp.route("/", methods=["GET"])
