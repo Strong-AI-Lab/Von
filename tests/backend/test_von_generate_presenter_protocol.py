@@ -41,6 +41,7 @@ class _StubOrchestrator:
     ):
         self._result = result
         self.calls: list[dict] = []
+        self.supervised_calls: list[dict] = []
         self.workflow_calls: list[dict] = []
         self._workflow_result = workflow_result
         if workflow_capable:
@@ -58,6 +59,12 @@ class _StubOrchestrator:
 
     def run(self, **kwargs):
         self.calls.append(dict(kwargs))
+        return self._result
+
+    def execute_conversation_turn_supervised(self, **kwargs):
+        payload = dict(kwargs)
+        self.supervised_calls.append(payload)
+        self.calls.append(payload)
         return self._result
 
     def execute_workflow(self, *args, **kwargs):
