@@ -76,6 +76,51 @@ function Reset-Environment {
     }
 }
 
+function Get-RepoWindowsLatexTerminalPathEntries {
+    return @(
+        '${env:ProgramFiles}\MiKTeX\miktex\bin\x64',
+        '${env:ProgramFiles}\MiKTeX\miktex\bin',
+        '${env:ProgramFiles(x86)}\MiKTeX\miktex\bin\x64',
+        '${env:ProgramFiles(x86)}\MiKTeX\miktex\bin',
+        '${env:LOCALAPPDATA}\Programs\MiKTeX\miktex\bin\x64',
+        '${env:LOCALAPPDATA}\Programs\MiKTeX\miktex\bin',
+        'C:\Strawberry\perl\bin',
+        'C:\Strawberry\c\bin',
+        '${env:ProgramFiles}\Strawberry Perl\perl\bin',
+        '${env:ProgramFiles}\Strawberry Perl\c\bin'
+    )
+}
+
+function Merge-RepoWindowsTerminalPath {
+    param(
+        [AllowEmptyString()]
+        [string]$ExistingPath
+    )
+
+    $combinedEntries = New-Object System.Collections.Generic.List[string]
+    $seenEntries = @{}
+
+    foreach ($entry in (Get-RepoWindowsLatexTerminalPathEntries) + (($ExistingPath -split ';') | Where-Object { $_ })) {
+        $entryText = if ($null -eq $entry) { '' } else { [string]$entry }
+        $trimmedEntry = $entryText.Trim()
+        if (-not $trimmedEntry) {
+            continue
+        }
+
+        $normalisedEntry = $trimmedEntry.TrimEnd('\')
+        if (-not $seenEntries.ContainsKey($normalisedEntry)) {
+            $seenEntries[$normalisedEntry] = $true
+            [void]$combinedEntries.Add($trimmedEntry)
+        }
+    }
+
+    if (-not ($combinedEntries | Where-Object { $_ -eq '${env:PATH}' })) {
+        [void]$combinedEntries.Add('${env:PATH}')
+    }
+
+    return $combinedEntries -join ';'
+}
+
 # Function to configure VS Code settings
 function Set-VSCode {
     Write-Host "Setting up VS Code settings..." -ForegroundColor Cyan
@@ -97,6 +142,7 @@ function Set-VSCode {
         $settings["terminal.integrated.defaultProfile.windows"] = "PowerShell"
         $settings["terminal.integrated.env.windows"] = @{
             PYTHONPATH = '${workspaceFolder}'
+            PATH       = (Merge-RepoWindowsTerminalPath)
         }
         $settings | ConvertTo-Json -Depth 10 | Set-Content -Path $settingsFile
         Write-Host "Created $settingsFile" -ForegroundColor Green
@@ -137,6 +183,15 @@ function Set-VSCode {
             }
         }
         $terminalEnv["PYTHONPATH"] = '${workspaceFolder}'
+        $existingPath = ''
+        if ($terminalEnv.ContainsKey("PATH")) {
+            $existingPath = [string]$terminalEnv["PATH"]
+        }
+        elseif ($terminalEnv.ContainsKey("Path")) {
+            $existingPath = [string]$terminalEnv["Path"]
+            $terminalEnv.Remove("Path")
+        }
+        $terminalEnv["PATH"] = Merge-RepoWindowsTerminalPath -ExistingPath $existingPath
         $settings["terminal.integrated.env.windows"] = $terminalEnv
 
         $settings | ConvertTo-Json -Depth 10 | Set-Content -Path $settingsFile

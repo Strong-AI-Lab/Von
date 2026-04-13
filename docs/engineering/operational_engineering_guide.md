@@ -118,6 +118,33 @@ finding in diagnostics or task notes.
 For minimum local and hosted environment sets, see
 `docs/engineering/environment_minimums.md`.
 
+### 5.1 PATH changes are scope-sensitive
+
+- Treat PATH behaviour as scope-sensitive, not magical. A PowerShell script can
+  change `$env:Path` for its own process, but if it is invoked with
+  `& .\script.ps1` those session-local changes do not flow back into the
+  already-open caller shell.
+- `[Environment]::SetEnvironmentVariable(..., "User")` and
+  `[Environment]::SetEnvironmentVariable(..., "Machine")` affect future shells,
+  not the already-running agent session or the current integrated terminal.
+- For repo-scoped developer tooling that should be available in fresh workspace
+  terminals, prefer a repo-controlled terminal environment surface such as
+  `.vscode/settings.json` `terminal.integrated.env.windows`, or an explicit
+  activation script that the caller intentionally dot-sources into the current
+  session.
+- Bootstrap/install scripts may still update user or machine PATH, but they
+  should also either:
+  - update the repo-scoped terminal config for future workspace terminals, or
+  - state clearly that a new shell must be opened before `Get-Command` will
+    succeed.
+- Do not claim that a tool is now "on PATH" for the current session unless you
+  verified it in that same session with a direct probe such as
+  `Get-Command latexmk`.
+- When wrappers can reliably discover tools by absolute install location, keep
+  that fallback for resilience; however, treat "wrapper works but PATH is still
+  stale" as an operational defect worth fixing, not as proof that the PATH
+  problem is solved.
+
 ## 6. Preferred Tool and Access Pathways
 
 ### 6.1 Vontology and workflow behaviour
