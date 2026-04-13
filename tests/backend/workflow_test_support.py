@@ -215,11 +215,14 @@ AUTHORITATIVE_FILE_COPY_WORKFLOW_IDS: tuple[str, ...] = (
 
 TEST_WORKFLOW_SELECTOR_PROMPT_ID = "#V#chat_turn_classifier_prompt"
 TEST_WORKFLOW_SELECTOR_PROMPT_TEMPLATE = (
-    "You are a workflow router. Given the user's request and the candidate "
-    "workflows below, select the single best workflow.\n\n"
+    "You are a workflow router. You will receive the full turn context as "
+    "LLM context messages, the user's current request, and the candidate "
+    "workflows below. Select the single best workflow.\n\n"
     "Return JSON with fields workflow_id, confidence, and reasoning.\n\n"
     "Rules:\n"
     "- Prefer the most specific routing-eligible executable workflow.\n"
+    "- Treat the full turn context messages as authoritative context for "
+    "resolving user-relative references and continuity.\n"
     "- When workflow continuation context is present, treat it as "
     "authoritative routing context for continuation, repair, verification, "
     "or failure-explanation turns unless the user explicitly diverges.\n"

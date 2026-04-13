@@ -852,12 +852,57 @@ def test_build_workflow_routing_diagnostics_preserves_selector_exchange_and_disp
                         {
                             "role": "system",
                             "content": {
+                                "text": "CURRENT USER CONTEXT: Test User (#V#test_user)",
+                                "char_count": 46,
+                            },
+                        },
+                        {
+                            "role": "system",
+                            "content": {
                                 "text": "Selector system prompt",
                                 "char_count": 22,
                             },
-                        }
+                        },
+                        {
+                            "role": "user",
+                            "content": {
+                                "text": "Run the meeting invitation test",
+                                "char_count": 31,
+                            },
+                        },
                     ],
-                    "context_message_count": 1,
+                    "context_message_count": 3,
+                    "context_summary": {
+                        "message_count": 3,
+                        "leading_system_message_count": 2,
+                        "role_counts": {"system": 2, "user": 1},
+                        "total_content_chars": 99,
+                    },
+                    "context_lineage": {
+                        "stage": "workflow_dispatch",
+                        "base_context_source": "augmented_context",
+                        "insertion_strategy": "after_leading_system",
+                        "base_context_summary": {
+                            "message_count": 2,
+                            "leading_system_message_count": 1,
+                            "role_counts": {"system": 1, "user": 1},
+                            "total_content_chars": 77,
+                        },
+                        "stage_added_message_count": 1,
+                        "stage_added_messages": [
+                            {
+                                "role": "system",
+                                "content_preview": "Selector system prompt",
+                                "content_char_count": 22,
+                            }
+                        ],
+                        "stage_context_summary": {
+                            "message_count": 3,
+                            "leading_system_message_count": 2,
+                            "role_counts": {"system": 2, "user": 1},
+                            "total_content_chars": 99,
+                        },
+                    },
                 },
                 "selected": {
                     "provider": "openai",
@@ -914,6 +959,11 @@ def test_build_workflow_routing_diagnostics_preserves_selector_exchange_and_disp
                 "candidate_list": {
                     "text": "- #V#meeting_invitation_testing_workflow",
                     "char_count": 40,
+                },
+                "context_lineage": {
+                    "stage": "workflow_dispatch",
+                    "base_context_source": "augmented_context",
+                    "stage_added_message_count": 1,
                 },
                 "response": {
                     "text": "#V#tool_calling_workflow",
@@ -1007,6 +1057,16 @@ def test_build_workflow_routing_diagnostics_preserves_selector_exchange_and_disp
     assert diagnostics["selector"]["model_request"]["context_messages"][0]["role"] == (
         "system"
     )
+    assert diagnostics["selector"]["model_request"]["context_summary"] == {
+        "message_count": 3,
+        "leading_system_message_count": 2,
+        "role_counts": {"system": 2, "user": 1},
+        "total_content_chars": 99,
+    }
+    assert diagnostics["selector"]["context_lineage"]["base_context_source"] == (
+        "augmented_context"
+    )
+    assert diagnostics["selector"]["context_lineage"]["stage_added_message_count"] == 1
     assert diagnostics["selector"]["model_attempts"][0]["failure_kind"] == (
         "provider_unreachable"
     )

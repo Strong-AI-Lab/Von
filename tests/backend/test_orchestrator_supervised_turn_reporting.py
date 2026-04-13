@@ -210,6 +210,113 @@ def test_turn_execution_route_discovers_when_prefilled_payload_is_empty(
     ]
 
 
+def test_turn_execution_route_reuses_augmented_context_for_selector_and_tracks_lineage(
+    monkeypatch,
+) -> None:
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
+        gateway=cast(Any, _DummyGateway()),
+        selector_enabled=True,
+    )
+    llm_calls: list[dict[str, Any]] = []
+
+    class _CapturingRouteLLM:
+        def generate(self, prompt, context=None, model=None):
+            llm_calls.append(
+                {"prompt": prompt, "context": list(context or []), "model": model}
+            )
+            return CHAT_ASSISTANT_WORKFLOW_ID
+
+    aux_llm_calls: list[dict[str, Any]] = []
+    result = orchestrator._action_turn_execution_route(
+        SimpleNamespace(
+            data={
+                "user_prompt": "What is my name?",
+                "workflow_discovery_result": {
+                    "matches": [
+                        {
+                            "concept_id": CHAT_ASSISTANT_WORKFLOW_ID,
+                            "name": "Chat Assistant Workflow",
+                            "description": "Default chat assistant route.",
+                            "is_executable": True,
+                            "executability_reason": "executable_now",
+                            "routing_eligible": True,
+                        }
+                    ],
+                    "candidates": [
+                        {
+                            "concept_id": CHAT_ASSISTANT_WORKFLOW_ID,
+                            "name": "Chat Assistant Workflow",
+                            "description": "Default chat assistant route.",
+                            "is_executable": True,
+                            "executability_reason": "executable_now",
+                            "routing_eligible": True,
+                        }
+                    ],
+                    "match_count": 1,
+                },
+                "workflow_discovery": None,
+                "policy_state": SimpleNamespace(
+                    enabled=False,
+                    policy=None,
+                    policy_id=None,
+                    predicate_id=None,
+                    errors=(),
+                ),
+                "registry_snapshot": None,
+                "llm_calls": [],
+                "aux_llm_calls": aux_llm_calls,
+                "augmented_context": [
+                    {
+                        "role": "system",
+                        "content": "CURRENT USER CONTEXT: Test User (#V#test_user)",
+                    },
+                    {"role": "user", "content": "What is my name?"},
+                ],
+            },
+            environment=SimpleNamespace(
+                user_namespace="#V#user",
+                llm_client=_CapturingRouteLLM(),
+                model="test-model",
+            ),
+        )
+    )
+
+    assert result.status == "success"
+    assert result.outputs["selected_workflow_id"] == CHAT_ASSISTANT_WORKFLOW_ID
+    assert llm_calls
+    selector_context = llm_calls[0]["context"]
+    assert any(
+        isinstance(message, dict)
+        and message.get("content") == "CURRENT USER CONTEXT: Test User (#V#test_user)"
+        for message in selector_context
+    )
+    assert any(
+        isinstance(message, dict)
+        and message.get("role") == "user"
+        and message.get("content") == "What is my name?"
+        for message in selector_context
+    )
+
+    stage_summary = next(
+        entry
+        for entry in aux_llm_calls
+        if isinstance(entry, dict)
+        and entry.get("type") == "workflow_model_policy_stage"
+        and entry.get("stage") == "workflow_dispatch"
+    )
+    request = stage_summary["request"]
+    assert request["context_lineage"]["base_context_source"] == "augmented_context"
+    assert request["context_lineage"]["stage_added_message_count"] == 1
+    assert request["context_summary"]["message_count"] == len(selector_context)
+    assert (
+        result.outputs["selected_workflow_trace"]["selector_context_lineage"][
+            "base_context_source"
+        ]
+        == "augmented_context"
+    )
+
+
 def test_turn_execution_route_preserves_non_default_selector_intent_with_safe_general_fallback(
     monkeypatch,
 ) -> None:

@@ -5373,6 +5373,79 @@ def test_workflow_selector_uses_provider_aware_classifier_fallback(monkeypatch):
     )
 
 
+def test_workflow_selector_reuses_augmented_context_and_tracks_context_lineage(
+    monkeypatch,
+):
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    base_context = [
+        {
+            "role": "system",
+            "content": "CURRENT USER CONTEXT: Test User (#V#test_user)",
+        },
+        {"role": "assistant", "content": "Earlier context that still matters."},
+        {"role": "user", "content": "What is my name?"},
+    ]
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_augmented_context",
+        lambda *args, **kwargs: list(base_context),
+    )
+
+    llm = _CapturingLLM(
+        [
+            CHAT_ASSISTANT_WORKFLOW_ID,
+            "Your name is Test User.",
+        ]
+    )
+
+    result = orchestrator.run(
+        prompt="What is my name?",
+        context=[],
+        llm_client=llm,
+        model="test-model",
+        user_namespace="#V#user",
+    )
+
+    assert result.response_text == "Your name is Test User."
+    selector_context = llm.calls[0]["context"]
+    assert any(
+        isinstance(message, dict)
+        and message.get("content") == "CURRENT USER CONTEXT: Test User (#V#test_user)"
+        for message in selector_context
+    )
+    assert any(
+        isinstance(message, dict)
+        and message.get("role") == "user"
+        and message.get("content") == "What is my name?"
+        for message in selector_context
+    )
+
+    stage_summary = next(
+        entry
+        for entry in result.aux_llm_calls
+        if isinstance(entry, dict)
+        and entry.get("type") == "workflow_model_policy_stage"
+        and entry.get("stage") == "workflow_dispatch"
+    )
+    request = stage_summary["request"]
+    assert request["context_lineage"]["base_context_source"] == "augmented_context"
+    assert request["context_lineage"]["stage_added_message_count"] == 1
+    assert request["context_lineage"]["stage_added_messages"][0]["role"] == "system"
+    assert request["context_lineage"]["base_context_summary"]["message_count"] == 3
+    assert request["context_summary"]["message_count"] == len(selector_context)
+    assert request["context_summary"]["role_counts"]["system"] >= 2
+
+    selector_prompt_entry = next(
+        entry
+        for entry in result.aux_llm_calls
+        if isinstance(entry, dict) and entry.get("type") == "workflow_selector_prompt"
+    )
+    assert selector_prompt_entry["context_lineage"]["base_context_source"] == (
+        "augmented_context"
+    )
+    assert selector_prompt_entry["context_lineage"]["stage_added_message_count"] == 1
+
+
 def test_mutative_wording_does_not_override_plain_response_routing(monkeypatch):
     """Mutative wording alone must not trigger Python-side routing overrides."""
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
