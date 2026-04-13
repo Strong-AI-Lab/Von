@@ -170,6 +170,111 @@ def test_swift_blob_store_exists_uses_get_object_obj_signature():
     assert store._conn.object_store.calls == [("demo/thing.txt", "demo-container")]
 
 
+def test_swift_blob_store_exists_returns_false_for_openstack_not_found():
+    class _DummyResponse:
+        status_code = 404
+
+    class _NotFoundException(Exception):
+        __module__ = "openstack.exceptions"
+
+        def __init__(self, message: str, *, response=None):
+            super().__init__(message)
+            self.response = response
+
+    class _DummyObjectStore:
+        def get_object(self, obj, container=None, **attrs):
+            raise _NotFoundException("Not Found", response=_DummyResponse())
+
+    class _DummyConn:
+        def __init__(self):
+            self.object_store = _DummyObjectStore()
+
+    store = SwiftBlobStore.__new__(SwiftBlobStore)
+    store._container = "demo-container"
+    store._prefix = ""
+    store._public_base_url = None
+    store._cloud = None
+    store._conn = _DummyConn()
+
+    assert store.exists("missing.txt") is False
+
+
+def test_swift_blob_store_delete_then_exists_returns_false():
+    class _NotFoundException(Exception):
+        __module__ = "openstack.exceptions"
+
+        def __init__(self, message: str):
+            super().__init__(message)
+            self.http_status = 404
+
+    class _DummyObjectStore:
+        def __init__(self):
+            self.objects: set[str] = set()
+
+        def create_object(
+            self,
+            *,
+            container=None,
+            name=None,
+            data=None,
+            content_type=None,
+            metadata=None,
+        ):
+            self.objects.add(str(name))
+
+        def get_object(self, obj, container=None, **attrs):
+            if obj not in self.objects:
+                raise _NotFoundException("Not Found")
+            return {"name": obj}
+
+        def delete_object(self, obj, ignore_missing=True, container=None, **attrs):
+            self.objects.discard(str(obj))
+
+    class _DummyConn:
+        def __init__(self):
+            self.object_store = _DummyObjectStore()
+
+    store = SwiftBlobStore.__new__(SwiftBlobStore)
+    store._container = "demo-container"
+    store._prefix = ""
+    store._public_base_url = None
+    store._cloud = None
+    store._conn = _DummyConn()
+
+    store.put_bytes("demo/thing.txt", b"hello")
+    assert store.exists("demo/thing.txt") is True
+
+    store.delete("demo/thing.txt")
+    assert store.exists("demo/thing.txt") is False
+
+
+def test_swift_blob_store_exists_propagates_non_not_found_failures():
+    class _TransportException(Exception):
+        __module__ = "openstack.exceptions"
+
+        def __init__(self, message: str):
+            super().__init__(message)
+            self.http_status = 503
+
+    class _DummyObjectStore:
+        def get_object(self, obj, container=None, **attrs):
+            raise _TransportException("Service unavailable")
+
+    class _DummyConn:
+        def __init__(self):
+            self.object_store = _DummyObjectStore()
+
+    store = SwiftBlobStore.__new__(SwiftBlobStore)
+    store._container = "demo-container"
+    store._prefix = ""
+    store._public_base_url = None
+    store._cloud = None
+    store._conn = _DummyConn()
+
+    with pytest.raises(_TransportException, match="Service unavailable"):
+        store.exists("demo/thing.txt")
+
+
 def test_swift_blob_store_delete_uses_delete_object_obj_signature():
     class _DummyObjectStore:
         def __init__(self):

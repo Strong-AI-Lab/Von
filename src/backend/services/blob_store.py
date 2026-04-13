@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Mapping, Protocol
+from typing import Any, Protocol
 
 
 @dataclass(frozen=True)
@@ -77,6 +78,45 @@ def _normalise_key(key: str) -> str:
         raise ValueError("Blob key must not be empty")
 
     return key
+
+
+def _exception_http_status(exc: Exception) -> int | None:
+    for attr in ("http_status", "status_code", "status"):
+        value = getattr(exc, attr, None)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+
+    response = getattr(exc, "response", None)
+    if isinstance(response, Mapping):
+        status = response.get("status_code")
+        if isinstance(status, int):
+            return status
+        metadata = response.get("ResponseMetadata")
+        if isinstance(metadata, Mapping):
+            meta_status = metadata.get("HTTPStatusCode")
+            if isinstance(meta_status, int):
+                return meta_status
+    else:
+        status = getattr(response, "status_code", None)
+        if isinstance(status, int):
+            return status
+
+    return None
+
+
+def _is_openstack_not_found_exception(exc: Exception) -> bool:
+    exc_type = type(exc)
+    module_name = str(getattr(exc_type, "__module__", "")).lower()
+    type_name = str(getattr(exc_type, "__name__", ""))
+    if not module_name.startswith("openstack"):
+        return False
+
+    if type_name in {"NotFoundException", "ResourceNotFound"}:
+        return True
+
+    return _exception_http_status(exc) == 404
 
 
 class LocalBlobStore:
@@ -358,10 +398,19 @@ class SwiftBlobStore:
                 container=self._container,
             )
         except TypeError:
-            obj = self._conn.object_store.get_object(
-                name=full_key,
-                container=self._container,
-            )
+            try:
+                obj = self._conn.object_store.get_object(
+                    name=full_key,
+                    container=self._container,
+                )
+            except Exception as exc:
+                if _is_openstack_not_found_exception(exc):
+                    return False
+                raise
+        except Exception as exc:
+            if _is_openstack_not_found_exception(exc):
+                return False
+            raise
         return obj is not None
 
     def delete(self, key: str) -> None:
