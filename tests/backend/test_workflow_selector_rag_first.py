@@ -347,7 +347,7 @@ class TestRagFirstPrompt:
         assert prompt.prompt_text is not None
         assert "What is the meaning of life?" in prompt.prompt_text
 
-    def test_prompt_can_emit_lexical_guidance_without_direct_selection(self):
+    def test_prompt_does_not_emit_python_lexical_guidance_without_learned_policy(self):
         selector = _build_selector()
         prompt = selector.prepare_selection_prompt(
             turn_text=(
@@ -368,12 +368,15 @@ class TestRagFirstPrompt:
             ],
         )
 
-        assert prompt.policy_recommendation["guidance_mode"] == "prompt_guidance"
-        assert (
-            prompt.policy_recommendation["recommended_workflow_id"]
-            == "#V#meeting_invitation_testing_workflow"
-        )
-        assert prompt.policy_recommendation["guidance_basis"] == "lexical_specificity"
+        assert prompt.policy_recommendation["policy_active"] is False
+        assert prompt.policy_recommendation["guidance_mode"] == "none"
+        assert prompt.policy_recommendation["ranked_candidate_ids"] == []
+        assert "recommended_workflow_id" not in prompt.policy_recommendation
+        assert "guidance_basis" not in prompt.policy_recommendation
+        assert [entry["concept_id"] for entry in prompt.candidate_entries] == [
+            "#V#synthetic_workflow_regression_suite_workflow",
+            "#V#meeting_invitation_testing_workflow",
+        ]
 
     def test_prompt_missing_candidate_list_fails_closed(self):
         selector = WorkflowSelector(
@@ -424,7 +427,7 @@ class TestRagFirstPrompt:
         assert result.selection_source == "selector_fail_closed"
         mock_llm.generate.assert_not_called()
 
-    def test_select_workflow_uses_llm_even_when_lexical_guidance_is_strong(self):
+    def test_select_workflow_uses_llm_even_without_python_policy_guidance(self):
         selector = _build_selector()
         mock_llm = MagicMock()
         mock_llm.generate.return_value = "#V#meeting_invitation_testing_workflow"

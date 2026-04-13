@@ -68,6 +68,38 @@ def test_no_prompt_semantic_regex_patterns_in_orchestrator() -> None:
     )
 
 
+def test_no_python_lexical_selector_guidance_in_policy_service() -> None:
+    """Selector candidate steering must not fall back to Python lexical logic."""
+    from src.backend.services import workflow_selection_policy_service as mod
+
+    banned_attributes = [
+        "_LEXICAL_GUIDANCE_STOPWORDS",
+        "_normalise_selector_text",
+        "_filtered_selector_tokens",
+        "_selector_query_phrases",
+        "_recommend_guidance_candidate_by_specificity",
+    ]
+    for name in banned_attributes:
+        assert not hasattr(mod, name), (
+            f"{name} was re-introduced in workflow_selection_policy_service. "
+            "Selector semantic guidance must remain LLM- or learned-policy-owned."
+        )
+
+    source = inspect.getsource(mod)
+    banned_fragments = [
+        "lexical_specificity",
+        "lexical_guidance",
+        "lexical_candidate_scores",
+        "selection_reason\": \"lexical_specificity_guidance_candidate",
+    ]
+    for fragment in banned_fragments:
+        assert fragment not in source, (
+            f"Found banned lexical selector guidance fragment '{fragment}' in "
+            "workflow_selection_policy_service. Python must not steer workflow "
+            "selection semantics via lexical overlap."
+        )
+
+
 def test_prompt_semantic_source_budget_in_orchestrator() -> None:
     """Only one orchestrator call site should use prompt_semantic_inference.
 
