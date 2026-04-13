@@ -91,6 +91,27 @@ class _StubUpdateResult:
         self.upserted_id = upserted_id
 
 
+class _StubCursor:
+    def __init__(self, docs: list[dict]) -> None:
+        self._docs = list(docs)
+
+    def sort(self, field: str, direction: int):
+        reverse = direction < 0
+        self._docs = sorted(
+            self._docs,
+            key=lambda item: item.get(field) or "",
+            reverse=reverse,
+        )
+        return self
+
+    def limit(self, value: int):
+        self._docs = self._docs[:value]
+        return self
+
+    def __iter__(self):
+        return iter(self._docs)
+
+
 class _StubCollection:
     def __init__(self) -> None:
         self.docs: dict[str, dict] = {}
@@ -114,6 +135,41 @@ class _StubCollection:
 
     def find_one(self, query, _projection=None):
         return self.docs.get(query["memory_id"])
+
+    def find(self, query, projection=None):
+        namespace = query.get("namespace")
+        workflow_candidates = {
+            clause_value
+            for clause in query.get("$or", [])
+            for clause_key, clause_value in clause.items()
+            if clause_key
+            in {"workflow_id", "implicated_workflow_ids", "improvement_target_workflow_ids"}
+        }
+        docs = []
+        for doc in self.docs.values():
+            if namespace and doc.get("namespace") != namespace:
+                continue
+            if int(doc.get("improvement_suggestion_count") or 0) <= 0:
+                continue
+            direct_workflow_id = doc.get("workflow_id")
+            implicated_ids = set(doc.get("implicated_workflow_ids") or [])
+            target_ids = set(doc.get("improvement_target_workflow_ids") or [])
+            if workflow_candidates and not (
+                direct_workflow_id in workflow_candidates
+                or implicated_ids.intersection(workflow_candidates)
+                or target_ids.intersection(workflow_candidates)
+            ):
+                continue
+            if projection:
+                projected = {}
+                for key, include in projection.items():
+                    if key == "_id" or not include:
+                        continue
+                    projected[key] = doc.get(key)
+                docs.append(projected)
+            else:
+                docs.append(dict(doc))
+        return _StubCursor(docs)
 
 
 def test_build_episode_critique_memory_state_extracts_links_and_receipts(monkeypatch):
@@ -179,6 +235,21 @@ def test_upsert_episode_critique_memory_projection_persists_document(monkeypatch
             "jira_action": "created_new",
         },
         "recommendations": ["No remediation is currently indicated by the recorded critic evidence."],
+        "improvement_suggestions": [
+            {
+                "suggestion_id": "tool_addition_alpha",
+                "category": "tool_addition",
+                "priority": "high",
+                "target_surface": "tool",
+                "target_workflow_id": "#V#workflow",
+                "target_tool_name": "search_web",
+                "title": "Add missing web search support",
+                "rationale": "The episode lacked a required external lookup.",
+                "suggested_change": "Add a reusable web-search tool surface.",
+                "evidence_refs": ["capability_gaps:missing_search_tool"],
+                "recursion_level": 0,
+            }
+        ],
         "dedupe_fingerprint": "fingerprint-123",
         "evidence_receipts": {"receipt_hash": "receipt-123"},
         "created_at_utc": "2026-03-29T05:00:00Z",
@@ -194,6 +265,128 @@ def test_upsert_episode_critique_memory_projection_persists_document(monkeypatch
     assert stored["remediation_task_ids"] == ["#V#task_123"]
     assert stored["routing_decision"] == "task_and_jira"
     assert stored["routing_fingerprint"] == "route-fingerprint-123"
+    assert stored["improvement_suggestion_count"] == 1
+    assert stored["improvement_suggestion_categories"] == ["tool_addition"]
+    assert stored["improvement_target_tool_names"] == ["search_web"]
+
+
+def test_build_episode_assessment_state_normalises_improvement_suggestions():
+    from src.backend.services import episode_critique_memory_service as svc
+
+    state = svc.build_episode_critique_memory_state_from_episode_assessment(
+        evidence_bundle={
+            "episode_locator": {
+                "request_id": "req-1838",
+                "workflow_id": "#V#alpha_workflow",
+                "namespace": "#V#user@org",
+            },
+            "capability_gaps": [],
+        },
+        assessment={
+            "verdict": "fail",
+            "summary": "The episode selected the wrong route and lacked a needed tool.",
+            "improvement_suggestions": [
+                {
+                    "category": "workflow_fix",
+                    "priority": "HIGH",
+                    "target_surface": "workflow_definition",
+                    "title": "Repair routing policy",
+                    "rationale": "Another eligible workflow should have won.",
+                    "suggested_change": "Tighten routing exemplars for #V#alpha_workflow.",
+                    "evidence_refs": ["expected_context.routing_quality_signals"],
+                },
+                {
+                    "category": "critic_improvement",
+                    "target_surface": "critic",
+                    "title": "Keep critic self-repair bounded",
+                    "rationale": "The critique should not recurse indefinitely.",
+                    "suggested_change": "Restrict critic follow-up to one level.",
+                    "evidence_refs": ["episode_locator.request_id"],
+                    "recursion_level": 7,
+                },
+            ],
+        },
+    )
+
+    assert state is not None
+    suggestions = state["improvement_suggestions"]
+    assert len(suggestions) == 2
+    assert suggestions[0]["category"] == "workflow_change"
+    assert suggestions[0]["priority"] == "high"
+    assert suggestions[0]["target_surface"] == "workflow"
+    assert suggestions[0]["target_workflow_id"] == "#V#alpha_workflow"
+    assert suggestions[1]["category"] == "critic_self_improvement"
+    assert suggestions[1]["target_surface"] == "episode_critic"
+    assert suggestions[1]["recursion_level"] == 1
+
+
+def test_list_recent_workflow_improvement_suggestions_filters_and_flattens(monkeypatch):
+    from src.backend.services import episode_critique_memory_service as svc
+
+    coll = _StubCollection()
+    coll.docs["#V#episode_critique_memory_1"] = {
+        "memory_id": "#V#episode_critique_memory_1",
+        "request_id": "req-1838-a",
+        "workflow_id": "#V#alpha_workflow",
+        "namespace": "#V#user@org",
+        "created_at_utc": "2026-04-13T04:00:00Z",
+        "verdict": "fail",
+        "critic_summary_text": "Routing failed.",
+        "receipt_hash": "receipt-a",
+        "improvement_suggestion_count": 1,
+        "improvement_target_workflow_ids": ["#V#alpha_workflow"],
+        "improvement_suggestions": [
+            {
+                "suggestion_id": "workflow_change_alpha",
+                "category": "workflow_change",
+                "priority": "high",
+                "target_surface": "workflow",
+                "target_workflow_id": "#V#alpha_workflow",
+                "title": "Repair routing policy",
+                "rationale": "Routing selected the wrong workflow.",
+                "suggested_change": "Tighten routing exemplars.",
+                "evidence_refs": ["expected_context.routing_quality_signals"],
+                "recursion_level": 0,
+            }
+        ],
+    }
+    coll.docs["#V#episode_critique_memory_2"] = {
+        "memory_id": "#V#episode_critique_memory_2",
+        "request_id": "req-1838-b",
+        "workflow_id": "#V#beta_workflow",
+        "namespace": "#V#user@org",
+        "created_at_utc": "2026-04-13T05:00:00Z",
+        "verdict": "fail",
+        "critic_summary_text": "Other workflow failure.",
+        "receipt_hash": "receipt-b",
+        "improvement_suggestion_count": 1,
+        "improvement_target_workflow_ids": ["#V#beta_workflow"],
+        "improvement_suggestions": [
+            {
+                "suggestion_id": "workflow_change_beta",
+                "category": "workflow_change",
+                "priority": "medium",
+                "target_surface": "workflow",
+                "target_workflow_id": "#V#beta_workflow",
+                "title": "Repair beta routing",
+                "rationale": "Different workflow.",
+                "suggested_change": "Adjust beta routing metadata.",
+                "evidence_refs": ["episode_locator.request_id"],
+                "recursion_level": 0,
+            }
+        ],
+    }
+    monkeypatch.setattr(svc, "get_episode_critique_memories_collection", lambda: coll)
+
+    suggestions = svc.list_recent_workflow_improvement_suggestions(
+        "#V#alpha_workflow",
+        namespace="#V#user@org",
+    )
+
+    assert len(suggestions) == 1
+    assert suggestions[0]["memory_id"] == "#V#episode_critique_memory_1"
+    assert suggestions[0]["request_id"] == "req-1838-a"
+    assert suggestions[0]["critic_summary_text"] == "Routing failed."
 
 
 def test_record_episode_critique_memory_routing_merges_remediation_links(monkeypatch):

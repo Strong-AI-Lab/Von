@@ -14,6 +14,32 @@ EPISODE_EVALUATION_PROMPT_LINK_PREDICATE = "#V#hasEpisodeCriticEvaluationPrompt"
 EPISODE_EVALUATION_BUILD_EVIDENCE_ACTION_ID = "episode_critic.build_evidence_bundle"
 EPISODE_EVALUATION_PERSIST_MEMORY_ACTION_ID = "episode_critic.persist_memory"
 
+EPISODE_EVALUATION_IMPROVEMENT_SUGGESTION_SCHEMA_VERSION = (
+    "episode_improvement_suggestion.v1"
+)
+EPISODE_EVALUATION_IMPROVEMENT_SUGGESTION_MAX_COUNT = 6
+EPISODE_EVALUATION_IMPROVEMENT_SUGGESTION_CATEGORIES: tuple[str, ...] = (
+    "workflow_change",
+    "prompt_improvement",
+    "tool_addition",
+    "support_surface_addition",
+    "tool_metadata_fix",
+    "tool_contract_fix",
+    "telemetry_addition",
+    "verification_improvement",
+    "critic_self_improvement",
+)
+EPISODE_EVALUATION_IMPROVEMENT_TARGET_SURFACES: tuple[str, ...] = (
+    "workflow",
+    "prompt",
+    "tool",
+    "support_surface",
+    "tool_metadata",
+    "tool_contract",
+    "telemetry",
+    "episode_critic",
+)
+
 EVENT_TYPE_TURN_COMPLETION_GATE_FINALISED = "turn_execution.completion_gate"
 EVENT_TYPE_WORKFLOW_INSTANCE_TERMINAL = "workflow.instance_terminal"
 EVENT_TYPE_EPISODE_MAINTENANCE_FOLLOW_UP = "episode_critic.maintenance_follow_up"
@@ -36,6 +62,10 @@ __all__ = [
     "EPISODE_EVALUATION_DEFAULT_MAX_DEPTH",
     "EPISODE_EVALUATION_MAX_DEPTH_ENV",
     "EPISODE_EVALUATION_PERSIST_MEMORY_ACTION_ID",
+    "EPISODE_EVALUATION_IMPROVEMENT_SUGGESTION_SCHEMA_VERSION",
+    "EPISODE_EVALUATION_IMPROVEMENT_SUGGESTION_MAX_COUNT",
+    "EPISODE_EVALUATION_IMPROVEMENT_SUGGESTION_CATEGORIES",
+    "EPISODE_EVALUATION_IMPROVEMENT_TARGET_SURFACES",
     "EPISODE_EVALUATION_PROMPT_CONCEPT_ID",
     "EPISODE_EVALUATION_PROMPT_LINK_PREDICATE",
     "EPISODE_EVALUATION_WORKFLOW_ID",

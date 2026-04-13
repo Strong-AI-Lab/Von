@@ -98,6 +98,7 @@ def test_bootstrap_materialises_episode_evaluation_workflow_family(
     assert isinstance(prompt_text, str)
     assert "routing_quality_signals" in prompt_text
     assert "workflow/routing selection defects" in prompt_text
+    assert "improvement_suggestions" in prompt_text
 
     manager = get_instance_manager()
     turn_bindings = manager.list_event_bindings(
@@ -138,3 +139,35 @@ def test_episode_prompt_support_seeds_content_from_repo_asset(
     assert isinstance(prompt_text, str)
     assert "routing_quality_signals" in prompt_text
     assert "workflow/routing selection defects" in prompt_text
+    assert "improvement_suggestions" in prompt_text
+
+
+def test_episode_prompt_support_force_prompt_seed_refreshes_existing_content(
+    _reset_mock_db: Any,
+) -> None:
+    _ensure_episode_evaluation_prompt_support()
+    from src.backend.services.text_value_service import upsert_singleton_text_relation
+
+    upsert_singleton_text_relation(
+        subject_concept_id=EPISODE_EVALUATION_PROMPT_CONCEPT_ID,
+        predicate="hasContent",
+        text="stale prompt text",
+        lang="en-NZ",
+        garbage_collect=True,
+    )
+
+    report = _ensure_episode_evaluation_prompt_support(force_prompt_seed=True)
+
+    assert report.get("success") is True
+    prompt_content_rows = get_texts_for_concept(
+        EPISODE_EVALUATION_PROMPT_CONCEPT_ID,
+        predicate="hasContent",
+        limit=5,
+    )
+    prompt_text = next(
+        ((row or {}).get("text") for row in prompt_content_rows if (row or {}).get("text")),
+        "",
+    )
+    assert isinstance(prompt_text, str)
+    assert prompt_text != "stale prompt text"
+    assert "improvement_suggestions" in prompt_text

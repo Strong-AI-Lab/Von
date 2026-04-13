@@ -24,6 +24,20 @@ def test_persist_memory_handler_surfaces_remediation_routing(monkeypatch):
             "state": {
                 "memory_id": "#V#episode_critique_memory_abc",
                 "namespace": "#V#user@org",
+                "improvement_suggestions": [
+                    {
+                        "suggestion_id": "workflow_change_alpha",
+                        "category": "workflow_change",
+                        "priority": "high",
+                        "target_surface": "workflow",
+                        "target_workflow_id": "#V#alpha_workflow",
+                        "title": "Repair the workflow route",
+                        "rationale": "Another eligible route existed.",
+                        "suggested_change": "Tighten routing metadata for the workflow.",
+                        "evidence_refs": ["expected_context.routing_quality_signals"],
+                        "recursion_level": 0,
+                    }
+                ],
             },
         },
     )
@@ -68,6 +82,11 @@ def test_persist_memory_handler_surfaces_remediation_routing(monkeypatch):
     assert result.outputs["remediation_repeat_count"] == 3
     assert result.outputs["remediation_task_id"] == "#V#task_1610"
     assert result.outputs["remediation_issue_key"] == "JVNAUTOSCI-1610"
+    assert result.outputs["improvement_suggestion_count"] == 1
+    assert result.outputs["improvement_suggestion_categories"] == ["workflow_change"]
+    assert result.outputs["improvement_suggestions"][0]["target_workflow_id"] == (
+        "#V#alpha_workflow"
+    )
     assert result.outputs["maintenance_follow_up_requested"] is False
 
 

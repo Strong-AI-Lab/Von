@@ -455,11 +455,72 @@ function renderSummaryHeader() {
   chips.push(`<span class="workflow-studio-hero-chip">${stepCount} step${stepCount === 1 ? '' : 's'}</span>`);
   const activeCount = Number(state.workflowDetail?.operations?.instances?.active_count || 0);
   chips.push(`<span class="workflow-studio-hero-chip">${activeCount} active instance${activeCount === 1 ? '' : 's'}</span>`);
+  const improvementCount = Number(state.workflowDetail?.improvement_guidance?.count || 0);
+  if (improvementCount > 0) {
+    chips.push(`<span class="workflow-studio-hero-chip warning">${improvementCount} improvement suggestion${improvementCount === 1 ? '' : 's'}</span>`);
+  }
   chips.push(`<span class="workflow-studio-hero-chip">${escapeHtml(cleanText(lifecycle.phase) || 'phase unknown')}</span>`);
   if (cleanText(proposal.status || lifecycle.review_state)) {
     chips.push(`<span class="workflow-studio-hero-chip ${proposal?.active ? 'muted' : 'success'}">${escapeHtml(cleanText(proposal.status || lifecycle.review_state))}</span>`);
   }
   elements.summaryChips.innerHTML = chips.join('');
+}
+
+function renderImprovementGuidanceSection() {
+  const guidance = state.workflowDetail?.improvement_guidance || {};
+  const items = asArray(guidance.items);
+  if (!items.length) {
+    return `
+      <div class="workflow-studio-section">
+        <h3>Improvement guidance</h3>
+        <div class="workflow-studio-muted">No recent episode-critique suggestions are linked to this workflow.</div>
+      </div>
+    `;
+  }
+
+  const cards = items.map((item) => {
+    const target = cleanText(item.target_workflow_id) || cleanText(item.target_tool_name) || cleanText(item.target_prompt_concept_id) || cleanText(item.target_surface) || 'unspecified target';
+    const evidenceRefs = asArray(item.evidence_refs)
+      .map((ref) => `<span class="workflow-studio-hero-chip muted">${escapeHtml(cleanText(ref) || '')}</span>`)
+      .join('');
+    return `
+      <div class="workflow-studio-callout ${cleanText(item.priority) === 'high' ? 'warning' : 'info'}">
+        <strong>${escapeHtml(cleanText(item.title) || 'Untitled suggestion')}</strong>
+        <span>${escapeHtml(cleanText(item.category) || 'workflow_change')} on ${escapeHtml(target)}</span>
+      </div>
+      <div class="workflow-studio-muted">${escapeHtml(cleanText(item.suggested_change) || '')}</div>
+      <div class="workflow-studio-muted">${escapeHtml(cleanText(item.rationale) || '')}</div>
+      <div class="workflow-studio-key-value">
+        <span>Episode evidence</span>
+        <strong>${escapeHtml(cleanText(item.request_id) || cleanText(item.memory_id) || 'unavailable')}</strong>
+      </div>
+      <div class="workflow-studio-key-value">
+        <span>Verdict</span>
+        <strong>${escapeHtml(cleanText(item.verdict) || 'unknown')}</strong>
+      </div>
+      <div class="workflow-studio-key-value">
+        <span>Recursion level</span>
+        <strong>${escapeHtml(String(item.recursion_level ?? 0))}</strong>
+      </div>
+      ${evidenceRefs ? `<div class="workflow-studio-chip-row">${evidenceRefs}</div>` : ''}
+    `;
+  }).join('<hr class="workflow-studio-divider" />');
+
+  return `
+    <div class="workflow-studio-section">
+      <h3>Improvement guidance</h3>
+      <div class="workflow-studio-muted">Recent episode-critique suggestions linked to this workflow. These are guidance surfaces only and are not auto-applied.</div>
+      <div class="workflow-studio-key-value">
+        <span>Suggestions</span>
+        <strong>${escapeHtml(String(guidance.count || items.length))}</strong>
+      </div>
+      <div class="workflow-studio-key-value">
+        <span>High priority</span>
+        <strong>${escapeHtml(String(guidance.high_priority_count || 0))}</strong>
+      </div>
+      ${cards}
+    </div>
+  `;
 }
 
 function renderTopologyView() {
@@ -990,6 +1051,7 @@ function renderInspector() {
         <div class="workflow-studio-muted">${escapeHtml(summarisePreviewDiff(proposal.preview_summary?.diff_summary))}</div>
       </div>
     ` : ''}
+    ${renderImprovementGuidanceSection()}
     ${state.preview?.preview ? `
       <div class="workflow-studio-section">
         <h3>Pending preview</h3>

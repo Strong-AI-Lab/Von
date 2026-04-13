@@ -193,7 +193,7 @@
             "llm_policy": {
               "policy_stage": "postcondition_critic",
               "tool_mode": "none",
-              "response_contract_text": "Return JSON with keys verdict, confidence, unresolved_check_count, summary, maintenance_follow_up_recommended, maintenance_follow_up_reason, recommendations, and root_causes.",
+              "response_contract_text": "Return JSON with keys verdict, confidence, unresolved_check_count, summary, maintenance_follow_up_recommended, maintenance_follow_up_reason, recommendations, root_causes, and improvement_suggestions.",
               "context_fields": [
                 {
                   "context_key": "episode_locator",
@@ -282,6 +282,21 @@
                 "tool_output_field": "episode_critique_memory_id"
               },
               {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_evaluation_workflow_persist_assessment_improvement_suggestions_to_improvement_suggestions",
+                "context_key": "improvement_suggestions",
+                "tool_output_field": "improvement_suggestions"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_evaluation_workflow_persist_assessment_improvement_suggestion_count_to_improvement_suggestion_count",
+                "context_key": "improvement_suggestion_count",
+                "tool_output_field": "improvement_suggestion_count"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_evaluation_workflow_persist_assessment_improvement_suggestion_categories_to_improvement_suggestion_categories",
+                "context_key": "improvement_suggestion_categories",
+                "tool_output_field": "improvement_suggestion_categories"
+              },
+              {
                 "concept_id": "#V#workflow_mapping_tool_field_episode_evaluation_workflow_persist_assessment_maintenance_launch_inputs_to_maintenance_launch_inputs",
                 "context_key": "maintenance_launch_inputs",
                 "tool_output_field": "maintenance_launch_inputs"
@@ -311,6 +326,9 @@
             "writes_context_keys": [
               "episode_critique_memory_upsert",
               "episode_critique_memory_id",
+              "improvement_suggestions",
+              "improvement_suggestion_count",
+              "improvement_suggestion_categories",
               "maintenance_launch_inputs",
               "maintenance_launch_source_event_id",
               "maintenance_launch_event_idempotency_key",

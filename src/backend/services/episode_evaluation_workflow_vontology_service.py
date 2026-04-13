@@ -51,7 +51,10 @@ def _load_episode_evaluation_prompt_seed_text() -> str:
     return prompt_text
 
 
-def _ensure_episode_evaluation_prompt_support() -> dict[str, Any]:
+def _ensure_episode_evaluation_prompt_support(
+    *,
+    force_prompt_seed: bool = False,
+) -> dict[str, Any]:
     report = ensure_prompt_concept_support(
         prompt_specs=(
             WorkflowPromptConceptSpec(
@@ -77,7 +80,9 @@ def _ensure_episode_evaluation_prompt_support() -> dict[str, Any]:
     )
 
     seeded_prompt_ids: list[str] = []
-    if not prompt_concept_has_content(EPISODE_EVALUATION_PROMPT_CONCEPT_ID):
+    if force_prompt_seed or not prompt_concept_has_content(
+        EPISODE_EVALUATION_PROMPT_CONCEPT_ID
+    ):
         upsert_singleton_text_relation(
             subject_concept_id=EPISODE_EVALUATION_PROMPT_CONCEPT_ID,
             predicate="hasContent",
@@ -157,7 +162,9 @@ def bootstrap_canonical_episode_evaluation_workflow(
 ) -> dict[str, Any]:
     """Publish and validate the canonical episode-evaluation workflow."""
 
-    prompt_support = _ensure_episode_evaluation_prompt_support()
+    prompt_support = _ensure_episode_evaluation_prompt_support(
+        force_prompt_seed=bool(force_republish),
+    )
     publication = bootstrap_repo_seed_workflow_bundle(
         asset_path=_REPO_SEED_ASSET_PATH,
         publish_context_manager_factory=suspend_event_workflow_integration,

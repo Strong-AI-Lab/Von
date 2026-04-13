@@ -254,6 +254,90 @@ def test_build_workflow_catalogue_payload_uses_fast_listing_mode(monkeypatch) ->
     assert seen["resolve_vontology_metadata"] is False
 
 
+def test_build_workflow_studio_detail_payload_includes_improvement_guidance(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        mod,
+        "_load_runtime_definition",
+        lambda _workflow_id: (None, "vontology", object()),
+    )
+    monkeypatch.setattr(
+        mod,
+        "build_workflow_process_graph",
+        lambda _workflow_id: (
+            {"steps": [], "edges": [], "warnings": []},
+            [],
+        ),
+    )
+    monkeypatch.setattr(mod, "resolve_workflow_narrative_text", lambda _workflow_id: ("Narrative", "vontology"))
+    monkeypatch.setattr(
+        mod,
+        "build_workflow_listing_entry",
+        lambda **_kwargs: {
+            "workflow_id": "#V#alpha_workflow",
+            "description": "Alpha workflow",
+            "source": "vontology",
+        },
+    )
+    monkeypatch.setattr(mod, "get_workflow_usage_aggregates_for_workflows", lambda _ids: {})
+    monkeypatch.setattr(
+        mod,
+        "classify_workflow_concept_executability",
+        lambda _workflow_id: (True, "ok", None),
+    )
+    monkeypatch.setattr(
+        mod,
+        "_build_operations_payload",
+        lambda _workflow_id: {"instances": {"active_count": 0}},
+    )
+    monkeypatch.setattr(mod, "count_workflow_use_episodes", lambda **_kwargs: 2)
+    monkeypatch.setattr(
+        mod,
+        "_build_current_policy_payload",
+        lambda _workflow_id: {
+            "publication_lifecycle": {"phase": "published"},
+            "routing_profile": {"role": "execution"},
+        },
+    )
+    monkeypatch.setattr(mod, "_load_workflow_authoring_proposal", lambda _workflow_id: None)
+    monkeypatch.setattr(
+        mod,
+        "_build_authoring_payload",
+        lambda **_kwargs: {"available": True, "validation": {"valid": True}},
+    )
+    monkeypatch.setattr(
+        mod,
+        "list_recent_workflow_improvement_suggestions",
+        lambda workflow_id, **_kwargs: [
+            {
+                "suggestion_id": "workflow_change_alpha",
+                "category": "workflow_change",
+                "priority": "high",
+                "target_surface": "workflow",
+                "target_workflow_id": workflow_id,
+                "title": "Repair routing policy",
+                "rationale": "Another eligible route existed.",
+                "suggested_change": "Tighten routing exemplars.",
+                "evidence_refs": ["expected_context.routing_quality_signals"],
+                "recursion_level": 0,
+                "memory_id": "#V#episode_critique_memory_1",
+                "request_id": "req-1838",
+                "verdict": "fail",
+            }
+        ],
+    )
+
+    payload = mod.build_workflow_studio_detail_payload("#V#alpha_workflow")
+
+    assert payload["summary"]["improvement_suggestion_count"] == 1
+    guidance = payload["improvement_guidance"]
+    assert guidance["available"] is True
+    assert guidance["count"] == 1
+    assert guidance["high_priority_count"] == 1
+    assert guidance["items"][0]["category"] == "workflow_change"
+
+
 def test_submit_workflow_authoring_proposal_sets_pending_review_lifecycle(
     monkeypatch,
 ) -> None:

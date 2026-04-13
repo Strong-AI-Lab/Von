@@ -10,6 +10,9 @@ from typing import Any
 from ..db.transient_errors import is_transient_mongo_error
 from ..languagemodels.llm_interface import get_active_model_name, get_llm_client
 from ..prompt.annotation_prompt import AnnotationPromptBuilder
+from ..services.episode_critique_memory_service import (
+    list_recent_workflow_improvement_suggestions,
+)
 from ..services.text_value_service import (
     get_texts_for_concept,
     upsert_singleton_text_relation,
@@ -1107,6 +1110,31 @@ def _summarise_authoring_diff(
     }
 
 
+def _build_improvement_guidance_payload(
+    workflow_id: str,
+    *,
+    namespace: str | None,
+) -> dict[str, Any]:
+    items = list_recent_workflow_improvement_suggestions(
+        workflow_id,
+        namespace=namespace,
+        limit=8,
+    )
+    categories = _clean_string_list([item.get("category") for item in items])
+    high_priority_count = sum(
+        1 for item in items if _clean_text(item.get("priority")) == "high"
+    )
+    return {
+        "workflow_id": workflow_id,
+        "available": bool(items),
+        "count": len(items),
+        "high_priority_count": high_priority_count,
+        "categories": categories,
+        "source": "episode_critique_memory_projection",
+        "items": items,
+    }
+
+
 def build_workflow_studio_detail_payload(
     workflow_id: str,
     *,
@@ -1180,6 +1208,10 @@ def build_workflow_studio_detail_payload(
     current_proposal = _proposal_summary(
         _load_workflow_authoring_proposal(workflow_id_clean)
     )
+    improvement_guidance = _build_improvement_guidance_payload(
+        workflow_id_clean,
+        namespace=namespace,
+    )
 
     return {
         "workflow_id": workflow_id_clean,
@@ -1200,6 +1232,7 @@ def build_workflow_studio_detail_payload(
             "definition_identity": definition_identity,
             "publication_lifecycle": current_policy.get("publication_lifecycle") or None,
             "routing_profile": current_policy.get("routing_profile") or None,
+            "improvement_suggestion_count": improvement_guidance.get("count") or 0,
         },
         "authority": {
             "authoritative_store": "vontology",
@@ -1228,6 +1261,7 @@ def build_workflow_studio_detail_payload(
             operations_payload=operations,
         ),
         "proposal": current_proposal,
+        "improvement_guidance": improvement_guidance,
         "raw": raw,
         "raw_source": raw_source,
         "warnings": list(warnings or []),

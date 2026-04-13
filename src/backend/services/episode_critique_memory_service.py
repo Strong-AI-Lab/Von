@@ -16,7 +16,13 @@ from pymongo.errors import OperationFailure, PyMongoError
 from ..db.mongo_client import get_db
 from . import concept_service
 from .concept_service import ConceptNotFoundError, get_concept_by_concept_id_exact
-from .episode_evaluation_workflow_contracts import EPISODE_EVALUATION_WORKFLOW_ID
+from .episode_evaluation_workflow_contracts import (
+    EPISODE_EVALUATION_IMPROVEMENT_SUGGESTION_CATEGORIES,
+    EPISODE_EVALUATION_IMPROVEMENT_SUGGESTION_MAX_COUNT,
+    EPISODE_EVALUATION_IMPROVEMENT_SUGGESTION_SCHEMA_VERSION,
+    EPISODE_EVALUATION_IMPROVEMENT_TARGET_SURFACES,
+    EPISODE_EVALUATION_WORKFLOW_ID,
+)
 from .text_value_service import upsert_singleton_text_relation
 from .workflow_episode_service import get_latest_workflow_use_episode
 
@@ -32,6 +38,40 @@ _INDEXES_READY = False
 
 _CONCEPT_ID_PATTERN = re.compile(r"#V#[A-Za-z0-9][A-Za-z0-9._:@/-]*")
 _JIRA_ISSUE_KEY_PATTERN = re.compile(r"\b([A-Z][A-Z0-9]+-\d+)\b")
+_SNAKE_TOKEN_PATTERN = re.compile(r"[^a-z0-9]+")
+_EPISODE_IMPROVEMENT_CATEGORY_SET = set(
+    EPISODE_EVALUATION_IMPROVEMENT_SUGGESTION_CATEGORIES
+)
+_EPISODE_IMPROVEMENT_TARGET_SURFACE_SET = set(
+    EPISODE_EVALUATION_IMPROVEMENT_TARGET_SURFACES
+)
+_EPISODE_IMPROVEMENT_CATEGORY_ALIASES = {
+    "workflow_fix": "workflow_change",
+    "workflow_improvement": "workflow_change",
+    "workflow_repair": "workflow_change",
+    "prompt_change": "prompt_improvement",
+    "prompt_fix": "prompt_improvement",
+    "tool_support": "tool_addition",
+    "tooling_improvement": "tool_addition",
+    "support_surface": "support_surface_addition",
+    "tool_metadata_improvement": "tool_metadata_fix",
+    "tool_contract_improvement": "tool_contract_fix",
+    "telemetry_improvement": "telemetry_addition",
+    "verification_fix": "verification_improvement",
+    "critic_improvement": "critic_self_improvement",
+    "episode_critic_self_improvement": "critic_self_improvement",
+}
+_EPISODE_IMPROVEMENT_TARGET_SURFACE_ALIASES = {
+    "workflow_definition": "workflow",
+    "tooling": "tool",
+    "tool_support": "tool",
+    "support": "support_surface",
+    "tool_metadata_json": "tool_metadata",
+    "tool_contract_json": "tool_contract",
+    "prompt_concept": "prompt",
+    "critic": "episode_critic",
+}
+_EPISODE_IMPROVEMENT_PRIORITY_VALUES = {"high", "medium", "low"}
 
 
 def _utcnow() -> datetime:
@@ -141,6 +181,253 @@ def _hash_payload(value: Any) -> str:
     if not text:
         return ""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _normalise_concept_id(value: Any) -> str | None:
+    text = _safe_str(value)
+    if not text:
+        return None
+    return text if _CONCEPT_ID_PATTERN.fullmatch(text) else None
+
+
+def _normalise_machine_token(value: Any) -> str | None:
+    text = _safe_str(value)
+    if not text:
+        return None
+    lowered = text.lower()
+    token = _SNAKE_TOKEN_PATTERN.sub("_", lowered).strip("_")
+    return token or None
+
+
+def _coerce_episode_improvement_category(value: Any) -> str:
+    token = _normalise_machine_token(value) or "workflow_change"
+    token = _EPISODE_IMPROVEMENT_CATEGORY_ALIASES.get(token, token)
+    if token not in _EPISODE_IMPROVEMENT_CATEGORY_SET:
+        return "workflow_change"
+    return token
+
+
+def _coerce_episode_improvement_target_surface(value: Any, *, category: str) -> str:
+    token = _normalise_machine_token(value)
+    if token:
+        token = _EPISODE_IMPROVEMENT_TARGET_SURFACE_ALIASES.get(token, token)
+    if token in _EPISODE_IMPROVEMENT_TARGET_SURFACE_SET:
+        return token
+    defaults = {
+        "workflow_change": "workflow",
+        "prompt_improvement": "prompt",
+        "tool_addition": "tool",
+        "support_surface_addition": "support_surface",
+        "tool_metadata_fix": "tool_metadata",
+        "tool_contract_fix": "tool_contract",
+        "telemetry_addition": "telemetry",
+        "verification_improvement": "workflow",
+        "critic_self_improvement": "episode_critic",
+    }
+    return defaults.get(category, "workflow")
+
+
+def _coerce_episode_improvement_priority(value: Any) -> str:
+    token = _normalise_machine_token(value) or "medium"
+    if token not in _EPISODE_IMPROVEMENT_PRIORITY_VALUES:
+        return "medium"
+    return token
+
+
+def _build_episode_improvement_suggestion_id(
+    *,
+    category: str,
+    title: str,
+    target_surface: str,
+    target_workflow_id: str | None,
+    target_tool_name: str | None,
+) -> str:
+    title_token = _normalise_machine_token(title) or "suggestion"
+    scope_token = (
+        _normalise_machine_token(target_workflow_id)
+        or _normalise_machine_token(target_tool_name)
+        or target_surface
+    )
+    seed = {
+        "category": category,
+        "title": title,
+        "target_surface": target_surface,
+        "target_workflow_id": target_workflow_id,
+        "target_tool_name": target_tool_name,
+    }
+    digest = _hash_payload(seed)[:8]
+    return f"{category}_{scope_token}_{title_token}_{digest}".strip("_")
+
+
+def _build_fallback_episode_improvement_suggestions(
+    *,
+    assessment: Mapping[str, Any],
+    evidence_bundle: Mapping[str, Any],
+    workflow_id: str | None,
+) -> list[dict[str, Any]]:
+    suggestions: list[dict[str, Any]] = []
+    capability_gaps = [
+        item
+        for item in (evidence_bundle.get("capability_gaps") or [])
+        if isinstance(item, Mapping)
+    ]
+    for index, raw_gap in enumerate(capability_gaps):
+        if len(suggestions) >= EPISODE_EVALUATION_IMPROVEMENT_SUGGESTION_MAX_COUNT:
+            break
+        gap = _mapping_or_empty(raw_gap)
+        gap_id = _safe_str(gap.get("gap_id")) or f"gap_{index + 1}"
+        description = _safe_str(gap.get("description")) or (
+            "Episode evidence bundle capability gap."
+        )
+        lowered = description.lower()
+        target_tool_name = _safe_str(gap.get("tool_name"))
+        category = (
+            "tool_addition"
+            if target_tool_name or "tool" in lowered
+            else "support_surface_addition"
+        )
+        target_surface = (
+            "tool" if category == "tool_addition" else "support_surface"
+        )
+        title = (
+            "Add missing tool support"
+            if category == "tool_addition"
+            else "Add missing reusable support surface"
+        )
+        suggestions.append(
+            {
+                "schema_version": EPISODE_EVALUATION_IMPROVEMENT_SUGGESTION_SCHEMA_VERSION,
+                "suggestion_id": f"fallback_{gap_id}",
+                "category": category,
+                "priority": "high" if bool(gap.get("required")) else "medium",
+                "target_surface": target_surface,
+                "target_workflow_id": workflow_id,
+                "target_prompt_concept_id": None,
+                "target_tool_name": target_tool_name,
+                "title": title,
+                "rationale": description,
+                "suggested_change": description,
+                "evidence_refs": [f"capability_gaps:{gap_id}"],
+                "recursion_level": 0,
+            }
+        )
+
+    if suggestions:
+        return suggestions[:EPISODE_EVALUATION_IMPROVEMENT_SUGGESTION_MAX_COUNT]
+
+    fail_closed_codes = _normalise_strings(
+        evidence_bundle.get("fail_closed_reason_codes"),
+        limit=4,
+    )
+    if not fail_closed_codes:
+        return []
+    return [
+        {
+            "schema_version": EPISODE_EVALUATION_IMPROVEMENT_SUGGESTION_SCHEMA_VERSION,
+            "suggestion_id": "fallback_fail_closed_telemetry",
+            "category": "telemetry_addition",
+            "priority": "high",
+            "target_surface": "telemetry",
+            "target_workflow_id": workflow_id,
+            "target_prompt_concept_id": None,
+            "target_tool_name": None,
+            "title": "Add stronger episode-evaluation evidence capture",
+            "rationale": _safe_str(assessment.get("summary"))
+            or "Fail-closed reason codes prevented an authoritative episode judgement.",
+            "suggested_change": (
+                "Add the telemetry or verification support needed to avoid future "
+                "fail-closed episode evaluations."
+            ),
+            "evidence_refs": [
+                f"fail_closed_reason_codes:{code}" for code in fail_closed_codes
+            ],
+            "recursion_level": 0,
+        }
+    ]
+
+
+def _normalise_episode_improvement_suggestions(
+    value: Any,
+    *,
+    default_workflow_id: str | None,
+    assessment: Mapping[str, Any],
+    evidence_bundle: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    if isinstance(value, Mapping):
+        raw_items = [value]
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        raw_items = [item for item in value if isinstance(item, Mapping)]
+    else:
+        raw_items = []
+
+    suggestions: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for raw_item in raw_items:
+        item = _mapping_or_empty(raw_item)
+        category = _coerce_episode_improvement_category(item.get("category"))
+        title = _safe_str(item.get("title")) or _safe_str(item.get("suggested_change"))
+        rationale = _safe_str(item.get("rationale"))
+        suggested_change = _safe_str(item.get("suggested_change"))
+        if not title or not rationale or not suggested_change:
+            continue
+        target_workflow_id = (
+            _normalise_concept_id(item.get("target_workflow_id"))
+            or default_workflow_id
+        )
+        target_prompt_concept_id = _normalise_concept_id(
+            item.get("target_prompt_concept_id")
+        )
+        target_tool_name = _safe_str(item.get("target_tool_name"))
+        target_surface = _coerce_episode_improvement_target_surface(
+            item.get("target_surface"),
+            category=category,
+        )
+        priority = _coerce_episode_improvement_priority(item.get("priority"))
+        recursion_level = min(max(_safe_int(item.get("recursion_level"), default=0), 0), 1)
+        if category == "critic_self_improvement":
+            recursion_level = 1
+        evidence_refs = _normalise_strings(item.get("evidence_refs"), limit=6)
+        suggestion_id = _safe_str(item.get("suggestion_id")) or _build_episode_improvement_suggestion_id(
+            category=category,
+            title=title,
+            target_surface=target_surface,
+            target_workflow_id=target_workflow_id,
+            target_tool_name=target_tool_name,
+        )
+        dedupe_key = (
+            category,
+            _normalise_machine_token(title) or suggestion_id,
+        )
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        suggestions.append(
+            {
+                "schema_version": EPISODE_EVALUATION_IMPROVEMENT_SUGGESTION_SCHEMA_VERSION,
+                "suggestion_id": suggestion_id,
+                "category": category,
+                "priority": priority,
+                "target_surface": target_surface,
+                "target_workflow_id": target_workflow_id,
+                "target_prompt_concept_id": target_prompt_concept_id,
+                "target_tool_name": target_tool_name,
+                "title": title,
+                "rationale": rationale,
+                "suggested_change": suggested_change,
+                "evidence_refs": evidence_refs,
+                "recursion_level": recursion_level,
+            }
+        )
+        if len(suggestions) >= EPISODE_EVALUATION_IMPROVEMENT_SUGGESTION_MAX_COUNT:
+            break
+
+    if suggestions:
+        return suggestions
+    return _build_fallback_episode_improvement_suggestions(
+        assessment=assessment,
+        evidence_bundle=evidence_bundle,
+        workflow_id=default_workflow_id,
+    )
 
 
 def _build_memory_id(*, request_id: str, episode_id: str | None) -> str:
@@ -667,6 +954,12 @@ def build_episode_critique_memory_state_from_episode_assessment(
     observed_evidence = _mapping_or_empty(evidence_bundle.get("observed_evidence"))
     workflow_identity = _mapping_or_empty(observed_evidence.get("workflow_definition_identity"))
     recommendations = _normalise_strings(assessment.get("recommendations"), limit=8)
+    improvement_suggestions = _normalise_episode_improvement_suggestions(
+        assessment.get("improvement_suggestions"),
+        default_workflow_id=workflow_id,
+        assessment=assessment,
+        evidence_bundle=evidence_bundle,
+    )
     summary = _safe_str(assessment.get("summary"))
     created_at_utc = _utcnow_iso()
     updated_at_utc = created_at_utc
@@ -736,6 +1029,7 @@ def build_episode_critique_memory_state_from_episode_assessment(
             "jira_issue_keys": issue_keys,
         },
         "recommendations": recommendations,
+        "improvement_suggestions": improvement_suggestions,
         "evidence_receipts": {
             **receipt_payload,
             "receipt_hash": _hash_payload(receipt_payload),
@@ -953,6 +1247,13 @@ def _build_episode_critique_memory_projection(
     remediation = _mapping_or_empty(state.get("remediation"))
     evidence_receipts = _mapping_or_empty(state.get("evidence_receipts"))
     routing = _mapping_or_empty(state.get("routing"))
+    critic_summary = _mapping_or_empty(critic.get("summary"))
+    improvement_suggestions = _normalise_episode_improvement_suggestions(
+        state.get("improvement_suggestions"),
+        default_workflow_id=_safe_str(subject_episode.get("workflow_id")),
+        assessment=_mapping_or_empty(critic.get("assessment")),
+        evidence_bundle={},
+    )
 
     return {
         "schema_version": EPISODE_CRITIQUE_MEMORY_SCHEMA_VERSION,
@@ -967,6 +1268,7 @@ def _build_episode_critique_memory_projection(
         "created_at_utc": _safe_str(state.get("created_at_utc")),
         "updated_at_utc": _safe_str(state.get("updated_at_utc")),
         "verdict": _safe_str(critic.get("verdict")),
+        "critic_summary_text": _safe_str(critic_summary.get("summary")),
         "confidence": _safe_float(critic.get("confidence")),
         "unresolved_check_count": _safe_int(critic.get("unresolved_check_count")),
         "implicated_workflow_ids": _normalise_strings(
@@ -1000,6 +1302,20 @@ def _build_episode_critique_memory_projection(
         "routing_jira_action": _safe_str(routing.get("jira_action")),
         "dedupe_fingerprint": _safe_str(state.get("dedupe_fingerprint")),
         "recommendations": _normalise_strings(state.get("recommendations"), limit=8),
+        "improvement_suggestions": improvement_suggestions,
+        "improvement_suggestion_count": len(improvement_suggestions),
+        "improvement_suggestion_categories": _normalise_strings(
+            [item.get("category") for item in improvement_suggestions],
+            limit=20,
+        ),
+        "improvement_target_workflow_ids": _normalise_strings(
+            [item.get("target_workflow_id") for item in improvement_suggestions],
+            limit=20,
+        ),
+        "improvement_target_tool_names": _normalise_strings(
+            [item.get("target_tool_name") for item in improvement_suggestions],
+            limit=20,
+        ),
         "receipt_hash": _safe_str(evidence_receipts.get("receipt_hash")),
     }
 
@@ -1036,6 +1352,11 @@ def _ensure_indexes(collection: Any) -> None:
             collection.create_index(
                 [("workflow_id", ASCENDING), ("created_at_utc", DESCENDING)],
                 name="workflow_created_desc",
+            )
+        if "implicated_workflow_created_desc" not in existing_indexes:
+            collection.create_index(
+                [("implicated_workflow_ids", ASCENDING), ("created_at_utc", DESCENDING)],
+                name="implicated_workflow_created_desc",
             )
         if "verdict_created_desc" not in existing_indexes:
             collection.create_index(
@@ -1164,6 +1485,95 @@ def get_episode_critique_memory_projection(memory_id: str) -> dict[str, Any] | N
     if not isinstance(state, Mapping):
         return None
     return _build_episode_critique_memory_projection(state)
+
+
+def list_recent_workflow_improvement_suggestions(
+    workflow_id: str,
+    *,
+    namespace: str | None = None,
+    limit: int = 8,
+) -> list[dict[str, Any]]:
+    workflow_id_clean = _safe_str(workflow_id)
+    if not workflow_id_clean:
+        return []
+
+    coll = get_episode_critique_memories_collection()
+    if coll is None:
+        return []
+
+    query: dict[str, Any] = {
+        "$or": [
+            {"workflow_id": workflow_id_clean},
+            {"implicated_workflow_ids": workflow_id_clean},
+            {"improvement_target_workflow_ids": workflow_id_clean},
+        ],
+        "improvement_suggestion_count": {"$gt": 0},
+    }
+    if _safe_str(namespace):
+        query["namespace"] = _safe_str(namespace)
+
+    projection = {
+        "_id": 0,
+        "memory_id": 1,
+        "request_id": 1,
+        "episode_id": 1,
+        "workflow_id": 1,
+        "created_at_utc": 1,
+        "updated_at_utc": 1,
+        "verdict": 1,
+        "critic_summary_text": 1,
+        "receipt_hash": 1,
+        "improvement_suggestions": 1,
+    }
+
+    try:
+        cursor = coll.find(query, projection)
+        if hasattr(cursor, "sort"):
+            cursor = cursor.sort("created_at_utc", DESCENDING)
+        if hasattr(cursor, "limit"):
+            cursor = cursor.limit(max(1, min(int(limit), 20)))
+        docs = list(cursor)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning(
+            "Could not list recent workflow improvement suggestions for %s: %s",
+            workflow_id_clean,
+            exc,
+        )
+        return []
+
+    suggestions: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for raw_doc in docs:
+        doc = dict(raw_doc) if isinstance(raw_doc, Mapping) else {}
+        for raw_item in doc.get("improvement_suggestions") or []:
+            item = _mapping_or_empty(raw_item)
+            item_workflow_id = _safe_str(item.get("target_workflow_id"))
+            if item_workflow_id and item_workflow_id != workflow_id_clean:
+                continue
+            signature = (
+                _safe_str(item.get("suggestion_id")) or "",
+                _safe_str(doc.get("memory_id")) or "",
+            )
+            if signature in seen:
+                continue
+            seen.add(signature)
+            suggestions.append(
+                {
+                    **item,
+                    "memory_id": _safe_str(doc.get("memory_id")),
+                    "request_id": _safe_str(doc.get("request_id")),
+                    "episode_id": _safe_str(doc.get("episode_id")),
+                    "source_workflow_id": _safe_str(doc.get("workflow_id")),
+                    "created_at_utc": _safe_str(doc.get("created_at_utc")),
+                    "updated_at_utc": _safe_str(doc.get("updated_at_utc")),
+                    "verdict": _safe_str(doc.get("verdict")),
+                    "critic_summary_text": _safe_str(doc.get("critic_summary_text")),
+                    "receipt_hash": _safe_str(doc.get("receipt_hash")),
+                }
+            )
+            if len(suggestions) >= max(1, min(int(limit), 20)):
+                return suggestions
+    return suggestions
 
 
 def upsert_episode_critique_memory_from_turn(
@@ -1318,6 +1728,7 @@ __all__ = [
     "get_episode_critique_memories_collection",
     "get_episode_critique_memory_projection",
     "get_episode_critique_memory_state",
+    "list_recent_workflow_improvement_suggestions",
     "record_episode_critique_memory_routing",
     "upsert_episode_critique_memory_from_episode_assessment",
     "upsert_episode_critique_memory_from_turn",
