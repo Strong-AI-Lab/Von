@@ -56,6 +56,11 @@ For practical agent design, system behaviour is usually co-determined by:
 
 If a task changes system behaviour, it may be changing one or more of those authored surfaces, not merely "implementation".
 
+For multi-stage turns, the accumulated turn context presented to each LLM phase
+is one of those behaviour-shaping surfaces. If selector, planner, tool-use, and
+response stages receive materially different contexts because code silently
+rebuilds or thins them, Python has effectively become a hidden policy layer.
+
 ### 3.2 Behaviour authority matters
 
 In Von, behaviour often ought to be authored in:
@@ -79,6 +84,10 @@ Python should usually provide:
 If Python starts containing the actual task policy, Von usually becomes harder to inspect, evolve, and improve.
 
 A good default question is therefore not only "what Python should I write?" but also "can this change be cleanly authored in Vontology, workflow, prompt, or KB artefacts instead?"
+
+Another good default question is: "are different LLM stages seeing different
+effective contexts because that is part of the designed policy, or because code
+has drifted into phase-specific context shaping?"
 
 ### 3.3 A strong model is often better at semantics than brittle lexical code
 
@@ -123,6 +132,7 @@ Python is usually the wrong place for:
 
 - domain-specific recommendation policy;
 - long-lived ranking logic encoded as weights and thresholds;
+- stage-specific semantic context pruning that decides what the model may know;
 - task-specific routing rules that VWL can express;
 - code-side prompt bodies for Vontology-governed features;
 - durable type, predicate, or workflow policy edits that could be represented directly in Vontology;

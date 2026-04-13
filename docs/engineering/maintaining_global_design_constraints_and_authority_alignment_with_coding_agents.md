@@ -7,7 +7,9 @@ The goal is to notice when the current code shape increases the risk that:
 
 - future fixes will keep landing as local patches inside monoliths
 - workflow control or verification will drift into Python
+- stage-specific context shaping will silently change what different LLM phases know
 - user-visible meaning will be silently distorted by support layers
+- workflow bookkeeping or diagnostics will leak into the answer channel
 - or support surfaces will become too tangled to evolve safely
 
 ## 1. When to do a scan
@@ -36,13 +38,13 @@ Size matters, but size alone is not enough.
 The strongest refactor candidates usually combine several of the following:
 
 - `Mixed responsibilities`
-  - one function handles boundary mechanics, coordination, validation, telemetry, and response shaping all together
+  - one function handles boundary mechanics, context construction, coordination, validation, telemetry, and response shaping all together
 - `Repeated patch pressure`
   - multiple recent fixes landed in the same large function or file
 - `Hidden policy drift`
-  - Python is beginning to own workflow control, verification criteria, ranking logic, or display-selection logic that should live in represented authority surfaces
+  - Python is beginning to own workflow control, verification criteria, ranking logic, display-selection logic, or stage-specific semantic context selection that should live in represented authority surfaces
 - `User-visible interpretation risk`
-  - one support-layer function can silently change what the user sees or how workflow reasoning is explained
+  - one support-layer function can silently change what the user sees, what a stage knows, or how workflow reasoning is explained
 - `Poor test seams`
   - the only way to test behaviour is through one huge function with many nested helpers or conditionals
 - `Integration-boundary sprawl`
@@ -66,6 +68,7 @@ For workflow/orchestration work in particular, a refactor is not successful if i
 - workflow control
 - workflow verification
 - decision policy
+- stage-specific semantic context choice
 - display-selection policy
 
 Those should remain authored in Vontology/workflow/prompt/programme artefacts wherever the architecture intends them to live, with Python acting as a support surface.
@@ -125,6 +128,8 @@ When scanning workflow/orchestration code, actively ask:
 - should this coordination logic remain in Python at all?
 - is this actually authored workflow policy hiding in code?
 - are verification criteria being implemented in Python instead of represented artefacts?
+- has one support layer silently replaced the shared turn context with a thinner phase-specific context?
+- is workflow bookkeeping or completion narration able to replace the answer channel?
 - could a clearer support seam let workflows, prompts, or Vontology own more of the behaviour?
 
 The preferred direction is:
@@ -141,6 +146,8 @@ These are common scan outcomes:
   - too much request parsing, context derivation, orchestration, and response shaping in one HTTP handler
 - `Orchestrator monoliths`
   - helper sprawl around selection, dispatch, override, and narration/routing logic
+- `Context-shaping monoliths`
+  - support code quietly builds different effective contexts for selector, planner, tool, and response stages without explicit authority or telemetry
 - `Diagnostics adapters`
   - large functions that convert internal telemetry into user-visible meaning
 - `Workflow-engine loops`

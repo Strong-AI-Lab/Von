@@ -69,25 +69,28 @@ For frontend/browser user-view validation practice, also see
 6. Branch first for substantial Jira work. Keep Jira status, comments, assignee, and links in sync with the real implementation state.
 7. Prefer MCP and existing repo control surfaces over ad-hoc scripts or handwritten workarounds.
 8. Workflow-first / KB-authoritative is the default doctrine: if a durable behaviour or policy change can live cleanly in workflow, prompt, KB, or Vontology artefacts, prefer changing it there rather than encoding the policy in Python.
-9. Decision-policy authority extends beyond routing. Ranking, recommendation, matching, classification, explanation, retrieval strategy, and planning count as authored behaviour.
+9. Decision-policy authority extends beyond routing. Ranking, recommendation, matching, classification, explanation, retrieval strategy, planning, and stage-specific context construction count as authored behaviour.
 10. Python should usually provide reusable support surfaces: execution, validation, tool wrappers, rendering, telemetry, persistence, safety checks, integrations, and genuinely missing reusable primitives.
-11. Do not place Vontology-governed prompt bodies in Python. Prompts are operational policy and should live in Vontology text relations.
-12. If a required Vontology/workflow/prompt authority surface is unavailable, fail closed for that feature. Do not silently fall back to stale prompts or heuristic hacks.
-13. Do not relax workflow- or KB-authority requirements to justify a preferred implementation. Any genuine exception requires explicit human approval and a named missing reusable primitive or authority surface.
-14. Heuristic fallbacks must be explicitly temporary, non-authoritative, linked to a removal task, and easy to delete.
-15. Destructive mutations require explicit confirmation or workflow escalation; do not infer permission for deletes or removals from general task context.
-16. Default to minimal imposition. Exhaust machine-side retrieval, context, search, and reasoning before asking the user to do extra work.
-17. Treat older Jira wording sceptically. Reinterpret stale tasks toward the current Von architecture and note the reinterpretation in Jira.
-18. For research-sensitive, architecture-shaping, or long-horizon-agent tasks, do a short targeted literature review before finalising the plan.
-19. Run targeted impacted validation by default, including real call-path tests where relevant. Do not claim broader coverage than you actually ran.
-20. End-to-end or user-visible acceptance requires direct evidence on the exact path or the nearest real path, not only nearby unit tests.
-21. Substantial-task reflection is mandatory. Extract durable lessons, update docs when warranted, and create Jira tasks for real process gaps.
-22. Prefer durable capability improvements over case-specific patches. If a proper noun from the triggering task appears in core logic, treat that as a design smell unless there is a strong reason.
-23. Notice when functions or methods are becoming large, tangled, or repeatedly patched. Treat that as a design signal, not merely a style issue. Prefer refactoring toward clear reusable support-surface functions with explicit inputs/outputs and better test seams.
-24. When coordination or decision-making logic inside Python looks like authored workflow policy, actively consider whether it should instead live in Von workflows, Vontology artefacts, prompt/programme artefacts, or other represented authority surfaces. Refactoring should reduce hidden code-side policy, not merely rearrange it.
-25. Agents are authorised to create new refactoring or architecture-alignment Jira tasks when they encounter code of this kind. Such tasks should explain the observed structural problem, why it matters now, and how the proposed refactor would improve code coherence, represented-authority alignment, and future change safety.
-26. Do not use size alone as the criterion for opening refactor tasks. A strong candidate usually combines size or repeated patch pressure with mixed responsibilities, weak test seams, user-visible interpretation risk, integration-boundary sprawl, or drift of workflow/control/verification logic away from represented authority.
-27. After a substantial workflow/orchestration refactor, perform a bounded structural scan of adjacent code for monoliths or authority-drift risks. Create linked follow-on Jira tasks when the architectural case is clear; do not create noise tickets based only on line count.
+11. Treat the shared turn context as a first-class authority surface. By default, selector, planner, tool-use, and response phases should consume the same accumulated turn context; stage-specific additions are acceptable, but silent phase-specific pruning or substitution is not.
+12. Workflows, tools, and telemetry are means to a user-facing end. Do not let execution bookkeeping, workflow completion summaries, or renderer diagnostics replace the answer unless the user explicitly asked for that operational view.
+13. If a stage changes the effective LLM context, make the change explicit and preserve it in telemetry so later diagnosis can see what the model actually saw.
+14. Do not place Vontology-governed prompt bodies in Python. Prompts are operational policy and should live in Vontology text relations.
+15. If a required Vontology/workflow/prompt authority surface is unavailable, fail closed for that feature. Do not silently fall back to stale prompts or heuristic hacks.
+16. Do not relax workflow- or KB-authority requirements to justify a preferred implementation. Any genuine exception requires explicit human approval and a named missing reusable primitive or authority surface.
+17. Heuristic fallbacks must be explicitly temporary, non-authoritative, linked to a removal task, and easy to delete.
+18. Destructive mutations require explicit confirmation or workflow escalation; do not infer permission for deletes or removals from general task context.
+19. Default to minimal imposition. Exhaust machine-side retrieval, context, search, and reasoning before asking the user to do extra work.
+20. Treat older Jira wording sceptically. Reinterpret stale tasks toward the current Von architecture and note the reinterpretation in Jira.
+21. For research-sensitive, architecture-shaping, or long-horizon-agent tasks, do a short targeted literature review before finalising the plan.
+22. Run targeted impacted validation by default, including real call-path tests where relevant. Do not claim broader coverage than you actually ran.
+23. End-to-end or user-visible acceptance requires direct evidence on the exact path or the nearest real path, not only nearby unit tests.
+24. Substantial-task reflection is mandatory. Extract durable lessons, update docs when warranted, and create Jira tasks for real process gaps.
+25. Prefer durable capability improvements over case-specific patches. If a proper noun from the triggering task appears in core logic, treat that as a design smell unless there is a strong reason.
+26. Notice when functions or methods are becoming large, tangled, or repeatedly patched. Treat that as a design signal, not merely a style issue. Prefer refactoring toward clear reusable support-surface functions with explicit inputs/outputs and better test seams.
+27. When coordination or decision-making logic inside Python looks like authored workflow policy, actively consider whether it should instead live in Von workflows, Vontology artefacts, prompt/programme artefacts, or other represented authority surfaces. Refactoring should reduce hidden code-side policy, not merely rearrange it.
+28. Agents are authorised to create new refactoring or architecture-alignment Jira tasks when they encounter code of this kind. Such tasks should explain the observed structural problem, why it matters now, and how the proposed refactor would improve code coherence, represented-authority alignment, and future change safety.
+29. Do not use size alone as the criterion for opening refactor tasks. A strong candidate usually combines size or repeated patch pressure with mixed responsibilities, weak test seams, user-visible interpretation risk, integration-boundary sprawl, or drift of workflow/control/verification logic away from represented authority.
+30. After a substantial workflow/orchestration refactor, perform a bounded structural scan of adjacent code for monoliths or authority-drift risks. Create linked follow-on Jira tasks when the architectural case is clear; do not create noise tickets based only on line count.
 
 ## 4. Workflow, prompt, and KB authority
 
@@ -109,7 +112,8 @@ Treat those artefacts as implementation surfaces, not as commentary about an imp
 Pause and rethink if you are about to introduce:
 
 - task-specific orchestration in Python that VWL could express
-- lexical scoring tables for durable recommendation or ranking policy
+- lexical scoring tables, stopword lists, token-overlap scoring, or other language-specific semantic steering for durable recommendation, ranking, routing, or classification policy
+- phase-specific context-thinning or ad-hoc prompt/context shaping in Python that quietly changes what different LLM stages know
 - repo-side prompt/template/workflow files that become the real production authority
 - code-side prompt defaults for a Vontology-governed feature
 - hard-coded ontology term lists that should be resolved from Vontology
@@ -131,18 +135,22 @@ Then keep the authored workflow or policy in Vontology where possible, and docum
 Verify all of the following:
 
 - the authoritative decision policy lives in workflow/prompt/KB/Vontology artefacts or materialised KB assertions
+- LLM-facing stages share the intended turn context, or any justified reduction is explicit, evaluated, and telemetry-visible
+- user-facing answer semantics are preserved and execution bookkeeping stays in supporting surfaces unless explicitly requested
 - Python remains a support surface rather than hidden task policy
+- any context additions or reductions are visible in telemetry
 - any heuristic fallback is explicitly temporary and non-authoritative
 - repo-side seeds or snapshots could be deleted without losing authority
 
 ## 5. Prompt and model rules
 
-1. Treat prompts as versioned, inspectable policy artefacts.
-2. When prompt behaviour changes, inspect the authoritative prompt and rendered context before doing code-first diagnosis.
-3. Prefer prompt revision, retrieval/context improvement, validators, or model routing over lexical pseudo-NLP.
-4. When model choice matters, think in terms of a model portfolio: small local models, medium models, frontier models, fine-tunes, and symbolic modules.
-5. Keep model-specific quirks out of durable business logic whenever possible.
-6. Make model differences visible through telemetry, evaluation, and policy metadata.
+1. Treat prompts, selector/classifier prompts, and stage-local instruction layers as versioned, inspectable policy artefacts.
+2. When prompt behaviour changes, inspect the authoritative prompt and the actual LLM context at that stage before doing code-first diagnosis.
+3. Prefer prompt revision, retrieval/context improvement, validators, or model routing over lexical pseudo-NLP or code-side semantic matching.
+4. Default to a shared turn-context object across LLM stages; stage-local additions should layer onto it rather than replace it unless there is an explicit validated reason.
+5. When model choice matters, think in terms of a model portfolio: small local models, medium models, frontier models, fine-tunes, and symbolic modules.
+6. Keep model-specific quirks out of durable business logic whenever possible.
+7. Make model differences visible through telemetry, evaluation, policy metadata, and context-lineage diagnostics when context evolves across stages.
 
 ## 6. Vontology and representation rules
 
@@ -220,10 +228,12 @@ Tasks that consist only of a summary sentence and acceptance criteria without th
 2. When changing MCP tools or handlers, test through the real gateway path (`InternalMCPGateway.invoke()`) and not only the handler function, especially for error paths and output-schema validation.
 3. Telemetry correctness is an operational requirement, not optional polish.
 4. Diagnostic payloads should preserve safe machine-readable counters such as token counts and durations.
-5. When multiple tests fail, check whether the tests encode a stale design assumption before forcing the code to fit them.
-6. Use targeted impacted pytest execution by default; widen only when risk or failures warrant it.
-7. Never run backend tests against `VON_DB_NAME=von_db`. Use the test DB.
-8. Before every commit, run the lint/type-check gate and fix outstanding diagnostics.
+5. When stage context changes, record context lineage or equivalent telemetry so later diagnosis can distinguish shared turn context, stage-local additions, and final effective prompt shape.
+6. When a workflow or tool path produces the answer, verify the user-visible output remains answer-first rather than execution-bookkeeping-first.
+7. When multiple tests fail, check whether the tests encode a stale design assumption before forcing the code to fit them.
+8. Use targeted impacted pytest execution by default; widen only when risk or failures warrant it.
+9. Never run backend tests against `VON_DB_NAME=von_db`. Use the test DB.
+10. Before every commit, run the lint/type-check gate and fix outstanding diagnostics.
 
 ## 9. Tooling defaults
 
@@ -241,9 +251,11 @@ If something went wrong in a coding thread, consider whether:
 
 - a shared helper should exist
 - a validator or telemetry surface is missing
+- shared turn-context construction or context-lineage telemetry is missing
 - a workflow/Vontology primitive is missing
 - a large or tangled function should be decomposed into clearer support surfaces
 - hidden coordination or decision policy should move from Python into workflow/Vontology authority
+- execution bookkeeping is leaking into the user-facing answer channel
 - a benchmark or acceptance path is inadequate
 - `AGENTS.md` or one of the situation-specific docs should be sharpened
 - `docs/engineering/operational_engineering_guide.md` should absorb durable practical engineering lessons that do not belong in `AGENTS.md`

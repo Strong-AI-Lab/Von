@@ -30,6 +30,32 @@ Model selection is also policy. It should not be hidden in scattered conditional
 5. Do not silently override a Vontology-governed prompt in code.
 6. Do not treat a prompt change as harmless copy-editing when it changes behaviour.
 
+Selector/classifier prompts are not second-class helper prompts. If they steer
+semantic routing or stage behaviour, they are prompt-programme authority
+surfaces and should be governed, versioned, and published with the same
+discipline as response, narration, and recovery prompts.
+
+## 3A. Shared turn-context discipline
+
+For multi-stage turns, the accumulated turn context is itself part of the
+behaviour contract.
+
+Default to one shared turn-context object reused across selector, planner,
+tool-use, and response stages. Stage prompts may add instructions or evidence,
+but should not silently replace the underlying context unless a narrower
+context is explicitly required, justified, and evaluated.
+
+If code quietly gives different stages materially different contexts, Python
+has become a hidden policy layer even when the prompt text still lives in
+Vontology.
+
+Telemetry should expose:
+
+- the effective stage context summary
+- any stage-local additions or reductions
+- enough lineage to distinguish a prompt fragment from the full
+  model-visible context
+
 ## 4. Prompt optimisation loop
 
 For features worth systematic optimisation, define:
@@ -98,6 +124,14 @@ the following policy constraints intact:
 4. Require explicit authoring intent before routing into workflow-creation or
    workflow-authoring flows. Casual mention of “workflow”, or discussion of what
    workflow might eventually be needed, is not sufficient.
+5. Default to the same accumulated turn context across selector-adjacent stages
+   and later answer-generation stages. Stage-local prompt layers may add to
+   that context, but silent phase-specific thinning is an architectural smell
+   that requires explicit justification and telemetry.
+6. Do not let workflow execution bookkeeping become the user-facing answer.
+   Completion reports, dispatch summaries, and renderer diagnostics are
+   supporting surfaces unless the user explicitly asked for an operational
+   view.
 
 ## 9. Fine-tuning guidance
 
@@ -120,7 +154,13 @@ Fine-tuning is not a substitute for:
 Before closing prompt- or routing-related work, verify:
 
 - the authoritative prompt lives in Vontology
+- selector/classifier prompts are under the same authority and publishing
+  discipline as other prompt artefacts
 - prompt or router changes were evaluated on a relevant downstream metric
 - the previous baseline remains reproducible
 - model and prompt differences are visible in telemetry or task notes
+- any stage-specific context additions or reductions are visible in telemetry
+  and justified in task notes when non-obvious
+- user-facing evaluation cases verify that execution summaries do not displace
+  answers
 - rollback is straightforward
