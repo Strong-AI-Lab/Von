@@ -2301,6 +2301,14 @@ def publish_canonical_chat_workflow_graphs(
             if isinstance(item, str) and str(item).strip()
         ]
     target_workflow_ids = list(dict.fromkeys(target_workflow_ids))
+
+    if CONVERSATION_TURN_EXECUTION_WORKFLOW_ID in target_workflow_ids:
+        from ..services.conversation_turn_workflow_vontology_service import (
+            _ensure_conversation_turn_prompt_support,
+        )
+
+        _ensure_conversation_turn_prompt_support()
+
     available_publication_specs: Dict[str, _CanonicalWorkflowPublicationSpec] = (
         _resolve_authoritative_publication_specs(
             workflow_ids=target_workflow_ids,
@@ -2398,8 +2406,22 @@ def publish_canonical_chat_workflow_graphs(
             workflow_id not in explicit_publication_specs
             and registration_definition is not None
         ):
-            spec = _build_publication_spec_from_definition(registration_definition)
-            available_publication_specs[workflow_id] = spec
+            registration_spec = _build_publication_spec_from_definition(
+                registration_definition
+            )
+            registration_spec_has_actions = _publication_spec_has_executable_actions(
+                registration_spec
+            )
+            current_spec_has_actions = bool(
+                spec is not None and _publication_spec_has_executable_actions(spec)
+            )
+            if (
+                spec is None
+                or registration_spec_has_actions
+                or not current_spec_has_actions
+            ):
+                spec = registration_spec
+                available_publication_specs[workflow_id] = spec
         if spec is None:
             spec = resolve_authoritative_workflow_publication_spec(
                 workflow_id,
