@@ -109,4 +109,55 @@ describe('chatTab latest execution telemetry publication', () => {
             fallback_used: true
         }));
     });
+
+    test('publishes explicit stage override semantics from workflow policy telemetry', () => {
+        const chatTab = require(chatTabModulePath);
+
+        chatTab.__testOnly_clearLlmDebugData();
+        chatTab.setLlmDebugDataForTurn('a-201', {
+            timestamp: '2026-04-14T00:31:11.019Z',
+            model: 'gpt-5.4-mini',
+            llm_interaction: {
+                requested_model: 'gpt-5.4-mini',
+                calls: [
+                    {
+                        type: 'llm.generate',
+                        model: 'gpt-4o-mini',
+                        provider: 'openai',
+                    }
+                ]
+            },
+            aux_llm_calls: [
+                {
+                    type: 'workflow_model_policy_stage',
+                    stage: 'workflow_dispatch',
+                    policy_stage: 'classifier',
+                    requested_model: 'gpt-5.4-mini',
+                    selection_mode: 'policy_primary_override',
+                    follows_active_llm: false,
+                    explicit_stage_model_override: true,
+                    explicit_stage_model_override_origin: 'policy_primary',
+                    selected: {
+                        provider: 'openai',
+                        model: 'gpt-4o-mini',
+                        model_resolved: 'gpt-4o-mini',
+                        source: 'policy'
+                    }
+                }
+            ]
+        });
+
+        const published = chatTab.__testOnly_getLatestLlmExecutionTelemetry();
+        expect(published).toEqual(expect.objectContaining({
+            requested_model: 'gpt-5.4-mini',
+            actual_model: 'gpt-4o-mini',
+            actual_provider: 'openai',
+            execution_stage: 'workflow_dispatch',
+            policy_stage: 'classifier',
+            selection_mode: 'policy_primary_override',
+            follows_active_llm: false,
+            explicit_stage_model_override: true,
+            explicit_stage_model_override_origin: 'policy_primary'
+        }));
+    });
 });

@@ -44,6 +44,16 @@ def _policy_state() -> _WorkflowModelPolicyState:
     )
 
 
+def _active_llm_policy_state() -> _WorkflowModelPolicyState:
+    return _WorkflowModelPolicyState(
+        enabled=True,
+        policy={"stages": {"classifier": {"primary": "active_llm", "fallback": []}}},
+        policy_id="#V#default_workflow_model_policy",
+        predicate_id="#V#has_model_policy_json",
+        errors=(),
+    )
+
+
 def _bare_orchestrator() -> InternalMCPChatOrchestrator:
     orchestrator = object.__new__(InternalMCPChatOrchestrator)
     orchestrator._logger = logging.getLogger(__name__)
@@ -283,6 +293,149 @@ def test_run_llm_with_fallbacks_records_attempt_chain_and_fallback_metadata(
     assert attempts[1]["status"] == "succeeded"
 
     assert recorded_calls[0]["note"] == "candidate reachability probe failed; trying fallback"
+
+
+def test_run_llm_with_fallbacks_marks_policy_primary_active_llm_selection(
+    monkeypatch,
+) -> None:
+    orchestrator = _bare_orchestrator()
+    monkeypatch.setattr(
+        orchestrator,
+        "_probe_model_candidate_reachability",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_invoke_with_llm_heartbeat",
+        lambda *, call, **_kwargs: call(),
+    )
+
+    llm_calls_log: list[dict[str, Any]] = []
+    aux_log: list[Mapping[str, Any]] = []
+
+    response, model_name, telemetry = orchestrator._run_llm_with_fallbacks(
+        stage="workflow_dispatch",
+        policy_stage="classifier",
+        prompt="Select workflow",
+        context=[],
+        default_client=_SuccessfulClient(),
+        default_model="gpt-5.4-mini",
+        policy_state=_active_llm_policy_state(),
+        registry_snapshot=None,
+        user_concept_id=None,
+        org_concept_id=None,
+        llm_calls_log=llm_calls_log,
+        aux_log=aux_log,
+        record_llm_call=lambda **_payload: None,
+        emit_progress=None,
+    )
+
+    assert response == '["Proceed", "Hold"]'
+    assert model_name == "gpt-5.4-mini"
+    assert telemetry.get("source") == "active_llm"
+
+    stage_summary = next(
+        entry
+        for entry in aux_log
+        if entry.get("type") == "workflow_model_policy_stage"
+    )
+    assert stage_summary["policy_stage"] == "classifier"
+    assert stage_summary["requested_model"] == "gpt-5.4-mini"
+    assert stage_summary["selection_mode"] == "policy_primary_active_llm"
+    assert stage_summary["follows_active_llm"] is True
+    assert stage_summary["explicit_stage_model_override"] is False
+
+
+def test_run_llm_with_fallbacks_marks_explicit_policy_stage_override(
+    monkeypatch,
+) -> None:
+    orchestrator = _bare_orchestrator()
+    override_candidate = _ModelCandidate(
+        provider="openai",
+        model="gpt-4o-mini",
+        raw="openai:gpt-4o-mini",
+        source="policy",
+    )
+    policy_state = _WorkflowModelPolicyState(
+        enabled=True,
+        policy={
+            "stages": {
+                "classifier": {
+                    "primary": "openai:gpt-4o-mini",
+                    "fallback": [],
+                }
+            }
+        },
+        policy_id="#V#default_workflow_model_policy",
+        predicate_id="#V#has_model_policy_json",
+        errors=(),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_stage_model_candidates",
+        lambda **_kwargs: [override_candidate],
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_create_client_for_candidate",
+        lambda candidate, **_kwargs: (
+            _SuccessfulClient(),
+            "gpt-4o-mini",
+            {
+                "provider": candidate.provider,
+                "model": candidate.model,
+                "raw": candidate.raw,
+                "source": candidate.source,
+                "host": candidate.host,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_probe_model_candidate_reachability",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_invoke_with_llm_heartbeat",
+        lambda *, call, **_kwargs: call(),
+    )
+
+    aux_log: list[Mapping[str, Any]] = []
+    response, model_name, telemetry = orchestrator._run_llm_with_fallbacks(
+        stage="workflow_dispatch",
+        policy_stage="classifier",
+        prompt="Select workflow",
+        context=[],
+        default_client=object(),
+        default_model="gpt-5.4-mini",
+        policy_state=policy_state,
+        registry_snapshot=None,
+        user_concept_id=None,
+        org_concept_id=None,
+        llm_calls_log=[],
+        aux_log=aux_log,
+        record_llm_call=lambda **_payload: None,
+        emit_progress=None,
+    )
+
+    assert response == '["Proceed", "Hold"]'
+    assert model_name == "gpt-4o-mini"
+    assert telemetry.get("source") == "policy"
+
+    stage_summary = next(
+        entry
+        for entry in aux_log
+        if entry.get("type") == "workflow_model_policy_stage"
+    )
+    assert stage_summary["policy_stage"] == "classifier"
+    assert stage_summary["requested_model"] == "gpt-5.4-mini"
+    assert stage_summary["selection_mode"] == "policy_primary_override"
+    assert stage_summary["follows_active_llm"] is False
+    assert stage_summary["explicit_stage_model_override"] is True
+    assert (
+        stage_summary["explicit_stage_model_override_origin"] == "policy_primary"
+    )
 
 
 def test_probe_model_candidate_reachability_uses_failure_cooldown_cache(

@@ -1,7 +1,7 @@
 # Workflow Model Policy Schema (Draft)
 
 ## Purpose
-Define a **Vontology-backed model policy** that selects models per workflow stage, with safe fallback chains and backward compatibility (single-model default).
+Define a **Vontology-backed model policy** that selects models per workflow stage, with safe fallback chains and backward compatibility (`active_llm` as the default single-model behaviour).
 
 This document supports JVNAUTOSCI-994 (subtask of JVNAUTOSCI-993) and JVNAUTOSCI-998.
 
@@ -58,7 +58,8 @@ This document supports JVNAUTOSCI-994 (subtask of JVNAUTOSCI-993) and JVNAUTOSCI
 ### Required metadata
 - policy scope (global, organisation, user, programme/project)
 - policy provenance (author, timestamp)
-- explicit compatibility note: default policy preserves single-model behaviour
+- explicit compatibility note: default policy preserves single-model behaviour via `active_llm`
+- override semantics: stage-specific model overrides must be explicit and telemetry-visible
 
 ## Stage taxonomy (initial)
 - `planner`
@@ -88,7 +89,15 @@ environment variables (see `src/backend/languagemodels/model_defaults.py`):
 
 When writing policy JSON, prefer `active_llm` for stages that should follow
 the user's primary model selection, and use explicit `provider:model` strings
-only when a stage genuinely requires a specific model.
+only when a stage genuinely requires a specific model or provider. Such stage
+overrides should be visible in telemetry/UI so they do not look like silent
+model drift.
+
+Longer term, stage matching should move toward capability-oriented references
+resolved through the model registry (for example “cheap reliable classifier”
+or similar capability/profile metadata) rather than hard-coded concrete model
+IDs. The explicit `provider:model` form remains the current concrete mechanism,
+not the desired end-state for learned or capability-based model selection.
 
 ```json
 {
@@ -107,14 +116,14 @@ only when a stage genuinely requires a specific model.
       "constraints": {"local_only": false}
     },
     "tool_recovery": {
-      "primary": "ollama:default",
-      "fallback": ["active_llm"],
-      "constraints": {"local_only": true}
+      "primary": "active_llm",
+      "fallback": [],
+      "constraints": {"local_only": false}
     },
     "classifier": {
-      "primary": "ollama:default",
-      "fallback": ["active_llm"],
-      "constraints": {"local_only": true}
+      "primary": "active_llm",
+      "fallback": [],
+      "constraints": {"local_only": false}
     },
     "critic": {
       "primary": "active_llm",
@@ -137,18 +146,32 @@ only when a stage genuinely requires a specific model.
       "constraints": {"local_only": false}
     },
     "buttonify": {
-      "primary": "ollama:default",
-      "fallback": ["active_llm"],
-      "constraints": {"local_only": true}
+      "primary": "active_llm",
+      "fallback": [],
+      "constraints": {"local_only": false}
     }
   },
   "constraints": {
-    "local_only_stages": ["tool_recovery", "classifier", "buttonify"],
+    "local_only_stages": [],
     "max_fallback_hops": 2
   },
   "compatibility": {
     "single_model_default": true,
-    "notes": "Default policy keeps current single-model behaviour until policy resolution is implemented."
+    "notes": "Default policy follows the active selected LLM for all stages unless an explicit stage override is authored."
+  }
+}
+```
+
+Example explicit stage override (deliberate and telemetry-visible):
+
+```json
+{
+  "stages": {
+    "classifier": {
+      "primary": "openai:gpt-4o-mini",
+      "fallback": ["active_llm"],
+      "constraints": {"local_only": false}
+    }
   }
 }
 ```
@@ -171,7 +194,7 @@ only when a stage genuinely requires a specific model.
 ```
 
 ## Compatibility note
-The first policy instance **must preserve current behaviour** by mapping all stages to the active LLM, with optional local-only fallbacks for low-risk classifier stages. No runtime behaviour changes are required until the orchestrator consumes this policy.
+The default policy instance **must preserve current behaviour** by mapping all stages to `active_llm` unless an explicit stage override is authored. If an override exists, runtime telemetry should make that override obvious rather than presenting it as an unexplained mismatch against the selected model.
 
 ## Implementation status (JVNAUTOSCI-998)
 Completed:

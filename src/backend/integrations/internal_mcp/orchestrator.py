@@ -10541,6 +10541,170 @@ class InternalMCPChatOrchestrator:
 
         return value
 
+    @staticmethod
+    def _normalise_model_candidate_identity(
+        candidate: _ModelCandidate | None,
+    ) -> tuple[str | None, str | None, str | None, str | None]:
+        if candidate is None:
+            return (None, None, None, None)
+        raw = candidate.raw.strip().lower() if isinstance(candidate.raw, str) and candidate.raw.strip() else None
+        provider = (
+            candidate.provider.strip().lower()
+            if isinstance(candidate.provider, str) and candidate.provider.strip()
+            else None
+        )
+        model = InternalMCPChatOrchestrator._normalise_llm_model_name(candidate.model)
+        model = model.strip().lower() if isinstance(model, str) and model.strip() else None
+        host = (
+            candidate.host.strip().lower()
+            if isinstance(candidate.host, str) and candidate.host.strip()
+            else None
+        )
+        return (raw, provider, model, host)
+
+    @classmethod
+    def _model_candidates_match(
+        cls,
+        left: _ModelCandidate | None,
+        right: _ModelCandidate | None,
+    ) -> bool:
+        left_identity = cls._normalise_model_candidate_identity(left)
+        right_identity = cls._normalise_model_candidate_identity(right)
+        if left_identity[0] and right_identity[0] and left_identity[0] == right_identity[0]:
+            return True
+        return left_identity[1:] == right_identity[1:]
+
+    @staticmethod
+    def _infer_provider_from_model_reference(model_ref: str | None) -> str | None:
+        if not isinstance(model_ref, str) or not model_ref.strip():
+            return None
+        raw = model_ref.strip()
+        if "://" not in raw and ":" in raw and not raw.startswith("#V#"):
+            provider, _, _model = raw.partition(":")
+            provider_text = provider.strip().lower()
+            return provider_text or None
+        try:
+            from src.backend.languagemodels.llm_interface import (
+                resolve_provider_from_model_concept,
+            )
+
+            resolved_provider = resolve_provider_from_model_concept(raw)
+            if isinstance(resolved_provider, str) and resolved_provider.strip():
+                return resolved_provider.strip().lower()
+        except Exception:
+            return None
+        return None
+
+    def _build_stage_model_selection_metadata(
+        self,
+        *,
+        stage: str,
+        policy_stage: str | None,
+        selected_candidate: _ModelCandidate | None,
+        default_model: str | None,
+        policy_state: _WorkflowModelPolicyState,
+        registry_snapshot: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        requested_model = (
+            default_model.strip()
+            if isinstance(default_model, str) and default_model.strip()
+            else None
+        )
+        requested_provider = self._infer_provider_from_model_reference(requested_model)
+        metadata: dict[str, Any] = {}
+        if requested_model:
+            metadata["requested_model"] = requested_model
+        if requested_provider:
+            metadata["requested_provider"] = requested_provider
+
+        if selected_candidate is None:
+            return metadata
+
+        effective_stage = policy_stage or stage
+        primary_candidate: _ModelCandidate | None = None
+        fallback_candidates: list[_ModelCandidate] = []
+        if policy_state.enabled and isinstance(policy_state.policy, Mapping):
+            stages = (
+                policy_state.policy.get("stages")
+                if isinstance(policy_state.policy.get("stages"), Mapping)
+                else None
+            )
+            stage_config = (
+                stages.get(effective_stage)
+                if isinstance(stages, Mapping)
+                and isinstance(stages.get(effective_stage), Mapping)
+                else None
+            )
+            if isinstance(stage_config, Mapping):
+                resolved_primary = self._resolve_registry_model_candidate(
+                    stage_config.get("primary"),
+                    registry_snapshot,
+                )
+                primary_candidate = self._parse_policy_model_candidate(resolved_primary)
+                raw_fallback = stage_config.get("fallback")
+                if isinstance(raw_fallback, list):
+                    for item in raw_fallback:
+                        resolved_fallback = self._resolve_registry_model_candidate(
+                            item,
+                            registry_snapshot,
+                        )
+                        fallback_candidate = self._parse_policy_model_candidate(
+                            resolved_fallback
+                        )
+                        if fallback_candidate is not None:
+                            fallback_candidates.append(fallback_candidate)
+
+        follows_active_llm = selected_candidate.source == "active_llm"
+        explicit_stage_override = False
+        explicit_override_origin: str | None = None
+        selection_mode: str | None = None
+
+        if primary_candidate and self._model_candidates_match(
+            selected_candidate, primary_candidate
+        ):
+            if primary_candidate.source == "active_llm":
+                follows_active_llm = True
+                selection_mode = "policy_primary_active_llm"
+            else:
+                explicit_stage_override = True
+                explicit_override_origin = "policy_primary"
+                selection_mode = "policy_primary_override"
+        else:
+            for fallback_candidate in fallback_candidates:
+                if not self._model_candidates_match(selected_candidate, fallback_candidate):
+                    continue
+                if fallback_candidate.source == "active_llm":
+                    follows_active_llm = True
+                    selection_mode = "policy_fallback_active_llm"
+                else:
+                    explicit_stage_override = True
+                    explicit_override_origin = "policy_fallback"
+                    selection_mode = "policy_fallback_override"
+                break
+
+        if selection_mode is None:
+            if selected_candidate.source == "active_llm":
+                follows_active_llm = True
+                selection_mode = "active_llm_default"
+            elif selected_candidate.source == "enabled_settings":
+                selection_mode = "enabled_settings_candidate"
+            elif selected_candidate.source == "policy":
+                selection_mode = "policy_candidate"
+            else:
+                selection_mode = (
+                    selected_candidate.source.strip()
+                    if isinstance(selected_candidate.source, str)
+                    and selected_candidate.source.strip()
+                    else "model_candidate"
+                )
+
+        metadata["selection_mode"] = selection_mode
+        metadata["follows_active_llm"] = follows_active_llm
+        metadata["explicit_stage_model_override"] = explicit_stage_override
+        if explicit_override_origin:
+            metadata["explicit_stage_model_override_origin"] = explicit_override_origin
+        return metadata
+
     def _stage_model_candidates(
         self,
         *,
@@ -11834,6 +11998,14 @@ class InternalMCPChatOrchestrator:
                         else None,
                     }
                 )
+                selection_metadata = self._build_stage_model_selection_metadata(
+                    stage=stage,
+                    policy_stage=candidate_stage,
+                    selected_candidate=candidate,
+                    default_model=default_model,
+                    policy_state=policy_state,
+                    registry_snapshot=registry_snapshot,
+                )
                 aux_log.append(
                     {
                         "type": "workflow_model_policy_stage",
@@ -11849,6 +12021,7 @@ class InternalMCPChatOrchestrator:
                         "fallback_attempts": list(fallback_attempts),
                         "failure_count": len(errors),
                         "errors": list(errors),
+                        **selection_metadata,
                     }
                 )
                 return response, model_name, telemetry
@@ -11910,6 +12083,14 @@ class InternalMCPChatOrchestrator:
                 continue
 
         if errors:
+            selection_metadata = self._build_stage_model_selection_metadata(
+                stage=stage,
+                policy_stage=candidate_stage,
+                selected_candidate=None,
+                default_model=default_model,
+                policy_state=policy_state,
+                registry_snapshot=registry_snapshot,
+            )
             aux_log.append(
                 {
                     "type": "workflow_model_policy_stage",
@@ -11922,6 +12103,7 @@ class InternalMCPChatOrchestrator:
                     "fallback_attempts": list(fallback_attempts),
                     "failure_count": len(errors),
                     "errors": list(errors),
+                    **selection_metadata,
                 }
             )
 
@@ -12016,8 +12198,9 @@ class InternalMCPChatOrchestrator:
         required_prompt_tools: Sequence[str] = (),
         context_telemetry: Mapping[str, Any] | None = None,
     ) -> tuple[LLMResponse, Optional[str], Mapping[str, Any]]:
+        candidate_stage = stage
         candidates = self._stage_model_candidates(
-            stage=stage,
+            stage=candidate_stage,
             default_model=default_model,
             policy_state=policy_state,
             registry_snapshot=registry_snapshot,
@@ -12343,10 +12526,19 @@ class InternalMCPChatOrchestrator:
                         else None,
                     }
                 )
+                selection_metadata = self._build_stage_model_selection_metadata(
+                    stage=stage,
+                    policy_stage=candidate_stage,
+                    selected_candidate=candidate,
+                    default_model=default_model,
+                    policy_state=policy_state,
+                    registry_snapshot=registry_snapshot,
+                )
                 aux_log.append(
                     {
                         "type": "workflow_model_policy_stage",
                         "stage": stage,
+                        "policy_stage": candidate_stage,
                         "request": request_telemetry,
                         "selected": {
                             **telemetry,
@@ -12357,6 +12549,7 @@ class InternalMCPChatOrchestrator:
                         "fallback_attempts": list(fallback_attempts),
                         "failure_count": len(errors),
                         "errors": list(errors),
+                        **selection_metadata,
                     }
                 )
                 return llm_response, model_name, telemetry
@@ -12419,10 +12612,19 @@ class InternalMCPChatOrchestrator:
                 continue
 
         if errors:
+            selection_metadata = self._build_stage_model_selection_metadata(
+                stage=stage,
+                policy_stage=candidate_stage,
+                selected_candidate=None,
+                default_model=default_model,
+                policy_state=policy_state,
+                registry_snapshot=registry_snapshot,
+            )
             aux_log.append(
                 {
                     "type": "workflow_model_policy_stage",
                     "stage": stage,
+                    "policy_stage": candidate_stage,
                     "request": request_telemetry,
                     "selected": None,
                     "fallback_used": True,
@@ -12430,6 +12632,7 @@ class InternalMCPChatOrchestrator:
                     "fallback_attempts": list(fallback_attempts),
                     "failure_count": len(errors),
                     "errors": list(errors),
+                    **selection_metadata,
                 }
             )
 

@@ -188,4 +188,43 @@ describe('footer latest LLM execution status', () => {
         expect(modelSegment).toBeTruthy();
         expect(modelSegment.classList.contains('fatal')).toBe(true);
     });
+
+    test('shows warning rather than fatal for an explicit stage-model override', async () => {
+        const { setModelInfoFooterText } = require(domUtilsPath);
+
+        await setModelInfoFooterText();
+
+        window.__vonLatestLlmExecutionTelemetry = {
+            requested_model: 'gpt-5.4-mini',
+            actual_model: 'gpt-4o-mini',
+            actual_provider: 'openai',
+            call_models: ['gpt-4o-mini'],
+            fallback_used: false,
+            execution_stage: 'workflow_dispatch',
+            policy_stage: 'classifier',
+            selection_mode: 'policy_primary_override',
+            explicit_stage_model_override: true,
+            explicit_stage_model_override_origin: 'policy_primary'
+        };
+        document.dispatchEvent(new CustomEvent('von:latestLlmExecutionTelemetryUpdated', {
+            detail: window.__vonLatestLlmExecutionTelemetry
+        }));
+        await flushUiTicks();
+
+        const modelSegment = await waitForModelSegment((seg) =>
+            seg.classList.contains('warning')
+        );
+        expect(modelSegment).toBeTruthy();
+        expect(modelSegment.classList.contains('warning')).toBe(true);
+        expect(modelSegment.classList.contains('fatal')).toBe(false);
+
+        const modelButton = modelSegment.querySelector('.concept-footer-button');
+        expect(modelButton.textContent.trim()).toBe('gpt-4o-mini');
+        expect(modelButton.title).toContain('Last execution status: Stage Override Active');
+        expect(modelButton.title).toContain('Stage model override: explicit policy override');
+        expect(modelButton.title).toContain('Execution stage: workflow_dispatch');
+        expect(modelButton.title).toContain('Policy stage: classifier');
+        expect(modelButton.title).toContain('Selection mode: policy_primary_override');
+        expect(modelButton.title).toContain('Override origin: policy_primary');
+    });
 });

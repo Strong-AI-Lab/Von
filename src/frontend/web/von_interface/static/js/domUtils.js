@@ -517,6 +517,19 @@ function readLatestLlmExecutionTelemetry() {
     const error = (typeof raw.error === 'string' && raw.error.trim())
       ? raw.error.trim()
       : null;
+    const executionStage = (typeof raw.execution_stage === 'string' && raw.execution_stage.trim())
+      ? raw.execution_stage.trim()
+      : null;
+    const policyStage = (typeof raw.policy_stage === 'string' && raw.policy_stage.trim())
+      ? raw.policy_stage.trim()
+      : null;
+    const selectionMode = (typeof raw.selection_mode === 'string' && raw.selection_mode.trim())
+      ? raw.selection_mode.trim()
+      : null;
+    const explicitStageModelOverrideOrigin = (typeof raw.explicit_stage_model_override_origin === 'string'
+      && raw.explicit_stage_model_override_origin.trim())
+      ? raw.explicit_stage_model_override_origin.trim()
+      : null;
     const warnings = normaliseFooterTelemetryStrings(raw.warnings).slice(0, 3);
     if (!requestedModel && !actualModel && !actualProvider && !primaryFailureReason && !error && warnings.length === 0) {
       return null;
@@ -531,6 +544,12 @@ function readLatestLlmExecutionTelemetry() {
       primaryFailureKind,
       primaryFailureReason,
       error,
+      executionStage,
+      policyStage,
+      selectionMode,
+      followsActiveLlm: raw.follows_active_llm === true,
+      explicitStageModelOverride: raw.explicit_stage_model_override === true,
+      explicitStageModelOverrideOrigin,
       warnings,
     };
   } catch (_) {
@@ -1008,13 +1027,20 @@ export async function setModelInfoFooterText() {
       && normaliseModelNameForComparison(actualModel) !== normaliseModelNameForComparison(requestedModel);
     const actualDiffersFromConfiguredProvider = !!actualProvider && !!configuredProvider && actualProvider !== configuredProvider;
     const failureReason = executionTelemetry?.primaryFailureReason || executionTelemetry?.error || '';
+    const explicitStageModelOverride = !!executionTelemetry?.explicitStageModelOverride;
+    const unexpectedModelMismatch = (
+      actualDiffersFromRequested || actualDiffersFromConfiguredProvider
+    ) && !explicitStageModelOverride;
     const executionOverlayActive = !!executionTelemetry && (
       !!executionTelemetry.fallbackUsed
       || actualDiffersFromRequested
       || actualDiffersFromConfiguredProvider
+      || explicitStageModelOverride
       || !!failureReason
     );
-    const executionStatusLabel = executionTelemetry?.primaryFailureKind === 'quota_exhausted'
+    const executionStatusLabel = explicitStageModelOverride && !failureReason
+      ? 'Stage Override Active'
+      : executionTelemetry?.primaryFailureKind === 'quota_exhausted'
       ? 'Quota Exhausted'
       : (executionTelemetry?.fallbackUsed ? 'Fallback Active' : (failureReason ? 'Execution Error' : 'Last Execution'));
     const titleParts = ['Open language model settings'];
@@ -1024,12 +1050,27 @@ export async function setModelInfoFooterText() {
     if (llmHost) titleParts.push(`Host: ${llmHost}`);
     if (errorMsg) titleParts.push(`Error: ${errorMsg}`);
     if (executionOverlayActive) {
-      const hasHardFailure = !!failureReason || actualDiffersFromConfiguredProvider || actualDiffersFromRequested;
+      const hasHardFailure = !!failureReason || unexpectedModelMismatch;
       llmClass = hasHardFailure ? 'fatal' : 'warning';
       titleParts.push(`Last execution status: ${executionStatusLabel}`);
       if (requestedModel) titleParts.push(`Requested model: ${requestedModel}`);
       if (actualProvider) titleParts.push(`Executed provider: ${actualProvider}`);
       if (actualModel) titleParts.push(`Executed model: ${actualModel}`);
+      if (explicitStageModelOverride) {
+        titleParts.push('Stage model override: explicit policy override');
+        if (executionTelemetry.executionStage) {
+          titleParts.push(`Execution stage: ${executionTelemetry.executionStage}`);
+        }
+        if (executionTelemetry.policyStage) {
+          titleParts.push(`Policy stage: ${executionTelemetry.policyStage}`);
+        }
+        if (executionTelemetry.selectionMode) {
+          titleParts.push(`Selection mode: ${executionTelemetry.selectionMode}`);
+        }
+        if (executionTelemetry.explicitStageModelOverrideOrigin) {
+          titleParts.push(`Override origin: ${executionTelemetry.explicitStageModelOverrideOrigin}`);
+        }
+      }
       if (executionTelemetry?.callModels?.length > 1) {
         titleParts.push(`Execution models tried: ${executionTelemetry.callModels.join(', ')}`);
       }

@@ -314,6 +314,11 @@ def test_build_stage_authority_summary_preserves_bounded_llm_exchange_summaries(
             "type": "workflow_model_policy_stage",
             "stage": "workflow_dispatch",
             "policy_stage": "classifier",
+            "requested_model": "gpt-5.4-mini",
+            "selection_mode": "policy_primary_override",
+            "follows_active_llm": False,
+            "explicit_stage_model_override": True,
+            "explicit_stage_model_override_origin": "policy_primary",
             "request": {
                 "prompt": {"text": "Select workflow", "char_count": 15},
                 "context_message_count": 1,
@@ -383,6 +388,11 @@ def test_build_stage_authority_summary_preserves_bounded_llm_exchange_summaries(
         "#V#chat_turn_classifier_prompt"
     )
     assert summary["llm_exchange_summaries"][1]["selected_model"] == "gpt-5-mini"
+    assert summary["llm_exchange_summaries"][1]["requested_model"] == "gpt-5.4-mini"
+    assert summary["llm_exchange_summaries"][1]["selection_mode"] == (
+        "policy_primary_override"
+    )
+    assert summary["llm_exchange_summaries"][1]["explicit_stage_model_override"] is True
     assert summary["llm_exchange_summaries"][1]["failure_kinds"] == [
         "provider_unreachable"
     ]

@@ -323,6 +323,65 @@ function extractLatestLlmExecutionFailure(auxCalls = []) {
     };
 }
 
+function extractLatestStageModelSelection(auxCalls = []) {
+    const policyStages = Array.isArray(auxCalls)
+        ? auxCalls.filter((entry) => entry && typeof entry === 'object' && entry.type === 'workflow_model_policy_stage')
+        : [];
+
+    for (let index = policyStages.length - 1; index >= 0; index -= 1) {
+        const entry = policyStages[index];
+        const selected = entry && typeof entry.selected === 'object' ? entry.selected : null;
+        const requestedModel = (typeof entry?.requested_model === 'string' && entry.requested_model.trim())
+            ? entry.requested_model.trim()
+            : null;
+        const requestedProvider = (typeof entry?.requested_provider === 'string' && entry.requested_provider.trim())
+            ? entry.requested_provider.trim()
+            : null;
+        const actualModel = (typeof selected?.model_resolved === 'string' && selected.model_resolved.trim())
+            ? selected.model_resolved.trim()
+            : ((typeof selected?.model === 'string' && selected.model.trim()) ? selected.model.trim() : null);
+        const actualProvider = (typeof selected?.provider === 'string' && selected.provider.trim())
+            ? selected.provider.trim()
+            : null;
+        const selectionMode = (typeof entry?.selection_mode === 'string' && entry.selection_mode.trim())
+            ? entry.selection_mode.trim()
+            : null;
+        const overrideOrigin = (typeof entry?.explicit_stage_model_override_origin === 'string'
+            && entry.explicit_stage_model_override_origin.trim())
+            ? entry.explicit_stage_model_override_origin.trim()
+            : null;
+        const stage = (typeof entry?.stage === 'string' && entry.stage.trim()) ? entry.stage.trim() : null;
+        const policyStage = (typeof entry?.policy_stage === 'string' && entry.policy_stage.trim())
+            ? entry.policy_stage.trim()
+            : stage;
+        return {
+            stage,
+            policyStage,
+            requestedModel,
+            requestedProvider,
+            actualModel,
+            actualProvider,
+            selectionMode,
+            followsActiveLlm: entry?.follows_active_llm === true,
+            explicitStageModelOverride: entry?.explicit_stage_model_override === true,
+            explicitStageModelOverrideOrigin: overrideOrigin,
+        };
+    }
+
+    return {
+        stage: null,
+        policyStage: null,
+        requestedModel: null,
+        requestedProvider: null,
+        actualModel: null,
+        actualProvider: null,
+        selectionMode: null,
+        followsActiveLlm: false,
+        explicitStageModelOverride: false,
+        explicitStageModelOverrideOrigin: null,
+    };
+}
+
 function buildLatestLlmExecutionTelemetrySummary(turnId, debugData) {
     if (!debugData || typeof debugData !== 'object') {
         return null;
@@ -379,6 +438,7 @@ function buildLatestLlmExecutionTelemetrySummary(turnId, debugData) {
         : null;
     const warnings = deriveLlmDebugWarnings(debugData);
     const failure = extractLatestLlmExecutionFailure(debugData.aux_llm_calls);
+    const stageSelection = extractLatestStageModelSelection(debugData.aux_llm_calls);
     const callNoteIndicatesFallback = rawCalls.some((call) => (
         typeof call?.note === 'string'
         && call.note.toLowerCase().includes('trying fallback')
@@ -386,10 +446,14 @@ function buildLatestLlmExecutionTelemetrySummary(turnId, debugData) {
     const fallbackUsed = !!failure.fallbackUsed || callNoteIndicatesFallback;
     const primaryFailureReason = failure.failureReason || topLevelError || (warnings[0] || null);
 
+    const effectiveRequestedModel = requestedModel || stageSelection.requestedModel || null;
+    const effectiveActualModel = actualModel || stageSelection.actualModel || null;
+    const effectiveActualProvider = actualProvider || stageSelection.actualProvider || null;
+
     if (
-        !requestedModel
-        && !actualModel
-        && !actualProvider
+        !effectiveRequestedModel
+        && !effectiveActualModel
+        && !effectiveActualProvider
         && !primaryFailureReason
         && warnings.length === 0
     ) {
@@ -400,15 +464,21 @@ function buildLatestLlmExecutionTelemetrySummary(turnId, debugData) {
         schema_version: LATEST_LLM_EXECUTION_TELEMETRY_SCHEMA_VERSION,
         turn_id: typeof turnId === 'string' ? turnId : null,
         timestamp: debugData.timestamp ?? null,
-        requested_model: requestedModel,
-        actual_model: actualModel,
-        actual_provider: actualProvider,
+        requested_model: effectiveRequestedModel,
+        actual_model: effectiveActualModel,
+        actual_provider: effectiveActualProvider,
         call_models: uniqueCallModels,
         call_providers: uniqueCallProviders,
         fallback_used: fallbackUsed,
         primary_failure_kind: failure.failureKind || null,
         primary_failure_reason: primaryFailureReason,
         error: topLevelError,
+        execution_stage: stageSelection.stage,
+        policy_stage: stageSelection.policyStage,
+        selection_mode: stageSelection.selectionMode,
+        follows_active_llm: stageSelection.followsActiveLlm,
+        explicit_stage_model_override: stageSelection.explicitStageModelOverride,
+        explicit_stage_model_override_origin: stageSelection.explicitStageModelOverrideOrigin,
         warnings: warnings.slice(0, 5),
     };
 }

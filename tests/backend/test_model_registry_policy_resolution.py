@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, Mapping, cast
+from unittest.mock import patch
 
 from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
@@ -61,3 +62,40 @@ def test_policy_candidate_resolves_via_model_registry():
     assert candidates[0].provider == "openai"
     assert candidates[0].model == "gpt-5-nano-2025-08-07"
     assert candidates[-1].source == "active_llm"
+
+
+def test_policy_candidate_prefers_active_llm_primary_before_enabled_models():
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _StubGateway()))
+
+    policy_state = _WorkflowModelPolicyState(
+        enabled=True,
+        policy={
+            "stages": {
+                "classifier": {
+                    "primary": "active_llm",
+                    "fallback": [],
+                }
+            }
+        },
+        policy_id="#V#default_workflow_model_policy",
+        predicate_id="#V#has_model_policy_json",
+        errors=(),
+    )
+
+    with patch(
+        "src.backend.services.settings_service.resolve_enabled_llm_settings",
+        return_value=[
+            {"provider": "openai", "model": "gpt-4.1-mini"},
+            {"provider": "ollama", "model": "granite3.3:2b"},
+        ],
+    ):
+        candidates = orchestrator._stage_model_candidates(
+            stage="classifier",
+            default_model="gemma4:26b",
+            policy_state=policy_state,
+            registry_snapshot=None,
+        )
+
+    assert candidates, "Expected at least one candidate"
+    assert candidates[0].source == "active_llm"
+    assert candidates[0].raw == "active_llm"

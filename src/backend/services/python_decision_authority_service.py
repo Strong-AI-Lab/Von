@@ -207,9 +207,15 @@ def _build_llm_exchange_summary(
         "workflow_id": _safe_str(entry.get("workflow_id")),
         "verdict": _safe_str(entry.get("verdict")),
         "selection_source": _safe_str(entry.get("selection_source")),
+        "selection_mode": _safe_str(entry.get("selection_mode")),
+        "explicit_stage_model_override_origin": _safe_str(
+            entry.get("explicit_stage_model_override_origin")
+        ),
         "selection_resolution": _safe_str(
             selection_metadata_mapping.get("selection_resolution")
         ),
+        "requested_provider": _safe_str(entry.get("requested_provider")),
+        "requested_model": _safe_str(entry.get("requested_model")),
         "selected_provider": _safe_str(selected_mapping.get("provider")),
         "selected_model": _safe_str(
             selected_mapping.get("model_resolved") or selected_mapping.get("model")
@@ -255,6 +261,12 @@ def _build_llm_exchange_summary(
 
     if "fallback_used" in entry:
         summary["fallback_used"] = bool(entry.get("fallback_used"))
+    if "follows_active_llm" in entry:
+        summary["follows_active_llm"] = bool(entry.get("follows_active_llm"))
+    if "explicit_stage_model_override" in entry:
+        summary["explicit_stage_model_override"] = bool(
+            entry.get("explicit_stage_model_override")
+        )
 
     failure_kinds = _extract_failure_kinds(entry)
     if failure_kinds:
