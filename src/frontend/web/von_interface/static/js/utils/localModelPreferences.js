@@ -112,9 +112,22 @@ export function clearStoredOllamaSelection() {
   writeStoredJson(LS_OLLAMA_SELECTION, null);
 }
 
+function buildOllamaRequestedLlm(ollamaSelection) {
+  if (!ollamaSelection?.model) return null;
+
+  return {
+    provider: 'ollama',
+    model: ollamaSelection.model,
+    host: ollamaSelection.host || null,
+    requestModel: `ollama:${ollamaSelection.model}`,
+  };
+}
+
 export function resolveLocalRequestedLlm() {
   if (!hasLocalPremiumModelUsePreference()) {
-    return null;
+    // A persisted Ollama selection is itself an explicit local-model choice.
+    // Older browser state may predate the machine-local premium toggle key.
+    return buildOllamaRequestedLlm(getStoredOllamaSelection());
   }
 
   if (getLocalPremiumModelUseEnabled(false)) {
@@ -129,15 +142,7 @@ export function resolveLocalRequestedLlm() {
     return null;
   }
 
-  const ollamaSelection = getStoredOllamaSelection();
-  if (!ollamaSelection?.model) return null;
-
-  return {
-    provider: 'ollama',
-    model: ollamaSelection.model,
-    host: ollamaSelection.host || null,
-    requestModel: `ollama:${ollamaSelection.model}`,
-  };
+  return buildOllamaRequestedLlm(getStoredOllamaSelection());
 }
 
 export function applyLocalModelPreferenceOverlay(settings) {

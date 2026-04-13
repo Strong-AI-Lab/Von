@@ -45,7 +45,7 @@ describe('local model preferences', () => {
         });
     });
 
-    test('does not apply a local override until the machine-local premium preference has been set', async () => {
+    test('treats a stored Ollama selection as an active local override even when the legacy premium flag is absent', async () => {
         const {
             resolveLocalRequestedLlm,
             setStoredOllamaSelection,
@@ -56,6 +56,22 @@ describe('local model preferences', () => {
             model: 'llama3.1:8b',
             host: 'http://localhost:11434',
         });
+
+        expect(resolveLocalRequestedLlm()).toEqual({
+            provider: 'ollama',
+            model: 'llama3.1:8b',
+            host: 'http://localhost:11434',
+            requestModel: 'ollama:llama3.1:8b',
+        });
+    });
+
+    test('does not activate a stored premium model until premium use is enabled locally', async () => {
+        const {
+            resolveLocalRequestedLlm,
+            setStoredOpenAiSelectedModel,
+        } = await import('../../src/frontend/web/von_interface/static/js/utils/localModelPreferences.js');
+
+        setStoredOpenAiSelectedModel('gpt-5.4-mini');
 
         expect(resolveLocalRequestedLlm()).toBeNull();
     });

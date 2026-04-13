@@ -1866,6 +1866,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const ollamaSelection = resolveOllamaSelection(false);
     if (ollamaSelection) {
       setStoredOllamaSelection(ollamaSelection);
+      setLocalPremiumModelUseEnabled(false);
     } else {
       clearStoredOllamaSelection();
     }
