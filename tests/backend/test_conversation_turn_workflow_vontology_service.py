@@ -66,8 +66,9 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     )
 
     assert isinstance(prompt_text, str)
-    assert "narrate the results of a workflow execution" in prompt_text
-    assert "operationally truthful and concise" in prompt_text
+    assert "Selected Workflow User Response" in prompt_text
+    assert "Completion Report` is supporting evidence only" in prompt_text
+    assert "Do not narrate workflow bookkeeping as the response" in prompt_text
 
     recovery_rows = get_texts_for_concept(
         RECOVERY_PROMPT_CONCEPT_ID,
@@ -199,6 +200,13 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     prompt_contract = narration_action.prompt_contract
     assert isinstance(prompt_contract, dict)
     assert prompt_contract.get("resolved_prompt_concept_id") == NARRATION_PROMPT_CONCEPT_ID
+    narration_context_fields = (narration_action.llm_policy or {}).get("context_fields")
+    assert isinstance(narration_context_fields, list)
+    assert any(
+        isinstance(field, dict)
+        and field.get("context_key") == "selected_workflow_user_response"
+        for field in narration_context_fields
+    )
     narration_mappings = narration_state.metadata.get("tool_output_context_mappings") or []
     assert any(
         mapping.get("tool_output_field") == "final_response"

@@ -3,7 +3,7 @@
 JVNAUTOSCI-1763:
 - Cede turn control from Python routes to durable VWL workflows.
 - Support supervised execution of capability workflows (e.g. arXiv).
-- Close the 'communicative gap' by reporting outcomes from completion reports.
+- Keep selected-workflow answer content separate from execution reporting.
 """
 
 from __future__ import annotations

@@ -7,6 +7,7 @@ verification and runtime behaviour stay in sync.
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from typing import Any, Mapping, Sequence
@@ -57,6 +58,293 @@ def _normalise_string_list(raw_values: Any) -> list[str]:
     return normalised
 
 
+def _coerce_non_empty_text(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _looks_like_machine_json_text(text: Any) -> bool:
+    candidate = _coerce_non_empty_text(text)
+    if not candidate:
+        return False
+    if not (
+        (candidate.startswith("{") and candidate.endswith("}"))
+        or (candidate.startswith("[") and candidate.endswith("]"))
+    ):
+        return False
+    try:
+        parsed = json.loads(candidate)
+    except Exception:
+        return False
+    return isinstance(parsed, (list, dict))
+
+
+def _looks_like_execution_bookkeeping_response(
+    text: Any,
+    *,
+    workflow_id: str | None = None,
+) -> bool:
+    candidate = _coerce_non_empty_text(text)
+    if not candidate:
+        return False
+
+    lowered = candidate.lower()
+    if lowered.startswith("the workflow completed successfully"):
+        return True
+    if lowered.startswith("the workflow finished successfully"):
+        return True
+    if lowered.startswith("workflow completed successfully"):
+        return True
+
+    if workflow_id:
+        workflow_text = workflow_id.strip()
+        if workflow_text and candidate == (
+            f"Workflow {workflow_text} completed (state: completed)."
+        ):
+            return True
+        if workflow_text and candidate.startswith(f"Workflow {workflow_text} "):
+            if " completed (state: " in candidate or " failed (state: " in candidate:
+                return True
+
+    if candidate.startswith("Workflow ") and (
+        " completed (state: " in candidate or " failed (state: " in candidate
+    ):
+        return True
+
+    return False
+
+
+def _render_structured_observation_lines(observations: Any) -> list[str]:
+    if not isinstance(observations, Sequence) or isinstance(
+        observations, (str, bytes, bytearray)
+    ):
+        return []
+
+    lines: list[str] = []
+    for item in observations[:6]:
+        if isinstance(item, Mapping):
+            label = _coerce_non_empty_text(item.get("label")) or "observation"
+            verdict = _coerce_non_empty_text(item.get("verdict"))
+            expected = _coerce_non_empty_text(item.get("expected_outcome"))
+            observed = _coerce_non_empty_text(item.get("observed_outcome"))
+            segments = [label]
+            if verdict:
+                segments.append(verdict)
+            detail_parts: list[str] = []
+            if expected:
+                detail_parts.append(f"expected: {expected}")
+            if observed:
+                detail_parts.append(f"observed: {observed}")
+            line = ": ".join(segments) if len(segments) > 1 else segments[0]
+            if detail_parts:
+                line = f"{line} ({'; '.join(detail_parts)})"
+            lines.append(line)
+            continue
+
+        text = _coerce_non_empty_text(item)
+        if text:
+            lines.append(text)
+
+    extra_count = len(observations) - len(lines)
+    if extra_count > 0:
+        lines.append(f"... (+{extra_count} more observations)")
+    return lines
+
+
+def _render_selected_workflow_artefact_lines(data: Mapping[str, Any]) -> list[str]:
+    lines: list[str] = []
+    paper_concept_id = _coerce_non_empty_text(data.get("paper_concept_id"))
+    file_copy_concept_id = _coerce_non_empty_text(data.get("file_copy_concept_id"))
+    if paper_concept_id:
+        lines.append(f"Created paper concept: {paper_concept_id}.")
+    if file_copy_concept_id:
+        lines.append(f"Linked file copy: {file_copy_concept_id}.")
+
+    workflow_execution_summary = data.get("workflow_execution_summary")
+    durable_side_effects = (
+        workflow_execution_summary.get("durable_side_effects")
+        if isinstance(workflow_execution_summary, Mapping)
+        else data.get("durable_side_effects")
+    )
+    if isinstance(durable_side_effects, list):
+        for item in durable_side_effects[:3]:
+            if not isinstance(item, Mapping):
+                continue
+            mutation_kind = _coerce_non_empty_text(item.get("mutation_kind"))
+            artefact_type = _coerce_non_empty_text(item.get("artefact_type"))
+            artefact_ids = item.get("artefact_ids")
+            if (
+                mutation_kind == "created"
+                and artefact_type
+                and isinstance(artefact_ids, list)
+                and artefact_ids
+            ):
+                first_id = _coerce_non_empty_text(artefact_ids[0])
+                if first_id and first_id not in {
+                    paper_concept_id,
+                    file_copy_concept_id,
+                }:
+                    lines.append(
+                        f"Created {artefact_type.replace('_', ' ')}: {first_id}."
+                    )
+    return lines
+
+
+def render_selected_workflow_user_response(
+    *,
+    selected_workflow_id: str | None,
+    child_completed: bool,
+    final_state: str | None,
+    failure_detail: str | None,
+    child_outputs: Mapping[str, Any] | None,
+    child_result_snapshot: Mapping[str, Any] | None = None,
+) -> str | None:
+    """Derive a user-facing response from a selected-workflow outcome.
+
+    This is intentionally separate from execution bookkeeping. Generic
+    workflow-status summaries are not treated as answers.
+    """
+
+    child_outputs_map = (
+        dict(child_outputs) if isinstance(child_outputs, Mapping) else {}
+    )
+    child_snapshot = (
+        dict(child_result_snapshot)
+        if isinstance(child_result_snapshot, Mapping)
+        else {}
+    )
+    orchestrator_result = child_outputs_map.get("orchestrator_result")
+    orchestrator_result_map = (
+        dict(orchestrator_result) if isinstance(orchestrator_result, Mapping) else {}
+    )
+    completion_report = child_outputs_map.get("completion_report")
+    completion_report_map = (
+        dict(completion_report) if isinstance(completion_report, Mapping) else {}
+    )
+    workflow_execution_summary = child_outputs_map.get("workflow_execution_summary")
+    workflow_execution_summary_map = (
+        dict(workflow_execution_summary)
+        if isinstance(workflow_execution_summary, Mapping)
+        else {}
+    )
+
+    combined_data: dict[str, Any] = {}
+    for payload in (
+        workflow_execution_summary_map,
+        completion_report_map,
+        child_snapshot,
+        orchestrator_result_map,
+        child_outputs_map,
+    ):
+        if isinstance(payload, Mapping):
+            for key, value in payload.items():
+                if isinstance(key, str) and key not in combined_data:
+                    combined_data[key] = value
+
+    artefact_lines = _render_selected_workflow_artefact_lines(combined_data)
+
+    candidate_texts: list[str] = []
+    seen_candidates: set[str] = set()
+    for payload, field_name in (
+        (child_outputs_map, "response_text"),
+        (child_outputs_map, "final_response"),
+        (child_outputs_map, "current_response"),
+        (child_outputs_map, "summary"),
+        (orchestrator_result_map, "response_text"),
+        (orchestrator_result_map, "final_response"),
+        (orchestrator_result_map, "summary"),
+        (child_snapshot, "response_text"),
+        (child_snapshot, "final_response"),
+        (completion_report_map, "response_text"),
+        (workflow_execution_summary_map, "response_text"),
+    ):
+        candidate = _coerce_non_empty_text(payload.get(field_name))
+        if not candidate:
+            continue
+        lowered = candidate.lower()
+        if lowered in seen_candidates:
+            continue
+        seen_candidates.add(lowered)
+        candidate_texts.append(candidate)
+
+    for candidate_text in candidate_texts:
+        if _looks_like_machine_json_text(candidate_text):
+            continue
+        if _looks_like_execution_bookkeeping_response(
+            candidate_text,
+            workflow_id=selected_workflow_id,
+        ):
+            continue
+        if artefact_lines:
+            return "\n".join([*artefact_lines, "", candidate_text])
+        return candidate_text
+
+    if not child_completed:
+        failure_text = _coerce_non_empty_text(failure_detail)
+        if failure_text:
+            return failure_text
+
+    lines: list[str] = list(artefact_lines)
+
+    verdict = _coerce_non_empty_text(combined_data.get("verdict"))
+    if verdict:
+        lines.append(f"Workflow verdict: {verdict}.")
+
+    run_id = _coerce_non_empty_text(combined_data.get("run_id"))
+    if run_id:
+        lines.append(f"Experiment run: {run_id}.")
+
+    verdict_summary = combined_data.get("verdict_summary")
+    if isinstance(verdict_summary, Mapping):
+        summary_reason = _coerce_non_empty_text(verdict_summary.get("reason"))
+        if summary_reason:
+            lines.append(f"Verdict summary: {summary_reason}.")
+
+    promotion = combined_data.get("promotion_recommendation")
+    if isinstance(promotion, Mapping):
+        promotion_bits: list[str] = []
+        recommended = promotion.get("recommended")
+        if isinstance(recommended, bool):
+            promotion_bits.append("recommended" if recommended else "not recommended")
+        requires_gate = promotion.get("requires_promotion_gate")
+        if isinstance(requires_gate, bool):
+            promotion_bits.append(
+                "promotion gate required"
+                if requires_gate
+                else "no promotion gate required"
+            )
+        promotion_reason = _coerce_non_empty_text(promotion.get("reason"))
+        if promotion_reason:
+            promotion_bits.append(promotion_reason)
+        if promotion_bits:
+            lines.append(f"Promotion recommendation: {'; '.join(promotion_bits)}.")
+
+    meeting_type = _coerce_non_empty_text(combined_data.get("candidate_meeting_type"))
+    if meeting_type:
+        lines.append(f"Candidate meeting type: {meeting_type}.")
+
+    safe_downstream_action = _coerce_non_empty_text(
+        combined_data.get("candidate_safe_downstream_action")
+    )
+    if safe_downstream_action:
+        lines.append(f"Candidate safe downstream action: {safe_downstream_action}.")
+
+    observation_lines = _render_structured_observation_lines(
+        combined_data.get("meeting_candidate_observations")
+        or combined_data.get("observations")
+    )
+    if observation_lines:
+        lines.append("Evidence:")
+        lines.extend(f"- {line}" for line in observation_lines)
+
+    if lines:
+        return "\n".join(lines)
+
+    return None
+
+
 def build_turn_execution_selected_workflow_outputs(
     *,
     selected_workflow_id: str | None,
@@ -87,6 +375,16 @@ def build_turn_execution_selected_workflow_outputs(
         if isinstance(child_result_snapshot, Mapping)
         else None
     )
+    derived_user_response = _coerce_non_empty_text(rendered_response) or (
+        render_selected_workflow_user_response(
+            selected_workflow_id=clean_selected_workflow_id,
+            child_completed=bool(child_completed),
+            final_state=_safe_str(final_state),
+            failure_detail=_safe_str(failure_detail),
+            child_outputs=child_outputs_map,
+            child_result_snapshot=child_snapshot,
+        )
+    )
 
     completion_report = child_outputs_map.get("completion_report")
     completion_report_source = "child_completion_report"
@@ -108,30 +406,25 @@ def build_turn_execution_selected_workflow_outputs(
                 "completed": bool(child_completed),
                 "final_state": _safe_str(final_state),
                 "error": _safe_str(failure_detail),
-                "response_text": response_preview,
             }
+            if response_preview:
+                completion_report["response_text"] = response_preview
             completion_report_source = "synthetic_selected_workflow_summary"
 
     completion_report_map = dict(completion_report)
-    if rendered_response:
-        completion_report_map.setdefault("response_text", rendered_response)
+    if derived_user_response:
+        completion_report_map["response_text"] = derived_user_response
+    else:
+        completion_report_map.pop("response_text", None)
     if child_snapshot:
         completion_report_map.setdefault("result_snapshot", dict(child_snapshot))
         for key, value in child_snapshot.items():
             if isinstance(key, str) and key not in completion_report_map:
                 completion_report_map[key] = value
 
-    final_response = (
-        rendered_response
-        or _safe_str(child_outputs_map.get("final_response"))
-        or _safe_str(child_outputs_map.get("response_text"))
-    )
-    current_response = (
-        rendered_response
-        or _safe_str(child_outputs_map.get("current_response"))
-        or final_response
-    )
-    response_text = rendered_response or _safe_str(child_outputs_map.get("response_text"))
+    final_response = derived_user_response
+    current_response = derived_user_response
+    response_text = derived_user_response
 
     outputs: dict[str, Any] = {
         "completion_report": completion_report_map,
@@ -151,6 +444,7 @@ def build_turn_execution_selected_workflow_outputs(
             "child_workflow_error": _safe_str(failure_detail),
             "completion_report_source": completion_report_source,
             "child_result_snapshot": child_snapshot,
+            "selected_workflow_user_response_available": bool(derived_user_response),
         },
         "workflow_routing": (
             {
@@ -183,9 +477,12 @@ def build_turn_execution_selected_workflow_outputs(
         "selected_workflow_child_failed": not bool(child_completed),
         "selected_workflow_final_state": _safe_str(final_state),
         "selected_workflow_error": _safe_str(failure_detail),
+        "selected_workflow_user_response_available": bool(derived_user_response),
     }
     if clean_selected_workflow_id:
         outputs["selected_workflow_id"] = clean_selected_workflow_id
+    if derived_user_response:
+        outputs["selected_workflow_user_response"] = derived_user_response
     if final_response:
         outputs["final_response"] = final_response
     if current_response:

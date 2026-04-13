@@ -352,6 +352,9 @@ def test_execute_selected_promotes_child_result_snapshot_into_completion_report(
     assert report["file_copy_concept_id"] == "#V#file_copy_456"
     assert report["result_snapshot"]["paper_concept_id"] == "#V#paper_123"
     assert report["result_snapshot"]["file_copy_concept_id"] == "#V#file_copy_456"
+    assert "Created paper concept: #V#paper_123." in result.outputs[
+        "selected_workflow_user_response"
+    ]
     assert "Created paper concept: #V#paper_123." in report["response_text"]
     assert "Linked file copy: #V#file_copy_456." in report["response_text"]
     assert "Created paper concept: #V#paper_123." in result.outputs["response_text"]
@@ -396,11 +399,65 @@ def test_execute_selected_captures_child_failure_for_recovery_path(
     assert result.outputs["selected_workflow_child_failed"] is True
     assert result.outputs["selected_workflow_final_state"] == "failed"
     assert result.outputs["selected_workflow_error"] == "selected route failed closed"
+    assert result.outputs["selected_workflow_user_response"] == "selected route failed closed"
+    assert result.outputs["response_text"] == "selected route failed closed"
     report = result.outputs["completion_report"]
     assert report["workflow_id"] == "#V#specialised_route"
     assert report["completed"] is False
     assert report["final_state"] == "failed"
     assert report["error"] == "selected route failed closed"
+    assert report["response_text"] == "selected route failed closed"
+
+
+def test_execute_selected_does_not_surface_generic_workflow_status_as_answer(
+    monkeypatch,
+) -> None:
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _DummyGateway()))
+    monkeypatch.setattr(
+        orchestrator,
+        "execute_workflow",
+        lambda *args, **kwargs: SimpleNamespace(
+            completed=True,
+            final_state="completed",
+            error=None,
+            data={
+                "workflow_execution_summary": {
+                    "schema_version": "workflow_execution_summary.v1",
+                    "workflow_id": "#V#chat_assistant_workflow",
+                    "completed": True,
+                    "final_state": "#V#workflow_step_chat_assistant_workflow_completed",
+                    "response_text": (
+                        "Workflow #V#chat_assistant_workflow completed "
+                        "(state: #V#workflow_step_chat_assistant_workflow_completed)."
+                    ),
+                }
+            },
+        ),
+    )
+
+    result = orchestrator._action_turn_execution_execute_selected(
+        SimpleNamespace(
+            data={
+                "selected_workflow_id": "#V#chat_assistant_workflow",
+                "selected_workflow_trace": {},
+                "conversation_session_id": "session-1",
+                "turn_id": "turn-1",
+            },
+            environment=SimpleNamespace(
+                llm_client=_DummyLLM(),
+                model="test-model",
+                user_namespace="#V#user",
+                auxiliary_system_prompt=None,
+            ),
+            trace=None,
+        )
+    )
+
+    assert result.status == "success"
+    assert result.outputs.get("selected_workflow_user_response") is None
+    assert result.outputs.get("response_text") is None
+    report = result.outputs["completion_report"]
+    assert report.get("response_text") is None
 
 
 def test_execute_selected_surfaces_missing_selected_workflow_as_recoverable_context() -> None:

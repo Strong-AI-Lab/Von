@@ -176,6 +176,7 @@ def test_e2e_dispatch_gate_falls_back_to_tool_pipeline_when_not_launchable(
     ), patch(
         "src.backend.integrations.internal_mcp.orchestrator.get_model_registry_snapshot",
         return_value={},
+        create=True,
     ), patch.object(mock_orchestrator, "execute_workflow") as mock_execute:
         _install_custom_workflow_selection(mock_orchestrator, wf_id, mock_llm)
         mock_execute.return_value = WorkflowResult(
@@ -263,6 +264,7 @@ def test_e2e_dispatch_gate_allows_satisfied_contract(mock_orchestrator):
     ), patch(
         "src.backend.integrations.internal_mcp.orchestrator.get_model_registry_snapshot",
         return_value={},
+        create=True,
     ), patch.object(mock_orchestrator, "execute_workflow") as mock_execute:
         _install_custom_workflow_selection(mock_orchestrator, wf_id, mock_llm)
         mock_execute.return_value = WorkflowResult(
@@ -280,8 +282,5 @@ def test_e2e_dispatch_gate_allows_satisfied_contract(mock_orchestrator):
 
     assert isinstance(result, OrchestratorResult)
     assert mock_execute.call_args.args[0] == wf_id
-    assert (
-        result.response_text
-        == "Workflow #V#arxiv_paper_representation_workflow completed (state: completed)."
-    )
+    assert result.response_text == "Workflow Executed Successfully"
     assert mock_execute.called
