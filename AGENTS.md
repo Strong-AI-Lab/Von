@@ -80,7 +80,7 @@ For frontend/browser user-view validation practice, also see
 17. Heuristic fallbacks must be explicitly temporary, non-authoritative, linked to a removal task, and easy to delete.
 18. Destructive mutations require explicit confirmation or workflow escalation; do not infer permission for deletes or removals from general task context.
 19. Default to minimal imposition. Exhaust machine-side retrieval, context, search, and reasoning before asking the user to do extra work.
-20. Treat older Jira wording sceptically. Reinterpret stale tasks toward the current Von architecture and note the reinterpretation in Jira.
+20. Treat older Jira wording sceptically. Before implementing a Jira task that will make a significant architectural or other significant change, perform a bounded staleness/implementability review first: verify the current code path and line ranges, inspect what has materially changed since the task was written, check the current targeted validation surface, reinterpret the task toward the current Von architecture, and update Jira plus any genuinely helpful adjacent/precondition tasks when the original wording is materially stale.
 21. For research-sensitive, architecture-shaping, or long-horizon-agent tasks, do a short targeted literature review before finalising the plan.
 22. Run targeted impacted validation by default, including real call-path tests where relevant. Do not claim broader coverage than you actually ran.
 23. End-to-end or user-visible acceptance requires direct evidence on the exact path or the nearest real path, not only nearby unit tests.
@@ -171,6 +171,7 @@ Verify all of the following:
 - transition the Jira issue to `In Progress`
 - when creating Jira issues on the user's behalf, assign them to the authenticated Jira user by default unless the user explicitly asks for a different assignee or Jira refuses the assignment
 - review task age, linked issues, and likely staleness
+- before implementing a Jira task that will make a significant architectural or other significant change, perform and record a bounded staleness/implementability review: confirm the live code path and current line ranges, identify meaningful since-ticket changes, check the present targeted test/validation surface, and update the Jira task wording or linked precondition tasks if the original framing is no longer accurate
 - identify the authoritative KB/workflow/prompt artefacts
 - decide which situation-specific docs are mandatory for this task
 
