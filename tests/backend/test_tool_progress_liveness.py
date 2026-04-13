@@ -1262,6 +1262,148 @@ def test_stage_diagnostics_include_workflow_selection_rationale(monkeypatch) -> 
     )
 
 
+def test_stage_diagnostics_backfill_selected_workflow_from_routing_diagnostics(
+    monkeypatch,
+) -> None:
+    clock = _set_clock(monkeypatch, start=5480.0)
+
+    selected_workflow_id = "#V#arxiv_paper_representation_workflow"
+    workflow_name = "Arxiv Paper Representation Workflow"
+
+    von_routes._set_tool_progress(
+        "scope-routing-backfill",
+        "req-routing-backfill",
+        {
+            "status": "thinking",
+            "phase": "workflow_dispatch_prepare",
+            "phase_label": "Workflow dispatch preparation",
+            "request_id": "req-routing-backfill",
+            "result_summary": "Preparing workflow dispatch",
+            "workflow_discovery": {
+                "candidate_count": 2,
+                "match_count": 1,
+                "candidates": [
+                    {
+                        "concept_id": selected_workflow_id,
+                        "name": workflow_name,
+                        "routing_eligible": True,
+                    },
+                    {
+                        "concept_id": "#V#arxiv_paper_ingestion_testing_workflow",
+                        "name": "Arxiv Paper Ingestion Testing Workflow",
+                        "routing_eligible": True,
+                    },
+                ],
+                "matches": [
+                    {
+                        "concept_id": selected_workflow_id,
+                        "name": workflow_name,
+                        "routing_eligible": True,
+                    }
+                ],
+            },
+            "workflow_routing": {
+                "workflow_id": selected_workflow_id,
+                "verdict": "rag_selected",
+                "source": "selector",
+                "selection_rationale": "selector_selected_discovered_candidate",
+            },
+            "workflow_routing_aux": [
+                {
+                    "type": "workflow_selector_prompt",
+                    "prompt_id": "#V#chat_turn_classifier_prompt",
+                    "requested_prompt_ids": ["#V#chat_turn_classifier_prompt"],
+                    "candidate_list": {
+                        "text": "- #V#arxiv_paper_representation_workflow",
+                        "char_count": 38,
+                    },
+                },
+                {
+                    "type": "workflow_selector",
+                    "workflow_id": selected_workflow_id,
+                    "verdict": "rag_selected",
+                    "selection_source": "selector",
+                    "response": {
+                        "text": selected_workflow_id,
+                        "char_count": len(selected_workflow_id),
+                    },
+                },
+            ],
+            "counters": {"tools_started": 0, "tools_completed": 0},
+        },
+    )
+    clock["now"] += 0.1
+    von_routes._set_tool_progress(
+        "scope-routing-backfill",
+        "req-routing-backfill",
+        {
+            "status": "phase_transition",
+            "phase": "response_finalising",
+            "phase_label": "Finalising response",
+            "request_id": "req-routing-backfill",
+            "result_summary": "assembling the final response payload",
+        },
+    )
+
+    snapshot = von_routes._snapshot_tool_progress_for_request(
+        "scope-routing-backfill",
+        "req-routing-backfill",
+    )
+    assert snapshot is not None
+    assert snapshot.get("selected_workflow_id") == selected_workflow_id
+    assert snapshot.get("selected_workflow_name") == workflow_name
+    assert snapshot.get("workflow_selector_verdict") == "rag_selected"
+    assert snapshot.get("workflow_selector_source") == "selector"
+    assert snapshot.get("workflow_selection_rationale") == (
+        "selector_selected_discovered_candidate"
+    )
+
+    stage_diagnostics = snapshot.get("stage_diagnostics")
+    assert isinstance(stage_diagnostics, list)
+    workflow_dispatch_prepare = next(
+        (
+            entry
+            for entry in stage_diagnostics
+            if isinstance(entry, dict)
+            and entry.get("stage_id") == "workflow_dispatch_prepare"
+        ),
+        None,
+    )
+    assert workflow_dispatch_prepare is not None
+    assert workflow_dispatch_prepare.get("selected_workflow_id") == selected_workflow_id
+    assert workflow_dispatch_prepare.get("selected_workflow_name") == workflow_name
+    assert workflow_dispatch_prepare.get("workflow_selector_verdict") == "rag_selected"
+    assert workflow_dispatch_prepare.get("workflow_selector_source") == "selector"
+    assert workflow_dispatch_prepare.get("workflow_selection_rationale") == (
+        "selector_selected_discovered_candidate"
+    )
+
+    diagnostics = von_routes._build_turn_execution_diagnostics(
+        request_id="req-routing-backfill",
+        prompt_text="https://arxiv.org/abs/2502.13025",
+        tool_progress_state=snapshot,
+    )
+    rebuilt_stage_diagnostics = diagnostics.get("stage_diagnostics")
+    assert isinstance(rebuilt_stage_diagnostics, list)
+    rebuilt_dispatch_prepare = next(
+        (
+            entry
+            for entry in rebuilt_stage_diagnostics
+            if isinstance(entry, dict)
+            and entry.get("stage_id") == "workflow_dispatch_prepare"
+        ),
+        None,
+    )
+    assert rebuilt_dispatch_prepare is not None
+    assert rebuilt_dispatch_prepare.get("selected_workflow_id") == selected_workflow_id
+    assert rebuilt_dispatch_prepare.get("selected_workflow_name") == workflow_name
+    assert rebuilt_dispatch_prepare.get("workflow_selector_verdict") == "rag_selected"
+    assert rebuilt_dispatch_prepare.get("workflow_selector_source") == "selector"
+    assert rebuilt_dispatch_prepare.get("workflow_selection_rationale") == (
+        "selector_selected_discovered_candidate"
+    )
+
+
 def test_progress_summary_prefers_lifecycle_counts_over_null_history_rows() -> None:
     serialised = von_routes._serialise_tool_progress_state(
         {

@@ -554,6 +554,16 @@ def _serialise_tool_progress_state(
                 else None
             ),
         )
+        payload.update(
+            _resolve_workflow_selection_fields(
+                latest_progress_payload=payload,
+                workflow_routing_diagnostics=(
+                    payload.get("workflow_routing_diagnostics")
+                    if isinstance(payload.get("workflow_routing_diagnostics"), Mapping)
+                    else None
+                ),
+            )
+        )
     stage_diagnostics = _build_turn_execution_stage_diagnostics(
         diagnostic_events=diagnostic_events,
         workflow_stage_path=workflow_stage_path,
@@ -1254,6 +1264,136 @@ def _extract_live_stage_diagnostic_map(
     }
 
 
+def _workflow_candidate_name_matches_selected_id(
+    candidate: Mapping[str, Any] | None,
+    selected_workflow_id: str | None,
+) -> str | None:
+    if not isinstance(candidate, Mapping):
+        return None
+
+    candidate_workflow_id = _progress_str(candidate.get("concept_id")) or _progress_str(
+        candidate.get("workflow_id")
+    ) or _progress_str(candidate.get("id"))
+    if selected_workflow_id and candidate_workflow_id:
+        if candidate_workflow_id.strip().lower() != selected_workflow_id.strip().lower():
+            return None
+
+    return _progress_str(candidate.get("name")) or _progress_str(
+        candidate.get("workflow_name")
+    ) or _progress_str(candidate.get("label"))
+
+
+def _resolve_workflow_name_from_routing_diagnostics(
+    selected_workflow_id: str | None,
+    workflow_routing_diagnostics: Mapping[str, Any] | None,
+) -> str | None:
+    if not isinstance(workflow_routing_diagnostics, Mapping):
+        return None
+
+    selector_payload = workflow_routing_diagnostics.get("selector")
+    if isinstance(selector_payload, Mapping):
+        selected_candidate_name = _workflow_candidate_name_matches_selected_id(
+            selector_payload.get("selected_candidate")
+            if isinstance(selector_payload.get("selected_candidate"), Mapping)
+            else None,
+            selected_workflow_id,
+        )
+        if selected_candidate_name:
+            return selected_candidate_name
+
+        selector_candidates = selector_payload.get("candidate_entries")
+        if isinstance(selector_candidates, list):
+            for entry in selector_candidates:
+                candidate_name = _workflow_candidate_name_matches_selected_id(
+                    entry if isinstance(entry, Mapping) else None,
+                    selected_workflow_id,
+                )
+                if candidate_name:
+                    return candidate_name
+
+    discovery_payload = workflow_routing_diagnostics.get("discovery")
+    if not isinstance(discovery_payload, Mapping):
+        return None
+
+    for collection_name in ("routing_matches", "candidates", "excluded_candidates"):
+        collection = discovery_payload.get(collection_name)
+        if not isinstance(collection, list):
+            continue
+        for entry in collection:
+            candidate_name = _workflow_candidate_name_matches_selected_id(
+                entry if isinstance(entry, Mapping) else None,
+                selected_workflow_id,
+            )
+            if candidate_name:
+                return candidate_name
+
+    return None
+
+
+def _resolve_workflow_selection_fields(
+    *,
+    latest_progress_payload: Mapping[str, Any] | None,
+    live_stage_payload: Mapping[str, Any] | None = None,
+    latest_stage_event: Mapping[str, Any] | None = None,
+    workflow_routing_diagnostics: Mapping[str, Any] | None = None,
+) -> dict[str, str]:
+    latest_payload = latest_progress_payload if isinstance(latest_progress_payload, Mapping) else {}
+    stage_payload = live_stage_payload if isinstance(live_stage_payload, Mapping) else {}
+    stage_event = latest_stage_event if isinstance(latest_stage_event, Mapping) else {}
+    routing_payload = (
+        workflow_routing_diagnostics
+        if isinstance(workflow_routing_diagnostics, Mapping)
+        else {}
+    )
+
+    selected_workflow_id = (
+        _progress_str(stage_payload.get("selected_workflow_id"))
+        or _progress_str(stage_event.get("selected_workflow_id"))
+        or _progress_str(latest_payload.get("selected_workflow_id"))
+        or _progress_str(routing_payload.get("selected_workflow_id"))
+    )
+    selected_workflow_name = (
+        _progress_str(stage_payload.get("selected_workflow_name"))
+        or _progress_str(stage_event.get("selected_workflow_name"))
+        or _progress_str(latest_payload.get("selected_workflow_name"))
+        or _resolve_workflow_name_from_routing_diagnostics(
+            selected_workflow_id,
+            routing_payload,
+        )
+    )
+    workflow_selector_verdict = (
+        _progress_str(stage_payload.get("workflow_selector_verdict"))
+        or _progress_str(stage_event.get("workflow_selector_verdict"))
+        or _progress_str(latest_payload.get("workflow_selector_verdict"))
+        or _progress_str(routing_payload.get("selector_verdict"))
+    )
+    workflow_selector_source = (
+        _progress_str(stage_payload.get("workflow_selector_source"))
+        or _progress_str(stage_event.get("workflow_selector_source"))
+        or _progress_str(latest_payload.get("workflow_selector_source"))
+        or _progress_str(routing_payload.get("selector_source"))
+    )
+    workflow_selection_rationale = (
+        _progress_str(stage_payload.get("workflow_selection_rationale"))
+        or _progress_str(stage_event.get("workflow_selection_rationale"))
+        or _progress_str(latest_payload.get("workflow_selection_rationale"))
+        or _progress_str(routing_payload.get("selection_rationale"))
+    )
+
+    resolved: dict[str, str] = {}
+    if selected_workflow_id:
+        resolved["selected_workflow_id"] = selected_workflow_id
+    if selected_workflow_name:
+        resolved["selected_workflow_name"] = selected_workflow_name
+    if workflow_selector_verdict:
+        resolved["workflow_selector_verdict"] = workflow_selector_verdict
+    if workflow_selector_source:
+        resolved["workflow_selector_source"] = workflow_selector_source
+    if workflow_selection_rationale:
+        resolved["workflow_selection_rationale"] = workflow_selection_rationale
+    return resolved
+
+
 def _extract_workflow_stage_path_from_progress(
     progress_state: Mapping[str, Any] | None,
 ) -> dict[str, Any] | None:
@@ -1740,24 +1880,21 @@ def _build_turn_execution_stage_diagnostics(
             "workflow_dispatch",
             "plain_response",
         }:
-            stage_payload["selected_workflow_id"] = _progress_str(
-                latest_progress_payload.get("selected_workflow_id")
-            )
-            stage_payload["selected_workflow_name"] = _progress_str(
-                latest_progress_payload.get("selected_workflow_name")
-            )
-            stage_payload["workflow_selector_verdict"] = _progress_str(
-                latest_progress_payload.get("workflow_selector_verdict")
-            )
-            stage_payload["workflow_selector_source"] = _progress_str(
-                latest_progress_payload.get("workflow_selector_source")
-            )
-            stage_payload["workflow_selection_rationale"] = _progress_str(
-                latest_progress_payload.get("workflow_selection_rationale")
-            ) or (
-                _progress_str(latest_stage_event.get("workflow_selection_rationale"))
-                if isinstance(latest_stage_event, Mapping)
-                else None
+            stage_payload.update(
+                _resolve_workflow_selection_fields(
+                    latest_progress_payload=latest_progress_payload,
+                    live_stage_payload=live_stage_payload,
+                    latest_stage_event=(
+                        latest_stage_event
+                        if isinstance(latest_stage_event, Mapping)
+                        else None
+                    ),
+                    workflow_routing_diagnostics=(
+                        workflow_routing_diagnostics
+                        if isinstance(workflow_routing_diagnostics, Mapping)
+                        else None
+                    ),
+                )
             )
             if isinstance(dispatch_payload, Mapping):
                 pre_dispatch = dispatch_payload.get("pre_dispatch")
