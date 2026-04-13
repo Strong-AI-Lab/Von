@@ -85,6 +85,38 @@ def test_validate_contract_rejects_non_terminal_vacuous_state() -> None:
     assert validation.get("vacuous_state_ids") == ["start"]
 
 
+def test_validate_contract_rejects_prompt_sentence_like_workflow_id() -> None:
+    definition = WorkflowDefinition(
+        workflow_id=(
+            "#V#the_enrichment_workflow_isn_t_the_right_one_we_need_a_new_"
+            "vontology_search_workflow_i_suspect_manually_retrieve_the_"
+            "v_timothy_pistotti_concept_and_then_look_at_its_types_and_"
+            "relations_in_particular_ones_about_supervision_workflow"
+        ),
+        initial_state="done",
+        states={
+            "done": WorkflowStateSpec(
+                state_id="done",
+                actions=(WorkflowActionInvocation(action_id="mark.done"),),
+                terminal=True,
+            ),
+        },
+        termination_states=("done",),
+        purpose="test",
+    )
+
+    validation = validate_workflow_definition_contract(definition=definition)
+
+    assert validation["valid"] is False
+    assert "workflow_id_invalid" in (validation.get("errors") or [])
+    reason_codes = {
+        issue.get("reason_code") for issue in validation.get("workflow_id_issues", [])
+    }
+    assert "workflow_id_slug_too_long" in reason_codes
+    assert "workflow_id_too_many_tokens" in reason_codes
+    assert "workflow_id_prompt_sentence_like" in reason_codes
+
+
 def test_validate_contract_rejects_actionless_output_only_contract() -> None:
     definition = WorkflowDefinition(
         workflow_id="#V#test_output_only_state_workflow",

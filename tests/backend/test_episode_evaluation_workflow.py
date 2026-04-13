@@ -69,3 +69,66 @@ def test_persist_memory_handler_surfaces_remediation_routing(monkeypatch):
     assert result.outputs["remediation_task_id"] == "#V#task_1610"
     assert result.outputs["remediation_issue_key"] == "JVNAUTOSCI-1610"
     assert result.outputs["maintenance_follow_up_requested"] is False
+
+
+def test_persist_memory_handler_emits_maintenance_launch_payload(monkeypatch):
+    from src.backend.workflows.durable import episode_evaluation_workflow as mod
+
+    monkeypatch.setattr(
+        mod,
+        "upsert_episode_critique_memory_from_episode_assessment",
+        lambda **kwargs: {
+            "success": True,
+            "memory_id": "#V#episode_critique_memory_req_1837",
+            "state": {
+                "memory_id": "#V#episode_critique_memory_req_1837",
+                "namespace": "#V#user@org",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "route_episode_critique_memory",
+        lambda **kwargs: {"success": True, "decision": "maintenance_follow_up"},
+    )
+
+    handler = mod._build_persist_memory_handler()
+    result = handler(
+        _request(
+            {
+                "episode_evidence_bundle": {
+                    "episode_locator": {
+                        "request_id": "req-1837",
+                        "session_id": "session-1837",
+                        "workflow_id": "#V#student_supervision_lookup_workflow",
+                        "namespace": "#V#user@org",
+                    }
+                },
+                "critic_assessment": {
+                    "summary": "Workflow discovery surfaced a malformed workflow candidate.",
+                    "maintenance_follow_up_recommended": True,
+                    "maintenance_follow_up_reason": "malformed_discovery_candidate",
+                },
+                "namespace": "#V#user@org",
+                "user_id": "#V#user",
+                "org_id": "#V#org",
+                "maintenance_apply_repairs_default": True,
+            }
+        )
+    )
+
+    assert result.ok
+    assert result.outputs["episode_critique_memory_id"] == (
+        "#V#episode_critique_memory_req_1837"
+    )
+    assert result.outputs["maintenance_follow_up_requested"] is True
+    launch_inputs = result.outputs["maintenance_launch_inputs"]
+    assert launch_inputs["episode_critique_memory_id"] == (
+        "#V#episode_critique_memory_req_1837"
+    )
+    assert launch_inputs["request_id"] == "req-1837"
+    assert launch_inputs["session_id"] == "session-1837"
+    assert launch_inputs["selected_workflow_id"] == (
+        "#V#student_supervision_lookup_workflow"
+    )
+    assert "malformed workflow candidate" in launch_inputs["incident_text"].lower()

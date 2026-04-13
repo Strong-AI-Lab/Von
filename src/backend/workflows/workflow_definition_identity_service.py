@@ -12,6 +12,7 @@ import hashlib
 import json
 from typing import Any, Callable, Dict, Iterable, Mapping, Sequence
 
+from ..utils.concept_id_utils import canonicalise_vontology_concept_id
 from .subworkflow_contracts import (
     WORKFLOW_SUBWORKFLOW_ACTION_ID,
     normalise_subworkflow_contract,
@@ -43,6 +44,34 @@ from .write_tool_policy import (
 WORKFLOW_DEFINITION_IDENTITY_SCHEMA_VERSION = "workflow_definition_identity.v1"
 WORKFLOW_DEFINITION_IDENTITY_VERSION = 1
 WORKFLOW_CONTRACT_SHAPE_SCHEMA_VERSION = "workflow_contract_shape.v1"
+WORKFLOW_ID_HYGIENE_MAX_SLUG_LENGTH = 96
+WORKFLOW_ID_HYGIENE_MAX_TOKEN_COUNT = 12
+_WORKFLOW_ID_PROMPTISH_TOKENS = frozenset(
+    {
+        "can",
+        "could",
+        "do",
+        "how",
+        "look",
+        "manually",
+        "me",
+        "my",
+        "need",
+        "please",
+        "show",
+        "should",
+        "tell",
+        "then",
+        "we",
+        "what",
+        "when",
+        "why",
+        "will",
+        "would",
+        "you",
+        "your",
+    }
+)
 
 _STATE_METADATA_CONTRACT_KEYS: tuple[str, ...] = (
     "preconditions",
@@ -117,6 +146,91 @@ def _normalise_symbol_list(value: Any) -> list[str]:
         seen.add(text)
         symbols.append(text)
     return symbols
+
+
+def assess_workflow_id_hygiene(workflow_id: Any) -> dict[str, Any]:
+    """Return deterministic workflow-ID hygiene diagnostics.
+
+    Workflow IDs are concept IDs, but discovery-visible workflow identifiers
+    also need to be stable enough to act as durable capability-index keys.
+    This helper rejects malformed or prompt-sentence-like IDs before they are
+    published or surfaced for routing.
+    """
+
+    raw_workflow_id = str(workflow_id or "").strip() if isinstance(workflow_id, str) else ""
+    canonical_workflow_id = canonicalise_vontology_concept_id(raw_workflow_id)
+    issues: list[dict[str, Any]] = []
+
+    if not raw_workflow_id:
+        issues.append({"reason_code": "workflow_id_missing"})
+        return {
+            "valid": False,
+            "workflow_id": raw_workflow_id,
+            "canonical_workflow_id": canonical_workflow_id,
+            "slug_length": 0,
+            "token_count": 0,
+            "issues": issues,
+        }
+
+    if not canonical_workflow_id:
+        issues.append({"reason_code": "workflow_id_not_canonicalisable"})
+        return {
+            "valid": False,
+            "workflow_id": raw_workflow_id,
+            "canonical_workflow_id": canonical_workflow_id,
+            "slug_length": 0,
+            "token_count": 0,
+            "issues": issues,
+        }
+
+    if canonical_workflow_id != raw_workflow_id:
+        issues.append(
+            {
+                "reason_code": "workflow_id_not_canonical",
+                "canonical_workflow_id": canonical_workflow_id,
+            }
+        )
+
+    slug = canonical_workflow_id[3:]
+    tokens = [token for token in slug.split("_") if token]
+    slug_length = len(slug)
+    token_count = len(tokens)
+
+    if slug_length > WORKFLOW_ID_HYGIENE_MAX_SLUG_LENGTH:
+        issues.append(
+            {
+                "reason_code": "workflow_id_slug_too_long",
+                "slug_length": slug_length,
+                "maximum_slug_length": WORKFLOW_ID_HYGIENE_MAX_SLUG_LENGTH,
+            }
+        )
+
+    if token_count > WORKFLOW_ID_HYGIENE_MAX_TOKEN_COUNT:
+        issues.append(
+            {
+                "reason_code": "workflow_id_too_many_tokens",
+                "token_count": token_count,
+                "maximum_token_count": WORKFLOW_ID_HYGIENE_MAX_TOKEN_COUNT,
+            }
+        )
+
+    promptish_tokens = [token for token in tokens if token in _WORKFLOW_ID_PROMPTISH_TOKENS]
+    if token_count >= 6 and len(promptish_tokens) >= 3:
+        issues.append(
+            {
+                "reason_code": "workflow_id_prompt_sentence_like",
+                "promptish_tokens": promptish_tokens[:8],
+            }
+        )
+
+    return {
+        "valid": len(issues) == 0,
+        "workflow_id": raw_workflow_id,
+        "canonical_workflow_id": canonical_workflow_id,
+        "slug_length": slug_length,
+        "token_count": token_count,
+        "issues": issues,
+    }
 
 
 def _state_metadata(state_spec: Any) -> dict[str, Any]:
@@ -625,6 +739,8 @@ def validate_workflow_definition_contract(
         return {
             "valid": False,
             "errors": ["workflow_definition_missing"],
+            "canonical_workflow_id": None,
+            "workflow_id_issues": [],
             "unsupported_action_ids": [],
             "missing_transition_state_ids": [],
             "unknown_transition_targets": [],
@@ -647,6 +763,12 @@ def validate_workflow_definition_contract(
     states = states_raw if isinstance(states_raw, Mapping) else {}
     state_ids = set(str(state_id) for state_id in states.keys())
     parent_workflow_id = str(getattr(definition, "workflow_id", "") or "").strip()
+    workflow_id_hygiene = assess_workflow_id_hygiene(parent_workflow_id)
+    workflow_id_issues = [
+        dict(item)
+        for item in (workflow_id_hygiene.get("issues") or [])
+        if isinstance(item, Mapping)
+    ]
     termination_raw = getattr(definition, "termination_states", ())
     termination_values = termination_raw if _is_sequence_like(termination_raw) else ()
     termination_states = set(str(item) for item in termination_values)
@@ -1390,8 +1512,14 @@ def validate_workflow_definition_contract(
             str(item.get("reason_code") or ""),
         ),
     )
+    workflow_id_issues = sorted(
+        workflow_id_issues,
+        key=lambda item: str(item.get("reason_code") or ""),
+    )
 
     errors: list[str] = []
+    if workflow_id_issues:
+        errors.append("workflow_id_invalid")
     if vacuous_state_ids:
         errors.append("workflow_step_contract_vacuous")
     if missing_transition_state_ids:
@@ -1458,6 +1586,8 @@ def validate_workflow_definition_contract(
     return {
         "valid": len(errors) == 0,
         "errors": errors,
+        "canonical_workflow_id": workflow_id_hygiene.get("canonical_workflow_id"),
+        "workflow_id_issues": workflow_id_issues,
         "unsupported_action_ids": unsupported_action_ids,
         "missing_transition_state_ids": missing_transition_state_ids,
         "unknown_transition_targets": unknown_transition_targets,
@@ -1483,6 +1613,9 @@ def validate_workflow_definition_contract(
 __all__ = [
     "WORKFLOW_DEFINITION_IDENTITY_SCHEMA_VERSION",
     "WORKFLOW_DEFINITION_IDENTITY_VERSION",
+    "WORKFLOW_ID_HYGIENE_MAX_SLUG_LENGTH",
+    "WORKFLOW_ID_HYGIENE_MAX_TOKEN_COUNT",
+    "assess_workflow_id_hygiene",
     "build_workflow_definition_identity",
     "build_workflow_definition_identity_from_graph",
     "collect_workflow_action_ids",

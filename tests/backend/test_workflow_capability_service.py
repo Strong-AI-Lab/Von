@@ -232,6 +232,43 @@ class TestIndexFromRegistry:
         results = index.search("entity resolution")
         assert all(r.workflow_id != "#V#entity_resolution_workflow" for r in results)
 
+    def test_invalid_workflow_id_is_skipped_even_with_authoritative_text(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from src.backend.workflows import WorkflowRegistry
+        from src.backend.workflows.workflow_registry import LazyWorkflowRegistration
+
+        malformed_workflow_id = (
+            "#V#the_enrichment_workflow_isn_t_the_right_one_we_need_a_new_"
+            "vontology_search_workflow_i_suspect_manually_retrieve_the_"
+            "v_timothy_pistotti_concept_and_then_look_at_its_types_and_"
+            "relations_in_particular_ones_about_supervision_workflow"
+        )
+        registry = WorkflowRegistry()
+        registry.register_lazy(
+            LazyWorkflowRegistration(
+                workflow_id=malformed_workflow_id,
+                purpose="Find supervision evidence in Vontology.",
+                source="vontology",
+            )
+        )
+        monkeypatch.setattr(
+            "src.backend.workflows.vontology_loader.batch_fetch_workflow_routing_metadata",
+            lambda workflow_ids: {
+                malformed_workflow_id: {
+                    "description_text": "Find supervision evidence in Vontology.",
+                    "description_source": "text_relation:#V#hasDescription",
+                }
+            },
+        )
+
+        index = WorkflowCapabilityIndex()
+        count = index.index_from_registry(registry)
+
+        assert count == 0
+        assert malformed_workflow_id not in index._entries
+
     def test_non_vontology_registration_is_skipped(self):
         from src.backend.workflows import WorkflowRegistry
         from src.backend.workflows.workflow_registry import WorkflowRegistration

@@ -31,6 +31,10 @@ from dataclasses import dataclass, field
 from threading import Lock
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from ..workflows.workflow_definition_identity_service import (
+    assess_workflow_id_hygiene,
+)
+
 logger = logging.getLogger(__name__)
 
 WORKFLOW_CAPABILITY_NAMESPACE = "workflow_capabilities"
@@ -196,6 +200,7 @@ class WorkflowCapabilityIndex:
         """
         skipped_non_authoritative = 0
         skipped_missing_purpose = 0
+        skipped_invalid_workflow_id = 0
         pending_entries: Dict[str, _CapabilityEntry] = {}
         candidate_rows: list[tuple[str, Any, Any]] = []
         authoritative_workflow_ids: list[str] = []
@@ -209,6 +214,12 @@ class WorkflowCapabilityIndex:
         ) -> None:
             nonlocal skipped_non_authoritative
             nonlocal skipped_missing_purpose
+            nonlocal skipped_invalid_workflow_id
+
+            workflow_id_hygiene = assess_workflow_id_hygiene(workflow_id)
+            if not bool(workflow_id_hygiene.get("valid")):
+                skipped_invalid_workflow_id += 1
+                return
 
             text, reason = _resolve_authoritative_capability_text(
                 workflow_id=workflow_id,
@@ -288,12 +299,14 @@ class WorkflowCapabilityIndex:
         logger.info(
             "[workflow_capability_index] Indexed %d workflows "
             "(%d eager, %d lazy), skipped_non_authoritative=%d "
-            "skipped_missing_authoritative_text=%d",
+            "skipped_missing_authoritative_text=%d "
+            "skipped_invalid_workflow_id=%d",
             count,
             len(list(registry.eager_workflow_ids())),
             len(list(registry.lazy_workflow_ids())),
             skipped_non_authoritative,
             skipped_missing_purpose,
+            skipped_invalid_workflow_id,
         )
         return count
 

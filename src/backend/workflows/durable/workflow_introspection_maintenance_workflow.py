@@ -765,6 +765,43 @@ def _incident_text_from_evidence(evidence: Mapping[str, Any]) -> str:
     explicit_incident = _normalise_text(evidence.get("incident_text"))
     if explicit_incident:
         return explicit_incident
+    episode_critique_memory = _coerce_mapping(evidence.get("episode_critique_memory"))
+    if episode_critique_memory:
+        description = _normalise_text(
+            episode_critique_memory.get("description")
+            or episode_critique_memory.get("summary")
+        )
+        if description:
+            return description
+        workflow_id = _normalise_text(episode_critique_memory.get("workflow_id"))
+        request_id = _normalise_text(episode_critique_memory.get("request_id"))
+        verdict = _normalise_text(episode_critique_memory.get("verdict"))
+        routing_reason_codes = [
+            str(item).strip()
+            for item in (episode_critique_memory.get("routing_reason_codes") or [])
+            if isinstance(item, str) and str(item).strip()
+        ]
+        recommendations = [
+            str(item).strip()
+            for item in (episode_critique_memory.get("recommendations") or [])
+            if isinstance(item, str) and str(item).strip()
+        ]
+        fragments: list[str] = []
+        headline = "Episode critique memory"
+        if workflow_id:
+            headline = f"{headline} for {workflow_id}"
+        if request_id:
+            headline = f"{headline} (request {request_id})"
+        if verdict:
+            headline = f"{headline}; verdict={verdict}"
+        fragments.append(headline)
+        if routing_reason_codes:
+            fragments.append("routing reasons: " + ", ".join(routing_reason_codes[:6]))
+        if recommendations:
+            fragments.append("recommendations: " + " | ".join(recommendations[:3]))
+        incident_from_memory = " | ".join(fragment for fragment in fragments if fragment)
+        if incident_from_memory:
+            return incident_from_memory
     turn_execution = _coerce_mapping(evidence.get("turn_execution"))
     prompt_preview = _normalise_text(turn_execution.get("prompt_preview"))
     if prompt_preview:
@@ -787,6 +824,7 @@ def _handle_assess_context(request: WorkflowActionRequest) -> WorkflowActionResu
     request_id = _normalise_text(context.get("request_id")) or _normalise_text(
         context.get("session_id")
     )
+    episode_critique_memory_id = _normalise_text(context.get("episode_critique_memory_id"))
     max_prompt_chars = _coerce_int(
         context.get("max_prompt_chars"),
         default=_DEFAULT_MAX_PROMPT_CHARS,
@@ -810,6 +848,18 @@ def _handle_assess_context(request: WorkflowActionRequest) -> WorkflowActionResu
             )
         },
     )
+
+    episode_critique_memory: dict[str, Any] = {}
+    if episode_critique_memory_id:
+        episode_critique_memory = _invoke_mcp_tool(
+            "episode_critique_memory_get",
+            {
+                "memory_id": episode_critique_memory_id,
+                "namespace": namespace,
+            },
+        )
+        if not request_id:
+            request_id = _normalise_text(episode_critique_memory.get("request_id"))
 
     prompt_context: dict[str, Any] = {}
     prompt_lookup_namespace: str | None = None
@@ -842,6 +892,8 @@ def _handle_assess_context(request: WorkflowActionRequest) -> WorkflowActionResu
     selected_workflow_id = _normalise_text(context.get("selected_workflow_id"))
     if not selected_workflow_id:
         selected_workflow_id = _normalise_text(turn_execution.get("selected_workflow_id"))
+    if not selected_workflow_id:
+        selected_workflow_id = _normalise_text(episode_critique_memory.get("workflow_id"))
 
     workflow_concept: dict[str, Any] = {}
     if selected_workflow_id and selected_workflow_id.startswith("#V#"):
@@ -859,6 +911,8 @@ def _handle_assess_context(request: WorkflowActionRequest) -> WorkflowActionResu
     maintenance_context = {
         "namespace": namespace,
         "request_id": request_id,
+        "episode_critique_memory_id": episode_critique_memory_id
+        or _normalise_text(episode_critique_memory.get("memory_id")),
         "prompt_lookup_namespace": prompt_lookup_namespace,
         "selected_workflow_id": selected_workflow_id,
         "apply_repairs": _coerce_bool(context.get("apply_repairs"), default=True),
@@ -887,6 +941,7 @@ def _handle_assess_context(request: WorkflowActionRequest) -> WorkflowActionResu
         maintenance_context,
         {
             "incident_text": _normalise_text(context.get("incident_text")),
+            "episode_critique_memory": episode_critique_memory,
             "turn_execution": turn_execution,
         },
     )
@@ -899,6 +954,12 @@ def _handle_assess_context(request: WorkflowActionRequest) -> WorkflowActionResu
             "request_id": request_id,
             "prompt_lookup_namespace": prompt_lookup_namespace,
             "selected_workflow_id": selected_workflow_id,
+            "episode_critique_memory_id": maintenance_context.get(
+                "episode_critique_memory_id"
+            ),
+            "episode_critique_memory_success": bool(
+                episode_critique_memory.get("success")
+            ),
             "known_tool_count": len(known_tools),
             "workflow_definition_count": int(workflow_definitions.get("count") or 0),
             "github_repository": github_evidence.get("repository"),
@@ -912,6 +973,7 @@ def _handle_assess_context(request: WorkflowActionRequest) -> WorkflowActionResu
         "incident_text": _normalise_text(context.get("incident_text")),
         "workflow_definitions": workflow_definitions,
         "prompt_context": prompt_context,
+        "episode_critique_memory": episode_critique_memory,
         "turn_execution": turn_execution,
         "workflow_concept": workflow_concept,
         "known_tool_names": known_tools,

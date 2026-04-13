@@ -1098,6 +1098,34 @@ def test_generated_phd_student_workflow_fails_closed_for_ambiguous_student() -> 
     assert "#V#person_pat_lee_b" in failure_error
 
 
+def test_normalise_workflow_spec_derives_bounded_stable_generated_workflow_id() -> None:
+    from src.backend.workflows.durable.workflow_creation_workflow import (
+        _normalise_workflow_spec,
+    )
+    from src.backend.workflows.workflow_definition_identity_service import (
+        WORKFLOW_ID_HYGIENE_MAX_SLUG_LENGTH,
+        assess_workflow_id_hygiene,
+    )
+
+    prompt = (
+        "The enrichment workflow isn't the right one; we need a new Vontology "
+        "search workflow. I suspect manually retrieve the V Timothy Pistotti "
+        "concept and then look at its types and relations in particular ones "
+        "about supervision."
+    )
+
+    first = _normalise_workflow_spec({"prompt": prompt})
+    second = _normalise_workflow_spec({"prompt": prompt})
+    workflow_id = str(first.get("workflow_id") or "")
+
+    assert workflow_id == second.get("workflow_id")
+    assert workflow_id.startswith("#V#")
+    assert workflow_id.endswith("_workflow")
+    assert len(workflow_id[3:]) <= WORKFLOW_ID_HYGIENE_MAX_SLUG_LENGTH
+    assert "manually_retrieve_the_v_timothy_pistotti_concept" not in workflow_id
+    assert assess_workflow_id_hygiene(workflow_id)["valid"] is True
+
+
 def test_workflow_authoring_preflight_create_routes_through_wrapper_workflow() -> None:
     _publish_workflow_authoring_governance_workflows()
 

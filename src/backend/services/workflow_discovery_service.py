@@ -38,6 +38,7 @@ from .workflow_capability_service import (
     get_workflow_capability_index_runtime_state,
     search_workflow_capabilities,
 )
+from ..workflows.workflow_definition_identity_service import assess_workflow_id_hygiene
 
 logger = logging.getLogger(__name__)
 
@@ -741,6 +742,22 @@ def _classify_workflow_concept_executability(
             False,
             EXECUTABILITY_NON_EXECUTABLE_DESIGN_ARTIFACT,
             "invalid_concept_id",
+        )
+
+    workflow_id_hygiene = assess_workflow_id_hygiene(concept_id)
+    if not bool(workflow_id_hygiene.get("valid")):
+        reason_codes = [
+            str(item.get("reason_code") or "").strip()
+            for item in (workflow_id_hygiene.get("issues") or [])
+            if isinstance(item, Mapping) and str(item.get("reason_code") or "").strip()
+        ]
+        detail = "workflow_id_invalid"
+        if reason_codes:
+            detail = f"{detail}:{','.join(reason_codes)}"
+        return (
+            False,
+            EXECUTABILITY_NON_EXECUTABLE_DESIGN_ARTIFACT,
+            detail,
         )
 
     try:

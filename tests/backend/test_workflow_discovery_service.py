@@ -1027,6 +1027,24 @@ def test_classify_workflow_treats_unpublished_draft_as_non_executable() -> None:
     assert detail == "workflow_not_published:phase=validated:source=concept_data"
 
 
+def test_classify_workflow_treats_prompt_sentence_like_id_as_non_executable() -> None:
+    _classify_workflow_concept_executability.cache_clear()
+
+    is_executable, reason, detail = _classify_workflow_concept_executability(
+        (
+            "#V#the_enrichment_workflow_isn_t_the_right_one_we_need_a_new_"
+            "vontology_search_workflow_i_suspect_manually_retrieve_the_"
+            "v_timothy_pistotti_concept_and_then_look_at_its_types_and_"
+            "relations_in_particular_ones_about_supervision_workflow"
+        )
+    )
+
+    assert is_executable is False
+    assert reason == EXECUTABILITY_NON_EXECUTABLE_DESIGN_ARTIFACT
+    assert "workflow_id_invalid" in str(detail)
+    assert "workflow_id_slug_too_long" in str(detail)
+
+
 def test_classify_workflow_treats_completely_vacuous_steps_as_non_executable() -> None:
     graph = {
         "workflow_id": "#V#wf_vacancy_full",
@@ -1116,6 +1134,61 @@ def test_classify_workflow_rejects_actionless_output_only_contract() -> None:
     assert "count=1" in str(detail)
     assert "total=1" in str(detail)
     assert "first_step=#V#step_one" in str(detail)
+
+
+def test_classify_workflow_treats_student_lookup_subworkflow_as_executable() -> None:
+    _classify_workflow_concept_executability.cache_clear()
+    graph = {
+        "workflow_id": "#V#student_supervision_lookup_workflow",
+        "initial_step": "#V#find_student",
+        "steps": [
+            {
+                "step_id": "#V#find_student",
+                "name": "find student",
+                "invokes_workflow": "#V#find_concepts_workflow",
+                "preconditions": [],
+                "effects": [],
+                "reads_variables": [],
+                "writes_variables": [],
+                "reads_context_keys": ["student_name"],
+                "writes_context_keys": ["student_concept_id"],
+            },
+            {
+                "step_id": "#V#verify_supervision",
+                "name": "verify supervision",
+                "invokes_action": "tool.verify_supervision",
+                "preconditions": [],
+                "effects": [],
+                "reads_variables": [],
+                "writes_variables": [],
+                "reads_context_keys": ["student_concept_id"],
+                "writes_context_keys": ["student_supervision_verified"],
+            },
+        ],
+        "edges": [
+            {
+                "from": "#V#find_student",
+                "to": "#V#verify_supervision",
+                "predicate": "next_step",
+            }
+        ],
+        "warnings": [],
+    }
+
+    with patch(
+        "src.backend.workflows.vontology_loader.build_workflow_process_graph",
+        return_value=(graph, []),
+    ), patch(
+        "src.backend.workflows.vontology_loader.load_workflow_definition_from_vontology",
+        return_value=object(),
+    ):
+        is_executable, reason, detail = _classify_workflow_concept_executability(
+            "#V#student_supervision_lookup_workflow"
+        )
+
+    assert is_executable is True
+    assert reason == EXECUTABILITY_EXECUTABLE_NOW
+    assert detail is None
 
 
 def test_classify_workflow_uses_registry_fallback_for_built_in_workflow() -> None:

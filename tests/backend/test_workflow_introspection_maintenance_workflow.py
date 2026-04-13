@@ -122,6 +122,84 @@ def test_assess_collects_github_evidence(monkeypatch):
     assert github_evidence["repository"] == "Strong-AI-Lab/Von"
 
 
+def test_assess_context_loads_episode_critique_memory(monkeypatch):
+    from src.backend.workflows.durable import workflow_introspection_maintenance_workflow as mod
+
+    turn_execution_requests: list[str] = []
+
+    def _fake_invoke(tool_name: str, payload: dict):
+        if tool_name == "workflow_list_definitions":
+            return {"success": True, "count": 1, "definitions": []}
+        if tool_name == "episode_critique_memory_get":
+            return {
+                "success": True,
+                "memory_id": "#V#episode_critique_memory_req_1837",
+                "request_id": "req-1837",
+                "workflow_id": "#V#student_supervision_lookup_workflow",
+                "verdict": "failed",
+                "routing_reason_codes": ["repeat_threshold_met"],
+                "recommendations": [
+                    "Reject malformed workflow identifiers before indexing."
+                ],
+            }
+        if tool_name == "chat_get_prompt_context":
+            return {"success": True, "behaviour_prompt_concepts": []}
+        if tool_name == "turn_execution_get":
+            turn_execution_requests.append(str(payload.get("request_id")))
+            return {
+                "success": True,
+                "selected_workflow_id": "#V#student_supervision_lookup_workflow",
+                "prompt_preview": "Please inspect discovery behaviour.",
+            }
+        if tool_name == "fetch_concept":
+            return {
+                "success": True,
+                "concept_id": "#V#student_supervision_lookup_workflow",
+            }
+        if tool_name == "github_get_auth_config":
+            return {"success": True, "proxy_tools_available": True}
+        if tool_name == "github_list_commits":
+            return {"success": True, "items": []}
+        if tool_name == "github_list_pull_requests":
+            return {"success": True, "items": []}
+        if tool_name == "github_get_file_contents":
+            return {"success": True, "content": "x", "path": payload.get("path")}
+        return {"success": True}
+
+    monkeypatch.setattr(mod, "_invoke_mcp_tool", _fake_invoke)
+    monkeypatch.setattr(mod, "_available_tool_names", lambda: ["task_create"])
+
+    result = mod._handle_assess_context(
+        _request(
+            action_id="workflow_introspection.assess_context",
+            data={
+                "episode_critique_memory_id": "#V#episode_critique_memory_req_1837",
+                "github_owner": "Strong-AI-Lab",
+                "github_repo": "Von",
+            },
+            namespace="#V#user@org",
+        )
+    )
+
+    assert result.ok
+    assert turn_execution_requests == ["req-1837"]
+    maintenance_context = result.outputs["maintenance_context"]
+    maintenance_evidence = result.outputs["maintenance_evidence"]
+    assert maintenance_context["episode_critique_memory_id"] == (
+        "#V#episode_critique_memory_req_1837"
+    )
+    assert maintenance_context["request_id"] == "req-1837"
+    assert maintenance_context["selected_workflow_id"] == (
+        "#V#student_supervision_lookup_workflow"
+    )
+    assert maintenance_evidence["episode_critique_memory"]["memory_id"] == (
+        "#V#episode_critique_memory_req_1837"
+    )
+    incident_text = mod._incident_text_from_evidence(maintenance_evidence)
+    assert "repeat_threshold_met" in incident_text
+    assert "reject malformed workflow identifiers" in incident_text.lower()
+
+
 def test_diagnose_detects_alias_scope_and_cross_domain_signals():
     from src.backend.workflows.durable import workflow_introspection_maintenance_workflow as mod
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import uuid
@@ -106,6 +107,59 @@ WORKFLOW_CREATION_SYNTHESIS_POLICY_MISSING_ERROR = (
 )
 WORKFLOW_PUBLICATION_LIFECYCLE_SCHEMA_VERSION = "workflow_publication_lifecycle.v1"
 WORKFLOW_PUBLICATION_LIFECYCLE_TEXT_PREDICATE = "#V#hasWorkflowLifecycleJson"
+_AUTO_WORKFLOW_ID_KEYWORD_LIMIT = 5
+_AUTO_WORKFLOW_ID_KEYWORD_MAX_CHARS = 48
+_AUTO_WORKFLOW_ID_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "be",
+        "can",
+        "create",
+        "description",
+        "for",
+        "from",
+        "how",
+        "i",
+        "in",
+        "into",
+        "is",
+        "it",
+        "look",
+        "manually",
+        "me",
+        "my",
+        "need",
+        "new",
+        "of",
+        "on",
+        "or",
+        "our",
+        "please",
+        "request",
+        "show",
+        "tell",
+        "that",
+        "the",
+        "then",
+        "this",
+        "to",
+        "use",
+        "using",
+        "we",
+        "what",
+        "when",
+        "why",
+        "will",
+        "with",
+        "workflow",
+        "workflows",
+        "would",
+        "you",
+        "your",
+    }
+)
 
 
 def _clean_text(value: Any) -> str:
@@ -120,6 +174,23 @@ def _normalise_slug(value: Any, *, fallback: str) -> str:
         raw = raw[3:]
     slug = _SLUG_RE.sub("_", raw).strip("_")
     return slug or fallback
+
+
+def _derive_generated_workflow_id(request_text: str) -> str:
+    slug = _normalise_slug(request_text, fallback="generated")
+    tokens = [token for token in slug.split("_") if token]
+    keywords = [token for token in tokens if token not in _AUTO_WORKFLOW_ID_STOPWORDS]
+    if not keywords:
+        keywords = [token for token in tokens if token != "workflow"]
+    keyword_fragment = "_".join(keywords[:_AUTO_WORKFLOW_ID_KEYWORD_LIMIT]).strip("_")
+    keyword_fragment = keyword_fragment[:_AUTO_WORKFLOW_ID_KEYWORD_MAX_CHARS].rstrip("_")
+    if not keyword_fragment:
+        keyword_fragment = "generated"
+    digest = hashlib.sha1(request_text.strip().lower().encode("utf-8")).hexdigest()[:8]
+    return _normalise_concept_id(
+        f"#V#{keyword_fragment}_{digest}_workflow",
+        fallback_slug="generated_workflow",
+    )
 
 
 def _titleise(slug: str) -> str:
@@ -883,10 +954,7 @@ def _normalise_workflow_spec(context: Mapping[str, Any]) -> dict[str, Any]:
         or _clean_text(context.get("target_workflow_id"))
     )
     if not candidate_workflow_id:
-        stem = _normalise_slug(request_text, fallback="generated")
-        if not stem.endswith("workflow"):
-            stem = f"{stem}_workflow"
-        candidate_workflow_id = f"#V#{stem}"
+        candidate_workflow_id = _derive_generated_workflow_id(request_text)
     workflow_id = _normalise_concept_id(
         candidate_workflow_id,
         fallback_slug="generated_workflow",
