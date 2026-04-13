@@ -1502,6 +1502,10 @@
                   "label": "User Request"
                 },
                 {
+                  "context_key": "selected_workflow_user_response",
+                  "label": "Selected Workflow User Response"
+                },
+                {
                   "context_key": "completion_report",
                   "label": "Completion Report"
                 }

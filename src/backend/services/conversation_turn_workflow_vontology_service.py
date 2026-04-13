@@ -64,15 +64,20 @@ def _load_recovery_prompt_seed_text() -> str:
     return prompt_text
 
 
-def _ensure_conversation_turn_prompt_support() -> dict[str, Any]:
+def _ensure_conversation_turn_prompt_support(
+    *,
+    force_prompt_seed: bool = False,
+) -> dict[str, Any]:
     report = ensure_prompt_concept_support(
         prompt_specs=(
             WorkflowPromptConceptSpec(
                 concept_id=_NARRATION_PROMPT_CONCEPT_ID,
                 name="Turn execution completion-report narration prompt",
                 description=(
-                    "Canonical narration prompt for converting a structured "
-                    "completion report into a truthful user-visible response."
+                    "Canonical conversation-turn narration prompt for composing "
+                    "the user-facing answer from selected-workflow result "
+                    "content, using completion-report data only as supporting "
+                    "evidence."
                 ),
                 parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
             ),
@@ -91,7 +96,7 @@ def _ensure_conversation_turn_prompt_support() -> dict[str, Any]:
     )
 
     seeded_prompt_ids: list[str] = []
-    if not prompt_concept_has_content(_NARRATION_PROMPT_CONCEPT_ID):
+    if force_prompt_seed or not prompt_concept_has_content(_NARRATION_PROMPT_CONCEPT_ID):
         upsert_singleton_text_relation(
             subject_concept_id=_NARRATION_PROMPT_CONCEPT_ID,
             predicate="hasContent",
@@ -101,7 +106,7 @@ def _ensure_conversation_turn_prompt_support() -> dict[str, Any]:
             garbage_collect=True,
         )
         seeded_prompt_ids.append(_NARRATION_PROMPT_CONCEPT_ID)
-    if not prompt_concept_has_content(_RECOVERY_PROMPT_CONCEPT_ID):
+    if force_prompt_seed or not prompt_concept_has_content(_RECOVERY_PROMPT_CONCEPT_ID):
         upsert_singleton_text_relation(
             subject_concept_id=_RECOVERY_PROMPT_CONCEPT_ID,
             predicate="hasContent",
@@ -161,7 +166,9 @@ def bootstrap_canonical_conversation_turn_workflows(
 ) -> dict[str, Any]:
     """Publish and validate the canonical conversation-turn workflow family."""
 
-    prompt_support = _ensure_conversation_turn_prompt_support()
+    prompt_support = _ensure_conversation_turn_prompt_support(
+        force_prompt_seed=bool(force_republish),
+    )
     publication = bootstrap_repo_seed_workflow_bundle(
         asset_path=_REPO_SEED_ASSET_PATH,
         force_republish=force_republish,

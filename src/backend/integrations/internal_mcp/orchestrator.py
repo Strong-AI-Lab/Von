@@ -105,6 +105,7 @@ from ...workflows.durable.registry_factory import (
 )
 from ...workflows.durable.turn_execution_runtime_support import (
     build_turn_execution_selected_workflow_outputs,
+    render_selected_workflow_user_response,
     run_turn_execution_completion_gate,
     run_turn_execution_critic,
 )
@@ -4177,104 +4178,19 @@ class InternalMCPChatOrchestrator:
         data = getattr(workflow_result, "data", None)
         if not isinstance(data, Mapping):
             data = {}
-
-        workflow_completed = _workflow_result_effective_completed(workflow_result)
-        response_text = cls._coerce_non_empty_text(data.get("response_text"))
-        summary_text = cls._coerce_non_empty_text(data.get("summary"))
-        final_response_text = cls._coerce_non_empty_text(data.get("final_response"))
-        artefact_lines = cls._render_custom_workflow_artefact_lines(data)
-
-        if not workflow_completed:
-            if response_text and not cls._looks_like_machine_json_text(response_text):
-                return response_text
-            failure_text = _extract_explicit_workflow_failure_detail(workflow_result)
-            if failure_text:
-                return failure_text
-            for text in (summary_text, final_response_text):
-                if text and not cls._looks_like_machine_json_text(text):
-                    return text
-
-        candidate_text: str | None = None
-        for text in (response_text, summary_text, final_response_text):
-            if text:
-                candidate_text = text
-                if artefact_lines and not cls._looks_like_machine_json_text(text):
-                    return "\n".join([*artefact_lines, "", text])
-                if not cls._looks_like_machine_json_text(text):
-                    return text
-                break
-
-        lines: list[str] = list(artefact_lines)
-
-        verdict = cls._coerce_non_empty_text(data.get("verdict"))
-        if verdict:
-            lines.append(f"Workflow verdict: {verdict}.")
-
-        run_id = cls._coerce_non_empty_text(data.get("run_id"))
-        if run_id:
-            lines.append(f"Experiment run: {run_id}.")
-
-        verdict_summary = data.get("verdict_summary")
-        if isinstance(verdict_summary, Mapping):
-            summary_reason = cls._coerce_non_empty_text(verdict_summary.get("reason"))
-            if summary_reason:
-                lines.append(f"Verdict summary: {summary_reason}.")
-
-        promotion = data.get("promotion_recommendation")
-        if isinstance(promotion, Mapping):
-            promotion_bits: list[str] = []
-            recommended = promotion.get("recommended")
-            if isinstance(recommended, bool):
-                promotion_bits.append(
-                    "recommended" if recommended else "not recommended"
-                )
-            requires_gate = promotion.get("requires_promotion_gate")
-            if isinstance(requires_gate, bool):
-                promotion_bits.append(
-                    "promotion gate required"
-                    if requires_gate
-                    else "no promotion gate required"
-                )
-            promotion_reason = cls._coerce_non_empty_text(promotion.get("reason"))
-            if promotion_reason:
-                promotion_bits.append(promotion_reason)
-            if promotion_bits:
-                lines.append(
-                    f"Promotion recommendation: {'; '.join(promotion_bits)}."
-                )
-
-        meeting_type = cls._coerce_non_empty_text(data.get("candidate_meeting_type"))
-        if meeting_type:
-            lines.append(f"Candidate meeting type: {meeting_type}.")
-
-        safe_downstream_action = cls._coerce_non_empty_text(
-            data.get("candidate_safe_downstream_action")
+        return render_selected_workflow_user_response(
+            selected_workflow_id=workflow_id,
+            child_completed=_workflow_result_effective_completed(workflow_result),
+            final_state=cls._coerce_non_empty_text(
+                getattr(workflow_result, "final_state", None)
+            ),
+            failure_detail=_extract_explicit_workflow_failure_detail(workflow_result)
+            or cls._coerce_non_empty_text(getattr(workflow_result, "error", None)),
+            child_outputs=data,
+            child_result_snapshot=_build_workflow_execution_aux_result_snapshot(
+                workflow_result
+            ),
         )
-        if safe_downstream_action:
-            lines.append(
-                f"Candidate safe downstream action: {safe_downstream_action}."
-            )
-
-        observation_lines = cls._render_structured_observation_lines(
-            data.get("meeting_candidate_observations") or data.get("observations")
-        )
-        if observation_lines:
-            lines.append("Evidence:")
-            lines.extend(f"- {line}" for line in observation_lines)
-
-        if lines:
-            return "\n".join(lines)
-
-        if candidate_text:
-            return candidate_text
-
-        final_state = cls._coerce_non_empty_text(
-            getattr(workflow_result, "final_state", None)
-        )
-        if final_state:
-            status = "completed" if workflow_completed else "failed"
-            return f"Workflow {workflow_id} {status} (state: {final_state})."
-        return None
 
     def _action_narration_render(self, request: Any) -> WorkflowActionResult:
         prompt_text = request.data.get("narration_prompt_text") or ""
@@ -29577,11 +29493,17 @@ class InternalMCPChatOrchestrator:
                         workflow_result=wf_result,
                     )
                     if not isinstance(wf_response, str) or not wf_response.strip():
-                        workflow_status = "completed" if wf_completed else "failed"
-                        wf_response = (
-                            f"Workflow {selected_workflow_id_text} {workflow_status} "
-                            f"(state: {wf_result.final_state})."
+                        failure_detail = _extract_explicit_workflow_failure_detail(
+                            wf_result
                         )
+                        if failure_detail:
+                            wf_response = failure_detail
+                        else:
+                            wf_response = (
+                                "I couldn't complete that request because the "
+                                "selected workflow did not produce a user-visible "
+                                "result."
+                            )
                     wf_response = self._sanitise_user_visible_action_output(
                         wf_response,
                         aux_log=aux_llm_calls if isinstance(aux_llm_calls, list) else None,

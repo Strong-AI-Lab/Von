@@ -7550,7 +7550,7 @@ def test_tool_planner_skips_continuation_when_selected_workflow_is_not_executabl
                     "effect_id": "effect_workflow_execution_1",
                     "effect_type": "workflow_execution",
                     "description": (
-                        "Execute the selected custom workflow to a successful terminal state."
+                        "Obtain the selected workflow result needed for the user-facing answer."
                     ),
                 }
             ],

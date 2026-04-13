@@ -171,7 +171,7 @@ def test_non_executable_selected_workflow_fails_closed(monkeypatch) -> None:
                     "effect_id": "effect_workflow_execution_1",
                     "effect_type": "workflow_execution",
                     "status": "not_executed",
-                    "description": "Execute the selected custom workflow to a successful terminal state.",
+                    "description": "Obtain the selected workflow result needed for the user-facing answer.",
                 }
             ],
         },

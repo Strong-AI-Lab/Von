@@ -3570,7 +3570,7 @@ def _infer_custom_workflow_required_effect(
         "effect_id": "effect_workflow_execution_1",
         "intent_origin": "workflow_contract",
         "effect_type": "workflow_execution",
-        "description": "Execute the selected custom workflow to a successful terminal state.",
+        "description": "Obtain the selected workflow result needed for the user-facing answer.",
         "required_tools": [],
         "targets": [],
         "required_predicates": [],
