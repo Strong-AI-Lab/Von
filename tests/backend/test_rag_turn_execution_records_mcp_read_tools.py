@@ -8,6 +8,15 @@ class _Cursor:
     def __init__(self, docs: list[dict[str, Any]]):
         self._docs = list(docs)
 
+    def sort(self, field: str, direction: Any):
+        reverse = False
+        try:
+            reverse = int(direction) < 0
+        except Exception:
+            reverse = False
+        self._docs.sort(key=lambda doc: str(doc.get(field) or ""), reverse=reverse)
+        return self
+
     def skip(self, n: int):
         self._docs = self._docs[int(n) :]
         return self
@@ -108,6 +117,75 @@ class _TurnExecutionCollection:
             key = str(decision)
             counts[key] = counts.get(key, 0) + 1
         return [{"_id": key, "count": value} for key, value in counts.items()]
+
+
+class _EpisodeCritiqueCollection:
+    def __init__(self, docs: list[dict[str, Any]]):
+        self._docs = list(docs)
+
+    def _matches(self, doc: dict[str, Any], query: dict[str, Any]) -> bool:
+        namespace = query.get("namespace")
+        if isinstance(namespace, str) and doc.get("namespace") != namespace:
+            return False
+
+        request_filter = query.get("request_id")
+        request_id = doc.get("request_id")
+        if isinstance(request_filter, str) and request_id != request_filter:
+            return False
+        if isinstance(request_filter, dict):
+            options = request_filter.get("$in")
+            if isinstance(options, list) and request_id not in options:
+                return False
+
+        workflow_filter = query.get("workflow_id")
+        if isinstance(workflow_filter, str) and doc.get("workflow_id") != workflow_filter:
+            return False
+
+        episode_filter = query.get("episode_id")
+        if isinstance(episode_filter, str) and doc.get("episode_id") != episode_filter:
+            return False
+
+        verdict_filter = query.get("verdict")
+        if isinstance(verdict_filter, str) and doc.get("verdict") != verdict_filter:
+            return False
+        if isinstance(verdict_filter, dict):
+            options = verdict_filter.get("$in")
+            if isinstance(options, list) and doc.get("verdict") not in options:
+                return False
+
+        created_at_filter = query.get("created_at_utc")
+        if isinstance(created_at_filter, dict):
+            created_at = doc.get("created_at_utc")
+            if not isinstance(created_at, str):
+                return False
+            gte = created_at_filter.get("$gte")
+            if isinstance(gte, str) and created_at < gte:
+                return False
+            lte = created_at_filter.get("$lte")
+            if isinstance(lte, str) and created_at > lte:
+                return False
+
+        return True
+
+    def find(self, query: dict[str, Any], projection: dict[str, Any] | None = None):
+        docs = [doc for doc in self._docs if self._matches(doc, query)]
+        if not isinstance(projection, dict):
+            return _Cursor(docs)
+
+        include_keys = {key for key, include in projection.items() if include}
+        projected_docs: list[dict[str, Any]] = []
+        for doc in docs:
+            projected: dict[str, Any] = {}
+            for key in include_keys:
+                if key == "_id":
+                    continue
+                if key in doc:
+                    projected[key] = doc[key]
+            projected_docs.append(projected)
+        return _Cursor(projected_docs)
+
+    def count_documents(self, query: dict[str, Any]) -> int:
+        return len(list(self.find(query)))
 
 
 class _ChatHistoryCollection:
@@ -454,6 +532,129 @@ def _build_corrective_evidence_failure_docs(
     ]
 
 
+def _build_corrective_evidence_follow_up_docs() -> list[dict[str, Any]]:
+    return [
+        {
+            "request_id": "req-corr-family-1",
+            "session_id": "chat-corr-family-1",
+            "namespace": "#V#user@org",
+            "created_at_utc": "2026-04-12T07:44:21Z",
+            "completion_gate": {
+                "decision": "partial",
+                "decision_reason": "Workflow misrouted and stronger verification was not executed.",
+                "safe_to_claim_completion": False,
+                "requires_follow_up": True,
+                "blocking_effect_ids": ["effect_corr_family_1"],
+            },
+            "required_effects": [
+                {"effect_id": "effect_corr_family_1", "status": "satisfied"}
+            ],
+            "workflow_selection": {
+                "selected_workflow_id": "#V#chat_assistant_workflow",
+                "selector_verdict": "rag_default",
+            },
+            "workflow_routing_diagnostics": {
+                "selector": {
+                    "selected_model_candidate": {
+                        "concept_id": "#V#specialised_vontology_search_workflow"
+                    }
+                },
+                "dispatch": {
+                    "dispatch_workflow_id": "#V#chat_assistant_workflow",
+                    "dispatch_terminal_status": "follow_up_required",
+                },
+            },
+            "execution": {
+                "tool_invocations": [
+                    {
+                        "tool": "concept_exists",
+                        "status": "ok",
+                    }
+                ]
+            },
+            "prompt": {
+                "preview": "Verify whether Su Yuchen is represented and whether the student relation needs correction."
+            },
+            "critic": {"summary": {"not_verified_count": 1}},
+            "final_response": {
+                "completion_claim_detected": False,
+                "completion_claim_validated": False,
+            },
+            "execution_correctness": {
+                "overall_outcome": "tool_or_workflow_misrouting",
+                "failure_mode": "mutation_failed_or_blocked",
+                "likely_failure_to_act": True,
+                "metric_labels": {
+                    "successful_completion": False,
+                    "false_success": False,
+                    "unresolved_follow_up_needed": True,
+                    "tool_or_workflow_misrouting": True,
+                    "abstain_escalate_no_safe_route": False,
+                },
+            },
+        },
+        {
+            "request_id": "req-corr-family-2",
+            "session_id": "chat-corr-family-1",
+            "namespace": "#V#user@org",
+            "created_at_utc": "2026-04-12T07:45:55Z",
+            "completion_gate": {
+                "decision": "partial",
+                "decision_reason": "Dispatch still diverged, but the follow-up used stronger relation verification.",
+                "safe_to_claim_completion": False,
+                "requires_follow_up": True,
+                "blocking_effect_ids": ["effect_corr_family_2"],
+            },
+            "required_effects": [
+                {"effect_id": "effect_corr_family_2", "status": "satisfied"}
+            ],
+            "workflow_selection": {
+                "selected_workflow_id": "#V#chat_assistant_workflow",
+                "selector_verdict": "rag_default",
+            },
+            "workflow_routing_diagnostics": {
+                "selector": {
+                    "selected_model_candidate": {
+                        "concept_id": "#V#specialised_vontology_search_workflow"
+                    }
+                },
+                "dispatch": {
+                    "dispatch_workflow_id": "#V#chat_assistant_workflow",
+                    "dispatch_terminal_status": "follow_up_required",
+                },
+            },
+            "execution": {
+                "tool_invocations": [
+                    {
+                        "tool": "fetch_concept_content",
+                        "status": "ok",
+                    }
+                ]
+            },
+            "prompt": {
+                "preview": "No, stronger evidence: Yuchen Su is an instance of the current UoA SAIL PhD student concept, so verify the relation."
+            },
+            "critic": {"summary": {"not_verified_count": 1}},
+            "final_response": {
+                "completion_claim_detected": False,
+                "completion_claim_validated": False,
+            },
+            "execution_correctness": {
+                "overall_outcome": "tool_or_workflow_misrouting",
+                "failure_mode": "mutation_failed_or_blocked",
+                "likely_failure_to_act": True,
+                "metric_labels": {
+                    "successful_completion": False,
+                    "false_success": False,
+                    "unresolved_follow_up_needed": True,
+                    "tool_or_workflow_misrouting": True,
+                    "abstain_escalate_no_safe_route": False,
+                },
+            },
+        },
+    ]
+
+
 def _build_dashboard_trace_docs() -> list[dict[str, Any]]:
     return [
         {
@@ -785,6 +986,73 @@ def test_rag_get_item_supports_turn_execution_records(monkeypatch):
         result["workflow_routing_diagnostics"]["dispatch"]["last_successful_boundary"]
         == "workflow_handoff"
     )
+
+
+def test_rag_list_indexed_supports_episode_critique_improvement_suggestion_summary(
+    monkeypatch,
+):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    coll = _EpisodeCritiqueCollection(
+        [
+            {
+                "memory_id": "#V#episode_critique_memory_1",
+                "request_id": "req-1839-a",
+                "episode_id": "ep-1839-a",
+                "workflow_id": "#V#specialised_vontology_search_workflow",
+                "created_at_utc": "2026-04-12T07:50:00Z",
+                "updated_at_utc": "2026-04-12T07:51:00Z",
+                "namespace": "#V#user@org",
+                "verdict": "fail",
+                "critic_summary_text": "Dispatch collapsed and the follow-up action stayed too weak.",
+                "confidence": 0.89,
+                "unresolved_check_count": 2,
+                "implicated_tool_names": ["concept_exists"],
+                "implicated_concept_ids": ["#V#yuchen_su"],
+                "routing_decision": "create_task",
+                "routing_reason_codes": ["repeat_threshold_met"],
+                "routing_fingerprint": "fp-1839-a",
+                "routing_repeat_count": 1,
+                "routing_task_action": "created_task",
+                "routing_jira_action": None,
+                "remediation_task_ids": ["#V#task_1839"],
+                "remediation_issue_keys": ["JVNAUTOSCI-1839"],
+                "improvement_suggestion_count": 1,
+                "improvement_suggestion_categories": ["workflow_change"],
+                "improvement_target_workflow_ids": [
+                    "#V#specialised_vontology_search_workflow"
+                ],
+                "improvement_target_tool_names": ["fetch_concept_content"],
+            }
+        ]
+    )
+    monkeypatch.setattr(
+        "src.backend.db.connection_manager.get_db",
+        lambda: _DB({"episode_critique_memories": coll}),
+    )
+
+    result = cat._rag_list_indexed(
+        namespace="#V#user@org",
+        collection="episode_critique_memories",
+        limit=10,
+        offset=0,
+    )
+
+    assert result["success"] is True
+    assert result["collection"] == "episode_critique_memories"
+    assert result["provenance"]["item_kind"] == "episode_critique_memory_list"
+    assert len(result["items"]) == 1
+    item = result["items"][0]
+    assert item["memory_id"] == "#V#episode_critique_memory_1"
+    assert item["critic_summary_text"] == (
+        "Dispatch collapsed and the follow-up action stayed too weak."
+    )
+    assert item["improvement_suggestion_count"] == 1
+    assert item["improvement_suggestion_categories"] == ["workflow_change"]
+    assert item["improvement_target_workflow_ids"] == [
+        "#V#specialised_vontology_search_workflow"
+    ]
+    assert item["improvement_target_tool_names"] == ["fetch_concept_content"]
 
 
 def test_turn_execution_list_includes_rag_indexing_state_from_chat_history(monkeypatch):
@@ -2030,6 +2298,135 @@ def test_turn_execution_build_benchmark_corrective_evidence_signal_changes_with_
     )
 
 
+def test_turn_execution_build_benchmark_links_episode_evaluation_context_and_follow_up_strengthening(
+    monkeypatch,
+):
+    _install_minimal_imposition_profile_loader(monkeypatch)
+    coll = _TurnExecutionCollection(_build_corrective_evidence_follow_up_docs())
+    critique_coll = _EpisodeCritiqueCollection(
+        [
+            {
+                "memory_id": "#V#episode_critique_memory_corr_1",
+                "request_id": "req-corr-family-1",
+                "workflow_id": "#V#specialised_vontology_search_workflow",
+                "namespace": "#V#user@org",
+                "created_at_utc": "2026-04-12T07:46:30Z",
+                "verdict": "fail",
+                "critic_summary_text": "Dispatch collapsed and the first follow-up action stayed too weak.",
+                "improvement_suggestion_count": 1,
+                "improvement_suggestion_categories": ["workflow_change"],
+                "improvement_target_workflow_ids": [
+                    "#V#specialised_vontology_search_workflow"
+                ],
+                "improvement_target_tool_names": ["fetch_concept_content"],
+            },
+            {
+                "memory_id": "#V#episode_critique_memory_corr_2",
+                "request_id": "req-corr-family-2",
+                "workflow_id": "#V#specialised_vontology_search_workflow",
+                "namespace": "#V#user@org",
+                "created_at_utc": "2026-04-12T07:47:00Z",
+                "verdict": "fail",
+                "critic_summary_text": "The follow-up improved action quality but dispatch still diverged.",
+                "improvement_suggestion_count": 1,
+                "improvement_suggestion_categories": ["workflow_change"],
+                "improvement_target_workflow_ids": [
+                    "#V#specialised_vontology_search_workflow"
+                ],
+                "improvement_target_tool_names": ["fetch_concept_content"],
+            },
+        ]
+    )
+    monkeypatch.setattr(
+        "src.backend.db.connection_manager.get_db",
+        lambda: _DB(
+            {
+                "turn_execution_records": coll,
+                "episode_critique_memories": critique_coll,
+            }
+        ),
+    )
+
+    gateway = _build_gateway()
+    payload = gateway.invoke(
+        "turn_execution_build_benchmark",
+        {
+            "namespace": "#V#user@org",
+            "limit": 20,
+            "offset": 0,
+            "max_cases": 5,
+        },
+    ).payload
+
+    assert payload["success"] is True
+    replay_cases = payload.get("replay_cases")
+    assert isinstance(replay_cases, list)
+    assert len(replay_cases) == 2
+
+    first_case = next(
+        case
+        for case in replay_cases
+        if isinstance(case, dict) and case.get("request_id") == "req-corr-family-1"
+    )
+    evidence = first_case.get("evidence")
+    assert isinstance(evidence, dict)
+    follow_up = evidence.get("follow_up")
+    assert isinstance(follow_up, dict)
+    assert follow_up.get("available") is True
+    assert follow_up.get("follow_up_request_id") == "req-corr-family-2"
+    assert follow_up.get("follow_up_action_strengthened") is True
+
+    episode_evaluation = evidence.get("episode_evaluation")
+    assert isinstance(episode_evaluation, dict)
+    assert episode_evaluation.get("available") is True
+    assert episode_evaluation.get("memory_id") == "#V#episode_critique_memory_corr_1"
+    assert episode_evaluation.get("useful_suggestion_present") is True
+    assert episode_evaluation.get("improvement_target_tool_names") == [
+        "fetch_concept_content"
+    ]
+    assert episode_evaluation.get("useful_target_tool_names") == []
+
+    diagnosis_layers = evidence.get("diagnosis_layers")
+    assert isinstance(diagnosis_layers, dict)
+    assert diagnosis_layers.get("routing_layer", {}).get("diagnosable") is True
+    assert diagnosis_layers.get("action_layer", {}).get("diagnosable") is True
+    assert diagnosis_layers.get("telemetry_layer", {}).get("diagnosable") is True
+    assert (
+        diagnosis_layers.get("episode_evaluation_layer", {}).get("diagnosable")
+        is True
+    )
+
+    replay_diagnostic_metrics = payload.get("metrics", {}).get("replay_diagnostic_metrics")
+    assert isinstance(replay_diagnostic_metrics, dict)
+    assert replay_diagnostic_metrics.get("selected_case_count") == 2
+    assert replay_diagnostic_metrics.get("diagnostic_candidate_case_count") == 2
+    assert replay_diagnostic_metrics.get("telemetry_sufficient_case_count") == 2
+    assert replay_diagnostic_metrics.get("episode_evaluation_available_count") == 2
+    assert (
+        replay_diagnostic_metrics.get("corrective_evidence_follow_up_count") == 1
+    )
+    assert (
+        replay_diagnostic_metrics.get("corrective_evidence_stronger_follow_up_count")
+        == 1
+    )
+
+    signal_by_id = {
+        signal.get("signal_id"): signal
+        for signal in payload.get("benchmark_signals") or []
+        if isinstance(signal, dict)
+    }
+    assert (
+        signal_by_id["replay_cases_preserve_diagnostic_layer_coverage"]["status"]
+        == "pass"
+    )
+    assert (
+        signal_by_id[
+            "corrective_evidence_follow_up_strengthens_verification_action"
+        ]["status"]
+        == "pass"
+    )
+
+
 def test_turn_execution_build_selector_benchmark_gateway_e2e():
     gateway = _build_gateway()
     payload = gateway.invoke(
@@ -2111,6 +2508,41 @@ def test_turn_execution_build_selector_benchmark_supports_entity_representation_
     assert (
         signal_by_id["selector_misrouting_examples_detected"]["status"]
         == "not_evaluated"
+    )
+
+
+def test_turn_execution_build_selector_benchmark_supports_corrective_evidence_failure_family_case_set():
+    gateway = _build_gateway()
+    payload = gateway.invoke(
+        "turn_execution_build_selector_benchmark",
+        {"case_set": "corrective_evidence_failure_family"},
+    ).payload
+
+    assert payload["success"] is True
+    metrics = payload.get("metrics")
+    assert isinstance(metrics, dict)
+    assert metrics.get("scanned_count") == 2
+    assert metrics.get("matched_case_count") == 2
+    assert metrics.get("selector_accuracy_pct") == 100.0
+
+    replay_cases = payload.get("replay_cases")
+    assert isinstance(replay_cases, list)
+    assert len(replay_cases) == 2
+    assert all(
+        case.get("replay_family_id") == "strong_ai_lab_su_yuchen_corrective_evidence"
+        for case in replay_cases
+        if isinstance(case, dict)
+    )
+    follow_up_case = next(
+        case
+        for case in replay_cases
+        if isinstance(case, dict)
+        and case.get("case_id") == "su_yuchen_follow_up_requires_stronger_verification"
+    )
+    assert "follow_up_turn" in follow_up_case.get("case_tags", [])
+    assert (
+        follow_up_case.get("source_session_id")
+        == "e1ca7cde-9341-420f-8cc4-908db1218bd8"
     )
 
 

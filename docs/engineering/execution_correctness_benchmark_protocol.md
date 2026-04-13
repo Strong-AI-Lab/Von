@@ -15,6 +15,7 @@ In practice, this protocol ties together:
 - the shared execution-correctness schema and label surface from `JVNAUTOSCI-965`
 - the selector-routing benchmark layer from `JVNAUTOSCI-1664`
 - the pre-dispatch latency attribution surfaces from `JVNAUTOSCI-1429`
+- the actor/critic improvement-suggestion overlay from `JVNAUTOSCI-1838` and `JVNAUTOSCI-1839`
 - the reporting and regression views from `JVNAUTOSCI-966`
 
 Later benchmark overlays should continue to attach to this same stack rather
@@ -106,7 +107,30 @@ Typical failures:
 - latency regression hidden inside coarse routing totals
 - non-comparable timing because stage attribution is missing or inconsistent
 
-### 3.4 Shared reporting layer
+### 3.4 Actor/critic improvement layer
+
+Question:
+
+When a failure class is replayed, did episode evaluation produce enough bounded workflow/tool improvement guidance to help distinguish route failure, action-choice failure, telemetry failure, and critic failure?
+
+Primary surface:
+
+- `episode_critique_build_benchmark`
+
+Primary companion tasks:
+
+- `JVNAUTOSCI-1838`
+- `JVNAUTOSCI-1839`
+
+Typical failures:
+
+- strong actionable critique episodes missing `improvement_suggestions`
+- suggestions present but not targeted to the implicated workflow/tool surface
+- replay cases lacking enough linked episode-evaluation context to tell whether the critic layer is helping
+
+This is an overlay on the same replay/evidence stack, not a separate benchmark family.
+
+### 3.5 Shared reporting layer
 
 Question:
 
@@ -295,7 +319,21 @@ Review:
 
 Use baseline comparison when a stable prior rate exists and the change is large enough to justify regression judgement.
 
-### 6.4 Joined dashboard run
+### 6.4 Actor/critic overlay run
+
+Run:
+
+- `episode_critique_build_benchmark`
+
+Review:
+
+- presence/absence of `improvement_suggestions` for strong actionable critique episodes
+- usefulness proxies for whether suggestions target the implicated workflow/tool surface
+- sampled meta-audit cases for whether the replay evidence is sufficient to diagnose the critic layer
+
+Use this layer when the failure class depends on whether episode evaluation is producing actionable workflow/tool guidance rather than only a verdict.
+
+### 6.5 Joined dashboard run
 
 Run:
 
@@ -310,12 +348,12 @@ Review:
 
 This is the default review surface for engineering judgement once the individual layers have run.
 
-### 6.5 Triage output
+### 6.6 Triage output
 
 For any material regression:
 
 1. inspect the replay cases first
-2. determine whether the root cause is route selection, execution correctness, or observability/latency
+2. determine whether the root cause is route selection, execution correctness, observability/latency, or missing/weak episode-evaluation guidance
 3. attach the resulting evidence to the responsible Jira task or epic
 
 ## 7. When Results Are Informative Only

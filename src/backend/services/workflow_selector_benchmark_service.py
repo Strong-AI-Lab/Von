@@ -66,7 +66,11 @@ class SelectorBenchmarkCase:
     prompt_failure_detail: str | None = None
     notes: str = ""
     jira_issue_keys: tuple[str, ...] = ()
+    replay_family_id: str | None = None
+    source_session_id: str | None = None
     source_request_id: str | None = None
+    source_request_ids: tuple[str, ...] = ()
+    case_tags: tuple[str, ...] = ()
 
 
 def _utc_now_iso() -> str:
@@ -184,6 +188,13 @@ def _normalise_benchmark_case(
     if not selector_response_text and prompt_failure_reason is None:
         return None
 
+    source_request_ids = _normalise_string_sequence(raw_case.get("source_request_ids"))
+    source_request_id = _safe_str(raw_case.get("source_request_id")) or None
+    if not source_request_ids and source_request_id:
+        source_request_ids = (source_request_id,)
+    if source_request_id is None and source_request_ids:
+        source_request_id = source_request_ids[0]
+
     case_id = _safe_str(raw_case.get("case_id")) or f"selector_case_{index:03d}"
     return SelectorBenchmarkCase(
         case_id=case_id,
@@ -197,7 +208,11 @@ def _normalise_benchmark_case(
         prompt_failure_detail=prompt_failure_detail,
         notes=_safe_str(raw_case.get("notes"), limit=1000),
         jira_issue_keys=_normalise_string_sequence(raw_case.get("jira_issue_keys")),
-        source_request_id=_safe_str(raw_case.get("source_request_id")) or None,
+        replay_family_id=_safe_str(raw_case.get("replay_family_id")) or None,
+        source_session_id=_safe_str(raw_case.get("source_session_id")) or None,
+        source_request_id=source_request_id,
+        source_request_ids=source_request_ids,
+        case_tags=_normalise_string_sequence(raw_case.get("case_tags")),
     )
 
 
@@ -328,9 +343,18 @@ def _evaluate_selector_case(
         "raw_response": case.selector_response_text,
         "prompt_failure_reason": case.prompt_failure_reason,
         "notes": case.notes,
+        "replay_family_id": case.replay_family_id,
+        "source_session_id": case.source_session_id,
+        "source_request_id": case.source_request_id,
+        "source_request_ids": list(case.source_request_ids),
+        "case_tags": list(case.case_tags),
         "evidence": {
             "jira_issue_keys": list(case.jira_issue_keys),
+            "replay_family_id": case.replay_family_id,
+            "source_session_id": case.source_session_id,
             "source_request_id": case.source_request_id,
+            "source_request_ids": list(case.source_request_ids),
+            "case_tags": list(case.case_tags),
         },
     }
 

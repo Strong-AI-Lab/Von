@@ -9281,6 +9281,346 @@ def _build_turn_execution_replay_case_diagnostic_flags(
     return flags
 
 
+def _normalise_turn_execution_string_sequence(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    values: list[str] = []
+    seen: set[str] = set()
+    for raw in value:
+        if not isinstance(raw, str):
+            continue
+        text = raw.strip()
+        if not text:
+            continue
+        lowered = text.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        values.append(text)
+    return values
+
+
+def _build_turn_execution_episode_critique_lookup(
+    *,
+    db: Any,
+    namespace: Any,
+    request_ids: Sequence[str],
+) -> dict[str, dict[str, Any]]:
+    if not isinstance(namespace, str) or not namespace.strip():
+        return {}
+    resolved_request_ids = [
+        request_id.strip()
+        for request_id in request_ids
+        if isinstance(request_id, str) and request_id.strip()
+    ]
+    if not resolved_request_ids:
+        return {}
+    try:
+        coll = db["episode_critique_memories"]
+    except Exception:
+        return {}
+
+    try:
+        cursor = coll.find(
+            {
+                "namespace": namespace.strip(),
+                "request_id": {"$in": resolved_request_ids},
+            },
+            {
+                "_id": 0,
+                "memory_id": 1,
+                "request_id": 1,
+                "workflow_id": 1,
+                "verdict": 1,
+                "critic_summary_text": 1,
+                "improvement_suggestion_count": 1,
+                "improvement_suggestion_categories": 1,
+                "improvement_target_workflow_ids": 1,
+                "improvement_target_tool_names": 1,
+            },
+        )
+    except Exception:
+        return {}
+
+    lookup: dict[str, dict[str, Any]] = {}
+    for raw in cursor:
+        if not isinstance(raw, Mapping):
+            continue
+        request_id = raw.get("request_id")
+        if not isinstance(request_id, str) or not request_id.strip():
+            continue
+        memory_id_raw = raw.get("memory_id")
+        workflow_id_raw = raw.get("workflow_id")
+        verdict_raw = raw.get("verdict")
+        critic_summary_text_raw = raw.get("critic_summary_text")
+        lookup[request_id.strip()] = {
+            "memory_id": (
+                memory_id_raw.strip()
+                if isinstance(memory_id_raw, str) and memory_id_raw.strip()
+                else None
+            ),
+            "request_id": request_id.strip(),
+            "workflow_id": (
+                workflow_id_raw.strip()
+                if isinstance(workflow_id_raw, str) and workflow_id_raw.strip()
+                else None
+            ),
+            "verdict": (
+                verdict_raw.strip()
+                if isinstance(verdict_raw, str) and verdict_raw.strip()
+                else None
+            ),
+            "critic_summary_text": (
+                critic_summary_text_raw.strip()
+                if isinstance(critic_summary_text_raw, str)
+                and critic_summary_text_raw.strip()
+                else None
+            ),
+            "improvement_suggestion_count": int(
+                raw.get("improvement_suggestion_count") or 0
+            ),
+            "improvement_suggestion_categories": _normalise_turn_execution_string_sequence(
+                raw.get("improvement_suggestion_categories")
+            ),
+            "improvement_target_workflow_ids": _normalise_turn_execution_string_sequence(
+                raw.get("improvement_target_workflow_ids")
+            ),
+            "improvement_target_tool_names": _normalise_turn_execution_string_sequence(
+                raw.get("improvement_target_tool_names")
+            ),
+        }
+    return lookup
+
+
+def _build_turn_execution_follow_up_summary_by_request_id(
+    items: Sequence[Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    grouped: dict[str, list[Mapping[str, Any]]] = {}
+    for item in items:
+        session_id = (
+            item.get("chat_session_id")
+            if isinstance(item.get("chat_session_id"), str)
+            else item.get("session_id")
+        )
+        if not isinstance(session_id, str) or not session_id.strip():
+            continue
+        grouped.setdefault(session_id.strip(), []).append(item)
+
+    summaries: dict[str, dict[str, Any]] = {}
+    for session_items in grouped.values():
+        ordered = sorted(
+            session_items,
+            key=lambda item: (
+                str(item.get("created_at_utc") or ""),
+                str(item.get("request_id") or ""),
+            ),
+        )
+        group_keys: list[str | None] = []
+        for item in ordered:
+            selected_workflow_id_raw = item.get("selected_workflow_id")
+            selected_workflow_id = (
+                selected_workflow_id_raw.strip()
+                if isinstance(selected_workflow_id_raw, str)
+                and selected_workflow_id_raw.strip()
+                else None
+            )
+            group_keys.append(
+                _extract_turn_execution_selector_intended_workflow_id(item)
+                or _extract_turn_execution_dispatch_workflow_id(item)
+                or selected_workflow_id
+            )
+        for index, item in enumerate(ordered):
+            request_id = item.get("request_id")
+            if not isinstance(request_id, str) or not request_id.strip():
+                continue
+            group_key = group_keys[index]
+            if not isinstance(group_key, str) or not group_key.strip():
+                continue
+            follow_up_item: Mapping[str, Any] | None = None
+            for later_index in range(index + 1, len(ordered)):
+                if group_keys[later_index] != group_key:
+                    continue
+                follow_up_item = ordered[later_index]
+                break
+            if follow_up_item is None:
+                continue
+            follow_up_request_id = follow_up_item.get("request_id")
+            if (
+                not isinstance(follow_up_request_id, str)
+                or not follow_up_request_id.strip()
+            ):
+                continue
+            follow_up_tool_invocation_summary = _extract_turn_execution_tool_invocation_summary(
+                follow_up_item
+            )
+            follow_up_weak_follow_up_action = _has_turn_execution_weak_follow_up_action(
+                follow_up_item
+            )
+            summaries[request_id.strip()] = {
+                "available": True,
+                "group_key": group_key,
+                "follow_up_request_id": follow_up_request_id.strip(),
+                "follow_up_created_at_utc": follow_up_item.get("created_at_utc"),
+                "follow_up_selector_dispatch_divergence": (
+                    _has_turn_execution_selector_dispatch_divergence(follow_up_item)
+                ),
+                "follow_up_weak_follow_up_action": follow_up_weak_follow_up_action,
+                "follow_up_tool_invocation_summary": follow_up_tool_invocation_summary,
+                "follow_up_action_strengthened": (
+                    _has_turn_execution_weak_follow_up_action(item)
+                    and not follow_up_weak_follow_up_action
+                    and bool(follow_up_tool_invocation_summary)
+                ),
+            }
+    return summaries
+
+
+def _build_turn_execution_episode_evaluation_context(
+    item: Mapping[str, Any],
+    *,
+    critique_lookup: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    request_id = item.get("request_id")
+    if not isinstance(request_id, str) or not request_id.strip():
+        return {"available": False}
+    critique_doc = critique_lookup.get(request_id.strip())
+    if not isinstance(critique_doc, Mapping):
+        return {"available": False}
+
+    selected_workflow_id_raw = item.get("selected_workflow_id")
+    selected_workflow_id = (
+        selected_workflow_id_raw.strip()
+        if isinstance(selected_workflow_id_raw, str) and selected_workflow_id_raw.strip()
+        else None
+    )
+    candidate_workflow_ids = {
+        workflow_id
+        for workflow_id in (
+            _extract_turn_execution_selector_intended_workflow_id(item),
+            _extract_turn_execution_dispatch_workflow_id(item),
+            selected_workflow_id,
+        )
+        if isinstance(workflow_id, str) and workflow_id.strip()
+    }
+    critique_workflow_id = critique_doc.get("workflow_id")
+    if isinstance(critique_workflow_id, str) and critique_workflow_id.strip():
+        candidate_workflow_ids.add(critique_workflow_id.strip())
+
+    targeted_workflow_ids = [
+        workflow_id
+        for workflow_id in _normalise_turn_execution_string_sequence(
+            critique_doc.get("improvement_target_workflow_ids")
+        )
+        if workflow_id in candidate_workflow_ids
+    ]
+
+    tool_names = {
+        str(entry.get("tool")).strip().lower()
+        for entry in _extract_turn_execution_tool_invocation_summary(item)
+        if isinstance(entry, Mapping)
+        and isinstance(entry.get("tool"), str)
+        and str(entry.get("tool")).strip()
+    }
+    targeted_tool_names = [
+        tool_name
+        for tool_name in _normalise_turn_execution_string_sequence(
+            critique_doc.get("improvement_target_tool_names")
+        )
+        if tool_name.lower() in tool_names
+    ]
+
+    improvement_suggestion_count = int(
+        critique_doc.get("improvement_suggestion_count") or 0
+    )
+    useful_suggestion_present = improvement_suggestion_count > 0 and bool(
+        targeted_workflow_ids or targeted_tool_names
+    )
+    return {
+        "available": True,
+        "memory_id": critique_doc.get("memory_id"),
+        "verdict": critique_doc.get("verdict"),
+        "workflow_id": critique_workflow_id,
+        "critic_summary_text": critique_doc.get("critic_summary_text"),
+        "improvement_suggestion_count": improvement_suggestion_count,
+        "improvement_suggestion_categories": _normalise_turn_execution_string_sequence(
+            critique_doc.get("improvement_suggestion_categories")
+        ),
+        "improvement_target_workflow_ids": _normalise_turn_execution_string_sequence(
+            critique_doc.get("improvement_target_workflow_ids")
+        ),
+        "improvement_target_tool_names": _normalise_turn_execution_string_sequence(
+            critique_doc.get("improvement_target_tool_names")
+        ),
+        "useful_target_workflow_ids": targeted_workflow_ids,
+        "useful_target_tool_names": targeted_tool_names,
+        "useful_suggestion_present": useful_suggestion_present,
+    }
+
+
+def _build_turn_execution_replay_diagnosis_layers(
+    item: Mapping[str, Any],
+    *,
+    episode_evaluation_context: Mapping[str, Any],
+) -> dict[str, Any]:
+    selector_intended_workflow_id = _extract_turn_execution_selector_intended_workflow_id(
+        item
+    )
+    dispatch_workflow_id = _extract_turn_execution_dispatch_workflow_id(item)
+    tool_invocation_summary = _extract_turn_execution_tool_invocation_summary(item)
+    routing_diagnosable = bool(selector_intended_workflow_id) and bool(
+        dispatch_workflow_id
+    )
+    action_diagnosable = bool(tool_invocation_summary)
+    telemetry_sufficient = (
+        routing_diagnosable
+        and action_diagnosable
+        and isinstance(item.get("request_id"), str)
+        and bool(str(item.get("request_id")).strip())
+        and isinstance(item.get("decision_reason"), str)
+        and bool(str(item.get("decision_reason")).strip())
+        and isinstance(item.get("prompt_preview"), str)
+        and bool(str(item.get("prompt_preview")).strip())
+    )
+    episode_evaluation_available = bool(episode_evaluation_context.get("available"))
+    return {
+        "routing_layer": {
+            "diagnosable": routing_diagnosable,
+            "selector_intended_workflow_id": selector_intended_workflow_id,
+            "dispatch_workflow_id": dispatch_workflow_id,
+        },
+        "action_layer": {
+            "diagnosable": action_diagnosable,
+            "tool_invocation_count": len(tool_invocation_summary),
+        },
+        "telemetry_layer": {
+            "diagnosable": telemetry_sufficient,
+            "request_id_present": bool(
+                isinstance(item.get("request_id"), str)
+                and str(item.get("request_id")).strip()
+            ),
+            "decision_reason_present": bool(
+                isinstance(item.get("decision_reason"), str)
+                and str(item.get("decision_reason")).strip()
+            ),
+            "prompt_preview_present": bool(
+                isinstance(item.get("prompt_preview"), str)
+                and str(item.get("prompt_preview")).strip()
+            ),
+        },
+        "episode_evaluation_layer": {
+            "diagnosable": episode_evaluation_available,
+            "improvement_suggestion_count": (
+                episode_evaluation_context.get("improvement_suggestion_count")
+                if episode_evaluation_available
+                else 0
+            ),
+            "useful_suggestion_present": bool(
+                episode_evaluation_context.get("useful_suggestion_present")
+            ),
+        },
+    }
+
+
 def _build_turn_execution_case_id(request_id: Any, index: int) -> str:
     if isinstance(request_id, str) and request_id.strip():
         cleaned_chars: list[str] = []
@@ -9363,6 +9703,8 @@ def _build_turn_execution_replay_case(
     *,
     index: int,
     jira_base_url: str,
+    follow_up_context: Mapping[str, Any] | None = None,
+    episode_evaluation_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     failure_mode = (
         str(item.get("failure_mode")).strip()
@@ -9376,6 +9718,20 @@ def _build_turn_execution_replay_case(
     dispatch_workflow_id = _extract_turn_execution_dispatch_workflow_id(item)
     tool_invocation_summary = _extract_turn_execution_tool_invocation_summary(item)
     diagnostic_flags = _build_turn_execution_replay_case_diagnostic_flags(item)
+    episode_evaluation = (
+        dict(episode_evaluation_context)
+        if isinstance(episode_evaluation_context, Mapping)
+        else {"available": False}
+    )
+    follow_up = (
+        dict(follow_up_context)
+        if isinstance(follow_up_context, Mapping)
+        else {"available": False}
+    )
+    diagnosis_layers = _build_turn_execution_replay_diagnosis_layers(
+        item,
+        episode_evaluation_context=episode_evaluation,
+    )
     return {
         "case_id": _build_turn_execution_case_id(request_id, index),
         "request_id": request_id,
@@ -9413,6 +9769,9 @@ def _build_turn_execution_replay_case(
             ),
             "tool_invocation_summary": tool_invocation_summary,
             "weak_follow_up_action": _has_turn_execution_weak_follow_up_action(item),
+            "follow_up": follow_up,
+            "episode_evaluation": episode_evaluation,
+            "diagnosis_layers": diagnosis_layers,
         },
         "triage": _build_turn_execution_case_triage(
             item,
@@ -9593,6 +9952,7 @@ def _derive_turn_execution_capability_gaps(
     items: Sequence[Mapping[str, Any]],
     *,
     failure_mode_counts: Mapping[str, int],
+    replay_diagnostic_metrics: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     gaps: list[dict[str, Any]] = []
 
@@ -9700,6 +10060,76 @@ def _derive_turn_execution_capability_gaps(
             }
         )
 
+    replay_metrics = (
+        replay_diagnostic_metrics
+        if isinstance(replay_diagnostic_metrics, Mapping)
+        else {}
+    )
+    diagnostic_candidate_case_count = int(
+        replay_metrics.get("diagnostic_candidate_case_count") or 0
+    )
+    telemetry_sufficient_case_count = int(
+        replay_metrics.get("telemetry_sufficient_case_count") or 0
+    )
+    if diagnostic_candidate_case_count > telemetry_sufficient_case_count:
+        gaps.append(
+            {
+                "gap_id": "replay_diagnostic_coverage_incomplete",
+                "title": "Replay cases do not preserve enough telemetry to localise the failing layer",
+                "evidence_count": (
+                    diagnostic_candidate_case_count - telemetry_sufficient_case_count
+                ),
+                "severity": "medium",
+                "description": (
+                    "At least one corrective-evidence replay case is missing enough routing/action telemetry to "
+                    "separate routing, action choice, and observability failures cleanly."
+                ),
+            }
+        )
+
+    episode_evaluation_available_count = int(
+        replay_metrics.get("episode_evaluation_available_count") or 0
+    )
+    if diagnostic_candidate_case_count > episode_evaluation_available_count:
+        gaps.append(
+            {
+                "gap_id": "missing_episode_evaluation_context_for_replay_cases",
+                "title": "Replay cases are missing linked episode-evaluation context",
+                "evidence_count": (
+                    diagnostic_candidate_case_count - episode_evaluation_available_count
+                ),
+                "severity": "medium",
+                "description": (
+                    "At least one corrective-evidence replay case could not be joined to episode-evaluation output, "
+                    "so the benchmark cannot show whether the critic/suggestion layer is also failing."
+                ),
+            }
+        )
+
+    episode_evaluation_useful_suggestion_count = int(
+        replay_metrics.get("episode_evaluation_useful_suggestion_count") or 0
+    )
+    if (
+        episode_evaluation_available_count > 0
+        and episode_evaluation_available_count
+        > episode_evaluation_useful_suggestion_count
+    ):
+        gaps.append(
+            {
+                "gap_id": "episode_evaluation_suggestions_not_actionable",
+                "title": "Some linked episode-evaluation outputs lack useful actionable suggestions",
+                "evidence_count": (
+                    episode_evaluation_available_count
+                    - episode_evaluation_useful_suggestion_count
+                ),
+                "severity": "low",
+                "description": (
+                    "The critic layer is present for the replay case, but at least one linked episode evaluation "
+                    "did not surface a workflow/tool-targeted suggestion that aligns with the observed failure."
+                ),
+            }
+        )
+
     return gaps
 
 
@@ -9756,6 +10186,12 @@ def _build_turn_execution_benchmark_signals(
     action_quality_metrics = (
         action_quality_metrics_raw
         if isinstance(action_quality_metrics_raw, Mapping)
+        else {}
+    )
+    replay_diagnostic_metrics_raw = metrics.get("replay_diagnostic_metrics")
+    replay_diagnostic_metrics = (
+        replay_diagnostic_metrics_raw
+        if isinstance(replay_diagnostic_metrics_raw, Mapping)
         else {}
     )
 
@@ -9860,6 +10296,90 @@ def _build_turn_execution_benchmark_signals(
             "observed_case_count": weak_follow_up_with_divergence_count,
             "expected_case_count": 0,
             "request_ids": weak_follow_up_request_ids,
+        },
+    )
+    selected_case_count = int(replay_diagnostic_metrics.get("selected_case_count") or 0)
+    diagnostic_candidate_case_count = int(
+        replay_diagnostic_metrics.get("diagnostic_candidate_case_count") or 0
+    )
+    telemetry_sufficient_case_count = int(
+        replay_diagnostic_metrics.get("telemetry_sufficient_case_count") or 0
+    )
+    routing_layer_diagnosable_count = int(
+        replay_diagnostic_metrics.get("routing_layer_diagnosable_count") or 0
+    )
+    action_layer_diagnosable_count = int(
+        replay_diagnostic_metrics.get("action_layer_diagnosable_count") or 0
+    )
+    episode_evaluation_available_count = int(
+        replay_diagnostic_metrics.get("episode_evaluation_available_count") or 0
+    )
+    episode_evaluation_useful_suggestion_count = int(
+        replay_diagnostic_metrics.get("episode_evaluation_useful_suggestion_count") or 0
+    )
+    replay_diagnostic_passed: bool | None
+    if diagnostic_candidate_case_count <= 0:
+        replay_diagnostic_passed = None
+    else:
+        replay_diagnostic_passed = (
+            telemetry_sufficient_case_count >= diagnostic_candidate_case_count
+        )
+    _add_signal(
+        signal_id="replay_cases_preserve_diagnostic_layer_coverage",
+        dimension="diagnostics",
+        title="Replay cases preserve enough routing/action telemetry to localise the failing layer",
+        passed=replay_diagnostic_passed,
+        details={
+            "selected_case_count": selected_case_count,
+            "diagnostic_candidate_case_count": diagnostic_candidate_case_count,
+            "routing_layer_diagnosable_count": routing_layer_diagnosable_count,
+            "action_layer_diagnosable_count": action_layer_diagnosable_count,
+            "telemetry_sufficient_case_count": telemetry_sufficient_case_count,
+            "episode_evaluation_available_count": episode_evaluation_available_count,
+            "episode_evaluation_useful_suggestion_count": (
+                episode_evaluation_useful_suggestion_count
+            ),
+        },
+    )
+    corrective_follow_up_count = int(
+        replay_diagnostic_metrics.get("corrective_evidence_follow_up_count") or 0
+    )
+    corrective_stronger_follow_up_count = int(
+        replay_diagnostic_metrics.get("corrective_evidence_stronger_follow_up_count")
+        or 0
+    )
+    corrective_persistently_weak_follow_up_request_ids_raw = replay_diagnostic_metrics.get(
+        "corrective_evidence_persistently_weak_follow_up_request_ids"
+    )
+    corrective_persistently_weak_follow_up_request_ids = (
+        [
+            request_id.strip()
+            for request_id in corrective_persistently_weak_follow_up_request_ids_raw
+            if isinstance(request_id, str) and request_id.strip()
+        ]
+        if isinstance(corrective_persistently_weak_follow_up_request_ids_raw, list)
+        else []
+    )
+    corrective_follow_up_passed: bool | None
+    if corrective_follow_up_count <= 0:
+        corrective_follow_up_passed = None
+    else:
+        corrective_follow_up_passed = (
+            corrective_stronger_follow_up_count >= corrective_follow_up_count
+        )
+    _add_signal(
+        signal_id="corrective_evidence_follow_up_strengthens_verification_action",
+        dimension="action_quality",
+        title="Corrective-evidence follow-up turns strengthen verification action quality",
+        passed=corrective_follow_up_passed,
+        details={
+            "corrective_evidence_follow_up_count": corrective_follow_up_count,
+            "corrective_evidence_stronger_follow_up_count": (
+                corrective_stronger_follow_up_count
+            ),
+            "persistently_weak_follow_up_request_ids": (
+                corrective_persistently_weak_follow_up_request_ids
+            ),
         },
     )
 
@@ -10612,6 +11132,7 @@ def _combine_dashboard_recommendations(
 
 
 def _turn_execution_build_benchmark(**kwargs):
+    from ...db.connection_manager import get_db
     from ...services.turn_execution_record_service import (
         TURN_EXECUTION_CORRECTNESS_SCHEMA_VERSION,
     )
@@ -10652,18 +11173,118 @@ def _turn_execution_build_benchmark(**kwargs):
         item for item in sorted_items if bool(item.get("likely_failure_to_act", False))
     ]
     selected_cases = likely_items[:max_cases]
+    request_ids_for_critique_lookup = [
+        request_id.strip()
+        for request_id in (
+            item.get("request_id") for item in selected_cases
+        )
+        if isinstance(request_id, str) and request_id.strip()
+    ]
+    episode_critique_lookup = _build_turn_execution_episode_critique_lookup(
+        db=get_db(),
+        namespace=kwargs.get("namespace"),
+        request_ids=request_ids_for_critique_lookup,
+    )
+    follow_up_summary_by_request_id = _build_turn_execution_follow_up_summary_by_request_id(
+        likely_items
+    )
 
     jira_base_url = _normalise_turn_execution_jira_base_url(kwargs.get("jira_base_url"))
 
     replay_cases: list[dict[str, Any]] = []
     for idx, item in enumerate(selected_cases, start=1):
+        request_id_raw = item.get("request_id")
+        request_id = (
+            request_id_raw.strip()
+            if isinstance(request_id_raw, str) and request_id_raw.strip()
+            else None
+        )
         replay_cases.append(
             _build_turn_execution_replay_case(
                 item,
                 index=idx,
                 jira_base_url=jira_base_url,
+                follow_up_context=(
+                    follow_up_summary_by_request_id.get(request_id, {"available": False})
+                    if request_id
+                    else {"available": False}
+                ),
+                episode_evaluation_context=(
+                    _build_turn_execution_episode_evaluation_context(
+                        item,
+                        critique_lookup=episode_critique_lookup,
+                    )
+                ),
             )
         )
+    diagnostic_candidate_case_count = 0
+    routing_layer_diagnosable_count = 0
+    action_layer_diagnosable_count = 0
+    telemetry_sufficient_case_count = 0
+    episode_evaluation_available_count = 0
+    episode_evaluation_useful_suggestion_count = 0
+    corrective_evidence_follow_up_count = 0
+    corrective_evidence_stronger_follow_up_count = 0
+    corrective_evidence_persistently_weak_follow_up_request_ids: list[str] = []
+    for case in replay_cases:
+        evidence_raw = case.get("evidence")
+        if not isinstance(evidence_raw, Mapping):
+            continue
+        evidence: Mapping[str, Any] = evidence_raw
+        diagnosis_layers_raw = evidence.get("diagnosis_layers")
+        diagnosis_layers = (
+            diagnosis_layers_raw if isinstance(diagnosis_layers_raw, Mapping) else {}
+        )
+        routing_layer_raw = diagnosis_layers.get("routing_layer")
+        routing_layer: Mapping[str, Any] = (
+            routing_layer_raw if isinstance(routing_layer_raw, Mapping) else {}
+        )
+        action_layer_raw = diagnosis_layers.get("action_layer")
+        action_layer: Mapping[str, Any] = (
+            action_layer_raw if isinstance(action_layer_raw, Mapping) else {}
+        )
+        telemetry_layer_raw = diagnosis_layers.get("telemetry_layer")
+        telemetry_layer: Mapping[str, Any] = (
+            telemetry_layer_raw if isinstance(telemetry_layer_raw, Mapping) else {}
+        )
+        episode_evaluation_layer_raw = diagnosis_layers.get("episode_evaluation_layer")
+        episode_evaluation_layer: Mapping[str, Any] = (
+            episode_evaluation_layer_raw
+            if isinstance(episode_evaluation_layer_raw, Mapping)
+            else {}
+        )
+        replay_diagnostic_candidate = bool(
+            evidence.get("selector_dispatch_divergence")
+            or evidence.get("weak_follow_up_action")
+            or episode_evaluation_layer.get("diagnosable")
+        )
+        if replay_diagnostic_candidate:
+            diagnostic_candidate_case_count += 1
+        if replay_diagnostic_candidate and bool(routing_layer.get("diagnosable")):
+            routing_layer_diagnosable_count += 1
+        if replay_diagnostic_candidate and bool(action_layer.get("diagnosable")):
+            action_layer_diagnosable_count += 1
+        if replay_diagnostic_candidate and bool(telemetry_layer.get("diagnosable")):
+            telemetry_sufficient_case_count += 1
+        if replay_diagnostic_candidate and bool(episode_evaluation_layer.get("diagnosable")):
+            episode_evaluation_available_count += 1
+        if replay_diagnostic_candidate and bool(
+            episode_evaluation_layer.get("useful_suggestion_present")
+        ):
+            episode_evaluation_useful_suggestion_count += 1
+
+        follow_up_raw = evidence.get("follow_up")
+        follow_up = follow_up_raw if isinstance(follow_up_raw, Mapping) else {}
+        if replay_diagnostic_candidate and bool(follow_up.get("available")):
+            corrective_evidence_follow_up_count += 1
+            if bool(follow_up.get("follow_up_action_strengthened")):
+                corrective_evidence_stronger_follow_up_count += 1
+            elif bool(follow_up.get("follow_up_weak_follow_up_action")):
+                request_id = case.get("request_id")
+                if isinstance(request_id, str) and request_id.strip():
+                    corrective_evidence_persistently_weak_follow_up_request_ids.append(
+                        request_id.strip()
+                    )
 
     workflow_counts: dict[str, int] = {}
     workflow_failure_counts: dict[str, int] = {}
@@ -10856,6 +11477,24 @@ def _turn_execution_build_benchmark(**kwargs):
                 )
             )[:10],
         },
+        "replay_diagnostic_metrics": {
+            "selected_case_count": len(replay_cases),
+            "diagnostic_candidate_case_count": diagnostic_candidate_case_count,
+            "routing_layer_diagnosable_count": routing_layer_diagnosable_count,
+            "action_layer_diagnosable_count": action_layer_diagnosable_count,
+            "telemetry_sufficient_case_count": telemetry_sufficient_case_count,
+            "episode_evaluation_available_count": episode_evaluation_available_count,
+            "episode_evaluation_useful_suggestion_count": (
+                episode_evaluation_useful_suggestion_count
+            ),
+            "corrective_evidence_follow_up_count": corrective_evidence_follow_up_count,
+            "corrective_evidence_stronger_follow_up_count": (
+                corrective_evidence_stronger_follow_up_count
+            ),
+            "corrective_evidence_persistently_weak_follow_up_request_ids": list(
+                dict.fromkeys(corrective_evidence_persistently_weak_follow_up_request_ids)
+            )[:10],
+        },
         "gate_metrics": {
             "false_success_count": false_success_count,
             "safe_completion_count": safe_completion_count,
@@ -10937,6 +11576,7 @@ def _turn_execution_build_benchmark(**kwargs):
     capability_gaps = _derive_turn_execution_capability_gaps(
         sorted_items,
         failure_mode_counts=failure_mode_counts,
+        replay_diagnostic_metrics=metrics_payload.get("replay_diagnostic_metrics"),
     )
     if not bool(imposition_assessment.get("success")):
         capability_gaps.append(
@@ -17020,6 +17660,7 @@ def _rag_list_indexed(**kwargs):
                     "updated_at_utc": 1,
                     "namespace": 1,
                     "verdict": 1,
+                    "critic_summary_text": 1,
                     "confidence": 1,
                     "unresolved_check_count": 1,
                     "implicated_tool_names": 1,
@@ -17032,6 +17673,10 @@ def _rag_list_indexed(**kwargs):
                     "routing_jira_action": 1,
                     "remediation_task_ids": 1,
                     "remediation_issue_keys": 1,
+                    "improvement_suggestion_count": 1,
+                    "improvement_suggestion_categories": 1,
+                    "improvement_target_workflow_ids": 1,
+                    "improvement_target_tool_names": 1,
                 },
             )
             .sort("created_at_utc", DESCENDING)
@@ -17054,6 +17699,7 @@ def _rag_list_indexed(**kwargs):
                     "updated_at_utc": doc.get("updated_at_utc"),
                     "namespace": doc.get("namespace"),
                     "verdict": doc.get("verdict"),
+                    "critic_summary_text": doc.get("critic_summary_text"),
                     "confidence": doc.get("confidence"),
                     "unresolved_check_count": doc.get("unresolved_check_count"),
                     "implicated_tool_names": doc.get("implicated_tool_names") or [],
@@ -17066,6 +17712,18 @@ def _rag_list_indexed(**kwargs):
                     "routing_jira_action": doc.get("routing_jira_action"),
                     "remediation_task_ids": doc.get("remediation_task_ids") or [],
                     "remediation_issue_keys": doc.get("remediation_issue_keys") or [],
+                    "improvement_suggestion_count": int(
+                        doc.get("improvement_suggestion_count") or 0
+                    ),
+                    "improvement_suggestion_categories": (
+                        doc.get("improvement_suggestion_categories") or []
+                    ),
+                    "improvement_target_workflow_ids": (
+                        doc.get("improvement_target_workflow_ids") or []
+                    ),
+                    "improvement_target_tool_names": (
+                        doc.get("improvement_target_tool_names") or []
+                    ),
                     "item_kind": "episode_critique_memory",
                     "source_system": "mongo.episode_critique_memories",
                     "namespace_source": ns_report.get("namespace_source"),

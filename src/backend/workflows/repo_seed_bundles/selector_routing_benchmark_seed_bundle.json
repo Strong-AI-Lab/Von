@@ -303,6 +303,98 @@
         },
         "notes": "General workflow-authoring recovery case for out-of-family entity requests."
       }
+    ],
+    "corrective_evidence_failure_family": [
+      {
+        "case_id": "su_yuchen_initial_specialised_vontology_route",
+        "replay_family_id": "strong_ai_lab_su_yuchen_corrective_evidence",
+        "case_tags": [
+          "corrective_evidence",
+          "selector_dispatch_divergence",
+          "failed_turn_replay"
+        ],
+        "source_session_id": "e1ca7cde-9341-420f-8cc4-908db1218bd8",
+        "source_request_id": "ab7ca424-373a-4b0f-9d26-f8075c549546",
+        "source_request_ids": [
+          "ab7ca424-373a-4b0f-9d26-f8075c549546",
+          "d4328819-168c-4381-989c-f5a7cd1a639d"
+        ],
+        "turn_text": "Search Vontology to verify whether Su Yuchen is already represented and whether the student relationship needs correction.",
+        "candidate_workflows": [
+          {
+            "concept_id": "#V#chat_assistant_workflow",
+            "name": "Chat assistant workflow",
+            "description": "Generic explanatory response path."
+          },
+          {
+            "concept_id": "#V#tool_calling_workflow",
+            "name": "Tool calling workflow",
+            "description": "General tool-seeking path."
+          },
+          {
+            "concept_id": "#V#specialised_vontology_search_workflow",
+            "name": "Specialised Vontology search workflow",
+            "description": "Runs targeted Vontology lookup and verification actions over represented concepts and relations."
+          }
+        ],
+        "expected_workflow_id": "#V#specialised_vontology_search_workflow",
+        "baseline_workflow_id": "#V#chat_assistant_workflow",
+        "selector_response": {
+          "workflow_id": "#V#specialised_vontology_search_workflow",
+          "confidence": 0.95,
+          "reasoning": "The user is asking for targeted represented-state verification, so the specialised Vontology search route is the correct path."
+        },
+        "jira_issue_keys": [
+          "JVNAUTOSCI-1834",
+          "JVNAUTOSCI-1839"
+        ],
+        "notes": "Replay seed for the initial Strong AI Lab / Su Yuchen failure turn. The selector intent should remain specialised even though the historical failure later collapsed during dispatch."
+      },
+      {
+        "case_id": "su_yuchen_follow_up_requires_stronger_verification",
+        "replay_family_id": "strong_ai_lab_su_yuchen_corrective_evidence",
+        "case_tags": [
+          "corrective_evidence",
+          "follow_up_turn",
+          "stronger_verification"
+        ],
+        "source_session_id": "e1ca7cde-9341-420f-8cc4-908db1218bd8",
+        "source_request_id": "d4328819-168c-4381-989c-f5a7cd1a639d",
+        "source_request_ids": [
+          "ab7ca424-373a-4b0f-9d26-f8075c549546",
+          "d4328819-168c-4381-989c-f5a7cd1a639d"
+        ],
+        "turn_text": "No, stronger evidence: Yuchen Su is an instance of the current UoA SAIL PhD student concept, so verify the relation rather than only checking whether the concept exists.",
+        "candidate_workflows": [
+          {
+            "concept_id": "#V#chat_assistant_workflow",
+            "name": "Chat assistant workflow",
+            "description": "Generic explanatory response path."
+          },
+          {
+            "concept_id": "#V#tool_calling_workflow",
+            "name": "Tool calling workflow",
+            "description": "General tool-seeking path."
+          },
+          {
+            "concept_id": "#V#specialised_vontology_search_workflow",
+            "name": "Specialised Vontology search workflow",
+            "description": "Runs targeted Vontology lookup and verification actions over represented concepts and relations."
+          }
+        ],
+        "expected_workflow_id": "#V#specialised_vontology_search_workflow",
+        "baseline_workflow_id": "#V#chat_assistant_workflow",
+        "selector_response": {
+          "workflow_id": "#V#specialised_vontology_search_workflow",
+          "confidence": 0.98,
+          "reasoning": "The follow-up provides stronger corrective evidence and still requires relation-level verification in Vontology rather than a plain response."
+        },
+        "jira_issue_keys": [
+          "JVNAUTOSCI-1838",
+          "JVNAUTOSCI-1839"
+        ],
+        "notes": "Replay seed for the stronger corrective-evidence follow-up. A passing system should preserve the specialised route and support stronger verification action on the next layer."
+      }
     ]
   }
 }

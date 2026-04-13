@@ -46,6 +46,10 @@ def _sample_docs() -> list[dict[str, Any]]:
             "remediation_task_ids": [],
             "remediation_issue_keys": [],
             "recommendations": ["Create a remediation task"],
+            "improvement_suggestion_count": 0,
+            "improvement_suggestion_categories": [],
+            "improvement_target_workflow_ids": [],
+            "improvement_target_tool_names": [],
             "receipt_hash": "receipt-a",
         },
         {
@@ -66,6 +70,10 @@ def _sample_docs() -> list[dict[str, Any]]:
             "remediation_task_ids": ["#V#task_1"],
             "remediation_issue_keys": [],
             "recommendations": ["Document but do not escalate"],
+            "improvement_suggestion_count": 0,
+            "improvement_suggestion_categories": [],
+            "improvement_target_workflow_ids": [],
+            "improvement_target_tool_names": [],
             "receipt_hash": "receipt-b",
         },
         {
@@ -86,6 +94,11 @@ def _sample_docs() -> list[dict[str, Any]]:
             "remediation_task_ids": ["#V#task_2"],
             "remediation_issue_keys": [],
             "recommendations": ["Fix workflow defect"],
+            "implicated_workflow_ids": ["#V#episode_evaluation_workflow"],
+            "improvement_suggestion_count": 1,
+            "improvement_suggestion_categories": ["workflow_change"],
+            "improvement_target_workflow_ids": ["#V#episode_evaluation_workflow"],
+            "improvement_target_tool_names": [],
             "receipt_hash": "receipt-c1",
         },
         {
@@ -106,6 +119,11 @@ def _sample_docs() -> list[dict[str, Any]]:
             "remediation_task_ids": [],
             "remediation_issue_keys": [],
             "recommendations": ["Escalate recurrence"],
+            "implicated_tool_names": ["fetch_concept_content"],
+            "improvement_suggestion_count": 1,
+            "improvement_suggestion_categories": ["tool_addition"],
+            "improvement_target_workflow_ids": [],
+            "improvement_target_tool_names": ["fetch_concept_content"],
             "receipt_hash": "receipt-c2",
         },
         {
@@ -126,6 +144,10 @@ def _sample_docs() -> list[dict[str, Any]]:
             "remediation_task_ids": [],
             "remediation_issue_keys": [],
             "recommendations": ["Gather more evidence"],
+            "improvement_suggestion_count": 1,
+            "improvement_suggestion_categories": ["critic_self_improvement"],
+            "improvement_target_workflow_ids": [],
+            "improvement_target_tool_names": [],
             "receipt_hash": "receipt-d",
         },
     ]
@@ -222,11 +244,22 @@ def test_build_episode_critique_benchmark_report_returns_metrics_and_sampled_cas
     assert recurrence_metrics["post_remediation_recurrence_fingerprint_count"] == 1
     assert recurrence_metrics["post_remediation_recurrence_rate_pct"] == 50.0
 
+    improvement_metrics = report["metrics"]["improvement_suggestion_metrics"]
+    assert improvement_metrics["episode_with_suggestions_count"] == 3
+    assert improvement_metrics["strong_actionable_episode_with_suggestions_count"] == 2
+    assert improvement_metrics["strong_actionable_episode_missing_suggestions_count"] == 1
+    assert (
+        improvement_metrics["strong_actionable_episode_with_useful_suggestions_count"]
+        == 2
+    )
+    assert improvement_metrics["suggestion_usefulness_proxy_pct"] == 100.0
+
     sampled_meta_audit = report["sampled_meta_audit"]
     assert sampled_meta_audit["non_recursive"] is True
     assert sampled_meta_audit["bucket_counts"]["false_positive_task_proxy"] == 1
     assert sampled_meta_audit["bucket_counts"]["false_negative_task_proxy"] == 2
     assert sampled_meta_audit["bucket_counts"]["inconclusive_actionable"] == 1
+    assert sampled_meta_audit["cases"][0]["improvement_suggestion_count"] >= 0
 
     regression = report["regression_assessment"]
     assert regression["regression_detected"] is True
@@ -236,9 +269,14 @@ def test_build_episode_critique_benchmark_report_returns_metrics_and_sampled_cas
     }
     assert signals["low_signal_remediation_suppressed"] == "fail"
     assert signals["strong_actionable_findings_receive_remediation"] == "fail"
+    assert (
+        signals["strong_actionable_episodes_receive_improvement_suggestions"] == "fail"
+    )
+    assert signals["improvement_suggestions_target_actionable_surface"] == "pass"
 
     gap_ids = {gap["gap_id"] for gap in report["capability_gaps"]}
     assert "sampled_meta_audit_bundle_fail_closed" in gap_ids
+    assert "missing_improvement_suggestions_for_actionable_episodes" in gap_ids
 
 
 def test_build_episode_critique_benchmark_report_records_experiment_observation(

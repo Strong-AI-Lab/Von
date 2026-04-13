@@ -171,6 +171,7 @@ def _normalise_projection_doc(doc: Mapping[str, Any]) -> dict[str, Any]:
         "created_at_utc": _safe_str(doc.get("created_at_utc")),
         "updated_at_utc": _safe_str(doc.get("updated_at_utc")),
         "verdict": _safe_str(doc.get("verdict")) or "inconclusive",
+        "critic_summary_text": _safe_str(doc.get("critic_summary_text")),
         "confidence": _safe_float(doc.get("confidence")),
         "unresolved_check_count": _safe_int(doc.get("unresolved_check_count")),
         "implicated_workflow_ids": _normalise_strings(
@@ -203,6 +204,19 @@ def _normalise_projection_doc(doc: Mapping[str, Any]) -> dict[str, Any]:
             limit=20,
         ),
         "recommendations": _normalise_strings(doc.get("recommendations"), limit=8),
+        "improvement_suggestion_count": _safe_int(doc.get("improvement_suggestion_count")),
+        "improvement_suggestion_categories": _normalise_strings(
+            doc.get("improvement_suggestion_categories"),
+            limit=20,
+        ),
+        "improvement_target_workflow_ids": _normalise_strings(
+            doc.get("improvement_target_workflow_ids"),
+            limit=20,
+        ),
+        "improvement_target_tool_names": _normalise_strings(
+            doc.get("improvement_target_tool_names"),
+            limit=20,
+        ),
         "receipt_hash": _safe_str(doc.get("receipt_hash")),
         "dedupe_fingerprint": _safe_str(doc.get("dedupe_fingerprint")),
     }
@@ -228,6 +242,7 @@ def _fetch_projection_rows(
         "created_at_utc": 1,
         "updated_at_utc": 1,
         "verdict": 1,
+        "critic_summary_text": 1,
         "confidence": 1,
         "unresolved_check_count": 1,
         "implicated_workflow_ids": 1,
@@ -242,6 +257,10 @@ def _fetch_projection_rows(
         "remediation_task_ids": 1,
         "remediation_issue_keys": 1,
         "recommendations": 1,
+        "improvement_suggestion_count": 1,
+        "improvement_suggestion_categories": 1,
+        "improvement_target_workflow_ids": 1,
+        "improvement_target_tool_names": 1,
         "receipt_hash": 1,
         "dedupe_fingerprint": 1,
     }
@@ -274,6 +293,50 @@ def _fetch_projection_rows(
 
 def _has_remediation(row: Mapping[str, Any]) -> bool:
     return bool(row.get("remediation_task_ids")) or bool(row.get("remediation_issue_keys"))
+
+
+def _row_improvement_suggestion_count(row: Mapping[str, Any]) -> int:
+    explicit_count = _safe_int(row.get("improvement_suggestion_count"))
+    if explicit_count > 0:
+        return explicit_count
+    category_count = len(_normalise_strings(row.get("improvement_suggestion_categories")))
+    workflow_target_count = len(
+        _normalise_strings(row.get("improvement_target_workflow_ids"))
+    )
+    tool_target_count = len(_normalise_strings(row.get("improvement_target_tool_names")))
+    return max(category_count, workflow_target_count, tool_target_count)
+
+
+def _has_improvement_suggestions(row: Mapping[str, Any]) -> bool:
+    return _row_improvement_suggestion_count(row) > 0
+
+
+def _has_useful_improvement_suggestions(row: Mapping[str, Any]) -> bool:
+    if not _has_improvement_suggestions(row):
+        return False
+
+    implicated_workflow_ids = set(
+        _normalise_strings(row.get("implicated_workflow_ids"), limit=40)
+    )
+    subject_workflow_id = _safe_str(row.get("workflow_id"))
+    if subject_workflow_id:
+        implicated_workflow_ids.add(subject_workflow_id)
+
+    targeted_workflow_ids = set(
+        _normalise_strings(row.get("improvement_target_workflow_ids"), limit=40)
+    )
+    if implicated_workflow_ids.intersection(targeted_workflow_ids):
+        return True
+
+    implicated_tool_names = {
+        item.lower()
+        for item in _normalise_strings(row.get("implicated_tool_names"), limit=40)
+    }
+    targeted_tool_names = {
+        item.lower()
+        for item in _normalise_strings(row.get("improvement_target_tool_names"), limit=40)
+    }
+    return bool(implicated_tool_names.intersection(targeted_tool_names))
 
 
 def _is_likely_actionable(row: Mapping[str, Any]) -> bool:
@@ -414,6 +477,28 @@ def _build_metrics(
     strong_actionable_remediated_count = sum(
         1 for row in strong_actionable_rows if _has_remediation(row)
     )
+    suggestion_rows = [row for row in rows if _has_improvement_suggestions(row)]
+    actionable_suggestion_rows = [
+        row for row in actionable_rows if _has_improvement_suggestions(row)
+    ]
+    strong_actionable_suggestion_rows = [
+        row for row in strong_actionable_rows if _has_improvement_suggestions(row)
+    ]
+    strong_actionable_useful_suggestion_rows = [
+        row
+        for row in strong_actionable_suggestion_rows
+        if _has_useful_improvement_suggestions(row)
+    ]
+    workflow_targeted_suggestion_rows = [
+        row
+        for row in suggestion_rows
+        if bool(_normalise_strings(row.get("improvement_target_workflow_ids"), limit=40))
+    ]
+    tool_targeted_suggestion_rows = [
+        row
+        for row in suggestion_rows
+        if bool(_normalise_strings(row.get("improvement_target_tool_names"), limit=40))
+    ]
 
     recurrence_metrics, _ = _analyse_recurrence(rows)
 
@@ -460,6 +545,51 @@ def _build_metrics(
                 len(strong_actionable_rows),
             ),
         },
+        "improvement_suggestion_metrics": {
+            "episode_with_suggestions_count": len(suggestion_rows),
+            "episode_with_suggestions_rate_pct": _rate_pct(
+                len(suggestion_rows),
+                scanned_count,
+            ),
+            "actionable_episode_with_suggestions_count": len(actionable_suggestion_rows),
+            "actionable_episode_with_suggestions_rate_pct": _rate_pct_or_none(
+                len(actionable_suggestion_rows),
+                len(actionable_rows),
+            ),
+            "strong_actionable_episode_with_suggestions_count": len(
+                strong_actionable_suggestion_rows
+            ),
+            "strong_actionable_episode_with_suggestions_rate_pct": _rate_pct_or_none(
+                len(strong_actionable_suggestion_rows),
+                len(strong_actionable_rows),
+            ),
+            "strong_actionable_episode_missing_suggestions_count": max(
+                0,
+                len(strong_actionable_rows) - len(strong_actionable_suggestion_rows),
+            ),
+            "strong_actionable_episode_missing_suggestions_rate_pct": _rate_pct_or_none(
+                max(
+                    0,
+                    len(strong_actionable_rows) - len(strong_actionable_suggestion_rows),
+                ),
+                len(strong_actionable_rows),
+            ),
+            "strong_actionable_episode_with_useful_suggestions_count": len(
+                strong_actionable_useful_suggestion_rows
+            ),
+            "strong_actionable_episode_with_useful_suggestions_rate_pct": _rate_pct_or_none(
+                len(strong_actionable_useful_suggestion_rows),
+                len(strong_actionable_rows),
+            ),
+            "suggestion_usefulness_proxy_pct": _rate_pct_or_none(
+                len(strong_actionable_useful_suggestion_rows),
+                len(strong_actionable_suggestion_rows),
+            ),
+            "workflow_targeted_suggestion_episode_count": len(
+                workflow_targeted_suggestion_rows
+            ),
+            "tool_targeted_suggestion_episode_count": len(tool_targeted_suggestion_rows),
+        },
         "recurrence_metrics": recurrence_metrics,
         "audit_metrics": {
             "sampled_case_count": audit_case_count,
@@ -473,6 +603,7 @@ def _build_metrics(
 def _build_capability_gaps(
     rows: Sequence[Mapping[str, Any]],
     *,
+    metrics: Mapping[str, Any],
     sampled_bundle_fail_closed_count: int,
     sampled_bundle_failure_memory_ids: Sequence[str],
 ) -> list[dict[str, Any]]:
@@ -538,6 +669,44 @@ def _build_capability_gaps(
                 "memory_ids": list(sampled_bundle_failure_memory_ids)[:20],
             }
         )
+    improvement_metrics = _mapping_or_empty(metrics.get("improvement_suggestion_metrics"))
+    missing_suggestions_count = _safe_int(
+        improvement_metrics.get("strong_actionable_episode_missing_suggestions_count")
+    )
+    if missing_suggestions_count > 0:
+        gaps.append(
+            {
+                "gap_id": "missing_improvement_suggestions_for_actionable_episodes",
+                "title": "Strong actionable critique episodes are missing improvement suggestions",
+                "evidence_count": missing_suggestions_count,
+                "severity": "medium",
+                "description": (
+                    "At least one strong actionable critique episode did not produce bounded workflow/tool "
+                    "improvement suggestions, which weakens the remediation handoff from episode evaluation."
+                ),
+            }
+        )
+    strong_with_suggestions_count = _safe_int(
+        improvement_metrics.get("strong_actionable_episode_with_suggestions_count")
+    )
+    strong_with_useful_suggestions_count = _safe_int(
+        improvement_metrics.get("strong_actionable_episode_with_useful_suggestions_count")
+    )
+    if strong_with_suggestions_count > strong_with_useful_suggestions_count:
+        gaps.append(
+            {
+                "gap_id": "improvement_suggestions_not_targeted_to_actionable_surface",
+                "title": "Some improvement suggestions are not clearly targeted to the actionable workflow/tool surface",
+                "evidence_count": (
+                    strong_with_suggestions_count - strong_with_useful_suggestions_count
+                ),
+                "severity": "medium",
+                "description": (
+                    "The benchmark found strong actionable episodes with suggestions present, but at least one "
+                    "suggestion was not aligned to the implicated workflow or tool surface."
+                ),
+            }
+        )
     return gaps
 
 
@@ -555,6 +724,7 @@ def _build_recommendations(
     remediation_metrics = _mapping_or_empty(metrics.get("remediation_metrics"))
     recurrence_metrics = _mapping_or_empty(metrics.get("recurrence_metrics"))
     audit_metrics = _mapping_or_empty(metrics.get("audit_metrics"))
+    improvement_metrics = _mapping_or_empty(metrics.get("improvement_suggestion_metrics"))
 
     recommendations: list[str] = []
     if _safe_int(remediation_metrics.get("false_negative_task_proxy_count")) > 0:
@@ -572,6 +742,23 @@ def _build_recommendations(
     if _safe_int(audit_metrics.get("sampled_bundle_fail_closed_count")) > 0:
         recommendations.append(
             "Improve episode evidence bundle completeness before relying on sampled meta-audit verdicts."
+        )
+    if (
+        _safe_int(improvement_metrics.get("strong_actionable_episode_missing_suggestions_count"))
+        > 0
+    ):
+        recommendations.append(
+            "Ensure strong actionable critique episodes produce bounded workflow/tool improvement suggestions, not only verdict text."
+        )
+    strong_with_suggestions_count = _safe_int(
+        improvement_metrics.get("strong_actionable_episode_with_suggestions_count")
+    )
+    strong_with_useful_suggestions_count = _safe_int(
+        improvement_metrics.get("strong_actionable_episode_with_useful_suggestions_count")
+    )
+    if strong_with_suggestions_count > strong_with_useful_suggestions_count:
+        recommendations.append(
+            "Tighten improvement-suggestion targeting so suggested workflow/tool changes align with the implicated actionable surface."
         )
     if not recommendations and capability_gaps:
         recommendations.append(
@@ -704,6 +891,7 @@ def _build_benchmark_signals(
     remediation_metrics = _mapping_or_empty(metrics.get("remediation_metrics"))
     recurrence_metrics = _mapping_or_empty(metrics.get("recurrence_metrics"))
     audit_metrics = _mapping_or_empty(metrics.get("audit_metrics"))
+    improvement_metrics = _mapping_or_empty(metrics.get("improvement_suggestion_metrics"))
 
     signals: list[dict[str, Any]] = []
     false_positive_count = _safe_int(remediation_metrics.get("false_positive_task_proxy_count"))
@@ -754,6 +942,61 @@ def _build_benchmark_signals(
             "max_audit_cases": max_audit_cases,
             "mode": "on_demand_sample",
             "non_recursive": True,
+        },
+    )
+    strong_actionable_episode_count = _safe_int(
+        _mapping_or_empty(metrics.get("actionability_metrics")).get(
+            "strong_actionable_episode_count"
+        )
+    )
+    strong_actionable_with_suggestions_count = _safe_int(
+        improvement_metrics.get("strong_actionable_episode_with_suggestions_count")
+    )
+    strong_actionable_with_useful_suggestions_count = _safe_int(
+        improvement_metrics.get("strong_actionable_episode_with_useful_suggestions_count")
+    )
+    improvement_presence_passed: bool | None
+    if strong_actionable_episode_count <= 0:
+        improvement_presence_passed = None
+    else:
+        improvement_presence_passed = (
+            strong_actionable_with_suggestions_count >= strong_actionable_episode_count
+        )
+    _add_signal(
+        signal_id="strong_actionable_episodes_receive_improvement_suggestions",
+        dimension="improvement_suggestions",
+        title="Strong actionable critique episodes produce improvement suggestions",
+        passed=improvement_presence_passed,
+        details={
+            "strong_actionable_episode_count": strong_actionable_episode_count,
+            "strong_actionable_episode_with_suggestions_count": (
+                strong_actionable_with_suggestions_count
+            ),
+        },
+    )
+    improvement_usefulness_passed: bool | None
+    if strong_actionable_with_suggestions_count <= 0:
+        improvement_usefulness_passed = None
+    else:
+        improvement_usefulness_passed = (
+            strong_actionable_with_useful_suggestions_count
+            >= strong_actionable_with_suggestions_count
+        )
+    _add_signal(
+        signal_id="improvement_suggestions_target_actionable_surface",
+        dimension="improvement_suggestions",
+        title="Improvement suggestions align with the implicated actionable workflow/tool surface",
+        passed=improvement_usefulness_passed,
+        details={
+            "strong_actionable_episode_with_suggestions_count": (
+                strong_actionable_with_suggestions_count
+            ),
+            "strong_actionable_episode_with_useful_suggestions_count": (
+                strong_actionable_with_useful_suggestions_count
+            ),
+            "suggestion_usefulness_proxy_pct": improvement_metrics.get(
+                "suggestion_usefulness_proxy_pct"
+            ),
         },
     )
 
@@ -1018,6 +1261,23 @@ def _build_sampled_meta_audit_cases(
                     limit=10,
                 ),
                 "recommendations": _normalise_strings(row.get("recommendations"), limit=6),
+                "critic_summary_text": _safe_str(row.get("critic_summary_text")),
+                "improvement_suggestion_count": _row_improvement_suggestion_count(row),
+                "improvement_suggestion_categories": _normalise_strings(
+                    row.get("improvement_suggestion_categories"),
+                    limit=10,
+                ),
+                "improvement_target_workflow_ids": _normalise_strings(
+                    row.get("improvement_target_workflow_ids"),
+                    limit=10,
+                ),
+                "improvement_target_tool_names": _normalise_strings(
+                    row.get("improvement_target_tool_names"),
+                    limit=10,
+                ),
+                "improvement_suggestions_useful": _has_useful_improvement_suggestions(
+                    row
+                ),
                 "receipt_hash": _safe_str(row.get("receipt_hash")),
                 "audit_inputs": {
                     "memory_id": memory_id,
@@ -1224,6 +1484,7 @@ def build_episode_critique_benchmark_report(
     )
     capability_gaps = _build_capability_gaps(
         rows,
+        metrics=metrics,
         sampled_bundle_fail_closed_count=sampled_bundle_fail_closed_count,
         sampled_bundle_failure_memory_ids=sampled_bundle_failure_memory_ids,
     )

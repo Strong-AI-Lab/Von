@@ -155,3 +155,66 @@ def test_build_selector_routing_benchmark_report_for_entity_representation_case_
         signal_by_id["selector_misrouting_examples_detected"]["status"]
         == "not_evaluated"
     )
+
+
+def test_load_selector_routing_benchmark_cases_supports_corrective_evidence_failure_family_case_set() -> None:
+    result = load_selector_routing_benchmark_cases(
+        case_set="corrective_evidence_failure_family"
+    )
+
+    assert result["source"] == "seed_bundle"
+    assert result["case_set"] == "corrective_evidence_failure_family"
+
+    cases = result["cases"]
+    assert len(cases) == 2
+    assert cases[0].replay_family_id == "strong_ai_lab_su_yuchen_corrective_evidence"
+    assert cases[0].source_session_id == "e1ca7cde-9341-420f-8cc4-908db1218bd8"
+    assert (
+        "ab7ca424-373a-4b0f-9d26-f8075c549546" in cases[0].source_request_ids
+    )
+    assert "follow_up_turn" in cases[1].case_tags
+
+
+def test_build_selector_routing_benchmark_report_for_corrective_evidence_failure_family_case_set() -> None:
+    result = build_selector_routing_benchmark_report(
+        case_set="corrective_evidence_failure_family"
+    )
+
+    assert result["success"] is True
+    metrics = result["metrics"]
+    assert metrics["scanned_count"] == 2
+    assert metrics["matched_case_count"] == 2
+    assert metrics["selector_accuracy_pct"] == 100.0
+    assert metrics["baseline_accuracy_pct"] == 0.0
+    assert metrics["outcome_label_counts"]["successful_completion"] == 2
+
+    replay_cases = result["replay_cases"]
+    assert len(replay_cases) == 2
+    initial_case = next(
+        case
+        for case in replay_cases
+        if case["case_id"] == "su_yuchen_initial_specialised_vontology_route"
+    )
+    assert (
+        initial_case["selected_workflow_id"]
+        == "#V#specialised_vontology_search_workflow"
+    )
+    assert (
+        initial_case["replay_family_id"]
+        == "strong_ai_lab_su_yuchen_corrective_evidence"
+    )
+    assert (
+        initial_case["source_session_id"] == "e1ca7cde-9341-420f-8cc4-908db1218bd8"
+    )
+    assert "selector_dispatch_divergence" in initial_case["case_tags"]
+
+    follow_up_case = next(
+        case
+        for case in replay_cases
+        if case["case_id"] == "su_yuchen_follow_up_requires_stronger_verification"
+    )
+    assert "follow_up_turn" in follow_up_case["case_tags"]
+    assert (
+        "d4328819-168c-4381-989c-f5a7cd1a639d"
+        in follow_up_case["source_request_ids"]
+    )
