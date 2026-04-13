@@ -205,6 +205,20 @@ def test_stage_path_prefers_mapped_execution_workflow_over_route_hint() -> None:
     assert path[1]["workflow_id"] == TOOL_CALLING_WORKFLOW_ID
 
 
+def test_stage_path_preserves_selected_workflow_identity_when_only_auxiliary_workflow_is_observed() -> None:
+    result = build_conversation_turn_stage_path(
+        runtime_stages=["workflow_dispatch_prepare", "buttonify", "response_finalising"],
+        workflow_id=CHAT_BUTTONIFY_WORKFLOW_ID,
+        selected_workflow_id="#V#arxiv_paper_representation_workflow",
+    )
+
+    assert result["workflow_id"] == "#V#arxiv_paper_representation_workflow"
+    assert result["workflow_id_source"] == "selected_workflow"
+    assert result["selected_workflow_id"] == "#V#arxiv_paper_representation_workflow"
+    assert result["observed_workflow_ids"] == [CHAT_BUTTONIFY_WORKFLOW_ID]
+    assert result["auxiliary_workflow_ids"] == [CHAT_BUTTONIFY_WORKFLOW_ID]
+
+
 def test_stage_path_maps_orchestrator_start_alias_to_dispatch_prepare() -> None:
     result = build_conversation_turn_stage_path(
         runtime_stages=["orchestrator_start", "workflow_dispatch"],

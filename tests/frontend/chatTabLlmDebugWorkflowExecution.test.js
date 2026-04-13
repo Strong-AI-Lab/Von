@@ -38,21 +38,34 @@ describe('LLM debug popup workflow execution hook', () => {
         `;
     });
 
-    test('surfaces execution_id and links to trace endpoint', async () => {
+    test('surfaces execution traces and prefers the selected-workflow trace', async () => {
         const { setLlmDebugDataForTurn, showLlmDebugPopup } = require(chatTabModulePath);
 
         const turnId = 'assistant-123';
-        const executionId = 'exec-abc/123';
+        const selectedExecutionId = 'exec-selected/123';
+        const auxiliaryExecutionId = 'exec-aux/456';
 
         setLlmDebugDataForTurn(turnId, {
             model: 'gpt-5.2-test',
             messages: [],
             response: 'ok',
+            turn_execution_diagnostics: {
+                workflow_selection: {
+                    selected_workflow_id: '#V#example_workflow'
+                }
+            },
             aux_llm_calls: [
                 {
                     type: 'workflow_execution_trace',
+                    workflow_id: '#V#chat_narration_workflow',
+                    execution_id: auxiliaryExecutionId,
+                    stored: true,
+                    status: 'stored'
+                },
+                {
+                    type: 'workflow_execution_trace',
                     workflow_id: '#V#example_workflow',
-                    execution_id: executionId,
+                    execution_id: selectedExecutionId,
                     stored: true,
                     status: 'stored'
                 }
@@ -62,12 +75,14 @@ describe('LLM debug popup workflow execution hook', () => {
         await showLlmDebugPopup(turnId);
 
         const metaDiv = document.getElementById('chatLlmDebugMeta');
-        expect(metaDiv.innerHTML).toContain('Workflow execution');
-        expect(metaDiv.innerHTML).toContain('exec-abc/123');
+        expect(metaDiv.innerHTML).toContain('Workflow execution traces');
+        expect(metaDiv.innerHTML).toContain('exec-selected/123');
+        expect(metaDiv.innerHTML).toContain('selected workflow');
+        expect(metaDiv.innerHTML).toContain('exec-aux/456');
 
         const link = metaDiv.querySelector('a');
         expect(link).not.toBeNull();
-        expect(link.getAttribute('href')).toBe(`/api/workflows/executions/${encodeURIComponent(executionId)}`);
+        expect(link.getAttribute('href')).toBe(`/api/workflows/executions/${encodeURIComponent(selectedExecutionId)}`);
 
         const popup = document.getElementById('chatLlmDebugPopup');
         expect(popup.classList.contains('hidden')).toBe(false);
@@ -125,6 +140,60 @@ describe('LLM debug popup workflow execution hook', () => {
         }));
         expect(payload.model).toBeUndefined();
         expect(payload.messages).toBeUndefined();
+    });
+
+    test('copy payload keeps auxiliary traces separate from the selected-workflow trace', async () => {
+        const { setLlmDebugDataForTurn, showLlmDebugPopup } = require(chatTabModulePath);
+
+        setLlmDebugDataForTurn('assistant-789', {
+            model: 'gpt-5.2-test',
+            messages: [],
+            response: 'ok',
+            turn_execution_diagnostics: {
+                request_id: 'req-789',
+                workflow_selection: {
+                    selected_workflow_id: '#V#arxiv_paper_representation_workflow'
+                }
+            },
+            aux_llm_calls: [
+                {
+                    type: 'workflow_execution_trace',
+                    workflow_id: '#V#chat_narration_workflow',
+                    execution_id: 'exec-narration',
+                    stored: true,
+                    status: 'stored'
+                },
+                {
+                    type: 'workflow_execution_trace',
+                    workflow_id: '#V#arxiv_paper_representation_workflow',
+                    execution_id: 'exec-selected',
+                    stored: true,
+                    status: 'stored'
+                }
+            ]
+        });
+
+        await showLlmDebugPopup('assistant-789');
+
+        const popup = document.getElementById('chatLlmDebugPopup');
+        const payload = JSON.parse(popup.dataset.currentDebugData || '{}');
+
+        expect(payload.mcp_access.workflow_get_execution_trace).toEqual(expect.objectContaining({
+            tool_name: 'workflow_get_execution_trace',
+            arguments: expect.objectContaining({
+                execution_id: 'exec-selected'
+            })
+        }));
+        expect(payload.mcp_access.workflow_execution_traces).toEqual([
+            expect.objectContaining({
+                workflow_id: '#V#chat_narration_workflow',
+                trace_role: 'auxiliary_workflow'
+            }),
+            expect.objectContaining({
+                workflow_id: '#V#arxiv_paper_representation_workflow',
+                trace_role: 'selected_workflow'
+            })
+        ]);
     });
 
     test('hydrates popup locator history_location from the server conversation locator when missing locally', async () => {

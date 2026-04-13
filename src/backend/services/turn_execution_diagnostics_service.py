@@ -219,6 +219,12 @@ def _extract_workflow_execution_trace_refs(
 ) -> list[dict[str, Any]]:
     if not isinstance(payload, Mapping):
         return []
+    workflow_selection = payload.get("workflow_selection")
+    selected_workflow_id = (
+        _safe_str(workflow_selection.get("selected_workflow_id"))
+        if isinstance(workflow_selection, Mapping)
+        else None
+    )
     aux_llm_calls = payload.get("aux_llm_calls")
     if not isinstance(aux_llm_calls, Sequence) or isinstance(
         aux_llm_calls, (str, bytes, bytearray)
@@ -240,11 +246,21 @@ def _extract_workflow_execution_trace_refs(
         seen_pairs.add(trace_key)
         if not execution_id and not instance_id:
             continue
+        trace_workflow_id = _safe_str(raw_entry.get("workflow_id"))
+        trace_role = "workflow_execution"
+        if selected_workflow_id and trace_workflow_id:
+            trace_role = (
+                "selected_workflow"
+                if trace_workflow_id.strip().lower()
+                == selected_workflow_id.strip().lower()
+                else "auxiliary_workflow"
+            )
         traces.append(
             {
                 "execution_id": execution_id,
                 "instance_id": instance_id,
-                "workflow_id": _safe_str(raw_entry.get("workflow_id")),
+                "workflow_id": trace_workflow_id,
+                "trace_role": trace_role,
                 "mcp_access": _build_tool_call_descriptor(
                     "workflow_get_execution_trace",
                     {
@@ -255,6 +271,9 @@ def _extract_workflow_execution_trace_refs(
                 ),
             }
         )
+    traces.sort(
+        key=lambda entry: 0 if entry.get("trace_role") == "selected_workflow" else 1
+    )
     return traces
 
 
@@ -502,6 +521,7 @@ def _build_fallback_turn_execution_diagnostics(
         else build_conversation_turn_stage_path(
             runtime_stages=(),
             workflow_id=selected_workflow_id,
+            selected_workflow_id=selected_workflow_id,
         )
     )
 
@@ -706,6 +726,7 @@ def _normalise_embedded_diagnostics_payload(
             payload["workflow_stage_path"] = build_conversation_turn_stage_path(
                 runtime_stages=(),
                 workflow_id=selected_workflow_id,
+                selected_workflow_id=selected_workflow_id,
             )
 
     payload.setdefault("latest_progress", None)

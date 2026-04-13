@@ -3415,6 +3415,12 @@ def test_workflow_selector_emits_dispatch_progress_events(monkeypatch):
     )
     assert selected_event.get("phase_label") == "Workflow selected"
     assert selected_event.get("selected_workflow_id") == TOOL_CALLING_WORKFLOW_ID
+    assert any(
+        entry.get("phase") == "workflow_dispatch"
+        and entry.get("selected_workflow_id") == TOOL_CALLING_WORKFLOW_ID
+        and entry.get("goal_label") == "Execute Tool Calling Workflow."
+        for entry in captured_progress
+    )
     assert result.workflow_routing is not None
     assert result.workflow_routing.verdict == "rag_selected"
 

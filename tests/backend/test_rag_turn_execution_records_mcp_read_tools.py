@@ -1306,23 +1306,30 @@ def test_turn_execution_get_diagnostics_returns_embedded_payload(monkeypatch):
                     "role": "assistant",
                     "content": "Done",
                     "timestamp": "2026-04-01T00:00:02Z",
-                    "llm_debug_data": {
-                        "request_id": "req-diag-1",
-                        "interaction_timestamp_utc": "2026-04-01T00:00:03Z",
-                        "code_version": "v20260401+g1234567",
-                        "code_version_details": {
-                            "schema_version": "runtime_code_version.v1",
-                            "version": "v20260401+g1234567",
-                        },
-                        "turn_execution_diagnostics": {
+                        "llm_debug_data": {
                             "request_id": "req-diag-1",
-                            "generated_at_utc": "2026-04-01T00:00:03Z",
-                            "prompt_preview": "Show the turn diagnostics",
-                            "aux_llm_calls": [
-                                {
-                                    "type": "workflow_execution_trace",
-                                    "execution_id": "exec-diag-1",
-                                    "instance_id": "#V#wf_instance_diag_1",
+                            "interaction_timestamp_utc": "2026-04-01T00:00:03Z",
+                            "code_version": "v20260401+g1234567",
+                            "code_version_details": {
+                                "schema_version": "runtime_code_version.v1",
+                                "version": "v20260401+g1234567",
+                            },
+                            "workflow_routing_diagnostics": {
+                                "schema_version": "workflow_routing_diagnostics.v1",
+                                "dispatch": {"dispatch_terminal_status": "completed"},
+                            },
+                            "turn_execution_diagnostics": {
+                                "request_id": "req-diag-1",
+                                "generated_at_utc": "2026-04-01T00:00:03Z",
+                                "prompt_preview": "Show the turn diagnostics",
+                                "workflow_selection": {
+                                    "selected_workflow_id": "#V#chat_assistant_workflow"
+                                },
+                                "aux_llm_calls": [
+                                    {
+                                        "type": "workflow_execution_trace",
+                                        "execution_id": "exec-diag-1",
+                                        "instance_id": "#V#wf_instance_diag_1",
                                     "workflow_id": "#V#chat_assistant_workflow",
                                 }
                             ],
@@ -1349,18 +1356,14 @@ def test_turn_execution_get_diagnostics_returns_embedded_payload(monkeypatch):
                                     "phase_elapsed_ms": 42,
                                     "llm_elapsed_ms": 0,
                                     "llm_call_count": 0,
+                                    },
                                 },
                             },
                         },
-                        "workflow_routing_diagnostics": {
-                            "schema_version": "workflow_routing_diagnostics.v1",
-                            "dispatch": {"dispatch_terminal_status": "completed"},
-                        },
                     },
-                },
-            ],
-        }
-    ]
+                ],
+            }
+        ]
 
     monkeypatch.setattr(
         "src.backend.services.turn_execution_diagnostics_service.get_chat_history_collection_service",
@@ -1416,6 +1419,7 @@ def test_turn_execution_get_diagnostics_returns_embedded_payload(monkeypatch):
             "execution_id": "exec-diag-1",
             "instance_id": "#V#wf_instance_diag_1",
             "workflow_id": "#V#chat_assistant_workflow",
+            "trace_role": "selected_workflow",
             "mcp_access": {
                 "tool_name": "workflow_get_execution_trace",
                 "arguments": {

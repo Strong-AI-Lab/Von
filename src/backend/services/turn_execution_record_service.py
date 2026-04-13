@@ -5394,6 +5394,7 @@ def build_turn_execution_record(
         workflow_stage_path = build_conversation_turn_stage_path(
             runtime_stages=runtime_stages,
             workflow_id=selected_workflow_id,
+            selected_workflow_id=selected_workflow_id,
         )
 
     execution_summary_with_contract = dict(execution_summary)

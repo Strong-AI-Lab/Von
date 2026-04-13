@@ -957,6 +957,28 @@ def _derive_workflow_selection_rationale(
     return f"routing_source:{source}"
 
 
+def _derive_selected_workflow_goal_label(
+    *,
+    selected_workflow_id: str | None,
+    selected_workflow_name: str | None = None,
+) -> str | None:
+    workflow_name = (
+        selected_workflow_name.strip()
+        if isinstance(selected_workflow_name, str) and selected_workflow_name.strip()
+        else None
+    )
+    if workflow_name:
+        return f"Execute {workflow_name}."
+    workflow_id = (
+        selected_workflow_id.strip()
+        if isinstance(selected_workflow_id, str) and selected_workflow_id.strip()
+        else None
+    )
+    if workflow_id:
+        return f"Execute {workflow_id}."
+    return None
+
+
 def _build_selector_safe_general_fallback_payload(
     *,
     selected_workflow_id: str | None,
@@ -19908,6 +19930,15 @@ class InternalMCPChatOrchestrator:
             final_state: str | None = None,
             terminal_stage: str | None = None,
         ) -> dict[str, Any]:
+            selection = _build_turn_execution_selection_snapshot(
+                workflow_data=workflow_data,
+                turn_record=(
+                    workflow_data.get("turn_execution_record")
+                    if isinstance(workflow_data, Mapping)
+                    and isinstance(workflow_data.get("turn_execution_record"), Mapping)
+                    else None
+                ),
+            )
             return build_conversation_turn_stage_path(
                 runtime_stages=_collect_turn_runtime_stage_sequence(
                     workflow_data=workflow_data,
@@ -19915,6 +19946,9 @@ class InternalMCPChatOrchestrator:
                     terminal_stage=terminal_stage,
                 ),
                 workflow_id=_safe_scalar_text(workflow_id),
+                selected_workflow_id=_safe_scalar_text(
+                    selection.get("selected_workflow_id")
+                ),
             )
 
         def _build_turn_execution_summary(payload: Any) -> dict[str, Any] | None:
@@ -28395,6 +28429,12 @@ class InternalMCPChatOrchestrator:
                 )
                 if selected_name:
                     progress_payload["selected_workflow_name"] = selected_name
+                goal_label = _derive_selected_workflow_goal_label(
+                    selected_workflow_id=cleaned_selected_workflow_id,
+                    selected_workflow_name=selected_name,
+                )
+                if goal_label:
+                    progress_payload["goal_label"] = goal_label
                 progress_payload.setdefault(
                     "workflow_task",
                     cleaned_dispatch_workflow_id or cleaned_selected_workflow_id,
@@ -29345,6 +29385,12 @@ class InternalMCPChatOrchestrator:
             + len(excluded_discovered_matches),
             "workflow_selection_rationale": workflow_selection_rationale,
         }
+        goal_label = _derive_selected_workflow_goal_label(
+            selected_workflow_id=selected_workflow_id_text,
+            selected_workflow_name=selected_workflow_name,
+        )
+        if goal_label:
+            workflow_dispatch_progress["goal_label"] = goal_label
         _emit_phase_transition_local(
             self.PHASE_WORKFLOW_DISPATCH,
             extra=workflow_dispatch_progress,

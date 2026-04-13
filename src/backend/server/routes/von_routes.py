@@ -798,6 +798,7 @@ def _build_live_workflow_stage_path_from_runtime_stages(
     return build_conversation_turn_stage_path(
         runtime_stages=runtime_stages,
         workflow_id=workflow_id,
+        selected_workflow_id=workflow_id,
     )
 
 
@@ -805,7 +806,11 @@ def _build_live_workflow_stage_path(
     state: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     if not isinstance(state, Mapping):
-        return build_conversation_turn_stage_path(runtime_stages=(), workflow_id=None)
+        return build_conversation_turn_stage_path(
+            runtime_stages=(),
+            workflow_id=None,
+            selected_workflow_id=None,
+        )
 
     runtime_stages = _normalise_live_runtime_stage_sequence(
         state.get("_workflow_runtime_stages")
@@ -2151,6 +2156,7 @@ def _build_turn_execution_diagnostics(
         workflow_stage_path = build_conversation_turn_stage_path(
             runtime_stages=runtime_stages,
             workflow_id=selected_workflow_id,
+            selected_workflow_id=selected_workflow_id,
         )
     llm_call_entries = [
         cast(dict[str, Any], entry)

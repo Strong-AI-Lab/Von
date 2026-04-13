@@ -486,14 +486,16 @@ def build_conversation_turn_stage_path(
     *,
     runtime_stages: Sequence[Any],
     workflow_id: str | None = None,
+    selected_workflow_id: str | None = None,
 ) -> dict[str, Any]:
     """Map a runtime stage sequence into stage catalogue entries.
 
     ``workflow_id`` is treated as a route/mapping hint, not as authoritative
-    proof that every runtime stage belongs to that workflow. The returned root
-    ``workflow_id`` therefore reflects the mapped stage membership when the path
-    yields a single unambiguous workflow, and falls back to the caller-provided
-    hint only when the path itself carries no workflow membership.
+    proof that every runtime stage belongs to that workflow. ``selected_workflow_id``
+    represents the workflow actually chosen for the turn when it is known.
+    Auxiliary workflows such as narration/render helpers may still appear in the
+    mapped runtime path, but they should not displace the selected workflow as
+    the primary turn identity.
     """
 
     path: list[dict[str, Any]] = []
@@ -558,9 +560,19 @@ def build_conversation_turn_stage_path(
         if normalised_stage not in unmapped_runtime_stages:
             unmapped_runtime_stages.append(normalised_stage)
 
+    selected_workflow_id_text = (
+        str(selected_workflow_id).strip()
+        if isinstance(selected_workflow_id, str) and str(selected_workflow_id).strip()
+        else None
+    )
+    clean_selected_workflow_id = _normalise_workflow_id(selected_workflow_id)
+
     root_workflow_id: str | None
     workflow_id_source: str | None
-    if len(observed_workflow_ids) == 1:
+    if clean_selected_workflow_id:
+        root_workflow_id = selected_workflow_id_text
+        workflow_id_source = "selected_workflow"
+    elif len(observed_workflow_ids) == 1:
         root_workflow_id = observed_workflow_ids[0]
         workflow_id_source = "mapped_stage_consensus"
     elif observed_workflow_ids:
@@ -570,13 +582,24 @@ def build_conversation_turn_stage_path(
         root_workflow_id = workflow_id
         workflow_id_source = "route_hint" if workflow_id else None
 
+    auxiliary_workflow_ids = [
+        observed_workflow_id
+        for observed_workflow_id in observed_workflow_ids
+        if (
+            not clean_selected_workflow_id
+            or observed_workflow_id.lower() != clean_selected_workflow_id.lower()
+        )
+    ]
+
     return {
         "schema_version": CONVERSATION_TURN_STAGE_PATH_SCHEMA_VERSION,
         "stage_model_schema_version": CONVERSATION_TURN_STAGE_MODEL_SCHEMA_VERSION,
         "workflow_representation_id": CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
         "workflow_id": root_workflow_id,
         "workflow_id_source": workflow_id_source,
+        "selected_workflow_id": selected_workflow_id_text,
         "observed_workflow_ids": observed_workflow_ids,
+        "auxiliary_workflow_ids": auxiliary_workflow_ids,
         "path": path,
         "has_unmapped_runtime_stages": bool(unmapped_runtime_stages),
         "unmapped_runtime_stages": unmapped_runtime_stages,
