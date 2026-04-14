@@ -31,6 +31,9 @@ from ...services.paper_recommendation_profile_vontology_service import (
 from ...services.paper_recommendation_workflow_vontology_service import (
     request_paper_recommendation_refresh,
 )
+from ...services.concept_summary_renderer_service import (
+    load_concept_summary_renderer,
+)
 from ...vontology.utils_vontology import (
     get_concept_notes,
 )  # Added getter import
@@ -185,6 +188,25 @@ def set_concept_recommendation_profile(concept_id: str) -> ResponseReturnValue:
             exc_info=True,
         )
         return jsonify({"error": "Failed to save paper recommendation profile"}), 500
+
+
+@concept_bp.route("/<string:concept_id>/summary_renderer", methods=["GET"])
+def get_concept_summary_renderer(concept_id: str) -> ResponseReturnValue:
+    """Return the concept-page summary renderer payload for one concept."""
+
+    try:
+        payload = load_concept_summary_renderer(concept_id)
+        return jsonify(payload), 200
+    except ConceptNotFoundError:
+        return jsonify({"error": "Concept not found"}), 404
+    except Exception as e:
+        current_app.logger.error(
+            "Failed to load concept summary renderer for %s: %s",
+            concept_id,
+            e,
+            exc_info=True,
+        )
+        return jsonify({"error": "Failed to load concept summary renderer"}), 500
 
 
 @concept_bp.route("/", methods=["GET"])

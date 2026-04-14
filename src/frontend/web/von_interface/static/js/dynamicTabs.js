@@ -3012,9 +3012,20 @@ async function adaptIndividualConceptTabUI(conceptId, suffix) {
             if (conceptName) nameInput.value = conceptName;
         }
 
-        // Insert a small types summary line under the title
+        // Prefer the dedicated concept summary renderer panel; fall back to the
+        // older type-summary line if the summary payload is unavailable.
         const step1 = document.getElementById(`conceptStep1_${suffix}`) || document.getElementById('conceptStep1');
-        if (step1 && !step1.querySelector('.concept-types-summary')) {
+        let renderedConceptSummary = false;
+        try {
+            const { ensureConceptSummaryRendererPanelForConceptTab } = await import('./components/conceptSummaryRendererPanel.js');
+            renderedConceptSummary = await ensureConceptSummaryRendererPanelForConceptTab({
+                conceptId,
+                suffix,
+            });
+        } catch (rendererErr) {
+            console.warn('[dynamicTabs] Unable to initialise concept summary renderer panel', rendererErr);
+        }
+        if (!renderedConceptSummary && step1 && !step1.querySelector('.concept-types-summary')) {
             const summary = document.createElement('div');
             summary.className = 'concept-types-summary';
             summary.style.margin = '6px 0 10px 0';
