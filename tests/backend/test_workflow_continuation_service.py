@@ -331,3 +331,58 @@ def test_build_workflow_continuation_routing_prompt_summarises_targets_and_tools
     assert "Artefact file_copy_ids: #V#uploaded_file_copy_abc123" in prompt
     assert "Artefact urls: https://arxiv.org/abs/2502.14996" in prompt
     assert prompt.rstrip().endswith("Please proceed.")
+
+
+def test_extract_url_targets_from_continuation_context_reads_contract_and_targets() -> None:
+    urls = service.extract_url_targets_from_continuation_context(
+        {
+            "unresolved_required_effects": [
+                {
+                    "targets": [
+                        "https://arxiv.org/abs/2502.14996",
+                        "#V#uploaded_file_copy_abc123",
+                    ]
+                }
+            ],
+            "required_effects_contract": {
+                "artefact_context": {
+                    "urls": [
+                        "https://arxiv.org/abs/2502.14996",
+                        "https://example.org/papers/2502.14996",
+                    ]
+                }
+            },
+        }
+    )
+
+    assert urls == [
+        "https://arxiv.org/abs/2502.14996",
+        "https://example.org/papers/2502.14996",
+    ]
+
+
+def test_project_launch_inputs_from_continuation_context_projects_stable_artefacts() -> None:
+    projected = service.project_launch_inputs_from_continuation_context(
+        {
+            "unresolved_required_effects": [
+                {
+                    "targets": [
+                        "#V#uploaded_file_copy_abc123",
+                        "https://arxiv.org/abs/2502.14996",
+                    ]
+                }
+            ],
+            "required_effects_contract": {
+                "artefact_context": {
+                    "file_copy_ids": ["#V#uploaded_file_copy_abc123"],
+                    "urls": ["https://arxiv.org/abs/2502.14996"],
+                }
+            },
+        }
+    )
+
+    assert projected == {
+        "file_copy_concept_id": "#V#uploaded_file_copy_abc123",
+        "source_uri": "https://arxiv.org/abs/2502.14996",
+        "arxiv_id": "2502.14996",
+    }

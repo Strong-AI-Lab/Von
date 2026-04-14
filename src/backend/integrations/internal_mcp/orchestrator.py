@@ -22066,11 +22066,36 @@ class InternalMCPChatOrchestrator:
         final_state: str | None = None
         failure_detail: str | None = None
         child_result_snapshot: Mapping[str, Any] | None = None
+        child_workflow_data = dict(data)
+
+        continuation_context = child_workflow_data.get("continuation_context")
+        if isinstance(continuation_context, Mapping) and bool(
+            continuation_context.get("applied")
+        ):
+            try:
+                from ...services.workflow_continuation_service import (
+                    project_launch_inputs_from_continuation_context,
+                )
+
+                projected_continuation_launch_inputs = (
+                    project_launch_inputs_from_continuation_context(
+                        continuation_context
+                    )
+                )
+            except Exception:
+                projected_continuation_launch_inputs = {}
+            if projected_continuation_launch_inputs:
+                child_workflow_data.setdefault(
+                    "workflow_continuation_launch_inputs",
+                    dict(projected_continuation_launch_inputs),
+                )
+                for key, value in projected_continuation_launch_inputs.items():
+                    child_workflow_data.setdefault(key, value)
 
         if selected_workflow_id:
             child_result = self.execute_workflow(
                 selected_workflow_id,
-                data=dict(data),
+                data=child_workflow_data,
                 llm_client=env.llm_client,
                 model=getattr(env, "model", None),
                 user_namespace=env.user_namespace,
@@ -29075,9 +29100,14 @@ class InternalMCPChatOrchestrator:
                 and workflow_id_override.strip()
                 else selected_workflow_id_text
             )
-            return {
+            workflow_dispatch_data = {
                 "prompt": prompt,
                 "augmented_context": augmented_context,
+                "continuation_context": (
+                    dict(workflow_continuation_payload)
+                    if isinstance(workflow_continuation_payload, Mapping)
+                    else None
+                ),
                 "workflow_routing": (
                     asdict(routing_info)
                     if isinstance(routing_info, WorkflowRoutingInfo)
@@ -29109,6 +29139,30 @@ class InternalMCPChatOrchestrator:
                 "workflow_episode_source": "chat_turn_workflow",
                 "workflow_episode_stage": "workflow_dispatch",
             }
+
+            if isinstance(workflow_continuation_payload, Mapping) and bool(
+                workflow_continuation_payload.get("applied")
+            ):
+                try:
+                    from ...services.workflow_continuation_service import (
+                        project_launch_inputs_from_continuation_context,
+                    )
+
+                    projected_launch_inputs = (
+                        project_launch_inputs_from_continuation_context(
+                            workflow_continuation_payload
+                        )
+                    )
+                except Exception:
+                    projected_launch_inputs = {}
+                if projected_launch_inputs:
+                    workflow_dispatch_data["workflow_continuation_launch_inputs"] = dict(
+                        projected_launch_inputs
+                    )
+                    for key, value in projected_launch_inputs.items():
+                        workflow_dispatch_data.setdefault(key, value)
+
+            return workflow_dispatch_data
 
         custom_workflow_launchability_probe_cache: dict[str, dict[str, Any]] = {}
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from typing import Any, Mapping
 
+from .arxiv_paper_link_service import extract_arxiv_id_candidates
 from .file_copy_reference_service import is_file_copy_concept_id
 from .turn_execution_record_service import get_latest_turn_execution_record_projection
 from .workflow_discovery_service import classify_workflow_concept_executability
@@ -19,6 +20,7 @@ _CONCEPT_ID_PATTERN = re.compile(
     r"#V#[A-Za-z0-9][A-Za-z0-9._-]*",
     flags=re.IGNORECASE,
 )
+_URL_TARGET_PATTERN = re.compile(r"(?i)^https?://[^\s]+$")
 
 _WORKFLOW_DIVERGENCE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (
@@ -705,3 +707,71 @@ def extract_concept_targets_from_continuation_context(
             found.append(target)
 
     return found
+
+
+def extract_url_targets_from_continuation_context(
+    continuation_context: Mapping[str, Any] | None,
+) -> list[str]:
+    """Return URL targets referenced by unresolved continuation artefacts."""
+
+    if not isinstance(continuation_context, Mapping):
+        return []
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def _add(candidate: str | None) -> None:
+        text = _safe_str(candidate)
+        if not text or not _URL_TARGET_PATTERN.fullmatch(text):
+            return
+        lowered = text.lower()
+        if lowered in seen:
+            return
+        seen.add(lowered)
+        found.append(text)
+
+    unresolved_effects = continuation_context.get("unresolved_required_effects")
+    if isinstance(unresolved_effects, list):
+        for effect in unresolved_effects:
+            if not isinstance(effect, Mapping):
+                continue
+            for target in _dedupe_strings(effect.get("targets")):
+                _add(target)
+
+    required_effects_contract = continuation_context.get("required_effects_contract")
+    if isinstance(required_effects_contract, Mapping):
+        artefact_context = required_effects_contract.get("artefact_context")
+        if isinstance(artefact_context, Mapping):
+            for candidate in _dedupe_strings(artefact_context.get("urls")):
+                _add(candidate)
+
+    return found
+
+
+def project_launch_inputs_from_continuation_context(
+    continuation_context: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Project stable launch inputs from authoritative continuation artefacts."""
+
+    if not isinstance(continuation_context, Mapping):
+        return {}
+
+    projected: dict[str, Any] = {}
+    file_copy_targets = extract_file_copy_targets_from_continuation_context(
+        continuation_context
+    )
+    if len(file_copy_targets) == 1:
+        projected["file_copy_concept_id"] = file_copy_targets[0]
+
+    url_targets = extract_url_targets_from_continuation_context(continuation_context)
+    if len(url_targets) == 1:
+        projected["source_uri"] = url_targets[0]
+
+    arxiv_ids = extract_arxiv_id_candidates(
+        continuation_context.get("required_effects_contract"),
+        continuation_context.get("unresolved_required_effects"),
+        url_targets,
+    )
+    if len(arxiv_ids) == 1:
+        projected["arxiv_id"] = arxiv_ids[0]
+
+    return projected
