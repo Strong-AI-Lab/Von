@@ -1,8 +1,21 @@
 /** @jest-environment jsdom */
 
 const domUtilsPath = '../../src/frontend/web/von_interface/static/js/domUtils.js';
+const suppressTooltipsPath = '../../src/frontend/web/von_interface/static/js/suppressTooltips.js';
 
-function installFetchMock() {
+function installFetchMock(options = {}) {
+    const {
+        settingsPayload = { resolved_llm: { provider: 'openai', model: 'gpt-5.4-mini' } },
+        llmInfoOk = true,
+        llmInfoPayload = {
+            provider: 'openai',
+            model: 'gpt-5.4-mini',
+            status: 'ready',
+            details: {}
+        },
+        dbInfoPayload = {},
+        authPayload = { authenticated: true, email: 'researcher@example.test' }
+    } = options;
     global.fetch = jest.fn(async (url) => {
         const rawUrl = typeof url === 'string' ? url : (url?.url || String(url));
         const parsed = new URL(rawUrl, 'http://localhost');
@@ -10,27 +23,20 @@ function installFetchMock() {
         if (path === '/api/settings/' || path === '/api/settings') {
             return {
                 ok: true,
-                json: async () => ({
-                    resolved_llm: { provider: 'openai', model: 'gpt-5.4-mini' }
-                })
+                json: async () => settingsPayload
             };
         }
         if (path === '/api/settings/llm/info') {
             return {
-                ok: true,
-                json: async () => ({
-                    provider: 'openai',
-                    model: 'gpt-5.4-mini',
-                    status: 'ready',
-                    details: {}
-                })
+                ok: llmInfoOk,
+                json: async () => llmInfoPayload
             };
         }
         if (path === '/api/settings/db/info') {
-            return { ok: true, json: async () => ({}) };
+            return { ok: true, json: async () => dbInfoPayload };
         }
         if (path === '/von/api/auth/status' || path === '/api/auth/status') {
-            return { ok: true, json: async () => ({ authenticated: true, email: 'researcher@example.test' }) };
+            return { ok: true, json: async () => authPayload };
         }
         return { ok: true, json: async () => ({}) };
     });
@@ -66,14 +72,22 @@ describe('footer latest LLM execution status', () => {
         localStorage.clear();
         sessionStorage.clear();
         window.__vonLatestLlmExecutionTelemetry = null;
+        delete window.__VON_TOOLTIP_SUPPRESS_ACTIVE__;
+        delete window.__VON_RESTORE_TITLES;
         installFetchMock();
+        require(suppressTooltipsPath);
     });
 
     afterEach(() => {
+        if (typeof window.__VON_RESTORE_TITLES === 'function') {
+            window.__VON_RESTORE_TITLES();
+        }
         jest.restoreAllMocks();
         localStorage.clear();
         sessionStorage.clear();
         window.__vonLatestLlmExecutionTelemetry = null;
+        delete window.__VON_TOOLTIP_SUPPRESS_ACTIVE__;
+        delete window.__VON_RESTORE_TITLES;
     });
 
     test('turns footer red and shows actual fallback model plus reason', async () => {
@@ -106,6 +120,7 @@ describe('footer latest LLM execution status', () => {
 
         const modelButton = modelSegment.querySelector('.concept-footer-button');
         expect(modelButton.textContent.trim()).toBe('granite3.3:2b');
+        expect(modelButton.getAttribute('data-keep-title')).toBe('true');
         expect(modelButton.title).toContain('Configured model: gpt-5.4-mini');
         expect(modelButton.title).toContain('Executed provider: ollama');
         expect(modelButton.title).toContain('Executed model: granite3.3:2b');
@@ -220,11 +235,25 @@ describe('footer latest LLM execution status', () => {
 
         const modelButton = modelSegment.querySelector('.concept-footer-button');
         expect(modelButton.textContent.trim()).toBe('gpt-4o-mini');
+        expect(modelButton.getAttribute('data-keep-title')).toBe('true');
         expect(modelButton.title).toContain('Last execution status: Stage Override Active');
         expect(modelButton.title).toContain('Stage model override: explicit policy override');
         expect(modelButton.title).toContain('Execution stage: workflow_dispatch');
         expect(modelButton.title).toContain('Policy stage: classifier');
         expect(modelButton.title).toContain('Selection mode: policy_primary_override');
         expect(modelButton.title).toContain('Override origin: policy_primary');
+    });
+
+    test('preserves partial-readiness footer hover summary under global tooltip suppression', async () => {
+        installFetchMock({ llmInfoOk: false });
+        const { setModelInfoFooterText } = require(domUtilsPath);
+
+        await setModelInfoFooterText();
+        await flushUiTicks();
+
+        const footerContainer = document.querySelector('.footer-container');
+        expect(footerContainer).toBeTruthy();
+        expect(footerContainer.getAttribute('data-keep-title')).toBe('true');
+        expect(footerContainer.title).toContain('Footer partially ready.');
     });
 });

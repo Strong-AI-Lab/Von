@@ -1,6 +1,7 @@
 /** @jest-environment jsdom */
 
 const domUtilsPath = '../../src/frontend/web/von_interface/static/js/domUtils.js';
+const suppressTooltipsPath = '../../src/frontend/web/von_interface/static/js/suppressTooltips.js';
 
 function buildDbInfo({
     classification = 'atlas',
@@ -55,12 +56,20 @@ describe('footer DB badge outage state handling', () => {
         document.body.innerHTML = '<div class="footer-container"><p id="modelInfoFooter"></p></div>';
         localStorage.clear();
         sessionStorage.clear();
+        delete window.__VON_TOOLTIP_SUPPRESS_ACTIVE__;
+        delete window.__VON_RESTORE_TITLES;
+        require(suppressTooltipsPath);
     });
 
     afterEach(() => {
+        if (typeof window.__VON_RESTORE_TITLES === 'function') {
+            window.__VON_RESTORE_TITLES();
+        }
         jest.restoreAllMocks();
         localStorage.clear();
         sessionStorage.clear();
+        delete window.__VON_TOOLTIP_SUPPRESS_ACTIVE__;
+        delete window.__VON_RESTORE_TITLES;
     });
 
     test('keeps Atlas-unreachable alarm when server is reachable', async () => {
@@ -76,7 +85,9 @@ describe('footer DB badge outage state handling', () => {
         expect(badge.textContent).toContain('MongoDB Atlas unreachable');
         expect(badge.classList.contains('fatal')).toBe(true);
         expect(badge.classList.contains('warning')).toBe(false);
+        expect(badge.getAttribute('data-keep-title')).toBe('true');
         expect(latency?.textContent).toBe('offline');
+        expect(latency?.getAttribute('data-keep-title')).toBe('true');
         expect(latency?.title).toContain('Atlas unreachable');
     });
 
@@ -97,6 +108,8 @@ describe('footer DB badge outage state handling', () => {
         expect(badge.classList.contains('fatal')).toBe(false);
         expect(badge.textContent).toContain('Mongo status unknown (Von down)');
         expect(latency?.textContent).toBe('unknown');
+        expect(badge.getAttribute('data-keep-title')).toBe('true');
+        expect(latency?.getAttribute('data-keep-title')).toBe('true');
         expect(latency?.title).toContain('Von server is unreachable');
     });
 });

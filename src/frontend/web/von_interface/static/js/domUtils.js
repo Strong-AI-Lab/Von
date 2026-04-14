@@ -579,14 +579,40 @@ try {
   // Ignore missing document in tests or constrained environments.
 }
 
+function clearKeptNativeTitle(element) {
+  if (!element) return;
+  element.removeAttribute('title');
+  element.removeAttribute('data-original-title');
+  element.removeAttribute('data-keep-title');
+}
+
+function setKeptNativeTitle(element, title) {
+  if (!element) return;
+  const cleanTitle = typeof title === 'string' ? title.trim() : '';
+  if (!cleanTitle) {
+    clearKeptNativeTitle(element);
+    return;
+  }
+  element.setAttribute('data-keep-title', 'true');
+  element.setAttribute('title', cleanTitle);
+  element.setAttribute('data-original-title', cleanTitle);
+}
+
+function readKeptNativeTitle(element) {
+  if (!element) return '';
+  return element.getAttribute('title')
+    || element.getAttribute('data-original-title')
+    || '';
+}
+
 function updateFooterReadinessState(footerContainer, readinessIssues) {
   if (!footerContainer) return;
   const issueList = Array.from(readinessIssues || []);
   const notReady = issueList.length > 0;
   footerContainer.classList.toggle('footer-not-ready', notReady);
-  footerContainer.title = notReady
+  setKeptNativeTitle(footerContainer, notReady
     ? `Footer partially ready. Waiting on: ${issueList.join(', ')}`
-    : '';
+    : '');
 }
 
 function ensureFooterDbLoadingBadge(footer) {
@@ -597,8 +623,9 @@ function ensureFooterDbLoadingBadge(footer) {
   const badge = document.createElement('span');
   badge.className = 'db-conn-badge loading';
   badge.style.marginLeft = '12px';
-  badge.title = 'Loading database status...';
   badge.innerHTML = '<span class="db-label">🕓 Mongo: loading...</span> <span class="db-latency" aria-label="DB latency" title="Waiting for DB status">...</span>';
+  setKeptNativeTitle(badge, 'Loading database status...');
+  setKeptNativeTitle(badge.querySelector('.db-latency'), 'Waiting for DB status');
   footer.appendChild(badge);
   return badge;
 }
@@ -656,7 +683,7 @@ function attachFooterDbBadge(footer, dbInfo) {
     } else if (state === 'degraded') {
       dynamic = '\nCurrent status: degraded/fallback connection.';
     }
-    badge.title = `${baseTooltip}${dynamic}`;
+    setKeptNativeTitle(badge, `${baseTooltip}${dynamic}`);
   };
 
   const applyBadgeState = (currentPingOk, currentClassification, currentFallback, currentServerReachable = lastServerReachable) => {
@@ -713,20 +740,20 @@ function attachFooterDbBadge(footer, dbInfo) {
     if (state === 'fatal_atlas') {
       span.textContent = 'offline';
       span.classList.add('fatal');
-      span.title = 'MongoDB Atlas unreachable';
+      setKeptNativeTitle(span, 'MongoDB Atlas unreachable');
       return;
     }
 
     if (state === 'server_down_unknown') {
       span.textContent = 'unknown';
       span.classList.add('warn');
-      span.title = 'Mongo status unknown because Von server is unreachable';
+      setKeptNativeTitle(span, 'Mongo status unknown because Von server is unreachable');
       return;
     }
 
     if (!Number.isFinite(elapsedMs)) {
       span.textContent = '...';
-      span.title = 'Waiting for DB status';
+      setKeptNativeTitle(span, 'Waiting for DB status');
       return;
     }
 
@@ -735,9 +762,9 @@ function attachFooterDbBadge(footer, dbInfo) {
     span.classList.toggle('slow', elapsedMs > 600);
     const summary = getFooterDbProbeSummary();
     if (summary.sampleCount > 0 && Number.isFinite(summary.p50Ms) && Number.isFinite(summary.p90Ms)) {
-      span.title = `Recent DB latency: ${elapsedMs} ms (p50 ${summary.p50Ms} ms, p90 ${summary.p90Ms} ms, n=${summary.sampleCount})`;
+      setKeptNativeTitle(span, `Recent DB latency: ${elapsedMs} ms (p50 ${summary.p50Ms} ms, p90 ${summary.p90Ms} ms, n=${summary.sampleCount})`);
     } else {
-      span.title = `Recent DB latency: ${elapsedMs} ms`;
+      setKeptNativeTitle(span, `Recent DB latency: ${elapsedMs} ms`);
     }
   };
 
@@ -828,9 +855,9 @@ function attachFooterDbBadge(footer, dbInfo) {
   function copyServerIp(withEvent) {
     if (!serverPublicIp) return;
     const finish = () => {
-      const oldTitle = badge.title;
-      badge.title = `Copied IP: ${serverPublicIp}`;
-      setTimeout(() => { badge.title = oldTitle; }, 1800);
+      const oldTitle = readKeptNativeTitle(badge);
+      setKeptNativeTitle(badge, `Copied IP: ${serverPublicIp}`);
+      setTimeout(() => { setKeptNativeTitle(badge, oldTitle); }, 1800);
     };
     if (navigator?.clipboard?.writeText) {
       navigator.clipboard.writeText(serverPublicIp).then(finish).catch(() => {
@@ -935,7 +962,7 @@ export async function setModelInfoFooterText() {
       const tooltipParts = [];
       if (conceptId) tooltipParts.push(`ID: ${conceptId}`);
       if (conceptName) tooltipParts.push(`Name: ${conceptName}`);
-      btn.title = tooltipParts.join('\n');
+      setKeptNativeTitle(btn, tooltipParts.join('\n'));
       btn.addEventListener('click', async (ev) => {
         ev.stopPropagation();
         const id = conceptId || null;
@@ -1001,7 +1028,7 @@ export async function setModelInfoFooterText() {
     btn.type = 'button';
     btn.className = 'concept-footer-button';
     btn.textContent = displayName;
-    if (options.title) btn.title = options.title;
+    setKeptNativeTitle(btn, options.title);
     if (options.ariaLabel) btn.setAttribute('aria-label', options.ariaLabel);
     if (typeof onClick === 'function') {
       btn.addEventListener('click', (ev) => {
@@ -1130,7 +1157,7 @@ export async function setModelInfoFooterText() {
       const badge = document.createElement('span');
       badge.className = 'footer-segment write-policy-override-badge footer';
       badge.textContent = 'WRITE GATE ON';
-      badge.title = 'Write-tool conservatism is enabled: explicit user write intent required.';
+      setKeptNativeTitle(badge, 'Write-tool conservatism is enabled: explicit user write intent required.');
       segments.push(badge);
     }
   } catch (_) { }
@@ -1188,18 +1215,18 @@ export async function setModelInfoFooterText() {
         if (!effectiveBtn) return;
         if (authData?.authenticated) {
           effectiveBtn.classList.add('user-auth-active');
-          effectiveBtn.title = `Logged in as ${authData.email || '(unknown email)'}`;
+          setKeptNativeTitle(effectiveBtn, `Logged in as ${authData.email || '(unknown email)'}`);
         } else {
-          effectiveBtn.title = 'Not logged in';
+          setKeptNativeTitle(effectiveBtn, 'Not logged in');
         }
       });
     } else {
       const btn = footer.querySelector('.footer-segment .concept-footer-button');
-      if (btn) btn.title = 'Not logged in';
+      if (btn) setKeptNativeTitle(btn, 'Not logged in');
     }
   } catch (_) {
     const btn = footer.querySelector('.footer-segment .concept-footer-button');
-    if (btn) btn.title = 'Not logged in';
+    if (btn) setKeptNativeTitle(btn, 'Not logged in');
   }
 
   // Jest fallback: if running under tests and highlight missing, force-create it to avoid timing/env flakiness.
@@ -1219,14 +1246,14 @@ export async function setModelInfoFooterText() {
           if (labelEl && labelEl.nextSibling) userSeg.insertBefore(btn, labelEl.nextSibling); else userSeg.appendChild(btn);
         }
         btn.classList.add('user-auth-active');
-        btn.title = btn.title && btn.title.includes('Logged in as') ? btn.title : 'Logged in as (test fallback)';
+        setKeptNativeTitle(btn, readKeptNativeTitle(btn).includes('Logged in as') ? readKeptNativeTitle(btn) : 'Logged in as (test fallback)');
       }
     }
   } catch (_) { /* non-fatal */ }
 
   // Clicking empty space (not concept buttons) still opens settings
   footer.style.cursor = 'pointer';
-  footer.title = 'Click empty area to open settings';
+  setKeptNativeTitle(footer, 'Click empty area to open settings');
   footer.addEventListener('click', (ev) => {
     if (ev.target.closest('.concept-footer-button')) { return; }
     const settingsTabButton = document.querySelector('.tab-button[data-tab="settingsTab"]');
@@ -1280,7 +1307,7 @@ export async function setModelInfoFooterText() {
 
     const delayMs = computeFooterDbRetryDelayMs(attempt);
     if (loadingBadge) {
-      loadingBadge.title = formatFooterDbRetryHint(attempt, delayMs);
+      setKeptNativeTitle(loadingBadge, formatFooterDbRetryHint(attempt, delayMs));
     }
     clearFooterDbRetryTimer();
     footerDbRetryTimerId = setTimeout(() => { void loadDbBadge(attempt + 1); }, delayMs);
