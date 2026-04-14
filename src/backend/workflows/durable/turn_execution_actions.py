@@ -98,14 +98,44 @@ def _build_turn_execution_execute_selected_handler() -> Any:
             )
             return WorkflowActionResult(outputs=outputs)
 
+        request_data = {
+            str(key): value for key, value in request.data.items() if isinstance(key, str)
+        }
+        continuation_context = request_data.get("continuation_context")
+        projected_continuation_launch_inputs: dict[str, Any] = {}
+        if isinstance(continuation_context, Mapping) and bool(
+            continuation_context.get("applied")
+        ):
+            try:
+                from ...services.workflow_continuation_service import (
+                    project_launch_inputs_from_continuation_context,
+                )
+
+                projected_continuation_launch_inputs = (
+                    project_launch_inputs_from_continuation_context(
+                        continuation_context
+                    )
+                )
+            except Exception:
+                projected_continuation_launch_inputs = {}
+        if projected_continuation_launch_inputs:
+            if isinstance(request.data, dict):
+                request.data.setdefault(
+                    "workflow_continuation_launch_inputs",
+                    dict(projected_continuation_launch_inputs),
+                )
+                for key, value in projected_continuation_launch_inputs.items():
+                    request.data.setdefault(key, value)
+            request_data["workflow_continuation_launch_inputs"] = dict(
+                projected_continuation_launch_inputs
+            )
+            for key, value in projected_continuation_launch_inputs.items():
+                request_data.setdefault(key, value)
+
         subworkflow_inputs = {
             "workflow_id": selected_workflow_id,
             "failure_mode": WORKFLOW_SUBWORKFLOW_FAILURE_MODE_CAPTURE,
-            **{
-                str(key): value
-                for key, value in request.data.items()
-                if isinstance(key, str)
-            },
+            **request_data,
         }
         subworkflow_result = get_shared_durable_action_registry().execute(
             "workflow_invoke_subworkflow",

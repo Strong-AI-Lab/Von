@@ -483,6 +483,137 @@ def test_generate_bare_arxiv_url_recovers_from_selector_clarification_to_special
     )
 
 
+def test_generate_arxiv_continuation_turn_projects_authoritative_launch_inputs(
+    monkeypatch,
+):
+    llm = _LLMSequence(
+        [
+            (
+                '{"workflow_id":"#V#arxiv_paper_representation_workflow",'
+                '"confidence":0.99,'
+                '"reasoning":"Continue the active arXiv representation workflow."}'
+            ),
+            "Downloaded and represented the paper.",
+            "Downloaded and represented the paper.",
+            "Downloaded and represented the paper.",
+        ]
+    )
+    discovery_result = {
+        "query": "Download and represent the paper",
+        "requested_query": "Download and represent the paper",
+        "search_sources": ["capability_index"],
+        "candidate_count": 1,
+        "match_count": 1,
+        "matches": [
+            {
+                "concept_id": ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+                "name": "Arxiv Paper Representation Workflow",
+                "description": "Represent an arXiv paper from prior session state.",
+                "is_executable": True,
+                "executability_reason": "executable_now",
+                "is_policy_safe": True,
+                "routing_eligible": True,
+                "candidate_source": "capability_index",
+                "routing_profile": {"role": "execution"},
+            }
+        ],
+        "candidates": [
+            {
+                "concept_id": ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+                "name": "Arxiv Paper Representation Workflow",
+                "description": "Represent an arXiv paper from prior session state.",
+                "is_executable": True,
+                "executability_reason": "executable_now",
+                "is_policy_safe": True,
+                "routing_eligible": True,
+                "candidate_source": "capability_index",
+                "routing_profile": {"role": "execution"},
+            }
+        ],
+    }
+    app = _make_app(
+        monkeypatch,
+        llm=llm,
+        workflow_discovery_result=discovery_result,
+    )
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_continuation_service.get_session_workflow_continuation_context",
+        lambda **_kwargs: {
+            "session_id": "session-1858-route",
+            "selected_workflow_id": ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+            "completion_gate_decision": "follow_up_required",
+            "requires_follow_up": True,
+            "safe_to_claim_completion": False,
+            "has_unresolved_required_effects": True,
+            "unresolved_required_effects": [
+                {
+                    "effect_id": "effect_workflow_execution_1",
+                    "effect_type": "workflow_execution",
+                    "status": "not_executed",
+                    "description": (
+                        "Obtain the selected workflow result needed for the "
+                        "user-facing answer."
+                    ),
+                }
+            ],
+            "required_effects_contract": {
+                "schema_version": "required_effects_contract.v1",
+                "intent_class": "representation",
+                "artefact_context": {
+                    "urls": ["https://arxiv.org/abs/2501.00663"],
+                },
+            },
+        },
+    )
+
+    orchestrator = app.config["INTERNAL_MCP_ORCHESTRATOR"]
+    original_execute_workflow = orchestrator.execute_workflow
+    captured_data: dict[str, object] = {}
+
+    def _execute_workflow(workflow_id: str, **kwargs):
+        if workflow_id != ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID:
+            return original_execute_workflow(workflow_id, **kwargs)
+        captured_data.update(dict(kwargs.get("data") or {}))
+        return SimpleNamespace(
+            completed=True,
+            final_state="verify_arxiv_path",
+            error=None,
+            data={
+                "response_text": "Downloaded and represented the paper.",
+                "final_response": "Downloaded and represented the paper.",
+            },
+        )
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
+
+    client = app.test_client()
+    response = client.post(
+        "/von/generate",
+        json={
+            "prompt": "Download and represent the paper",
+            "conversation_session_id": "session-1858-route",
+        },
+    )
+    assert response.status_code == 200
+
+    body = response.get_json()
+    assert isinstance(body, dict)
+    assert body.get("response") == "Downloaded and represented the paper."
+    assert captured_data["source_uri"] == "https://arxiv.org/abs/2501.00663"
+    assert captured_data["arxiv_id"] == "2501.00663"
+    assert captured_data["workflow_continuation_launch_inputs"] == {
+        "source_uri": "https://arxiv.org/abs/2501.00663",
+        "arxiv_id": "2501.00663",
+    }
+
+    llm_debug = body.get("llm_debug") or {}
+    workflow_routing = llm_debug.get("workflow_routing") or {}
+    assert workflow_routing.get("workflow_id") == ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
+    assert workflow_routing.get("verdict") == "rag_selected"
+    assert workflow_routing.get("source") == "selector"
+
+
 def test_generate_bare_arxiv_url_falls_back_to_tool_pipeline_when_specialised_route_is_unavailable(
     monkeypatch,
 ):

@@ -7591,6 +7591,151 @@ def test_tool_planner_receives_authoritative_workflow_continuation_context(
     assert continuation_entry.get("reason") == "workflow_state_authoritative"
 
 
+def test_custom_workflow_dispatch_projects_launch_inputs_from_applied_continuation_context(
+    monkeypatch,
+):
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    selected_workflow_id = ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
+
+    orchestrator._workflow_registry.register_or_replace(
+        WorkflowRegistration(
+            workflow_id=selected_workflow_id,
+            definition=WorkflowDefinition(
+                workflow_id=selected_workflow_id,
+                initial_state="normalise_arxiv_source",
+                states={
+                    "normalise_arxiv_source": WorkflowStateSpec(
+                        state_id="normalise_arxiv_source",
+                        actions=(
+                            WorkflowActionInvocation(action_id="arxiv.normalise_source"),
+                        ),
+                        terminal=True,
+                    )
+                },
+                metadata={
+                    "launch_input_contract": {
+                        "schema_version": "workflow_launch_input_contract.v1",
+                        "required_inputs": ["prompt"],
+                        "input_mappings": [
+                            {
+                                "target_context_key": "prompt",
+                                "source_expression": "inputs.prompt",
+                                "required": True,
+                            },
+                            {
+                                "target_context_key": "source_uri",
+                                "source_expression": "inputs.source_uri",
+                            },
+                            {
+                                "target_context_key": "arxiv_id",
+                                "source_expression": "inputs.arxiv_id",
+                            },
+                        ],
+                    },
+                    "launch_input_contract_source": "test_contract",
+                },
+            ),
+            purpose="Continuation-aware arXiv workflow dispatch test.",
+            source="test",
+        )
+    )
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_continuation_service.get_session_workflow_continuation_context",
+        lambda **_kwargs: {
+            "session_id": "session-1858",
+            "selected_workflow_id": selected_workflow_id,
+            "completion_gate_decision": "follow_up_required",
+            "requires_follow_up": True,
+            "safe_to_claim_completion": False,
+            "has_unresolved_required_effects": True,
+            "unresolved_required_effects": [
+                {
+                    "effect_id": "effect_workflow_execution_1",
+                    "effect_type": "workflow_execution",
+                    "status": "not_executed",
+                    "description": (
+                        "Obtain the selected workflow result needed for the "
+                        "user-facing answer."
+                    ),
+                }
+            ],
+            "required_effects_contract": {
+                "schema_version": "required_effects_contract.v1",
+                "intent_class": "representation",
+                "artefact_context": {
+                    "urls": ["https://arxiv.org/abs/2501.00663"],
+                },
+            },
+        },
+    )
+
+    captured_data: dict[str, Any] = {}
+
+    def _run_workflow(_workflow_def: Any, *, data: Mapping[str, Any], **_kwargs: Any):
+        captured_data.update(dict(data))
+        return SimpleNamespace(
+            completed=True,
+            final_state="normalise_arxiv_source",
+            error=None,
+            data={"response_text": "Prepared from continuation context."},
+        )
+
+    monkeypatch.setattr(orchestrator._workflow_executor, "run", _run_workflow)
+
+    result = orchestrator.run(
+        prompt="Download and represent the paper",
+        context=[],
+        llm_client=_CapturingLLM([selected_workflow_id]),
+        model=None,
+        user_namespace="#V#user",
+        conversation_session_id="session-1858",
+        workflow_discovery_result={
+            "matches": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Arxiv Paper Representation Workflow",
+                    "description": "Represent an arXiv paper from a prior session artefact.",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "is_policy_safe": True,
+                    "routing_eligible": True,
+                }
+            ],
+            "candidates": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Arxiv Paper Representation Workflow",
+                    "description": "Represent an arXiv paper from a prior session artefact.",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "is_policy_safe": True,
+                    "routing_eligible": True,
+                }
+            ],
+            "match_count": 1,
+        },
+    )
+
+    assert result.response_text == "Prepared from continuation context."
+    assert captured_data["selected_workflow_id"] == selected_workflow_id
+    assert captured_data["source_uri"] == "https://arxiv.org/abs/2501.00663"
+    assert captured_data["arxiv_id"] == "2501.00663"
+    assert captured_data["workflow_continuation_launch_inputs"] == {
+        "source_uri": "https://arxiv.org/abs/2501.00663",
+        "arxiv_id": "2501.00663",
+    }
+
+    launch_resolution = captured_data.get("workflow_launch_input_resolution")
+    assert isinstance(launch_resolution, dict)
+    assert launch_resolution.get("status") == "resolved"
+    assert launch_resolution.get("resolved_inputs") == [
+        "arxiv_id",
+        "prompt",
+        "source_uri",
+    ]
+
+
 def test_selector_routes_failure_follow_up_with_episode_aware_context(
     monkeypatch,
 ):
