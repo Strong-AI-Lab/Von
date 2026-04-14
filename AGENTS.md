@@ -213,6 +213,7 @@ When scanning for such opportunities, prefer opening tasks where you can state t
 5. **Regression test requirements.** Name the specific assertions the fix must be tested against (not generic "add tests"). State what conditions the test must reproduce and what the expected vs. failing outcome is.
 6. **Relationship to other tasks.** Link related issues and explain the relationship (shared root cause, same pipeline stage, discovered together, one blocks another). A link without explanation is insufficient.
 7. **Key file references.** List the primary files the implementer will need to read, with the relevant function or section name.
+8. **User-impact summary.** Add a brief plain-language comment (not just in the description — also as a visible Jira comment) explaining what the task means for people who actually use Von. State concretely what users will see differently after the work is done, or state explicitly that nothing changes for users and why the work matters anyway (e.g. test quality, reliability, performance). This summary exists so that humans can triage, prioritise, and communicate about the task without decoding the technical diagnosis. It also forces the agent to confirm it has actually reasoned about user impact rather than only code mechanics.
 
 When creating diagnostic or bug tasks from a failed-turn analysis:
 
