@@ -109,11 +109,6 @@ def test_conversation_turn_workflow_uses_deterministic_critic_and_gate() -> None
     completion_gate = workflow.states["completion_gate"]
     assert completion_gate.actions[0].action_id == "turn_execution.completion_gate"
     assert any(
-        t.to_state == "execution"
-        and t.reason == "completion_gate_repeat_iteration"
-        for t in completion_gate.transitions
-    )
-    assert any(
         t.to_state == "recovery_decision" and t.reason == "follow_up_required"
         for t in completion_gate.transitions
     )
@@ -132,6 +127,23 @@ def test_conversation_turn_workflow_uses_deterministic_critic_and_gate() -> None
     assert prompt_contract.get("requested_prompt_concept_ids") == [
         "#V#prompt_turn_execution_recovery_decision"
     ]
+    recovery_context_fields = (recovery_action.llm_policy or {}).get("context_fields")
+    assert isinstance(recovery_context_fields, list)
+    assert any(
+        isinstance(field, dict)
+        and field.get("context_key") == "workflow_discovery_result"
+        for field in recovery_context_fields
+    )
+    assert any(
+        isinstance(field, dict)
+        and field.get("context_key") == "completion_gate_repeat_eligible"
+        for field in recovery_context_fields
+    )
+    assert any(
+        isinstance(field, dict)
+        and field.get("context_key") == "turn_recovery_last_target_workflow_id"
+        for field in recovery_context_fields
+    )
     assert any(
         t.to_state == "apply_recovery_retry" and t.reason == "retry_execution"
         for t in recovery_decision.transitions
@@ -144,6 +156,17 @@ def test_conversation_turn_workflow_uses_deterministic_critic_and_gate() -> None
 
     recovery_retry = workflow.states["apply_recovery_retry"]
     assert recovery_retry.actions[0].action_id == "workflow_control.context_set"
+    retry_inputs = recovery_retry.actions[0].inputs
+    retry_assignments = retry_inputs.get("assignments")
+    assert isinstance(retry_assignments, list)
+    assert {
+        "key": "selected_workflow_id",
+        "value_from_context": "turn_recovery_target_workflow_id",
+    } in retry_assignments
+    assert {"key": "response_text", "value": ""} in retry_assignments
+    assert {"key": "final_response", "value": ""} in retry_assignments
+    assert {"key": "current_response", "value": ""} in retry_assignments
+    assert {"key": "selected_workflow_user_response", "value": ""} in retry_assignments
     assert any(
         t.to_state == "execution" and t.reason == "recovery_retry_prepared"
         for t in recovery_retry.transitions

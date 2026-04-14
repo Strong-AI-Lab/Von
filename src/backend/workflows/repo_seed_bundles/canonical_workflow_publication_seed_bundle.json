@@ -1548,14 +1548,6 @@
             "conditional_transitions": [
               {
                 "condition_spec": {
-                  "key": "completion_gate_repeat_iteration",
-                  "kind": "context_flag"
-                },
-                "reason": "completion_gate_repeat_iteration",
-                "to_state": "execution"
-              },
-              {
-                "condition_spec": {
                   "key": "completion_gate_requires_follow_up",
                   "kind": "context_flag"
                 },
@@ -1629,6 +1621,22 @@
                   "label": "Selected Workflow Outcome"
                 },
                 {
+                  "context_key": "selected_workflow_user_response",
+                  "label": "Selected Workflow User Response"
+                },
+                {
+                  "context_key": "workflow_discovery_result",
+                  "label": "Workflow Discovery Result"
+                },
+                {
+                  "context_key": "workflow_routing",
+                  "label": "Workflow Routing"
+                },
+                {
+                  "context_key": "continuation_context",
+                  "label": "Continuation Context"
+                },
+                {
                   "context_key": "completion_report",
                   "label": "Completion Report"
                 },
@@ -1649,8 +1657,36 @@
                   "label": "Unresolved Preconditions"
                 },
                 {
+                  "context_key": "completion_gate_repeat_eligible",
+                  "label": "Retry Eligible"
+                },
+                {
+                  "context_key": "completion_gate_repeat_iteration",
+                  "label": "Repeat Iteration Suggested"
+                },
+                {
+                  "context_key": "completion_gate_loop_attempts",
+                  "label": "Recovery Loop Attempts"
+                },
+                {
+                  "context_key": "completion_gate_loop_max_attempts",
+                  "label": "Recovery Loop Attempt Budget"
+                },
+                {
+                  "context_key": "completion_gate_loop_stop_reason",
+                  "label": "Recovery Loop Stop Reason"
+                },
+                {
                   "context_key": "turn_recovery_attempted",
                   "label": "Recovery Already Attempted"
+                },
+                {
+                  "context_key": "turn_recovery_last_target_workflow_id",
+                  "label": "Previous Recovery Target Workflow"
+                },
+                {
+                  "context_key": "turn_recovery_last_reasoning",
+                  "label": "Previous Recovery Reasoning"
                 },
                 {
                   "context_key": "response_text",
@@ -1730,6 +1766,22 @@
                   {
                     "key": "turn_recovery_last_target_workflow_id",
                     "value_from_context": "turn_recovery_target_workflow_id"
+                  },
+                  {
+                    "key": "response_text",
+                    "value": ""
+                  },
+                  {
+                    "key": "final_response",
+                    "value": ""
+                  },
+                  {
+                    "key": "current_response",
+                    "value": ""
+                  },
+                  {
+                    "key": "selected_workflow_user_response",
+                    "value": ""
                   }
                 ]
               ]
@@ -1739,7 +1791,11 @@
               "turn_recovery_attempted",
               "turn_recovery_last_decision",
               "turn_recovery_last_reasoning",
-              "turn_recovery_last_target_workflow_id"
+              "turn_recovery_last_target_workflow_id",
+              "response_text",
+              "final_response",
+              "current_response",
+              "selected_workflow_user_response"
             ]
           },
           {

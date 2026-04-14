@@ -95,6 +95,7 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     )
     assert isinstance(recovery_text, str)
     assert "recovery-decision policy" in recovery_text
+    assert "next best bounded automated step" in recovery_text
     assert "`decision`" in recovery_text
     assert "`\"retry_execution\"` or `\"respond_with_follow_up\"`" in recovery_text
 
@@ -140,9 +141,9 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     assert required_effects_contract.get("contract_id") == (
         "conversation_diagnostics_required_evidence"
     )
-    assert required_effects_contract.get("required_effects")[0]["effect_id"] == (
-        "conversation_locator"
-    )
+    required_effects = required_effects_contract.get("required_effects")
+    assert isinstance(required_effects, list)
+    assert required_effects[0]["effect_id"] == "conversation_locator"
     contract_rows = get_texts_for_concept(
         TOOL_CALLING_WORKFLOW_ID,
         predicate="#V#hasWorkflowRequiredEffectsContractJson",
@@ -183,6 +184,23 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     assert recovery_prompt_contract.get("resolved_prompt_concept_id") == (
         RECOVERY_PROMPT_CONCEPT_ID
     )
+    recovery_context_fields = (recovery_action.llm_policy or {}).get("context_fields")
+    assert isinstance(recovery_context_fields, list)
+    assert any(
+        isinstance(field, dict)
+        and field.get("context_key") == "workflow_discovery_result"
+        for field in recovery_context_fields
+    )
+    assert any(
+        isinstance(field, dict)
+        and field.get("context_key") == "completion_gate_repeat_eligible"
+        for field in recovery_context_fields
+    )
+    assert any(
+        isinstance(field, dict)
+        and field.get("context_key") == "turn_recovery_last_reasoning"
+        for field in recovery_context_fields
+    )
 
     completed_step_id = authority_service._step_concept_id(
         workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
@@ -197,7 +215,7 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
         state_id="apply_recovery_follow_up",
     )
     transition_targets = {transition.to_state for transition in completion_gate.transitions}
-    assert execution_step_id in transition_targets
+    assert execution_step_id not in transition_targets
     assert recovery_decision_step_id in transition_targets
     assert completed_step_id in transition_targets
     recovery_transition_targets = {
