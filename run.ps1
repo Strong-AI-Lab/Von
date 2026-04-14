@@ -596,61 +596,17 @@ function Stop-PythonProcessesByScript {
 
     $pythonExe = Get-ProjectPythonExecutable
     $scriptPath = Join-Path $Root $ScriptRelativePath
-    $code = @'
-import json
-import os
-import sys
-
-try:
-    import psutil
-except Exception:
-    print("[]")
-    raise SystemExit(0)
-
-args = sys.argv[1:]
-if args and args[0] == "--":
-    args = args[1:]
-if not args:
-    print("[]")
-    raise SystemExit(0)
-
-target = os.path.normcase(os.path.normpath(args[0]))
-exclude_pid = int(args[1]) if len(args) > 1 else 0
-current_pid = os.getpid()
-target_fragment = target.lower().replace("\\", "/")
-target_name = os.path.basename(target).lower()
-killed = []
-
-for proc in psutil.process_iter(["pid", "cmdline"]):
-    try:
-        pid = int(proc.info.get("pid") or 0)
-        if pid <= 0 or pid == current_pid or pid == exclude_pid:
-            continue
-        cmdline = [str(part) for part in (proc.info.get("cmdline") or [])]
-        if not cmdline:
-            continue
-        cmd_joined = " ".join(cmdline)
-        cmd_norm = cmd_joined.lower().replace("\\", "/")
-        if target_fragment not in cmd_norm and target_name not in cmd_norm:
-            continue
-        try:
-            proc.terminate()
-            proc.wait(timeout=1.0)
-        except Exception:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-        killed.append(pid)
-    except Exception:
-        continue
-
-print(json.dumps(killed))
-'@
+    $helperScript = Join-Path $Root 'scripts/cleanup_stale_python_processes.py'
+    if (-not (Test-Path $helperScript)) {
+        Write-LauncherLog ("WARN: Stale-process cleanup helper missing for {0}: {1}" -f $Label, $helperScript)
+        return
+    }
 
     $raw = @()
     try {
-        $raw = & $pythonExe -c $code -- $scriptPath $ExcludePid 2>$null
+        # Use a file-backed helper rather than `python -c` to avoid native-command
+        # argument parsing regressions in newer PowerShell hosts.
+        $raw = & $pythonExe $helperScript $scriptPath $ExcludePid 2>$null
     }
     catch {
         Write-LauncherLog ("WARN: Failed stale-process cleanup for {0}: {1}" -f $Label, $_.Exception.Message)

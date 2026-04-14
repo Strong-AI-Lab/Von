@@ -186,3 +186,46 @@ $result | ConvertTo-Json -Depth 8 -Compress
     assert any("Workflow purity gate failed." in line for line in logs)
     assert "2026-04-11T20:00:03" in payload["reported_marker"]
     assert "|1|failed" in payload["reported_marker"]
+
+
+def test_run_ps1_stale_process_cleanup_uses_file_backed_helper(tmp_path: Path) -> None:
+    arg_log = tmp_path / "cleanup_args.txt"
+    fake_python = tmp_path / "fake_python.cmd"
+    fake_python.write_text(
+        "\r\n".join(
+            [
+                "@echo off",
+                f"> \"{arg_log}\" echo %*",
+                "echo []",
+            ]
+        )
+        + "\r\n",
+        encoding="utf-8",
+    )
+
+    script = f"""
+$ErrorActionPreference = 'Stop'
+Set-Location {_ps_quote(str(REPO_ROOT))}
+. {_ps_quote(str(REPO_ROOT / 'run.ps1'))} help -NoBackupMigrate *> $null
+$script:Logs = New-Object System.Collections.Generic.List[string]
+function global:Write-LauncherLog {{
+    param([string]$Msg)
+    $script:Logs.Add($Msg) | Out-Null
+}}
+function global:Get-ProjectPythonExecutable {{
+    {_ps_quote(str(fake_python))}
+}}
+Stop-PythonProcessesByScript -ScriptRelativePath 'src/backend/utilities/rag_indexing_worker.py' -Label 'RAG Worker'
+$result = [ordered]@{{
+    logs = @($script:Logs)
+    arg_log = (Get-Content -Raw -Path {_ps_quote(str(arg_log))}).Trim()
+}}
+$result | ConvertTo-Json -Depth 6 -Compress
+""".strip()
+
+    payload = _run_powershell_json(script)
+
+    assert "cleanup_stale_python_processes.py" in payload["arg_log"]
+    assert "rag_indexing_worker.py" in payload["arg_log"]
+    assert "-c" not in payload["arg_log"]
+    assert not any("WARN: Failed stale-process cleanup" in line for line in payload["logs"])

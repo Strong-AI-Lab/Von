@@ -10,65 +10,13 @@ must be enabled intentionally rather than running by default.
 from __future__ import annotations
 
 import os
-from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable
 
-
-def _normalise_path(value: str) -> str:
-    return os.path.normcase(os.path.normpath(value))
-
-
-def _cmdline_matches_script(cmdline: Sequence[str], script_path: str) -> bool:
-    if not cmdline:
-        return False
-    script_norm = _normalise_path(script_path)
-    script_name = Path(script_norm).name.lower()
-    script_fragment = script_norm.lower().replace("\\", "/")
-
-    for token in cmdline:
-        token_text = str(token)
-        token_norm = _normalise_path(token_text)
-        if token_norm == script_norm:
-            return True
-
-        token_fragment = token_text.lower().replace("\\", "/")
-        if token_fragment.endswith(f"/{script_name}") or token_fragment == script_name:
-            return True
-        if token_fragment == script_fragment:
-            return True
-
-    return False
-
-
-def _process_pid(proc: Any) -> int:
-    info = getattr(proc, "info", None)
-    if isinstance(info, dict):
-        try:
-            return int(info.get("pid") or 0)
-        except Exception:
-            return 0
-
-    try:
-        return int(getattr(proc, "pid", 0) or 0)
-    except Exception:
-        return 0
-
-
-def _process_cmdline(proc: Any) -> list[str]:
-    info = getattr(proc, "info", None)
-    if isinstance(info, dict):
-        cmdline = info.get("cmdline")
-        if isinstance(cmdline, Iterable) and not isinstance(cmdline, (str, bytes)):
-            return [str(part) for part in cmdline]
-
-    try:
-        cmdline = proc.cmdline()
-    except Exception:
-        return []
-
-    if not isinstance(cmdline, Iterable) or isinstance(cmdline, (str, bytes)):
-        return []
-    return [str(part) for part in cmdline]
+from src.backend.utilities.process_hygiene import (
+    cmdline_matches_script as _cmdline_matches_script,
+    process_cmdline as _process_cmdline,
+    process_pid as _process_pid,
+)
 
 
 def terminate_duplicate_sibling_servers(
