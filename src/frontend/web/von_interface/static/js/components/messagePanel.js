@@ -185,6 +185,7 @@ async function loadMessageThreads() {
     if (_isLoading) return;
 
     _isLoading = true;
+    let autoOpenUserId = null;
     const threadListEl = _messagesContainer?.querySelector('#messageThreadList');
 
     if (threadListEl) {
@@ -195,6 +196,7 @@ async function loadMessageThreads() {
         const response = await getJson('/api/messages/threads?limit=20');
         _threads = response.threads || [];
         renderThreadList();
+        autoOpenUserId = resolveAutoOpenThreadUserId();
 
     } catch (err) {
         console.error('[messagePanel] Failed to load threads:', err);
@@ -204,6 +206,37 @@ async function loadMessageThreads() {
     } finally {
         _isLoading = false;
     }
+
+    if (autoOpenUserId) {
+        await selectConversation(autoOpenUserId);
+    }
+}
+
+function getThreadUserId(thread) {
+    const otherUsers = thread?._id || [];
+    if (Array.isArray(otherUsers)) {
+        return otherUsers[0] || null;
+    }
+    return otherUsers || null;
+}
+
+function resolveAutoOpenThreadUserId() {
+    if (_threads.length !== 1) {
+        return null;
+    }
+
+    const onlyUserId = getThreadUserId(_threads[0]);
+    if (!onlyUserId) {
+        return null;
+    }
+
+    const selectedThread = _messagesContainer?.querySelector('.message-thread-item.selected');
+    const selectedUserId = selectedThread?.dataset?.userId || _currentConversationUserId;
+    if (selectedUserId === onlyUserId) {
+        return null;
+    }
+
+    return onlyUserId;
 }
 
 /**
@@ -245,7 +278,7 @@ function renderThreadList() {
             ? formatTime(new Date(lastMessage.created_at))
             : '';
 
-        const userId = Array.isArray(otherUsers) ? otherUsers[0] : otherUsers;
+        const userId = getThreadUserId(thread);
 
         html += `
             <div class="message-thread-item" data-user-id="${escapeHtml(userId)}"
@@ -364,13 +397,41 @@ function findRecommendationPanel(messageId) {
     ).find((panel) => panel.dataset.messageId === messageId) || null;
 }
 
-function formatFeedbackSummary(latestFeedback) {
+function readLatestFeedbackValue(latestFeedback, keys = []) {
     if (!latestFeedback || typeof latestFeedback !== 'object') {
-        return 'Record whether the recommendation and its explanation were useful.';
+        return '';
     }
-    const recommendation = String(latestFeedback.recommendation_usefulness || '').trim();
-    const explanation = String(latestFeedback.explanation_usefulness || '').trim();
-    const note = String(latestFeedback.free_text_feedback || '').trim();
+    for (const key of keys) {
+        const value = String(latestFeedback?.[key] || '').trim();
+        if (value) {
+            return value;
+        }
+    }
+    return '';
+}
+
+function normaliseLatestFeedback(latestFeedback) {
+    return {
+        recommendation_usefulness: readLatestFeedbackValue(latestFeedback, [
+            'recommendation_usefulness',
+            'recommendation_usefulness_label',
+        ]),
+        explanation_usefulness: readLatestFeedbackValue(latestFeedback, [
+            'explanation_usefulness',
+            'explanation_usefulness_label',
+        ]),
+        free_text_feedback: readLatestFeedbackValue(latestFeedback, [
+            'free_text_feedback',
+            'feedback_text',
+        ]),
+    };
+}
+
+function formatFeedbackSummary(latestFeedback) {
+    const feedback = normaliseLatestFeedback(latestFeedback);
+    const recommendation = feedback.recommendation_usefulness;
+    const explanation = feedback.explanation_usefulness;
+    const note = feedback.free_text_feedback;
     const bits = [];
     if (recommendation) bits.push(`Recommendation: ${recommendation.replace(/_/g, ' ')}`);
     if (explanation) bits.push(`Explanation: ${explanation.replace(/_/g, ' ')}`);
@@ -428,7 +489,7 @@ function appendMessageRecommendationFeedbackControls({ card, row, messageId }) {
     if (!card || !row?.assertion_concept_id) return;
 
     card.dataset.assertionConceptId = row.assertion_concept_id;
-    const latestFeedback = row?.latest_feedback || {};
+    const latestFeedback = normaliseLatestFeedback(row?.latest_feedback);
 
     const section = document.createElement('div');
     section.className = 'message-recommendation-feedback';
@@ -469,9 +530,9 @@ function appendMessageRecommendationFeedbackControls({ card, row, messageId }) {
     const recommendationSelect = controls.querySelector('[data-feedback-field="recommendation_usefulness"]');
     const explanationSelect = controls.querySelector('[data-feedback-field="explanation_usefulness"]');
     const noteInput = controls.querySelector('[data-feedback-field="feedback_text"]');
-    if (recommendationSelect) recommendationSelect.value = latestFeedback?.recommendation_usefulness || '';
-    if (explanationSelect) explanationSelect.value = latestFeedback?.explanation_usefulness || '';
-    if (noteInput) noteInput.value = latestFeedback?.free_text_feedback || '';
+    if (recommendationSelect) recommendationSelect.value = latestFeedback.recommendation_usefulness;
+    if (explanationSelect) explanationSelect.value = latestFeedback.explanation_usefulness;
+    if (noteInput) noteInput.value = latestFeedback.free_text_feedback;
 
     const actions = document.createElement('div');
     actions.className = 'message-recommendation-actions';
