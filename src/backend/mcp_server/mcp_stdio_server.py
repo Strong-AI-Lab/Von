@@ -124,6 +124,7 @@ if TYPE_CHECKING:
         _testing_verify_arxiv_paper_ingestion_result,
         _turn_execution_backfill_from_chat_history,
         _turn_execution_build_benchmark,
+        _turn_execution_build_context_answering_benchmark,
         _turn_execution_build_dashboard,
         _turn_execution_build_selector_benchmark,
         _turn_execution_get,
@@ -345,6 +346,7 @@ _bind_imports(
         "_skill_catalogue_sync",
         "_undo_relationship_removal",
         "_turn_execution_build_benchmark",
+        "_turn_execution_build_context_answering_benchmark",
         "_turn_execution_build_selector_benchmark",
         "_turn_execution_build_dashboard",
         "_turn_execution_backfill_from_chat_history",
@@ -3522,6 +3524,16 @@ async def _handle_turn_execution_build_selector_benchmark(
     )
 
 
+async def _handle_turn_execution_build_context_answering_benchmark(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _turn_execution_build_context_answering_benchmark,
+        arguments,
+        tool_family_label="TurnExecution",
+    )
+
+
 async def _handle_turn_execution_build_dashboard(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
@@ -4145,6 +4157,7 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "turn_execution_get_critic_bundle": _handle_turn_execution_get_critic_bundle,
     "turn_execution_search_failures": _handle_turn_execution_search_failures,
     "turn_execution_build_benchmark": _handle_turn_execution_build_benchmark,
+    "turn_execution_build_context_answering_benchmark": _handle_turn_execution_build_context_answering_benchmark,
     "turn_execution_build_selector_benchmark": _handle_turn_execution_build_selector_benchmark,
     "turn_execution_build_dashboard": _handle_turn_execution_build_dashboard,
     "turn_execution_backfill_from_chat_history": _handle_turn_execution_backfill_from_chat_history,

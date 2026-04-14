@@ -416,6 +416,69 @@ def test_structured_calling_path_used_when_available(orchestrator):
     assert result.tool_invocations[0]["tool"] == "search_knowledge_base"
 
 
+def test_structured_tool_pipeline_preserves_answer_first_represented_context_response(
+    orchestrator, mock_gateway
+):
+    class _RepresentedContextLLM:
+        def __init__(self) -> None:
+            self.generate_called = 0
+            self.generate_with_tools_called = 0
+
+        def _should_use_structured_calling(self) -> bool:
+            return True
+
+        def generate(self, prompt, context=None, model=None):
+            self.generate_called += 1
+            return "Michael Witbrock is affiliated with Test Org."
+
+        def generate_with_tools(
+            self,
+            prompt: str,
+            available_tools: List[ToolDefinition],
+            context: Optional[Sequence[Mapping[str, Any]]] = None,
+            model: Optional[str] = None,
+            system_message: Optional[str] = None,
+        ) -> LLMResponse:
+            self.generate_with_tools_called += 1
+            return LLMResponse(
+                text_response="I will check the represented knowledge.",
+                tool_calls=[
+                    ToolCall(
+                        tool_name="search_knowledge_base",
+                        payload={"query": "Michael Witbrock affiliation"},
+                        call_id="call_ctx_1",
+                    )
+                ],
+            )
+
+    mock_result = MagicMock()
+    mock_result.payload = {
+        "results": [
+            {
+                "concept_id": "#V#michael_witbrock",
+                "text": "Michael Witbrock is affiliated with Test Org.",
+            }
+        ]
+    }
+    mock_result.duration_ms = 50
+    mock_gateway.invoke.return_value = mock_result
+
+    llm_client = _RepresentedContextLLM()
+    result = orchestrator.run(
+        prompt="Which organisation is Michael Witbrock affiliated with in the represented knowledge?",
+        context=[],
+        llm_client=llm_client,
+        model="gpt-4",
+        user_namespace="#V#test_user",
+    )
+
+    assert llm_client.generate_with_tools_called == 1
+    assert len(result.tool_invocations) == 1
+    assert result.tool_invocations[0]["tool"] == "search_knowledge_base"
+    assert result.response_text == "Michael Witbrock is affiliated with Test Org."
+    assert "Execution status:" not in result.response_text
+
+
 def test_legacy_fallback_when_structured_disabled(orchestrator):
     """Test that legacy path is used when feature flag disabled."""
     llm_client = MockLLMClientWithTools(should_use_structured=False)

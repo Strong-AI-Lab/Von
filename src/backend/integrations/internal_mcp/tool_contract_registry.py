@@ -148,6 +148,7 @@ VONTOLOGY_STDIO_EXPOSED_TOOL_NAMES: tuple[str, ...] = (
     "turn_execution_get_live_progress",
     "turn_execution_search_failures",
     "turn_execution_build_benchmark",
+    "turn_execution_build_context_answering_benchmark",
     "turn_execution_build_selector_benchmark",
     "turn_execution_build_dashboard",
     "turn_execution_backfill_from_chat_history",

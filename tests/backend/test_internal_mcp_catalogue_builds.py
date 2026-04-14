@@ -15,6 +15,7 @@ def test_internal_mcp_catalogue_builds_and_includes_relationship_tools():
     assert "turn_execution_get_critic_bundle" in methods
     assert "turn_execution_search_failures" in methods
     assert "turn_execution_build_benchmark" in methods
+    assert "turn_execution_build_context_answering_benchmark" in methods
     assert "turn_execution_build_selector_benchmark" in methods
     assert "turn_execution_build_dashboard" in methods
     assert "turn_execution_backfill_from_chat_history" in methods

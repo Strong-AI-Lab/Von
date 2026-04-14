@@ -22,6 +22,8 @@ class _IdentityLLM:
         )
         if isinstance(prompt, str) and prompt.strip() == "Select workflow":
             return CHAT_ASSISTANT_WORKFLOW_ID
+        if isinstance(prompt, str) and "organisation" in prompt.lower():
+            return "You are in Test Org (#V#test_org)."
         return "You are Test User (#V#test_user)."
 
 
@@ -214,3 +216,41 @@ def test_generate_authenticated_identity_turn_uses_direct_response_and_records_p
     assert selected_workflow_trace.get("child_workflow_final_state") == "plain_response"
 
     assert len(llm.calls) >= 2
+
+
+def test_generate_authenticated_organisation_turn_uses_direct_response_and_preserves_org_context_telemetry(
+    monkeypatch,
+) -> None:
+    llm = _IdentityLLM()
+    app = _make_app(monkeypatch, llm=llm)
+
+    client = app.test_client()
+    response = client.post("/von/generate", json={"prompt": "Which organisation am I in?"})
+    assert response.status_code == 200
+
+    body = response.get_json()
+    assert isinstance(body, dict)
+    assert body.get("response") == "You are in Test Org (#V#test_org)."
+
+    llm_debug = body.get("llm_debug") or {}
+    diagnostics = llm_debug.get("turn_execution_diagnostics") or {}
+    workflow_routing_diagnostics = diagnostics.get("workflow_routing_diagnostics") or {}
+    dispatch = workflow_routing_diagnostics.get("dispatch") or {}
+    assert dispatch.get("selected_execution_mode") == "direct_response"
+    assert dispatch.get("dispatch_workflow_id") == CHAT_ASSISTANT_WORKFLOW_ID
+
+    turn_record = llm_debug.get("turn_execution_record") or {}
+    completion_report = turn_record.get("completion_report") or {}
+    assert completion_report.get("response_text") == "You are in Test Org (#V#test_org)."
+    execution = turn_record.get("execution") or {}
+    selected_workflow_trace = execution.get("selected_workflow_trace") or {}
+    assert selected_workflow_trace.get("selected_execution_mode") == "direct_response"
+    assert selected_workflow_trace.get("child_workflow_final_state") == "plain_response"
+
+    context_text = "\n".join(
+        str(message.get("content") or "")
+        for call in llm.calls
+        for message in (call.get("context") or [])
+        if isinstance(message, dict)
+    )
+    assert "CURRENT ORGANISATION CONTEXT: Test Org (#V#test_org)" in context_text

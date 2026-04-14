@@ -2465,6 +2465,65 @@ def test_turn_execution_build_selector_benchmark_gateway_e2e():
     assert signal_by_id["abstain_cases_routed_safely"]["status"] == "pass"
 
 
+def test_turn_execution_build_context_answering_benchmark_gateway_e2e():
+    gateway = _build_gateway()
+    payload = gateway.invoke(
+        "turn_execution_build_context_answering_benchmark",
+        {"case_set": "phase1_seed"},
+    ).payload
+
+    assert payload["success"] is True
+    metrics = payload.get("metrics")
+    assert isinstance(metrics, dict)
+    assert metrics.get("scanned_count") == 5
+    assert metrics.get("exact_path_case_count") == 5
+    assert metrics.get("telemetry_check_count") == 10
+    assert (
+        metrics.get("authoritative_source_counts", {}).get("represented_context") == 1
+    )
+    assert metrics.get("execution_mode_counts", {}).get("tool_pipeline") == 1
+    assert metrics.get("answer_property_counts", {}).get("answer_first") == 5
+
+    corpus = payload.get("corpus")
+    assert isinstance(corpus, dict)
+    assert corpus.get("source") == "seed_bundle"
+    assert corpus.get("case_set") == "phase1_seed"
+
+    replay_cases = payload.get("replay_cases")
+    assert isinstance(replay_cases, list)
+    represented_case = next(
+        case
+        for case in replay_cases
+        if isinstance(case, dict)
+        and case.get("case_id") == "represented_context_tool_pipeline_answer"
+    )
+    assert represented_case["expected_execution_mode"] == "tool_pipeline"
+
+    signal_by_id = {
+        signal.get("signal_id"): signal
+        for signal in payload.get("benchmark_signals") or []
+        if isinstance(signal, dict)
+    }
+    assert (
+        signal_by_id["context_grounded_benchmark_corpus_present"]["status"]
+        == "pass"
+    )
+    assert (
+        signal_by_id["required_context_grounding_classes_present"]["status"]
+        == "pass"
+    )
+    assert signal_by_id["authoritative_sources_represented"]["status"] == "pass"
+    assert (
+        signal_by_id[
+            "execution_modes_cover_direct_tool_and_workflow_paths"
+        ]["status"]
+        == "pass"
+    )
+    assert (
+        signal_by_id["benchmark_backed_by_exact_path_validation"]["status"] == "pass"
+    )
+
+
 def test_turn_execution_build_selector_benchmark_supports_entity_representation_case_set():
     gateway = _build_gateway()
     payload = gateway.invoke(

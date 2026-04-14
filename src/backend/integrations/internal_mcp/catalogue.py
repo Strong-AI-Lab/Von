@@ -11704,6 +11704,53 @@ def _turn_execution_build_selector_benchmark(**kwargs):
     )
 
 
+def _turn_execution_build_context_answering_benchmark(**kwargs):
+    from ...services.context_grounded_answering_benchmark_service import (
+        build_context_grounded_answering_benchmark_report,
+    )
+
+    inline_cases = kwargs.get("cases")
+    try:
+        result = build_context_grounded_answering_benchmark_report(
+            cases=inline_cases if isinstance(inline_cases, list) else None,
+            case_set=kwargs.get("case_set"),
+            max_cases=kwargs.get("max_cases"),
+            bundle_path=kwargs.get("bundle_path"),
+        )
+    except ValueError as exc:
+        return make_error_response(
+            "context_grounded_answering_benchmark_invalid_input",
+            "Context-grounded answering benchmark could not be built from the requested corpus.",
+            details={"error": str(exc)},
+        )
+    except Exception as exc:
+        return make_error_response(
+            "context_grounded_answering_benchmark_build_failed",
+            "Context-grounded answering benchmark evaluation failed.",
+            details={"error": str(exc)},
+        )
+
+    if not isinstance(result, dict):
+        return result
+
+    corpus = result.get("corpus")
+    source = (
+        str(corpus.get("source")).strip()
+        if isinstance(corpus, Mapping) and isinstance(corpus.get("source"), str)
+        else "unknown"
+    )
+    source_system = (
+        "repo.context_grounded_answering_benchmark_seed_bundle"
+        if source == "seed_bundle"
+        else "inline.context_grounded_answering_benchmark_cases"
+    )
+    return _with_rag_provenance(
+        payload=result,
+        item_kind="context_grounded_answering_benchmark_report",
+        source_system=source_system,
+    )
+
+
 def _turn_execution_build_dashboard(**kwargs):
     from ...services.minimal_imposition_benchmark_service import (
         build_minimal_imposition_assessment,
@@ -26822,6 +26869,28 @@ def build_default_catalogue() -> MethodCatalogue:
             category="read",
             description=(
                 "Evaluate workflow selector routing against a reviewable benchmark corpus while emitting the shared execution-correctness outcome labels."
+            ),
+        ),
+        MethodDefinition(
+            name="turn_execution_build_context_answering_benchmark",
+            handler=_turn_execution_build_context_answering_benchmark,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "cases": (list,),
+                    "case_set": (str, type(None)),
+                    "max_cases": (int,),
+                    "bundle_path": (str, type(None)),
+                },
+                allow_unknown=True,
+                description=(
+                    "Build context-grounded answering benchmark coverage and acceptance signals from explicit corpus cases or the repo seed bundle."
+                ),
+            ),
+            output_schema=None,
+            category="read",
+            description=(
+                "Evaluate context-grounded answering coverage across direct-response, tool-pipeline, continuation, and workflow-result answer paths."
             ),
         ),
         MethodDefinition(

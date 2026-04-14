@@ -113,6 +113,7 @@ def test_testing_and_turn_execution_tools_are_exposed_on_vontology_stdio_surface
         "turn_execution_get_critic_bundle",
         "turn_execution_search_failures",
         "turn_execution_build_benchmark",
+        "turn_execution_build_context_answering_benchmark",
         "turn_execution_build_selector_benchmark",
         "turn_execution_build_dashboard",
         "turn_execution_backfill_from_chat_history",

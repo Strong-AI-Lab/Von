@@ -1,0 +1,229 @@
+{
+  "schema_version": "context_grounded_answering_benchmark.seed_bundle.v1",
+  "default_case_set": "phase1_seed",
+  "case_sets": {
+    "phase1_seed": [
+      {
+        "case_id": "authenticated_identity_direct_response",
+        "prompt_text": "Who am I?",
+        "expected_authoritative_source": "authenticated_user_context",
+        "expected_execution_mode": "direct_response",
+        "expected_workflow_id": "#V#chat_assistant_workflow",
+        "coverage_tags": [
+          "authenticated_self_identity",
+          "mixed_direct_response_vs_workflow",
+          "answer_first_rendering"
+        ],
+        "answer_properties": [
+          {
+            "property_id": "answer_first",
+            "description": "The response should answer directly rather than foregrounding execution bookkeeping."
+          },
+          {
+            "property_id": "names_authenticated_user",
+            "description": "The response should surface the authenticated user identity."
+          }
+        ],
+        "telemetry_checks": [
+          {
+            "check_id": "dispatch_mode_direct_response",
+            "field_path": "llm_debug.turn_execution_diagnostics.workflow_routing_diagnostics.dispatch.selected_execution_mode",
+            "expected_value": "direct_response"
+          },
+          {
+            "check_id": "selected_trace_plain_response",
+            "field_path": "llm_debug.turn_execution_record.execution.selected_workflow_trace.child_workflow_final_state",
+            "expected_value": "plain_response"
+          }
+        ],
+        "validation_surfaces": [
+          {
+            "surface_kind": "exact_path_test",
+            "reference": "tests/backend/test_von_generate_authenticated_identity_routing.py::test_generate_authenticated_identity_turn_uses_direct_response_and_records_plain_response_telemetry"
+          }
+        ],
+        "jira_issue_keys": [
+          "JVNAUTOSCI-1859",
+          "JVNAUTOSCI-1863"
+        ],
+        "notes": "Recent live failure family: authenticated identity prompt should answer from injected user context on the direct-response path."
+      },
+      {
+        "case_id": "authenticated_organisation_direct_response",
+        "prompt_text": "Which organisation am I in?",
+        "expected_authoritative_source": "authenticated_org_context",
+        "expected_execution_mode": "direct_response",
+        "expected_workflow_id": "#V#chat_assistant_workflow",
+        "coverage_tags": [
+          "organisation_self_context",
+          "mixed_direct_response_vs_workflow",
+          "answer_first_rendering"
+        ],
+        "answer_properties": [
+          {
+            "property_id": "answer_first",
+            "description": "The response should answer directly rather than foregrounding execution bookkeeping."
+          },
+          {
+            "property_id": "names_authenticated_org",
+            "description": "The response should surface the authenticated organisation identity."
+          }
+        ],
+        "telemetry_checks": [
+          {
+            "check_id": "dispatch_mode_direct_response",
+            "field_path": "llm_debug.turn_execution_diagnostics.workflow_routing_diagnostics.dispatch.selected_execution_mode",
+            "expected_value": "direct_response"
+          },
+          {
+            "check_id": "org_context_prompt_presence",
+            "field_path": "llm_context.system.CURRENT_ORGANISATION_CONTEXT",
+            "expected_value": "CURRENT ORGANISATION CONTEXT"
+          }
+        ],
+        "validation_surfaces": [
+          {
+            "surface_kind": "exact_path_test",
+            "reference": "tests/backend/test_von_generate_authenticated_identity_routing.py::test_generate_authenticated_organisation_turn_uses_direct_response_and_preserves_org_context_telemetry"
+          }
+        ],
+        "jira_issue_keys": [
+          "JVNAUTOSCI-1863"
+        ],
+        "notes": "Organisation-context answering was an explicitly missing class on the acceptance surface."
+      },
+      {
+        "case_id": "continuation_arxiv_launch_projection",
+        "prompt_text": "Download and represent the paper",
+        "expected_authoritative_source": "workflow_continuation_context",
+        "expected_execution_mode": "custom_workflow",
+        "expected_workflow_id": "#V#arxiv_paper_representation_workflow",
+        "coverage_tags": [
+          "continuation_referent_resolution",
+          "answer_first_rendering"
+        ],
+        "answer_properties": [
+          {
+            "property_id": "answer_first",
+            "description": "The response should present the successful continuation outcome rather than execution bookkeeping."
+          },
+          {
+            "property_id": "projects_continuation_launch_inputs",
+            "description": "The selected workflow should receive the resolved arXiv source and identifier from continuation context."
+          }
+        ],
+        "telemetry_checks": [
+          {
+            "check_id": "workflow_routing_selected_arxiv_workflow",
+            "field_path": "llm_debug.workflow_routing.workflow_id",
+            "expected_value": "#V#arxiv_paper_representation_workflow"
+          },
+          {
+            "check_id": "launch_inputs_include_arxiv_identifier",
+            "field_path": "captured_data.workflow_continuation_launch_inputs.arxiv_id",
+            "expected_value": "2501.00663"
+          }
+        ],
+        "validation_surfaces": [
+          {
+            "surface_kind": "exact_path_test",
+            "reference": "tests/backend/test_von_generate_bare_arxiv_url_integration.py::test_generate_continuation_turn_projects_arxiv_identifier_from_context"
+          }
+        ],
+        "jira_issue_keys": [
+          "JVNAUTOSCI-1858",
+          "JVNAUTOSCI-1863"
+        ],
+        "notes": "Recent live continuation failure family: the selector chose the correct workflow but the launch lost the identifier."
+      },
+      {
+        "case_id": "bare_arxiv_specialised_workflow_result",
+        "prompt_text": "https://arxiv.org/abs/2510.06248",
+        "expected_authoritative_source": "workflow_result",
+        "expected_execution_mode": "custom_workflow",
+        "expected_workflow_id": "#V#arxiv_paper_representation_workflow",
+        "coverage_tags": [
+          "mixed_direct_response_vs_workflow",
+          "answer_first_rendering"
+        ],
+        "answer_properties": [
+          {
+            "property_id": "answer_first",
+            "description": "The response should surface the successful workflow outcome rather than selector or execution bookkeeping."
+          },
+          {
+            "property_id": "surfaces_created_concepts",
+            "description": "The response should surface the created or linked scholarly-paper/file-copy results."
+          }
+        ],
+        "telemetry_checks": [
+          {
+            "check_id": "workflow_routing_selected_arxiv_workflow",
+            "field_path": "llm_debug.workflow_routing.workflow_id",
+            "expected_value": "#V#arxiv_paper_representation_workflow"
+          },
+          {
+            "check_id": "turn_record_selected_workflow",
+            "field_path": "llm_debug.turn_execution_record.workflow_selection.selected_workflow_id",
+            "expected_value": "#V#arxiv_paper_representation_workflow"
+          }
+        ],
+        "validation_surfaces": [
+          {
+            "surface_kind": "exact_path_test",
+            "reference": "tests/backend/test_von_generate_bare_arxiv_url_integration.py::test_generate_bare_arxiv_url_routes_to_specialised_workflow_and_surfaces_created_concepts"
+          }
+        ],
+        "jira_issue_keys": [
+          "JVNAUTOSCI-1856",
+          "JVNAUTOSCI-1863"
+        ],
+        "notes": "Recent live failure family: bare arXiv URLs should select the specialised route and answer from the workflow result."
+      },
+      {
+        "case_id": "represented_context_tool_pipeline_answer",
+        "prompt_text": "Which organisation is Michael Witbrock affiliated with in the represented knowledge?",
+        "expected_authoritative_source": "represented_context",
+        "expected_execution_mode": "tool_pipeline",
+        "expected_workflow_id": "#V#tool_calling_workflow",
+        "coverage_tags": [
+          "represented_context_factual_answering",
+          "mixed_direct_response_vs_workflow",
+          "answer_first_rendering"
+        ],
+        "answer_properties": [
+          {
+            "property_id": "answer_first",
+            "description": "The response should return the represented fact instead of a workflow-status narration."
+          },
+          {
+            "property_id": "surfaces_represented_fact",
+            "description": "The response should surface the represented factual answer grounded by the tool result."
+          }
+        ],
+        "telemetry_checks": [
+          {
+            "check_id": "tool_pipeline_search_invoked",
+            "field_path": "result.tool_invocations[0].tool",
+            "expected_value": "search_knowledge_base"
+          },
+          {
+            "check_id": "tool_pipeline_answer_first",
+            "field_path": "result.response_text",
+            "expected_value": "Michael Witbrock is affiliated with Test Org."
+          }
+        ],
+        "validation_surfaces": [
+          {
+            "surface_kind": "exact_path_test",
+            "reference": "tests/backend/test_orchestrator_structured_calling.py::test_structured_tool_pipeline_preserves_answer_first_represented_context_response"
+          }
+        ],
+        "jira_issue_keys": [
+          "JVNAUTOSCI-1863"
+        ],
+        "notes": "This closes the previously missing represented-context factual-answering class on the maintained benchmark surface."
+      }
+    ]
+  }
+}
