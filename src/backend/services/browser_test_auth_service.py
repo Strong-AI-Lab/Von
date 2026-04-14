@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import os
 import re
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 from flask import current_app, has_request_context, request, session
 
@@ -32,6 +32,15 @@ from ..services.message_service import (
 )
 from ..services.namespace_service import derive_namespace
 from ..services.organisation_membership_service import create_organisation_membership
+from ..services.paper_recommendation_constants import (
+    PAPER_RECOMMENDATION_DELIVERED_VIA_MESSAGE_PREDICATE_ID,
+    PAPER_RECOMMENDATION_POLICY_VERSION,
+    SCHOLARLY_ARTICLE_TYPE_ID,
+)
+from ..services.paper_recommendation_vontology_service import (
+    upsert_paper_recommendation_assertion,
+)
+from ..services.relationship_write_service import add_relationship
 from ..services.settings_service import (
     MultipleUsersForEmailError,
     _find_user_concept_by_email,
@@ -41,6 +50,7 @@ from ..services.window_session_context_service import (
     set_window_chat_session,
     set_window_organisation,
 )
+from .coding_agent_identity_bootstrap_service import VON_SYSTEM_ID
 
 _BROWSER_TEST_FIXTURE_ID = "browser_user_view.v1"
 _LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
@@ -52,6 +62,22 @@ _BROWSER_TEST_ENV_KEYS = (
     "VON_BROWSER_TEST_PSEUDOUSER_CONCEPT_ID",
     "VON_BROWSER_TEST_ORGANISATION_CONCEPT_ID",
 )
+_BROWSER_TEST_RECOMMENDATION_PAPER_ID = (
+    "#V#browser_test_paper_workflow_grounded_neuro_symbolic_planning"
+)
+_BROWSER_TEST_RECOMMENDATION_PAPER_TITLE = (
+    "Workflow-Grounded Neuro-Symbolic Planning for Research Agents"
+)
+_BROWSER_TEST_RECOMMENDATION_PUBLICATION_DATE = "2026-03-14"
+_BROWSER_TEST_RECOMMENDATION_SUMMARY = (
+    "A browser-fixture paper about neuro-symbolic planning, workflow-grounded "
+    "evaluation, and durable represented authority surfaces."
+)
+_BROWSER_TEST_RECOMMENDATION_RATIONALE = (
+    "Matches stated interests: neuro-symbolic planning, workflow-grounded "
+    "evaluation, and represented-authority design."
+)
+_BROWSER_TEST_PUBLICATION_DATE_PREDICATE_ID = "#V#has_publication_date"
 
 
 @dataclass(frozen=True)
@@ -323,6 +349,195 @@ def _current_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _browser_test_fixture_provenance(**extra: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "source": "browser_test_fixture",
+        "fixture_id": _BROWSER_TEST_FIXTURE_ID,
+    }
+    for key, value in extra.items():
+        if value is None:
+            continue
+        payload[str(key)] = value
+    return payload
+
+
+def _browser_test_message_participant_signature(
+    *,
+    sender_id: str,
+    recipient_ids: Iterable[str],
+) -> str:
+    sender = str(sender_id or "").strip()
+    recipients = sorted(
+        {
+            str(recipient_id).strip()
+            for recipient_id in (recipient_ids or [])
+            if str(recipient_id or "").strip()
+        }
+    )
+    return f"{sender}|{'|'.join(recipients)}"
+
+
+def _build_fixture_message_metadata(*, spec: Mapping[str, Any]) -> dict[str, Any]:
+    metadata = dict(spec.get("metadata") or {})
+    metadata.update(
+        {
+            "browser_test_fixture_id": _BROWSER_TEST_FIXTURE_ID,
+            "browser_test_message_key": str(spec["key"]),
+            "browser_test_seeded_at": _current_iso(),
+        }
+    )
+    target_user_concept_id = str(spec.get("target_user_concept_id") or "").strip()
+    if target_user_concept_id:
+        metadata["browser_test_target_user_concept_id"] = target_user_concept_id
+    metadata["browser_test_participant_signature"] = (
+        _browser_test_message_participant_signature(
+            sender_id=str(spec.get("sender_id") or ""),
+            recipient_ids=spec.get("recipient_ids") or [],
+        )
+    )
+    return metadata
+
+
+def _link_fixture_message_metadata(
+    *,
+    message_concept_id: str,
+    metadata: Mapping[str, Any],
+) -> None:
+    if not isinstance(metadata, Mapping):
+        return
+    if str(metadata.get("delivery_channel") or "").strip() != "paper_recommendation_message":
+        return
+    assertion_ids = metadata.get("recommendation_assertion_ids")
+    if not isinstance(assertion_ids, list):
+        return
+    for assertion_id in assertion_ids:
+        clean_assertion_id = str(assertion_id or "").strip()
+        if not clean_assertion_id:
+            continue
+        add_relationship(
+            source_id=clean_assertion_id,
+            predicate=PAPER_RECOMMENDATION_DELIVERED_VIA_MESSAGE_PREDICATE_ID,
+            target=message_concept_id,
+        )
+
+
+def _ensure_fixture_recommendation_paper(*, concept_id: str) -> dict[str, Any]:
+    with bypass_access_control():
+        try:
+            concept_doc = get_concept_by_concept_id(concept_id)
+        except ConceptNotFoundError:
+            concept_doc = create_concept(
+                name=_BROWSER_TEST_RECOMMENDATION_PAPER_TITLE,
+                concept_id=concept_id,
+                description=_BROWSER_TEST_RECOMMENDATION_SUMMARY,
+                parent_concept_ids=[SCHOLARLY_ARTICLE_TYPE_ID],
+                create_as_instance=True,
+            )
+
+        upsert_text_for_concept(
+            subject_concept_id=concept_id,
+            predicate="hasDescription",
+            text=_BROWSER_TEST_RECOMMENDATION_SUMMARY,
+            provenance=_browser_test_fixture_provenance(
+                fixture_surface="paper_recommendation_message",
+            ),
+        )
+        upsert_text_for_concept(
+            subject_concept_id=concept_id,
+            predicate=_BROWSER_TEST_PUBLICATION_DATE_PREDICATE_ID,
+            text=_BROWSER_TEST_RECOMMENDATION_PUBLICATION_DATE,
+            provenance=_browser_test_fixture_provenance(
+                fixture_surface="paper_recommendation_message",
+            ),
+        )
+        return concept_doc if isinstance(concept_doc, dict) else {"concept_id": concept_id}
+
+
+def _paper_recommendation_fixture_spec(
+    *,
+    pseudouser_concept_id: str,
+    organisation_concept_id: str,
+) -> dict[str, Any]:
+    paper_concept_id = _BROWSER_TEST_RECOMMENDATION_PAPER_ID
+    _ensure_fixture_recommendation_paper(concept_id=paper_concept_id)
+    evaluation_payload = {
+        "schema_version": "paper_recommendation_evaluation.v1",
+        "status": "ranked",
+        "active": True,
+        "score": 0.88,
+        "recommendation_tier": "recommended",
+        "policy_version": PAPER_RECOMMENDATION_POLICY_VERSION,
+        "decision_mode": "browser_test_fixture",
+        "trigger_source": "browser_test_fixture_refresh",
+        "rationale_summary": _BROWSER_TEST_RECOMMENDATION_RATIONALE,
+        "rationale": [_BROWSER_TEST_RECOMMENDATION_RATIONALE],
+        "evidence": [
+            {
+                "evidence_type": "interest_term_match",
+                "profile_value": "workflow-grounded evaluation",
+                "matched_paper_text": "workflow-grounded evaluation of research agents",
+                "paper_reference_id": "browser-fixture-paper-summary",
+            }
+        ],
+        "paper_representation": {
+            "publication_date": _BROWSER_TEST_RECOMMENDATION_PUBLICATION_DATE,
+            "topic_labels": [
+                "neuro-symbolic planning",
+                "workflow-grounded evaluation",
+                "represented authority",
+            ],
+            "author_names": [
+                "Browser Fixture Research Collective",
+            ],
+        },
+        "provenance": _browser_test_fixture_provenance(
+            fixture_surface="message_panel.paper_recommendation_review",
+        ),
+    }
+    assertion = upsert_paper_recommendation_assertion(
+        subject_concept_id=pseudouser_concept_id,
+        paper_concept_id=paper_concept_id,
+        evaluation_payload=evaluation_payload,
+        rationale_summary=_BROWSER_TEST_RECOMMENDATION_RATIONALE,
+        provenance=_browser_test_fixture_provenance(
+            fixture_surface="message_panel.paper_recommendation_review",
+        ),
+        context={
+            "browser_test_fixture_id": _BROWSER_TEST_FIXTURE_ID,
+            "subject_concept_id": pseudouser_concept_id,
+            "paper_concept_id": paper_concept_id,
+        },
+    )
+    assertion_id = str(assertion.get("assertion_concept_id") or "").strip()
+    if not assertion_id:
+        raise RuntimeError("Browser-test recommendation fixture failed to create an assertion")
+
+    return {
+        "key": "paper-recommendation",
+        "sender_id": VON_SYSTEM_ID,
+        "recipient_ids": [pseudouser_concept_id],
+        "subject": "New paper recommendation from Von",
+        "content": (
+            "I found a paper that looks relevant to your research profile. "
+            "Open Review recommendations to inspect the rationale, provenance, "
+            "and record feedback directly on the delivered message."
+        ),
+        "metadata": {
+            "attribution": "Sent by Von",
+            "delivery_channel": "paper_recommendation_message",
+            "intent": "paper_recommendation",
+            "trigger_source": "browser_test_fixture_refresh",
+            "recommendation_subject_concept_id": pseudouser_concept_id,
+            "recommendation_assertion_ids": [assertion_id],
+            "recommendation_paper_concept_ids": [paper_concept_id],
+            "recommendation_count": 1,
+        },
+        "mark_unread_for": pseudouser_concept_id,
+        "org_id": organisation_concept_id,
+        "target_user_concept_id": pseudouser_concept_id,
+    }
+
+
 def _message_fixture_specs(
     *,
     pseudouser_concept_id: str,
@@ -347,6 +562,7 @@ def _message_fixture_specs(
             },
             "mark_unread_for": pseudouser_concept_id,
             "org_id": organisation_concept_id,
+            "target_user_concept_id": pseudouser_concept_id,
         },
         {
             "key": "workflow-review-reply",
@@ -363,6 +579,7 @@ def _message_fixture_specs(
                 "delivery_channel": "interuser_message",
             },
             "org_id": organisation_concept_id,
+            "target_user_concept_id": pseudouser_concept_id,
         },
         {
             "key": "paper-digest",
@@ -380,7 +597,12 @@ def _message_fixture_specs(
             },
             "mark_unread_for": pseudouser_concept_id,
             "org_id": organisation_concept_id,
+            "target_user_concept_id": pseudouser_concept_id,
         },
+        _paper_recommendation_fixture_spec(
+            pseudouser_concept_id=pseudouser_concept_id,
+            organisation_concept_id=organisation_concept_id,
+        ),
     )
 
 
@@ -446,11 +668,26 @@ def _ensure_fixture_message(
         raise RuntimeError("Database not available for browser-test messages")
 
     key = spec["key"]
+    metadata = _build_fixture_message_metadata(spec=spec)
     query = {
         "relationships.is_an_instance_of": MESSAGE_TYPE_CONCEPT_ID,
-        "concept_data.metadata.browser_test_fixture_id": _BROWSER_TEST_FIXTURE_ID,
+        "concept_data.metadata.browser_test_fixture_id": metadata["browser_test_fixture_id"],
         "concept_data.metadata.browser_test_message_key": key,
     }
+    target_user_concept_id = str(
+        metadata.get("browser_test_target_user_concept_id") or ""
+    ).strip()
+    if target_user_concept_id:
+        query["concept_data.metadata.browser_test_target_user_concept_id"] = (
+            target_user_concept_id
+        )
+    participant_signature = str(
+        metadata.get("browser_test_participant_signature") or ""
+    ).strip()
+    if participant_signature:
+        query["concept_data.metadata.browser_test_participant_signature"] = (
+            participant_signature
+        )
     with bypass_access_control():
         existing = coll.find_one(query, {"concept_id": 1, "concept_data.read_by": 1})
     if isinstance(existing, dict) and existing.get("concept_id"):
@@ -460,6 +697,7 @@ def _ensure_fixture_message(
             "concept_data.content_fallback": spec.get("content"),
             "concept_data.message_status": MESSAGE_STATUS_SENT,
             "concept_data.deleted": False,
+            "concept_data.metadata": metadata,
         }
         if spec.get("mark_unread_for"):
             reset_payload["concept_data.read_by"] = []
@@ -475,16 +713,12 @@ def _ensure_fixture_message(
                 lang="en-NZ",
                 provenance={"source": "browser_test_fixture"},
             )
+            _link_fixture_message_metadata(
+                message_concept_id=existing["concept_id"],
+                metadata=metadata,
+            )
         return {"concept_id": existing["concept_id"], "created": False}
 
-    metadata = dict(spec.get("metadata") or {})
-    metadata.update(
-        {
-            "browser_test_fixture_id": _BROWSER_TEST_FIXTURE_ID,
-            "browser_test_message_key": key,
-            "browser_test_seeded_at": _current_iso(),
-        }
-    )
     created = create_message(
         sender_id=spec["sender_id"],
         recipient_ids=list(spec["recipient_ids"]),
@@ -493,6 +727,12 @@ def _ensure_fixture_message(
         org_id=spec.get("org_id"),
         metadata=metadata,
     )
+    message_concept_id = str(created.get("concept_id") or "").strip()
+    if message_concept_id:
+        _link_fixture_message_metadata(
+            message_concept_id=message_concept_id,
+            metadata=metadata,
+        )
     return {"concept_id": created.get("concept_id"), "created": True}
 
 

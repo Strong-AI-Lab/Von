@@ -18,8 +18,6 @@ class _FakeConceptCollection:
         self.docs: dict[str, dict] = {}
 
     def find_one(self, query, projection=None):
-        fixture_id = query.get("concept_data.metadata.browser_test_fixture_id")
-        message_key = query.get("concept_data.metadata.browser_test_message_key")
         concept_id = query.get("concept_id")
         if concept_id:
             doc = self.docs.get(concept_id)
@@ -33,10 +31,15 @@ class _FakeConceptCollection:
             }
         for doc in self.docs.values():
             metadata = ((doc.get("concept_data") or {}).get("metadata") or {})
-            if (
-                metadata.get("browser_test_fixture_id") == fixture_id
-                and metadata.get("browser_test_message_key") == message_key
-            ):
+            matches = True
+            for key, value in query.items():
+                if not isinstance(key, str) or not key.startswith("concept_data.metadata."):
+                    continue
+                metadata_key = key.split(".", 2)[2]
+                if metadata.get(metadata_key) != value:
+                    matches = False
+                    break
+            if matches:
                 return {
                     "concept_id": doc["concept_id"],
                     "concept_data": {
@@ -69,6 +72,7 @@ def test_ensure_fixture_message_reuses_existing_message(monkeypatch):
     fake_coll = _FakeConceptCollection()
     create_calls: list[str] = []
     upsert_calls: list[str] = []
+    relationship_calls: list[tuple[str, str, str]] = []
 
     def _fake_create_message(**kwargs):
         concept_id = f"#V#message_{len(create_calls) + 1}"
@@ -87,6 +91,13 @@ def test_ensure_fixture_message_reuses_existing_message(monkeypatch):
     monkeypatch.setattr(service, "create_message", _fake_create_message)
     monkeypatch.setattr(
         service,
+        "add_relationship",
+        lambda *, source_id, predicate, target: relationship_calls.append(
+            (source_id, predicate, target)
+        ),
+    )
+    monkeypatch.setattr(
+        service,
         "upsert_text_for_concept",
         lambda **kwargs: upsert_calls.append(kwargs["subject_concept_id"]),
     )
@@ -97,20 +108,110 @@ def test_ensure_fixture_message_reuses_existing_message(monkeypatch):
         "recipient_ids": ["#V#zhan_von_witbrock"],
         "subject": "Workflow preview needs a sanity check",
         "content": "Long browser-testing message content",
-        "metadata": {"intent": "review_request"},
+        "metadata": {
+            "intent": "paper_recommendation",
+            "delivery_channel": "paper_recommendation_message",
+            "recommendation_assertion_ids": ["#V#assertion_1"],
+        },
         "mark_unread_for": "#V#zhan_von_witbrock",
         "org_id": "#V#university_of_auckland_strong_ai_lab",
+        "target_user_concept_id": "#V#zhan_von_witbrock",
     }
 
     first = service._ensure_fixture_message(spec=spec)
     fake_coll.docs[first["concept_id"]]["concept_data"]["read_by"] = ["#V#zhan_von_witbrock"]
+    fake_coll.docs[first["concept_id"]]["concept_data"]["metadata"]["intent"] = "review_request"
+    fake_coll.docs[first["concept_id"]]["concept_data"]["metadata"]["delivery_channel"] = (
+        "interuser_message"
+    )
     second = service._ensure_fixture_message(spec=spec)
 
     assert first["created"] is True
     assert second["created"] is False
     assert len(create_calls) == 1
     assert fake_coll.docs[first["concept_id"]]["concept_data"]["read_by"] == []
+    assert (
+        fake_coll.docs[first["concept_id"]]["concept_data"]["metadata"]["delivery_channel"]
+        == "paper_recommendation_message"
+    )
+    assert (
+        fake_coll.docs[first["concept_id"]]["concept_data"]["metadata"][
+            "browser_test_target_user_concept_id"
+        ]
+        == "#V#zhan_von_witbrock"
+    )
     assert upsert_calls == [first["concept_id"]]
+    assert relationship_calls == [
+        (
+            "#V#assertion_1",
+            service.PAPER_RECOMMENDATION_DELIVERED_VIA_MESSAGE_PREDICATE_ID,
+            first["concept_id"],
+        ),
+        (
+            "#V#assertion_1",
+            service.PAPER_RECOMMENDATION_DELIVERED_VIA_MESSAGE_PREDICATE_ID,
+            first["concept_id"],
+        ),
+    ]
+
+
+def test_ensure_fixture_message_creates_new_message_for_different_target_user(monkeypatch):
+    fake_coll = _FakeConceptCollection()
+    create_calls: list[str] = []
+
+    fake_coll.docs["#V#message_existing"] = {
+        "concept_id": "#V#message_existing",
+        "concept_data": {
+            "metadata": {
+                "browser_test_fixture_id": "browser_user_view.v1",
+                "browser_test_message_key": "workflow-review-request",
+                "browser_test_target_user_concept_id": "#V#zhan_von_witbrock",
+                "browser_test_participant_signature": (
+                    "#V#browser_test_workflow_reviewer|#V#zhan_von_witbrock"
+                ),
+            },
+            "read_by": [],
+            "content_fallback": "Old content",
+        },
+    }
+
+    def _fake_create_message(**kwargs):
+        concept_id = f"#V#message_{len(create_calls) + 1}"
+        create_calls.append(concept_id)
+        fake_coll.docs[concept_id] = {
+            "concept_id": concept_id,
+            "concept_data": {
+                "metadata": dict(kwargs["metadata"]),
+                "read_by": [],
+                "content_fallback": kwargs["content"],
+            },
+        }
+        return {"concept_id": concept_id}
+
+    monkeypatch.setattr(service, "get_concepts_collection", lambda: fake_coll)
+    monkeypatch.setattr(service, "create_message", _fake_create_message)
+    monkeypatch.setattr(service, "upsert_text_for_concept", lambda **kwargs: None)
+    monkeypatch.setattr(service, "add_relationship", lambda **kwargs: None)
+
+    spec = {
+        "key": "workflow-review-request",
+        "sender_id": "#V#browser_test_workflow_reviewer",
+        "recipient_ids": ["#V#codex_browser_fixture"],
+        "subject": "Workflow preview needs a sanity check",
+        "content": "Long browser-testing message content",
+        "metadata": {"intent": "review_request", "delivery_channel": "interuser_message"},
+        "mark_unread_for": "#V#codex_browser_fixture",
+        "org_id": "#V#university_of_auckland_strong_ai_lab",
+        "target_user_concept_id": "#V#codex_browser_fixture",
+    }
+
+    result = service._ensure_fixture_message(spec=spec)
+
+    assert result["created"] is True
+    assert create_calls == ["#V#message_1"]
+    assert fake_coll.docs["#V#message_existing"]["concept_data"]["metadata"][
+        "browser_test_target_user_concept_id"
+    ] == "#V#zhan_von_witbrock"
 
 
 def test_ensure_fixture_chat_session_skips_duplicate_history_entries(monkeypatch):
@@ -270,6 +371,24 @@ def test_login_browser_test_user_handles_existing_counterpart_name_variants(
     )
     monkeypatch.setattr(
         service,
+        "_paper_recommendation_fixture_spec",
+        lambda *, pseudouser_concept_id, organisation_concept_id: {
+            "key": "paper-recommendation",
+            "sender_id": "#V#von_system",
+            "recipient_ids": [pseudouser_concept_id],
+            "subject": "New paper recommendation from Von",
+            "content": "Recommendation fixture content",
+            "metadata": {
+                "delivery_channel": "paper_recommendation_message",
+                "recommendation_assertion_ids": ["#V#assertion_browser_fixture"],
+            },
+            "mark_unread_for": pseudouser_concept_id,
+            "org_id": organisation_concept_id,
+            "target_user_concept_id": pseudouser_concept_id,
+        },
+    )
+    monkeypatch.setattr(
+        service,
         "_ensure_fixture_chat_session",
         lambda **kwargs: {
             "session_id": "browser-fixture-user-view-state",
@@ -280,10 +399,18 @@ def test_login_browser_test_user_handles_existing_counterpart_name_variants(
     with app.test_request_context("/von/api/auth/browser-test-login"):
         result = service.login_browser_test_user(window_session_id="ws_fixture")
 
-    assert len(message_specs_seen) == 3
+    assert len(message_specs_seen) == 4
     sender_ids = {item["sender_id"] for item in message_specs_seen}
     assert "#V#browser_test_workflow_reviewer" in sender_ids
     assert "#V#browser_test_paper_scout" in sender_ids
+    recommendation_specs = [
+        item
+        for item in message_specs_seen
+        if item.get("metadata", {}).get("delivery_channel")
+        == "paper_recommendation_message"
+    ]
+    assert len(recommendation_specs) == 1
+    assert recommendation_specs[0]["target_user_concept_id"] == "#V#zhan_von_witbrock"
     assert result["fixture"]["counterparts"][0]["name"] == "Workflow Reviewer Existing Alias"
     assert result["fixture"]["counterparts"][1]["name"] == "Paper Scout Existing Alias"
 
