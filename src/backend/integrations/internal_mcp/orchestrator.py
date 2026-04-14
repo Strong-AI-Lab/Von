@@ -143,6 +143,22 @@ _SELECTOR_GENERIC_WORKFLOW_IDS = frozenset(
         TOOL_CALLING_WORKFLOW_ID,
     }
 )
+_TURN_EXECUTION_TOOL_PIPELINE_ACTION_IDS = frozenset(
+    {
+        "tool_calling.preflight_requirements",
+        "tool_calling.respond",
+        "turn_execution.critic",
+        "turn_execution.completion_gate",
+    }
+)
+_TURN_EXECUTION_NARRATION_ACTION_IDS = frozenset(
+    {
+        "narration.classify",
+        "narration.select_prompts",
+        "narration.render",
+        "narration.emit_audio",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -2513,6 +2529,71 @@ class InternalMCPChatOrchestrator:
             if required_actions.issubset(_workflow_action_ids(candidate)):
                 return candidate
         return None
+
+    def _selected_workflow_uses_action_contract(
+        self,
+        *,
+        selected_workflow_id: str | None,
+        required_action_ids: frozenset[str],
+    ) -> bool:
+        cleaned_workflow_id = (
+            selected_workflow_id.strip()
+            if isinstance(selected_workflow_id, str) and selected_workflow_id.strip()
+            else None
+        )
+        if not cleaned_workflow_id:
+            return False
+        return (
+            self._resolve_workflow_id_for_action_contract(
+                required_action_ids=required_action_ids,
+                preferred_workflow_id=cleaned_workflow_id,
+            )
+            == cleaned_workflow_id
+        )
+
+    def _selected_workflow_prefers_direct_response(
+        self,
+        *,
+        selected_workflow_id: str | None,
+    ) -> bool:
+        cleaned_workflow_id = (
+            selected_workflow_id.strip()
+            if isinstance(selected_workflow_id, str) and selected_workflow_id.strip()
+            else None
+        )
+        if not cleaned_workflow_id:
+            return False
+        if cleaned_workflow_id == CHAT_ASSISTANT_WORKFLOW_ID:
+            return True
+        if cleaned_workflow_id == CHAT_NARRATION_WORKFLOW_ID:
+            return True
+        return self._selected_workflow_uses_action_contract(
+            selected_workflow_id=cleaned_workflow_id,
+            required_action_ids=_TURN_EXECUTION_NARRATION_ACTION_IDS,
+        )
+
+    def _selected_workflow_execution_mode(
+        self,
+        *,
+        selected_workflow_id: str | None,
+    ) -> str | None:
+        cleaned_workflow_id = (
+            selected_workflow_id.strip()
+            if isinstance(selected_workflow_id, str) and selected_workflow_id.strip()
+            else None
+        )
+        if not cleaned_workflow_id:
+            return None
+        if self._selected_workflow_uses_action_contract(
+            selected_workflow_id=cleaned_workflow_id,
+            required_action_ids=_TURN_EXECUTION_TOOL_PIPELINE_ACTION_IDS,
+        ):
+            return "tool_pipeline"
+        if self._selected_workflow_prefers_direct_response(
+            selected_workflow_id=cleaned_workflow_id
+        ):
+            return "direct_response"
+        return "custom_workflow"
 
     # -------------------------------------------------------------------
     # Generic MCP tool invocation action (Phase 3.1)
@@ -22060,6 +22141,32 @@ class InternalMCPChatOrchestrator:
             and data.get("selected_workflow_id").strip()
             else None
         )
+        selected_execution_mode = self._selected_workflow_execution_mode(
+            selected_workflow_id=selected_workflow_id
+        )
+        selected_workflow_trace_payload = (
+            {
+                str(key): value
+                for key, value in data.get("selected_workflow_trace", {}).items()
+                if isinstance(key, str)
+            }
+            if isinstance(data.get("selected_workflow_trace"), Mapping)
+            else {}
+        )
+        if selected_execution_mode:
+            selected_workflow_trace_payload.setdefault(
+                "selected_execution_mode",
+                selected_execution_mode,
+            )
+        workflow_routing_payload = (
+            {
+                str(key): value
+                for key, value in data.get("workflow_routing", {}).items()
+                if isinstance(key, str)
+            }
+            if isinstance(data.get("workflow_routing"), Mapping)
+            else {}
+        )
         child_outputs: dict[str, Any] = {}
         rendered_child_response_text: str | None = None
         completed = False
@@ -22067,6 +22174,48 @@ class InternalMCPChatOrchestrator:
         failure_detail: str | None = None
         child_result_snapshot: Mapping[str, Any] | None = None
         child_workflow_data = dict(data)
+        aux_llm_calls = data.get("aux_llm_calls")
+        emit_phase_transition_raw = data.get("emit_phase_transition")
+        emit_phase_transition = (
+            cast(Callable[..., Any], emit_phase_transition_raw)
+            if callable(emit_phase_transition_raw)
+            else None
+        )
+        emit_progress_raw = data.get("emit_progress")
+        emit_progress = (
+            cast(Callable[[Mapping[str, Any]], None], emit_progress_raw)
+            if callable(emit_progress_raw)
+            else None
+        )
+
+        def _append_dispatch_boundary(
+            *,
+            boundary: str,
+            status: str,
+            final_state_value: str | None = None,
+            completed_value: bool | None = None,
+            error: str | None = None,
+        ) -> None:
+            if not isinstance(aux_llm_calls, list):
+                return
+            payload: dict[str, Any] = {
+                "type": "workflow_dispatch_boundary",
+                "boundary": boundary,
+                "status": status,
+                "selected_execution_mode": (
+                    selected_execution_mode or "custom_workflow"
+                ),
+            }
+            if selected_workflow_id:
+                payload["selected_workflow_id"] = selected_workflow_id
+                payload["dispatch_workflow_id"] = selected_workflow_id
+            if isinstance(final_state_value, str) and final_state_value.strip():
+                payload["final_state"] = final_state_value.strip()
+            if isinstance(completed_value, bool):
+                payload["completed"] = completed_value
+            if isinstance(error, str) and error.strip():
+                payload["error"] = error.strip()
+            aux_llm_calls.append(payload)
 
         continuation_context = child_workflow_data.get("continuation_context")
         if isinstance(continuation_context, Mapping) and bool(
@@ -22092,7 +22241,227 @@ class InternalMCPChatOrchestrator:
                 for key, value in projected_continuation_launch_inputs.items():
                     child_workflow_data.setdefault(key, value)
 
-        if selected_workflow_id:
+        if (
+            selected_workflow_id
+            and selected_execution_mode == "direct_response"
+        ):
+            prompt_text = (
+                data.get("user_prompt")
+                if isinstance(data.get("user_prompt"), str)
+                and data.get("user_prompt").strip()
+                else data.get("prompt")
+            )
+            prompt_text = (
+                prompt_text.strip() if isinstance(prompt_text, str) else ""
+            )
+            augmented_context_raw = data.get("augmented_context")
+            augmented_context = (
+                cast(Sequence[Mapping[str, Any]], augmented_context_raw)
+                if isinstance(augmented_context_raw, Sequence)
+                and not isinstance(augmented_context_raw, (str, bytes, bytearray))
+                else ()
+            )
+            direct_response_text: str | None = None
+            context_telemetry: dict[str, Any] = (
+                {
+                    str(key): value
+                    for key, value in selected_workflow_trace_payload.get(
+                        "selector_context_lineage", {}
+                    ).items()
+                    if isinstance(key, str)
+                }
+                if isinstance(
+                    selected_workflow_trace_payload.get("selector_context_lineage"),
+                    Mapping,
+                )
+                else {"base_context_source": "augmented_context"}
+            )
+            context_telemetry.setdefault("base_context_source", "augmented_context")
+            context_telemetry["selected_execution_mode"] = "direct_response"
+            context_telemetry["stage_added_message_count"] = 0
+            try:
+                _append_dispatch_boundary(
+                    boundary="execution_mode_selected",
+                    status="selected",
+                )
+                if callable(emit_phase_transition):
+                    emit_phase_transition(
+                        self.PHASE_PLAIN_RESPONSE,
+                        extra={
+                            "selected_workflow_id": selected_workflow_id,
+                            "selected_execution_mode": "direct_response",
+                            "result_summary": "Answering directly from accessible context",
+                        },
+                    )
+
+                policy_state = data.get("policy_state")
+                record_llm_call = data.get("record_llm_call")
+                registry_snapshot = data.get("registry_snapshot")
+                user_concept_id = (
+                    data.get("user_concept_id")
+                    if isinstance(data.get("user_concept_id"), str)
+                    else None
+                )
+                org_concept_id = (
+                    data.get("org_concept_id")
+                    if isinstance(data.get("org_concept_id"), str)
+                    else None
+                )
+                model_for_stage = data.get("model_for_stage")
+                default_model_candidate = (
+                    model_for_stage("planner")
+                    if callable(model_for_stage)
+                    else env.model
+                )
+                default_model = (
+                    str(default_model_candidate).strip()
+                    if isinstance(default_model_candidate, str)
+                    and str(default_model_candidate).strip()
+                    else None
+                )
+
+                if not prompt_text:
+                    failure_detail = "turn_execution_missing_user_prompt"
+                    final_state = "plain_response_missing_prompt"
+                elif (
+                    isinstance(policy_state, _WorkflowModelPolicyState)
+                    and callable(record_llm_call)
+                    and isinstance(aux_llm_calls, list)
+                ):
+                    direct_response_text, _resolved_model, _selected_candidate = (
+                        self._run_llm_with_fallbacks(
+                            stage="plain_response",
+                            policy_stage="planner",
+                            prompt=prompt_text,
+                            context=augmented_context,
+                            default_client=env.llm_client,
+                            default_model=default_model,
+                            policy_state=policy_state,
+                            registry_snapshot=(
+                                registry_snapshot
+                                if isinstance(registry_snapshot, Mapping)
+                                else None
+                            ),
+                            user_concept_id=user_concept_id,
+                            org_concept_id=org_concept_id,
+                            llm_calls_log=(
+                                data.get("llm_calls")
+                                if isinstance(data.get("llm_calls"), list)
+                                else []
+                            ),
+                            aux_log=aux_llm_calls,
+                            record_llm_call=cast(
+                                Callable[..., Any], record_llm_call
+                            ),
+                            emit_progress=emit_progress,
+                            context_telemetry=context_telemetry,
+                        )
+                    )
+                else:
+                    llm_start = time.perf_counter()
+                    direct_response_text = env.llm_client.generate(
+                        prompt_text,
+                        context=cast(
+                            Optional[List[Dict[str, Any]]],
+                            list(augmented_context),
+                        ),
+                        model=default_model,
+                    )
+                    duration_ms = (time.perf_counter() - llm_start) * 1000.0
+                    if callable(record_llm_call):
+                        record_llm_call(
+                            call_type="llm.generate",
+                            model_name=default_model,
+                            duration_ms=duration_ms,
+                            usage=None,
+                            note="Selected-workflow direct response",
+                            stage="plain_response",
+                        )
+
+                if failure_detail is None:
+                    direct_response_text = self._sanitise_user_visible_action_output(
+                        direct_response_text
+                        if isinstance(direct_response_text, str)
+                        else str(direct_response_text or ""),
+                        aux_log=aux_llm_calls if isinstance(aux_llm_calls, list) else None,
+                        source_stage="turn_execution.execute_selected.direct_response",
+                    )
+                    completed = True
+                    final_state = "plain_response"
+                    rendered_child_response_text = direct_response_text or None
+                    child_outputs = {
+                        "response_text": direct_response_text,
+                        "final_response": direct_response_text,
+                        "current_response": direct_response_text,
+                        "selected_execution_mode": "direct_response",
+                        "workflow_execution_summary": {
+                            "schema_version": "workflow_execution_summary.v1",
+                            "workflow_id": selected_workflow_id,
+                            "completed": True,
+                            "final_state": "plain_response",
+                            "selected_execution_mode": "direct_response",
+                            "response_text": direct_response_text,
+                        },
+                    }
+                    child_result_snapshot = {
+                        "response_text": direct_response_text,
+                        "selected_execution_mode": "direct_response",
+                        "final_state": "plain_response",
+                    }
+                    _append_dispatch_boundary(
+                        boundary="workflow_terminal",
+                        status="completed",
+                        final_state_value="plain_response",
+                        completed_value=True,
+                    )
+                else:
+                    completed = False
+                    child_outputs = {
+                        "selected_execution_mode": "direct_response",
+                        "workflow_execution_summary": {
+                            "schema_version": "workflow_execution_summary.v1",
+                            "workflow_id": selected_workflow_id,
+                            "completed": False,
+                            "final_state": final_state,
+                            "selected_execution_mode": "direct_response",
+                            "error": failure_detail,
+                        },
+                    }
+                    _append_dispatch_boundary(
+                        boundary="workflow_terminal",
+                        status="failed",
+                        final_state_value=final_state,
+                        completed_value=False,
+                        error=failure_detail,
+                    )
+            except Exception as exc:
+                completed = False
+                final_state = "plain_response_failed"
+                failure_detail = str(exc)
+                child_outputs = {
+                    "selected_execution_mode": "direct_response",
+                    "workflow_execution_summary": {
+                        "schema_version": "workflow_execution_summary.v1",
+                        "workflow_id": selected_workflow_id,
+                        "completed": False,
+                        "final_state": final_state,
+                        "selected_execution_mode": "direct_response",
+                        "error": failure_detail,
+                    },
+                }
+                _append_dispatch_boundary(
+                    boundary="workflow_terminal",
+                    status="failed",
+                    final_state_value=final_state,
+                    completed_value=False,
+                    error=failure_detail,
+                )
+                child_result_snapshot = {
+                    "selected_execution_mode": "direct_response",
+                    "final_state": final_state,
+                    "error": failure_detail,
+                }
+        elif selected_workflow_id:
             child_result = self.execute_workflow(
                 selected_workflow_id,
                 data=child_workflow_data,
@@ -22141,6 +22510,30 @@ class InternalMCPChatOrchestrator:
             failure_detail = "turn_execution_no_workflow_selected"
             final_state = "no_selected_workflow"
 
+        if selected_execution_mode == "direct_response":
+            dispatch_payload: dict[str, Any] = (
+                {
+                    str(key): value
+                    for key, value in workflow_routing_payload.get("dispatch", {}).items()
+                    if isinstance(key, str)
+                }
+                if isinstance(workflow_routing_payload.get("dispatch"), Mapping)
+                else {}
+            )
+            dispatch_payload["selected_execution_mode"] = "direct_response"
+            if selected_workflow_id:
+                dispatch_payload.setdefault("selected_workflow_id", selected_workflow_id)
+                dispatch_payload["dispatch_workflow_id"] = selected_workflow_id
+            if isinstance(final_state, str) and final_state.strip():
+                dispatch_payload["final_state"] = final_state
+            dispatch_payload["completed"] = bool(completed)
+            if isinstance(failure_detail, str) and failure_detail.strip():
+                dispatch_payload["dispatch_terminal_failure_reason"] = (
+                    failure_detail.split(":", 1)[0].strip() or failure_detail
+                )
+                dispatch_payload["dispatch_terminal_failure_detail"] = failure_detail
+            workflow_routing_payload["dispatch"] = dispatch_payload
+
         outputs = build_turn_execution_selected_workflow_outputs(
             selected_workflow_id=selected_workflow_id,
             child_completed=completed,
@@ -22149,8 +22542,8 @@ class InternalMCPChatOrchestrator:
             child_outputs=child_outputs,
             rendered_child_response_text=rendered_child_response_text,
             child_result_snapshot=child_result_snapshot,
-            selected_workflow_trace=data.get("selected_workflow_trace"),
-            workflow_routing=data.get("workflow_routing"),
+            selected_workflow_trace=selected_workflow_trace_payload,
+            workflow_routing=workflow_routing_payload,
             workflow_discovery=(
                 data.get("workflow_discovery_result")
                 if isinstance(data.get("workflow_discovery_result"), Mapping)
@@ -24561,22 +24954,6 @@ class InternalMCPChatOrchestrator:
                 except Exception:
                     pass
 
-        _TOOL_PIPELINE_ACTION_IDS = frozenset(
-            {
-                "tool_calling.preflight_requirements",
-                "tool_calling.respond",
-                "turn_execution.critic",
-                "turn_execution.completion_gate",
-            }
-        )
-        _NARRATION_ACTION_IDS = frozenset(
-            {
-                "narration.classify",
-                "narration.select_prompts",
-                "narration.render",
-                "narration.emit_audio",
-            }
-        )
         selected_workflow_id_text = (
             selected_workflow_id.strip()
             if isinstance(selected_workflow_id, str) and selected_workflow_id.strip()
@@ -24595,21 +24972,13 @@ class InternalMCPChatOrchestrator:
             and routing_info.verdict.strip()
             else ""
         )
-        selected_uses_tool_pipeline_contract = bool(
-            selected_workflow_id_text
-            and self._resolve_workflow_id_for_action_contract(
-                required_action_ids=_TOOL_PIPELINE_ACTION_IDS,
-                preferred_workflow_id=selected_workflow_id_text,
-            )
-            == selected_workflow_id_text
+        selected_uses_tool_pipeline_contract = self._selected_workflow_uses_action_contract(
+            selected_workflow_id=selected_workflow_id_text,
+            required_action_ids=_TURN_EXECUTION_TOOL_PIPELINE_ACTION_IDS,
         )
-        selected_uses_narration_contract = bool(
-            selected_workflow_id_text
-            and self._resolve_workflow_id_for_action_contract(
-                required_action_ids=_NARRATION_ACTION_IDS,
-                preferred_workflow_id=selected_workflow_id_text,
-            )
-            == selected_workflow_id_text
+        selected_uses_narration_contract = self._selected_workflow_uses_action_contract(
+            selected_workflow_id=selected_workflow_id_text,
+            required_action_ids=_TURN_EXECUTION_NARRATION_ACTION_IDS,
         )
         selected_requests_explicit_narration_workflow = (
             selected_workflow_id_text == CHAT_NARRATION_WORKFLOW_ID
@@ -24617,10 +24986,8 @@ class InternalMCPChatOrchestrator:
         has_explicit_workflow_routing = isinstance(routing_info, WorkflowRoutingInfo)
         selected_prefers_direct_response = bool(
             has_explicit_workflow_routing
-            and (
-                selected_workflow_id_text == CHAT_ASSISTANT_WORKFLOW_ID
-                or selected_requests_explicit_narration_workflow
-                or selected_uses_narration_contract
+            and self._selected_workflow_prefers_direct_response(
+                selected_workflow_id=selected_workflow_id_text
             )
         )
         selector_requests_narration = bool(
@@ -30367,7 +30734,7 @@ class InternalMCPChatOrchestrator:
             dispatch_workflow_id=selected_workflow_id_text,
         )
         tool_dispatch_workflow_id = self._resolve_workflow_id_for_action_contract(
-            required_action_ids=_TOOL_PIPELINE_ACTION_IDS,
+            required_action_ids=_TURN_EXECUTION_TOOL_PIPELINE_ACTION_IDS,
             preferred_workflow_id=selected_workflow_id_text,
             candidate_workflow_ids=discovered_workflow_ids_for_contract_routing,
             fallback_workflow_ids=(TOOL_CALLING_WORKFLOW_ID,),
@@ -30379,7 +30746,9 @@ class InternalMCPChatOrchestrator:
                 selected_execution_mode="tool_pipeline",
                 selected_workflow_id=selected_workflow_id_text,
                 extra={
-                    "required_action_ids": list(_TOOL_PIPELINE_ACTION_IDS),
+                    "required_action_ids": list(
+                        _TURN_EXECUTION_TOOL_PIPELINE_ACTION_IDS
+                    ),
                     "preferred_workflow_id": selected_workflow_id_text,
                 },
             )
@@ -30428,7 +30797,9 @@ class InternalMCPChatOrchestrator:
             selected_workflow_id=selected_workflow_id_text,
             dispatch_workflow_id=tool_dispatch_workflow_id,
             extra={
-                "required_action_ids": list(_TOOL_PIPELINE_ACTION_IDS),
+                "required_action_ids": list(
+                    _TURN_EXECUTION_TOOL_PIPELINE_ACTION_IDS
+                ),
                 "preferred_workflow_id": selected_workflow_id_text,
             },
         )

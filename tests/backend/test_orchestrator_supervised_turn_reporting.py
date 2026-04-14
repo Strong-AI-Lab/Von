@@ -703,29 +703,30 @@ def test_execute_selected_captures_child_failure_for_recovery_path(
     assert report["response_text"] == "selected route failed closed"
 
 
-def test_execute_selected_does_not_surface_generic_workflow_status_as_answer(
+def test_execute_selected_routes_chat_assistant_via_direct_response(
     monkeypatch,
 ) -> None:
     orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _DummyGateway()))
+
+    class _DirectAnswerLLM:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def generate(self, prompt, context=None, model=None):
+            self.calls.append(
+                {"prompt": prompt, "context": list(context or []), "model": model}
+            )
+            return "You are Test User."
+
+    llm = _DirectAnswerLLM()
+
     monkeypatch.setattr(
         orchestrator,
         "execute_workflow",
-        lambda *args, **kwargs: SimpleNamespace(
-            completed=True,
-            final_state="completed",
-            error=None,
-            data={
-                "workflow_execution_summary": {
-                    "schema_version": "workflow_execution_summary.v1",
-                    "workflow_id": "#V#chat_assistant_workflow",
-                    "completed": True,
-                    "final_state": "#V#workflow_step_chat_assistant_workflow_completed",
-                    "response_text": (
-                        "Workflow #V#chat_assistant_workflow completed "
-                        "(state: #V#workflow_step_chat_assistant_workflow_completed)."
-                    ),
-                }
-            },
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError(
+                "chat_assistant direct response should not execute as a child workflow"
+            )
         ),
     )
 
@@ -733,12 +734,39 @@ def test_execute_selected_does_not_surface_generic_workflow_status_as_answer(
         SimpleNamespace(
             data={
                 "selected_workflow_id": "#V#chat_assistant_workflow",
-                "selected_workflow_trace": {},
+                "selected_workflow_trace": {
+                    "selector_context_lineage": {
+                        "base_context_source": "augmented_context",
+                        "stage_added_message_count": 1,
+                    }
+                },
+                "workflow_routing": {
+                    "workflow_id": "#V#chat_assistant_workflow",
+                    "verdict": "rag_selected",
+                    "source": "selector",
+                },
                 "conversation_session_id": "session-1",
                 "turn_id": "turn-1",
+                "user_prompt": "Who am I?",
+                "augmented_context": [
+                    {
+                        "role": "system",
+                        "content": "CURRENT USER CONTEXT: Test User (#V#test_user)",
+                    },
+                    {"role": "user", "content": "Who am I?"},
+                ],
+                "aux_llm_calls": [],
+                "llm_calls": [],
+                "policy_state": SimpleNamespace(
+                    enabled=False,
+                    policy=None,
+                    policy_id=None,
+                    predicate_id=None,
+                    errors=(),
+                ),
             },
             environment=SimpleNamespace(
-                llm_client=_DummyLLM(),
+                llm_client=llm,
                 model="test-model",
                 user_namespace="#V#user",
                 auxiliary_system_prompt=None,
@@ -748,10 +776,17 @@ def test_execute_selected_does_not_surface_generic_workflow_status_as_answer(
     )
 
     assert result.status == "success"
-    assert result.outputs.get("selected_workflow_user_response") is None
-    assert result.outputs.get("response_text") is None
+    assert llm.calls
+    assert result.outputs.get("selected_workflow_user_response") == "You are Test User."
+    assert result.outputs.get("response_text") == "You are Test User."
     report = result.outputs["completion_report"]
-    assert report.get("response_text") is None
+    assert report.get("response_text") == "You are Test User."
+    assert report.get("selected_execution_mode") == "direct_response"
+    workflow_routing = result.outputs["workflow_routing"]
+    assert workflow_routing["dispatch"]["selected_execution_mode"] == "direct_response"
+    assert workflow_routing["dispatch"]["dispatch_workflow_id"] == (
+        "#V#chat_assistant_workflow"
+    )
 
 
 def test_execute_selected_surfaces_missing_selected_workflow_as_recoverable_context() -> None:
