@@ -93,6 +93,12 @@ def _build_gateway(
         "src.backend.integrations.internal_mcp.arxiv_proxy_mcp._find_cached_pdf_for_arxiv_id",
         lambda *_a, **_kw: None,
     )
+    # Keep these route-level tests deterministic by forcing the live proxy/stub
+    # path rather than rehydrating a previously persisted durable blob.
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.catalogue._rehydrate_cached_arxiv_pdf_from_durable_blob",
+        lambda *_a, **_kw: None,
+    )
     monkeypatch.setattr(
         "src.backend.integrations.internal_mcp.arxiv_proxy_mcp.get_arxiv_proxy",
         _get_proxy,
