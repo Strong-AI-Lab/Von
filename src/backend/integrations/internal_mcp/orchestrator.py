@@ -136,6 +136,14 @@ from src.backend.services.tool_metadata_service import (
     is_tool_visible,
 )
 
+_SELECTOR_GENERIC_WORKFLOW_IDS = frozenset(
+    {
+        CHAT_ASSISTANT_WORKFLOW_ID,
+        CHAT_NARRATION_WORKFLOW_ID,
+        TOOL_CALLING_WORKFLOW_ID,
+    }
+)
+
 
 @dataclass(frozen=True)
 class WorkflowRoutingInfo:
@@ -1044,6 +1052,100 @@ def _build_selector_safe_general_fallback_payload(
 
     return {
         "requested_candidate_workflow_id": requested_candidate_workflow_id,
+        "selection_resolution": selection_resolution,
+        "raw_candidate_label": (
+            str(metadata.get("raw_candidate_label") or "").strip() or None
+        ),
+    }
+
+
+def _normalise_selector_candidate_role(candidate: Mapping[str, Any]) -> str | None:
+    raw_role = candidate.get("routing_profile_role")
+    if isinstance(raw_role, str) and raw_role.strip():
+        return raw_role.strip().lower()
+    routing_profile = candidate.get("routing_profile")
+    if isinstance(routing_profile, Mapping):
+        nested_role = routing_profile.get("role")
+        if isinstance(nested_role, str) and nested_role.strip():
+            return nested_role.strip().lower()
+    return None
+
+
+def _build_selector_single_discovered_execution_recovery_payload(
+    *,
+    selected_workflow_id: str | None,
+    selector_verdict: str | None,
+    selection_metadata: Mapping[str, Any] | None,
+    discovered_matches: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    """Recover a selector default when one specialised execution candidate remains."""
+
+    selected_workflow_id_text = (
+        str(selected_workflow_id).strip()
+        if isinstance(selected_workflow_id, str) and str(selected_workflow_id).strip()
+        else None
+    )
+    if selected_workflow_id_text != CHAT_ASSISTANT_WORKFLOW_ID:
+        return None
+
+    selector_verdict_text = (
+        str(selector_verdict).strip().lower()
+        if isinstance(selector_verdict, str) and str(selector_verdict).strip()
+        else ""
+    )
+    if selector_verdict_text != "rag_default":
+        return None
+
+    metadata = (
+        {
+            str(key): value
+            for key, value in selection_metadata.items()
+            if isinstance(key, str)
+        }
+        if isinstance(selection_metadata, Mapping)
+        else {}
+    )
+    selection_resolution = (
+        str(metadata.get("selection_resolution") or "").strip().lower()
+    )
+    if selection_resolution != "default_workflow_fallback":
+        return None
+
+    eligible_specialised_candidates: list[dict[str, Any]] = []
+    for candidate in discovered_matches:
+        if not isinstance(candidate, Mapping):
+            continue
+        concept_id = str(candidate.get("concept_id") or "").strip()
+        if not concept_id or concept_id in _SELECTOR_GENERIC_WORKFLOW_IDS:
+            continue
+        if candidate.get("routing_eligible") is False:
+            continue
+        if candidate.get("is_executable") is False:
+            continue
+        if candidate.get("is_policy_safe") is False:
+            continue
+        candidate_role = _normalise_selector_candidate_role(candidate)
+        if candidate_role not in {None, "", "execution"}:
+            continue
+        eligible_specialised_candidates.append(
+            {
+                "workflow_id": concept_id,
+                "name": str(candidate.get("name") or "").strip() or concept_id,
+                "role": candidate_role or "execution",
+            }
+        )
+
+    if len(eligible_specialised_candidates) != 1:
+        return None
+
+    recovered_candidate = eligible_specialised_candidates[0]
+    return {
+        "recovered_candidate_workflow_id": recovered_candidate["workflow_id"],
+        "recovered_candidate_name": recovered_candidate["name"],
+        "recovered_candidate_role": recovered_candidate["role"],
+        "eligible_specialised_candidate_ids": [
+            candidate["workflow_id"] for candidate in eligible_specialised_candidates
+        ],
         "selection_resolution": selection_resolution,
         "raw_candidate_label": (
             str(metadata.get("raw_candidate_label") or "").strip() or None
@@ -21611,8 +21713,8 @@ class InternalMCPChatOrchestrator:
                 turn_text=prompt_text,
             )
         selector_candidate_matches = self._merge_selector_candidates(
-            self._build_selector_default_candidates(),
             discovered_matches,
+            self._build_selector_default_candidates(),
         )
 
         policy_state = cast(
@@ -21658,6 +21760,7 @@ class InternalMCPChatOrchestrator:
         selected_workflow_id = CHAT_ASSISTANT_WORKFLOW_ID
         selector_selection_metadata: dict[str, Any] = {}
         selector_context_telemetry: dict[str, Any] | None = None
+        selector_override_trace: dict[str, Any] | None = None
         if env.user_namespace and self._workflow_selector.enabled():
             selector_prompt = self._workflow_selector.prepare_selection_prompt(
                 turn_text=prompt_text,
@@ -21746,6 +21849,14 @@ class InternalMCPChatOrchestrator:
                     selection_metadata=selector_selection_metadata,
                 )
             )
+            selector_single_discovered_recovery_payload = (
+                _build_selector_single_discovered_execution_recovery_payload(
+                    selected_workflow_id=selected_workflow_id,
+                    selector_verdict=selector_selection.verdict,
+                    selection_metadata=selector_selection_metadata,
+                    discovered_matches=discovered_matches,
+                )
+            )
             if selector_safe_general_fallback_payload is not None:
                 selected_workflow_id = TOOL_CALLING_WORKFLOW_ID
                 selector_reasoning = (
@@ -21753,16 +21864,17 @@ class InternalMCPChatOrchestrator:
                     "not eligible from the current candidate set, so the safe "
                     "general tool workflow was selected instead."
                 )
+                selector_override_trace = {
+                    "type": "workflow_selector_override",
+                    "reason": "selector_unmatched_candidate_requires_safe_general_fallback",
+                    "selected_workflow_id": TOOL_CALLING_WORKFLOW_ID,
+                    "prior_selected_workflow_id": CHAT_ASSISTANT_WORKFLOW_ID,
+                    "prior_selector_verdict": selector_selection.verdict,
+                    **selector_safe_general_fallback_payload,
+                }
                 aux_llm_calls.append(
                     annotate_python_decision_event(
-                        {
-                            "type": "workflow_selector_override",
-                            "reason": "selector_unmatched_candidate_requires_safe_general_fallback",
-                            "selected_workflow_id": TOOL_CALLING_WORKFLOW_ID,
-                            "prior_selected_workflow_id": CHAT_ASSISTANT_WORKFLOW_ID,
-                            "prior_selector_verdict": selector_selection.verdict,
-                            **selector_safe_general_fallback_payload,
-                        },
+                        selector_override_trace,
                         stage="workflow_dispatch",
                         component="internal_mcp_orchestrator",
                         function="_action_turn_execution_route",
@@ -21786,6 +21898,60 @@ class InternalMCPChatOrchestrator:
                     selection_rationale=_derive_workflow_selection_rationale(
                         selected_workflow_id=selected_workflow_id,
                         selector_verdict="tool_contract_override",
+                        selector_source="selector_override",
+                        candidate_workflow_ids=selector_selection.discovered_workflow_ids,
+                        explicit_reasoning=selector_reasoning,
+                    ),
+                )
+            elif selector_single_discovered_recovery_payload is not None:
+                selected_workflow_id = str(
+                    selector_single_discovered_recovery_payload.get(
+                        "recovered_candidate_workflow_id"
+                    )
+                    or ""
+                ).strip()
+                selector_reasoning = (
+                    "Selector defaulted to the generic chat workflow without "
+                    "choosing a discovered candidate, so the only eligible "
+                    "specialised discovered execution workflow was selected "
+                    "instead."
+                )
+                selector_override_trace = {
+                    "type": "workflow_selector_override",
+                    "reason": (
+                        "selector_default_recovered_to_single_discovered_execution_workflow"
+                    ),
+                    "selected_workflow_id": selected_workflow_id,
+                    "prior_selected_workflow_id": CHAT_ASSISTANT_WORKFLOW_ID,
+                    "prior_selector_verdict": selector_selection.verdict,
+                    **selector_single_discovered_recovery_payload,
+                }
+                aux_llm_calls.append(
+                    annotate_python_decision_event(
+                        selector_override_trace,
+                        stage="workflow_dispatch",
+                        component="internal_mcp_orchestrator",
+                        function="_action_turn_execution_route",
+                        decision_class="workflow_selector_override",
+                        decision_source="workflow_selector_contract_recovery",
+                        changed_outcome=True,
+                        reason_code=(
+                            "selector_default_recovered_to_single_discovered_execution_workflow"
+                        ),
+                        possible_inappropriate_python_code_use=False,
+                    )
+                )
+                routing_info = WorkflowRoutingInfo(
+                    workflow_id=selected_workflow_id,
+                    verdict="rag_selected",
+                    prompt_id=selector_selection.prompt_id,
+                    discovered_workflow_ids=selector_selection.discovered_workflow_ids,
+                    source="selector_override",
+                    confidence_score=selector_selection.confidence_score,
+                    reasoning=selector_reasoning,
+                    selection_rationale=_derive_workflow_selection_rationale(
+                        selected_workflow_id=selected_workflow_id,
+                        selector_verdict="rag_selected",
                         selector_source="selector_override",
                         candidate_workflow_ids=selector_selection.discovered_workflow_ids,
                         explicit_reasoning=selector_reasoning,
@@ -21850,6 +22016,11 @@ class InternalMCPChatOrchestrator:
                 "selected_workflow_trace": {
                     "selected_workflow_id": selected_workflow_id,
                     "workflow_routing": asdict(routing_info),
+                    **(
+                        {"selector_override": dict(selector_override_trace)}
+                        if isinstance(selector_override_trace, Mapping)
+                        else {}
+                    ),
                     "selector_selection_metadata": (
                         dict(selector_selection_metadata)
                         if isinstance(selector_selection_metadata, Mapping)
@@ -28878,11 +29049,21 @@ class InternalMCPChatOrchestrator:
                 selection_metadata=selector_selection_metadata,
             )
         )
+        selector_single_discovered_recovery_payload: dict[str, Any] | None = None
         if selector_safe_general_fallback_payload is not None:
             _force_tool_pipeline_routing(
                 reason="selector_unmatched_candidate_requires_safe_general_fallback",
                 excluded_selector_verdicts=[selector_verdict or "rag_default"],
                 extra_payload=selector_safe_general_fallback_payload,
+            )
+        else:
+            selector_single_discovered_recovery_payload = (
+                _build_selector_single_discovered_execution_recovery_payload(
+                    selected_workflow_id=selected_workflow_id_text,
+                    selector_verdict=selector_verdict or None,
+                    selection_metadata=selector_selection_metadata,
+                    discovered_matches=discovered_matches,
+                )
             )
 
         def _build_custom_workflow_dispatch_data(
@@ -29264,6 +29445,10 @@ class InternalMCPChatOrchestrator:
             prior_selected_workflow_id: str | None = None,
             prior_selector_verdict: str | None = None,
             extra_payload: Mapping[str, Any] | None = None,
+            decision_source: str = "workflow_launchability_check",
+            dispatch_prepare_step_id: str = "launchability_override",
+            dispatch_prepare_step_label: str = "Promote launchable workflow",
+            dispatch_prepare_result_summary: str | None = None,
         ) -> bool:
             nonlocal selected_workflow_id
             nonlocal selected_workflow_id_text
@@ -29350,7 +29535,7 @@ class InternalMCPChatOrchestrator:
                     component="internal_mcp_orchestrator",
                     function="_promote_selected_workflow_to_custom_dispatch",
                     decision_class="workflow_selector_override",
-                    decision_source="workflow_launchability_check",
+                    decision_source=decision_source,
                     changed_outcome=True,
                     reason_code=reason,
                     possible_inappropriate_python_code_use=False,
@@ -29369,13 +29554,19 @@ class InternalMCPChatOrchestrator:
             replacement_workflow_label = (
                 replacement_workflow_name or replacement_workflow_id or "launchable workflow"
             )
-            _record_dispatch_prepare_note(
-                step_id="launchability_override",
-                step_label="Promote launchable workflow",
-                result_summary=(
+            note_result_summary = (
+                dispatch_prepare_result_summary.strip()
+                if isinstance(dispatch_prepare_result_summary, str)
+                and dispatch_prepare_result_summary.strip()
+                else (
                     f"Using {replacement_workflow_label} because {prior_workflow_label} "
                     "could not launch from the current turn inputs."
-                ),
+                )
+            )
+            _record_dispatch_prepare_note(
+                step_id=dispatch_prepare_step_id,
+                step_label=dispatch_prepare_step_label,
+                result_summary=note_result_summary,
                 workflow_id=replacement_workflow_id,
                 workflow_name=replacement_workflow_name,
             )
@@ -29395,6 +29586,55 @@ class InternalMCPChatOrchestrator:
                 }
             )
             return True
+
+        if selector_single_discovered_recovery_payload is not None:
+            recovery_workflow_id = str(
+                selector_single_discovered_recovery_payload.get(
+                    "recovered_candidate_workflow_id"
+                )
+                or ""
+            ).strip()
+            if recovery_workflow_id:
+                try:
+                    recovery_probe = _get_cached_custom_workflow_launchability_probe(
+                        recovery_workflow_id
+                    )
+                except Exception as exc:
+                    _record_custom_workflow_launchability_override_failure(
+                        reason=(
+                            "selector_default_single_discovered_execution_recovery_probe_failed"
+                        ),
+                        error=exc,
+                        selected_workflow_id=selected_workflow_id_text,
+                    )
+                else:
+                    _promote_selected_workflow_to_custom_dispatch(
+                        replacement_probe=recovery_probe,
+                        reason=(
+                            "selector_default_recovered_to_single_discovered_execution_workflow"
+                        ),
+                        verdict="rag_selected",
+                        reasoning=(
+                            "Selector defaulted to the generic chat workflow "
+                            "without choosing a discovered candidate, so the "
+                            "only eligible specialised discovered execution "
+                            "workflow was selected instead."
+                        ),
+                        prior_selected_workflow_id=selected_workflow_id_text,
+                        prior_selector_verdict=selector_verdict or None,
+                        extra_payload=selector_single_discovered_recovery_payload,
+                        decision_source="workflow_selector_contract_recovery",
+                        dispatch_prepare_step_id="selector_default_recovery",
+                        dispatch_prepare_step_label=(
+                            "Recover selector default to discovered workflow"
+                        ),
+                        dispatch_prepare_result_summary=(
+                            "Selector defaulted to the generic chat workflow "
+                            "without choosing a discovered candidate; using "
+                            "the only eligible specialised discovered "
+                            "execution workflow instead."
+                        ),
+                    )
 
         def _maybe_override_selected_custom_workflow_for_launchability() -> bool:
             if not selected_workflow_id_text:
@@ -30575,8 +30815,8 @@ class InternalMCPChatOrchestrator:
                 turn_text=prompt,
             )
         local_selector_candidate_matches = self._merge_selector_candidates(
-            self._build_selector_default_candidates(),
             local_discovered_matches,
+            self._build_selector_default_candidates(),
         )
         return (
             local_discovered_matches,

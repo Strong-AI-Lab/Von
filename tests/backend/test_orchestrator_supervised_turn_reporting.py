@@ -6,6 +6,12 @@ from typing import Any, cast
 from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
 )
+from src.backend.workflows import (
+    WorkflowActionInvocation,
+    WorkflowDefinition,
+    WorkflowRegistration,
+    WorkflowStateSpec,
+)
 from src.backend.workflows.definitions import (
     CHAT_ASSISTANT_WORKFLOW_ID,
     TOOL_CALLING_WORKFLOW_ID,
@@ -408,6 +414,187 @@ def test_turn_execution_route_preserves_non_default_selector_intent_with_safe_ge
     )
     assert override_entry["selected_workflow_id"] == TOOL_CALLING_WORKFLOW_ID
     assert override_entry["requested_candidate_workflow_id"] == excluded_workflow_id
+
+
+def test_turn_execution_route_recovers_single_discovered_execution_workflow_after_selector_default(
+    monkeypatch,
+) -> None:
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
+        gateway=cast(Any, _DummyGateway()),
+        selector_enabled=True,
+    )
+    selected_workflow_id = "#V#arxiv_paper_representation_workflow"
+    testing_workflow_id = "#V#arxiv_paper_ingestion_testing_workflow"
+    aux_llm_calls: list[dict[str, Any]] = []
+
+    orchestrator._workflow_registry.register_or_replace(
+        WorkflowRegistration(
+            workflow_id=selected_workflow_id,
+            definition=WorkflowDefinition(
+                workflow_id=selected_workflow_id,
+                initial_state="complete",
+                states={
+                    "complete": WorkflowStateSpec(
+                        state_id="complete",
+                        actions=(
+                            WorkflowActionInvocation(
+                                action_id="tool.prepare_custom"
+                            ),
+                        ),
+                        terminal=True,
+                    )
+                },
+                metadata={
+                    "routing_profile": {
+                        "role": "execution",
+                        "explicit_workflow_context_required": False,
+                    }
+                },
+            ),
+            purpose="Represent an arXiv paper from a bare URL or arXiv identifier.",
+            source="test",
+        )
+    )
+    orchestrator._workflow_registry.register_or_replace(
+        WorkflowRegistration(
+            workflow_id=testing_workflow_id,
+            definition=WorkflowDefinition(
+                workflow_id=testing_workflow_id,
+                initial_state="prepare_fixture",
+                states={
+                    "prepare_fixture": WorkflowStateSpec(
+                        state_id="prepare_fixture",
+                        actions=(
+                            WorkflowActionInvocation(
+                                action_id="testing.prepare_arxiv_paper_ingestion_fixture"
+                            ),
+                        ),
+                        terminal=True,
+                    )
+                },
+                metadata={
+                    "routing_profile": {
+                        "role": "testing",
+                        "explicit_workflow_context_required": True,
+                    }
+                },
+            ),
+            purpose="Run the arXiv ingestion workflow as a testing/verification task.",
+            source="test",
+        )
+    )
+
+    llm = SimpleNamespace(
+        generate=lambda prompt, context=None, model=None: (
+            "I'm not sure which workflow you'd like me to select from the "
+            "provided candidates."
+        )
+    )
+
+    result = orchestrator._action_turn_execution_route(
+        SimpleNamespace(
+            data={
+                "user_prompt": "https://arxiv.org/abs/2501.00663",
+                "workflow_discovery_result": {
+                    "matches": [
+                        {
+                            "concept_id": selected_workflow_id,
+                            "name": "Arxiv Paper Representation Workflow",
+                            "description": (
+                                "Represent an arXiv paper from a bare URL or "
+                                "arXiv identifier."
+                            ),
+                            "routing_eligible": True,
+                            "is_executable": True,
+                            "is_policy_safe": True,
+                            "executability_reason": "executable_now",
+                            "candidate_source": "workflow_discovery",
+                            "routing_profile": {"role": "execution"},
+                        },
+                        {
+                            "concept_id": testing_workflow_id,
+                            "name": "Arxiv Paper Ingestion Testing Workflow",
+                            "description": "Run the arXiv ingestion workflow as a testing task.",
+                            "routing_eligible": True,
+                            "is_executable": True,
+                            "executability_reason": "executable_now",
+                            "candidate_source": "workflow_discovery",
+                        },
+                    ],
+                    "candidates": [
+                        {
+                            "concept_id": selected_workflow_id,
+                            "name": "Arxiv Paper Representation Workflow",
+                            "description": (
+                                "Represent an arXiv paper from a bare URL or "
+                                "arXiv identifier."
+                            ),
+                            "routing_eligible": True,
+                            "is_executable": True,
+                            "is_policy_safe": True,
+                            "executability_reason": "executable_now",
+                            "candidate_source": "workflow_discovery",
+                            "routing_profile": {"role": "execution"},
+                        },
+                        {
+                            "concept_id": testing_workflow_id,
+                            "name": "Arxiv Paper Ingestion Testing Workflow",
+                            "description": "Run the arXiv ingestion workflow as a testing task.",
+                            "routing_eligible": True,
+                            "is_executable": True,
+                            "executability_reason": "executable_now",
+                            "candidate_source": "workflow_discovery",
+                        },
+                    ],
+                    "match_count": 2,
+                },
+                "workflow_discovery": None,
+                "policy_state": SimpleNamespace(
+                    enabled=False,
+                    policy=None,
+                    policy_id=None,
+                    predicate_id=None,
+                    errors=(),
+                ),
+                "registry_snapshot": None,
+                "llm_calls": [],
+                "aux_llm_calls": aux_llm_calls,
+            },
+            environment=SimpleNamespace(
+                user_namespace="#V#user",
+                llm_client=llm,
+                model="test-model",
+            ),
+        )
+    )
+
+    assert result.status == "success"
+    assert result.outputs["selected_workflow_id"] == selected_workflow_id
+    assert result.outputs["workflow_routing"]["workflow_id"] == selected_workflow_id
+    assert result.outputs["workflow_routing"]["verdict"] == "rag_selected"
+    assert result.outputs["workflow_routing"]["source"] == "selector_override"
+    assert (
+        result.outputs["selected_workflow_trace"]["selector_selection_metadata"][
+            "selection_resolution"
+        ]
+        == "default_workflow_fallback"
+    )
+    selector_override = result.outputs["selected_workflow_trace"]["selector_override"]
+    assert (
+        selector_override["reason"]
+        == "selector_default_recovered_to_single_discovered_execution_workflow"
+    )
+    assert selector_override["recovered_candidate_workflow_id"] == selected_workflow_id
+    override_entry = next(
+        entry
+        for entry in aux_llm_calls
+        if isinstance(entry, dict)
+        and entry.get("type") == "workflow_selector_override"
+        and entry.get("reason")
+        == "selector_default_recovered_to_single_discovered_execution_workflow"
+    )
+    assert override_entry["selected_workflow_id"] == selected_workflow_id
 
 
 def test_execute_selected_promotes_child_result_snapshot_into_completion_report(

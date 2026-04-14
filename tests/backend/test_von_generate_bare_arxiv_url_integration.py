@@ -348,6 +348,135 @@ def test_generate_bare_arxiv_url_routes_to_specialised_workflow_and_surfaces_cre
     )
 
 
+def test_generate_bare_arxiv_url_recovers_from_selector_clarification_to_specialised_workflow(
+    monkeypatch,
+):
+    llm = _LLMSequence(
+        [
+            (
+                "I'm not sure which workflow you'd like me to select from the "
+                "provided candidates. If you want me to download or represent "
+                "the paper, please say so explicitly."
+            ),
+            "Downloaded and represented the paper.",
+            "Downloaded and represented the paper.",
+            "Downloaded and represented the paper.",
+        ]
+    )
+    discovery_result = {
+        "query": "https://arxiv.org/abs/2510.06248",
+        "requested_query": "https://arxiv.org/abs/2510.06248",
+        "search_sources": ["capability_index"],
+        "candidate_count": 1,
+        "match_count": 1,
+        "matches": [
+            {
+                "concept_id": ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+                "name": "Arxiv Paper Representation Workflow",
+                "description": "Represent an arXiv paper from a raw URL or arXiv identifier.",
+                "is_executable": True,
+                "executability_reason": "executable_now",
+                "is_policy_safe": True,
+                "routing_eligible": True,
+                "candidate_source": "capability_index",
+                "routing_profile": {"role": "execution"},
+            }
+        ],
+        "candidates": [
+            {
+                "concept_id": ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+                "name": "Arxiv Paper Representation Workflow",
+                "description": "Represent an arXiv paper from a raw URL or arXiv identifier.",
+                "is_executable": True,
+                "executability_reason": "executable_now",
+                "is_policy_safe": True,
+                "routing_eligible": True,
+                "candidate_source": "capability_index",
+                "routing_profile": {"role": "execution"},
+            }
+        ],
+    }
+    app = _make_app(
+        monkeypatch,
+        llm=llm,
+        workflow_discovery_result=discovery_result,
+    )
+
+    orchestrator = app.config["INTERNAL_MCP_ORCHESTRATOR"]
+    original_execute_workflow = orchestrator.execute_workflow
+
+    def _execute_workflow(workflow_id: str, **kwargs):
+        if workflow_id != ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID:
+            return original_execute_workflow(workflow_id, **kwargs)
+        return SimpleNamespace(
+            completed=True,
+            final_state="verify_arxiv_path",
+            error=None,
+            data={
+                "response_text": "Downloaded and represented the paper.",
+                "final_response": "Downloaded and represented the paper.",
+                "paper_concept_id": "#V#paper_on_arxiv_2510_06248",
+                "file_copy_concept_id": "#V#uploaded_file_copy_2510_06248",
+                "workflow_execution_summary": {
+                    "schema_version": "workflow_execution_summary.v1",
+                    "workflow_id": ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+                    "completed": True,
+                    "final_state": "verify_arxiv_path",
+                    "durable_side_effect_count": 2,
+                    "durable_side_effects": [
+                        {
+                            "mutation_kind": "created",
+                            "artefact_type": "paper_concept",
+                            "artefact_count": 1,
+                            "artefact_ids": ["#V#paper_on_arxiv_2510_06248"],
+                        },
+                        {
+                            "mutation_kind": "created",
+                            "artefact_type": "computer_file_copy",
+                            "artefact_count": 1,
+                            "artefact_ids": ["#V#uploaded_file_copy_2510_06248"],
+                        },
+                    ],
+                },
+            },
+        )
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
+
+    client = app.test_client()
+    response = client.post("/von/generate", json={"prompt": "https://arxiv.org/abs/2510.06248"})
+    assert response.status_code == 200
+
+    body = response.get_json()
+    assert isinstance(body, dict)
+    assert "Created paper concept: #V#paper_on_arxiv_2510_06248." in (
+        body.get("response") or ""
+    )
+
+    llm_debug = body.get("llm_debug") or {}
+    workflow_routing = llm_debug.get("workflow_routing") or {}
+    assert workflow_routing.get("workflow_id") == ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
+    assert workflow_routing.get("verdict") == "rag_selected"
+    assert workflow_routing.get("source") == "selector_override"
+
+    selected_workflow_trace = llm_debug.get("selected_workflow_trace") or {}
+    selector_override = selected_workflow_trace.get("selector_override") or {}
+    assert (
+        selector_override.get("reason")
+        == "selector_default_recovered_to_single_discovered_execution_workflow"
+    )
+    assert selector_override.get("recovered_candidate_workflow_id") == (
+        ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
+    )
+
+    turn_record = llm_debug.get("turn_execution_record") or {}
+    completion_report = turn_record.get("completion_report") or {}
+    assert completion_report.get("paper_concept_id") == "#V#paper_on_arxiv_2510_06248"
+    assert completion_report.get("file_copy_concept_id") == (
+        "#V#uploaded_file_copy_2510_06248"
+    )
+
+
 def test_generate_bare_arxiv_url_falls_back_to_tool_pipeline_when_specialised_route_is_unavailable(
     monkeypatch,
 ):
