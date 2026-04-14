@@ -24,9 +24,15 @@ function renderSettingsNavigationFixture() {
             <section id="current-user-settings" data-settings-concern="identity">
                 <h2>Current User Configuration</h2>
                 <div id="authenticationStatus"><button type="button">Login</button></div>
+                <select id="currentUserSelect">
+                    <option value="">Loading people...</option>
+                </select>
             </section>
             <section id="current-organisation-settings" data-settings-concern="identity">
                 <h2>Current Organisation Configuration</h2>
+                <select id="orgSelect">
+                    <option value="">Choose organisation</option>
+                </select>
             </section>
             <section id="conversation-history-settings" data-settings-concern="conversations">
                 <h2>Conversations</h2>
@@ -36,6 +42,7 @@ function renderSettingsNavigationFixture() {
             </section>
             <section id="premium-model-settings" data-settings-concern="models">
                 <h2>Premium Models (OpenAI)</h2>
+                <input id="enableOpenAiPremiumToggle" type="checkbox" />
                 <select id="openaiModelSelect"><option>gpt-5.4-mini</option></select>
             </section>
             <section id="ollima-settings" data-settings-concern="models">
@@ -89,14 +96,18 @@ describe('settings concern navigation', () => {
         expect(__testOnly_getSettingsConcernForSectionTarget('premium-model-settings')).toBe('models');
     });
 
-    test('initialises identity as the default visible concern and builds the section rail in the configured order', () => {
+    test('initialises identity as the default visible concern and renders actionable guidance in the configured order', () => {
         __testOnly_initialiseSettingsConcernNavigation();
 
         expect(__testOnly_getVisibleSettingsSectionIds()).toEqual([
             'current-user-settings',
             'current-organisation-settings',
         ]);
-        expect(document.getElementById('settingsConcernSummary').textContent).toContain('browser-scoped identity preferences');
+        const summary = document.getElementById('settingsConcernSummary');
+        expect(summary.dataset.guidanceSource).toBe('temporary-placeholder');
+        expect(summary.textContent).toContain('Choose the current user for this browser');
+        expect(summary.textContent).toContain('Suggested next step');
+        expect(summary.querySelector('[data-settings-guidance-target]')?.textContent).toBe('Choose current user');
         expect(__testOnly_getSettingsSectionRailTargets('identity')).toEqual([
             'current-user-settings',
             'current-organisation-settings',
@@ -104,6 +115,22 @@ describe('settings concern navigation', () => {
 
         const railLabels = Array.from(document.querySelectorAll('#settingsSectionRail button')).map((button) => button.textContent.trim());
         expect(railLabels).toEqual(['User', 'Organisation']);
+    });
+
+    test('changing the active concern refreshes the guidance card as well as the visible sections', () => {
+        __testOnly_initialiseSettingsConcernNavigation();
+
+        document.querySelector('[data-settings-concern-tab="models"]').click();
+
+        expect(__testOnly_getVisibleSettingsSectionIds()).toEqual([
+            'premium-model-settings',
+            'ollima-settings',
+        ]);
+
+        const summary = document.getElementById('settingsConcernSummary');
+        expect(summary.dataset.guidanceConcern).toBe('models');
+        expect(summary.textContent).toContain('Confirm the local model this browser should use by default');
+        expect(summary.querySelector('[data-settings-guidance-target]')?.dataset.settingsGuidanceTarget).toBe('ollima-settings');
     });
 
     test('model focus message reveals the models concern and focuses a model selector', () => {

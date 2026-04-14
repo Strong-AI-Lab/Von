@@ -10878,10 +10878,78 @@ body.settings-body {
 }
 
 .settings-concern-summary {
+    display: grid;
+    gap: 0.45rem;
     margin-top: -1rem;
+    padding: 1rem 1.1rem;
+    border-radius: 16px;
+    border: 1px solid #cfe2d4;
+    background:
+        linear-gradient(135deg, rgba(234, 250, 239, 0.98) 0%, rgba(248, 246, 234, 0.96) 100%);
+    box-shadow: 0 8px 22px rgba(15, 23, 42, 0.05);
+    color: #334155;
+}
+
+.settings-concern-guidance-kicker {
+    margin: 0;
+    font-size: 0.74rem;
+    font-weight: 700;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: #166534;
+}
+
+.settings-concern-guidance-title {
+    margin: 0;
+    font-size: 1.16rem;
+    line-height: 1.35;
+    font-weight: 700;
+    color: #1f2937;
+}
+
+.settings-concern-guidance-body {
+    margin: 0;
     font-size: 0.98rem;
-    line-height: 1.5;
+    line-height: 1.58;
     color: #52606f;
+}
+
+.settings-concern-guidance-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    align-items: center;
+    margin-top: 0.2rem;
+}
+
+.settings-concern-guidance-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.35rem;
+    min-height: 2.5rem;
+    width: auto !important;
+    margin: 0 !important;
+    padding: 0.72rem 1rem !important;
+    border-radius: 999px !important;
+    border: 1px solid #166534 !important;
+    background: linear-gradient(135deg, #14532d 0%, #1d7f46 100%) !important;
+    color: #f8fafc !important;
+    font-weight: 700 !important;
+    letter-spacing: 0.01em;
+    box-shadow: 0 8px 18px rgba(20, 83, 45, 0.18);
+    transition: transform 0.12s ease, box-shadow 0.12s ease, filter 0.12s ease;
+}
+
+.settings-concern-guidance-button:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 10px 22px rgba(20, 83, 45, 0.22);
+    filter: saturate(1.05);
+}
+
+.settings-concern-guidance-button:focus-visible {
+    outline: 3px solid rgba(22, 101, 52, 0.18);
+    outline-offset: 2px;
 }
 
 .settings-section-rail {
@@ -11201,6 +11269,14 @@ body.settings-body {
     .settings-concern-tab {
         flex: 1 1 calc(50% - 0.75rem);
         justify-content: center;
+    }
+
+    .settings-concern-summary {
+        padding: 0.95rem;
+    }
+
+    .settings-concern-guidance-button {
+        width: 100% !important;
     }
 
     .settings-section-rail {

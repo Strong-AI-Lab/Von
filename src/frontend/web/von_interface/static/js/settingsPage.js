@@ -95,6 +95,7 @@ let backgroundTaskUnsubscribe = null;
 let gmailProfileStatusInFlight = false;
 let currentResolvedLlm = null;
 let latestOpenAiModelProbe = null;
+let latestSettingsAuthStatus = null;
 
 let __vonIsAdminOrOwner = false;
 let __canPersistWriteConservatism = false;
@@ -111,7 +112,6 @@ const SETTINGS_CONCERN_ORDER = Object.freeze([
 
 const SETTINGS_CONCERN_CONFIG = Object.freeze({
   identity: Object.freeze({
-    summary: 'User auth, browser-scoped identity preferences, and organisation context.',
     sectionIds: Object.freeze([
       'current-user-settings',
       'current-organisation-settings',
@@ -122,7 +122,6 @@ const SETTINGS_CONCERN_CONFIG = Object.freeze({
     ]),
   }),
   conversations: Object.freeze({
-    summary: 'Conversation history visibility and speech preferences used by the Conversations tab.',
     sectionIds: Object.freeze([
       'conversation-history-settings',
       'speech-settings',
@@ -133,7 +132,6 @@ const SETTINGS_CONCERN_CONFIG = Object.freeze({
     ]),
   }),
   models: Object.freeze({
-    summary: 'Choose the active OpenAI and Ollama model surfaces, including premium enablement and host selection.',
     sectionIds: Object.freeze([
       'premium-model-settings',
       'ollima-settings',
@@ -144,7 +142,6 @@ const SETTINGS_CONCERN_CONFIG = Object.freeze({
     ]),
   }),
   vontology: Object.freeze({
-    summary: 'Control Vontology preload behaviour, background task visibility, and concept cartouche rendering.',
     sectionIds: Object.freeze([
       'vontology-performance',
     ]),
@@ -153,7 +150,6 @@ const SETTINGS_CONCERN_CONFIG = Object.freeze({
     ]),
   }),
   runtime: Object.freeze({
-    summary: 'Inspect server runtime details and the operational tool, Gmail, and Jira guardrail surfaces.',
     sectionIds: Object.freeze([
       'server-runtime-overview',
       'agent-configuration',
@@ -164,7 +160,6 @@ const SETTINGS_CONCERN_CONFIG = Object.freeze({
     ]),
   }),
   maintenance: Object.freeze({
-    summary: 'Database visibility, ontology maintenance, deprecation telemetry, and server control operations.',
     sectionIds: Object.freeze([
       'database-info',
       'ontology-maintenance',
@@ -244,10 +239,248 @@ function notifySettingsLayoutChanged() {
   } catch { }
 }
 
-function updateSettingsConcernSummary(concernId) {
+function getActiveSettingsConcernId() {
+  return (
+    document.querySelector('[data-settings-concern-tab].is-active')?.dataset?.settingsConcernTab
+    || SETTINGS_CONCERN_ORDER[0]
+  );
+}
+
+function getSettingsConcernIdentitySnapshot() {
+  return {
+    user: getSelectedUserContextFromUi() || getStoredJson(LS_USER_KEY),
+    organisation:
+      getSelectedOrganisationContextFromUi()
+      || getStoredJson(LS_ORG_KEY)
+      || getSessionScopedOrgContext(),
+    authStatus: latestSettingsAuthStatus,
+  };
+}
+
+function getSettingsConcernModelSnapshot() {
+  const localModelPreference = getEffectiveLocalModelPreference();
+  const premiumToggle = document.getElementById('enableOpenAiPremiumToggle');
+  const premiumEnabled = premiumToggle
+    ? !!premiumToggle.checked
+    : localModelPreference.activeSource === 'openai';
+  const openAiModel = String(
+    document.getElementById('openaiModelSelect')?.value
+    || getStoredOpenAiSelectedModel()
+    || localModelPreference.openaiModel
+    || '',
+  ).trim();
+  const ollamaSelection = resolveOllamaSelection(false) || localModelPreference.ollamaSelection || null;
+  const ollamaModel = String(ollamaSelection?.model || ollamaSelection?.value || '').trim();
+
+  return {
+    premiumEnabled,
+    openAiModel,
+    ollamaModel,
+  };
+}
+
+// Temporary placeholder guidance until a workflow/Vontology-backed provider supplies
+// concern-aware setup recommendations for the Settings shell.
+function buildTemporarySettingsConcernRecommendation(concernId) {
+  switch (concernId) {
+    case 'identity': {
+      const { user, organisation, authStatus } = getSettingsConcernIdentitySnapshot();
+      const authKnown = typeof authStatus?.authenticated === 'boolean';
+
+      if (!user?.concept_id) {
+        return {
+          kicker: 'Suggested next step',
+          title: 'Choose the current user for this browser',
+          description: 'This keeps preferences, scoped history, and later setup steps anchored to one person instead of an anonymous browser state.',
+          actionLabel: 'Choose current user',
+          actionTarget: 'current-user-settings',
+          focusSelector: '#currentUserSelect',
+          source: 'temporary-placeholder',
+        };
+      }
+
+      if (!organisation?.concept_id) {
+        return {
+          kicker: 'Suggested next step',
+          title: 'Choose the organisation scope to work in',
+          description: 'Organisation context decides which shared conversations, RAG state, and team-facing surfaces this browser should see.',
+          actionLabel: 'Choose organisation',
+          actionTarget: 'current-organisation-settings',
+          focusSelector: '#orgSelect, #currentOrganisationSelect',
+          source: 'temporary-placeholder',
+        };
+      }
+
+      if (authKnown && !authStatus.authenticated) {
+        return {
+          kicker: 'Suggested next step',
+          title: 'Log in to unlock user-scoped tools',
+          description: 'Your browser knows the user and organisation to act as. Authenticate next if you want server-backed sessions, RAG, and Messages.',
+          actionLabel: 'Open sign-in controls',
+          actionTarget: 'current-user-settings',
+          focusSelector: '#authenticationStatus button',
+          source: 'temporary-placeholder',
+        };
+      }
+
+      return {
+        kicker: 'Suggested next step',
+        title: 'Identity is configured for normal use',
+        description: 'Review language and concept-display preferences here, then move on to the model surface this browser should prefer.',
+        actionLabel: 'Review model setup',
+        actionTarget: 'premium-model-settings',
+        focusSelector: '#globalModelSelect, #openaiModelSelect, #openaiApiKeyEnvVar',
+        source: 'temporary-placeholder',
+      };
+    }
+    case 'conversations':
+      return {
+        kicker: 'Suggested next step',
+        title: 'Tune the conversation window for this browser',
+        description: 'Set how much recent history should appear by default, then adjust speech settings if you rely on dictation or text-to-speech.',
+        actionLabel: 'Review conversation preferences',
+        actionTarget: 'conversation-history-settings',
+        focusSelector: '#settingsConversationRecentLimitInput',
+        source: 'temporary-placeholder',
+      };
+    case 'models': {
+      const { premiumEnabled, openAiModel, ollamaModel } = getSettingsConcernModelSnapshot();
+
+      if (premiumEnabled && !openAiModel) {
+        return {
+          kicker: 'Suggested next step',
+          title: 'Choose the premium model before relying on it',
+          description: 'Premium use is enabled for this browser, but there is no selected OpenAI model yet. Pick one before you leave this page.',
+          actionLabel: 'Choose premium model',
+          actionTarget: 'premium-model-settings',
+          focusSelector: '#openaiApiKeyEnvVar, #openaiModelSelect',
+          source: 'temporary-placeholder',
+        };
+      }
+
+      if (!premiumEnabled && !ollamaModel) {
+        return {
+          kicker: 'Suggested next step',
+          title: 'Choose the local model Von should prefer',
+          description: 'Select an Ollama model so this browser has a clear local default before you switch premium use on or off.',
+          actionLabel: 'Choose Ollama model',
+          actionTarget: 'ollima-settings',
+          focusSelector: '#globalModelSelect',
+          source: 'temporary-placeholder',
+        };
+      }
+
+      if (premiumEnabled && openAiModel) {
+        return {
+          kicker: 'Suggested next step',
+          title: 'Test the selected premium model before relying on it',
+          description: `${openAiModel} is selected for premium use on this browser. Run a quick check here before you return to chat.`,
+          actionLabel: 'Review premium model',
+          actionTarget: 'premium-model-settings',
+          focusSelector: '#testOpenAiModelButton, #openaiModelSelect',
+          source: 'temporary-placeholder',
+        };
+      }
+
+      return {
+        kicker: 'Suggested next step',
+        title: 'Confirm the local model this browser should use by default',
+        description: 'Ollama is the current local path. Review the selected model or switch to premium if you need a stronger model surface.',
+        actionLabel: 'Review Ollama model',
+        actionTarget: 'ollima-settings',
+        focusSelector: '#globalModelSelect',
+        source: 'temporary-placeholder',
+      };
+    }
+    case 'vontology': {
+      const preloadEnabled = !!document.getElementById('preloadVontologyTreeToggle')?.checked;
+      return {
+        kicker: 'Suggested next step',
+        title: preloadEnabled
+          ? 'Check that background preload is worth the extra startup work'
+          : 'Decide whether Vontology should preload in the background',
+        description: 'This concern controls how quickly the Vontology UI appears versus how much work the browser starts doing immediately.',
+        actionLabel: 'Review Vontology performance',
+        actionTarget: 'vontology-performance',
+        focusSelector: '#preloadVontologyTreeToggle, #fetchCountsOnLoadToggle',
+        source: 'temporary-placeholder',
+      };
+    }
+    case 'runtime':
+      return {
+        kicker: 'Suggested next step',
+        title: 'Refresh runtime status before changing tool access',
+        description: 'Confirm the live server state first, then review Gmail, Jira, and write-guardrail settings with the current runtime in view.',
+        actionLabel: 'Inspect runtime status',
+        actionTarget: 'server-runtime-overview',
+        focusSelector: '#refreshRuntimeButton',
+        source: 'temporary-placeholder',
+      };
+    case 'maintenance':
+      return {
+        kicker: 'Suggested next step',
+        title: 'Check database health before using maintenance controls',
+        description: 'Maintenance actions matter most when something is already off. Start with the database and telemetry surfaces before you use restart or ontology operations.',
+        actionLabel: 'Review maintenance surfaces',
+        actionTarget: 'database-info',
+        focusSelector: '#refreshDbInfoButton, #ontology-maintenance button, #shutdownServerButton',
+        source: 'temporary-placeholder',
+      };
+    default:
+      return null;
+  }
+}
+
+function renderSettingsConcernSummary(concernId) {
   const summaryElement = document.getElementById('settingsConcernSummary');
   if (!summaryElement) return;
-  summaryElement.textContent = getSettingsConcernConfig(concernId).summary;
+
+  const recommendation = buildTemporarySettingsConcernRecommendation(concernId);
+  summaryElement.replaceChildren();
+  summaryElement.dataset.guidanceConcern = concernId;
+  summaryElement.dataset.guidanceSource = recommendation?.source || 'none';
+
+  if (!recommendation) {
+    return;
+  }
+
+  const kicker = document.createElement('p');
+  kicker.className = 'settings-concern-guidance-kicker';
+  kicker.textContent = recommendation.kicker;
+
+  const title = document.createElement('p');
+  title.className = 'settings-concern-guidance-title';
+  title.textContent = recommendation.title;
+
+  const description = document.createElement('p');
+  description.className = 'settings-concern-guidance-body';
+  description.textContent = recommendation.description;
+
+  const actions = document.createElement('div');
+  actions.className = 'settings-concern-guidance-actions';
+
+  if (recommendation.actionLabel && recommendation.actionTarget) {
+    const actionButton = document.createElement('button');
+    actionButton.type = 'button';
+    actionButton.className = 'settings-concern-guidance-button';
+    actionButton.dataset.settingsGuidanceTarget = recommendation.actionTarget;
+    actionButton.textContent = recommendation.actionLabel;
+    actionButton.addEventListener('click', () => {
+      focusSettingsSection(recommendation.actionTarget, {
+        focusSelector: recommendation.focusSelector,
+      });
+    });
+    actions.appendChild(actionButton);
+  }
+
+  summaryElement.append(kicker, title, description);
+  if (actions.childElementCount) {
+    summaryElement.appendChild(actions);
+  }
+}
+
+function refreshActiveSettingsConcernGuidance() {
+  renderSettingsConcernSummary(getActiveSettingsConcernId());
 }
 
 function focusElementIfPossible(element) {
@@ -331,7 +564,7 @@ function setActiveSettingsConcern(concernId, options = {}) {
     section.setAttribute('aria-hidden', isActive ? 'false' : 'true');
   }
 
-  updateSettingsConcernSummary(resolvedConcernId);
+  renderSettingsConcernSummary(resolvedConcernId);
   renderSettingsSectionRail(resolvedConcernId);
 
   if (options.notifyLayout !== false) {
@@ -340,6 +573,15 @@ function setActiveSettingsConcern(concernId, options = {}) {
 
   return resolvedConcernId;
 }
+
+document.addEventListener('authStatusChanged', (event) => {
+  latestSettingsAuthStatus = event?.detail || null;
+  refreshActiveSettingsConcernGuidance();
+});
+
+document.addEventListener('orgSwitched', () => {
+  refreshActiveSettingsConcernGuidance();
+});
 
 function initialiseSettingsConcernNavigation() {
   const buttons = getSettingsConcernButtons();
@@ -2134,6 +2376,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     } else {
       clearStoredOllamaSelection();
     }
+    refreshActiveSettingsConcernGuidance();
     notifyLocalModelPreferenceChanged();
   });
   document.getElementById('openaiModelSelect')?.addEventListener('change', async () => {
@@ -2141,6 +2384,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     setStoredOpenAiSelectedModel(selectedModel);
     latestOpenAiModelProbe = null;
     updateOpenAiModelStatusMessage();
+    refreshActiveSettingsConcernGuidance();
     await testSelectedOpenAiModel();
     await saveAllSettings();
     notifyLocalModelPreferenceChanged();
@@ -2162,12 +2406,14 @@ document.addEventListener('DOMContentLoaded', async () => {
       setStoredOllamaSelection(ollamaSelection);
       setLocalPremiumModelUseEnabled(false);
       updateOpenAiModelStatusMessage();
+      refreshActiveSettingsConcernGuidance();
       notifyLocalModelPreferenceChanged();
       return;
     }
 
     setLocalPremiumModelUseEnabled(true);
     updateOpenAiModelStatusMessage();
+    refreshActiveSettingsConcernGuidance();
     const probe = await testSelectedOpenAiModel();
     if (!probe?.usable) {
       showStatusMessage(
@@ -2206,8 +2452,10 @@ document.addEventListener('DOMContentLoaded', async () => {
           try { await window.refreshOrgSelector(); } catch (e) { console.warn('Org selector refresh failed', e); }
         }
       }
+      refreshActiveSettingsConcernGuidance();
     } else {
       setStoredJson(LS_USER_KEY, null);
+      refreshActiveSettingsConcernGuidance();
     }
   });
   document.getElementById('currentOrganisationSelect')?.addEventListener('change', async () => {
@@ -2228,10 +2476,12 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (window.parent?.updateModelInfoFooterDisplay) { window.parent.updateModelInfoFooterDisplay(); }
       // Persist organisation preference (and language if set)
       persistCurrentUserPreferences();
+      refreshActiveSettingsConcernGuidance();
     } else {
       setStoredJson(LS_ORG_KEY, null);
       if (window.parent?.updateModelInfoFooterDisplay) { window.parent.updateModelInfoFooterDisplay(); }
       persistCurrentUserPreferences();
+      refreshActiveSettingsConcernGuidance();
     }
   });
   document.getElementById('preferredLanguageSelect')?.addEventListener('change', () => {
@@ -2467,6 +2717,7 @@ document.getElementById('resetLocalPrefsButton')?.addEventListener('click', () =
     setCartoucheKindAsBackgroundSetting(false);
     if (window.parent?.updateModelInfoFooterDisplay) { window.parent.updateModelInfoFooterDisplay(); }
     showStatusMessage('settingsStatusMessage', 'Local preferences cleared');
+    refreshActiveSettingsConcernGuidance();
   } catch (e) {
     console.warn('Failed to reset local prefs', e);
     showStatusMessage('settingsStatusMessage', 'Failed to reset local preferences', true);
@@ -2632,6 +2883,7 @@ async function loadAndDisplaySettings() {
 
         renderActiveNamespace();
         void loadRagStatus(null);
+        refreshActiveSettingsConcernGuidance();
       });
     } catch (error) {
       console.error('Error initializing organisation selector:', error);
@@ -2656,6 +2908,7 @@ async function loadAndDisplaySettings() {
     }
     latestOpenAiModelProbe = null;
     updateOpenAiModelStatusMessage();
+    refreshActiveSettingsConcernGuidance();
 
     // Populate Gmail profile selector
     try {
