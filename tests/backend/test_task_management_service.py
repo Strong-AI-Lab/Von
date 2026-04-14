@@ -224,6 +224,46 @@ class TestGetTask:
         assert result["assignee_concept_id"] == "#V#user_alice"
 
     @patch("src.backend.services.task_management_service.ConceptsRepository")
+    @patch("src.backend.services.task_management_service.get_texts_for_concept")
+    def test_get_task_supports_legacy_task_taxonomy_predicates(
+        self,
+        mock_get_texts: MagicMock,
+        mock_repo: MagicMock,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        mock_repo.find_one.return_value = {
+            "concept_id": "#V#task_legacy",
+            "relationships": {
+                "is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID],
+                "#V#hasTaskSource": [JIRA_IMPORTED_TASK_SOURCE_ID],
+                "#V#reportsTo": ["#V#user_manager"],
+            },
+            "metadata": {},
+            "created_at": now,
+            "updated_at": now,
+        }
+        mock_get_texts.return_value = [
+            {"predicate": "#V#hasName", "text": "Legacy Task"},
+            {"predicate": "#V#hasDescription", "text": "Legacy description"},
+            {"predicate": "#V#hasTaskStatus", "text": "pending"},
+            {"predicate": "#V#hasTaskRole", "text": "Communicator"},
+            {"predicate": "#V#hasNextCheckpoint", "text": "Tomorrow morning"},
+            {"predicate": "#V#hasProgressSignal", "text": "Confirmed by chat"},
+            {"predicate": "#V#hasEvidence", "text": "Printed document"},
+            {"predicate": "#V#hasTaskReferenceCode", "text": "TASK-001"},
+        ]
+
+        result = get_task("#V#task_legacy")
+
+        assert result["task_source_id"] == JIRA_IMPORTED_TASK_SOURCE_ID
+        assert result["report_to_concept_id"] == "#V#user_manager"
+        assert result["task_role"] == "Communicator"
+        assert result["next_checkpoint"] == "Tomorrow morning"
+        assert result["progress_signal"] == "Confirmed by chat"
+        assert result["evidence"] == "Printed document"
+        assert result["reference_code"] == "TASK-001"
+
+    @patch("src.backend.services.task_management_service.ConceptsRepository")
     def test_get_task_not_found(self, mock_repo: MagicMock) -> None:
         """get_task() should raise TaskNotFoundError when not found."""
         mock_repo.find_one.return_value = None

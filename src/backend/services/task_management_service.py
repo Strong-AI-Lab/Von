@@ -35,7 +35,9 @@ from .effort_unit_ontology_service import (
 )
 from .task_ontology_service import (
     DEFAULT_TASK_SOURCE_ID,
+    EVIDENCE_TEXT_PREDICATES,
     JIRA_IMPORTED_TASK_SOURCE_ID,
+    NEXT_CHECKPOINT_TEXT_PREDICATES,
     PREDICATE_HAS_EVIDENCE,
     PREDICATE_HAS_NEXT_CHECKPOINT,
     PREDICATE_HAS_PROGRESS_SIGNAL,
@@ -43,6 +45,11 @@ from .task_ontology_service import (
     PREDICATE_HAS_TASK_ROLE,
     PREDICATE_HAS_TASK_SOURCE,
     PREDICATE_REPORTS_TO,
+    PROGRESS_SIGNAL_TEXT_PREDICATES,
+    REPORTS_TO_RELATIONSHIP_PREDICATES,
+    TASK_REFERENCE_CODE_TEXT_PREDICATES,
+    TASK_ROLE_TEXT_PREDICATES,
+    TASK_SOURCE_RELATIONSHIP_PREDICATES,
     ensure_task_ontology,
     get_task_source_definition,
     get_task_taxonomy as get_task_taxonomy_definition,
@@ -101,6 +108,19 @@ TASK_LINK_TYPE_INVERSES: Dict[str, str] = {
 }
 
 TASK_LINK_PREDICATES: set[str] = set(TASK_LINK_TYPE_TO_PREDICATE.values())
+
+_TASK_RELATIONSHIP_PREDICATE_ALIAS_MAP: Dict[str, tuple[str, ...]] = {
+    PREDICATE_HAS_TASK_SOURCE: TASK_SOURCE_RELATIONSHIP_PREDICATES,
+    PREDICATE_REPORTS_TO: REPORTS_TO_RELATIONSHIP_PREDICATES,
+}
+
+_TASK_TEXT_PREDICATE_ALIAS_MAP: Dict[str, tuple[str, ...]] = {
+    PREDICATE_HAS_TASK_ROLE: TASK_ROLE_TEXT_PREDICATES,
+    PREDICATE_HAS_NEXT_CHECKPOINT: NEXT_CHECKPOINT_TEXT_PREDICATES,
+    PREDICATE_HAS_PROGRESS_SIGNAL: PROGRESS_SIGNAL_TEXT_PREDICATES,
+    PREDICATE_HAS_EVIDENCE: EVIDENCE_TEXT_PREDICATES,
+    PREDICATE_HAS_TASK_REFERENCE_CODE: TASK_REFERENCE_CODE_TEXT_PREDICATES,
+}
 
 # Metadata keys
 TASK_METADATA_KEY_CONCEPT_TYPE = "concept_type"
@@ -313,13 +333,25 @@ def _upsert_optional_task_text(
     value: str | None,
     lang: str = "en-NZ",
 ) -> None:
+    predicate_aliases = _text_predicate_aliases(predicate)
     if value is None:
-        _clear_task_datetime_text_relations(
+        _clear_task_text_relations(
             task_concept_id=task_concept_id,
-            predicate=predicate,
+            predicates=predicate_aliases,
             log_field_name=predicate,
         )
         return
+
+    legacy_predicates = tuple(
+        alias for alias in predicate_aliases if alias != predicate
+    )
+    if legacy_predicates:
+        _clear_task_text_relations(
+            task_concept_id=task_concept_id,
+            predicates=legacy_predicates,
+            log_field_name=predicate,
+        )
+
     upsert_text_for_concept(
         subject_concept_id=task_concept_id,
         predicate=predicate,
@@ -335,22 +367,27 @@ def _replace_single_relationship_target(
     new_target_id: str | None,
 ) -> None:
     _, task_doc = _get_task_doc(task_concept_id)
-    existing_targets = _relationship_id_list(
-        (task_doc.get("relationships") or {}).get(predicate)
-    )
+    relationships = task_doc.get("relationships") or {}
+    predicate_aliases = _relationship_predicate_aliases(predicate)
+    existing_targets_by_predicate = {
+        alias: _relationship_id_list(relationships.get(alias))
+        for alias in predicate_aliases
+    }
+    canonical_existing_targets = existing_targets_by_predicate.get(predicate, [])
 
-    for existing_target in existing_targets:
-        if existing_target == new_target_id:
-            continue
-        ConceptsRepository.mutate_relationship_edge(
-            source_id=task_concept_id,
-            kind=predicate,
-            target_id=existing_target,
-            action="remove",
-            maintain_inverse=False,
-        )
+    for alias, existing_targets in existing_targets_by_predicate.items():
+        for existing_target in existing_targets:
+            if alias == predicate and existing_target == new_target_id:
+                continue
+            ConceptsRepository.mutate_relationship_edge(
+                source_id=task_concept_id,
+                kind=alias,
+                target_id=existing_target,
+                action="remove",
+                maintain_inverse=False,
+            )
 
-    if new_target_id and new_target_id not in existing_targets:
+    if new_target_id and new_target_id not in canonical_existing_targets:
         ConceptsRepository.mutate_relationship_edge(
             source_id=task_concept_id,
             kind=predicate,
@@ -635,6 +672,25 @@ def _first_relationship_value(raw: Any) -> str | None:
     return None
 
 
+def _first_relationship_value_from_aliases(
+    relationships: Mapping[str, Any],
+    predicates: Iterable[str],
+) -> str | None:
+    for predicate in predicates:
+        value = _first_relationship_value(relationships.get(predicate))
+        if value:
+            return value
+    return None
+
+
+def _relationship_predicate_aliases(predicate: str) -> tuple[str, ...]:
+    return _TASK_RELATIONSHIP_PREDICATE_ALIAS_MAP.get(predicate, (predicate,))
+
+
+def _text_predicate_aliases(predicate: str) -> tuple[str, ...]:
+    return _TASK_TEXT_PREDICATE_ALIAS_MAP.get(predicate, (predicate,))
+
+
 def _task_subtask_ids_from_doc(doc: Dict[str, Any]) -> list[str]:
     relationships = doc.get("relationships", {})
     raw = relationships.get(PREDICATE_HAS_SUBTASK) or []
@@ -651,15 +707,34 @@ def _clear_task_datetime_text_relations(
     predicate: str,
     log_field_name: str,
 ) -> None:
+    _clear_task_text_relations(
+        task_concept_id=task_concept_id,
+        predicates=(predicate,),
+        log_field_name=log_field_name,
+    )
+
+
+def _clear_task_text_relations(
+    *,
+    task_concept_id: str,
+    predicates: Iterable[str],
+    log_field_name: str,
+) -> None:
     from ..services.text_value_service import delete_text_relation
 
-    for existing in get_texts_for_concept(
-        task_concept_id,
-        predicate=predicate,
-        limit=100,
-    ):
-        relation_id = existing.get("relation_id")
-        if isinstance(relation_id, str) and relation_id:
+    seen_relation_ids: set[str] = set()
+    for predicate in predicates:
+        for existing in get_texts_for_concept(
+            task_concept_id,
+            predicate=predicate,
+            limit=100,
+        ):
+            relation_id = existing.get("relation_id")
+            if not isinstance(relation_id, str) or not relation_id:
+                continue
+            if relation_id in seen_relation_ids:
+                continue
+            seen_relation_ids.add(relation_id)
             try:
                 delete_text_relation(task_concept_id, relation_id)
             except Exception as e:
@@ -1240,15 +1315,15 @@ def _build_task_response(doc: Dict[str, Any]) -> Dict[str, Any]:
             start_date = text_value
         elif predicate in (PREDICATE_HAS_DUE_DATE, "hasDueDate"):
             due_date = text_value
-        elif predicate in (PREDICATE_HAS_TASK_ROLE, "hasTaskRole"):
+        elif predicate in TASK_ROLE_TEXT_PREDICATES:
             task_role = text_value
-        elif predicate in (PREDICATE_HAS_NEXT_CHECKPOINT, "hasNextCheckpoint"):
+        elif predicate in NEXT_CHECKPOINT_TEXT_PREDICATES:
             next_checkpoint = text_value
-        elif predicate in (PREDICATE_HAS_PROGRESS_SIGNAL, "hasProgressSignal"):
+        elif predicate in PROGRESS_SIGNAL_TEXT_PREDICATES:
             progress_signal = text_value
-        elif predicate in (PREDICATE_HAS_EVIDENCE, "hasEvidence"):
+        elif predicate in EVIDENCE_TEXT_PREDICATES:
             evidence = text_value
-        elif predicate in (PREDICATE_HAS_TASK_REFERENCE_CODE, "hasTaskReferenceCode"):
+        elif predicate in TASK_REFERENCE_CODE_TEXT_PREDICATES:
             reference_code = text_value
         elif predicate in ("hasNote", "#V#hasNote"):
             notes = text_value
@@ -1256,7 +1331,10 @@ def _build_task_response(doc: Dict[str, Any]) -> Dict[str, Any]:
     # Get relationship values
     assignee = _first_relationship_value(relationships.get(PREDICATE_HAS_ASSIGNEE))
     created_by = _first_relationship_value(relationships.get(PREDICATE_HAS_CREATED_BY))
-    report_to = _first_relationship_value(relationships.get(PREDICATE_REPORTS_TO))
+    report_to = _first_relationship_value_from_aliases(
+        relationships,
+        REPORTS_TO_RELATIONSHIP_PREDICATES,
+    )
     originating_conversation = _first_relationship_value(
         relationships.get(PREDICATE_HAS_ORIGINATING_CONVERSATION)
     )
@@ -1293,8 +1371,9 @@ def _build_task_response(doc: Dict[str, Any]) -> Dict[str, Any]:
     external_references = (
         raw_external_references if isinstance(raw_external_references, dict) else {}
     )
-    explicit_task_source = _first_relationship_value(
-        relationships.get(PREDICATE_HAS_TASK_SOURCE)
+    explicit_task_source = _first_relationship_value_from_aliases(
+        relationships,
+        TASK_SOURCE_RELATIONSHIP_PREDICATES,
     )
     task_source_id = _infer_task_source_id(
         explicit_source_id=explicit_task_source,

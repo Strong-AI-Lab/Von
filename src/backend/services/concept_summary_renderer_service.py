@@ -19,6 +19,7 @@ from .renderer_applicability_service import resolve_renderer_applicability_from_
 from .renderer_applicability_vontology_service import (
     load_renderer_definitions_from_concept_ids,
 )
+from .task_ontology_service import TASK_SOURCE_RELATIONSHIP_PREDICATES
 from .text_value_service import get_texts_for_concept
 from ..vontology.utils_vontology import get_concept_display_name_with_names_fallback
 
@@ -104,7 +105,7 @@ _RELATIONSHIP_PREDICATE_ALIASES: dict[str, tuple[str, ...]] = {
     "meeting_participant": ("#V#meeting_participant", "#V#performed_by"),
     "meeting_location": ("#V#meeting_location", "#V#has_location"),
     "meeting_host": ("#V#meeting_host_organisation",),
-    "task_source": ("#V#hasTaskSource",),
+    "task_source": TASK_SOURCE_RELATIONSHIP_PREDICATES,
     "authored_work": ("#V#author_of",),
 }
 

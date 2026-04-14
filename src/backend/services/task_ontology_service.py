@@ -18,13 +18,58 @@ logger = logging.getLogger(__name__)
 TASK_SPECIFICATION_TYPE_ID = "#V#task_specification"
 TASK_SOURCE_TYPE_ID = "#V#task_source"
 
-PREDICATE_HAS_TASK_SOURCE = "#V#hasTaskSource"
-PREDICATE_REPORTS_TO = "#V#reportsTo"
-PREDICATE_HAS_TASK_ROLE = "#V#hasTaskRole"
-PREDICATE_HAS_NEXT_CHECKPOINT = "#V#hasNextCheckpoint"
-PREDICATE_HAS_PROGRESS_SIGNAL = "#V#hasProgressSignal"
-PREDICATE_HAS_EVIDENCE = "#V#hasEvidence"
-PREDICATE_HAS_TASK_REFERENCE_CODE = "#V#hasTaskReferenceCode"
+# Keep these predicate IDs in canonical slug form. ``create_concept()`` lowercases
+# concept IDs during canonicalisation, so mixed-case identifiers would bootstrap
+# under a different persisted ID than the one later used for relationship writes.
+PREDICATE_HAS_TASK_SOURCE = "#V#hastasksource"
+PREDICATE_REPORTS_TO = "#V#reportsto"
+PREDICATE_HAS_TASK_ROLE = "#V#hastaskrole"
+PREDICATE_HAS_NEXT_CHECKPOINT = "#V#hasnextcheckpoint"
+PREDICATE_HAS_PROGRESS_SIGNAL = "#V#hasprogresssignal"
+PREDICATE_HAS_EVIDENCE = "#V#hasevidence"
+PREDICATE_HAS_TASK_REFERENCE_CODE = "#V#hastaskreferencecode"
+
+LEGACY_PREDICATE_HAS_TASK_SOURCE = "#V#hasTaskSource"
+LEGACY_PREDICATE_REPORTS_TO = "#V#reportsTo"
+LEGACY_PREDICATE_HAS_TASK_ROLE = "#V#hasTaskRole"
+LEGACY_PREDICATE_HAS_NEXT_CHECKPOINT = "#V#hasNextCheckpoint"
+LEGACY_PREDICATE_HAS_PROGRESS_SIGNAL = "#V#hasProgressSignal"
+LEGACY_PREDICATE_HAS_EVIDENCE = "#V#hasEvidence"
+LEGACY_PREDICATE_HAS_TASK_REFERENCE_CODE = "#V#hasTaskReferenceCode"
+
+TASK_SOURCE_RELATIONSHIP_PREDICATES: tuple[str, ...] = (
+    PREDICATE_HAS_TASK_SOURCE,
+    LEGACY_PREDICATE_HAS_TASK_SOURCE,
+)
+REPORTS_TO_RELATIONSHIP_PREDICATES: tuple[str, ...] = (
+    PREDICATE_REPORTS_TO,
+    LEGACY_PREDICATE_REPORTS_TO,
+)
+TASK_ROLE_TEXT_PREDICATES: tuple[str, ...] = (
+    PREDICATE_HAS_TASK_ROLE,
+    LEGACY_PREDICATE_HAS_TASK_ROLE,
+    "hasTaskRole",
+)
+NEXT_CHECKPOINT_TEXT_PREDICATES: tuple[str, ...] = (
+    PREDICATE_HAS_NEXT_CHECKPOINT,
+    LEGACY_PREDICATE_HAS_NEXT_CHECKPOINT,
+    "hasNextCheckpoint",
+)
+PROGRESS_SIGNAL_TEXT_PREDICATES: tuple[str, ...] = (
+    PREDICATE_HAS_PROGRESS_SIGNAL,
+    LEGACY_PREDICATE_HAS_PROGRESS_SIGNAL,
+    "hasProgressSignal",
+)
+EVIDENCE_TEXT_PREDICATES: tuple[str, ...] = (
+    PREDICATE_HAS_EVIDENCE,
+    LEGACY_PREDICATE_HAS_EVIDENCE,
+    "hasEvidence",
+)
+TASK_REFERENCE_CODE_TEXT_PREDICATES: tuple[str, ...] = (
+    PREDICATE_HAS_TASK_REFERENCE_CODE,
+    LEGACY_PREDICATE_HAS_TASK_REFERENCE_CODE,
+    "hasTaskReferenceCode",
+)
 
 TASK_TYPE_DEFINITIONS: tuple[dict[str, str], ...] = (
     {
@@ -496,7 +541,9 @@ def get_task_taxonomy() -> dict[str, Any]:
 __all__ = [
     "DEFAULT_TASK_SOURCE_ID",
     "DEFAULT_TASK_TYPE_ID",
+    "EVIDENCE_TEXT_PREDICATES",
     "JIRA_IMPORTED_TASK_SOURCE_ID",
+    "NEXT_CHECKPOINT_TEXT_PREDICATES",
     "PREDICATE_HAS_EVIDENCE",
     "PREDICATE_HAS_NEXT_CHECKPOINT",
     "PREDICATE_HAS_PROGRESS_SIGNAL",
@@ -504,8 +551,13 @@ __all__ = [
     "PREDICATE_HAS_TASK_ROLE",
     "PREDICATE_HAS_TASK_SOURCE",
     "PREDICATE_REPORTS_TO",
+    "PROGRESS_SIGNAL_TEXT_PREDICATES",
+    "REPORTS_TO_RELATIONSHIP_PREDICATES",
     "TASK_SOURCE_DEFINITIONS",
+    "TASK_SOURCE_RELATIONSHIP_PREDICATES",
     "TASK_SOURCE_TYPE_ID",
+    "TASK_REFERENCE_CODE_TEXT_PREDICATES",
+    "TASK_ROLE_TEXT_PREDICATES",
     "TASK_TYPE_DEFINITIONS",
     "ensure_task_ontology",
     "get_task_source_definition",
