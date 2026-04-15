@@ -2057,6 +2057,86 @@ describe('thinking activity history normalisation', () => {
         );
     });
 
+    test('surfaces live prepared and sent LLM request previews in stage diagnostics', () => {
+        const request = {
+            clientRequestId: 'req-live-llm',
+            promptRaw: 'tell me about the current user',
+            latestProgress: {
+                status: 'llm_call_start',
+                stage: 'workflow_dispatch_prepare',
+                phase: 'workflow_dispatch_prepare',
+                model: 'gemma4:26b',
+                provider: 'ollama',
+                llm_request_state: 'sent',
+                llm_request_prepared_at_utc: '2026-04-15T01:02:03Z',
+                llm_request_sent_at_utc: '2026-04-15T01:02:04Z',
+                fallback_attempt_no: 1,
+                fallback_candidate_count: 3,
+                llm_request: {
+                    prompt: {
+                        text: 'Answer using the authenticated current user context.',
+                        char_count: 49
+                    },
+                    context_summary: {
+                        message_count: 3,
+                        leading_system_message_count: 1,
+                        role_counts: { system: 1, user: 1, assistant: 1 },
+                        total_content_chars: 128
+                    },
+                    context_message_count: 3
+                }
+            },
+            workflowStagePath: {
+                path: [
+                    {
+                        stage_id: 'workflow_dispatch_prepare',
+                        stage_label: 'Workflow dispatch preparation'
+                    }
+                ]
+            },
+            stageDiagnostics: [
+                {
+                    stage_id: 'workflow_dispatch_prepare',
+                    stage_label: 'Workflow dispatch preparation',
+                    llm_input_recorded: false,
+                    llm_output_recorded: false,
+                    llm_exchange_record_count: 0
+                }
+            ]
+        };
+
+        const diagnosticsPayload = __testOnly_buildThinkingDiagnosticsPayload(request);
+        expect(diagnosticsPayload.schema_version).toBe('thinking_diagnostics_snapshot.v1');
+        expect(diagnosticsPayload.stage_diagnostics).toEqual([
+            expect.objectContaining({
+                stage_id: 'workflow_dispatch_prepare',
+                diagnostics: expect.objectContaining({
+                    llm_input_recorded: true,
+                    llm_exchange_record_count: 1,
+                    llm_request_state: 'sent',
+                    llm_selected_model: 'gemma4:26b',
+                    latest_llm_exchange: expect.objectContaining({
+                        entry_type: 'live_llm_request',
+                        llm_request_state: 'sent',
+                        selected_model: 'gemma4:26b',
+                        prompt_preview: expect.objectContaining({
+                            text: 'Answer using the authenticated current user context.'
+                        }),
+                        context_summary: expect.objectContaining({
+                            message_count: 3
+                        })
+                    })
+                })
+            })
+        ]);
+
+        const html = __testOnly_renderThinkingCardBodyHTML(request);
+        expect(html).toContain('Prepared prompt preview');
+        expect(html).toContain('Answer using the authenticated current user context.');
+        expect(html).toContain('LLM request state');
+        expect(html).toContain('Sent');
+    });
+
     test('renders preserved stage diagnostics when workflow stage path is absent', () => {
         const html = __testOnly_renderThinkingCardBodyHTML({
             latestProgress: {
@@ -3324,7 +3404,7 @@ describe('thinking card toggle accessibility', () => {
 
         expect(writeText).toHaveBeenCalledTimes(1);
         expect(JSON.parse(writeText.mock.calls[0][0])).toEqual(expect.objectContaining({
-            schema_version: 'turn_live_progress_locator.v1',
+            schema_version: 'thinking_diagnostics_snapshot.v1',
             mcp_access: expect.objectContaining({
                 turn_execution_get_live_progress: expect.objectContaining({
                     tool_name: 'turn_execution_get_live_progress'
@@ -3761,6 +3841,13 @@ describe('copy diagnostics button visibility on preserved finished card', () => 
         });
 
         expect(copied).toBe(true);
+        const copiedPayload = JSON.parse(writeText.mock.calls[0][0]);
+        expect(copiedPayload.schema_version).toBe('thinking_diagnostics_snapshot.v1');
+        expect(copiedPayload.mcp_access).toEqual(expect.objectContaining({
+            turn_execution_get_live_progress: expect.objectContaining({
+                tool_name: 'turn_execution_get_live_progress'
+            })
+        }));
         expect(copyBtn.textContent).toBe('✓ Copied');
         expect(copyBtn.classList.contains('copy-json-copied')).toBe(true);
         expect(copyBtn.classList.contains('success-feedback')).toBe(false);

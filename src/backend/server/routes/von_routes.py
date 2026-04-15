@@ -364,6 +364,7 @@ def _derive_progress_stage(update: dict[str, Any], existing: dict[str, Any]) -> 
     status_stage_map = {
         "orchestrator_start": "workflow_dispatch_prepare",
         "orchestrator_end": "orchestrator_end",
+        "llm_request_prepared": "llm_call",
         "llm_call_start": "llm_call",
         "llm_call_chunk": "llm_call",
         "llm_call_end": "llm_call",
@@ -403,6 +404,7 @@ def _derive_progress_event_kind(update: dict[str, Any]) -> str:
         "heartbeat": "heartbeat",
         "orchestrator_start": "orchestrator_start",
         "orchestrator_end": "orchestrator_end",
+        "llm_request_prepared": "llm_request_prepared",
         "llm_call_start": "llm_call_start",
         "llm_call_chunk": "llm_call_chunk",
         "llm_call_end": "llm_call_end",
@@ -1269,6 +1271,111 @@ def _extract_live_stage_diagnostic_map(
     }
 
 
+def _copy_live_progress_mapping(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    return {str(key): item for key, item in value.items() if isinstance(key, str)}
+
+
+def _build_live_llm_exchange_summary(
+    *,
+    stage_id: str,
+    live_stage_payload: Mapping[str, Any] | None,
+    latest_stage_event: Mapping[str, Any] | None,
+    latest_progress_payload: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    latest_progress_mapping: Mapping[str, Any] = (
+        cast(Mapping[str, Any], latest_progress_payload)
+        if isinstance(latest_progress_payload, Mapping)
+        else {}
+    )
+    latest_stage_id = _canonicalise_live_runtime_stage(
+        _progress_str(latest_progress_mapping.get("phase"))
+        or _progress_str(latest_progress_mapping.get("stage"))
+    )
+    candidate_sources: list[Mapping[str, Any]] = []
+    if stage_id == latest_stage_id and isinstance(latest_progress_payload, Mapping):
+        candidate_sources.append(latest_progress_mapping)
+    if isinstance(latest_stage_event, Mapping):
+        candidate_sources.append(latest_stage_event)
+    if isinstance(live_stage_payload, Mapping):
+        candidate_sources.append(live_stage_payload)
+
+    source: Mapping[str, Any] | None = None
+    for candidate in candidate_sources:
+        if (
+            isinstance(candidate.get("llm_request"), Mapping)
+            or isinstance(candidate.get("llm_response_preview"), Mapping)
+            or _progress_str(candidate.get("llm_request_state"))
+        ):
+            source = candidate
+            break
+    if not isinstance(source, Mapping):
+        return None
+
+    request_mapping_raw = source.get("llm_request")
+    request_mapping: Mapping[str, Any] = (
+        cast(Mapping[str, Any], request_mapping_raw)
+        if isinstance(request_mapping_raw, Mapping)
+        else {}
+    )
+    prompt_capture = _copy_live_progress_mapping(request_mapping.get("prompt"))
+    context_summary = _copy_live_progress_mapping(request_mapping.get("context_summary"))
+    response_preview = _copy_live_progress_mapping(source.get("llm_response_preview"))
+
+    has_input = bool(prompt_capture) or bool(request_mapping.get("context_messages"))
+    has_output = bool(response_preview)
+    request_state = _progress_str(source.get("llm_request_state"))
+    if not has_input and not has_output and not request_state:
+        return None
+
+    summary: dict[str, Any] = {
+        "entry_type": "live_llm_request",
+        "stage": stage_id,
+        "llm_input_recorded": has_input,
+        "llm_output_recorded": has_output,
+    }
+    if prompt_capture:
+        summary["prompt_preview"] = prompt_capture
+    if context_summary:
+        summary["context_summary"] = context_summary
+    context_message_count = _progress_number(request_mapping.get("context_message_count"))
+    if context_message_count is not None:
+        summary["context_message_count"] = int(max(0.0, context_message_count))
+    tool_count = _progress_number(request_mapping.get("tool_count"))
+    if tool_count is not None:
+        summary["tool_definition_count"] = int(max(0.0, tool_count))
+    if response_preview:
+        summary["response_preview"] = response_preview
+    selected_model = _progress_str(source.get("model"))
+    if selected_model:
+        summary["selected_model"] = selected_model
+    selected_provider = _progress_str(source.get("provider"))
+    if selected_provider:
+        summary["selected_provider"] = selected_provider
+    fallback_attempt_no = _progress_number(source.get("fallback_attempt_no"))
+    if fallback_attempt_no is not None:
+        summary["fallback_attempt_no"] = int(max(0.0, fallback_attempt_no))
+    fallback_candidate_count = _progress_number(source.get("fallback_candidate_count"))
+    if fallback_candidate_count is not None:
+        summary["fallback_candidate_count"] = int(
+            max(0.0, fallback_candidate_count)
+        )
+    if request_state:
+        summary["llm_request_state"] = request_state
+    prepared_at_utc = _progress_str(source.get("llm_request_prepared_at_utc"))
+    if prepared_at_utc:
+        summary["llm_request_prepared_at_utc"] = prepared_at_utc
+    sent_at_utc = _progress_str(source.get("llm_request_sent_at_utc"))
+    if sent_at_utc:
+        summary["llm_request_sent_at_utc"] = sent_at_utc
+    first_output_at_utc = _progress_str(source.get("llm_first_output_at_utc"))
+    if first_output_at_utc:
+        summary["llm_first_output_at_utc"] = first_output_at_utc
+
+    return summary
+
+
 def _workflow_candidate_name_matches_selected_id(
     candidate: Mapping[str, Any] | None,
     selected_workflow_id: str | None,
@@ -1724,10 +1831,44 @@ def _build_turn_execution_stage_diagnostics(
         ]
         latest_stage_event = stage_events[-1] if stage_events else None
         live_stage_payload = dict(live_stage_diagnostic_map.get(stage_id) or {})
+        live_llm_exchange = _build_live_llm_exchange_summary(
+            stage_id=stage_id,
+            live_stage_payload=live_stage_payload,
+            latest_stage_event=(
+                latest_stage_event if isinstance(latest_stage_event, Mapping) else None
+            ),
+            latest_progress_payload=latest_progress_payload,
+        )
         authority_summary = build_stage_authority_summary(
             stage_id=stage_id,
             aux_entries=aux_llm_calls,
         )
+        llm_input_recorded = bool(authority_summary["llm_input_recorded"]) or bool(
+            live_llm_exchange and live_llm_exchange.get("llm_input_recorded")
+        )
+        llm_output_recorded = bool(authority_summary["llm_output_recorded"]) or bool(
+            live_llm_exchange and live_llm_exchange.get("llm_output_recorded")
+        )
+        llm_exchange_record_count = int(authority_summary["llm_exchange_record_count"])
+        llm_exchange_entry_types = list(authority_summary["llm_exchange_entry_types"])
+        llm_exchange_summaries = [
+            dict(entry)
+            for entry in authority_summary["llm_exchange_summaries"]
+            if isinstance(entry, Mapping)
+        ]
+        llm_exchange_summary_truncated_count = int(
+            authority_summary["llm_exchange_summary_truncated_count"]
+        )
+        latest_llm_exchange = (
+            dict(authority_summary["latest_llm_exchange"])
+            if isinstance(authority_summary["latest_llm_exchange"], Mapping)
+            else None
+        )
+        if live_llm_exchange and llm_exchange_record_count == 0:
+            llm_exchange_record_count = 1
+            llm_exchange_entry_types = ["live_llm_request"]
+            llm_exchange_summaries = [dict(live_llm_exchange)]
+            latest_llm_exchange = dict(live_llm_exchange)
         workflow_routing_diagnostics = latest_progress_payload.get(
             "workflow_routing_diagnostics"
         )
@@ -1771,36 +1912,16 @@ def _build_turn_execution_stage_diagnostics(
                 if isinstance(latest_stage_event, Mapping)
                 else None
             ),
-            "llm_input_recorded": bool(authority_summary["llm_input_recorded"]),
-            "llm_output_recorded": bool(authority_summary["llm_output_recorded"]),
-            "has_recorded_llm_exchange": bool(
-                authority_summary["has_recorded_llm_exchange"]
-            ),
-            "llm_exchange_record_count": int(
-                authority_summary["llm_exchange_record_count"]
-            ),
-            "llm_exchange_entry_types": list(
-                authority_summary["llm_exchange_entry_types"]
-            ),
-            "llm_exchange_summaries": [
-                dict(entry)
-                for entry in authority_summary["llm_exchange_summaries"]
-                if isinstance(entry, Mapping)
-            ],
-            "llm_exchange_summary_truncated_count": int(
-                authority_summary["llm_exchange_summary_truncated_count"]
-            ),
-            "latest_llm_exchange": (
-                dict(authority_summary["latest_llm_exchange"])
-                if isinstance(authority_summary["latest_llm_exchange"], Mapping)
-                else None
-            ),
-            "missing_recorded_llm_input": bool(
-                authority_summary["missing_recorded_llm_input"]
-            ),
-            "missing_recorded_llm_output": bool(
-                authority_summary["missing_recorded_llm_output"]
-            ),
+            "llm_input_recorded": llm_input_recorded,
+            "llm_output_recorded": llm_output_recorded,
+            "has_recorded_llm_exchange": llm_input_recorded and llm_output_recorded,
+            "llm_exchange_record_count": llm_exchange_record_count,
+            "llm_exchange_entry_types": llm_exchange_entry_types,
+            "llm_exchange_summaries": llm_exchange_summaries,
+            "llm_exchange_summary_truncated_count": llm_exchange_summary_truncated_count,
+            "latest_llm_exchange": latest_llm_exchange,
+            "missing_recorded_llm_input": not llm_input_recorded,
+            "missing_recorded_llm_output": not llm_output_recorded,
             "python_decision_count": int(authority_summary["python_decision_count"]),
             "possibly_inappropriate_python_code_use_count": int(
                 authority_summary["possibly_inappropriate_python_code_use_count"]
@@ -3326,6 +3447,36 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
         call_id = _progress_str(safe_update.get("call_id"))
         if call_id:
             event_entry["call_id"] = call_id
+        llm_request = safe_update.get("llm_request")
+        if isinstance(llm_request, Mapping):
+            event_entry["llm_request"] = {
+                str(key): value for key, value in llm_request.items() if isinstance(key, str)
+            }
+        llm_request_state = _progress_str(safe_update.get("llm_request_state"))
+        if llm_request_state:
+            event_entry["llm_request_state"] = llm_request_state
+        llm_request_prepared_at_utc = _progress_str(
+            safe_update.get("llm_request_prepared_at_utc")
+        )
+        if llm_request_prepared_at_utc:
+            event_entry["llm_request_prepared_at_utc"] = llm_request_prepared_at_utc
+        llm_request_sent_at_utc = _progress_str(
+            safe_update.get("llm_request_sent_at_utc")
+        )
+        if llm_request_sent_at_utc:
+            event_entry["llm_request_sent_at_utc"] = llm_request_sent_at_utc
+        llm_first_output_at_utc = _progress_str(
+            safe_update.get("llm_first_output_at_utc")
+        )
+        if llm_first_output_at_utc:
+            event_entry["llm_first_output_at_utc"] = llm_first_output_at_utc
+        llm_response_preview = safe_update.get("llm_response_preview")
+        if isinstance(llm_response_preview, Mapping):
+            event_entry["llm_response_preview"] = {
+                str(key): value
+                for key, value in llm_response_preview.items()
+                if isinstance(key, str)
+            }
         duration_ms = _progress_number(safe_update.get("duration_ms"))
         if duration_ms is not None:
             event_entry["duration_ms"] = int(max(0.0, duration_ms))

@@ -3331,6 +3331,11 @@ function buildThinkingActivityLabelAndDetail(entry) {
         pushDetail(routingNarrative.text, routingNarrative.html);
     } else if (status === 'orchestrator_end') {
         label = 'Finished orchestrator';
+    } else if (status === 'llm_request_prepared') {
+        label = 'Prepared LLM request';
+        if (stageText) {
+            pushDetail(stageText);
+        }
     } else if (status === 'llm_call_start') {
         label = stage === 'workflow_dispatch' && stageText
             ? stageText
@@ -3968,6 +3973,24 @@ function buildThinkingDiagnosticListHTML(title, values, options = {}) {
     </div>`;
 }
 
+function buildThinkingDiagnosticTextSectionHTML(title, value, options = {}) {
+    const cleanTitle = normaliseThinkingActivityString(title) || 'Details';
+    const cleanValue = normaliseThinkingActivityString(value);
+    if (!cleanValue) {
+        return '';
+    }
+
+    const codeBlock = options.codeBlock === true;
+    const renderedValue = codeBlock
+        ? `<pre class="thinking-card-diagnostic-pre"><code>${escapeHtml(cleanValue)}</code></pre>`
+        : `<div class="thinking-card-diagnostic-text">${escapeHtml(cleanValue)}</div>`;
+
+    return `<div class="thinking-card-diagnostic-section">
+        <div class="thinking-card-diagnostic-section-title">${escapeHtml(cleanTitle)}</div>
+        ${renderedValue}
+    </div>`;
+}
+
 function renderThinkingDiagnosticWorkflowCandidatesHTML(candidates, workflowDiscovery = null) {
     const candidateList = Array.isArray(candidates)
         ? candidates.filter((candidate) => candidate && typeof candidate === 'object')
@@ -4141,6 +4164,157 @@ function getThinkingStageDiagnosticEntry(request, stageId) {
     return null;
 }
 
+function normaliseThinkingDiagnosticCapture(value) {
+    if (!value || typeof value !== 'object') {
+        return null;
+    }
+    const text = normaliseThinkingActivityString(value.text);
+    const preview = normaliseThinkingActivityString(value.preview);
+    const charCount = Number.isFinite(value.char_count)
+        ? Number(value.char_count)
+        : null;
+    if (!text && !preview && !Number.isFinite(charCount)) {
+        return null;
+    }
+    return {
+        text: text || null,
+        preview: preview || null,
+        char_count: charCount,
+        preview_truncated: value.preview_truncated === true
+    };
+}
+
+function buildThinkingLiveLlmExchange(stageId, stageDiagnostic, latestStageEvent, latestProgress) {
+    const cleanStageId = canonicaliseThinkingDiagnosticStageId(stageId);
+    const currentStageId = canonicaliseThinkingDiagnosticStageId(
+        latestProgress?.phase || latestProgress?.stage
+    );
+    const candidates = [];
+    if (stageDiagnostic?.latest_llm_exchange && typeof stageDiagnostic.latest_llm_exchange === 'object') {
+        candidates.push(stageDiagnostic.latest_llm_exchange);
+    }
+    if (latestStageEvent && typeof latestStageEvent === 'object') {
+        candidates.push(latestStageEvent);
+    }
+    if (cleanStageId && currentStageId === cleanStageId && latestProgress && typeof latestProgress === 'object') {
+        candidates.push(latestProgress);
+    }
+
+    for (const candidate of candidates) {
+        if (!candidate || typeof candidate !== 'object') {
+            continue;
+        }
+        if (candidate.prompt_preview && typeof candidate.prompt_preview === 'object') {
+            return {
+                entry_type: normaliseThinkingActivityString(candidate.entry_type) || 'live_llm_request',
+                stage: normaliseThinkingActivityString(candidate.stage) || cleanStageId || null,
+                llm_request_state: normaliseThinkingActivityString(candidate.llm_request_state) || null,
+                prompt_preview: normaliseThinkingDiagnosticCapture(candidate.prompt_preview),
+                context_summary: (candidate.context_summary && typeof candidate.context_summary === 'object')
+                    ? { ...candidate.context_summary }
+                    : null,
+                context_message_count: Number.isFinite(candidate.context_message_count)
+                    ? Number(candidate.context_message_count)
+                    : null,
+                tool_definition_count: Number.isFinite(candidate.tool_definition_count)
+                    ? Number(candidate.tool_definition_count)
+                    : null,
+                selected_model: normaliseThinkingActivityString(candidate.selected_model || candidate.model) || null,
+                selected_provider: normaliseThinkingActivityString(candidate.selected_provider || candidate.provider) || null,
+                fallback_attempt_no: Number.isFinite(candidate.fallback_attempt_no)
+                    ? Number(candidate.fallback_attempt_no)
+                    : null,
+                fallback_candidate_count: Number.isFinite(candidate.fallback_candidate_count)
+                    ? Number(candidate.fallback_candidate_count)
+                    : null,
+                llm_request_prepared_at_utc: normaliseThinkingActivityString(candidate.llm_request_prepared_at_utc) || null,
+                llm_request_sent_at_utc: normaliseThinkingActivityString(candidate.llm_request_sent_at_utc) || null,
+                llm_first_output_at_utc: normaliseThinkingActivityString(candidate.llm_first_output_at_utc) || null,
+                response_preview: normaliseThinkingDiagnosticCapture(candidate.response_preview || candidate.llm_response_preview)
+            };
+        }
+
+        const llmRequest = (candidate.llm_request && typeof candidate.llm_request === 'object')
+            ? candidate.llm_request
+            : null;
+        if (!llmRequest && !candidate.llm_request_state && !(candidate.llm_response_preview && typeof candidate.llm_response_preview === 'object')) {
+            continue;
+        }
+        return {
+            entry_type: 'live_llm_request',
+            stage: cleanStageId || null,
+            llm_request_state: normaliseThinkingActivityString(candidate.llm_request_state) || null,
+            prompt_preview: normaliseThinkingDiagnosticCapture(llmRequest?.prompt),
+            context_summary: (llmRequest?.context_summary && typeof llmRequest.context_summary === 'object')
+                ? { ...llmRequest.context_summary }
+                : null,
+            context_message_count: Number.isFinite(llmRequest?.context_message_count)
+                ? Number(llmRequest.context_message_count)
+                : null,
+            tool_definition_count: Number.isFinite(llmRequest?.tool_count)
+                ? Number(llmRequest.tool_count)
+                : null,
+            selected_model: normaliseThinkingActivityString(candidate.model) || null,
+            selected_provider: normaliseThinkingActivityString(candidate.provider) || null,
+            fallback_attempt_no: Number.isFinite(candidate.fallback_attempt_no)
+                ? Number(candidate.fallback_attempt_no)
+                : null,
+            fallback_candidate_count: Number.isFinite(candidate.fallback_candidate_count)
+                ? Number(candidate.fallback_candidate_count)
+                : null,
+            llm_request_prepared_at_utc: normaliseThinkingActivityString(candidate.llm_request_prepared_at_utc) || null,
+            llm_request_sent_at_utc: normaliseThinkingActivityString(candidate.llm_request_sent_at_utc) || null,
+            llm_first_output_at_utc: normaliseThinkingActivityString(candidate.llm_first_output_at_utc) || null,
+            response_preview: normaliseThinkingDiagnosticCapture(candidate.llm_response_preview)
+        };
+    }
+
+    return null;
+}
+
+function formatThinkingLlmRequestState(state) {
+    const cleanState = normaliseThinkingActivityString(state).toLowerCase();
+    switch (cleanState) {
+    case 'prepared':
+        return 'Prepared';
+    case 'sent':
+        return 'Sent';
+    case 'received_output':
+        return 'Received output';
+    case 'completed':
+        return 'Completed';
+    case 'failed':
+        return 'Failed';
+    default:
+        return cleanState ? formatThinkingActivityFallbackLabel(cleanState) : '';
+    }
+}
+
+function buildThinkingLlmContextSummaryLines(summary) {
+    if (!summary || typeof summary !== 'object') {
+        return [];
+    }
+    const lines = [];
+    if (Number.isFinite(summary.message_count)) {
+        lines.push(`${Number(summary.message_count)} context messages`);
+    }
+    if (Number.isFinite(summary.leading_system_message_count) && Number(summary.leading_system_message_count) > 0) {
+        lines.push(`${Number(summary.leading_system_message_count)} leading system messages`);
+    }
+    if (summary.role_counts && typeof summary.role_counts === 'object') {
+        const roleCounts = Object.entries(summary.role_counts)
+            .filter(([, value]) => Number.isFinite(Number(value)))
+            .map(([role, value]) => `${role}: ${Number(value)}`);
+        if (roleCounts.length > 0) {
+            lines.push(`Roles: ${roleCounts.join(', ')}`);
+        }
+    }
+    if (Number.isFinite(summary.total_content_chars)) {
+        lines.push(`${Number(summary.total_content_chars)} content chars`);
+    }
+    return lines;
+}
+
 function buildThinkingWorkflowStageDiagnosticData(stageId, stageLabel, request) {
     const cleanStageId = canonicaliseThinkingDiagnosticStageId(stageId);
     if (!cleanStageId) {
@@ -4150,6 +4324,9 @@ function buildThinkingWorkflowStageDiagnosticData(stageId, stageLabel, request) 
     const stageDiagnostic = getThinkingStageDiagnosticEntry(request, cleanStageId);
     const stageEvents = getThinkingDiagnosticEventsForStage(request, cleanStageId);
     const latestStageEvent = stageEvents.length > 0 ? stageEvents[stageEvents.length - 1] : null;
+    const latestProgress = (request?.latestProgress && typeof request.latestProgress === 'object')
+        ? request.latestProgress
+        : null;
     const workflowDiscovery = (request?.workflowDiscovery && typeof request.workflowDiscovery === 'object')
         ? request.workflowDiscovery
         : null;
@@ -4162,6 +4339,25 @@ function buildThinkingWorkflowStageDiagnosticData(stageId, stageLabel, request) 
     const stageRoutingNarrative = buildWorkflowRoutingNarrative(stageRoutingProgress, workflowDiscovery, {
         includeNoMatchTransition: true,
     });
+    const latestLlmExchange = buildThinkingLiveLlmExchange(
+        cleanStageId,
+        stageDiagnostic,
+        latestStageEvent,
+        latestProgress
+    );
+    const llmPromptPreview = normaliseThinkingDiagnosticCapture(latestLlmExchange?.prompt_preview);
+    const llmResponsePreview = normaliseThinkingDiagnosticCapture(latestLlmExchange?.response_preview);
+    const llmInputRecorded = stageDiagnostic?.llm_input_recorded === true || Boolean(llmPromptPreview);
+    const llmOutputRecorded = stageDiagnostic?.llm_output_recorded === true || Boolean(llmResponsePreview);
+    const hasRecordedLlmExchange = stageDiagnostic?.has_recorded_llm_exchange === true
+        || (Boolean(llmPromptPreview) && Boolean(llmResponsePreview));
+    const llmExchangeRecordCount = Number.isFinite(stageDiagnostic?.llm_exchange_record_count)
+        ? Math.max(Number(stageDiagnostic.llm_exchange_record_count), latestLlmExchange ? 1 : 0)
+        : (latestLlmExchange ? 1 : 0);
+    const missingRecordedLlmInput = stageDiagnostic?.missing_recorded_llm_input === true
+        || (!llmInputRecorded);
+    const missingRecordedLlmOutput = stageDiagnostic?.missing_recorded_llm_output === true
+        || (!llmOutputRecorded);
 
     const data = {
         stage_id: cleanStageId,
@@ -4181,14 +4377,12 @@ function buildThinkingWorkflowStageDiagnosticData(stageId, stageLabel, request) 
         latest_error: normaliseThinkingActivityString(stageDiagnostic?.latest_error)
             || normaliseThinkingActivityString(latestStageEvent?.error)
             || null,
-        llm_input_recorded: stageDiagnostic?.llm_input_recorded === true,
-        llm_output_recorded: stageDiagnostic?.llm_output_recorded === true,
-        has_recorded_llm_exchange: stageDiagnostic?.has_recorded_llm_exchange === true,
-        llm_exchange_record_count: Number.isFinite(stageDiagnostic?.llm_exchange_record_count)
-            ? Number(stageDiagnostic.llm_exchange_record_count)
-            : 0,
-        missing_recorded_llm_input: stageDiagnostic?.missing_recorded_llm_input === true,
-        missing_recorded_llm_output: stageDiagnostic?.missing_recorded_llm_output === true,
+        llm_input_recorded: llmInputRecorded,
+        llm_output_recorded: llmOutputRecorded,
+        has_recorded_llm_exchange: hasRecordedLlmExchange,
+        llm_exchange_record_count: llmExchangeRecordCount,
+        missing_recorded_llm_input: missingRecordedLlmInput,
+        missing_recorded_llm_output: missingRecordedLlmOutput,
         python_decision_count: Number.isFinite(stageDiagnostic?.python_decision_count)
             ? Number(stageDiagnostic.python_decision_count)
             : 0,
@@ -4204,7 +4398,31 @@ function buildThinkingWorkflowStageDiagnosticData(stageId, stageLabel, request) 
             ? stageDiagnostic.python_decision_sources
                 .map((value) => normaliseThinkingActivityString(value))
                 .filter(Boolean)
-            : []
+            : [],
+        latest_llm_exchange: latestLlmExchange,
+        llm_request_state: normaliseThinkingActivityString(latestLlmExchange?.llm_request_state) || null,
+        llm_request_prepared_at_utc: normaliseThinkingActivityString(latestLlmExchange?.llm_request_prepared_at_utc) || null,
+        llm_request_sent_at_utc: normaliseThinkingActivityString(latestLlmExchange?.llm_request_sent_at_utc) || null,
+        llm_first_output_at_utc: normaliseThinkingActivityString(latestLlmExchange?.llm_first_output_at_utc) || null,
+        llm_prompt_preview: llmPromptPreview,
+        llm_response_preview: llmResponsePreview,
+        llm_context_summary: (latestLlmExchange?.context_summary && typeof latestLlmExchange.context_summary === 'object')
+            ? { ...latestLlmExchange.context_summary }
+            : null,
+        llm_context_message_count: Number.isFinite(latestLlmExchange?.context_message_count)
+            ? Number(latestLlmExchange.context_message_count)
+            : null,
+        llm_tool_definition_count: Number.isFinite(latestLlmExchange?.tool_definition_count)
+            ? Number(latestLlmExchange.tool_definition_count)
+            : null,
+        llm_selected_model: normaliseThinkingActivityString(latestLlmExchange?.selected_model) || null,
+        llm_selected_provider: normaliseThinkingActivityString(latestLlmExchange?.selected_provider) || null,
+        llm_fallback_attempt_no: Number.isFinite(latestLlmExchange?.fallback_attempt_no)
+            ? Number(latestLlmExchange.fallback_attempt_no)
+            : null,
+        llm_fallback_candidate_count: Number.isFinite(latestLlmExchange?.fallback_candidate_count)
+            ? Number(latestLlmExchange.fallback_candidate_count)
+            : null
     };
 
     if (
@@ -4528,6 +4746,26 @@ function renderThinkingWorkflowStageDiagnosticDataHTML(data, workflowDiscovery =
         { label: 'Latest result', value: data.latest_result_summary },
         { label: 'Recorded LLM input', value: data.llm_input_recorded ? 'Yes' : 'No' },
         { label: 'Recorded LLM output', value: data.llm_output_recorded ? 'Yes' : 'No' },
+        {
+            label: 'LLM request state',
+            value: data.llm_request_state
+                ? formatThinkingLlmRequestState(data.llm_request_state)
+                : ''
+        },
+        { label: 'LLM model', value: data.llm_selected_model },
+        { label: 'LLM provider', value: data.llm_selected_provider },
+        { label: 'Request prepared', value: data.llm_request_prepared_at_utc },
+        { label: 'Request sent', value: data.llm_request_sent_at_utc },
+        { label: 'First output', value: data.llm_first_output_at_utc },
+        {
+            label: 'Fallback attempt',
+            value: (
+                Number.isFinite(data.llm_fallback_attempt_no)
+                && Number.isFinite(data.llm_fallback_candidate_count)
+            )
+                ? `${Number(data.llm_fallback_attempt_no)} of ${Number(data.llm_fallback_candidate_count)}`
+                : ''
+        },
         { label: 'Latest subtask', value: data.latest_subtask },
         { label: 'Latest workflow task', value: data.latest_workflow_task },
         { label: 'Latest tool', value: data.latest_tool },
@@ -4811,6 +5049,19 @@ function renderThinkingWorkflowStageDiagnosticDataHTML(data, workflowDiscovery =
     if (data.latest_error) {
         sections.push(buildThinkingDiagnosticListHTML('Latest error', [data.latest_error]));
     }
+    sections.push(buildThinkingDiagnosticTextSectionHTML(
+        'Prepared prompt preview',
+        data.llm_prompt_preview?.text || data.llm_prompt_preview?.preview,
+        { codeBlock: true }
+    ));
+    sections.push(buildThinkingDiagnosticListHTML(
+        'Context summary',
+        buildThinkingLlmContextSummaryLines(data.llm_context_summary)
+    ));
+    sections.push(buildThinkingDiagnosticTextSectionHTML(
+        'Latest output preview',
+        data.llm_response_preview?.preview || data.llm_response_preview?.text
+    ));
 
     if (Array.isArray(data.python_decision_classes) && data.python_decision_classes.length > 0) {
         sections.push(buildThinkingDiagnosticListHTML('Python decision classes', data.python_decision_classes));
@@ -21912,10 +22163,13 @@ function buildThinkingDiagnosticsPayload(request) {
         ? Math.max(0, Math.round(Number(latestProgress.elapsed_ms)))
         : null;
     const elapsedMs = backendElapsedMs ?? getThinkingRequestElapsedMs(request);
+    const locatorPayload = buildThinkingDiagnosticsLocatorPayload(request);
 
     return {
+        schema_version: 'thinking_diagnostics_snapshot.v1',
         generated_at_utc: new Date().toISOString(),
         request_id: request.clientRequestId || null,
+        chat_session_id: activeChatSessionId || null,
         elapsed_ms: elapsedMs,
         prompt_preview: typeof request.promptRaw === 'string' ? request.promptRaw.slice(0, 1000) : null,
         latest_progress: latestProgress,
@@ -21941,7 +22195,8 @@ function buildThinkingDiagnosticsPayload(request) {
                 : latestProgress
         ),
         workflow_stage_path: request.workflowStagePath || null,
-        stage_diagnostics: buildThinkingStageDiagnosticsSnapshot(request)
+        stage_diagnostics: buildThinkingStageDiagnosticsSnapshot(request),
+        mcp_access: locatorPayload?.mcp_access || null
     };
 }
 
@@ -22194,7 +22449,7 @@ async function copyActiveThinkingDiagnostics(button = null, requestOverride = nu
     if (!request) {
         return false;
     }
-    const payload = buildThinkingDiagnosticsLocatorPayload(request);
+    const payload = buildThinkingDiagnosticsPayload(request);
     if (!payload) {
         return false;
     }

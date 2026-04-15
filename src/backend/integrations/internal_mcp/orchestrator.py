@@ -12010,6 +12010,19 @@ class InternalMCPChatOrchestrator:
             context=context,
             context_telemetry=context_telemetry,
         )
+        request_prepared_at_utc = self._utc_now_iso()
+        if callable(emit_progress):
+            emit_progress(
+                {
+                    "status": "llm_request_prepared",
+                    "stage": stage,
+                    **self._build_live_llm_progress_payload(
+                        request_telemetry=request_telemetry,
+                        request_state="prepared",
+                        prepared_at_utc=request_prepared_at_utc,
+                    ),
+                }
+            )
 
         for attempt_no, candidate in enumerate(candidates, start=1):
             client, model_name, telemetry = self._create_client_for_candidate(
@@ -12031,19 +12044,6 @@ class InternalMCPChatOrchestrator:
             }
             if provider:
                 attempt_meta["provider"] = provider
-
-            if callable(emit_progress):
-                emit_progress(
-                    {
-                        "status": "llm_call_start",
-                        "stage": stage,
-                        "model": model_name,
-                        "candidate": (
-                            dict(telemetry) if isinstance(telemetry, Mapping) else None
-                        ),
-                        **attempt_meta,
-                    }
-                )
 
             reachability = self._probe_model_candidate_reachability(
                 telemetry=telemetry,
@@ -12114,6 +12114,25 @@ class InternalMCPChatOrchestrator:
             _progress_cb: Callable[[Mapping[str, Any]], None] | None = (
                 emit_progress if emit_progress is not None else None
             )
+            request_sent_at_utc = self._utc_now_iso()
+            if callable(emit_progress):
+                emit_progress(
+                    {
+                        "status": "llm_call_start",
+                        "stage": stage,
+                        "model": model_name,
+                        "candidate": (
+                            dict(telemetry) if isinstance(telemetry, Mapping) else None
+                        ),
+                        **attempt_meta,
+                        **self._build_live_llm_progress_payload(
+                            request_telemetry=request_telemetry,
+                            request_state="sent",
+                            prepared_at_utc=request_prepared_at_utc,
+                            sent_at_utc=request_sent_at_utc,
+                        ),
+                    }
+                )
             llm_start = time.perf_counter()
             try:
                 response = self._invoke_with_llm_heartbeat(
@@ -12129,6 +12148,7 @@ class InternalMCPChatOrchestrator:
                 )
                 duration_ms = (time.perf_counter() - llm_start) * 1000.0
                 if callable(emit_progress):
+                    first_output_at_utc = self._utc_now_iso()
                     emit_progress(
                         {
                             "status": "llm_call_chunk",
@@ -12137,6 +12157,14 @@ class InternalMCPChatOrchestrator:
                             "chunks": 1,
                             "duration_ms": int(duration_ms),
                             **attempt_meta,
+                            **self._build_live_llm_progress_payload(
+                                request_telemetry=request_telemetry,
+                                request_state="received_output",
+                                prepared_at_utc=request_prepared_at_utc,
+                                sent_at_utc=request_sent_at_utc,
+                                first_output_at_utc=first_output_at_utc,
+                                response=response,
+                            ),
                         }
                     )
                     emit_progress(
@@ -12149,6 +12177,14 @@ class InternalMCPChatOrchestrator:
                             "error": None,
                             "fallback_used": bool(errors),
                             **attempt_meta,
+                            **self._build_live_llm_progress_payload(
+                                request_telemetry=request_telemetry,
+                                request_state="completed",
+                                prepared_at_utc=request_prepared_at_utc,
+                                sent_at_utc=request_sent_at_utc,
+                                first_output_at_utc=first_output_at_utc,
+                                response=response,
+                            ),
                         }
                     )
                 record_llm_call(
@@ -12223,6 +12259,12 @@ class InternalMCPChatOrchestrator:
                             "error_class": type(exc).__name__,
                             "failure_kind": _fk,
                             **attempt_meta,
+                            **self._build_live_llm_progress_payload(
+                                request_telemetry=request_telemetry,
+                                request_state="failed",
+                                prepared_at_utc=request_prepared_at_utc,
+                                sent_at_utc=request_sent_at_utc,
+                            ),
                         }
                     )
                 record_llm_call(
@@ -12359,6 +12401,40 @@ class InternalMCPChatOrchestrator:
             }
         return {key: value for key, value in payload.items() if value is not None}
 
+    @staticmethod
+    def _utc_now_iso() -> str:
+        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    @classmethod
+    def _build_live_llm_progress_payload(
+        cls,
+        *,
+        request_telemetry: Mapping[str, Any] | None,
+        request_state: str | None,
+        prepared_at_utc: str | None = None,
+        sent_at_utc: str | None = None,
+        first_output_at_utc: str | None = None,
+        response: Any = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        if isinstance(request_telemetry, Mapping) and request_telemetry:
+            payload["llm_request"] = dict(request_telemetry)
+        if isinstance(request_state, str) and request_state.strip():
+            payload["llm_request_state"] = request_state.strip()
+        if isinstance(prepared_at_utc, str) and prepared_at_utc.strip():
+            payload["llm_request_prepared_at_utc"] = prepared_at_utc.strip()
+        if isinstance(sent_at_utc, str) and sent_at_utc.strip():
+            payload["llm_request_sent_at_utc"] = sent_at_utc.strip()
+        if isinstance(first_output_at_utc, str) and first_output_at_utc.strip():
+            payload["llm_first_output_at_utc"] = first_output_at_utc.strip()
+        response_preview = cls._build_context_text_capture(
+            response,
+            max_preview_chars=400,
+        )
+        if isinstance(response_preview, Mapping):
+            payload["llm_response_preview"] = dict(response_preview)
+        return payload
+
     def _run_llm_with_tools_fallbacks(
         self,
         *,
@@ -12403,6 +12479,19 @@ class InternalMCPChatOrchestrator:
             required_prompt_tools=required_prompt_tools,
             context_telemetry=context_telemetry,
         )
+        request_prepared_at_utc = self._utc_now_iso()
+        if callable(emit_progress):
+            emit_progress(
+                {
+                    "status": "llm_request_prepared",
+                    "stage": stage,
+                    **self._build_live_llm_progress_payload(
+                        request_telemetry=request_telemetry,
+                        request_state="prepared",
+                        prepared_at_utc=request_prepared_at_utc,
+                    ),
+                }
+            )
 
         for attempt_no, candidate in enumerate(candidates, start=1):
             client, model_name, telemetry = self._create_client_for_candidate(
@@ -12547,17 +12636,6 @@ class InternalMCPChatOrchestrator:
                 if callable(emit_progress):
                     emit_progress(
                         {
-                            "status": "llm_call_start",
-                            "stage": stage,
-                            "model": model_name,
-                            "candidate": (
-                                dict(telemetry) if isinstance(telemetry, Mapping) else None
-                            ),
-                            **attempt_meta,
-                        }
-                    )
-                    emit_progress(
-                        {
                             "status": "llm_call_end",
                             "stage": stage,
                             "model": model_name,
@@ -12567,6 +12645,11 @@ class InternalMCPChatOrchestrator:
                             "error_class": probe_error_class,
                             "failure_kind": "provider_unreachable",
                             **attempt_meta,
+                            **self._build_live_llm_progress_payload(
+                                request_telemetry=request_telemetry,
+                                request_state="failed",
+                                prepared_at_utc=request_prepared_at_utc,
+                            ),
                         }
                     )
                 record_llm_call(
@@ -12607,6 +12690,7 @@ class InternalMCPChatOrchestrator:
                 continue
 
             if callable(emit_progress):
+                request_sent_at_utc = self._utc_now_iso()
                 emit_progress(
                     {
                         "status": "llm_call_start",
@@ -12616,8 +12700,16 @@ class InternalMCPChatOrchestrator:
                             dict(telemetry) if isinstance(telemetry, Mapping) else None
                         ),
                         **attempt_meta,
+                        **self._build_live_llm_progress_payload(
+                            request_telemetry=request_telemetry,
+                            request_state="sent",
+                            prepared_at_utc=request_prepared_at_utc,
+                            sent_at_utc=request_sent_at_utc,
+                        ),
                     }
                 )
+            else:
+                request_sent_at_utc = self._utc_now_iso()
             llm_start = time.perf_counter()
             try:
                 llm_response = self._invoke_with_llm_heartbeat(
@@ -12635,6 +12727,7 @@ class InternalMCPChatOrchestrator:
                 )
                 duration_ms = (time.perf_counter() - llm_start) * 1000.0
                 if callable(emit_progress):
+                    first_output_at_utc = self._utc_now_iso()
                     completion_tokens = None
                     if isinstance(getattr(llm_response, "usage", None), Mapping):
                         raw_completion_tokens = llm_response.usage.get(
@@ -12651,6 +12744,14 @@ class InternalMCPChatOrchestrator:
                             "tokens_streamed": completion_tokens,
                             "duration_ms": int(duration_ms),
                             **attempt_meta,
+                            **self._build_live_llm_progress_payload(
+                                request_telemetry=request_telemetry,
+                                request_state="received_output",
+                                prepared_at_utc=request_prepared_at_utc,
+                                sent_at_utc=request_sent_at_utc,
+                                first_output_at_utc=first_output_at_utc,
+                                response=getattr(llm_response, "content", None),
+                            ),
                         }
                     )
                     emit_progress(
@@ -12663,6 +12764,14 @@ class InternalMCPChatOrchestrator:
                             "error": None,
                             "fallback_used": bool(errors),
                             **attempt_meta,
+                            **self._build_live_llm_progress_payload(
+                                request_telemetry=request_telemetry,
+                                request_state="completed",
+                                prepared_at_utc=request_prepared_at_utc,
+                                sent_at_utc=request_sent_at_utc,
+                                first_output_at_utc=first_output_at_utc,
+                                response=getattr(llm_response, "content", None),
+                            ),
                         }
                     )
                 record_llm_call(
@@ -12751,6 +12860,12 @@ class InternalMCPChatOrchestrator:
                             "error_class": type(exc).__name__,
                             "failure_kind": _fk,
                             **attempt_meta,
+                            **self._build_live_llm_progress_payload(
+                                request_telemetry=request_telemetry,
+                                request_state="failed",
+                                prepared_at_utc=request_prepared_at_utc,
+                                sent_at_utc=request_sent_at_utc,
+                            ),
                         }
                     )
                 record_llm_call(

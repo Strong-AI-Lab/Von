@@ -419,6 +419,116 @@ def test_progress_event_contains_required_telemetry_fields(monkeypatch) -> None:
     assert isinstance(serialised["activity_idle_ms"], int)
 
 
+def test_live_stage_diagnostics_surface_prepared_llm_request_before_aux_persistence(
+    monkeypatch,
+) -> None:
+    clock = _set_clock(monkeypatch, start=4050.0)
+
+    request_payload = {
+        "prompt": {
+            "text": "Answer using the authenticated current user context.",
+            "char_count": 49,
+        },
+        "context_summary": {
+            "message_count": 3,
+            "leading_system_message_count": 1,
+            "role_counts": {"system": 1, "user": 1, "assistant": 1},
+            "total_content_chars": 128,
+        },
+        "context_message_count": 3,
+    }
+    prepared_at = "2026-04-15T01:02:03Z"
+    sent_at = "2026-04-15T01:02:04Z"
+
+    von_routes._set_tool_progress(
+        "scope-live-llm",
+        "req-live-llm",
+        {
+            "status": "llm_request_prepared",
+            "stage": "workflow_dispatch_prepare",
+            "phase": "workflow_dispatch_prepare",
+            "request_id": "req-live-llm",
+            "llm_request": request_payload,
+            "llm_request_state": "prepared",
+            "llm_request_prepared_at_utc": prepared_at,
+        },
+    )
+    clock["now"] += 0.25
+    von_routes._set_tool_progress(
+        "scope-live-llm",
+        "req-live-llm",
+        {
+            "status": "llm_call_start",
+            "stage": "workflow_dispatch_prepare",
+            "phase": "workflow_dispatch_prepare",
+            "request_id": "req-live-llm",
+            "model": "gemma4:26b",
+            "provider": "ollama",
+            "llm_request": request_payload,
+            "llm_request_state": "sent",
+            "llm_request_prepared_at_utc": prepared_at,
+            "llm_request_sent_at_utc": sent_at,
+            "fallback_attempt_no": 1,
+            "fallback_candidate_count": 3,
+        },
+    )
+
+    state = von_routes._get_tool_progress("scope-live-llm", "req-live-llm")
+    assert state is not None
+    serialised = von_routes._serialise_tool_progress_state(state, now_epoch=clock["now"])
+
+    stage_diagnostics = serialised.get("stage_diagnostics")
+    assert isinstance(stage_diagnostics, list)
+    workflow_dispatch_prepare = next(
+        (
+            entry
+            for entry in stage_diagnostics
+            if isinstance(entry, dict)
+            and entry.get("stage_id") == "workflow_dispatch_prepare"
+        ),
+        None,
+    )
+    assert workflow_dispatch_prepare is not None
+    assert workflow_dispatch_prepare.get("llm_input_recorded") is True
+    assert workflow_dispatch_prepare.get("llm_output_recorded") is False
+    assert workflow_dispatch_prepare.get("llm_exchange_record_count") == 1
+    assert workflow_dispatch_prepare.get("llm_exchange_entry_types") == [
+        "live_llm_request"
+    ]
+    assert workflow_dispatch_prepare.get("latest_llm_exchange") == {
+        "entry_type": "live_llm_request",
+        "stage": "workflow_dispatch_prepare",
+        "llm_input_recorded": True,
+        "llm_output_recorded": False,
+        "prompt_preview": request_payload["prompt"],
+        "context_summary": request_payload["context_summary"],
+        "context_message_count": 3,
+        "selected_model": "gemma4:26b",
+        "selected_provider": "ollama",
+        "fallback_attempt_no": 1,
+        "fallback_candidate_count": 3,
+        "llm_request_state": "sent",
+        "llm_request_prepared_at_utc": prepared_at,
+        "llm_request_sent_at_utc": sent_at,
+    }
+
+    diagnostic_events = serialised.get("diagnostic_events")
+    assert isinstance(diagnostic_events, list)
+    prepared_event = next(
+        (
+            entry
+            for entry in diagnostic_events
+            if isinstance(entry, dict)
+            and entry.get("status") == "llm_request_prepared"
+        ),
+        None,
+    )
+    assert prepared_event is not None
+    assert prepared_event.get("llm_request", {}).get("prompt", {}).get("text") == (
+        request_payload["prompt"]["text"]
+    )
+
+
 def test_progress_goal_label_and_candidate_count_are_serialised(monkeypatch) -> None:
     clock = _set_clock(monkeypatch, start=4100.0)
 

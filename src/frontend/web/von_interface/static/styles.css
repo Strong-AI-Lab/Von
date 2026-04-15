@@ -7946,6 +7946,30 @@ footer {
     margin-bottom: 6px;
 }
 
+.thinking-card-diagnostic-pre {
+    margin: 0;
+    padding: 10px 12px;
+    border: 1px solid #dbeafe;
+    border-radius: 8px;
+    background: #eff6ff;
+    color: #0f172a;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 0.78rem;
+    line-height: 1.45;
+}
+
+.thinking-card-diagnostic-pre code {
+    font-family: inherit;
+}
+
+.thinking-card-diagnostic-text {
+    color: #1f2937;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
 .thinking-card-diagnostic-list,
 .thinking-card-diagnostic-candidates {
     margin: 0;
