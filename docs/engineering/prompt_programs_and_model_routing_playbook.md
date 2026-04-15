@@ -132,6 +132,13 @@ the following policy constraints intact:
    Completion reports, dispatch summaries, and renderer diagnostics are
    supporting surfaces unless the user explicitly asked for an operational
    view.
+7. Treat a failed specialised workflow as a routing event, not automatically
+   as the end of the turn. When a specialised route fails before meaningful
+   tool progress or verified durable effects, the default next step should be
+   bounded compositional recovery from accumulated turn context, such as the
+   general tool workflow or an authorised direct tool batch, before
+   workflow-gap escalation or user-facing surrender. Telemetry should preserve
+   both the failed specialised attempt and the recovery handoff.
 
 ## 9. Fine-tuning guidance
 

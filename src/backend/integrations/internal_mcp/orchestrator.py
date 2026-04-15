@@ -576,6 +576,124 @@ def _extract_explicit_workflow_failure_detail(workflow_result: Any) -> str | Non
     return None
 
 
+def _workflow_error_text_looks_like_machine_reason(error_text: Any) -> bool:
+    cleaned = _workflow_execution_summary_text(error_text)
+    if not cleaned:
+        return False
+    if len(cleaned) > 120 or any(char.isspace() for char in cleaned):
+        return False
+    return bool(re.fullmatch(r"[#A-Za-z0-9_.:-]+", cleaned))
+
+
+def _extract_operational_workflow_error_signal(workflow_result: Any) -> str | None:
+    error_text = _workflow_execution_summary_text(getattr(workflow_result, "error", None))
+    if error_text:
+        return error_text
+
+    result_data = getattr(workflow_result, "data", None)
+    if not isinstance(result_data, Mapping):
+        return None
+
+    for key in ("last_action_error", "workflow_error", "error"):
+        error_text = _workflow_execution_summary_text(result_data.get(key))
+        if error_text:
+            return error_text
+
+    last_step_envelope = result_data.get(LAST_WORKFLOW_STEP_RESULT_ENVELOPE_KEY)
+    step_error = _extract_workflow_step_failure_detail(last_step_envelope)
+    if step_error:
+        return step_error
+
+    for envelope in _workflow_execution_summary_mapping_list(
+        result_data.get(WORKFLOW_STEP_RESULT_ENVELOPES_KEY)
+    ):
+        step_error = _extract_workflow_step_failure_detail(envelope)
+        if step_error:
+            return step_error
+
+    return None
+
+
+def _workflow_result_contains_tool_progress(workflow_result: Any) -> bool:
+    result_data = getattr(workflow_result, "data", None)
+    if not isinstance(result_data, Mapping):
+        return False
+
+    for key in ("tool_invocations", "invocations", "tool_messages"):
+        if _workflow_execution_summary_mapping_list(result_data.get(key)):
+            return True
+
+    extra_messages = _workflow_execution_summary_mapping_list(
+        result_data.get("extra_messages")
+    )
+    return any(
+        _workflow_execution_summary_text(message.get("role")) == "tool"
+        for message in extra_messages
+    )
+
+
+def _should_continue_failed_custom_workflow_into_tool_pipeline(
+    workflow_result: Any,
+) -> bool:
+    if _workflow_result_effective_completed(workflow_result):
+        return False
+    if _workflow_result_contains_tool_progress(workflow_result):
+        return False
+
+    operational_error = _extract_operational_workflow_error_signal(workflow_result)
+    if operational_error and not _workflow_error_text_looks_like_machine_reason(
+        operational_error
+    ):
+        return False
+    return True
+
+
+def _build_failed_custom_workflow_snapshot(
+    *,
+    workflow_id: str | None,
+    workflow_result: Any,
+) -> dict[str, Any] | None:
+    cleaned_workflow_id = (
+        workflow_id.strip()
+        if isinstance(workflow_id, str) and workflow_id.strip()
+        else None
+    )
+    if not cleaned_workflow_id or _workflow_result_effective_completed(workflow_result):
+        return None
+
+    snapshot: dict[str, Any] = {
+        "workflow_id": cleaned_workflow_id,
+        "completed": False,
+        "tool_progress_detected": _workflow_result_contains_tool_progress(
+            workflow_result
+        ),
+    }
+
+    final_state = _workflow_execution_summary_text(
+        getattr(workflow_result, "final_state", None)
+    )
+    if final_state:
+        snapshot["final_state"] = final_state
+
+    operational_error = _extract_operational_workflow_error_signal(workflow_result)
+    if operational_error:
+        snapshot["operational_error"] = operational_error
+
+    explicit_failure_detail = _extract_explicit_workflow_failure_detail(workflow_result)
+    if explicit_failure_detail and explicit_failure_detail != operational_error:
+        snapshot["failure_detail"] = explicit_failure_detail
+
+    result_data = getattr(workflow_result, "data", None)
+    if isinstance(result_data, Mapping):
+        user_visible_failure_text = _workflow_execution_summary_text(
+            result_data.get("response_text")
+        ) or _workflow_execution_summary_text(result_data.get("summary"))
+        if user_visible_failure_text:
+            snapshot["user_visible_failure_text"] = user_visible_failure_text
+
+    return snapshot
+
+
 def _safe_workflow_execution_aux_snapshot_value(
     value: Any,
     *,
@@ -29434,6 +29552,8 @@ class InternalMCPChatOrchestrator:
 
             return extra_payload
 
+        prior_failed_selected_workflow_snapshot: dict[str, Any] | None = None
+
         # ----------------------------------------------------------------
         # JVNAUTOSCI-825: Route turns to the appropriate pathway.
         #
@@ -30418,11 +30538,20 @@ class InternalMCPChatOrchestrator:
         ) -> str | None:
             if not discovered_matches:
                 return "no_discovered_matches"
-            if execution_mode != "custom_workflow" or workflow_result is None:
+            if workflow_result is None:
                 return None
 
-            if not _workflow_result_effective_completed(workflow_result):
+            if (
+                execution_mode == "custom_workflow"
+                and not _workflow_result_effective_completed(workflow_result)
+            ):
                 return "discovered_custom_workflow_failed"
+            if (
+                execution_mode == "tool_pipeline"
+                and isinstance(prior_failed_selected_workflow_snapshot, Mapping)
+                and not _workflow_result_effective_completed(workflow_result)
+            ):
+                return "tool_pipeline_failed_after_custom_workflow_failure"
             return None
 
         def _maybe_apply_workflow_gap_recovery(
@@ -30503,6 +30632,10 @@ class InternalMCPChatOrchestrator:
                     workflow_result_error or None
                 ),
             }
+            if isinstance(prior_failed_selected_workflow_snapshot, Mapping):
+                recovery_request["workflow_gap_prior_failed_selected_workflow"] = dict(
+                    prior_failed_selected_workflow_snapshot
+                )
             try:
                 recovery_result = self.execute_workflow(
                     WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
@@ -30779,17 +30912,36 @@ class InternalMCPChatOrchestrator:
                         workflow_routing=routing_info,
                         render_plan=_result_render_plan(),
                     )
-                    result = _maybe_apply_workflow_gap_recovery(
-                        result,
-                        execution_mode="custom_workflow",
-                        workflow_result=wf_result,
+                    custom_failure_extra = _build_workflow_terminal_failure_extra(
+                        wf_result
                     )
-                    _finalise_selection_experience_record(
-                        result=result,
-                        outcome="completed" if wf_completed else "failed",
-                        final_state=wf_result.final_state,
-                        completed=wf_completed,
-                    )
+                    continue_to_tool_pipeline = False
+                    if _should_continue_failed_custom_workflow_into_tool_pipeline(
+                        wf_result
+                    ):
+                        fallback_tool_workflow_id = (
+                            self._resolve_workflow_id_for_action_contract(
+                                required_action_ids=_TURN_EXECUTION_TOOL_PIPELINE_ACTION_IDS,
+                                preferred_workflow_id=selected_workflow_id_text,
+                                candidate_workflow_ids=(
+                                    discovered_workflow_ids_for_contract_routing
+                                ),
+                                fallback_workflow_ids=(TOOL_CALLING_WORKFLOW_ID,),
+                            )
+                        )
+                        continue_to_tool_pipeline = bool(fallback_tool_workflow_id)
+                        if continue_to_tool_pipeline:
+                            prior_failed_selected_workflow_snapshot = (
+                                _build_failed_custom_workflow_snapshot(
+                                    workflow_id=selected_workflow_id_text,
+                                    workflow_result=wf_result,
+                                )
+                            )
+                            custom_failure_extra = {
+                                **custom_failure_extra,
+                                "continued_to_tool_pipeline": True,
+                                "fallback_tool_workflow_id": fallback_tool_workflow_id,
+                            }
                     _emit_dispatch_boundary(
                         boundary="workflow_terminal",
                         status="completed" if wf_completed else "failed",
@@ -30798,11 +30950,43 @@ class InternalMCPChatOrchestrator:
                         dispatch_workflow_id=selected_workflow_id_text,
                         final_state=wf_result.final_state,
                         completed=wf_completed,
-                        extra=_build_workflow_terminal_failure_extra(wf_result) or None,
+                        extra=custom_failure_extra or None,
                     )
-                    result = _refresh_result_runtime_snapshots(result)
-                    _persist_trace(status="completed")
-                    return result
+                    if continue_to_tool_pipeline:
+                        recovery_handoff_payload: dict[str, Any] = {
+                            "type": "workflow_recovery_handoff",
+                            "from_execution_mode": "custom_workflow",
+                            "to_execution_mode": "tool_pipeline",
+                            "selected_workflow_id": selected_workflow_id_text,
+                            "reason": "failed_custom_workflow_before_tool_progress",
+                        }
+                        if isinstance(
+                            prior_failed_selected_workflow_snapshot, Mapping
+                        ):
+                            recovery_handoff_payload[
+                                "failed_workflow_snapshot"
+                            ] = dict(prior_failed_selected_workflow_snapshot)
+                        aux_llm_calls.append(recovery_handoff_payload)
+                        self._logger.info(
+                            "[mcp_orchestrator] Selected workflow %s failed without "
+                            "tool progress; continuing into tool pipeline.",
+                            selected_workflow_id_text,
+                        )
+                    else:
+                        result = _maybe_apply_workflow_gap_recovery(
+                            result,
+                            execution_mode="custom_workflow",
+                            workflow_result=wf_result,
+                        )
+                        _finalise_selection_experience_record(
+                            result=result,
+                            outcome="completed" if wf_completed else "failed",
+                            final_state=wf_result.final_state,
+                            completed=wf_completed,
+                        )
+                        result = _refresh_result_runtime_snapshots(result)
+                        _persist_trace(status="completed")
+                        return result
                 _emit_dispatch_boundary(
                     boundary="workflow_terminal",
                     status="missing",
@@ -31006,6 +31190,10 @@ class InternalMCPChatOrchestrator:
                 "completion_gate_escalation_signal": False,
                 "completion_gate_escalation_reason": None,
             }
+            if isinstance(prior_failed_selected_workflow_snapshot, Mapping):
+                tc_data["prior_failed_selected_workflow"] = dict(
+                    prior_failed_selected_workflow_snapshot
+                )
 
             _emit_dispatch_boundary(
                 boundary="workflow_handoff",

@@ -421,6 +421,13 @@ def render_selected_workflow_user_response(
                     combined_data[key] = value
 
     artefact_lines = _render_selected_workflow_artefact_lines(combined_data)
+    failure_text = _coerce_non_empty_text(failure_detail) if not child_completed else None
+    if failure_text and (
+        any(char.isspace() for char in failure_text) or len(failure_text) > 120
+    ):
+        if artefact_lines:
+            return "\n".join([*artefact_lines, "", failure_text])
+        return failure_text
 
     candidate_texts: list[str] = []
     seen_candidates: set[str] = set()
@@ -458,10 +465,8 @@ def render_selected_workflow_user_response(
             return "\n".join([*artefact_lines, "", candidate_text])
         return candidate_text
 
-    if not child_completed:
-        failure_text = _coerce_non_empty_text(failure_detail)
-        if failure_text:
-            return failure_text
+    if failure_text:
+        return failure_text
 
     lines: list[str] = list(artefact_lines)
 

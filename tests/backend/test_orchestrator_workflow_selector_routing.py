@@ -4841,7 +4841,9 @@ def test_launchability_replacement_allows_testing_workflow_for_explicit_testing_
     )
 
 
-def test_custom_workflow_first_step_failure_projects_terminal_locality(monkeypatch):
+def test_custom_workflow_first_step_failure_projects_terminal_locality_before_tool_pipeline_fallback(
+    monkeypatch,
+):
     import src.backend.services.workflow_selection_policy_service as policy_module
 
     monkeypatch.setattr(policy_module, "get_live_selection_policy", lambda: None)
@@ -4869,25 +4871,41 @@ def test_custom_workflow_first_step_failure_projects_terminal_locality(monkeypat
         )
     )
 
-    def _execute_workflow(workflow_id: str, **_kwargs: Any):
-        assert workflow_id == selected_workflow_id
-        return SimpleNamespace(
-            completed=False,
-            final_state="prepare_spec",
-            error="workflow_launch_input_resolution_failed:invitation_text",
-            data={
-                "response_text": (
-                    f"Workflow {selected_workflow_id} could not start because "
-                    "required launch inputs were unresolved: invitation_text."
-                ),
-                "workflow_launch_input_resolution": {
-                    "status": "failed",
-                    "unresolved_required_inputs": ["invitation_text"],
-                    "failing_state_id": "prepare_spec",
-                    "failing_action_id": "tool.prepare_spec",
+    tool_pipeline_payload: dict[str, Any] = {}
+
+    def _execute_workflow(workflow_id: str, **kwargs: Any):
+        if workflow_id == selected_workflow_id:
+            return SimpleNamespace(
+                completed=False,
+                final_state="prepare_spec",
+                error="workflow_launch_input_resolution_failed:invitation_text",
+                data={
+                    "response_text": (
+                        f"Workflow {selected_workflow_id} could not start because "
+                        "required launch inputs were unresolved: invitation_text."
+                    ),
+                    "workflow_launch_input_resolution": {
+                        "status": "failed",
+                        "unresolved_required_inputs": ["invitation_text"],
+                        "failing_state_id": "prepare_spec",
+                        "failing_action_id": "tool.prepare_spec",
+                    },
                 },
-            },
-        )
+            )
+        if workflow_id == TOOL_CALLING_WORKFLOW_ID:
+            tool_pipeline_payload.update(dict(kwargs))
+            return SimpleNamespace(
+                completed=True,
+                final_state="complete",
+                error=None,
+                data={
+                    "final_response": "Recovered through the general tool workflow.",
+                    "tool_messages": [],
+                    "invocations": [{"tool": "extract_url"}],
+                    "iteration_count": 1,
+                },
+            )
+        raise AssertionError(f"Unexpected workflow execution: {workflow_id}")
 
     monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
 
@@ -4926,22 +4944,36 @@ def test_custom_workflow_first_step_failure_projects_terminal_locality(monkeypat
             turn_id="turn-launch-failure",
         )
 
-    assert "required launch inputs were unresolved: invitation_text" in result.response_text
+    assert result.response_text == "Recovered through the general tool workflow."
     assert result.workflow_routing is not None
     assert result.workflow_routing.workflow_id == selected_workflow_id
+    assert tool_pipeline_payload["data"]["prior_failed_selected_workflow"] == {
+        "workflow_id": selected_workflow_id,
+        "completed": False,
+        "tool_progress_detected": False,
+        "final_state": "prepare_spec",
+        "operational_error": "workflow_launch_input_resolution_failed:invitation_text",
+        "user_visible_failure_text": (
+            f"Workflow {selected_workflow_id} could not start because required "
+            "launch inputs were unresolved: invitation_text."
+        ),
+    }
 
     dispatch_boundaries = [
         entry
         for entry in result.aux_llm_calls
         if isinstance(entry, dict) and entry.get("type") == "workflow_dispatch_boundary"
     ]
-    assert [entry.get("boundary") for entry in dispatch_boundaries[-3:]] == [
-        "execution_mode_selected",
-        "workflow_handoff",
-        "workflow_terminal",
-    ]
-    assert dispatch_boundaries[-2].get("status") == "started"
-    terminal_boundary = dispatch_boundaries[-1]
+    terminal_boundary = next(
+        (
+            entry
+            for entry in dispatch_boundaries
+            if entry.get("boundary") == "workflow_terminal"
+            and entry.get("selected_execution_mode") == "custom_workflow"
+        ),
+        None,
+    )
+    assert terminal_boundary is not None
     assert terminal_boundary.get("status") == "failed"
     assert terminal_boundary.get("selected_execution_mode") == "custom_workflow"
     assert terminal_boundary.get("selected_workflow_id") == selected_workflow_id
@@ -4952,6 +4984,7 @@ def test_custom_workflow_first_step_failure_projects_terminal_locality(monkeypat
     assert terminal_boundary.get("unresolved_required_inputs") == ["invitation_text"]
     assert terminal_boundary.get("failing_state_id") == "prepare_spec"
     assert terminal_boundary.get("failing_action_id") == "tool.prepare_spec"
+    assert terminal_boundary.get("continued_to_tool_pipeline") is True
 
     terminal_progress = next(
         (
@@ -8575,7 +8608,9 @@ def test_discovery_miss_invokes_gap_recovery_after_plain_fallback(monkeypatch):
     assert recovery_entry.get("candidate_workflow_id") == "#V#candidate_recovery_workflow"
 
 
-def test_discovered_custom_workflow_failure_invokes_gap_recovery(monkeypatch):
+def test_discovered_custom_workflow_failure_falls_through_to_tool_pipeline_before_gap_recovery(
+    monkeypatch,
+):
     import src.backend.services.workflow_selection_policy_service as policy_module
 
     monkeypatch.setattr(policy_module, "get_live_selection_policy", lambda: None)
@@ -8588,9 +8623,11 @@ def test_discovered_custom_workflow_failure_invokes_gap_recovery(monkeypatch):
         purpose="Misaligned specialised workflow for gap-recovery routing tests.",
     )
 
-    recovery_calls: list[tuple[str, Mapping[str, Any]]] = []
+    executed_workflow_ids: list[str] = []
+    tool_pipeline_payload: dict[str, Any] = {}
 
     def _fake_execute_workflow(workflow_id: str, **kwargs: Any):
+        executed_workflow_ids.append(workflow_id)
         if workflow_id == selected_workflow_id:
             return SimpleNamespace(
                 data={"response_text": "Selected specialised workflow failed."},
@@ -8598,23 +8635,19 @@ def test_discovered_custom_workflow_failure_invokes_gap_recovery(monkeypatch):
                 completed=True,
                 error=None,
             )
-        if workflow_id == WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID:
-            recovery_calls.append((workflow_id, dict(kwargs)))
+        if workflow_id == TOOL_CALLING_WORKFLOW_ID:
+            tool_pipeline_payload.update(dict(kwargs))
             return SimpleNamespace(
                 data={
-                    "workflow_gap_final_response_text": (
-                        "Recovered after detected specialised-workflow failure."
-                    ),
-                    "workflow_gap_final_extra_messages": [
-                        {"role": "tool", "content": "gap recovery tool output"}
+                    "final_response": "Recovered through the general tool workflow.",
+                    "tool_messages": [
+                        {
+                            "role": "tool",
+                            "content": "general tool workflow inspected existing context",
+                        }
                     ],
-                    "workflow_gap_final_tool_invocations": [
-                        {"tool": "workflow_gap.execute_candidate"}
-                    ],
-                    "workflow_gap_recovery_outcome": "candidate_retried_successfully",
-                    "workflow_gap_candidate_workflow_id": (
-                        "#V#candidate_recovery_workflow"
-                    ),
+                    "invocations": [{"tool": "find_relations_with_argument"}],
+                    "iteration_count": 1,
                 },
                 final_state="complete",
                 completed=True,
@@ -8649,24 +8682,26 @@ def test_discovered_custom_workflow_failure_invokes_gap_recovery(monkeypatch):
         },
     )
 
-    assert recovery_calls
-    workflow_id, payload = recovery_calls[0]
-    assert workflow_id == WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID
-    assert payload["data"]["workflow_gap_trigger_reason"] == (
-        "discovered_custom_workflow_failed"
-    )
-    assert payload["data"]["workflow_gap_selected_workflow_completed"] is True
-    assert payload["data"]["workflow_gap_selected_workflow_final_state"] == (
-        "#V#workflow_step_misaligned_specialised_workflow_failed"
-    )
-    assert result.response_text == (
-        "Recovered after detected specialised-workflow failure."
-    )
+    assert executed_workflow_ids == [
+        selected_workflow_id,
+        TOOL_CALLING_WORKFLOW_ID,
+    ]
+    assert tool_pipeline_payload["data"]["prior_failed_selected_workflow"] == {
+        "workflow_id": selected_workflow_id,
+        "completed": False,
+        "tool_progress_detected": False,
+        "final_state": "#V#workflow_step_misaligned_specialised_workflow_failed",
+        "user_visible_failure_text": "Selected specialised workflow failed.",
+    }
+    assert result.response_text == "Recovered through the general tool workflow."
     assert result.extra_messages == (
-        {"role": "tool", "content": "gap recovery tool output"},
+        {
+            "role": "tool",
+            "content": "general tool workflow inspected existing context",
+        },
     )
     assert result.tool_invocations == (
-        {"tool": "workflow_gap.execute_candidate"},
+        {"tool": "find_relations_with_argument"},
     )
     dispatch_boundaries = [
         entry
@@ -8692,21 +8727,27 @@ def test_discovered_custom_workflow_failure_invokes_gap_recovery(monkeypatch):
     assert terminal_boundary.get("detail") == (
         "Selected specialised workflow failed."
     )
-    recovery_entry = next(
+    assert terminal_boundary.get("continued_to_tool_pipeline") is True
+    assert terminal_boundary.get("fallback_tool_workflow_id") == TOOL_CALLING_WORKFLOW_ID
+    handoff_entry = next(
         (
             entry
             for entry in result.aux_llm_calls
             if isinstance(entry, dict)
-            and entry.get("type") == "workflow_gap_recovery"
+            and entry.get("type") == "workflow_recovery_handoff"
         ),
         None,
     )
-    assert recovery_entry is not None
-    assert recovery_entry.get("status") == "applied"
-    assert recovery_entry.get("candidate_workflow_id") == "#V#candidate_recovery_workflow"
+    assert handoff_entry is not None
+    assert handoff_entry.get("to_execution_mode") == "tool_pipeline"
+    assert handoff_entry.get("reason") == "failed_custom_workflow_before_tool_progress"
+    assert not any(
+        isinstance(entry, dict) and entry.get("type") == "workflow_gap_recovery"
+        for entry in result.aux_llm_calls
+    )
 
 
-def test_entity_representation_failure_family_replays_with_truthful_gap_recovery(
+def test_entity_representation_failure_family_replays_with_truthful_gap_recovery_after_tool_pipeline_attempt(
     monkeypatch,
 ):
     import src.backend.services.workflow_selection_policy_service as policy_module
@@ -8725,17 +8766,36 @@ def test_entity_representation_failure_family_replays_with_truthful_gap_recovery
         ),
     )
 
+    executed_workflow_ids: list[str] = []
     recovery_calls: list[tuple[str, Mapping[str, Any]]] = []
+    tool_pipeline_payload: dict[str, Any] = {}
 
     def _fake_execute_workflow(workflow_id: str, **kwargs: Any):
+        executed_workflow_ids.append(workflow_id)
         if workflow_id == selected_workflow_id:
             return SimpleNamespace(
                 data={
                     "response_text": (
                         "ArXiv paper representation could not represent those people."
-                    )
+                    ),
+                    "error": "arxiv_identifier_missing",
                 },
                 final_state="#V#workflow_step_arxiv_paper_representation_workflow_failed",
+                completed=True,
+                error=None,
+            )
+        if workflow_id == TOOL_CALLING_WORKFLOW_ID:
+            tool_pipeline_payload.update(dict(kwargs))
+            return SimpleNamespace(
+                data={
+                    "final_response": (
+                        "The general tool workflow still could not complete the turn."
+                    ),
+                    "tool_messages": [],
+                    "invocations": [],
+                    "iteration_count": 1,
+                },
+                final_state="#V#tool_calling_workflow_failed",
                 completed=True,
                 error=None,
             )
@@ -8796,15 +8856,41 @@ def test_entity_representation_failure_family_replays_with_truthful_gap_recovery
         },
     )
 
+    assert executed_workflow_ids == [
+        selected_workflow_id,
+        TOOL_CALLING_WORKFLOW_ID,
+        WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
+    ]
+    assert tool_pipeline_payload["data"]["prior_failed_selected_workflow"] == {
+        "workflow_id": selected_workflow_id,
+        "completed": False,
+        "tool_progress_detected": False,
+        "final_state": "#V#workflow_step_arxiv_paper_representation_workflow_failed",
+        "operational_error": "arxiv_identifier_missing",
+        "user_visible_failure_text": (
+            "ArXiv paper representation could not represent those people."
+        ),
+    }
     assert recovery_calls
     workflow_id, payload = recovery_calls[0]
     assert workflow_id == WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID
     assert payload["data"]["workflow_gap_trigger_reason"] == (
-        "discovered_custom_workflow_failed"
+        "tool_pipeline_failed_after_custom_workflow_failure"
     )
     assert payload["data"]["workflow_gap_selected_workflow_final_state"] == (
-        "#V#workflow_step_arxiv_paper_representation_workflow_failed"
+        "#V#tool_calling_workflow_failed"
     )
+    assert payload["data"]["workflow_gap_selected_execution_mode"] == "tool_pipeline"
+    assert payload["data"]["workflow_gap_prior_failed_selected_workflow"] == {
+        "workflow_id": selected_workflow_id,
+        "completed": False,
+        "tool_progress_detected": False,
+        "final_state": "#V#workflow_step_arxiv_paper_representation_workflow_failed",
+        "operational_error": "arxiv_identifier_missing",
+        "user_visible_failure_text": (
+            "ArXiv paper representation could not represent those people."
+        ),
+    }
     assert result.response_text == (
         "Recovered by escalating into entity-representation workflow authoring."
     )
@@ -8829,9 +8915,8 @@ def test_entity_representation_failure_family_replays_with_truthful_gap_recovery
     assert terminal_boundary.get("status") == "failed"
     assert terminal_boundary.get("completed") is False
     assert terminal_boundary.get("reason") == "failed_terminal_state"
-    assert terminal_boundary.get("detail") == (
-        "ArXiv paper representation could not represent those people."
-    )
+    assert terminal_boundary.get("detail") == "arxiv_identifier_missing"
+    assert terminal_boundary.get("continued_to_tool_pipeline") is True
 
 
 def test_custom_workflow_failure_prefers_explicit_action_error_over_metadata_summary(
