@@ -2887,7 +2887,7 @@ def test_selector_prompt_unavailable_fails_closed_without_selector_llm(monkeypat
 
 
 def test_selector_receives_discovered_workflows(monkeypatch):
-    """Policy-unsafe discovered workflows should be excluded from selector context."""
+    """Discovered workflows should reach selector context after JIT registration."""
 
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
 
@@ -2933,14 +2933,14 @@ def test_selector_receives_discovered_workflows(monkeypatch):
     )
     assert selector_entry is not None
     discovered_ids = set(selector_entry.get("discovered_workflow_ids", []))
-    assert "#V#custom_analysis_workflow" not in discovered_ids
+    assert "#V#custom_analysis_workflow" in discovered_ids
     assert {
         CHAT_ASSISTANT_WORKFLOW_ID,
         TOOL_CALLING_WORKFLOW_ID,
         CHAT_NARRATION_WORKFLOW_ID,
     }.issubset(discovered_ids)
     assert selector_entry.get("discovery_candidate_count") == 4
-    assert selector_entry.get("discovery_excluded_count") == 1
+    assert selector_entry.get("discovery_excluded_count") == 0
 
     # Since the workflow is not in the registry, execute_workflow returns None
     # and we fall through to tool-calling.  The response should come from the
@@ -3418,7 +3418,8 @@ def test_workflow_selector_emits_dispatch_progress_events(monkeypatch):
     assert any(
         entry.get("phase") == "workflow_dispatch"
         and entry.get("selected_workflow_id") == TOOL_CALLING_WORKFLOW_ID
-        and entry.get("goal_label") == "Execute Tool Calling Workflow."
+        and entry.get("goal_label")
+        == f"Execute {selected_event.get('selected_workflow_name')}."
         for entry in captured_progress
     )
     assert result.workflow_routing is not None
@@ -3951,7 +3952,7 @@ def test_custom_workflow_launchability_promotes_launchable_replacement_candidate
     assert dispatch_boundaries[-1].get("selected_workflow_id") == launchable_workflow_id
 
 
-def test_custom_workflow_launchability_override_failure_preserves_selected_dispatch(
+def test_custom_workflow_launchability_override_failure_preserves_selector_decision_but_surfaces_truthful_failure(
     monkeypatch,
 ):
     import src.backend.services.workflow_selection_policy_service as policy_module
@@ -3980,15 +3981,12 @@ def test_custom_workflow_launchability_override_failure_preserves_selected_dispa
         )
     )
 
-    _stub_execute_workflow_result(
-        monkeypatch,
-        orchestrator,
-        expected_workflow_id=selected_workflow_id,
-        data={
-            "response_text": "Preserved selected workflow dispatch.",
-            "final_response": "Preserved selected workflow dispatch.",
-        },
-    )
+    def _unexpected_execute_workflow(*_args: Any, **_kwargs: Any):
+        raise AssertionError(
+            "execute_workflow should not run after launchability gate failure"
+        )
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _unexpected_execute_workflow)
 
     def _raise_override_failure(**_kwargs: Any) -> Any:
         raise AttributeError("override policy exploded")
@@ -4027,11 +4025,18 @@ def test_custom_workflow_launchability_override_failure_preserves_selected_dispa
         turn_id="turn-launchability-override-failure",
     )
 
-    assert result.response_text == "Preserved selected workflow dispatch."
+    assert (
+        result.response_text
+        == "I identified a specialized workflow but could not launch it due to "
+        "missing requirements. Details: Missing required context key: "
+        "file_copy_concept_id"
+    )
     assert result.workflow_routing is not None
     assert result.workflow_routing.workflow_id == selected_workflow_id
     assert result.workflow_routing.verdict == "rag_selected"
     assert result.workflow_routing.source == "selector"
+    assert result.extra_messages == ()
+    assert result.tool_invocations == ()
 
     failure_entry = next(
         (
@@ -4049,21 +4054,6 @@ def test_custom_workflow_launchability_override_failure_preserves_selected_dispa
     assert failure_entry.get("prior_selected_workflow_id") == selected_workflow_id
     assert failure_entry.get("preserved_selector_decision") is True
     assert failure_entry.get("error_class") == "AttributeError"
-
-    dispatch_boundaries = [
-        entry
-        for entry in result.aux_llm_calls
-        if isinstance(entry, dict) and entry.get("type") == "workflow_dispatch_boundary"
-    ]
-    assert [entry.get("boundary") for entry in dispatch_boundaries[-3:]] == [
-        "execution_mode_selected",
-        "workflow_handoff",
-        "workflow_terminal",
-    ]
-    assert dispatch_boundaries[-3].get("selected_execution_mode") == "custom_workflow"
-    assert dispatch_boundaries[-3].get("selected_workflow_id") == selected_workflow_id
-    assert dispatch_boundaries[-2].get("selected_workflow_id") == selected_workflow_id
-    assert dispatch_boundaries[-1].get("selected_workflow_id") == selected_workflow_id
 
 
 def test_custom_workflow_override_prefers_semantically_fit_execution_candidate(

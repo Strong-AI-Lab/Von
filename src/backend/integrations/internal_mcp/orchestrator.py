@@ -30537,6 +30537,12 @@ class InternalMCPChatOrchestrator:
             workflow_result: Any | None = None,
         ) -> str | None:
             if not discovered_matches:
+                # An intentional plain-response outcome should not background-run
+                # workflow-gap recovery solely because discovery produced only
+                # excluded candidates, such as authoring workflows that require
+                # explicit intent. Preserve direct answers in that case.
+                if execution_mode == "direct_response" and excluded_discovered_matches:
+                    return None
                 return "no_discovered_matches"
             if workflow_result is None:
                 return None
