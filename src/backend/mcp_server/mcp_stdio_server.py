@@ -89,6 +89,7 @@ if TYPE_CHECKING:
         _jira_delete_issue_link,
         _jira_get_auth_config,
         _jira_get_issue,
+        _jira_get_project_issue_types,
         _jira_get_myself,
         _jira_get_transitions,
         _jira_link_issue,
@@ -332,6 +333,7 @@ _bind_imports(
         "_jira_delete_issue_link",
         "_jira_get_auth_config",
         "_jira_get_issue",
+        "_jira_get_project_issue_types",
         "_jira_get_transitions",
         "_jira_get_myself",
         "_jira_link_issue",
@@ -3040,6 +3042,17 @@ async def _handle_jira_get_issue(arguments: dict[str, Any]) -> list[TextContent]
     )
 
 
+async def _handle_jira_get_project_issue_types(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _jira_get_project_issue_types,
+        arguments,
+        tool_family_label="Jira",
+        suggestions=["Check Jira authentication and network connectivity"],
+    )
+
+
 async def _handle_jira_get_transitions(arguments: dict[str, Any]) -> list[TextContent]:
     return _run_catalogue_proxy_handler(
         _jira_get_transitions,
@@ -4164,6 +4177,7 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "turn_execution_namespace_coverage_report": _handle_turn_execution_namespace_coverage_report,
     "jira_search": _handle_jira_search,
     "jira_get_issue": _handle_jira_get_issue,
+    "jira_get_project_issue_types": _handle_jira_get_project_issue_types,
     "jira_get_transitions": _handle_jira_get_transitions,
     "jira_add_comment": _handle_jira_add_comment,
     "jira_add_attachment": _handle_jira_add_attachment,

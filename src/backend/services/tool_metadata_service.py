@@ -268,6 +268,11 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "category": "jira",
         "display_template": "Issue: {key}",
     },
+    "jira_get_project_issue_types": {
+        "salience": "medium",
+        "category": "jira",
+        "display_template": "Issue types: {project_key}",
+    },
     "jira_get_transitions": {
         "salience": "medium",
         "category": "jira",

@@ -907,7 +907,7 @@
         },
         {
             "name": "download_paper",
-            "description": "Download PDF of an arXiv paper, then store it in the configured blob store (local or OpenStack Swift). The external arXiv tool writes into a local cache directory; this tool returns both the local cache file_path and a durable storage.uri and may register a #V#computer_file_copy when authenticated. Use when user asks to download/save/fetch a paper. This tool does not materialise the scholarly-paper concept.",
+            "description": "Download PDF of an arXiv paper, then store it in the configured blob store (local, OpenStack Swift, or S3-compatible object storage). The external arXiv tool writes into a local cache directory; this tool returns both the local cache file_path and a durable storage.uri and may register a #V#computer_file_copy when authenticated. Use when user asks to download/save/fetch a paper. This tool does not materialise the scholarly-paper concept.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2389,6 +2389,23 @@
                 "required": [],
                 "additionalProperties": true,
                 "description": "jira_get_myself input: no arguments"
+            }
+        },
+        {
+            "name": "jira_get_project_issue_types",
+            "description": "Inspect a Jira project's style and available issue types. Use to diagnose why a requested issue type such as Bug can or cannot be created in that project.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project_key": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "project_key"
+                ],
+                "additionalProperties": true,
+                "description": "jira_get_project_issue_types input: project_key (str, required). Returns project style plus configured/creatable issue types for that Jira project."
             }
         },
         {
@@ -4272,6 +4289,37 @@
                 "required": [],
                 "additionalProperties": true,
                 "description": "Build reproducible failure-mining benchmark metrics and replay cases from turn execution records."
+            }
+        },
+        {
+            "name": "turn_execution_build_context_answering_benchmark",
+            "description": "Evaluate context-grounded answering coverage across direct-response, tool-pipeline, continuation, and workflow-result answer paths.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "cases": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "case_set": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "max_cases": {
+                        "type": "integer"
+                    },
+                    "bundle_path": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "Build context-grounded answering benchmark coverage and acceptance signals from explicit corpus cases or the repo seed bundle."
             }
         },
         {

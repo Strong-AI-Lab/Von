@@ -15,6 +15,7 @@ JIRA_TOOL_NAMES = {
     "jira_delete_issue_link",
     "jira_get_myself",
     "jira_get_auth_config",
+    "jira_get_project_issue_types",
 }
 
 
@@ -46,3 +47,14 @@ def test_vontology_mcp_manifest_includes_jira_tools():
     )
     properties = jira_get_issue.get("inputSchema", {}).get("properties", {})
     assert "expand" in properties
+
+    jira_get_project_issue_types = next(
+        tool
+        for tool in tools
+        if isinstance(tool, dict)
+        and tool.get("name") == "jira_get_project_issue_types"
+    )
+    project_issue_types_properties = (
+        jira_get_project_issue_types.get("inputSchema", {}).get("properties", {})
+    )
+    assert "project_key" in project_issue_types_properties

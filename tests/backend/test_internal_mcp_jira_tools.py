@@ -26,6 +26,7 @@ def test_jira_methods_registered_in_catalogue():
     names = set(catalogue.list_methods())
     assert "jira_search" in names
     assert "jira_get_issue" in names
+    assert "jira_get_project_issue_types" in names
     assert "jira_get_transitions" in names
     assert "jira_add_comment" in names
     assert "jira_add_attachment" in names
@@ -88,7 +89,44 @@ def test_jira_handlers_require_minimum_fields():
     assert "issue_link_id" in err_delete.get("error", "")
 
 
-def test_jira_write_tools_allowlist_and_dry_run_defaults():
+def _team_managed_project_issue_type_context(project_key: str) -> dict:
+    return {
+        "success": True,
+        "project_key": project_key,
+        "project_id": "10066",
+        "project_name": "Zhan von Neumarkt - Automated Science",
+        "project_style": "next-gen",
+        "project_type_key": "software",
+        "is_team_managed": True,
+        "issue_type_scheme_supported": False,
+        "available_issue_type_names": ["Task", "Epic", "Subtask"],
+        "creatable_issue_types": [
+            {"id": "10122", "name": "Task", "subtask": False},
+            {"id": "10123", "name": "Epic", "subtask": False},
+            {"id": "10124", "name": "Subtask", "subtask": True},
+        ],
+        "project_issue_types": [
+            {"id": "10122", "name": "Task", "subtask": False},
+            {"id": "10123", "name": "Epic", "subtask": False},
+            {"id": "10124", "name": "Subtask", "subtask": True},
+        ],
+    }
+
+
+def test_jira_write_tools_allowlist_and_dry_run_defaults(monkeypatch):
+    class _FakeProxy:
+        async def get_project_issue_types(self, *, project_key: str):
+            assert project_key == "JVNAUTOSCI"
+            return _team_managed_project_issue_type_context(project_key)
+
+    async def _fake_get_jira_proxy():
+        return _FakeProxy()
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.jira_proxy_mcp.get_jira_proxy",
+        _fake_get_jira_proxy,
+    )
+
     # Default allow-list includes JVNAUTOSCI.
     ok_create = _jira_create_issue(
         project_key="JVNAUTOSCI",
@@ -105,6 +143,9 @@ def test_jira_write_tools_allowlist_and_dry_run_defaults():
     assert ok_create.get("success") is True
     assert ok_create.get("dry_run") is True
     assert ok_create.get("executed") is False
+    assert ok_create.get("issue_type_preflight", {}).get(
+        "available_issue_type_names"
+    ) == ["Task", "Epic", "Subtask"]
     assert (
         ok_create.get("proposed_payload", {})
         .get("fields", {})
@@ -198,6 +239,40 @@ def test_jira_write_tools_allowlist_and_dry_run_defaults():
     assert bad_delete.get("error_code") == "project_not_allowlisted"
 
 
+def test_jira_create_issue_reports_unavailable_project_issue_type(monkeypatch):
+    class _FakeProxy:
+        async def get_project_issue_types(self, *, project_key: str):
+            assert project_key == "JVNAUTOSCI"
+            return _team_managed_project_issue_type_context(project_key)
+
+        async def create_issue(self, *, payload):  # pragma: no cover - defensive
+            raise AssertionError(f"create_issue should not be called: {payload}")
+
+    async def _fake_get_jira_proxy():
+        return _FakeProxy()
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.jira_proxy_mcp.get_jira_proxy",
+        _fake_get_jira_proxy,
+    )
+
+    result = _jira_create_issue(
+        project_key="JVNAUTOSCI",
+        issue_type="Bug",
+        summary="Need a bug",
+    )
+
+    assert result.get("success") is False
+    assert result.get("error_code") == "jira_issue_type_not_available_for_project"
+    assert result.get("error_details", {}).get("project_style") == "next-gen"
+    assert result.get("error_details", {}).get("is_team_managed") is True
+    assert result.get("error_details", {}).get("available_issue_types") == [
+        "Task",
+        "Epic",
+        "Subtask",
+    ]
+
+
 def test_jira_write_tools_require_approval_when_not_dry_run():
     # Should fail closed before any external call.
     err = _jira_create_issue(
@@ -289,6 +364,40 @@ def test_jira_get_issue_supports_expand_through_gateway_invoke(monkeypatch):
     assert payload.get("key") == "JVNAUTOSCI-1141"
     assert payload.get("fields", {}).get("summary") == "Renderer applicability task"
     assert payload.get("changelog") == {"histories": []}
+
+
+def test_jira_get_project_issue_types_through_gateway_invoke(monkeypatch):
+    from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
+    from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
+
+    class _FakeProxy:
+        async def get_project_issue_types(self, *, project_key: str):
+            assert project_key == "JVNAUTOSCI"
+            return _team_managed_project_issue_type_context(project_key)
+
+    async def _fake_get_jira_proxy():
+        return _FakeProxy()
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.jira_proxy_mcp.get_jira_proxy",
+        _fake_get_jira_proxy,
+    )
+
+    gateway = InternalMCPGateway(
+        catalogue=build_default_catalogue(),
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+
+    result = gateway.invoke(
+        "jira_get_project_issue_types",
+        {"project_key": "JVNAUTOSCI"},
+    )
+    payload = result.payload
+    assert payload.get("success") is True
+    assert payload.get("project_key") == "JVNAUTOSCI"
+    assert payload.get("project_style") == "next-gen"
+    assert payload.get("available_issue_type_names") == ["Task", "Epic", "Subtask"]
 
 
 def test_jira_delete_issue_link_success_through_gateway_invoke(monkeypatch):
@@ -524,9 +633,22 @@ def test_jira_add_attachment_auth_error_passthrough_through_gateway_invoke(monke
     assert payload.get("status_code") == 401
 
 
-def test_jira_create_issue_components_through_gateway_invoke():
+def test_jira_create_issue_components_through_gateway_invoke(monkeypatch):
     from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
     from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
+
+    class _FakeProxy:
+        async def get_project_issue_types(self, *, project_key: str):
+            assert project_key == "JVNAUTOSCI"
+            return _team_managed_project_issue_type_context(project_key)
+
+    async def _fake_get_jira_proxy():
+        return _FakeProxy()
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.jira_proxy_mcp.get_jira_proxy",
+        _fake_get_jira_proxy,
+    )
 
     gateway = InternalMCPGateway(
         catalogue=build_default_catalogue(),
@@ -552,6 +674,9 @@ def test_jira_create_issue_components_through_gateway_invoke():
     assert payload.get("success") is True
     assert payload.get("dry_run") is True
     assert payload.get("executed") is False
+    assert payload.get("issue_type_preflight", {}).get(
+        "available_issue_type_names"
+    ) == ["Task", "Epic", "Subtask"]
     assert (
         payload.get("proposed_payload", {}).get("fields", {}).get("components")
         == [

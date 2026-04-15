@@ -15720,6 +15720,18 @@ def _jira_get_issue_input_schema() -> Schema:
     )
 
 
+def _jira_get_project_issue_types_input_schema() -> Schema:
+    return Schema(
+        required={"project_key": str},
+        optional={},
+        allow_unknown=True,
+        description=(
+            "jira_get_project_issue_types input: project_key (str, required). "
+            "Returns project style plus configured/creatable issue types for that Jira project."
+        ),
+    )
+
+
 def _jira_get_transitions_input_schema() -> Schema:
     return Schema(
         required={"issue_key": str},
@@ -16008,6 +16020,36 @@ def _jira_get_auth_config_output_schema() -> Schema:
         description=(
             "jira_get_auth_config output: base_url/email/token_present/token_length and which env keys were used. "
             "Never returns the token."
+        ),
+    )
+
+
+def _jira_get_project_issue_types_output_schema() -> Schema:
+    return Schema(
+        required={"success": bool},
+        optional={
+            "project_key": (str, type(None)),
+            "project_id": (str, type(None)),
+            "project_name": (str, type(None)),
+            "project_style": (str, type(None)),
+            "project_type_key": (str, type(None)),
+            "is_team_managed": (bool, type(None)),
+            "issue_type_scheme_supported": (bool, type(None)),
+            "available_issue_type_names": (list, type(None)),
+            "creatable_issue_types": (list, type(None)),
+            "project_issue_types": (list, type(None)),
+            "warnings": (list, type(None)),
+            "project_issue_types_error": (dict, type(None)),
+            "createmeta_issue_types_error": (dict, type(None)),
+            "error": (str, type(None)),
+            "error_code": (str, type(None)),
+            "error_details": (dict, type(None)),
+            "suggestions": (list, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "jira_get_project_issue_types output: project metadata plus project issue types, "
+            "creatable issue types, and a team-managed/classic diagnostic hint."
         ),
     )
 
@@ -19791,6 +19833,38 @@ def _jira_get_issue(**kwargs):
         )
 
 
+def _jira_get_project_issue_types(**kwargs):
+    from .jira_proxy_mcp import get_jira_proxy, JiraProxyError
+
+    project_key = kwargs.get("project_key")
+    if not project_key:
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: project_key",
+            details={"missing": ["project_key"]},
+            suggestions=["Provide a Jira project key (e.g., JVNAUTOSCI)"],
+        )
+
+    project_key_norm = str(project_key).strip().upper()
+
+    async def _async_get_project_issue_types():
+        proxy = await get_jira_proxy()
+        return await proxy.get_project_issue_types(project_key=project_key_norm)
+
+    try:
+        return _run_async_compat(_async_get_project_issue_types)
+    except JiraProxyError as exc:
+        return make_error_response(
+            "jira_proxy_error",
+            str(exc),
+            details={
+                "exception_type": "JiraProxyError",
+                "project_key": project_key_norm,
+            },
+            suggestions=["Check Jira connectivity and authentication"],
+        )
+
+
 def _jira_get_transitions(**kwargs):
     from .jira_proxy_mcp import get_jira_proxy, JiraProxyError
 
@@ -20069,6 +20143,108 @@ def _jira_transition_issue(**kwargs):
         return make_error_response("JIRA_ERROR", str(exc))
 
 
+def _jira_issue_type_context_names(payload: Any) -> list[str]:
+    if not isinstance(payload, dict):
+        return []
+
+    names: list[str] = []
+    available_names = payload.get("available_issue_type_names")
+    if isinstance(available_names, list):
+        for item in available_names:
+            if isinstance(item, str) and item and item not in names:
+                names.append(item)
+
+    for field_name in ("creatable_issue_types", "project_issue_types"):
+        values = payload.get(field_name)
+        if not isinstance(values, list):
+            continue
+        for item in values:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            if isinstance(name, str) and name and name not in names:
+                names.append(name)
+
+    return names
+
+
+def _jira_issue_type_available(payload: Any, requested_issue_type: str) -> bool:
+    if not isinstance(payload, dict):
+        return False
+
+    requested_key = requested_issue_type.strip().casefold()
+    if not requested_key:
+        return False
+
+    for name in _jira_issue_type_context_names(payload):
+        if name.casefold() == requested_key:
+            return True
+
+    for field_name in ("creatable_issue_types", "project_issue_types"):
+        values = payload.get(field_name)
+        if not isinstance(values, list):
+            continue
+        for item in values:
+            if not isinstance(item, dict):
+                continue
+            issue_type_id = item.get("id")
+            if isinstance(issue_type_id, (str, int)) and str(issue_type_id).strip():
+                if str(issue_type_id).strip() == requested_issue_type.strip():
+                    return True
+    return False
+
+
+def _jira_issue_type_unavailable_error(
+    *,
+    project_key: str,
+    requested_issue_type: str,
+    issue_type_context: dict[str, Any],
+) -> dict[str, Any]:
+    available_names = _jira_issue_type_context_names(issue_type_context)
+    is_team_managed = bool(issue_type_context.get("is_team_managed"))
+    project_style = issue_type_context.get("project_style")
+
+    suggestions = []
+    if available_names:
+        suggestions.append(
+            "Use one of the available issue types for this project: "
+            + ", ".join(available_names)
+        )
+    if is_team_managed:
+        suggestions.append(
+            "This is a team-managed Jira project, so the classic issue-type-scheme path does not apply."
+        )
+        suggestions.append(
+            "If you need Bug semantics here, add or enable a Bug-like issue type in the team-managed project configuration."
+        )
+    else:
+        suggestions.append(
+            "If this issue type should be available, check the project's Jira issue type configuration before retrying."
+        )
+
+    return make_error_response(
+        "jira_issue_type_not_available_for_project",
+        (
+            f"Issue type '{requested_issue_type}' is not available for Jira project "
+            f"'{project_key}'."
+        ),
+        details={
+            "project_key": project_key,
+            "requested_issue_type": requested_issue_type,
+            "available_issue_types": available_names,
+            "project_style": project_style,
+            "project_type_key": issue_type_context.get("project_type_key"),
+            "project_id": issue_type_context.get("project_id"),
+            "is_team_managed": is_team_managed,
+            "issue_type_scheme_supported": issue_type_context.get(
+                "issue_type_scheme_supported"
+            ),
+            "issue_type_context": issue_type_context,
+        },
+        suggestions=suggestions,
+    )
+
+
 def _jira_create_issue(**kwargs):
     import logging
     from .jira_proxy_mcp import get_jira_proxy, JiraProxyError
@@ -20110,11 +20286,38 @@ def _jira_create_issue(**kwargs):
             cached["reused"] = True
             return cached
 
+    requested_issue_type = str(issue_type).strip()
+    issue_type_context = _jira_get_project_issue_types(project_key=project_key_norm)
+    if issue_type_context.get("success") is not True:
+        return make_error_response(
+            "jira_issue_type_preflight_failed",
+            (
+                f"Could not verify whether issue type '{requested_issue_type}' is valid "
+                f"for Jira project '{project_key_norm}'."
+            ),
+            details={
+                "project_key": project_key_norm,
+                "requested_issue_type": requested_issue_type,
+                "preflight_result": issue_type_context,
+            },
+            suggestions=[
+                "Check Jira connectivity and authentication",
+                "Verify the project key is correct",
+            ],
+        )
+
+    if not _jira_issue_type_available(issue_type_context, requested_issue_type):
+        return _jira_issue_type_unavailable_error(
+            project_key=project_key_norm,
+            requested_issue_type=requested_issue_type,
+            issue_type_context=issue_type_context,
+        )
+
     payload: dict[str, Any] = {
         "fields": {
             "project": {"key": project_key_norm},
             "summary": str(summary),
-            "issuetype": {"name": str(issue_type)},
+            "issuetype": {"name": requested_issue_type},
         }
     }
 
@@ -20168,6 +20371,7 @@ def _jira_create_issue(**kwargs):
             "executed": False,
             "action": "create_issue",
             "project_key": project_key_norm,
+            "issue_type_preflight": issue_type_context,
             "proposed_payload": payload,
         }
 
@@ -20188,6 +20392,7 @@ def _jira_create_issue(**kwargs):
             result["dry_run"] = False
             result["executed"] = True
             result["action"] = "create_issue"
+            result.setdefault("issue_type_preflight", issue_type_context)
             if isinstance(request_id, str) and request_id.strip():
                 _jira_cache_set("jira_create_issue", request_id.strip(), result)
             return result
@@ -20196,6 +20401,7 @@ def _jira_create_issue(**kwargs):
             "dry_run": False,
             "executed": True,
             "action": "create_issue",
+            "issue_type_preflight": issue_type_context,
             "result": result,
         }
     except JiraProxyError as exc:
@@ -24310,6 +24516,9 @@ def build_default_catalogue() -> MethodCatalogue:
     concept_search_output_schema = _concept_search_output_schema()
     jira_search_output_schema = _jira_generic_output_schema("search")
     jira_get_issue_output_schema = _jira_generic_output_schema("get_issue")
+    jira_get_project_issue_types_output_schema = (
+        _jira_get_project_issue_types_output_schema()
+    )
     jira_get_transitions_output_schema = _jira_generic_output_schema("get_transitions")
     jira_add_comment_output_schema = _jira_generic_output_schema("add_comment")
     jira_add_attachment_output_schema = _jira_add_attachment_output_schema()
@@ -25622,6 +25831,19 @@ def build_default_catalogue() -> MethodCatalogue:
                 "Fetch full details for a Jira issue by key (e.g., JVNAUTOSCI-123). "
                 "Use when you need issue fields, summary, status, metadata, or "
                 "expanded sections such as changelog."
+            ),
+        ),
+        MethodDefinition(
+            name="jira_get_project_issue_types",
+            handler=_jira_get_project_issue_types,
+            input_schema=_jira_get_project_issue_types_input_schema(),
+            output_schema=jira_get_project_issue_types_output_schema,
+            category="read",
+            timeout_sec=15.0,
+            description=(
+                "Inspect a Jira project's style and available issue types. Use to "
+                "diagnose why a requested issue type such as Bug can or cannot be "
+                "created in that project."
             ),
         ),
         MethodDefinition(

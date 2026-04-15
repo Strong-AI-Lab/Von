@@ -157,6 +157,11 @@ class JiraMCPProxy:
     async def get_myself(self) -> Dict[str, Any]:
         return await self._call("jira_get_myself", {})
 
+    async def get_project_issue_types(self, *, project_key: str) -> Dict[str, Any]:
+        return await self._call(
+            "jira_get_project_issue_types", {"project_key": project_key}
+        )
+
     def get_stats(self) -> Dict[str, int]:
         return {
             "call_count": self._client.call_count,

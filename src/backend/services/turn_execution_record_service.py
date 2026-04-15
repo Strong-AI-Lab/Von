@@ -106,6 +106,7 @@ _WRITE_TOOL_NAMES = {
 _READ_ONLY_JIRA_TOOLS = {
     "jira_get_auth_config",
     "jira_get_issue",
+    "jira_get_project_issue_types",
     "jira_get_myself",
     "jira_get_transitions",
     "jira_search",
@@ -129,6 +130,7 @@ _VERIFICATION_READ_TOOL_NAMES = {
     "get_tree",
     "issue_read",
     "jira_get_issue",
+    "jira_get_project_issue_types",
     "jira_get_myself",
     "jira_get_transitions",
     "jira_search",

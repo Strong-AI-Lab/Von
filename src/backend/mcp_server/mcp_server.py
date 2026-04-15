@@ -252,6 +252,121 @@ def jira_delete(endpoint: str) -> Dict[str, Any]:
     return _request_json("DELETE", url)
 
 
+def _simplify_jira_issue_type(value: Any) -> Dict[str, Any]:
+    issue_type = value if isinstance(value, dict) else {}
+    scope = issue_type.get("scope")
+    project_scope = scope.get("project") if isinstance(scope, dict) else None
+    simplified = {
+        "id": issue_type.get("id"),
+        "name": issue_type.get("name"),
+        "description": issue_type.get("description"),
+        "subtask": issue_type.get("subtask"),
+    }
+    hierarchy_level = issue_type.get("hierarchyLevel")
+    if hierarchy_level is not None:
+        simplified["hierarchyLevel"] = hierarchy_level
+    if isinstance(scope, dict):
+        simplified["scope"] = {
+            "type": scope.get("type"),
+            "project": (
+                {
+                    "id": project_scope.get("id"),
+                    "key": project_scope.get("key"),
+                    "name": project_scope.get("name"),
+                }
+                if isinstance(project_scope, dict)
+                else None
+            ),
+        }
+    return simplified
+
+
+def jira_get_project_issue_types(project_key: str) -> Dict[str, Any]:
+    project_key_norm = str(project_key or "").strip().upper()
+    if not project_key_norm:
+        return {"success": False, "error": "project_key is required"}
+
+    project_result = jira_get(f"project/{project_key_norm}")
+    if not isinstance(project_result, dict) or project_result.get("success") is False:
+        error_payload = (
+            dict(project_result)
+            if isinstance(project_result, dict)
+            else {"success": False, "error": "jira_project_lookup_failed"}
+        )
+        error_payload.setdefault("project_key", project_key_norm)
+        return error_payload
+
+    project_id = project_result.get("id")
+    style = project_result.get("style")
+    project_type_key = project_result.get("projectTypeKey")
+    is_team_managed = style == "next-gen"
+
+    project_issue_types_result = None
+    if project_id is not None:
+        project_issue_types_result = jira_get(
+            "issuetype/project", params={"projectId": str(project_id)}
+        )
+
+    createmeta_result = None
+    if project_id is not None:
+        createmeta_result = jira_get(f"issue/createmeta/{project_id}/issuetypes")
+
+    project_issue_types_raw = []
+    if isinstance(project_issue_types_result, list):
+        project_issue_types_raw = project_issue_types_result
+    elif isinstance(project_issue_types_result, dict):
+        values = project_issue_types_result.get("values")
+        if isinstance(values, list):
+            project_issue_types_raw = values
+
+    creatable_issue_types_raw = []
+    if isinstance(createmeta_result, dict):
+        issue_types = createmeta_result.get("issueTypes")
+        if isinstance(issue_types, list):
+            creatable_issue_types_raw = issue_types
+
+    project_issue_types = [
+        _simplify_jira_issue_type(item) for item in project_issue_types_raw
+    ]
+    creatable_issue_types = [
+        _simplify_jira_issue_type(item) for item in creatable_issue_types_raw
+    ]
+
+    available_names: list[str] = []
+    for candidate in creatable_issue_types + project_issue_types:
+        name = candidate.get("name")
+        if isinstance(name, str) and name and name not in available_names:
+            available_names.append(name)
+
+    response: Dict[str, Any] = {
+        "success": True,
+        "project_key": project_key_norm,
+        "project_id": str(project_id) if project_id is not None else None,
+        "project_name": project_result.get("name"),
+        "project_style": style,
+        "project_type_key": project_type_key,
+        "is_team_managed": is_team_managed,
+        "issue_type_scheme_supported": not is_team_managed,
+        "creatable_issue_types": creatable_issue_types,
+        "project_issue_types": project_issue_types,
+        "available_issue_type_names": available_names,
+    }
+
+    warnings: list[str] = []
+    if isinstance(project_issue_types_result, dict) and project_issue_types_result.get(
+        "success"
+    ) is False:
+        warnings.append("jira_project_issue_types_lookup_failed")
+        response["project_issue_types_error"] = project_issue_types_result
+    if isinstance(createmeta_result, dict) and createmeta_result.get("success") is False:
+        warnings.append("jira_createmeta_issue_types_lookup_failed")
+        response["createmeta_issue_types_error"] = createmeta_result
+    if warnings:
+        response["warnings"] = warnings
+
+    return response
+
+
 def jira_add_attachment(
     *,
     issue_key: str,
@@ -842,6 +957,23 @@ async def list_tools() -> List[types.Tool]:
             },
         ),
         types.Tool(
+            name="jira_get_project_issue_types",
+            description=(
+                "Return Jira project style and the issue types currently configured/creatable "
+                "for a project key."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_key": {
+                        "type": "string",
+                        "description": "Project key, e.g. JVNAUTOSCI",
+                    }
+                },
+                "required": ["project_key"],
+            },
+        ),
+        types.Tool(
             name="jira_create_issue",
             description=(
                 "Create a Jira issue via POST /rest/api/3/issue. "
@@ -1087,6 +1219,12 @@ async def call_tool(
 
     elif name == "jira_get_myself":
         result = jira_get("myself")
+        text = json.dumps(result, indent=2)
+        return [types.TextContent(type="text", text=text)]
+
+    elif name == "jira_get_project_issue_types":
+        project_key = arguments["project_key"]
+        result = jira_get_project_issue_types(str(project_key))
         text = json.dumps(result, indent=2)
         return [types.TextContent(type="text", text=text)]
 

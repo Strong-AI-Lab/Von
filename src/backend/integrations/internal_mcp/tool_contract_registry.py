@@ -81,6 +81,7 @@ VONTOLOGY_STDIO_EXPOSED_TOOL_NAMES: tuple[str, ...] = (
     "jira_delete_issue_link",
     "jira_get_auth_config",
     "jira_get_issue",
+    "jira_get_project_issue_types",
     "jira_get_myself",
     "jira_get_transitions",
     "jira_link_issue",
