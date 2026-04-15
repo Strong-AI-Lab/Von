@@ -125,7 +125,7 @@ def _normalise_named_mapping_sequence(
         if lowered in seen:
             continue
         seen.add(lowered)
-        normalised = {id_key: item_id}
+        normalised: dict[str, Any] = {id_key: item_id}
         description = _safe_str(item.get(default_description_key), limit=1000)
         if description:
             normalised[default_description_key] = description
