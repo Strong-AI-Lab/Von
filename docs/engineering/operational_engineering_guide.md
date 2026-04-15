@@ -98,6 +98,20 @@ The visible UI label is not always the true execution host or shell. When host
 differences matter for debugging, inspect them conservatively and record the
 finding in diagnostics or task notes.
 
+### 4.5 Keep ad-hoc PowerShell probes boring
+
+- Do not serialise arbitrary PowerShell object graphs with `ConvertTo-Json`
+  inside temporary debug probes. That path can recurse into provider-backed or
+  otherwise surprising objects and create host-destabilising memory blow-ups.
+- For launcher-path diagnostics, prefer repo-supported probes that emit plain
+  text or bounded scalar/string-list fields. If you need the current workflow
+  purity status, use `scripts/powershell/invoke_workflow_purity_status_probe.ps1`
+  rather than inventing a new `%TEMP%\ps_stage_probe_*` script.
+- If stale probe processes or temp dirs do accumulate, use
+  `python scripts/cleanup_stale_powershell_probes.py --min-age-seconds 0`
+  to terminate matching `probe.ps1` processes and remove their temp
+  directories.
+
 ## 5. Environment and Credential Handling
 
 - `.env` is the authoritative local source for credentials and service-critical

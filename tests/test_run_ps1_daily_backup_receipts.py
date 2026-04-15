@@ -78,13 +78,18 @@ Invoke-DailyBackupIfDue
 $result = [ordered]@{{
     start_job_calls = $script:StartJobCalls
     logs = @($script:Logs)
-    receipt = if (Test-Path -LiteralPath $receiptPath) {{ Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json }} else {{ $null }}
+    receipt_json = if (Test-Path -LiteralPath $receiptPath) {{ Get-Content -LiteralPath $receiptPath -Raw }} else {{ $null }}
     legacy = if (Test-Path -LiteralPath $legacyPath) {{ (Get-Content -LiteralPath $legacyPath -Raw).Trim() }} else {{ $null }}
-    start_job_args = @($script:LastStartJobArgs)
+    start_job_args = @($script:LastStartJobArgs | ForEach-Object {{ [string]$_ }})
 }}
 """.strip()
 
     payload, _ = run_powershell_result(repo_root=REPO_ROOT, script=script)
+    payload["receipt"] = (
+        json.loads(payload["receipt_json"])
+        if payload["receipt_json"] is not None
+        else None
+    )
     return payload
 
 
