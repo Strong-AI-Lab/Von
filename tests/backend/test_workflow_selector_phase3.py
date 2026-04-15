@@ -598,6 +598,9 @@ class TestEnhancedPrompt:
         assert "JSON" in prompt.prompt_text
         assert "confidence" in prompt.prompt_text
         assert "reasoning" in prompt.prompt_text
+        assert "Canonical valid output examples" in prompt.prompt_text
+        assert "Invalid outputs. Never do any of these" in prompt.prompt_text
+        assert '"tool_name":"vontology_concept_search"' in prompt.prompt_text
 
     def test_prompt_preserves_candidate_list(self):
         selector = _build_selector()

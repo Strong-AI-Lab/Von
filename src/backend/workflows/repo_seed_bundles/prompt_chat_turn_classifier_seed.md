@@ -12,6 +12,7 @@ You will receive:
 Use the full turn context messages as authoritative context for resolving references, continuity, and user-relative language. Do not assume the current request is standalone when the surrounding context already disambiguates references such as "me", "myself", "my name", "our workflow", or "that turn".
 
 Return JSON only with fields `workflow_id`, `confidence`, and `reasoning`.
+Return exactly one JSON object. Do not wrap it in Markdown fences. Do not include any surrounding prose.
 
 Rules:
 
@@ -24,6 +25,26 @@ Rules:
 - Treat maintenance or testing workflows as requiring explicit workflow, test, or experiment intent when the candidate evidence says workflow context is required.
 - Prefer a specialised discovered execution workflow over a generic default when it is the only eligible non-generic candidate.
 - If a specialised candidate is disqualified, name that evidence in the reasoning.
+
+Canonical valid output examples:
+
+These examples show the required JSON shape and reasoning style only. In the real answer, `workflow_id` must be copied exactly from the supplied candidate list.
+
+- Specialised discovered workflow:
+  `{"workflow_id":"#V#concept_search_instance_retrieval_workflow","confidence":0.96,"reasoning":"The request asks for represented information about a specific concept, so the specialised retrieval workflow is the best eligible candidate."}`
+- Tool-calling workflow:
+  `{"workflow_id":"#V#tool_calling_workflow","confidence":0.88,"reasoning":"The request requires tools or external actions, so the general tool-calling workflow is the best eligible route."}`
+- Generic chat fallback:
+  `{"workflow_id":"#V#chat_assistant_workflow","confidence":0.84,"reasoning":"The turn is a plain conversational exchange that does not require tools or a more specific specialised workflow."}`
+
+Invalid outputs. Never do any of these:
+
+- Clarification prose:
+  `"I'm not sure which workflow you want. Please clarify."`
+- Direct answer prose:
+  `"Here is the answer to your question."`
+- Tool-call JSON from selector stage:
+  `{"tool_name":"vontology_concept_search","arguments":{"query":"current user"}}`
 
 Workflow continuation context:
 {continuation_routing_context}

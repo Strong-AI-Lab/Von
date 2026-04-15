@@ -68,6 +68,10 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     assert isinstance(selector_text, str)
     assert "full turn context as LLM context messages" in selector_text
     assert "Do not assume the current request is standalone" in selector_text
+    assert "Canonical valid output examples" in selector_text
+    assert "Invalid outputs. Never do any of these" in selector_text
+    assert '"workflow_id":"#V#tool_calling_workflow"' in selector_text
+    assert '"tool_name":"vontology_concept_search"' in selector_text
 
     prompt_rows = get_texts_for_concept(
         NARRATION_PROMPT_CONCEPT_ID,

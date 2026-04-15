@@ -225,6 +225,9 @@ class TestRagFirstPrompt:
         assert prompt.prompt_provenance["render_variables"][
             "continuation_routing_context"
         ] == "No active workflow continuation context."
+        assert prompt.prompt_text is not None
+        assert "Canonical valid output examples" in prompt.prompt_text
+        assert "Invalid outputs. Never do any of these" in prompt.prompt_text
 
     def test_prompt_carries_explicit_continuation_context(self):
         selector = _build_selector()
