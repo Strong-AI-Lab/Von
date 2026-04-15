@@ -11,6 +11,7 @@ from src.backend.integrations.internal_mcp.orchestrator import (
     _WorkflowModelPolicyState,
 )
 from src.backend.services.conversation_turn_workflow_vontology_service import (
+    _load_expected_outcome_prompt_seed_text,
     _load_narration_prompt_seed_text,
 )
 from src.backend.services.prompt_template_service import (
@@ -25,11 +26,29 @@ from workflow_test_support import (
 
 def _stub_stage_model_snapshot() -> dict[str, Any]:
     stages = [
+        ("expected_outcome_inference", "Infer expected outcome", None, None),
         ("workflow_discovery", "Workflow discovery", None, None),
+        (
+            "selector_preparation",
+            "Prepare selector context",
+            "#V#conversation_turn_execution_workflow",
+            "selector_preparation",
+        ),
+        (
+            "selector_decision",
+            "Select workflow",
+            "#V#conversation_turn_execution_workflow",
+            "selector_decision",
+        ),
         ("workflow_dispatch", "Workflow dispatch", None, None),
         ("tool_plan", "Plan tool calls", "#V#tool_calling_workflow", "plan"),
         ("tool_execute", "Execute tool calls", "#V#tool_calling_workflow", "execute"),
-        ("screen_backfill", "Summarise/backfill response", "#V#tool_calling_workflow", "backfill"),
+        (
+            "screen_backfill",
+            "Summarise/backfill response",
+            "#V#tool_calling_workflow",
+            "backfill",
+        ),
         ("response_finalising", "Finalising response", None, None),
         ("completed", "Completed", None, None),
     ]
@@ -57,7 +76,11 @@ def _stub_stage_path(*, runtime_stages: Any, **kwargs) -> dict[str, Any]:
         if isinstance(entry, dict) and isinstance(entry.get("stage_id"), str)
     }
     workflow_hint = kwargs.get("workflow_id")
-    workflow_hint = workflow_hint.strip() if isinstance(workflow_hint, str) and workflow_hint.strip() else None
+    workflow_hint = (
+        workflow_hint.strip()
+        if isinstance(workflow_hint, str) and workflow_hint.strip()
+        else None
+    )
     ordered_runtime_stages: list[str] = []
     for item in runtime_stages or []:
         if not isinstance(item, str):
@@ -139,7 +162,9 @@ def build_db_independent_orchestrator(
         LazyWorkflowRegistration,
         WorkflowRegistration,
     )
-    from src.backend.workflows import workflow_concept_authority_service as authority_service
+    from src.backend.workflows import (
+        workflow_concept_authority_service as authority_service,
+    )
 
     def _build_test_registry(*, defer_parity_work: bool = True) -> WorkflowRegistry:
         assert defer_parity_work is True
@@ -158,7 +183,9 @@ def build_db_independent_orchestrator(
         if isinstance(bundle_dir, Path) and bundle_dir.exists():
             for asset_path in sorted(bundle_dir.glob("*_seed_bundle.json")):
                 try:
-                    bundle = authority_service.load_repo_seed_workflow_bundle(asset_path)
+                    bundle = authority_service.load_repo_seed_workflow_bundle(
+                        asset_path
+                    )
                 except Exception:
                     continue
                 bundle_specs = bundle.get("publication_specs")
@@ -171,9 +198,11 @@ def build_db_independent_orchestrator(
                     for workflow_id, purpose in bundle_purposes.items():
                         publication_purposes.setdefault(
                             str(workflow_id),
-                            str(purpose).strip()
-                            if isinstance(purpose, str) and str(purpose).strip()
-                            else None,
+                            (
+                                str(purpose).strip()
+                                if isinstance(purpose, str) and str(purpose).strip()
+                                else None
+                            ),
                         )
 
         def _load_seed_workflow_definition(workflow_id: str):
@@ -317,11 +346,14 @@ def build_db_independent_orchestrator(
         for item in (orchestrator._TURN_SELECTOR_PROMPTS or ())
         if isinstance(item, str) and str(item).strip()
     }
+    expected_outcome_prompt_id = "#V#prompt_turn_execution_expected_outcome_inference"
     narration_prompt_id = "#V#prompt_turn_execution_narrate_completion_report"
 
     class _HarnessPromptTemplateService:
         def __init__(self, default_max_chars: int = 24000):
-            self._delegate = _RealPromptTemplateService(default_max_chars=default_max_chars)
+            self._delegate = _RealPromptTemplateService(
+                default_max_chars=default_max_chars
+            )
 
         def render_prompt(
             self,
@@ -336,6 +368,13 @@ def build_db_independent_orchestrator(
                 for item in (concept_ids or ())
                 if isinstance(item, str) and str(item).strip()
             ]
+            if expected_outcome_prompt_id in requested_prompt_ids:
+                return SimpleNamespace(
+                    text=_load_expected_outcome_prompt_seed_text(),
+                    prompt_id=expected_outcome_prompt_id,
+                    variables=dict(variables or {}),
+                    truncated=False,
+                )
             if narration_prompt_id in requested_prompt_ids:
                 return SimpleNamespace(
                     text=_load_narration_prompt_seed_text(),

@@ -28,9 +28,18 @@ _REPO_SEED_ASSET_PATH = (
     / "repo_seed_bundles"
     / "canonical_workflow_publication_seed_bundle.json"
 )
+_EXPECTED_OUTCOME_PROMPT_CONCEPT_ID = (
+    "#V#prompt_turn_execution_expected_outcome_inference"
+)
 _SELECTOR_PROMPT_CONCEPT_ID = "#V#chat_turn_classifier_prompt"
 _NARRATION_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_narrate_completion_report"
 _RECOVERY_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_recovery_decision"
+_EXPECTED_OUTCOME_PROMPT_SEED_ASSET_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "workflows"
+    / "repo_seed_bundles"
+    / "prompt_turn_execution_expected_outcome_inference_seed.md"
+)
 _SELECTOR_PROMPT_SEED_ASSET_PATH = (
     Path(__file__).resolve().parents[1]
     / "workflows"
@@ -64,6 +73,15 @@ def _load_narration_prompt_seed_text() -> str:
     return prompt_text
 
 
+def _load_expected_outcome_prompt_seed_text() -> str:
+    prompt_text = _EXPECTED_OUTCOME_PROMPT_SEED_ASSET_PATH.read_text(
+        encoding="utf-8"
+    ).strip()
+    if not prompt_text:
+        raise ValueError("turn_execution_expected_outcome_prompt_seed_missing")
+    return prompt_text
+
+
 def _load_selector_prompt_seed_text() -> str:
     prompt_text = _SELECTOR_PROMPT_SEED_ASSET_PATH.read_text(encoding="utf-8").strip()
     if not prompt_text:
@@ -84,6 +102,16 @@ def _ensure_conversation_turn_prompt_support(
 ) -> dict[str, Any]:
     report = ensure_prompt_concept_support(
         prompt_specs=(
+            WorkflowPromptConceptSpec(
+                concept_id=_EXPECTED_OUTCOME_PROMPT_CONCEPT_ID,
+                name="Turn expected-outcome inference prompt",
+                description=(
+                    "Canonical early-turn inference prompt for deriving the "
+                    "grounded success contract that should shape workflow "
+                    "selection, omission policy, and direct-answer behaviour."
+                ),
+                parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
+            ),
             WorkflowPromptConceptSpec(
                 concept_id=_SELECTOR_PROMPT_CONCEPT_ID,
                 name="Chat turn classifier prompt",
@@ -123,6 +151,18 @@ def _ensure_conversation_turn_prompt_support(
     )
 
     seeded_prompt_ids: list[str] = []
+    if force_prompt_seed or not prompt_concept_has_content(
+        _EXPECTED_OUTCOME_PROMPT_CONCEPT_ID
+    ):
+        upsert_singleton_text_relation(
+            subject_concept_id=_EXPECTED_OUTCOME_PROMPT_CONCEPT_ID,
+            predicate="hasContent",
+            text=_load_expected_outcome_prompt_seed_text(),
+            lang="en-NZ",
+            context={"jira": _SOURCE_TAG, "source": _MANAGED_BY},
+            garbage_collect=True,
+        )
+        seeded_prompt_ids.append(_EXPECTED_OUTCOME_PROMPT_CONCEPT_ID)
     if force_prompt_seed or not prompt_concept_has_content(_SELECTOR_PROMPT_CONCEPT_ID):
         upsert_singleton_text_relation(
             subject_concept_id=_SELECTOR_PROMPT_CONCEPT_ID,
@@ -133,7 +173,9 @@ def _ensure_conversation_turn_prompt_support(
             garbage_collect=True,
         )
         seeded_prompt_ids.append(_SELECTOR_PROMPT_CONCEPT_ID)
-    if force_prompt_seed or not prompt_concept_has_content(_NARRATION_PROMPT_CONCEPT_ID):
+    if force_prompt_seed or not prompt_concept_has_content(
+        _NARRATION_PROMPT_CONCEPT_ID
+    ):
         upsert_singleton_text_relation(
             subject_concept_id=_NARRATION_PROMPT_CONCEPT_ID,
             predicate="hasContent",
@@ -157,6 +199,17 @@ def _ensure_conversation_turn_prompt_support(
     report = dict(report)
     errors_by_target = dict(report.get("errors_by_target") or {})
     missing_content_prompt_ids = list(report.get("missing_content_prompt_ids") or [])
+    if prompt_concept_has_content(_EXPECTED_OUTCOME_PROMPT_CONCEPT_ID):
+        errors_by_target.pop(_EXPECTED_OUTCOME_PROMPT_CONCEPT_ID, None)
+        missing_content_prompt_ids = [
+            prompt_id
+            for prompt_id in missing_content_prompt_ids
+            if prompt_id != _EXPECTED_OUTCOME_PROMPT_CONCEPT_ID
+        ]
+        validated_prompt_ids = list(report.get("validated_prompt_ids") or [])
+        if _EXPECTED_OUTCOME_PROMPT_CONCEPT_ID not in validated_prompt_ids:
+            validated_prompt_ids.append(_EXPECTED_OUTCOME_PROMPT_CONCEPT_ID)
+        report["validated_prompt_ids"] = validated_prompt_ids
     if prompt_concept_has_content(_SELECTOR_PROMPT_CONCEPT_ID):
         errors_by_target.pop(_SELECTOR_PROMPT_CONCEPT_ID, None)
         missing_content_prompt_ids = [
@@ -222,12 +275,12 @@ def bootstrap_canonical_conversation_turn_workflows(
         force_republish=force_republish,
         target_workflow_ids=_TARGET_WORKFLOW_IDS,
     )
-    publication_counts = dict((publication.get("publication") or {}).get("counts") or {})
+    publication_counts = dict(
+        (publication.get("publication") or {}).get("counts") or {}
+    )
     return {
-        "success": bool(prompt_support.get("success")) and int(
-            publication_counts.get("errors") or 0
-        )
-        == 0,
+        "success": bool(prompt_support.get("success"))
+        and int(publication_counts.get("errors") or 0) == 0,
         "workflow_ids": list(_TARGET_WORKFLOW_IDS),
         "prompt_support": prompt_support,
         "publication": publication.get("publication"),

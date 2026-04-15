@@ -51,8 +51,7 @@ def test_tool_calling_workflow_includes_turn_execution_critic_and_gate() -> None
     preflight = workflow.states["preflight_requirements"]
     assert preflight.actions[0].action_id == "tool_calling.preflight_requirements"
     assert any(
-        t.to_state == "respond"
-        and t.reason == "requirements_preflight_completed"
+        t.to_state == "respond" and t.reason == "requirements_preflight_completed"
         for t in preflight.transitions
     )
 
@@ -66,13 +65,14 @@ def test_tool_calling_workflow_includes_turn_execution_critic_and_gate() -> None
 
     postcondition_critic = workflow.states["postcondition_critic"]
     assert postcondition_critic.actions[0].action_id == "turn_execution.critic"
-    assert any(t.to_state == "completion_gate" for t in postcondition_critic.transitions)
+    assert any(
+        t.to_state == "completion_gate" for t in postcondition_critic.transitions
+    )
 
     completion_gate = workflow.states["completion_gate"]
     assert completion_gate.actions[0].action_id == "turn_execution.completion_gate"
     assert any(
-        t.to_state == "respond"
-        and t.reason == "completion_gate_repeat_iteration"
+        t.to_state == "respond" and t.reason == "completion_gate_repeat_iteration"
         for t in completion_gate.transitions
     )
     assert any(t.to_state == "completed" for t in completion_gate.transitions)
@@ -90,7 +90,9 @@ def test_chat_assistant_workflow_executes_via_tool_calling_contract() -> None:
 
 
 def test_turn_completion_gate_workflow_fails_when_follow_up_is_required() -> None:
-    workflow = build_authoritative_test_workflow_definition(TURN_COMPLETION_GATE_WORKFLOW_ID)
+    workflow = build_authoritative_test_workflow_definition(
+        TURN_COMPLETION_GATE_WORKFLOW_ID
+    )
     assert workflow.initial_state == "decide"
     assert "decide" in workflow.states
     assert "completed" in workflow.states
@@ -102,14 +104,20 @@ def test_turn_completion_gate_workflow_fails_when_follow_up_is_required() -> Non
         t.to_state == "failed" and t.reason == "follow_up_required"
         for t in decide.transitions
     )
-    assert any(t.to_state == "completed" and t.reason == "decided" for t in decide.transitions)
+    assert any(
+        t.to_state == "completed" and t.reason == "decided" for t in decide.transitions
+    )
 
 
 def test_conversation_turn_workflow_uses_deterministic_critic_and_gate() -> None:
     workflow = build_authoritative_test_workflow_definition(
         CONVERSATION_TURN_EXECUTION_WORKFLOW_ID
     )
-    assert workflow.initial_state == "routing"
+    assert workflow.initial_state == "expected_outcome_inference"
+    assert "expected_outcome_inference" in workflow.states
+    assert "selector_preparation" in workflow.states
+    assert "selector_decision" in workflow.states
+    assert "routing" in workflow.states
     assert "narration" in workflow.states
     assert "critic" in workflow.states
     assert "completion_gate" in workflow.states
@@ -120,8 +128,103 @@ def test_conversation_turn_workflow_uses_deterministic_critic_and_gate() -> None
     assert "apply_recovery_follow_up" in workflow.states
     assert "failed" in workflow.states
 
+    expected_outcome = workflow.states["expected_outcome_inference"]
+    expected_outcome_action = expected_outcome.actions[0]
+    assert expected_outcome_action.action_id == "llm.action"
+    assert expected_outcome_action.execution_mode == WORKFLOW_STEP_EXECUTION_MODE_LLM
+    assert expected_outcome_action.validation_policy == {"output_format": "json_value"}
+    expected_outcome_prompt_contract = expected_outcome_action.prompt_contract
+    assert isinstance(expected_outcome_prompt_contract, dict)
+    assert expected_outcome_prompt_contract.get("requested_prompt_concept_ids") == [
+        "#V#prompt_turn_execution_expected_outcome_inference"
+    ]
+    expected_outcome_mappings = (
+        expected_outcome.metadata.get("tool_output_context_mappings") or []
+    )
+    assert any(
+        isinstance(mapping, dict)
+        and mapping.get("context_key") == "turn_expected_outcome_summary"
+        and mapping.get("tool_output_field")
+        == "validated_json.expected_outcome_summary"
+        for mapping in expected_outcome_mappings
+    )
+    assert any(
+        isinstance(mapping, dict)
+        and mapping.get("context_key") == "turn_answering_guidance"
+        and mapping.get("tool_output_field") == "validated_json.answering_guidance"
+        for mapping in expected_outcome_mappings
+    )
+    assert any(
+        t.to_state == "selector_preparation" and t.reason == "expected_outcome_inferred"
+        for t in expected_outcome.transitions
+    )
+
+    selector_preparation = workflow.states["selector_preparation"]
+    assert (
+        selector_preparation.actions[0].action_id
+        == "turn_execution.prepare_selector_context"
+    )
+    assert any(
+        t.to_state == "selector_decision" and t.reason == "selector_prompt_available"
+        for t in selector_preparation.transitions
+    )
+    assert any(
+        t.to_state == "routing" and t.reason == "selector_prompt_unavailable"
+        for t in selector_preparation.transitions
+    )
+
+    selector_decision = workflow.states["selector_decision"]
+    selector_decision_action = selector_decision.actions[0]
+    assert selector_decision_action.action_id == "llm.action"
+    assert selector_decision_action.execution_mode == WORKFLOW_STEP_EXECUTION_MODE_LLM
+    selector_decision_policy = selector_decision_action.llm_policy or {}
+    assert selector_decision_policy.get("prompt_text_context_key") == (
+        "selector_call_prompt_text"
+    )
+    assert selector_decision_policy.get("prompt_id_context_key") == "selector_prompt_id"
+    assert selector_decision_policy.get("context_messages_context_key") == (
+        "selector_context_messages"
+    )
+    assert selector_decision_policy.get("context_lineage_context_key") == (
+        "selector_context_lineage"
+    )
+    selector_decision_mappings = (
+        selector_decision.metadata.get("tool_output_context_mappings") or []
+    )
+    assert any(
+        isinstance(mapping, dict)
+        and mapping.get("context_key") == "selector_raw_response"
+        and mapping.get("tool_output_field") == "final_response"
+        for mapping in selector_decision_mappings
+    )
+    assert any(
+        t.to_state == "routing" and t.reason == "selector_decided"
+        for t in selector_decision.transitions
+    )
+
+    routing = workflow.states["routing"]
+    assert routing.actions[0].action_id == "turn_execution.route"
+    assert any(
+        t.to_state == "execution" and t.reason == "routing_resolved"
+        for t in routing.transitions
+    )
+
     narration = workflow.states["narration"]
     assert narration.actions[0].execution_mode == WORKFLOW_STEP_EXECUTION_MODE_LLM
+    narration_context_fields = (narration.actions[0].llm_policy or {}).get(
+        "context_fields"
+    )
+    assert isinstance(narration_context_fields, list)
+    assert any(
+        isinstance(field, dict)
+        and field.get("context_key") == "turn_expected_outcome_summary"
+        for field in narration_context_fields
+    )
+    assert any(
+        isinstance(field, dict)
+        and field.get("context_key") == "turn_expected_grounding_requirement"
+        for field in narration_context_fields
+    )
     narration_mappings = narration.metadata.get("tool_output_context_mappings") or []
     assert any(
         mapping.get("tool_output_field") == "final_response"
@@ -159,6 +262,11 @@ def test_conversation_turn_workflow_uses_deterministic_critic_and_gate() -> None
     assert isinstance(recovery_context_fields, list)
     assert any(
         isinstance(field, dict)
+        and field.get("context_key") == "turn_expected_outcome_summary"
+        for field in recovery_context_fields
+    )
+    assert any(
+        isinstance(field, dict)
         and field.get("context_key") == "workflow_discovery_result"
         for field in recovery_context_fields
     )
@@ -177,7 +285,9 @@ def test_conversation_turn_workflow_uses_deterministic_critic_and_gate() -> None
         and field.get("context_key") == "turn_recovery_tool_batch_execution"
         for field in recovery_context_fields
     )
-    recovery_mappings = recovery_decision.metadata.get("tool_output_context_mappings") or []
+    recovery_mappings = (
+        recovery_decision.metadata.get("tool_output_context_mappings") or []
+    )
     assert any(
         isinstance(mapping, dict)
         and mapping.get("context_key") == "turn_next_action_type"
@@ -213,13 +323,11 @@ def test_conversation_turn_workflow_uses_deterministic_critic_and_gate() -> None
         "expected": True,
     } in retry_conditions
     assert any(
-        t.to_state == "apply_recovery_tool_batch"
-        and t.reason == "execute_tool_batch"
+        t.to_state == "apply_recovery_tool_batch" and t.reason == "execute_tool_batch"
         for t in recovery_decision.transitions
     )
     assert any(
-        t.to_state == "apply_recovery_answer"
-        and t.reason == "respond_with_answer"
+        t.to_state == "apply_recovery_answer" and t.reason == "respond_with_answer"
         for t in recovery_decision.transitions
     )
     assert any(
@@ -229,16 +337,22 @@ def test_conversation_turn_workflow_uses_deterministic_critic_and_gate() -> None
     )
 
     recovery_retry = workflow.states["apply_recovery_retry"]
-    assert recovery_retry.actions[0].action_id == "turn_execution.prepare_recovery_retry"
+    assert (
+        recovery_retry.actions[0].action_id == "turn_execution.prepare_recovery_retry"
+    )
     assert any(
         t.to_state == "execution" and t.reason == "recovery_retry_prepared"
         for t in recovery_retry.transitions
     )
 
     recovery_tool_batch = workflow.states["apply_recovery_tool_batch"]
-    assert recovery_tool_batch.actions[0].action_id == "turn_execution.execute_tool_batch"
+    assert (
+        recovery_tool_batch.actions[0].action_id == "turn_execution.execute_tool_batch"
+    )
     tool_batch_inputs = recovery_tool_batch.actions[0].inputs
-    assert tool_batch_inputs.get("tool_calls_context_key") == "turn_next_action_tool_calls"
+    assert (
+        tool_batch_inputs.get("tool_calls_context_key") == "turn_next_action_tool_calls"
+    )
     assert tool_batch_inputs.get("tool_batch_cap") == 4
     assert any(
         t.to_state == "critic" and t.reason == "recovery_tool_batch_executed"
@@ -331,7 +445,9 @@ def test_conversation_turn_recovery_can_complete_with_direct_answer() -> None:
                         prompt_contract={
                             "prompt_text": "Return JSON only with a turn_next_action."
                         },
-                        llm_policy=workflow.states["recovery_decision"].actions[0].llm_policy,
+                        llm_policy=workflow.states["recovery_decision"]
+                        .actions[0]
+                        .llm_policy,
                         validation_policy=workflow.states["recovery_decision"]
                         .actions[0]
                         .validation_policy,
@@ -401,7 +517,9 @@ def test_conversation_turn_recovery_can_execute_direct_tool_batch() -> None:
                         prompt_contract={
                             "prompt_text": "Return JSON only with a turn_next_action."
                         },
-                        llm_policy=workflow.states["recovery_decision"].actions[0].llm_policy,
+                        llm_policy=workflow.states["recovery_decision"]
+                        .actions[0]
+                        .llm_policy,
                         validation_policy=workflow.states["recovery_decision"]
                         .actions[0]
                         .validation_policy,
@@ -506,7 +624,9 @@ def test_conversation_turn_recovery_retry_progresses_across_multiple_prompt_targ
             states={
                 "materialise": WorkflowStateSpec(
                     state_id="materialise",
-                    actions=(WorkflowActionInvocation(action_id="test.materialise_target"),),
+                    actions=(
+                        WorkflowActionInvocation(action_id="test.materialise_target"),
+                    ),
                     terminal=True,
                 )
             },
@@ -552,7 +672,9 @@ def test_conversation_turn_recovery_retry_progresses_across_multiple_prompt_targ
                         prompt_contract={
                             "prompt_text": "Return JSON only with a turn_next_action."
                         },
-                        llm_policy=workflow.states["recovery_decision"].actions[0].llm_policy,
+                        llm_policy=workflow.states["recovery_decision"]
+                        .actions[0]
+                        .llm_policy,
                         validation_policy=workflow.states["recovery_decision"]
                         .actions[0]
                         .validation_policy,
@@ -578,7 +700,9 @@ def test_conversation_turn_recovery_retry_progresses_across_multiple_prompt_targ
     def _handle_materialise_target(
         request: WorkflowActionRequest,
     ) -> WorkflowActionResult:
-        from src.backend.services.arxiv_paper_link_service import extract_arxiv_id_candidates
+        from src.backend.services.arxiv_paper_link_service import (
+            extract_arxiv_id_candidates,
+        )
 
         raw_target = request.data.get("arxiv_id") or request.data.get("source_uri")
         if not isinstance(raw_target, str) or not raw_target.strip():
@@ -672,12 +796,17 @@ def test_conversation_turn_recovery_retry_progresses_across_multiple_prompt_targ
     )
     assert result.data["selected_workflow_id"] == "#V#fake_multi_target_paper_workflow"
     assert len(result.data["invocations"]) == 4
-    assert [invocation["arguments"]["arxiv_id"] for invocation in result.data["invocations"]] == [
+    assert [
+        invocation["arguments"]["arxiv_id"] for invocation in result.data["invocations"]
+    ] == [
         "2310.03714",
         "2310.03714",
         "2308.03688",
         "2308.03688",
     ]
     required_effects = result.data["required_effects"]
-    assert [effect["status"] for effect in required_effects] == ["satisfied", "satisfied"]
+    assert [effect["status"] for effect in required_effects] == [
+        "satisfied",
+        "satisfied",
+    ]
     assert result.data["completion_gate_requires_follow_up"] is False

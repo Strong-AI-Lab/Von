@@ -13,6 +13,7 @@ Return JSON only with exactly these keys:
 
 Rules:
 - Choose the next best bounded automated step from the accumulated turn evidence, not merely a repetition of the previous route.
+- Treat `Turn Expected Outcome Summary`, `Grounding Requirement`, `Precision Policy`, and `Answering Guidance` as the authoritative answer-quality contract for this turn.
 - Use `turn_next_action.action_type = "retry_execution"` only when another bounded automated attempt is likely to make real progress and `completion_gate_repeat_eligible` is true.
 - Use `turn_next_action.action_type = "execute_tool_batch"` when the best next step is a small direct tool batch that can resolve or materially improve the turn without another workflow retry.
 - Use `turn_next_action.action_type = "respond_with_answer"` when the accumulated turn evidence already supports a direct user-facing answer without another tool or workflow attempt.
@@ -30,6 +31,7 @@ Rules:
 - Do not anchor on one literal phrase from the user request. Generalise from the available context and evidence.
 - If `completion_gate_repeat_eligible` is false, do not request another automated retry.
 - If another automated attempt is unlikely to help, prefer `"respond_with_answer"` when the evidence already supports it; otherwise use `"respond_with_follow_up"`.
+- For ownership, authorship, identity, or provenance questions, prefer a route that can retrieve or verify the grounding evidence before answering directly.
 - For `"retry_execution"`, set `turn_next_action.response_text = null`, provide `turn_next_action.target_workflow_id`, and set `turn_next_action.tool_calls = null`.
 - For `"execute_tool_batch"`, set `turn_next_action.target_workflow_id = null`, set `turn_next_action.response_text = null`, and provide `turn_next_action.tool_calls`.
 - For `"respond_with_answer"` and `"respond_with_follow_up"`, set `turn_next_action.response_text` to the exact user-facing text, set `turn_next_action.tool_calls = null`, and use `turn_next_action.target_workflow_id = null` unless a non-null value is genuinely useful supporting metadata.

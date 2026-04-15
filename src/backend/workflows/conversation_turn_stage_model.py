@@ -272,6 +272,51 @@ _FORMAL_STAGE_PROFILE_BY_ACTION_ID: dict[str, _DerivedFormalStageProfile] = {
     ),
 }
 
+_FORMAL_STAGE_PROFILE_BY_WORKFLOW_STATE_ID: dict[
+    tuple[str, str], _DerivedFormalStageProfile
+] = {
+    (
+        CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+        "expected_outcome_inference",
+    ): _DerivedFormalStageProfile(
+        stage_id="expected_outcome_inference",
+        stage_label="Infer expected outcome",
+        order=22,
+        boundary_type="policy",
+        runtime_aliases=("expected_outcome_inference",),
+    ),
+    (
+        CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+        "selector_preparation",
+    ): _DerivedFormalStageProfile(
+        stage_id="selector_preparation",
+        stage_label="Prepare selector context",
+        order=27,
+        boundary_type="routing",
+        runtime_aliases=("selector_preparation",),
+    ),
+    (
+        CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+        "selector_decision",
+    ): _DerivedFormalStageProfile(
+        stage_id="selector_decision",
+        stage_label="Select workflow",
+        order=29,
+        boundary_type="routing",
+        runtime_aliases=("selector_decision",),
+    ),
+    (
+        CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+        "routing",
+    ): _DerivedFormalStageProfile(
+        stage_id="workflow_dispatch",
+        stage_label="Workflow dispatch",
+        order=30,
+        boundary_type="routing",
+        runtime_aliases=("workflow_dispatch", "routing"),
+    ),
+}
+
 _CANONICAL_CONVERSATION_STAGE_WORKFLOW_IDS: tuple[str, ...] = (
     WRITE_TOOL_POLICY_WORKFLOW_ID,
     TOOL_CALLING_WORKFLOW_ID,
@@ -327,7 +372,10 @@ def _derive_formal_stage_spec(
         return None
 
     profile: _DerivedFormalStageProfile | None = None
+    profile = _FORMAL_STAGE_PROFILE_BY_WORKFLOW_STATE_ID.get((workflow_id, state_id))
     for action_id in action_ids:
+        if profile is not None:
+            break
         profile = _FORMAL_STAGE_PROFILE_BY_ACTION_ID.get(action_id)
         if profile is not None:
             break
@@ -375,7 +423,9 @@ def _iter_conversation_stage_workflow_ids(
 def _derive_formal_stage_specs() -> tuple[_StageSpec, ...]:
     registry = build_workflow_registry_read_only()
     workflow_ids = tuple(registry.all_workflow_ids())
-    candidates = _iter_conversation_stage_workflow_ids(registry_workflow_ids=workflow_ids)
+    candidates = _iter_conversation_stage_workflow_ids(
+        registry_workflow_ids=workflow_ids
+    )
     stage_specs: list[_StageSpec] = []
     seen_keys: set[tuple[str, str, str | None]] = set()
 
@@ -543,7 +593,9 @@ def build_conversation_turn_stage_path(
                 if dedupe_workflow_key not in observed_workflow_id_keys:
                     observed_workflow_id_keys.add(dedupe_workflow_key)
                     observed_workflow_ids.append(dedupe_workflow_id)
-            dedupe_key = f"mapped:{resolved.get('stage_id')}:{resolved.get('workflow_id')}"
+            dedupe_key = (
+                f"mapped:{resolved.get('stage_id')}:{resolved.get('workflow_id')}"
+            )
             if dedupe_key == last_dedupe_key:
                 continue
             path.append(

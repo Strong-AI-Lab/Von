@@ -118,7 +118,12 @@ von_bp = Blueprint("von", __name__, template_folder=_TEMPLATE_DIR)
 _TOOL_PROGRESS_TTL_SEC = 10 * 60
 _TOOL_PROGRESS_LOCK = threading.Lock()
 _TOOL_PROGRESS: dict[tuple[str, str], dict[str, Any]] = {}
-_TOOL_PROGRESS_TERMINAL_STATUSES = {"completed", "follow_up_required", "error", "cancelled"}
+_TOOL_PROGRESS_TERMINAL_STATUSES = {
+    "completed",
+    "follow_up_required",
+    "error",
+    "cancelled",
+}
 _TOOL_PROGRESS_TERMINAL_PHASES = {
     "completed",
     "follow_up_required",
@@ -309,7 +314,9 @@ def _build_continuation_progress_goal_label(
             if goal:
                 return goal
 
-    selected_workflow_id = _progress_str(continuation_context.get("selected_workflow_id"))
+    selected_workflow_id = _progress_str(
+        continuation_context.get("selected_workflow_id")
+    )
     if selected_workflow_id:
         return _normalise_progress_goal_label(f"Continue {selected_workflow_id}")
     return None
@@ -329,10 +336,13 @@ def _build_progress_goal_label(
 def _default_stage_label(stage: str) -> str:
     mapping = {
         "context_build": "Understanding request",
+        "expected_outcome_inference": "Inferring success criteria",
         "workflow_discovery": "Looking for relevant workflows",
         "workflow_discovery_complete": "Evaluating workflow applicability",
         "workflow_dispatch_prepare": "Preparing workflow dispatch",
         "workflow_dispatch": "Selecting workflow",
+        "selector_preparation": "Preparing selector context",
+        "selector_decision": "Selecting workflow",
         "tool_plan": "Deciding next actions",
         "tool_execute": "Applying actions",
         "screen_backfill": "Composing response",
@@ -456,9 +466,9 @@ def _derive_progress_liveness(
     if last_activity_epoch is None:
         last_activity_epoch = now
 
-    last_stage_activity_epoch = _progress_number(
-        state.get("last_stage_activity_epoch")
-    ) or last_activity_epoch
+    last_stage_activity_epoch = (
+        _progress_number(state.get("last_stage_activity_epoch")) or last_activity_epoch
+    )
 
     activity_idle_ms = int(max(0.0, (now - float(last_activity_epoch)) * 1000.0))
     stage_idle_ms = int(max(0.0, (now - float(last_stage_activity_epoch)) * 1000.0))
@@ -505,7 +515,7 @@ def _serialise_tool_progress_state(
     events = payload.get("diagnostic_events")
     if isinstance(events, list):
         payload["diagnostic_events"] = list(
-            events[-_TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT :]
+            events[-_TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT:]
         )
 
     workflow_stage_path = _extract_workflow_stage_path_from_progress(payload)
@@ -570,7 +580,9 @@ def _serialise_tool_progress_state(
         diagnostic_events=diagnostic_events,
         workflow_stage_path=workflow_stage_path,
         tool_history=tool_history,
-        tool_observation_summary=_extract_tool_observation_summary_from_progress(payload),
+        tool_observation_summary=_extract_tool_observation_summary_from_progress(
+            payload
+        ),
         workflow_discovery=(
             cast(dict[str, Any], payload["workflow_discovery"])
             if isinstance(payload.get("workflow_discovery"), Mapping)
@@ -605,7 +617,9 @@ def _serialise_tool_progress_state(
     return payload
 
 
-def _build_tool_progress_compact_summary(state: dict[str, Any] | None) -> dict[str, Any] | None:
+def _build_tool_progress_compact_summary(
+    state: dict[str, Any] | None,
+) -> dict[str, Any] | None:
     if not isinstance(state, dict):
         return None
 
@@ -681,7 +695,11 @@ def _normalise_workflow_discovery_progress_payload(
     )
 
     matches_raw = payload.get("matches")
-    matches = [dict(item) for item in matches_raw if isinstance(item, Mapping)] if isinstance(matches_raw, list) else []
+    matches = (
+        [dict(item) for item in matches_raw if isinstance(item, Mapping)]
+        if isinstance(matches_raw, list)
+        else []
+    )
     payload["matches"] = matches
 
     candidates_raw = payload.get("candidates")
@@ -759,9 +777,7 @@ def _normalise_live_runtime_stage_sequence(value: Any) -> list[str]:
     return runtime_stages
 
 
-def _append_live_runtime_stage(
-    runtime_stages: list[str], stage: Any
-) -> list[str]:
+def _append_live_runtime_stage(runtime_stages: list[str], stage: Any) -> list[str]:
     canonical_stage = _canonicalise_live_runtime_stage(stage)
     if not canonical_stage:
         return list(runtime_stages)
@@ -787,9 +803,7 @@ def _normalise_live_stage_summary_map(
         if not stage_id or not isinstance(raw_summary, Mapping):
             continue
         summary_map[stage_id] = {
-            key: item
-            for key, item in raw_summary.items()
-            if isinstance(key, str)
+            key: item for key, item in raw_summary.items() if isinstance(key, str)
         }
     return summary_map
 
@@ -821,7 +835,11 @@ def _build_live_workflow_stage_path(
     if not runtime_stages:
         diagnostic_events_raw = state.get("diagnostic_events")
         diagnostic_events = (
-            [cast(dict[str, Any], entry) for entry in diagnostic_events_raw if isinstance(entry, dict)]
+            [
+                cast(dict[str, Any], entry)
+                for entry in diagnostic_events_raw
+                if isinstance(entry, dict)
+            ]
             if isinstance(diagnostic_events_raw, list)
             else []
         )
@@ -850,9 +868,11 @@ def _normalise_progress_events_from_diagnostic_events(
     progress_events: list[dict[str, Any]] = []
     for entry in events:
         stage = _progress_str(entry.get("stage")) or _progress_str(entry.get("phase"))
-        subtask = _progress_str(entry.get("subtask")) or _progress_str(
-            entry.get("tool")
-        ) or _progress_str(entry.get("workflow_task"))
+        subtask = (
+            _progress_str(entry.get("subtask"))
+            or _progress_str(entry.get("tool"))
+            or _progress_str(entry.get("workflow_task"))
+        )
 
         sequence_no_raw = _progress_number(entry.get("sequence_no"))
         sequence_no = int(sequence_no_raw) if sequence_no_raw is not None else None
@@ -913,7 +933,7 @@ def _derive_phase_history_from_diagnostic_events(
         )
         last_phase = phase
 
-    return phase_history[-_TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT :]
+    return phase_history[-_TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT:]
 
 
 def _normalise_phase_history_entries(value: Any) -> list[dict[str, Any]]:
@@ -925,7 +945,9 @@ def _normalise_phase_history_entries(value: Any) -> list[dict[str, Any]]:
         if not isinstance(raw_entry, Mapping):
             continue
 
-        phase = _progress_str(raw_entry.get("phase")) or _progress_str(raw_entry.get("stage"))
+        phase = _progress_str(raw_entry.get("phase")) or _progress_str(
+            raw_entry.get("stage")
+        )
         if not phase:
             continue
 
@@ -949,12 +971,14 @@ def _normalise_phase_history_entries(value: Any) -> list[dict[str, Any]]:
                 "phaseLabel": phase_label,
                 "timestamp": int(max(0.0, timestamp)),
                 "at_utc": at_utc,
-                "sequence_no": int(max(0.0, _progress_number(raw_entry.get("sequence_no")) or 0))
+                "sequence_no": int(
+                    max(0.0, _progress_number(raw_entry.get("sequence_no")) or 0)
+                )
                 or None,
             }
         )
 
-    return normalised[-_TOOL_PROGRESS_PHASE_HISTORY_LIMIT :]
+    return normalised[-_TOOL_PROGRESS_PHASE_HISTORY_LIMIT:]
 
 
 def _append_preserved_phase_history_entry(
@@ -972,9 +996,13 @@ def _append_preserved_phase_history_entry(
 
     updated = [dict(entry) for entry in entries if isinstance(entry, Mapping)]
     clean_stage_id = _canonicalise_live_runtime_stage(clean_phase) or clean_phase
-    clean_phase_label = _progress_str(phase_label) or _default_stage_label(clean_stage_id)
+    clean_phase_label = _progress_str(phase_label) or _default_stage_label(
+        clean_stage_id
+    )
     clean_timestamp = int(max(0, timestamp_ms))
-    clean_sequence_no = int(max(0, sequence_no)) if isinstance(sequence_no, int) else None
+    clean_sequence_no = (
+        int(max(0, sequence_no)) if isinstance(sequence_no, int) else None
+    )
 
     if updated:
         last_entry = updated[-1]
@@ -986,11 +1014,12 @@ def _append_preserved_phase_history_entry(
                 last_entry["at_utc"] = at_utc
             if _progress_number(last_entry.get("timestamp")) is None:
                 last_entry["timestamp"] = clean_timestamp
-            if clean_sequence_no is not None and _progress_number(
-                last_entry.get("sequence_no")
-            ) is None:
+            if (
+                clean_sequence_no is not None
+                and _progress_number(last_entry.get("sequence_no")) is None
+            ):
                 last_entry["sequence_no"] = clean_sequence_no
-            return updated[-_TOOL_PROGRESS_PHASE_HISTORY_LIMIT :]
+            return updated[-_TOOL_PROGRESS_PHASE_HISTORY_LIMIT:]
 
     updated.append(
         {
@@ -1001,7 +1030,7 @@ def _append_preserved_phase_history_entry(
             "sequence_no": clean_sequence_no,
         }
     )
-    return updated[-_TOOL_PROGRESS_PHASE_HISTORY_LIMIT :]
+    return updated[-_TOOL_PROGRESS_PHASE_HISTORY_LIMIT:]
 
 
 def _extract_phase_history_from_progress_state(
@@ -1010,11 +1039,15 @@ def _extract_phase_history_from_progress_state(
     diagnostic_events: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     if isinstance(progress_state, Mapping):
-        preserved_entries = _normalise_phase_history_entries(progress_state.get("_phase_history"))
+        preserved_entries = _normalise_phase_history_entries(
+            progress_state.get("_phase_history")
+        )
         if preserved_entries:
             return preserved_entries
 
-        payload_entries = _normalise_phase_history_entries(progress_state.get("phase_history"))
+        payload_entries = _normalise_phase_history_entries(
+            progress_state.get("phase_history")
+        )
         if payload_entries:
             return payload_entries
 
@@ -1031,14 +1064,17 @@ def _build_progress_events_from_phase_history(
 
     latest_payload = latest_progress if isinstance(latest_progress, Mapping) else {}
     latest_stage = _canonicalise_live_runtime_stage(
-        _progress_str(latest_payload.get("phase")) or _progress_str(latest_payload.get("stage"))
+        _progress_str(latest_payload.get("phase"))
+        or _progress_str(latest_payload.get("stage"))
     )
     latest_status = _progress_str(latest_payload.get("status"))
     latest_liveness_state = _progress_str(latest_payload.get("liveness_state"))
     latest_idle_ms = _progress_number(latest_payload.get("idle_ms"))
-    latest_subtask = _progress_str(latest_payload.get("subtask")) or _progress_str(
-        latest_payload.get("tool")
-    ) or _progress_str(latest_payload.get("workflow_task"))
+    latest_subtask = (
+        _progress_str(latest_payload.get("subtask"))
+        or _progress_str(latest_payload.get("tool"))
+        or _progress_str(latest_payload.get("workflow_task"))
+    )
     goal_label = _normalise_progress_goal_label(latest_payload.get("goal_label"))
 
     progress_events: list[dict[str, Any]] = []
@@ -1051,15 +1087,21 @@ def _build_progress_events_from_phase_history(
         progress_events.append(
             {
                 "at_utc": _progress_str(entry.get("at_utc")),
-                "status": latest_status if is_latest and latest_status else "phase_transition",
+                "status": (
+                    latest_status if is_latest and latest_status else "phase_transition"
+                ),
                 "stage": stage_id,
                 "sequence_no": _progress_number(entry.get("sequence_no")),
-                "liveness_state": latest_liveness_state
-                if is_latest and latest_liveness_state
-                else "active",
-                "idle_ms": int(max(0.0, latest_idle_ms))
-                if is_latest and latest_idle_ms is not None
-                else 0,
+                "liveness_state": (
+                    latest_liveness_state
+                    if is_latest and latest_liveness_state
+                    else "active"
+                ),
+                "idle_ms": (
+                    int(max(0.0, latest_idle_ms))
+                    if is_latest and latest_idle_ms is not None
+                    else 0
+                ),
                 "subtask": latest_subtask if is_latest and latest_subtask else None,
                 "goal_label": goal_label,
             }
@@ -1068,7 +1110,7 @@ def _build_progress_events_from_phase_history(
     if latest_stage and progress_events:
         progress_events[-1]["stage"] = latest_stage
 
-    return progress_events[-_TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT :]
+    return progress_events[-_TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT:]
 
 
 def _build_activity_history_from_phase_history(
@@ -1082,14 +1124,16 @@ def _build_activity_history_from_phase_history(
 
     latest_payload = latest_progress if isinstance(latest_progress, Mapping) else {}
     latest_stage = _canonicalise_live_runtime_stage(
-        _progress_str(latest_payload.get("phase")) or _progress_str(latest_payload.get("stage"))
+        _progress_str(latest_payload.get("phase"))
+        or _progress_str(latest_payload.get("stage"))
     )
     latest_status = (_progress_str(latest_payload.get("status")) or "").lower()
     latest_terminal_state = _resolve_latest_turn_execution_activity_state(
         latest_payload
     )
     stage_diagnostic_map = {
-        _canonicalise_live_runtime_stage(entry.get("stage_id")) or _progress_str(entry.get("stage_id")): entry
+        _canonicalise_live_runtime_stage(entry.get("stage_id"))
+        or _progress_str(entry.get("stage_id")): entry
         for entry in stage_diagnostics
         if isinstance(entry, Mapping)
     }
@@ -1117,7 +1161,11 @@ def _build_activity_history_from_phase_history(
                 "atUtc": _progress_str(entry.get("at_utc")),
                 "stage": stage_id,
                 "status": _progress_str(stage_diagnostic.get("latest_status"))
-                or ("heartbeat" if is_latest and latest_status == "heartbeat" else "phase_transition"),
+                or (
+                    "heartbeat"
+                    if is_latest and latest_status == "heartbeat"
+                    else "phase_transition"
+                ),
                 "eventKind": "phase_transition",
                 "label": _progress_str(entry.get("phaseLabel"))
                 or _progress_str(stage_diagnostic.get("stage_label"))
@@ -1129,20 +1177,24 @@ def _build_activity_history_from_phase_history(
                 "isLowLevel": False,
                 "groupCount": 1,
                 "subtask": (
-                    _progress_str(latest_payload.get("subtask"))
-                    or _progress_str(latest_payload.get("tool"))
-                    or _progress_str(latest_payload.get("workflow_task"))
-                )
-                if is_latest
-                else None,
-                "model": _progress_str(latest_payload.get("model")) if is_latest else None,
+                    (
+                        _progress_str(latest_payload.get("subtask"))
+                        or _progress_str(latest_payload.get("tool"))
+                        or _progress_str(latest_payload.get("workflow_task"))
+                    )
+                    if is_latest
+                    else None
+                ),
+                "model": (
+                    _progress_str(latest_payload.get("model")) if is_latest else None
+                ),
             }
         )
 
     if latest_stage and activity_history:
         activity_history[-1]["stage"] = latest_stage
 
-    return activity_history[-_TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT :]
+    return activity_history[-_TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT:]
 
 
 def _resolve_latest_turn_execution_activity_state(
@@ -1156,8 +1208,10 @@ def _resolve_latest_turn_execution_activity_state(
         dispatch = workflow_routing_diagnostics.get("dispatch")
         if isinstance(dispatch, Mapping):
             dispatch_terminal_status = (
-                _progress_str(dispatch.get("dispatch_terminal_status")) or ""
-            ).strip().lower()
+                (_progress_str(dispatch.get("dispatch_terminal_status")) or "")
+                .strip()
+                .lower()
+            )
             if dispatch_terminal_status in {"failed", "failure"}:
                 return "failure"
             if dispatch_terminal_status in {
@@ -1169,7 +1223,9 @@ def _resolve_latest_turn_execution_activity_state(
             }:
                 return "success"
 
-    result_summary = (_progress_str(latest_progress.get("result_summary")) or "").strip()
+    result_summary = (
+        _progress_str(latest_progress.get("result_summary")) or ""
+    ).strip()
     if result_summary.lower().endswith(":failed"):
         return "failure"
 
@@ -1181,7 +1237,15 @@ def _resolve_latest_turn_execution_activity_state(
     )
     for value in terminal_status_candidates:
         status = (_progress_str(value) or "").strip().lower()
-        if status in {"error", "failed", "failure", "cancelled", "canceled", "aborted", "terminated"}:
+        if status in {
+            "error",
+            "failed",
+            "failure",
+            "cancelled",
+            "canceled",
+            "aborted",
+            "terminated",
+        }:
             return "failure"
         if status in {"completed", "complete", "done", "success", "succeeded"}:
             return "success"
@@ -1198,7 +1262,11 @@ def _derive_tool_history_from_diagnostic_events(
     )
     tool_history = tool_observations.get("tool_history")
     return (
-        [cast(dict[str, Any], entry) for entry in tool_history if isinstance(entry, dict)]
+        [
+            cast(dict[str, Any], entry)
+            for entry in tool_history
+            if isinstance(entry, dict)
+        ]
         if isinstance(tool_history, list)
         else []
     )
@@ -1248,14 +1316,14 @@ def _extract_live_stage_diagnostic_map(
             if not stage_id:
                 continue
             stage_map[stage_id] = {
-                key: value
-                for key, value in entry.items()
-                if isinstance(key, str)
+                key: value for key, value in entry.items() if isinstance(key, str)
             }
         if stage_map:
             return stage_map
 
-    summary_map = _normalise_live_stage_summary_map(progress_state.get("_stage_summaries"))
+    summary_map = _normalise_live_stage_summary_map(
+        progress_state.get("_stage_summaries")
+    )
     return {
         stage_id: {
             "stage_id": stage_id,
@@ -1264,7 +1332,9 @@ def _extract_live_stage_diagnostic_map(
             "event_count": int(_progress_number(summary.get("event_count")) or 0),
             "latest_status": _progress_str(summary.get("latest_status")),
             "latest_at_utc": _progress_str(summary.get("latest_at_utc")),
-            "latest_result_summary": _progress_str(summary.get("latest_result_summary")),
+            "latest_result_summary": _progress_str(
+                summary.get("latest_result_summary")
+            ),
             "latest_error": _progress_str(summary.get("latest_error")),
         }
         for stage_id, summary in summary_map.items()
@@ -1320,7 +1390,9 @@ def _build_live_llm_exchange_summary(
         else {}
     )
     prompt_capture = _copy_live_progress_mapping(request_mapping.get("prompt"))
-    context_summary = _copy_live_progress_mapping(request_mapping.get("context_summary"))
+    context_summary = _copy_live_progress_mapping(
+        request_mapping.get("context_summary")
+    )
     response_preview = _copy_live_progress_mapping(source.get("llm_response_preview"))
 
     has_input = bool(prompt_capture) or bool(request_mapping.get("context_messages"))
@@ -1339,7 +1411,9 @@ def _build_live_llm_exchange_summary(
         summary["prompt_preview"] = prompt_capture
     if context_summary:
         summary["context_summary"] = context_summary
-    context_message_count = _progress_number(request_mapping.get("context_message_count"))
+    context_message_count = _progress_number(
+        request_mapping.get("context_message_count")
+    )
     if context_message_count is not None:
         summary["context_message_count"] = int(max(0.0, context_message_count))
     tool_count = _progress_number(request_mapping.get("tool_count"))
@@ -1358,9 +1432,7 @@ def _build_live_llm_exchange_summary(
         summary["fallback_attempt_no"] = int(max(0.0, fallback_attempt_no))
     fallback_candidate_count = _progress_number(source.get("fallback_candidate_count"))
     if fallback_candidate_count is not None:
-        summary["fallback_candidate_count"] = int(
-            max(0.0, fallback_candidate_count)
-        )
+        summary["fallback_candidate_count"] = int(max(0.0, fallback_candidate_count))
     if request_state:
         summary["llm_request_state"] = request_state
     prepared_at_utc = _progress_str(source.get("llm_request_prepared_at_utc"))
@@ -1383,16 +1455,23 @@ def _workflow_candidate_name_matches_selected_id(
     if not isinstance(candidate, Mapping):
         return None
 
-    candidate_workflow_id = _progress_str(candidate.get("concept_id")) or _progress_str(
-        candidate.get("workflow_id")
-    ) or _progress_str(candidate.get("id"))
+    candidate_workflow_id = (
+        _progress_str(candidate.get("concept_id"))
+        or _progress_str(candidate.get("workflow_id"))
+        or _progress_str(candidate.get("id"))
+    )
     if selected_workflow_id and candidate_workflow_id:
-        if candidate_workflow_id.strip().lower() != selected_workflow_id.strip().lower():
+        if (
+            candidate_workflow_id.strip().lower()
+            != selected_workflow_id.strip().lower()
+        ):
             return None
 
-    return _progress_str(candidate.get("name")) or _progress_str(
-        candidate.get("workflow_name")
-    ) or _progress_str(candidate.get("label"))
+    return (
+        _progress_str(candidate.get("name"))
+        or _progress_str(candidate.get("workflow_name"))
+        or _progress_str(candidate.get("label"))
+    )
 
 
 def _resolve_workflow_name_from_routing_diagnostics(
@@ -1405,9 +1484,11 @@ def _resolve_workflow_name_from_routing_diagnostics(
     selector_payload = workflow_routing_diagnostics.get("selector")
     if isinstance(selector_payload, Mapping):
         selected_candidate_name = _workflow_candidate_name_matches_selected_id(
-            selector_payload.get("selected_candidate")
-            if isinstance(selector_payload.get("selected_candidate"), Mapping)
-            else None,
+            (
+                selector_payload.get("selected_candidate")
+                if isinstance(selector_payload.get("selected_candidate"), Mapping)
+                else None
+            ),
             selected_workflow_id,
         )
         if selected_candidate_name:
@@ -1449,8 +1530,12 @@ def _resolve_workflow_selection_fields(
     latest_stage_event: Mapping[str, Any] | None = None,
     workflow_routing_diagnostics: Mapping[str, Any] | None = None,
 ) -> dict[str, str]:
-    latest_payload = latest_progress_payload if isinstance(latest_progress_payload, Mapping) else {}
-    stage_payload = live_stage_payload if isinstance(live_stage_payload, Mapping) else {}
+    latest_payload = (
+        latest_progress_payload if isinstance(latest_progress_payload, Mapping) else {}
+    )
+    stage_payload = (
+        live_stage_payload if isinstance(live_stage_payload, Mapping) else {}
+    )
     stage_event = latest_stage_event if isinstance(latest_stage_event, Mapping) else {}
     routing_payload = (
         workflow_routing_diagnostics
@@ -1520,11 +1605,7 @@ def _extract_workflow_stage_path_from_progress(
     if not isinstance(raw_path, list):
         return None
 
-    path = [
-        dict(entry)
-        for entry in raw_path
-        if isinstance(entry, Mapping)
-    ]
+    path = [dict(entry) for entry in raw_path if isinstance(entry, Mapping)]
     if not path:
         return None
 
@@ -1682,7 +1763,10 @@ def _build_timing_breakdown(
 
     stage_rows = sorted(
         stage_totals.values(),
-        key=lambda item: (stage_order.get(cast(str, item.get("stage")), 1_000_000), cast(str, item.get("stage"))),
+        key=lambda item: (
+            stage_order.get(cast(str, item.get("stage")), 1_000_000),
+            cast(str, item.get("stage")),
+        ),
     )
 
     llm_rows = sorted(
@@ -1763,7 +1847,9 @@ def _extract_response_transformation_event_summary(
             "suppression_reason": _progress_str(raw_event.get("suppression_reason")),
             "error_class": _progress_str(raw_event.get("error_class")),
             "input_summary": (
-                dict(input_summary_raw) if isinstance(input_summary_raw, Mapping) else {}
+                dict(input_summary_raw)
+                if isinstance(input_summary_raw, Mapping)
+                else {}
             ),
             "output_summary": (
                 dict(output_summary_raw)
@@ -1811,7 +1897,9 @@ def _build_turn_execution_stage_diagnostics(
     latest_terminal_state = _resolve_latest_turn_execution_activity_state(
         latest_progress_payload
     )
-    live_stage_diagnostic_map = _extract_live_stage_diagnostic_map(latest_progress_payload)
+    live_stage_diagnostic_map = _extract_live_stage_diagnostic_map(
+        latest_progress_payload
+    )
     stage_diagnostics: list[dict[str, Any]] = []
 
     for stage_entry in path_entries:
@@ -1979,7 +2067,9 @@ def _build_turn_execution_stage_diagnostics(
                 stage_payload["tool_execution"] = dict(tool_execution)
         if stage_id == "tool_execute":
             summary_payload = (
-                tool_observation_summary if isinstance(tool_observation_summary, Mapping) else {}
+                tool_observation_summary
+                if isinstance(tool_observation_summary, Mapping)
+                else {}
             )
             stage_payload["tool_call_count"] = int(
                 _progress_number(summary_payload.get("tool_call_count")) or 0
@@ -2047,9 +2137,7 @@ def _build_turn_execution_stage_diagnostics(
 
         if stage_id == "postcondition_critic":
             critic_payload = (
-                dict(critic_verdict)
-                if isinstance(critic_verdict, Mapping)
-                else {}
+                dict(critic_verdict) if isinstance(critic_verdict, Mapping) else {}
             )
             if critic_payload:
                 stage_payload["critic_verdict"] = critic_payload
@@ -2081,9 +2169,7 @@ def _build_turn_execution_stage_diagnostics(
                     "completion_gate_safe_to_claim_completion"
                 )
                 if isinstance(safe_to_claim_completion, bool):
-                    gate_payload["safe_to_claim_completion"] = (
-                        safe_to_claim_completion
-                    )
+                    gate_payload["safe_to_claim_completion"] = safe_to_claim_completion
                 blocking_effect_ids = latest_progress_payload.get(
                     "completion_gate_blocking_effect_ids"
                 )
@@ -2218,7 +2304,9 @@ def _build_turn_execution_diagnostics(
         else None
     )
 
-    latest_progress = dict(tool_progress_state) if isinstance(tool_progress_state, dict) else None
+    latest_progress = (
+        dict(tool_progress_state) if isinstance(tool_progress_state, dict) else None
+    )
 
     diagnostic_events: list[dict[str, Any]] = []
     if isinstance(latest_progress, dict):
@@ -2228,12 +2316,14 @@ def _build_turn_execution_diagnostics(
                 cast(dict[str, Any], entry)
                 for entry in raw_events
                 if isinstance(entry, dict)
-            ][-_TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT :]
+            ][-_TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT:]
 
     effective_elapsed = _progress_number(elapsed_ms)
     if effective_elapsed is None and isinstance(latest_progress, dict):
         effective_elapsed = _progress_number(latest_progress.get("elapsed_ms"))
-    elapsed_ms_value = int(max(0.0, effective_elapsed)) if effective_elapsed is not None else None
+    elapsed_ms_value = (
+        int(max(0.0, effective_elapsed)) if effective_elapsed is not None else None
+    )
 
     workflow_payload = workflow_discovery
     if workflow_payload is None and isinstance(latest_progress, dict):
@@ -2349,10 +2439,18 @@ def _build_turn_execution_diagnostics(
         "activity_history": activity_history,
         "phase_history": phase_history,
         "tool_history": tool_history,
-        "tool_call_count": int(_progress_number(tool_observation_summary.get("tool_call_count")) or 0),
-        "tool_success_count": int(_progress_number(tool_observation_summary.get("tool_success_count")) or 0),
-        "tool_failure_count": int(_progress_number(tool_observation_summary.get("tool_failure_count")) or 0),
-        "tool_pending_count": int(_progress_number(tool_observation_summary.get("tool_pending_count")) or 0),
+        "tool_call_count": int(
+            _progress_number(tool_observation_summary.get("tool_call_count")) or 0
+        ),
+        "tool_success_count": int(
+            _progress_number(tool_observation_summary.get("tool_success_count")) or 0
+        ),
+        "tool_failure_count": int(
+            _progress_number(tool_observation_summary.get("tool_failure_count")) or 0
+        ),
+        "tool_pending_count": int(
+            _progress_number(tool_observation_summary.get("tool_pending_count")) or 0
+        ),
         "tool_call_start_count": int(
             _progress_number(tool_observation_summary.get("tool_call_start_count")) or 0
         ),
@@ -2362,9 +2460,7 @@ def _build_turn_execution_diagnostics(
         "workflow_discovery": workflow_payload,
         "workflow_routing_diagnostics": workflow_routing_diagnostics,
         "critic_verdict": (
-            dict(critic_verdict)
-            if isinstance(critic_verdict, Mapping)
-            else None
+            dict(critic_verdict) if isinstance(critic_verdict, Mapping) else None
         ),
         "completion_gate": (
             dict(completion_gate_verdict)
@@ -2380,9 +2476,7 @@ def _build_turn_execution_diagnostics(
         "workflow_stage_path": workflow_stage_path,
         "stage_diagnostics": stage_diagnostics,
         "timing_breakdown": timing_breakdown,
-        "mcp_access": (
-            dict(mcp_access) if isinstance(mcp_access, Mapping) else None
-        ),
+        "mcp_access": (dict(mcp_access) if isinstance(mcp_access, Mapping) else None),
     }
 
 
@@ -2412,7 +2506,9 @@ def _is_sensitive_diagnostic_export_key(key: str) -> bool:
 
 def _summarise_diagnostic_export_collection_shape(value: Any) -> dict[str, Any]:
     if isinstance(value, Mapping):
-        keys = [str(item) for item in value.keys()][: _DIAGNOSTIC_EXPORT_COLLECTION_LIMIT]
+        keys = [str(item) for item in value.keys()][
+            :_DIAGNOSTIC_EXPORT_COLLECTION_LIMIT
+        ]
         return {
             "summary": _DIAGNOSTIC_EXPORT_SUMMARISED_VALUE,
             "type": "object",
@@ -2425,7 +2521,10 @@ def _summarise_diagnostic_export_collection_shape(value: Any) -> dict[str, Any]:
             "type": "array",
             "item_count": len(value),
         }
-    return {"summary": _DIAGNOSTIC_EXPORT_SUMMARISED_VALUE, "type": type(value).__name__}
+    return {
+        "summary": _DIAGNOSTIC_EXPORT_SUMMARISED_VALUE,
+        "type": type(value).__name__,
+    }
 
 
 def _sanitise_diagnostic_export_payload(
@@ -2447,7 +2546,9 @@ def _sanitise_diagnostic_export_payload(
         sanitised: dict[str, Any] = {}
         for index, (raw_key, raw_item) in enumerate(value.items()):
             if index >= _DIAGNOSTIC_EXPORT_COLLECTION_LIMIT:
-                sanitised["truncated_keys"] = len(value) - _DIAGNOSTIC_EXPORT_COLLECTION_LIMIT
+                sanitised["truncated_keys"] = (
+                    len(value) - _DIAGNOSTIC_EXPORT_COLLECTION_LIMIT
+                )
                 break
 
             key = str(raw_key)
@@ -2472,7 +2573,11 @@ def _sanitise_diagnostic_export_payload(
         for index, raw_item in enumerate(value):
             if index >= _DIAGNOSTIC_EXPORT_COLLECTION_LIMIT:
                 sanitised_items.append(
-                    {"summary": _DIAGNOSTIC_EXPORT_SUMMARISED_VALUE, "truncated_items": len(value) - _DIAGNOSTIC_EXPORT_COLLECTION_LIMIT}
+                    {
+                        "summary": _DIAGNOSTIC_EXPORT_SUMMARISED_VALUE,
+                        "truncated_items": len(value)
+                        - _DIAGNOSTIC_EXPORT_COLLECTION_LIMIT,
+                    }
                 )
                 break
             sanitised_items.append(
@@ -2968,7 +3073,10 @@ def upload_file_to_blob_store_and_vontology():
     )
 
     organisation_concept_id = session.get("organisation_concept_id")
-    if not isinstance(organisation_concept_id, str) or not organisation_concept_id.strip():
+    if (
+        not isinstance(organisation_concept_id, str)
+        or not organisation_concept_id.strip()
+    ):
         organisation_concept_id = None
     else:
         organisation_concept_id = organisation_concept_id.strip()
@@ -3408,7 +3516,9 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
             else (existing_tokens_streamed or 0)
         )
 
-        existing_tools_started = _progress_number(existing_counters.get("tools_started"))
+        existing_tools_started = _progress_number(
+            existing_counters.get("tools_started")
+        )
         existing_tools_completed = _progress_number(
             existing_counters.get("tools_completed")
         )
@@ -3516,7 +3626,8 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
         phase_history = _normalise_phase_history_entries(existing.get("_phase_history"))
         phase_history = _append_preserved_phase_history_entry(
             phase_history,
-            phase=_progress_str(merged.get("phase")) or _progress_str(merged.get("stage")),
+            phase=_progress_str(merged.get("phase"))
+            or _progress_str(merged.get("stage")),
             phase_label=_progress_str(merged.get("phase_label"))
             or _progress_str(merged.get("stage_label")),
             timestamp_ms=int(now_epoch * 1000.0),
@@ -3524,9 +3635,11 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
             sequence_no=sequence_no,
         )
         merged["_phase_history"] = phase_history
-        merged["workflow_stage_path"] = _build_live_workflow_stage_path_from_runtime_stages(
-            runtime_stages,
-            _progress_str(merged.get("selected_workflow_id")),
+        merged["workflow_stage_path"] = (
+            _build_live_workflow_stage_path_from_runtime_stages(
+                runtime_stages,
+                _progress_str(merged.get("selected_workflow_id")),
+            )
         )
 
         existing_events = merged.get("diagnostic_events")
@@ -3559,7 +3672,9 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
         llm_request = safe_update.get("llm_request")
         if isinstance(llm_request, Mapping):
             event_entry["llm_request"] = {
-                str(key): value for key, value in llm_request.items() if isinstance(key, str)
+                str(key): value
+                for key, value in llm_request.items()
+                if isinstance(key, str)
             }
         llm_request_state = _progress_str(safe_update.get("llm_request_state"))
         if llm_request_state:
@@ -3674,10 +3789,12 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
                     + 1,
                     "latest_status": _progress_str(event_entry.get("status")),
                     "latest_at_utc": _progress_str(event_entry.get("at_utc")),
-                    "latest_result_summary": latest_result_summary
-                    if latest_result_summary
-                    else _progress_str(
-                        existing_summary.get("latest_result_summary")
+                    "latest_result_summary": (
+                        latest_result_summary
+                        if latest_result_summary
+                        else _progress_str(
+                            existing_summary.get("latest_result_summary")
+                        )
                     ),
                     "latest_error": _progress_str(event_entry.get("error")),
                 }
@@ -3740,7 +3857,9 @@ def _get_tool_progress(scope_key: str, request_id: str) -> dict[str, Any] | None
         if isinstance(value, dict):
             return dict(value)
     try:
-        persisted = fetch_tool_progress_state(scope_key=scope_key, request_id=request_id)
+        persisted = fetch_tool_progress_state(
+            scope_key=scope_key, request_id=request_id
+        )
     except Exception:
         persisted = None
     if isinstance(persisted, dict):
@@ -3863,7 +3982,9 @@ def _serialise_background_orchestrator_result(result: Any) -> dict[str, Any]:
     """
 
     tool_invocations = (
-        list(result.tool_invocations) if getattr(result, "tool_invocations", None) else []
+        list(result.tool_invocations)
+        if getattr(result, "tool_invocations", None)
+        else []
     )
     aux_llm_calls = (
         list(result.aux_llm_calls) if getattr(result, "aux_llm_calls", None) else []
@@ -3875,7 +3996,9 @@ def _serialise_background_orchestrator_result(result: Any) -> dict[str, Any]:
     serialised: dict[str, Any] = {
         "response_text": result.response_text,
         "extra_messages": (
-            list(result.extra_messages) if getattr(result, "extra_messages", None) else []
+            list(result.extra_messages)
+            if getattr(result, "extra_messages", None)
+            else []
         ),
         "tool_invocations": tool_invocations,
         "aux_llm_calls": aux_llm_calls,
@@ -3978,7 +4101,11 @@ def _resolve_generate_requested_model(
             user_concept_id=user_concept_id,
             org_concept_id=org_concept_id,
         )
-    if not model_name and isinstance(configured_model, str) and configured_model.strip():
+    if (
+        not model_name
+        and isinstance(configured_model, str)
+        and configured_model.strip()
+    ):
         model_name = configured_model.strip()
 
     return model_name, explicit_client_type
@@ -4148,7 +4275,9 @@ def _truncate_large_tool_results(
     return result
 
 
-def _serialise_tool_invocations_for_llm_debug(tool_invocations: Any) -> list[dict[str, Any]]:
+def _serialise_tool_invocations_for_llm_debug(
+    tool_invocations: Any,
+) -> list[dict[str, Any]]:
     """Persist a stable, compact view of tool invocations in llm_debug_data.
 
     Keep the common operational fields needed for later diagnosis, but avoid
@@ -4505,7 +4634,9 @@ def _derive_llm_debug_warnings(debug_info: dict) -> list[str]:
             if isinstance(errors, list):
                 for error in errors:
                     if isinstance(error, str) and error.strip():
-                        warnings.append(f"Display element validation error: {error.strip()}")
+                        warnings.append(
+                            f"Display element validation error: {error.strip()}"
+                        )
 
     # Remove duplicates while preserving order
     seen = set()
@@ -4543,9 +4674,7 @@ def _normalise_workflow_routing_payload(
     raw_dict = getattr(workflow_routing, "__dict__", None)
     if isinstance(raw_dict, dict):
         return {
-            str(key): value
-            for key, value in raw_dict.items()
-            if isinstance(key, str)
+            str(key): value for key, value in raw_dict.items() if isinstance(key, str)
         }
     return None
 
@@ -4558,7 +4687,10 @@ def _latest_turn_completion_gate(aux_calls: Any) -> dict[str, Any] | None:
         if not isinstance(entry, Mapping):
             continue
         call_type = entry.get("type")
-        if not isinstance(call_type, str) or call_type.strip() != "turn_completion_gate":
+        if (
+            not isinstance(call_type, str)
+            or call_type.strip() != "turn_completion_gate"
+        ):
             continue
 
         decision = _progress_str(entry.get("decision"))
@@ -4616,7 +4748,9 @@ def _build_terminal_tool_progress_payload(
     }
     if isinstance(completion_gate, dict):
         payload["completion_gate_decision"] = completion_gate.get("decision")
-        payload["completion_gate_decision_reason"] = completion_gate.get("decision_reason")
+        payload["completion_gate_decision_reason"] = completion_gate.get(
+            "decision_reason"
+        )
         blocking_effect_ids = completion_gate.get("blocking_effect_ids")
         if isinstance(blocking_effect_ids, list):
             payload["completion_gate_blocking_effect_ids"] = list(blocking_effect_ids)
@@ -4654,9 +4788,7 @@ def _build_pending_tool_progress_placeholder_payload(
 ) -> dict[str, Any]:
     request_known = int(status_code) != 404
     phase_label = (
-        "Awaiting visible progress"
-        if request_known
-        else "Request status unavailable"
+        "Awaiting visible progress" if request_known else "Request status unavailable"
     )
     result_summary = (
         "No live progress state is visible yet. The request may still be in early "
@@ -4666,9 +4798,7 @@ def _build_pending_tool_progress_placeholder_payload(
         "session."
     )
     pending_reason = (
-        "no_visible_progress_state"
-        if request_known
-        else "request_progress_not_found"
+        "no_visible_progress_state" if request_known else "request_progress_not_found"
     )
     return {
         "status": "pending",
@@ -4788,7 +4918,10 @@ def _finalise_llm_debug_info(
         workflow_routing_payload = _normalise_workflow_routing_payload(raw_routing)
 
     resolved_actor_concept_id = actor_concept_id
-    if not isinstance(resolved_actor_concept_id, str) or not resolved_actor_concept_id.strip():
+    if (
+        not isinstance(resolved_actor_concept_id, str)
+        or not resolved_actor_concept_id.strip()
+    ):
         raw_actor_concept_id = llm_debug_info.get("actor_concept_id")
         if isinstance(raw_actor_concept_id, str) and raw_actor_concept_id.strip():
             resolved_actor_concept_id = raw_actor_concept_id.strip()
@@ -5600,12 +5733,8 @@ def _extract_screen_element_targets_from_render_plan(
         "kanban_view": bool(raw_targets.get("kanban_view", True)),
         "timeline": bool(raw_targets.get("timeline", True)),
         "hierarchy_view": bool(raw_targets.get("hierarchy_view", True)),
-        "relation_graph_view": bool(
-            raw_targets.get("relation_graph_view", True)
-        ),
-        "relation_truth_state": bool(
-            raw_targets.get("relation_truth_state", True)
-        ),
+        "relation_graph_view": bool(raw_targets.get("relation_graph_view", True)),
+        "relation_truth_state": bool(raw_targets.get("relation_truth_state", True)),
     }
 
 
@@ -5882,7 +6011,9 @@ def _build_presenter_screen_summary_from_tool_messages(
     if write_activity_seen:
         lines.append("Write activity (authoritative):")
         if description_write_seen:
-            lines.append("- Description updated: YES (evidence present in tool results)")
+            lines.append(
+                "- Description updated: YES (evidence present in tool results)"
+            )
         if relationship_write_seen:
             lines.append("- Relationship writes detected")
         if names_write_seen:
@@ -6051,7 +6182,9 @@ def _build_tool_messages_prompt_blob(
             if concept_labels:
                 suffix = ""
                 total_created = payload.get("successful")
-                if isinstance(total_created, int) and total_created > len(concept_labels):
+                if isinstance(total_created, int) and total_created > len(
+                    concept_labels
+                ):
                     suffix = f" (+{total_created - len(concept_labels)} more)"
                 return f"- Concepts created: {', '.join(concept_labels)}{suffix}"
             total = payload.get("total")
@@ -6232,10 +6365,7 @@ def _build_chat_history_context_kwargs(
     context_kwargs: dict[str, Any] = {}
     if isinstance(namespace, str) and namespace.strip():
         context_kwargs["namespace"] = namespace.strip()
-    if (
-        isinstance(organisation_concept_id, str)
-        and organisation_concept_id.strip()
-    ):
+    if isinstance(organisation_concept_id, str) and organisation_concept_id.strip():
         context_kwargs["organisation_concept_id"] = organisation_concept_id.strip()
     if isinstance(role_in_org, str) and role_in_org.strip():
         context_kwargs["role_in_org"] = role_in_org.strip()
@@ -6267,8 +6397,10 @@ def _add_chat_history_message(
 
 
 def _namespace_is_org_scoped(namespace: str | None) -> bool:
-    return isinstance(namespace, str) and namespace.strip().startswith("#V#") and (
-        "@" in namespace.strip()
+    return (
+        isinstance(namespace, str)
+        and namespace.strip().startswith("#V#")
+        and ("@" in namespace.strip())
     )
 
 
@@ -6369,12 +6501,12 @@ def _resolve_generate_namespace_context(
     )
 
     org_candidates = [c for c in candidates if c.get("org_scoped")]
-    selected = org_candidates[0] if org_candidates else (candidates[0] if candidates else None)
+    selected = (
+        org_candidates[0] if org_candidates else (candidates[0] if candidates else None)
+    )
 
     comparable_candidates = [
-        c
-        for c in candidates
-        if c.get("source") != "derived_from_user_concept_id"
+        c for c in candidates if c.get("source") != "derived_from_user_concept_id"
     ]
     distinct_namespaces = {
         c.get("namespace")
@@ -6385,8 +6517,12 @@ def _resolve_generate_namespace_context(
 
     report = {
         "namespace": selected.get("namespace") if isinstance(selected, dict) else None,
-        "namespace_source": selected.get("source") if isinstance(selected, dict) else "missing",
-        "effective_context_source": effective_source if isinstance(effective_source, str) else None,
+        "namespace_source": (
+            selected.get("source") if isinstance(selected, dict) else "missing"
+        ),
+        "effective_context_source": (
+            effective_source if isinstance(effective_source, str) else None
+        ),
         "effective_context_namespace": (
             effective_namespace.strip()
             if isinstance(effective_namespace, str) and effective_namespace.strip()
@@ -6413,7 +6549,9 @@ def _set_active_chat_session_for_request(
     window_session_id: str | None,
 ) -> None:
     cleaned_session_id = (
-        session_id.strip() if isinstance(session_id, str) and session_id.strip() else None
+        session_id.strip()
+        if isinstance(session_id, str) and session_id.strip()
+        else None
     )
     if not cleaned_session_id:
         return
@@ -6518,6 +6656,7 @@ def _maybe_handle_prompt_introspection_fastpath(
 ):
     gateway = current_app.config.get("INTERNAL_MCP_GATEWAY")
     import json as _json
+
     prompt_namespace = user_namespace or user_concept_id
     if dynamic_instructions is None and isinstance(auxiliary_system_prompt, str):
         dynamic_instructions = auxiliary_system_prompt
@@ -6898,6 +7037,7 @@ def _maybe_handle_rag_status_fastpath(
 ):
     gateway = current_app.config.get("INTERNAL_MCP_GATEWAY")
     import json as _json
+
     rag_namespace = user_namespace or user_concept_id
 
     tool_messages: list[dict] = []
@@ -7070,7 +7210,10 @@ def onboard_new_member():
     try:
         max_retries = _coerce_onboarding_max_retries(data.get("max_retries", 3))
     except ValueError:
-        return jsonify({"error": "max_retries must be an integer between 0 and 10."}), 400
+        return (
+            jsonify({"error": "max_retries must be an integer between 0 and 10."}),
+            400,
+        )
 
     inputs = _build_onboarding_inputs(member_name=member_name, request_payload=data)
     workflow_candidates = _resolve_onboarding_workflow_candidates(data)
@@ -7963,9 +8106,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
     def _emit_generate_progress(update: Mapping[str, Any] | None) -> None:
         if not show_tool_use_progress:
             return
-        payload = (
-            dict(update) if isinstance(update, Mapping) else {"status": "unknown"}
-        )
+        payload = dict(update) if isinstance(update, Mapping) else {"status": "unknown"}
         payload.setdefault("request_id", request_id)
 
         seen_scope_keys: set[str] = set()
@@ -8108,7 +8249,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         "organisation_concept_id": org_concept_id,
         "namespace": user_namespace,
         "namespace_source": namespace_source,
-        "effective_context_source": namespace_resolution.get("effective_context_source"),
+        "effective_context_source": namespace_resolution.get(
+            "effective_context_source"
+        ),
         "effective_context_namespace": namespace_resolution.get(
             "effective_context_namespace"
         ),
@@ -8139,7 +8282,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         ),
         mismatch_detected=bool(namespace_report.get("mismatch_detected")),
         details={
-            "effective_context_source": namespace_report.get("effective_context_source"),
+            "effective_context_source": namespace_report.get(
+                "effective_context_source"
+            ),
             "effective_context_namespace": namespace_report.get(
                 "effective_context_namespace"
             ),
@@ -8198,11 +8343,17 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 invitee_history = chat_history_service.get_chat_history(
                     user_concept_id, session_id
                 )
-                owner_history = _apply_default_author(owner_history, history_owner_user_id)
-                invitee_history = _apply_default_author(invitee_history, user_concept_id)
+                owner_history = _apply_default_author(
+                    owner_history, history_owner_user_id
+                )
+                invitee_history = _apply_default_author(
+                    invitee_history, user_concept_id
+                )
                 context = _merge_shared_histories(owner_history, invitee_history)
             else:
-                context = chat_history_service.get_chat_history(history_user_id, session_id)
+                context = chat_history_service.get_chat_history(
+                    history_user_id, session_id
+                )
         finally:
             _chat_history_elapsed_ms = (
                 time.perf_counter() - _chat_history_start_perf
@@ -8508,10 +8659,14 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             )
 
         effective_request_user_id = (
-            user_concept_id if isinstance(user_concept_id, str) and user_concept_id.strip() else request_user_id
+            user_concept_id
+            if isinstance(user_concept_id, str) and user_concept_id.strip()
+            else request_user_id
         )
         effective_request_org_id = (
-            org_concept_id if isinstance(org_concept_id, str) and org_concept_id.strip() else request_org_id
+            org_concept_id
+            if isinstance(org_concept_id, str) and org_concept_id.strip()
+            else request_org_id
         )
 
         # Try to get user name from concept if user_id provided
@@ -8788,9 +8943,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                             function="assess_prompt_for_workflow_continuation",
                             decision_class="continuation_classifier",
                             decision_source=continuation_decision_source,
-                            changed_outcome=bool(
-                                apply_decision.get("applies", False)
-                            ),
+                            changed_outcome=bool(apply_decision.get("applies", False)),
                             reason_code=apply_reason,
                         )
                     )
@@ -8800,14 +8953,16 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 workflow_continuation_context["applied"] = bool(
                     apply_decision.get("applies", False)
                 )
-                workflow_continuation_context["apply_reason"] = str(
-                    apply_decision.get("reason") or ""
-                ).strip() or None
+                workflow_continuation_context["apply_reason"] = (
+                    str(apply_decision.get("reason") or "").strip() or None
+                )
                 workflow_continuation_context["apply_signals"] = list(apply_signals)
                 if bool(workflow_continuation_context.get("applied")):
-                    workflow_discovery_query = build_workflow_continuation_routing_prompt(
-                        prompt=prompt_text,
-                        continuation_context=workflow_continuation_context,
+                    workflow_discovery_query = (
+                        build_workflow_continuation_routing_prompt(
+                            prompt=prompt_text,
+                            continuation_context=workflow_continuation_context,
+                        )
                     )
         except Exception as exc:
             current_app.logger.debug(
@@ -9595,14 +9750,16 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         screen_backfill_screen_tag_present: bool | None = None
         needs_screen_backfill = False
         required_screen_json_fence = None
-        screen_fence_compat_enabled = (
-            get_display_elements_screen_fence_compat_enabled(default=True)
+        screen_fence_compat_enabled = get_display_elements_screen_fence_compat_enabled(
+            default=True
         )
 
         if presenter_mode_requested:
             screen_tag_present = _presenter_tag_present(response_text, "screen")
             screen_backfill_screen_tag_present = screen_tag_present
-            required_screen_json_fence = _extract_required_screen_json_fence(prompt_text)
+            required_screen_json_fence = _extract_required_screen_json_fence(
+                prompt_text
+            )
             screen_text = None
             spoken_text = None
             if isinstance(presenter_channels, dict):
@@ -9637,7 +9794,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 return a == b
 
             existing_screen_tool_dump = bool(
-                isinstance(screen_text, str) and _screen_looks_like_tool_dump(screen_text)
+                isinstance(screen_text, str)
+                and _screen_looks_like_tool_dump(screen_text)
             )
             existing_screen_internal_status = bool(
                 isinstance(screen_text, str)
@@ -9838,8 +9996,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 if follow_up_screen_summary:
                     supplementary_screen_summary = follow_up_screen_summary
                 response_candidate = _strip_presenter_tags(response_text)
-                response_candidate_internal_status = _looks_like_internal_status_diagnostic(
-                    response_candidate
+                response_candidate_internal_status = (
+                    _looks_like_internal_status_diagnostic(response_candidate)
                 )
                 response_candidate_tool_dump = bool(
                     isinstance(response_candidate, str)
@@ -10039,7 +10197,12 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                                     "model": screen_model_used,
                                 }
                             )
-                            synthesis_response = _llm_generate_screen_backfill(llm_client, synthesis_system, synthesis_user, screen_model_used)
+                            synthesis_response = _llm_generate_screen_backfill(
+                                llm_client,
+                                synthesis_system,
+                                synthesis_user,
+                                screen_model_used,
+                            )
                             screen_duration_ms = (
                                 time.perf_counter() - llm_start
                             ) * 1000.0
@@ -10186,7 +10349,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     base_channels["screen"] = str(screen_candidate).strip()
                     if screen_backfill_source == "response_text":
                         base_channels["format"] = "screen_backfill_from_response_v1"
-                    elif screen_backfill_source == "response_text_plus_follow_up_summary":
+                    elif (
+                        screen_backfill_source == "response_text_plus_follow_up_summary"
+                    ):
                         base_channels["format"] = (
                             "screen_backfill_from_response_with_operational_summary_v1"
                         )
@@ -10429,10 +10594,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     if isinstance(channels, dict) and channels:
                         presenter_channels = channels
                         workflow_spoken = channels.get("spoken")
-                        if (
-                            isinstance(workflow_spoken, str)
-                            and workflow_spoken.strip()
-                        ):
+                        if isinstance(workflow_spoken, str) and workflow_spoken.strip():
                             spoken_backfill_applied = True
                     if narration_trace_enabled and narration_trace is not None:
                         try:
@@ -10535,7 +10697,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         f"{screen_text}\n"
                     )
 
-                    narration_response = _llm_generate_spoken_backfill(llm_client, narration_system, narration_user, model_name)
+                    narration_response = _llm_generate_spoken_backfill(
+                        llm_client, narration_system, narration_user, model_name
+                    )
                     spoken_backfill_source = "llm_synthesis"
                     spoken_backfill_model_id = model_name
 
@@ -10681,8 +10845,10 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         screen_element_targets = _extract_screen_element_targets_from_render_plan(
             render_plan_for_display
         )
-        screen_element_reason_codes = _extract_screen_element_reason_codes_from_render_plan(
-            render_plan_for_display
+        screen_element_reason_codes = (
+            _extract_screen_element_reason_codes_from_render_plan(
+                render_plan_for_display
+            )
         )
         screen_table_elements = _extract_screen_table_elements_from_render_plan(
             render_plan_for_display,
@@ -10858,8 +11024,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 policy_state = None
                 registry_snapshot = None
                 try:
-                    policy_state, registry_snapshot = orchestrator._load_workflow_model_policy(
-                        request_language
+                    policy_state, registry_snapshot = (
+                        orchestrator._load_workflow_model_policy(request_language)
                     )
                 except Exception:
                     policy_state = None
@@ -10924,17 +11090,23 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         workflow_payload.get("buttonify_prompt_available")
                     )
                 if isinstance(workflow_payload.get("buttonify_prompt_error"), str):
-                    buttonify_prompt_error = workflow_payload.get("buttonify_prompt_error")
+                    buttonify_prompt_error = workflow_payload.get(
+                        "buttonify_prompt_error"
+                    )
                 if isinstance(workflow_payload.get("buttonify_status"), str):
                     buttonify_status = workflow_payload.get("buttonify_status", "no_op")
                 if isinstance(workflow_payload.get("buttonify_error_class"), str):
-                    buttonify_error_class = workflow_payload.get("buttonify_error_class")
+                    buttonify_error_class = workflow_payload.get(
+                        "buttonify_error_class"
+                    )
                 if isinstance(workflow_payload.get("buttonify_model_used"), str):
                     buttonify_model_used = workflow_payload.get("buttonify_model_used")
                 buttonify_model_attempted = bool(
                     workflow_payload.get("buttonify_model_attempted")
                 )
-                if isinstance(workflow_payload.get("buttonify_suppression_reason"), str):
+                if isinstance(
+                    workflow_payload.get("buttonify_suppression_reason"), str
+                ):
                     buttonify_suppression_reason = workflow_payload.get(
                         "buttonify_suppression_reason"
                     )
@@ -10944,7 +11116,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     buttonify_preflight_rejection_reason = workflow_payload.get(
                         "buttonify_preflight_rejection_reason"
                     )
-                contract_payload = workflow_payload.get("output_transformation_contract")
+                contract_payload = workflow_payload.get(
+                    "output_transformation_contract"
+                )
                 if isinstance(contract_payload, Mapping):
                     buttonify_workflow_contract = dict(contract_payload)
 
@@ -10985,7 +11159,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     llm_start = time.perf_counter()
                     buttonify_response = None
                     try:
-                        buttonify_response = _llm_generate_buttonify(llm_client, buttonify_prompt, buttonify_model_used)
+                        buttonify_response = _llm_generate_buttonify(
+                            llm_client, buttonify_prompt, buttonify_model_used
+                        )
                         _record_stage_llm_call(
                             call_type="llm.generate",
                             model_name=buttonify_model_used,
@@ -11032,7 +11208,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 "preflight_rejection_reason": buttonify_preflight_rejection_reason,
             }
             if isinstance(buttonify_filtering_boundary, Mapping):
-                buttonify_meta["filtering_boundary"] = dict(buttonify_filtering_boundary)
+                buttonify_meta["filtering_boundary"] = dict(
+                    buttonify_filtering_boundary
+                )
             if buttonify_workflow_contract is not None:
                 buttonify_meta["workflow_contract"] = buttonify_workflow_contract
 
@@ -11170,16 +11348,18 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             applied_tool_batch_cap = None
 
         if show_tool_use_progress:
-            response_finalising_payload = _build_response_finalising_tool_progress_payload(
-                request_id=request_id,
-                eta_ms=_estimate_response_finalising_eta_ms(
+            response_finalising_payload = (
+                _build_response_finalising_tool_progress_payload(
+                    request_id=request_id,
+                    eta_ms=_estimate_response_finalising_eta_ms(
+                        response_text=response_text,
+                        tool_message_count=len(tool_messages),
+                        persist_history=bool(history_user_id),
+                    ),
                     response_text=response_text,
                     tool_message_count=len(tool_messages),
                     persist_history=bool(history_user_id),
-                ),
-                response_text=response_text,
-                tool_message_count=len(tool_messages),
-                persist_history=bool(history_user_id),
+                )
             )
             _emit_generate_progress(response_finalising_payload)
 
@@ -11809,14 +11989,18 @@ def history_debug():
             if not owner_user_id:
                 return jsonify({"error": "Not authorised for conversation"}), 403
 
-        owner_namespace = _derive_namespace_for_user_org(
-            owner_user_id,
-            (
-                shared_invite.get("organisation_concept_id")
-                if shared_invite
-                else organisation_concept_id
-            ),
-        ) or namespace or chat_history_service.resolve_chat_history_namespace(owner_user_id)
+        owner_namespace = (
+            _derive_namespace_for_user_org(
+                owner_user_id,
+                (
+                    shared_invite.get("organisation_concept_id")
+                    if shared_invite
+                    else organisation_concept_id
+                ),
+            )
+            or namespace
+            or chat_history_service.resolve_chat_history_namespace(owner_user_id)
+        )
         print(
             f"[history/debug] owner_user_id={owner_user_id}, owner_namespace={owner_namespace}"
         )
@@ -11855,11 +12039,13 @@ def history_debug():
                 if isinstance(candidate, dict):
                     transformation_payload = candidate
             if transformation_payload is None:
-                transformation_payload = build_response_transformation_telemetry_payload(
-                    request_id=(
-                        debug_data.get("request_id")
-                        if isinstance(debug_data, dict)
-                        else None
+                transformation_payload = (
+                    build_response_transformation_telemetry_payload(
+                        request_id=(
+                            debug_data.get("request_id")
+                            if isinstance(debug_data, dict)
+                            else None
+                        )
                     )
                 )
             transformations = transformation_payload.get("transformations")
@@ -11941,14 +12127,17 @@ def history_telemetry_locator():
                 return jsonify({"error": "Not authorised for conversation"}), 403
             owner_user_id = user_concept_id
 
-        owner_namespace = _derive_namespace_for_user_org(
-            owner_user_id,
-            (
-                shared_invite.get("organisation_concept_id")
-                if shared_invite
-                else organisation_concept_id
-            ),
-        ) or namespace
+        owner_namespace = (
+            _derive_namespace_for_user_org(
+                owner_user_id,
+                (
+                    shared_invite.get("organisation_concept_id")
+                    if shared_invite
+                    else organisation_concept_id
+                ),
+            )
+            or namespace
+        )
         if not owner_namespace:
             owner_namespace = chat_history_service.resolve_chat_history_namespace(
                 owner_user_id
@@ -12295,7 +12484,9 @@ def history_backfill_spoken():
             f"{screen_text}\n"
         )
 
-        narration_response = _llm_generate_spoken_backfill(llm_client, narration_system, narration_user, model_name)
+        narration_response = _llm_generate_spoken_backfill(
+            llm_client, narration_system, narration_user, model_name
+        )
 
         spoken = _extract_spoken_only(str(narration_response))
         if not spoken:
@@ -12402,6 +12593,7 @@ def history_length():
 @von_bp.route("/history/sessions", methods=["GET"])
 def history_sessions():
     """Return per-session chat history counts for the current user."""
+
     def _resolve_authorised_active_session_id(
         *,
         user_concept_id: str,
@@ -12538,7 +12730,9 @@ def history_sessions():
                         or invite.get("inviter_user_id")
                     )
                     if not invite.get("conversation_owner_user_id"):
-                        resolved_owner = resolve_conversation_owner(session_id=session_id)
+                        resolved_owner = resolve_conversation_owner(
+                            session_id=session_id
+                        )
                         resolved_owner_id = _normalise_concept_id(resolved_owner)
                         if resolved_owner_id:
                             owner_id = resolved_owner_id
@@ -12888,9 +13082,9 @@ def set_user_concept():
         effective_context = get_effective_context(
             window_session_id, dict(session), user_concept_id
         )
-        organisation_concept_id = effective_context.get("organisation_id") or session.get(
-            "organisation_concept_id"
-        )
+        organisation_concept_id = effective_context.get(
+            "organisation_id"
+        ) or session.get("organisation_concept_id")
         role_in_org = effective_context.get("role") or session.get("role_in_org")
         org_slug = None
         if isinstance(organisation_concept_id, str) and organisation_concept_id.strip():
@@ -14876,26 +15070,26 @@ def _handle_orchestrator_missing_fallback(
             return "google"
         return "unknown"
 
-    orchestrator_status = current_app.config.get(
-        'INTERNAL_MCP_ORCHESTRATOR_STATUS'
-    ) or {}
-    orch_state = orchestrator_status.get('state', 'unknown')
+    orchestrator_status = (
+        current_app.config.get("INTERNAL_MCP_ORCHESTRATOR_STATUS") or {}
+    )
+    orch_state = orchestrator_status.get("state", "unknown")
     current_app.logger.warning(
-        '[ORCHESTRATOR_FALLBACK] orchestrator is None '
-        '(state=%s); falling back to direct LLM generate for request_id=%s',
+        "[ORCHESTRATOR_FALLBACK] orchestrator is None "
+        "(state=%s); falling back to direct LLM generate for request_id=%s",
         orch_state,
         request_id,
     )
     auxiliary_llm_calls.append(
         {
-            'type': 'orchestrator_unavailable_fallback',
-            'orchestrator_state': orch_state,
-            'orchestrator_status_error': orchestrator_status.get('error'),
+            "type": "orchestrator_unavailable_fallback",
+            "orchestrator_state": orch_state,
+            "orchestrator_status_error": orchestrator_status.get("error"),
         }
     )
 
     method_catalogue_for_fallback = None
-    if gateway is not None and hasattr(gateway, 'describe_methods'):
+    if gateway is not None and hasattr(gateway, "describe_methods"):
         try:
             described = gateway.describe_methods()
             if isinstance(described, Mapping):
@@ -14911,31 +15105,29 @@ def _handle_orchestrator_missing_fallback(
         )
     )
     unavailable_required_tools = list(
-        fallback_requirement_state.get('unavailable_required_tools') or []
+        fallback_requirement_state.get("unavailable_required_tools") or []
     )
     if unavailable_required_tools:
         auxiliary_llm_calls.append(
             annotate_python_decision_event(
                 {
-                    'type': 'prompt_tool_requirements_preflight',
-                    'stage': 'fallback_direct_llm',
-                    'required_tools': list(
+                    "type": "prompt_tool_requirements_preflight",
+                    "stage": "fallback_direct_llm",
+                    "required_tools": list(
                         cast(
                             list[str],
-                            fallback_requirement_state.get('required_tools') or [],
+                            fallback_requirement_state.get("required_tools") or [],
                         )
                     ),
-                    'unavailable_required_tools': list(
-                        unavailable_required_tools
-                    ),
+                    "unavailable_required_tools": list(unavailable_required_tools),
                 },
-                stage='fallback_direct_llm',
-                component='internal_mcp_orchestrator',
-                function='_derive_prompt_tool_requirements',
-                decision_class='prompt_requirement_inference',
-                decision_source='explicit_identifier_parse',
+                stage="fallback_direct_llm",
+                component="internal_mcp_orchestrator",
+                function="_derive_prompt_tool_requirements",
+                decision_class="prompt_requirement_inference",
+                decision_source="explicit_identifier_parse",
                 changed_outcome=True,
-                reason_code='explicit_prompt_tool_unavailable_in_fallback',
+                reason_code="explicit_prompt_tool_unavailable_in_fallback",
                 possible_inappropriate_python_code_use=False,
             )
         )
@@ -14943,21 +15135,20 @@ def _handle_orchestrator_missing_fallback(
     response_text = llm_client.generate(
         prompt_text, context=enhanced_context, model=model_name
     )
-    llm_interaction['duration_ms'] = (
-        time.perf_counter() - llm_start_perf
-    ) * 1000.0
-    llm_interaction['calls'] = [
+    llm_interaction["duration_ms"] = (time.perf_counter() - llm_start_perf) * 1000.0
+    llm_interaction["calls"] = [
         {
-            'type': 'llm.generate',
-            'model': model_name,
-            'provider': _infer_provider(model_name),
-            'duration_ms': llm_interaction['duration_ms'],
-            'usage': None,
-            'workflow': 'von_generate',
-            'stage': 'fallback_direct_llm',
+            "type": "llm.generate",
+            "model": model_name,
+            "provider": _infer_provider(model_name),
+            "duration_ms": llm_interaction["duration_ms"],
+            "usage": None,
+            "workflow": "von_generate",
+            "stage": "fallback_direct_llm",
         }
     ]
     return response_text
+
 
 def _perform_legacy_spoken_backfill(
     llm_client,
@@ -14983,7 +15174,7 @@ def _perform_legacy_spoken_backfill(
             return str(text_attr)
         return str(text)
 
-    spoken_backfill_status = 'not_started'
+    spoken_backfill_status = "not_started"
     spoken_backfill_suppression_reason = None
     spoken_backfill_applied = False
     spoken_backfill_error_class = None
@@ -14995,23 +15186,25 @@ def _perform_legacy_spoken_backfill(
     )
 
     needs_spoken_backfill = presenter_mode_requested and (
-        presenter_channels_missing or not presenter_channels.get('spoken')
+        presenter_channels_missing or not presenter_channels.get("spoken")
     )
 
     if needs_spoken_backfill:
         try:
             if not screen_text or len(screen_text.strip()) < 10:
-                spoken_backfill_second_pass_reason = 'insufficient_screen_text'
+                spoken_backfill_second_pass_reason = "insufficient_screen_text"
             else:
                 timing_hint = None
                 try:
                     speech = speech_info if isinstance(speech_info, dict) else {}
-                    raw_settings = speech.get('settings')
+                    raw_settings = speech.get("settings")
                     settings = raw_settings if isinstance(raw_settings, dict) else {}
-                    preferred = settings.get('preferred_speaking_seconds')
-                    maximum = settings.get('max_speaking_seconds')
+                    preferred = settings.get("preferred_speaking_seconds")
+                    maximum = settings.get("max_speaking_seconds")
                     try:
-                        preferred_int = int(preferred) if preferred is not None else None
+                        preferred_int = (
+                            int(preferred) if preferred is not None else None
+                        )
                     except Exception:
                         preferred_int = None
                     try:
@@ -15026,29 +15219,37 @@ def _perform_legacy_spoken_backfill(
                     if preferred_int is not None and maximum_int is not None:
                         effective_preferred = min(preferred_int, maximum_int)
                     if effective_preferred is not None or maximum_int is not None:
-                        timing_hint = (
-                            f'Speech timing hint: preferred={effective_preferred!r}, max={maximum_int!r}.'
-                        )
+                        timing_hint = f"Speech timing hint: preferred={effective_preferred!r}, max={maximum_int!r}."
                 except Exception:
                     pass
 
                 narration_system = (
-                    'You are Von. Produce a short talk track for text-to-speech. '
-                    'Return ONLY one block: <spoken>...</spoken>. '
-                    'Do not include <screen>. Do not include code blocks. '
-                    + ('\n\n' + timing_hint if timing_hint else '')
-                    + ('\n\nVON CHAT NARRATION PROMPT:\n' + narration_prompt_text if narration_prompt_text else '')
+                    "You are Von. Produce a short talk track for text-to-speech. "
+                    "Return ONLY one block: <spoken>...</spoken>. "
+                    "Do not include <screen>. Do not include code blocks. "
+                    + ("\n\n" + timing_hint if timing_hint else "")
+                    + (
+                        "\n\nVON CHAT NARRATION PROMPT:\n" + narration_prompt_text
+                        if narration_prompt_text
+                        else ""
+                    )
                 )
-                narration_user = f'User: {prompt_text}\n\nContent: {screen_text}'
-                narration_response = _llm_generate_spoken_backfill(llm_client, narration_system, narration_user, model_name)
+                narration_user = f"User: {prompt_text}\n\nContent: {screen_text}"
+                narration_response = _llm_generate_spoken_backfill(
+                    llm_client, narration_system, narration_user, model_name
+                )
                 spoken_fallback = _coerce_spoken_text(narration_response)
                 if not spoken_fallback:
                     spoken_fallback = _coerce_spoken_text(screen_text)
                 if spoken_fallback:
-                    base_channels = dict(presenter_channels) if isinstance(presenter_channels, dict) else {}
-                    base_channels['screen'] = screen_text
-                    base_channels['spoken'] = spoken_fallback
-                    base_channels['format'] = 'narration_fallback_v1'
+                    base_channels = (
+                        dict(presenter_channels)
+                        if isinstance(presenter_channels, dict)
+                        else {}
+                    )
+                    base_channels["screen"] = screen_text
+                    base_channels["spoken"] = spoken_fallback
+                    base_channels["format"] = "narration_fallback_v1"
                     presenter_channels = base_channels
                     spoken_backfill_applied = True
         except Exception as exc:
@@ -15056,22 +15257,28 @@ def _perform_legacy_spoken_backfill(
 
     latency = (time.perf_counter() - spoken_backfill_started_perf) * 1000.0
     if not presenter_mode_requested:
-        spoken_backfill_status = 'skipped'
-        spoken_backfill_suppression_reason = 'presenter_mode_disabled'
+        spoken_backfill_status = "skipped"
+        spoken_backfill_suppression_reason = "presenter_mode_disabled"
     elif not needs_spoken_backfill:
-        spoken_backfill_status = 'skipped'
-        spoken_backfill_suppression_reason = 'not_required'
+        spoken_backfill_status = "skipped"
+        spoken_backfill_suppression_reason = "not_required"
     elif spoken_backfill_applied:
-        spoken_backfill_status = 'success'
+        spoken_backfill_status = "success"
     elif spoken_backfill_error_class:
-        spoken_backfill_status = 'failure'
-        spoken_backfill_suppression_reason = 'model_error'
+        spoken_backfill_status = "failure"
+        spoken_backfill_suppression_reason = "model_error"
     else:
-        spoken_backfill_status = 'no_op'
-        spoken_backfill_suppression_reason = spoken_backfill_second_pass_reason or 'no_spoken_generated'
+        spoken_backfill_status = "no_op"
+        spoken_backfill_suppression_reason = (
+            spoken_backfill_second_pass_reason or "no_spoken_generated"
+        )
 
-    return presenter_channels, spoken_backfill_status, spoken_backfill_suppression_reason, latency
-
+    return (
+        presenter_channels,
+        spoken_backfill_status,
+        spoken_backfill_suppression_reason,
+        latency,
+    )
 
 
 def _llm_generate_screen_backfill(llm_client, system, user, model):
@@ -15084,6 +15291,7 @@ def _llm_generate_screen_backfill(llm_client, system, user, model):
         model=model,
     )
 
+
 def _llm_generate_spoken_backfill(llm_client, system, user, model):
     return llm_client.generate(
         prompt="Generate <spoken> talk track",
@@ -15093,6 +15301,7 @@ def _llm_generate_spoken_backfill(llm_client, system, user, model):
         ],
         model=model,
     )
+
 
 def _llm_generate_buttonify(llm_client, prompt, model):
     return llm_client.generate(

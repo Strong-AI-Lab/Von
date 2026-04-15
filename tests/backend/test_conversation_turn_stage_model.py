@@ -27,6 +27,17 @@ def _patch_stage_catalogue(monkeypatch: pytest.MonkeyPatch) -> None:
             runtime_aliases=("workflow_discovery",),
         ),
         stage_model._StageSpec(
+            stage_id="expected_outcome_inference",
+            stage_label="Infer expected outcome",
+            order=22,
+            stage_kind="formal",
+            boundary_type="policy",
+            stage_concept_id="#V#conversation_turn_stage_expected_outcome_inference",
+            workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+            workflow_state_id="expected_outcome_inference",
+            runtime_aliases=("expected_outcome_inference",),
+        ),
+        stage_model._StageSpec(
             stage_id="workflow_dispatch_prepare",
             stage_label="Workflow dispatch preparation",
             order=25,
@@ -34,6 +45,28 @@ def _patch_stage_catalogue(monkeypatch: pytest.MonkeyPatch) -> None:
             boundary_type="routing",
             stage_concept_id="#V#conversation_turn_stage_workflow_dispatch_prepare",
             runtime_aliases=("workflow_dispatch_prepare", "orchestrator_start"),
+        ),
+        stage_model._StageSpec(
+            stage_id="selector_preparation",
+            stage_label="Prepare selector context",
+            order=27,
+            stage_kind="formal",
+            boundary_type="routing",
+            stage_concept_id="#V#conversation_turn_stage_selector_preparation",
+            workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+            workflow_state_id="selector_preparation",
+            runtime_aliases=("selector_preparation",),
+        ),
+        stage_model._StageSpec(
+            stage_id="selector_decision",
+            stage_label="Select workflow",
+            order=29,
+            stage_kind="formal",
+            boundary_type="routing",
+            stage_concept_id="#V#conversation_turn_stage_selector_decision",
+            workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+            workflow_state_id="selector_decision",
+            runtime_aliases=("selector_decision",),
         ),
         stage_model._StageSpec(
             stage_id="workflow_dispatch",
@@ -85,7 +118,10 @@ def _patch_stage_catalogue(monkeypatch: pytest.MonkeyPatch) -> None:
             stage_concept_id="#V#conversation_turn_stage_recovery_tool_batch_execute",
             workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
             workflow_state_id="apply_recovery_tool_batch",
-            runtime_aliases=("apply_recovery_tool_batch", "recovery_tool_batch_execute"),
+            runtime_aliases=(
+                "apply_recovery_tool_batch",
+                "recovery_tool_batch_execute",
+            ),
         ),
         stage_model._StageSpec(
             stage_id="recovery_answer_prepare",
@@ -136,20 +172,28 @@ def test_stage_model_snapshot_exposes_formal_and_non_formal_stages() -> None:
     snapshot = build_conversation_turn_stage_model_snapshot()
 
     assert snapshot["schema_version"] == "conversation_turn_stage_model.v1"
-    assert snapshot["workflow_representation_id"] == "#V#conversation_turn_execution_workflow"
+    assert (
+        snapshot["workflow_representation_id"]
+        == "#V#conversation_turn_execution_workflow"
+    )
     stages = snapshot["stages"]
     assert isinstance(stages, list)
     assert any(stage.get("stage_kind") == "formal" for stage in stages)
     assert any(stage.get("stage_kind") == "non_formal" for stage in stages)
-    orders = [int(stage.get("order")) for stage in stages if stage.get("order") is not None]
+    orders = [
+        int(stage.get("order")) for stage in stages if stage.get("order") is not None
+    ]
     assert orders == sorted(orders)
 
 
 def test_stage_path_maps_known_runtime_stages_to_catalogue_entries() -> None:
     result = build_conversation_turn_stage_path(
         runtime_stages=[
+            "expected_outcome_inference",
             "workflow_discovery",
             "workflow_dispatch_prepare",
+            "selector_preparation",
+            "selector_decision",
             "tool_plan",
             "tool_execute",
             "completion_gate",
@@ -162,8 +206,11 @@ def test_stage_path_maps_known_runtime_stages_to_catalogue_entries() -> None:
     assert result["has_unmapped_runtime_stages"] is False
     path = result["path"]
     assert [entry["stage_id"] for entry in path] == [
+        "expected_outcome_inference",
         "workflow_discovery",
         "workflow_dispatch_prepare",
+        "selector_preparation",
+        "selector_decision",
         "tool_plan",
         "tool_execute",
         "completion_gate",
@@ -254,9 +301,15 @@ def test_stage_path_prefers_mapped_execution_workflow_over_route_hint() -> None:
     assert path[1]["workflow_id"] == TOOL_CALLING_WORKFLOW_ID
 
 
-def test_stage_path_preserves_selected_workflow_identity_when_only_auxiliary_workflow_is_observed() -> None:
+def test_stage_path_preserves_selected_workflow_identity_when_only_auxiliary_workflow_is_observed() -> (
+    None
+):
     result = build_conversation_turn_stage_path(
-        runtime_stages=["workflow_dispatch_prepare", "buttonify", "response_finalising"],
+        runtime_stages=[
+            "workflow_dispatch_prepare",
+            "buttonify",
+            "response_finalising",
+        ],
         workflow_id=CHAT_BUTTONIFY_WORKFLOW_ID,
         selected_workflow_id="#V#arxiv_paper_representation_workflow",
     )

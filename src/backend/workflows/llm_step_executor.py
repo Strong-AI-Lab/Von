@@ -76,6 +76,12 @@ def _coerce_context_messages(value: Any) -> list[dict[str, str]]:
     return rows
 
 
+def _coerce_context_telemetry(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    return {str(key): item for key, item in value.items() if isinstance(key, str)}
+
+
 def _resolve_user_context_ids(
     context: Mapping[str, Any],
 ) -> tuple[str | None, str | None]:
@@ -167,9 +173,7 @@ def _resolve_prompt_render(
     prompt_contract_map = (
         prompt_contract if isinstance(prompt_contract, Mapping) else {}
     )
-    requested_prompt_ids = (
-        prompt_contract_map.get("requested_prompt_concept_ids") or []
-    )
+    requested_prompt_ids = prompt_contract_map.get("requested_prompt_concept_ids") or []
     prompt_candidates = (
         list(requested_prompt_ids) if isinstance(requested_prompt_ids, list) else []
     )
@@ -427,7 +431,9 @@ def _apply_validation_policy(
         )
 
     if output_format == "buttonify_options_json":
-        options = sanitise_buttonify_options(parse_buttonify_options_json(response_text))
+        options = sanitise_buttonify_options(
+            parse_buttonify_options_json(response_text)
+        )
         status = "success" if options else "no_op"
         return (
             {
@@ -555,7 +561,13 @@ def _build_gateway_runtime(
     user_concept_id, org_concept_id = _resolve_user_context_ids(request.data)
     policy_state, _policy_telemetry = orchestrator._load_workflow_model_policy(None)
     registry_snapshot = get_model_registry_snapshot()
-    return orchestrator, policy_state, registry_snapshot, user_concept_id, org_concept_id
+    return (
+        orchestrator,
+        policy_state,
+        registry_snapshot,
+        user_concept_id,
+        org_concept_id,
+    )
 
 
 def _build_result(
@@ -589,7 +601,9 @@ def _build_result(
         "selected_prompt_source": prompt_source,
         "selected_model": selected_model,
         "selected_model_candidate": (
-            dict(selected_candidate) if isinstance(selected_candidate, Mapping) else None
+            dict(selected_candidate)
+            if isinstance(selected_candidate, Mapping)
+            else None
         ),
         "tool_invocations": list(tool_invocations),
         "tool_messages": list(tool_messages),
@@ -645,7 +659,9 @@ def _run_direct_llm_step(
         )
 
     context_messages = _coerce_context_messages(
-        request.data.get(_context_string(llm_policy_map.get("context_messages_context_key")))
+        request.data.get(
+            _context_string(llm_policy_map.get("context_messages_context_key"))
+        )
     )
     model_name = request.environment.model
     start = time.perf_counter()
@@ -698,6 +714,14 @@ def _run_gateway_llm_step_no_tools(
     )
     llm_calls: list[dict[str, Any]] = []
     aux_llm_calls: list[dict[str, Any]] = []
+    context_messages_key = _context_string(
+        llm_policy_map.get("context_messages_context_key")
+    )
+    context_messages = _coerce_context_messages(request.data.get(context_messages_key))
+    context_lineage_key = _context_string(
+        llm_policy_map.get("context_lineage_context_key")
+    )
+    context_telemetry = _coerce_context_telemetry(request.data.get(context_lineage_key))
     emit_progress = (
         request.data.get("emit_progress")
         if callable(request.data.get("emit_progress"))
@@ -735,11 +759,7 @@ def _run_gateway_llm_step_no_tools(
         orchestrator._run_llm_with_fallbacks(
             stage=stage,
             prompt=rendered_prompt,
-            context=_coerce_context_messages(
-                request.data.get(
-                    _context_string(llm_policy_map.get("context_messages_context_key"))
-                )
-            ),
+            context=context_messages,
             default_client=request.environment.llm_client,
             default_model=request.environment.model,
             policy_state=policy_state,
@@ -750,6 +770,7 @@ def _run_gateway_llm_step_no_tools(
             aux_log=aux_llm_calls,
             record_llm_call=_record_llm_call,
             emit_progress=emit_progress,
+            context_telemetry=context_telemetry,
         )
     )
 
@@ -857,27 +878,35 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
 
     llm_calls = cast(
         list[dict[str, Any]],
-        request.data.get("llm_calls")
-        if isinstance(request.data.get("llm_calls"), list)
-        else [],
+        (
+            request.data.get("llm_calls")
+            if isinstance(request.data.get("llm_calls"), list)
+            else []
+        ),
     )
     aux_llm_calls = cast(
         list[dict[str, Any]],
-        request.data.get("aux_llm_calls")
-        if isinstance(request.data.get("aux_llm_calls"), list)
-        else [],
+        (
+            request.data.get("aux_llm_calls")
+            if isinstance(request.data.get("aux_llm_calls"), list)
+            else []
+        ),
     )
     invocations = cast(
         list[dict[str, Any]],
-        request.data.get("invocations")
-        if isinstance(request.data.get("invocations"), list)
-        else [],
+        (
+            request.data.get("invocations")
+            if isinstance(request.data.get("invocations"), list)
+            else []
+        ),
     )
     tool_messages = cast(
         list[dict[str, Any]],
-        request.data.get("tool_messages")
-        if isinstance(request.data.get("tool_messages"), list)
-        else [],
+        (
+            request.data.get("tool_messages")
+            if isinstance(request.data.get("tool_messages"), list)
+            else []
+        ),
     )
     selected_models: dict[str, str | None] = {}
 
@@ -1036,9 +1065,7 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
         "build_validation_error_result": lambda errors, warnings, unavailable, **kwargs: _build_simple_error_result(
             "tool_call_validation_error",
             {
-                "message": "; ".join(
-                    [*list(errors or []), *list(warnings or [])]
-                )
+                "message": "; ".join([*list(errors or []), *list(warnings or [])])
                 or "tool validation failed",
                 "errors": list(errors or []),
                 "warnings": list(warnings or []),

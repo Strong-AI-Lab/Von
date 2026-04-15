@@ -55,3 +55,60 @@ def test_execute_llm_step_fails_closed_when_json_value_is_invalid() -> None:
     envelope = result.outputs["llm_step_envelope"]
     assert envelope["validation"]["status"] == "failed"
     assert "json_parse_failed" in str(envelope["validation"]["reason"] or "")
+
+
+def test_execute_llm_step_passes_context_lineage_to_gateway_llm(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _StubOrchestrator:
+        def _run_llm_with_fallbacks(self, **kwargs):
+            captured["context"] = kwargs.get("context")
+            captured["context_telemetry"] = kwargs.get("context_telemetry")
+            return ('{"ok": true}', "test-model", None)
+
+    monkeypatch.setattr(
+        "src.backend.workflows.llm_step_executor._build_gateway_runtime",
+        lambda request: (_StubOrchestrator(), object(), None, None, None),
+    )
+
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=MagicMock(),
+            gateway=object(),
+            model="test-model",
+        ),
+        data={
+            "selector_context_messages": [
+                {"role": "system", "content": "Selector prompt"},
+                {"role": "user", "content": "Who am I?"},
+            ],
+            "selector_context_lineage": {
+                "stage": "selector_decision",
+                "base_context_source": "augmented_context",
+                "stage_added_message_count": 1,
+            },
+        },
+        prompt_contract={"prompt_text": "Return JSON only."},
+        llm_policy={
+            "context_messages_context_key": "selector_context_messages",
+            "context_lineage_context_key": "selector_context_lineage",
+        },
+        validation_policy={"output_format": "json_value"},
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "success"
+    assert captured["context"] == [
+        {"role": "system", "content": "Selector prompt"},
+        {"role": "user", "content": "Who am I?"},
+    ]
+    assert captured["context_telemetry"] == {
+        "stage": "selector_decision",
+        "base_context_source": "augmented_context",
+        "stage_added_message_count": 1,
+    }

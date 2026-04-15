@@ -211,9 +211,114 @@ def test_turn_execution_route_discovers_when_prefilled_payload_is_empty(
     assert result.outputs["workflow_discovery_result"]["requested_query"] == (
         "https://example.com/resource"
     )
-    assert CHAT_ASSISTANT_WORKFLOW_ID in result.outputs["selected_workflow_trace"][
-        "selector_candidate_ids"
-    ]
+    assert (
+        CHAT_ASSISTANT_WORKFLOW_ID
+        in result.outputs["selected_workflow_trace"]["selector_candidate_ids"]
+    )
+
+
+def test_prepare_selector_context_emits_prompt_and_grounding_contract(
+    monkeypatch,
+) -> None:
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
+        gateway=cast(Any, _DummyGateway()),
+        selector_enabled=True,
+    )
+    aux_llm_calls: list[dict[str, Any]] = []
+
+    result = orchestrator._action_turn_execution_prepare_selector_context(
+        SimpleNamespace(
+            data={
+                "user_prompt": "What papers of mine do you know about?",
+                "workflow_discovery_result": {
+                    "matches": [
+                        {
+                            "concept_id": CHAT_ASSISTANT_WORKFLOW_ID,
+                            "name": "Chat Assistant Workflow",
+                            "description": "Default chat assistant route.",
+                            "is_executable": True,
+                            "executability_reason": "executable_now",
+                            "routing_eligible": True,
+                        }
+                    ],
+                    "candidates": [
+                        {
+                            "concept_id": CHAT_ASSISTANT_WORKFLOW_ID,
+                            "name": "Chat Assistant Workflow",
+                            "description": "Default chat assistant route.",
+                            "is_executable": True,
+                            "executability_reason": "executable_now",
+                            "routing_eligible": True,
+                        }
+                    ],
+                    "match_count": 1,
+                },
+                "turn_expected_outcome_summary": (
+                    "Answer only with papers that can be grounded to the user."
+                ),
+                "turn_expected_grounding_requirement": (
+                    "Only mention papers when authorship or ownership is grounded."
+                ),
+                "turn_expected_precision_policy": (
+                    "Prefer omission or explicit uncertainty over speculative recall."
+                ),
+                "turn_selector_guidance": (
+                    "Prefer retrieval or verification routes when the current context is insufficient."
+                ),
+                "augmented_context": [
+                    {
+                        "role": "system",
+                        "content": "CURRENT USER CONTEXT: Test User (#V#test_user)",
+                    },
+                    {
+                        "role": "user",
+                        "content": "What papers of mine do you know about?",
+                    },
+                ],
+                "aux_llm_calls": aux_llm_calls,
+            },
+            environment=SimpleNamespace(
+                user_namespace="#V#user",
+                llm_client=_DummyLLM(),
+                model="test-model",
+            ),
+        )
+    )
+
+    assert result.status == "success"
+    assert result.outputs["selector_prompt_available"] is True
+    selector_context = result.outputs["selector_context_messages"]
+    assert any(
+        isinstance(message, dict)
+        and "Expected answer contract for this turn"
+        in str(message.get("content") or "")
+        for message in selector_context
+    )
+    assert any(
+        isinstance(message, dict)
+        and "#V#chat_assistant_workflow" in str(message.get("content") or "")
+        for message in selector_context
+    )
+    lineage = result.outputs["selector_context_lineage"]
+    assert lineage["base_context_source"] == "augmented_context"
+    assert lineage["stage_added_message_count"] == 2
+    prepare_entry = next(
+        entry
+        for entry in aux_llm_calls
+        if isinstance(entry, dict)
+        and entry.get("type") == "workflow_dispatch_prepare_step"
+    )
+    assert prepare_entry["step_id"] == "selector_candidate_preparation"
+    prompt_entry = next(
+        entry
+        for entry in aux_llm_calls
+        if isinstance(entry, dict) and entry.get("type") == "workflow_selector_prompt"
+    )
+    assert prompt_entry["prompt_id"] == "#V#chat_turn_classifier_prompt"
+    assert "#V#chat_assistant_workflow" in (
+        ((prompt_entry.get("candidate_list") or {}).get("text")) or ""
+    )
 
 
 def test_turn_execution_route_reuses_augmented_context_for_selector_and_tracks_lineage(
@@ -320,6 +425,100 @@ def test_turn_execution_route_reuses_augmented_context_for_selector_and_tracks_l
             "base_context_source"
         ]
         == "augmented_context"
+    )
+
+
+def test_turn_execution_route_uses_prepared_selector_response_without_extra_llm_call(
+    monkeypatch,
+) -> None:
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
+        gateway=cast(Any, _DummyGateway()),
+        selector_enabled=True,
+    )
+
+    def _raise_if_called(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("selector LLM should not be called on prepared route data")
+
+    result = orchestrator._action_turn_execution_route(
+        SimpleNamespace(
+            data={
+                "user_prompt": "Who am I?",
+                "workflow_discovery_result": {
+                    "matches": [
+                        {
+                            "concept_id": CHAT_ASSISTANT_WORKFLOW_ID,
+                            "name": "Chat Assistant Workflow",
+                            "description": "Default chat assistant route.",
+                            "is_executable": True,
+                            "executability_reason": "executable_now",
+                            "routing_eligible": True,
+                        }
+                    ],
+                    "candidates": [
+                        {
+                            "concept_id": CHAT_ASSISTANT_WORKFLOW_ID,
+                            "name": "Chat Assistant Workflow",
+                            "description": "Default chat assistant route.",
+                            "is_executable": True,
+                            "executability_reason": "executable_now",
+                            "routing_eligible": True,
+                        }
+                    ],
+                    "match_count": 1,
+                },
+                "selector_prompt_available": True,
+                "selector_prompt_id": "#V#chat_turn_classifier_prompt",
+                "selector_prompt_text": "Selector system prompt",
+                "selector_call_prompt_text": "Select workflow",
+                "selector_requested_prompt_ids": ["#V#chat_turn_classifier_prompt"],
+                "selector_prompt_provenance": {
+                    "render_variables": {
+                        "candidate_list": "- #V#chat_assistant_workflow: Chat Assistant Workflow"
+                    }
+                },
+                "selector_candidate_entries": [
+                    {
+                        "concept_id": CHAT_ASSISTANT_WORKFLOW_ID,
+                        "name": "Chat Assistant Workflow",
+                        "description": "Default chat assistant route.",
+                        "candidate_source": "workflow_discovery",
+                    }
+                ],
+                "selector_candidate_ids": [CHAT_ASSISTANT_WORKFLOW_ID],
+                "selector_excluded_candidate_entries": [],
+                "selector_excluded_candidate_ids": [],
+                "selector_discovered_workflow_ids": [CHAT_ASSISTANT_WORKFLOW_ID],
+                "selector_context_messages": [
+                    {"role": "system", "content": "Selector system prompt"},
+                    {"role": "user", "content": "Who am I?"},
+                ],
+                "selector_context_lineage": {
+                    "stage": "selector_decision",
+                    "base_context_source": "augmented_context",
+                    "stage_added_message_count": 1,
+                },
+                "selector_raw_response": CHAT_ASSISTANT_WORKFLOW_ID,
+                "policy_state": None,
+                "registry_snapshot": None,
+                "llm_calls": [],
+                "aux_llm_calls": [],
+                "augmented_context": [
+                    {"role": "user", "content": "Who am I?"},
+                ],
+            },
+            environment=SimpleNamespace(
+                user_namespace="#V#user",
+                llm_client=SimpleNamespace(generate=_raise_if_called),
+                model="test-model",
+            ),
+        )
+    )
+
+    assert result.status == "success"
+    assert result.outputs["selected_workflow_id"] == CHAT_ASSISTANT_WORKFLOW_ID
+    assert result.outputs["selected_workflow_trace"]["selector_prompt_id"] == (
+        "#V#chat_turn_classifier_prompt"
     )
 
 
@@ -438,9 +637,7 @@ def test_turn_execution_route_recovers_single_discovered_execution_workflow_afte
                     "complete": WorkflowStateSpec(
                         state_id="complete",
                         actions=(
-                            WorkflowActionInvocation(
-                                action_id="tool.prepare_custom"
-                            ),
+                            WorkflowActionInvocation(action_id="tool.prepare_custom"),
                         ),
                         terminal=True,
                     )
@@ -647,9 +844,10 @@ def test_execute_selected_promotes_child_result_snapshot_into_completion_report(
     assert report["file_copy_concept_id"] == "#V#file_copy_456"
     assert report["result_snapshot"]["paper_concept_id"] == "#V#paper_123"
     assert report["result_snapshot"]["file_copy_concept_id"] == "#V#file_copy_456"
-    assert "Created paper concept: #V#paper_123." in result.outputs[
-        "selected_workflow_user_response"
-    ]
+    assert (
+        "Created paper concept: #V#paper_123."
+        in result.outputs["selected_workflow_user_response"]
+    )
     assert "Created paper concept: #V#paper_123." in report["response_text"]
     assert "Linked file copy: #V#file_copy_456." in report["response_text"]
     assert "Created paper concept: #V#paper_123." in result.outputs["response_text"]
@@ -694,7 +892,10 @@ def test_execute_selected_captures_child_failure_for_recovery_path(
     assert result.outputs["selected_workflow_child_failed"] is True
     assert result.outputs["selected_workflow_final_state"] == "failed"
     assert result.outputs["selected_workflow_error"] == "selected route failed closed"
-    assert result.outputs["selected_workflow_user_response"] == "selected route failed closed"
+    assert (
+        result.outputs["selected_workflow_user_response"]
+        == "selected route failed closed"
+    )
     assert result.outputs["response_text"] == "selected route failed closed"
     report = result.outputs["completion_report"]
     assert report["workflow_id"] == "#V#specialised_route"
@@ -749,6 +950,18 @@ def test_execute_selected_routes_chat_assistant_via_direct_response(
                 "conversation_session_id": "session-1",
                 "turn_id": "turn-1",
                 "user_prompt": "Who am I?",
+                "turn_expected_outcome_summary": (
+                    "Answer from grounded authenticated user context only."
+                ),
+                "turn_expected_grounding_requirement": (
+                    "Only state identity details that are grounded in the current turn context."
+                ),
+                "turn_expected_precision_policy": (
+                    "Prefer explicit uncertainty over speculation."
+                ),
+                "turn_answering_guidance": (
+                    "If no grounded identity evidence is available, say that clearly instead of guessing."
+                ),
                 "augmented_context": [
                     {
                         "role": "system",
@@ -778,6 +991,13 @@ def test_execute_selected_routes_chat_assistant_via_direct_response(
 
     assert result.status == "success"
     assert llm.calls
+    direct_context = llm.calls[0]["context"]
+    assert any(
+        isinstance(message, dict)
+        and "Expected answer contract for this turn"
+        in str(message.get("content") or "")
+        for message in direct_context
+    )
     assert result.outputs.get("selected_workflow_user_response") == "You are Test User."
     assert result.outputs.get("response_text") == "You are Test User."
     report = result.outputs["completion_report"]
@@ -790,7 +1010,9 @@ def test_execute_selected_routes_chat_assistant_via_direct_response(
     )
 
 
-def test_execute_selected_surfaces_missing_selected_workflow_as_recoverable_context() -> None:
+def test_execute_selected_surfaces_missing_selected_workflow_as_recoverable_context() -> (
+    None
+):
     orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _DummyGateway()))
 
     result = orchestrator._action_turn_execution_execute_selected(
@@ -814,4 +1036,7 @@ def test_execute_selected_surfaces_missing_selected_workflow_as_recoverable_cont
     assert result.outputs["selected_workflow_completed"] is False
     assert result.outputs["selected_workflow_child_failed"] is True
     assert result.outputs["selected_workflow_final_state"] == "no_selected_workflow"
-    assert result.outputs["selected_workflow_error"] == "turn_execution_no_workflow_selected"
+    assert (
+        result.outputs["selected_workflow_error"]
+        == "turn_execution_no_workflow_selected"
+    )

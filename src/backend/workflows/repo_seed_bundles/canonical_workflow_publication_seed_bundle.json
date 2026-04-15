@@ -1455,8 +1455,166 @@
     },
     {
       "publication_spec": {
-        "initial_state": "routing",
+        "initial_state": "expected_outcome_inference",
         "steps": [
+          {
+            "action_id": "llm.action",
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "expected_outcome_inferred",
+                "to_state": "selector_preparation"
+              }
+            ],
+            "execution_mode": "llm",
+            "llm_policy": {
+              "policy_stage": "planner",
+              "context_messages_context_key": "augmented_context",
+              "context_fields": [
+                {
+                  "context_key": "user_prompt",
+                  "label": "User Request"
+                },
+                {
+                  "context_key": "continuation_context",
+                  "label": "Continuation Context"
+                }
+              ]
+            },
+            "prompt_concept_ids": [
+              "#V#prompt_turn_execution_expected_outcome_inference"
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_expected_outcome_validated_json_to_turn_expected_outcome_profile",
+                "context_key": "turn_expected_outcome_profile",
+                "tool_output_field": "validated_json"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_expected_outcome_validated_json_expected_outcome_summary_to_turn_expected_outcome_summary",
+                "context_key": "turn_expected_outcome_summary",
+                "tool_output_field": "validated_json.expected_outcome_summary"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_expected_outcome_validated_json_grounding_requirement_to_turn_expected_grounding_requirement",
+                "context_key": "turn_expected_grounding_requirement",
+                "tool_output_field": "validated_json.grounding_requirement"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_expected_outcome_validated_json_precision_policy_to_turn_expected_precision_policy",
+                "context_key": "turn_expected_precision_policy",
+                "tool_output_field": "validated_json.precision_policy"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_expected_outcome_validated_json_selector_guidance_to_turn_selector_guidance",
+                "context_key": "turn_selector_guidance",
+                "tool_output_field": "validated_json.selector_guidance"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_expected_outcome_validated_json_answering_guidance_to_turn_answering_guidance",
+                "context_key": "turn_answering_guidance",
+                "tool_output_field": "validated_json.answering_guidance"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_expected_outcome_validated_json_reasoning_to_turn_expected_outcome_reasoning",
+                "context_key": "turn_expected_outcome_reasoning",
+                "tool_output_field": "validated_json.reasoning"
+              }
+            ],
+            "validation_policy": {
+              "output_format": "json_value"
+            },
+            "writes_context_keys": [
+              "turn_expected_outcome_profile",
+              "turn_expected_outcome_summary",
+              "turn_expected_grounding_requirement",
+              "turn_expected_precision_policy",
+              "turn_selector_guidance",
+              "turn_answering_guidance",
+              "turn_expected_outcome_reasoning"
+            ],
+            "state_id": "expected_outcome_inference"
+          },
+          {
+            "action_id": "turn_execution.prepare_selector_context",
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "key": "selector_prompt_available",
+                  "kind": "context_flag",
+                  "expected": true
+                },
+                "reason": "selector_prompt_available",
+                "to_state": "selector_decision"
+              },
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "selector_prompt_unavailable",
+                "to_state": "routing"
+              }
+            ],
+            "execution_mode": "deterministic",
+            "state_id": "selector_preparation",
+            "writes_context_keys": [
+              "workflow_discovery_result",
+              "workflow_discovery",
+              "selector_prompt_available",
+              "selector_prompt_id",
+              "selector_prompt_text",
+              "selector_call_prompt_text",
+              "selector_requested_prompt_ids",
+              "selector_prompt_provenance",
+              "selector_prompt_failure_reason",
+              "selector_prompt_failure_detail",
+              "selector_candidate_entries",
+              "selector_candidate_ids",
+              "selector_excluded_candidate_entries",
+              "selector_excluded_candidate_ids",
+              "selector_discovered_workflow_ids",
+              "selector_context_messages",
+              "selector_context_lineage",
+              "selector_candidate_count",
+              "selector_excluded_candidate_count",
+              "selector_policy_recommendation",
+              "selector_continuation_routing_context_text"
+            ]
+          },
+          {
+            "action_id": "llm.action",
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "selector_decided",
+                "to_state": "routing"
+              }
+            ],
+            "execution_mode": "llm",
+            "llm_policy": {
+              "policy_stage": "classifier",
+              "prompt_text_context_key": "selector_call_prompt_text",
+              "prompt_id_context_key": "selector_prompt_id",
+              "context_messages_context_key": "selector_context_messages",
+              "context_lineage_context_key": "selector_context_lineage",
+              "response_contract_text": "Return JSON only."
+            },
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_selector_decision_final_response_to_selector_raw_response",
+                "context_key": "selector_raw_response",
+                "tool_output_field": "final_response"
+              }
+            ],
+            "writes_context_keys": [
+              "selector_raw_response"
+            ],
+            "state_id": "selector_decision"
+          },
           {
             "action_id": "turn_execution.route",
             "conditional_transitions": [
@@ -1508,6 +1666,22 @@
                 {
                   "context_key": "completion_report",
                   "label": "Completion Report"
+                },
+                {
+                  "context_key": "turn_expected_outcome_summary",
+                  "label": "Turn Expected Outcome Summary"
+                },
+                {
+                  "context_key": "turn_expected_grounding_requirement",
+                  "label": "Grounding Requirement"
+                },
+                {
+                  "context_key": "turn_expected_precision_policy",
+                  "label": "Precision Policy"
+                },
+                {
+                  "context_key": "turn_answering_guidance",
+                  "label": "Answering Guidance"
                 }
               ]
             },
@@ -1679,6 +1853,26 @@
                 {
                   "context_key": "workflow_routing",
                   "label": "Workflow Routing"
+                },
+                {
+                  "context_key": "turn_expected_outcome_summary",
+                  "label": "Turn Expected Outcome Summary"
+                },
+                {
+                  "context_key": "turn_expected_grounding_requirement",
+                  "label": "Grounding Requirement"
+                },
+                {
+                  "context_key": "turn_expected_precision_policy",
+                  "label": "Precision Policy"
+                },
+                {
+                  "context_key": "turn_selector_guidance",
+                  "label": "Selector Guidance"
+                },
+                {
+                  "context_key": "turn_answering_guidance",
+                  "label": "Answering Guidance"
                 },
                 {
                   "context_key": "continuation_context",

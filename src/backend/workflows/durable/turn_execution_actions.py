@@ -31,9 +31,14 @@ from .turn_execution_runtime_support import (
 logger = logging.getLogger(__name__)
 
 TURN_EXECUTION_ROUTE_ACTION_ID = "turn_execution.route"
+TURN_EXECUTION_PREPARE_SELECTOR_CONTEXT_ACTION_ID = (
+    "turn_execution.prepare_selector_context"
+)
 TURN_EXECUTION_EXECUTE_SELECTED_ACTION_ID = "turn_execution.execute_selected"
 TURN_EXECUTION_EXECUTE_TOOL_BATCH_ACTION_ID = "turn_execution.execute_tool_batch"
-TURN_EXECUTION_PREPARE_RECOVERY_RETRY_ACTION_ID = "turn_execution.prepare_recovery_retry"
+TURN_EXECUTION_PREPARE_RECOVERY_RETRY_ACTION_ID = (
+    "turn_execution.prepare_recovery_retry"
+)
 TURN_EXECUTION_CRITIC_ACTION_ID = "turn_execution.critic"
 TURN_EXECUTION_COMPLETION_GATE_ACTION_ID = "turn_execution.completion_gate"
 _DEFAULT_RECOVERY_TOOL_BATCH_CAP = 4
@@ -67,7 +72,9 @@ def _normalise_tool_batch_cap(
 
 def _normalise_tool_batch_calls(raw_value: Any) -> list[dict[str, Any]]:
     raw_calls = raw_value
-    if isinstance(raw_value, Mapping) and isinstance(raw_value.get("tool_calls"), Sequence):
+    if isinstance(raw_value, Mapping) and isinstance(
+        raw_value.get("tool_calls"), Sequence
+    ):
         raw_calls = raw_value.get("tool_calls")
     if not isinstance(raw_calls, Sequence) or isinstance(
         raw_calls, (str, bytes, bytearray)
@@ -238,17 +245,75 @@ def _build_turn_execution_route_handler() -> Any:
             discovery = discovery_result or {}
 
         selected_workflow_id = discovery.get("selected_workflow_id")
-        
+
         # If still no workflow, we might want to default to a generic one
         # but for now we follow the existing logic.
-        
+
         return WorkflowActionResult(
             status="success",
             outputs={
                 "selected_workflow_id": selected_workflow_id,
                 "workflow_discovery": discovery,
-            }
+            },
         )
+
+    return _handle
+
+
+def _build_turn_execution_prepare_selector_context_handler() -> Any:
+    def _handle(request: WorkflowActionRequest) -> WorkflowActionResult:
+        """Preserve any already-prepared selector context for durable execution.
+
+        The authoritative preparation logic lives in the orchestrator override
+        action. This registry-level fallback keeps the action ID executable on
+        pure workflow-engine paths without inventing a second policy surface.
+        """
+
+        passthrough_keys = (
+            "workflow_discovery_result",
+            "workflow_discovery",
+            "selector_prompt_available",
+            "selector_prompt_id",
+            "selector_prompt_text",
+            "selector_call_prompt_text",
+            "selector_requested_prompt_ids",
+            "selector_prompt_provenance",
+            "selector_prompt_failure_reason",
+            "selector_prompt_failure_detail",
+            "selector_candidate_entries",
+            "selector_candidate_ids",
+            "selector_excluded_candidate_entries",
+            "selector_excluded_candidate_ids",
+            "selector_discovered_workflow_ids",
+            "selector_context_messages",
+            "selector_context_lineage",
+            "selector_candidate_count",
+            "selector_excluded_candidate_count",
+            "selector_policy_recommendation",
+            "selector_continuation_routing_context_text",
+        )
+        outputs = {
+            key: request.data.get(key)
+            for key in passthrough_keys
+            if key in request.data
+        }
+        if "workflow_discovery_result" not in outputs and isinstance(
+            request.data.get("workflow_discovery"),
+            Mapping,
+        ):
+            outputs["workflow_discovery_result"] = dict(
+                request.data["workflow_discovery"]
+            )
+        if "workflow_discovery" not in outputs and isinstance(
+            request.data.get("workflow_discovery_result"),
+            Mapping,
+        ):
+            outputs["workflow_discovery"] = dict(
+                request.data["workflow_discovery_result"]
+            )
+        outputs.setdefault("selector_prompt_available", False)
+        return WorkflowActionResult(outputs=outputs)
+
     return _handle
 
 
@@ -276,14 +341,18 @@ def _build_turn_execution_execute_selected_handler() -> Any:
                 workflow_routing=request.data.get("workflow_routing"),
                 workflow_discovery=(
                     request.data.get("workflow_discovery_result")
-                    if isinstance(request.data.get("workflow_discovery_result"), Mapping)
+                    if isinstance(
+                        request.data.get("workflow_discovery_result"), Mapping
+                    )
                     else request.data.get("workflow_discovery")
                 ),
             )
             return WorkflowActionResult(outputs=outputs)
 
         request_data = {
-            str(key): value for key, value in request.data.items() if isinstance(key, str)
+            str(key): value
+            for key, value in request.data.items()
+            if isinstance(key, str)
         }
         continuation_context = request_data.get("continuation_context")
         projected_continuation_launch_inputs: dict[str, Any] = {}
@@ -337,7 +406,9 @@ def _build_turn_execution_execute_selected_handler() -> Any:
 
         if subworkflow_result.ok:
             child_result = subworkflow_result.outputs.get("result")
-            child_payload = dict(child_result) if isinstance(child_result, Mapping) else {}
+            child_payload = (
+                dict(child_result) if isinstance(child_result, Mapping) else {}
+            )
             invocation = subworkflow_result.outputs.get("subworkflow_invocation")
             invocation_payload = (
                 dict(invocation) if isinstance(invocation, Mapping) else {}
@@ -414,6 +485,7 @@ def _build_turn_execution_execute_selected_handler() -> Any:
         if existing_tool_messages:
             outputs["tool_messages"] = [*existing_tool_messages, *new_tool_messages]
         return WorkflowActionResult(outputs=outputs)
+
     return _handle
 
 
@@ -523,7 +595,9 @@ def _build_turn_execution_execute_tool_batch_handler(
                 else None
             ),
             selected_workflow_id=request.data.get("selected_workflow_id"),
-            reasoning=_coerce_non_empty_text(request.data.get("turn_next_action_reasoning")),
+            reasoning=_coerce_non_empty_text(
+                request.data.get("turn_next_action_reasoning")
+            ),
             omitted_call_count=max(0, len(requested_tool_calls) - max_calls),
         )
         outputs.update(
@@ -647,7 +721,7 @@ def _build_turn_execution_completion_gate_handler() -> Any:
 
 def register_turn_execution_actions(registry: ActionRegistry) -> None:
     """Register all master-turn control plane actions."""
-    
+
     registry.register_if_absent(
         ActionSpec(
             action_id=TURN_EXECUTION_ROUTE_ACTION_ID,
@@ -655,7 +729,18 @@ def register_turn_execution_actions(registry: ActionRegistry) -> None:
             description="Resolve workflow routing for the current turn.",
         )
     )
-    
+
+    registry.register_if_absent(
+        ActionSpec(
+            action_id=TURN_EXECUTION_PREPARE_SELECTOR_CONTEXT_ACTION_ID,
+            handler=_build_turn_execution_prepare_selector_context_handler(),
+            description=(
+                "Preserve prepared selector prompt/context surfaces for the "
+                "authoritative selector decision state."
+            ),
+        )
+    )
+
     registry.register_if_absent(
         ActionSpec(
             action_id=TURN_EXECUTION_EXECUTE_SELECTED_ACTION_ID,

@@ -22,8 +22,13 @@ from src.backend.workflows import (
     TOOL_CALLING_WORKFLOW_ID,
     workflow_concept_authority_service as authority_service,
 )
-from src.backend.workflows.vontology_loader import load_workflow_definition_from_vontology
+from src.backend.workflows.vontology_loader import (
+    load_workflow_definition_from_vontology,
+)
 
+EXPECTED_OUTCOME_PROMPT_CONCEPT_ID = (
+    "#V#prompt_turn_execution_expected_outcome_inference"
+)
 SELECTOR_PROMPT_CONCEPT_ID = "#V#chat_turn_classifier_prompt"
 NARRATION_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_narrate_completion_report"
 RECOVERY_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_recovery_decision"
@@ -54,7 +59,31 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     report = _ensure_conversation_turn_prompt_support()
 
     assert report.get("success") is True
-    assert report.get("seeded_prompt_count") == 3
+    assert report.get("seeded_prompt_count") == 4
+
+    expected_outcome_rows = get_texts_for_concept(
+        EXPECTED_OUTCOME_PROMPT_CONCEPT_ID,
+        predicate="hasContent",
+        limit=5,
+    )
+    expected_outcome_text = next(
+        (
+            (row or {}).get("text")
+            for row in expected_outcome_rows
+            if (row or {}).get("text")
+        ),
+        "",
+    )
+    assert isinstance(expected_outcome_text, str)
+    assert "expected-success inference policy" in expected_outcome_text
+    assert "ownership, authorship, identity, provenance, attribution" in (
+        expected_outcome_text
+    )
+    assert "Prefer omission or explicit uncertainty over speculative recall" in (
+        expected_outcome_text
+    )
+    assert "`selector_guidance`" in expected_outcome_text
+    assert "`answering_guidance`" in expected_outcome_text
 
     selector_rows = get_texts_for_concept(
         SELECTOR_PROMPT_CONCEPT_ID,
@@ -86,6 +115,8 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     assert isinstance(prompt_text, str)
     assert "Selected Workflow User Response" in prompt_text
     assert "Completion Report` is supporting evidence only" in prompt_text
+    assert "Turn Expected Outcome Summary" in prompt_text
+    assert "Grounding Requirement" in prompt_text
     assert "Do not narrate workflow bookkeeping as the response" in prompt_text
 
     recovery_rows = get_texts_for_concept(
@@ -103,10 +134,11 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     assert "`turn_next_action`" in recovery_text
     assert "`action_type`" in recovery_text
     assert "completion_gate_repeat_eligible" in recovery_text
+    assert "Turn Expected Outcome Summary" in recovery_text
     assert "unresolved mechanically extractable targets remain" in recovery_text
     assert (
-        "`\"retry_execution\"`, `\"execute_tool_batch\"`, "
-        "`\"respond_with_answer\"`, or `\"respond_with_follow_up\"`"
+        '`"retry_execution"`, `"execute_tool_batch"`, '
+        '`"respond_with_answer"`, or `"respond_with_follow_up"`'
     ) in recovery_text
 
 
@@ -121,7 +153,9 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     assert counts.get("errors") == 0
     assert counts.get("workflows_published") == 4
 
-    chat_definition = load_workflow_definition_from_vontology(CHAT_ASSISTANT_WORKFLOW_ID)
+    chat_definition = load_workflow_definition_from_vontology(
+        CHAT_ASSISTANT_WORKFLOW_ID
+    )
     assert chat_definition is not None
     chat_respond_step_id = authority_service._step_concept_id(
         workflow_id=CHAT_ASSISTANT_WORKFLOW_ID,
@@ -165,6 +199,58 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
         CONVERSATION_TURN_EXECUTION_WORKFLOW_ID
     )
     assert turn_definition is not None
+    expected_outcome_step_id = authority_service._step_concept_id(
+        workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+        state_id="expected_outcome_inference",
+    )
+    expected_outcome_action = turn_definition.states[expected_outcome_step_id].actions[
+        0
+    ]
+    assert expected_outcome_action.action_id == "llm.action"
+    assert expected_outcome_action.validation_policy == {"output_format": "json_value"}
+    expected_outcome_prompt_contract = expected_outcome_action.prompt_contract
+    assert isinstance(expected_outcome_prompt_contract, dict)
+    assert expected_outcome_prompt_contract.get("resolved_prompt_concept_id") == (
+        EXPECTED_OUTCOME_PROMPT_CONCEPT_ID
+    )
+
+    selector_preparation_step_id = authority_service._step_concept_id(
+        workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+        state_id="selector_preparation",
+    )
+    selector_preparation = turn_definition.states[selector_preparation_step_id]
+    selector_preparation_action = selector_preparation.actions[0]
+    assert (
+        selector_preparation_action.action_id
+        == "turn_execution.prepare_selector_context"
+    )
+
+    selector_decision_step_id = authority_service._step_concept_id(
+        workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+        state_id="selector_decision",
+    )
+    selector_decision = turn_definition.states[selector_decision_step_id]
+    selector_decision_action = selector_decision.actions[0]
+    assert selector_decision_action.action_id == "llm.action"
+    selector_decision_policy = selector_decision_action.llm_policy or {}
+    assert selector_decision_policy.get("prompt_text_context_key") == (
+        "selector_call_prompt_text"
+    )
+    assert selector_decision_policy.get("context_messages_context_key") == (
+        "selector_context_messages"
+    )
+    assert selector_decision_policy.get("context_lineage_context_key") == (
+        "selector_context_lineage"
+    )
+    routing_step_id = authority_service._step_concept_id(
+        workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+        state_id="routing",
+    )
+    selector_preparation_targets = {
+        transition.to_state for transition in selector_preparation.transitions
+    }
+    assert selector_decision_step_id in selector_preparation_targets
+    assert routing_step_id in selector_preparation_targets
 
     critic_step_id = authority_service._step_concept_id(
         workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
@@ -196,6 +282,11 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     )
     recovery_context_fields = (recovery_action.llm_policy or {}).get("context_fields")
     assert isinstance(recovery_context_fields, list)
+    assert any(
+        isinstance(field, dict)
+        and field.get("context_key") == "turn_expected_outcome_summary"
+        for field in recovery_context_fields
+    )
     assert any(
         isinstance(field, dict)
         and field.get("context_key") == "workflow_discovery_result"
@@ -236,7 +327,14 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
         workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
         state_id="apply_recovery_answer",
     )
-    transition_targets = {transition.to_state for transition in completion_gate.transitions}
+    transition_targets = {
+        transition.to_state for transition in completion_gate.transitions
+    }
+    selector_targets = {
+        transition.to_state
+        for transition in turn_definition.states[expected_outcome_step_id].transitions
+    }
+    assert selector_preparation_step_id in selector_targets
     assert execution_step_id not in transition_targets
     assert recovery_decision_step_id in transition_targets
     assert completed_step_id in transition_targets
@@ -253,7 +351,9 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
         transition.to_state for transition in recovery_tool_batch.transitions
     }
     assert critic_step_id in recovery_tool_batch_targets
-    recovery_mappings = recovery_decision.metadata.get("tool_output_context_mappings") or []
+    recovery_mappings = (
+        recovery_decision.metadata.get("tool_output_context_mappings") or []
+    )
     assert any(
         mapping.get("context_key") == "turn_next_action"
         and mapping.get("tool_output_field") == "validated_json.turn_next_action"
@@ -283,7 +383,9 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     narration_action = narration_state.actions[0]
     prompt_contract = narration_action.prompt_contract
     assert isinstance(prompt_contract, dict)
-    assert prompt_contract.get("resolved_prompt_concept_id") == NARRATION_PROMPT_CONCEPT_ID
+    assert (
+        prompt_contract.get("resolved_prompt_concept_id") == NARRATION_PROMPT_CONCEPT_ID
+    )
     narration_context_fields = (narration_action.llm_policy or {}).get("context_fields")
     assert isinstance(narration_context_fields, list)
     assert any(
@@ -291,7 +393,9 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
         and field.get("context_key") == "selected_workflow_user_response"
         for field in narration_context_fields
     )
-    narration_mappings = narration_state.metadata.get("tool_output_context_mappings") or []
+    narration_mappings = (
+        narration_state.metadata.get("tool_output_context_mappings") or []
+    )
     assert any(
         mapping.get("tool_output_field") == "final_response"
         and mapping.get("context_key") == "response_text"

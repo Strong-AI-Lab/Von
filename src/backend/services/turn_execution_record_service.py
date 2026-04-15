@@ -617,9 +617,11 @@ def _derive_execution_signal_completion_blocker(
             "workflow_id": dispatch_workflow_id or None,
         }
 
-    if effect_type == "workflow_execution" and isinstance(
-        terminal_success_contract, Mapping
-    ) and not isinstance(terminal_success_evaluation, Mapping):
+    if (
+        effect_type == "workflow_execution"
+        and isinstance(terminal_success_contract, Mapping)
+        and not isinstance(terminal_success_evaluation, Mapping)
+    ):
         terminal_status = _safe_str(
             custom_workflow_execution.get("terminal_status")
             if isinstance(custom_workflow_execution, Mapping)
@@ -653,9 +655,10 @@ def _derive_execution_signal_completion_blocker(
                 contract_failure_codes = [
                     "contracted_workflow_terminal_success_contract_unmet"
                 ]
-            decision_reason = _safe_str(
-                terminal_success_evaluation.get("decision_reason")
-            ) or "Contracted workflow terminal-success requirements were not met."
+            decision_reason = (
+                _safe_str(terminal_success_evaluation.get("decision_reason"))
+                or "Contracted workflow terminal-success requirements were not met."
+            )
             return {
                 "effect_id": "effect_workflow_terminal_contract_1",
                 "effect_type": effect_type,
@@ -681,7 +684,9 @@ def _derive_execution_signal_completion_blocker(
             decision_reason = dispatch_terminal_failure_detail
         elif effect_type == "workflow_execution":
             decision_reason = (
-                _infer_custom_workflow_required_effect(execution_summary=execution_summary)
+                _infer_custom_workflow_required_effect(
+                    execution_summary=execution_summary
+                )
                 or {}
             ).get("status_reason") or _CUSTOM_WORKFLOW_EXECUTION_FAILURE_REASON
         else:
@@ -703,7 +708,9 @@ def _derive_execution_signal_completion_blocker(
             "status_reason": decision_reason,
             "failure_code": failure_codes[0],
             "failure_codes": list(failure_codes),
-            "decision": "failed" if status == "not_satisfied" else "escalation_required",
+            "decision": (
+                "failed" if status == "not_satisfied" else "escalation_required"
+            ),
             "decision_reason": decision_reason,
             "repeat_eligible": False,
             "source": "execution_signals",
@@ -840,9 +847,7 @@ def _has_tool_route_launchability_degradation(
         return False
 
     selector_payload = workflow_routing_diagnostics.get("selector")
-    selector_payload = (
-        selector_payload if isinstance(selector_payload, Mapping) else {}
-    )
+    selector_payload = selector_payload if isinstance(selector_payload, Mapping) else {}
     override_events = selector_payload.get("override_events")
     if not isinstance(override_events, list):
         return False
@@ -863,16 +868,17 @@ def _has_tool_route_launchability_degradation(
             else None
         )
         prior_launchable = (
-            prior_probe.get("launchable")
-            if isinstance(prior_probe, Mapping)
-            else None
+            prior_probe.get("launchable") if isinstance(prior_probe, Mapping) else None
         )
 
         if not prior_selected_workflow_id:
             continue
         if selected_workflow_id != "#V#tool_calling_workflow":
             continue
-        if reason == "selected_custom_workflow_launchability_requires_safe_general_fallback":
+        if (
+            reason
+            == "selected_custom_workflow_launchability_requires_safe_general_fallback"
+        ):
             return True
         if "launchability" in reason:
             return True
@@ -892,7 +898,9 @@ def build_turn_execution_correctness_summary(
     workflow_routing_diagnostics: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     required_effect_list = [
-        dict(effect) for effect in (required_effects or ()) if isinstance(effect, Mapping)
+        dict(effect)
+        for effect in (required_effects or ())
+        if isinstance(effect, Mapping)
     ]
     unresolved_effect_count = 0
     for effect in required_effect_list:
@@ -927,9 +935,8 @@ def build_turn_execution_correctness_summary(
     selector_verdict_lower = (selector_verdict or "").lower()
     selector_source = _safe_str(workflow_selection_payload.get("selector_source"))
     plain_response_route_selected = (
-        (selected_workflow_id or "") in _PLAIN_RESPONSE_WORKFLOW_IDS
-        or selector_verdict_lower == "plain_response"
-    )
+        selected_workflow_id or ""
+    ) in _PLAIN_RESPONSE_WORKFLOW_IDS or selector_verdict_lower == "plain_response"
     tool_route_selected = (
         (selected_workflow_id or "") == "#V#tool_calling_workflow"
         or selector_verdict_lower in _TOOL_CALLING_SELECTOR_VERDICTS
@@ -1080,22 +1087,32 @@ def ensure_turn_execution_record_execution_correctness(
     )
 
     payload["execution_correctness"] = build_turn_execution_correctness_summary(
-        completion_gate=payload.get("completion_gate")
-        if isinstance(payload.get("completion_gate"), Mapping)
-        else None,
-        required_effects=payload.get("required_effects")
-        if isinstance(payload.get("required_effects"), list)
-        else None,
+        completion_gate=(
+            payload.get("completion_gate")
+            if isinstance(payload.get("completion_gate"), Mapping)
+            else None
+        ),
+        required_effects=(
+            payload.get("required_effects")
+            if isinstance(payload.get("required_effects"), list)
+            else None
+        ),
         critic_summary=critic_summary,
-        final_response=payload.get("final_response")
-        if isinstance(payload.get("final_response"), Mapping)
-        else None,
-        workflow_selection=payload.get("workflow_selection")
-        if isinstance(payload.get("workflow_selection"), Mapping)
-        else None,
-        workflow_routing_diagnostics=payload.get("workflow_routing_diagnostics")
-        if isinstance(payload.get("workflow_routing_diagnostics"), Mapping)
-        else None,
+        final_response=(
+            payload.get("final_response")
+            if isinstance(payload.get("final_response"), Mapping)
+            else None
+        ),
+        workflow_selection=(
+            payload.get("workflow_selection")
+            if isinstance(payload.get("workflow_selection"), Mapping)
+            else None
+        ),
+        workflow_routing_diagnostics=(
+            payload.get("workflow_routing_diagnostics")
+            if isinstance(payload.get("workflow_routing_diagnostics"), Mapping)
+            else None
+        ),
     )
     return payload
 
@@ -1176,7 +1193,9 @@ def _payload_char_count(value: Any) -> int | None:
     return len(payload)
 
 
-def _payload_preview(value: Any, *, max_chars: int = _SEARCH_EVIDENCE_PREVIEW_CHARS) -> str | None:
+def _payload_preview(
+    value: Any, *, max_chars: int = _SEARCH_EVIDENCE_PREVIEW_CHARS
+) -> str | None:
     if value is None:
         return None
     try:
@@ -1426,11 +1445,7 @@ def _collect_aux_entries(
         if candidate_type != expected_type:
             continue
         entries.append(
-            {
-                str(key): value
-                for key, value in entry.items()
-                if isinstance(key, str)
-            }
+            {str(key): value for key, value in entry.items() if isinstance(key, str)}
         )
     return entries
 
@@ -1672,9 +1687,7 @@ def _build_custom_workflow_execution_summary(
     first_failing_state_id = _safe_str(summary_payload.get("first_failing_state_id"))
     if not first_failing_state_id:
         first_failing_state_id = _safe_str(dispatch_terminal_failing_state_id)
-    first_failing_action_id = _safe_str(
-        summary_payload.get("first_failing_action_id")
-    )
+    first_failing_action_id = _safe_str(summary_payload.get("first_failing_action_id"))
     if not first_failing_action_id:
         first_failing_action_id = _safe_str(dispatch_terminal_failing_action_id)
 
@@ -1796,7 +1809,8 @@ def _derive_zero_tool_execution_reason(
                 "zero_tool_execution_expected": True,
             }
         if (
-            isinstance(dispatch_terminal_completed, bool) and dispatch_terminal_completed
+            isinstance(dispatch_terminal_completed, bool)
+            and dispatch_terminal_completed
         ) or (dispatch_terminal_status or "").lower() == "completed":
             return {
                 "zero_tool_reason_code": "custom_workflow_completed_without_tool_invocations",
@@ -1831,7 +1845,8 @@ def _derive_zero_tool_execution_reason(
     if tool_route_selected:
         primary_failure_code = _safe_str(failure_codes[0]) if failure_codes else None
         return {
-            "zero_tool_reason_code": primary_failure_code or "tool_dispatch_zero_execution",
+            "zero_tool_reason_code": primary_failure_code
+            or "tool_dispatch_zero_execution",
             "zero_tool_reason": _TOOL_EXECUTION_FAILURE_REASON_MAP.get(
                 primary_failure_code or "",
                 "Tool-calling workflow selected but no tool execution was observed.",
@@ -2016,7 +2031,9 @@ def _derive_discovery_match_absence_reason(
     if routing_matches:
         return None
     if not discovery_candidates:
-        error_set = {str(item).strip() for item in discovery_errors if str(item).strip()}
+        error_set = {
+            str(item).strip() for item in discovery_errors if str(item).strip()
+        }
         if (
             "capability_index_wait_timed_out" in error_set
             and "capability_index_build_in_progress" in error_set
@@ -2050,7 +2067,9 @@ def _normalise_workflow_candidate_details(values: Any) -> list[dict[str, Any]]:
 
     if isinstance(values, Mapping):
         iterable: Sequence[Any] = (values,)
-    elif isinstance(values, Sequence) and not isinstance(values, (str, bytes, bytearray)):
+    elif isinstance(values, Sequence) and not isinstance(
+        values, (str, bytes, bytearray)
+    ):
         iterable = values
     else:
         iterable = (values,)
@@ -2131,9 +2150,13 @@ def build_workflow_routing_diagnostics(
     selector_prompt_entries = _collect_aux_entries(
         aux_llm_calls, entry_type="workflow_selector_prompt"
     )
-    selector_entries = _collect_aux_entries(aux_llm_calls, entry_type="workflow_selector")
+    selector_entries = _collect_aux_entries(
+        aux_llm_calls, entry_type="workflow_selector"
+    )
     selector_entry = selector_entries[-1] if selector_entries else {}
-    selector_prompt_entry = selector_prompt_entries[-1] if selector_prompt_entries else {}
+    selector_prompt_entry = (
+        selector_prompt_entries[-1] if selector_prompt_entries else {}
+    )
     selector_override_entries = _collect_aux_entries(
         aux_llm_calls,
         entry_type="workflow_selector_override",
@@ -2228,9 +2251,9 @@ def build_workflow_routing_diagnostics(
     selector_outcome_workflow_id = _safe_str(
         workflow_routing_payload.get("workflow_id")
     ) or _safe_str(selector_entry.get("workflow_id"))
-    selector_outcome_verdict = _safe_str(workflow_routing_payload.get("verdict")) or _safe_str(
-        selector_entry.get("verdict")
-    )
+    selector_outcome_verdict = _safe_str(
+        workflow_routing_payload.get("verdict")
+    ) or _safe_str(selector_entry.get("verdict"))
     if selector_outcome_workflow_id and (
         (selector_outcome_verdict or "").strip().lower()
         not in _SELECTOR_PROMPT_FAILURE_VERDICTS
@@ -2379,7 +2402,9 @@ def build_workflow_routing_diagnostics(
     )
     tool_execution_payload_raw = execution_summary_payload.get("tool_execution")
     tool_execution_payload = (
-        tool_execution_payload_raw if isinstance(tool_execution_payload_raw, Mapping) else {}
+        tool_execution_payload_raw
+        if isinstance(tool_execution_payload_raw, Mapping)
+        else {}
     )
     custom_workflow_execution_payload_raw = execution_summary_payload.get(
         "custom_workflow_execution"
@@ -2456,8 +2481,12 @@ def build_workflow_routing_diagnostics(
         or _safe_str(selector_entry.get("selection_rationale")),
         "discovery": {
             "query": _safe_str(workflow_discovery_payload.get("query")),
-            "requested_query": _safe_str(workflow_discovery_payload.get("requested_query")),
-            "search_time_ms": _safe_float(workflow_discovery_payload.get("search_time_ms")),
+            "requested_query": _safe_str(
+                workflow_discovery_payload.get("requested_query")
+            ),
+            "search_time_ms": _safe_float(
+                workflow_discovery_payload.get("search_time_ms")
+            ),
             "threshold": _safe_float(workflow_discovery_payload.get("threshold")),
             "candidate_count": discovery_candidate_count,
             "match_count": discovery_match_count,
@@ -2502,7 +2531,9 @@ def build_workflow_routing_diagnostics(
             "discovered_workflow_ids": _extract_workflow_ids(
                 _selector_context_value("discovered_workflow_ids")
             )
-            or _extract_workflow_ids(workflow_routing_payload.get("discovered_workflow_ids")),
+            or _extract_workflow_ids(
+                workflow_routing_payload.get("discovered_workflow_ids")
+            ),
             "candidate_count": len(selector_candidates),
             "candidate_source_counts": selector_candidate_source_counts,
             "candidate_reason_counts": selector_candidate_reason_counts,
@@ -2523,7 +2554,9 @@ def build_workflow_routing_diagnostics(
                 if isinstance(selector_response_capture, Mapping)
                 else None
             ),
-            "policy_guidance_mode": _safe_str(selector_entry.get("policy_guidance_mode")),
+            "policy_guidance_mode": _safe_str(
+                selector_entry.get("policy_guidance_mode")
+            ),
             "policy_snapshot_id": _safe_str(selector_entry.get("policy_snapshot_id")),
             "policy_candidate_scores": (
                 list(raw_policy_candidate_scores)
@@ -2865,15 +2898,15 @@ def _extract_completion_claim_signals(
         entry_type = _safe_str(entry.get("type"))
         if entry_type == "completion_claim_detection":
             try:
-                detected_count = max(
-                    detected_count, int(entry.get("claim_count") or 0)
-                )
+                detected_count = max(detected_count, int(entry.get("claim_count") or 0))
             except Exception:
                 continue
         if entry_type == "completion_claim_validation":
             validation_seen = True
             try:
-                verified_count = max(verified_count, int(entry.get("verified_count") or 0))
+                verified_count = max(
+                    verified_count, int(entry.get("verified_count") or 0)
+                )
             except Exception:
                 pass
             try:
@@ -2924,7 +2957,11 @@ def _classify_tool_invocation_status(
     invocation: Mapping[str, Any],
     payload: Mapping[str, Any] | None = None,
 ) -> str:
-    payload_value = payload if isinstance(payload, Mapping) else _extract_tool_invocation_payload(invocation)
+    payload_value = (
+        payload
+        if isinstance(payload, Mapping)
+        else _extract_tool_invocation_payload(invocation)
+    )
     error_value = _safe_str(invocation.get("error"))
     blocked = bool(invocation.get("blocked"))
     payload_status = ""
@@ -2977,14 +3014,16 @@ def _summarise_tool_invocations(
         if not isinstance(payload_value, Mapping):
             payload_value = invocation.get("payload")
 
-        status = _classify_tool_invocation_status(invocation=invocation, payload=payload_value)
+        status = _classify_tool_invocation_status(
+            invocation=invocation, payload=payload_value
+        )
         error_value = _safe_str(invocation.get("error"))
 
         result_summary = _safe_str(invocation.get("result_summary"))
         if not result_summary and isinstance(payload_value, Mapping):
-            result_summary = _safe_str(payload_value.get("result_summary")) or _safe_str(
-                payload_value.get("summary")
-            )
+            result_summary = _safe_str(
+                payload_value.get("result_summary")
+            ) or _safe_str(payload_value.get("summary"))
 
         serialised.append(
             {
@@ -3246,34 +3285,39 @@ def _summarise_tool_execution_context(
                 )
             unresolved_required_inputs = event.get("unresolved_required_inputs")
             if isinstance(unresolved_required_inputs, list):
-                dispatch_terminal_unresolved_required_inputs = (
-                    _dedupe_string_sequence(unresolved_required_inputs)
+                dispatch_terminal_unresolved_required_inputs = _dedupe_string_sequence(
+                    unresolved_required_inputs
                 )
             if status == "failed":
-                dispatch_terminal_failure_reason = (
-                    _safe_str(event.get("reason")) or ""
-                )
+                dispatch_terminal_failure_reason = _safe_str(event.get("reason")) or ""
                 dispatch_terminal_failure_error_class = (
                     _safe_str(event.get("error_class")) or ""
                 )
 
-    submission_status = _safe_str(latest_workflow_instance_submission.get("status")) or ""
-    submission_reason_code = _safe_str(
-        latest_workflow_instance_submission.get("reason_code")
-    ) or ""
+    submission_status = (
+        _safe_str(latest_workflow_instance_submission.get("status")) or ""
+    )
+    submission_reason_code = (
+        _safe_str(latest_workflow_instance_submission.get("reason_code")) or ""
+    )
     submission_payload = latest_workflow_instance_submission.get("submission")
-    submission_payload = submission_payload if isinstance(submission_payload, Mapping) else {}
+    submission_payload = (
+        submission_payload if isinstance(submission_payload, Mapping) else {}
+    )
     submission_verification = submission_payload.get("verification")
     submission_verification = (
         submission_verification if isinstance(submission_verification, Mapping) else {}
     )
-    submission_verification_failed = submission_verification.get(
-        "runnable_verification_success"
-    ) is False
+    submission_verification_failed = (
+        submission_verification.get("runnable_verification_success") is False
+    )
     if (
         not dispatch_boundary_events
         and submission_status == "submission_failed"
-        and (submission_verification_failed or submission_reason_code == "workflow_not_runnable")
+        and (
+            submission_verification_failed
+            or submission_reason_code == "workflow_not_runnable"
+        )
     ):
         dispatch_workflow_id = (
             _safe_str(latest_workflow_instance_submission.get("workflow_id"))
@@ -3302,6 +3346,8 @@ def _summarise_tool_execution_context(
             selected_execution_mode = "tool_pipeline"
         elif custom_workflow_route_selected:
             selected_execution_mode = "custom_workflow"
+        elif plain_response_route_selected:
+            selected_execution_mode = "direct_response"
     if not dispatch_workflow_id and selected_execution_mode in {
         "direct_response",
         "custom_workflow",
@@ -3375,7 +3421,9 @@ def _summarise_tool_execution_context(
             failure_codes.append("tool_dispatch_workflow_missing")
         if not dispatch_boundary_events:
             failure_codes.append("tool_dispatch_boundary_missing")
-        elif not workflow_handoff_started and selected_execution_mode == "tool_pipeline":
+        elif (
+            not workflow_handoff_started and selected_execution_mode == "tool_pipeline"
+        ):
             failure_codes.append("tool_dispatch_not_started")
         elif workflow_handoff_started and observed_started_count <= 0:
             if dispatch_terminal_failure_reason:
@@ -3409,9 +3457,14 @@ def _summarise_tool_execution_context(
     planned_count = max(
         observed_started_count,
         invocation_count,
-        1
-        if (tool_route_selected and (deduped_failure_codes or dispatch_boundary_events))
-        else 0,
+        (
+            1
+            if (
+                tool_route_selected
+                and (deduped_failure_codes or dispatch_boundary_events)
+            )
+            else 0
+        ),
     )
     tool_execution = {
         "planned_count": planned_count,
@@ -3507,9 +3560,7 @@ def _summarise_tool_execution_context(
         ],
         "failure_codes": list(tool_execution["failure_codes"]),
         "zero_tools_executed": tool_execution["zero_tools_executed"],
-        "parse_error_invocation_count": tool_execution[
-            "parse_error_invocation_count"
-        ],
+        "parse_error_invocation_count": tool_execution["parse_error_invocation_count"],
         "validation_error_invocation_count": tool_execution[
             "validation_error_invocation_count"
         ],
@@ -3729,10 +3780,14 @@ def _normalise_representation_decision_policy(raw: Any) -> dict[str, bool]:
     return policy
 
 
-def _load_representation_domain_profiles_from_vontology() -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def _load_representation_domain_profiles_from_vontology() -> (
+    tuple[list[dict[str, Any]], dict[str, Any]]
+):
     requested_profile_concept_ids = list(canonical_representation_profile_concept_ids())
-    loaded_profiles, diagnostics = load_representation_contract_profiles_from_concept_ids(
-        requested_profile_concept_ids
+    loaded_profiles, diagnostics = (
+        load_representation_contract_profiles_from_concept_ids(
+            requested_profile_concept_ids
+        )
     )
     bootstrap_report: dict[str, Any] | None = None
     diagnostics_mapping = diagnostics if isinstance(diagnostics, Mapping) else {}
@@ -3768,8 +3823,10 @@ def _load_representation_domain_profiles_from_vontology() -> tuple[list[dict[str
                 "error": str(exc),
             }
 
-        loaded_profiles, diagnostics = load_representation_contract_profiles_from_concept_ids(
-            requested_profile_concept_ids
+        loaded_profiles, diagnostics = (
+            load_representation_contract_profiles_from_concept_ids(
+                requested_profile_concept_ids
+            )
         )
 
     normalised_profiles: list[dict[str, Any]] = []
@@ -3777,7 +3834,9 @@ def _load_representation_domain_profiles_from_vontology() -> tuple[list[dict[str
         if not isinstance(profile, Mapping):
             continue
         profile_payload = dict(profile)
-        profile_payload["profile_id"] = _safe_str(profile_payload.get("profile_id")) or ""
+        profile_payload["profile_id"] = (
+            _safe_str(profile_payload.get("profile_id")) or ""
+        )
         profile_payload["profile_concept_id"] = _safe_str(
             profile_payload.get("profile_concept_id")
         ) or _safe_str(profile_payload.get("_source_concept_id"))
@@ -3809,11 +3868,17 @@ def _load_representation_domain_profiles_from_vontology() -> tuple[list[dict[str
                 source_key = (_safe_str(source) or "").lower()
                 if not source_key:
                     continue
-                if isinstance(raw_tools, Sequence) and not isinstance(raw_tools, (str, bytes)):
-                    normalised_tools_by_source[source_key] = _dedupe_string_sequence(raw_tools)
+                if isinstance(raw_tools, Sequence) and not isinstance(
+                    raw_tools, (str, bytes)
+                ):
+                    normalised_tools_by_source[source_key] = _dedupe_string_sequence(
+                        raw_tools
+                    )
         profile_payload["required_tools_by_source"] = normalised_tools_by_source
-        profile_payload["default_decision_policy"] = _normalise_representation_decision_policy(
-            profile_payload.get("default_decision_policy")
+        profile_payload["default_decision_policy"] = (
+            _normalise_representation_decision_policy(
+                profile_payload.get("default_decision_policy")
+            )
         )
 
         if not profile_payload["profile_id"]:
@@ -3866,7 +3931,9 @@ def _prompt_requests_representation_action(prompt_text: str) -> bool:
         if not re.search(r"\b(?:can|could|would)\s+you\b|\bplease\b", lowered):
             return False
     if _REPRESENTATION_ACTION_PATTERN.search(lowered):
-        if _REPRESENTATION_CREATE_ONLY_PATTERN.search(lowered) and not _contains_any_phrase(
+        if _REPRESENTATION_CREATE_ONLY_PATTERN.search(
+            lowered
+        ) and not _contains_any_phrase(
             lowered,
             _REPRESENTATION_CREATE_OBJECT_CUES,
         ):
@@ -3993,7 +4060,9 @@ def _build_representation_required_effect_template(
 ) -> dict[str, Any]:
     profile_id = _safe_str(profile.get("profile_id")) or "representation"
     profile_concept_id = _safe_str(profile.get("profile_concept_id"))
-    effect_type = _safe_str(profile.get("effect_type")) or f"representation_{profile_id}"
+    effect_type = (
+        _safe_str(profile.get("effect_type")) or f"representation_{profile_id}"
+    )
     description = (
         _safe_str(profile.get("description"))
         or "Ensure the requested representation is materialised from the artefact context."
@@ -4047,11 +4116,7 @@ def _build_prompt_representation_targets(
     url_arxiv_ids = extract_arxiv_id_candidates(*urls)
     url_arxiv_lookup = {item.lower() for item in url_arxiv_ids}
     extra_arxiv_ids = (
-        [
-            arxiv_id
-            for arxiv_id in arxiv_ids
-            if arxiv_id.lower() not in url_arxiv_lookup
-        ]
+        [arxiv_id for arxiv_id in arxiv_ids if arxiv_id.lower() not in url_arxiv_lookup]
         if profile_id == "paper"
         else []
     )
@@ -4126,7 +4191,9 @@ def _build_fail_closed_representation_effect(
 def _extract_applied_workflow_continuation_context(
     aux_llm_calls: Sequence[Mapping[str, Any]] | None,
 ) -> dict[str, Any] | None:
-    if not isinstance(aux_llm_calls, Sequence) or isinstance(aux_llm_calls, (str, bytes)):
+    if not isinstance(aux_llm_calls, Sequence) or isinstance(
+        aux_llm_calls, (str, bytes)
+    ):
         return None
     for entry in reversed(aux_llm_calls):
         if not isinstance(entry, Mapping):
@@ -4174,7 +4241,9 @@ def _build_representation_required_effects_contract(
     if not prompt_value or prompt_explicitly_denies_write(prompt_value):
         return None
 
-    prompt_requests_representation = _prompt_requests_representation_action(prompt_value)
+    prompt_requests_representation = _prompt_requests_representation_action(
+        prompt_value
+    )
     low_risk_arxiv_representation = _prompt_implies_low_risk_arxiv_representation(
         prompt_value,
         aux_llm_calls=aux_llm_calls,
@@ -4235,16 +4304,16 @@ def _build_representation_required_effects_contract(
         fail_closed_reason = ""
 
     profile_resolution = {
-        "requested_profile_concept_ids": _dedupe_string_sequence(
-            diagnostics.get("requested_concept_ids") or []
-        )
-        if isinstance(diagnostics, Mapping)
-        else [],
-        "loaded_profile_concept_ids": _dedupe_string_sequence(
-            diagnostics.get("loaded_concept_ids") or []
-        )
-        if isinstance(diagnostics, Mapping)
-        else [],
+        "requested_profile_concept_ids": (
+            _dedupe_string_sequence(diagnostics.get("requested_concept_ids") or [])
+            if isinstance(diagnostics, Mapping)
+            else []
+        ),
+        "loaded_profile_concept_ids": (
+            _dedupe_string_sequence(diagnostics.get("loaded_concept_ids") or [])
+            if isinstance(diagnostics, Mapping)
+            else []
+        ),
         "selected_profile_concept_id": _safe_str(profile.get("profile_concept_id")),
         "selected_profile_id": profile_id,
         "fail_closed": fail_closed,
@@ -4317,15 +4386,19 @@ def _is_representation_effect_type(effect_type: str | None) -> bool:
     if not isinstance(effect_type, str):
         return False
     lowered = effect_type.strip().lower()
-    return lowered == "scholarly_representation" or lowered.startswith("representation_")
+    return lowered == "scholarly_representation" or lowered.startswith(
+        "representation_"
+    )
 
 
 def _is_evidence_effect_type(effect_type: str | None) -> bool:
     if not isinstance(effect_type, str):
         return False
     lowered = effect_type.strip().lower()
-    return lowered == "required_evidence" or lowered.endswith("_evidence") or (
-        "evidence" in lowered
+    return (
+        lowered == "required_evidence"
+        or lowered.endswith("_evidence")
+        or ("evidence" in lowered)
     )
 
 
@@ -4345,7 +4418,9 @@ def _tools_match_mode_satisfied(
     match_mode: str,
 ) -> bool:
     cleaned_required = [
-        tool.lower().strip() for tool in required_tools if isinstance(tool, str) and tool.strip()
+        tool.lower().strip()
+        for tool in required_tools
+        if isinstance(tool, str) and tool.strip()
     ]
     if not cleaned_required:
         return False
@@ -4370,8 +4445,7 @@ def _summarise_required_tool_failure(
     required_tools = _dedupe_string_sequence(effect.get("required_tools") or [])
     effect_slug = _effect_failure_code_slug(effect)
     default_failed_code = (
-        _safe_str(effect.get("failed_failure_code"))
-        or f"{effect_slug}_failed"
+        _safe_str(effect.get("failed_failure_code")) or f"{effect_slug}_failed"
     )
     default_reason = (
         _safe_str(effect.get("not_satisfied_reason"))
@@ -4400,9 +4474,13 @@ def _summarise_required_tool_failure(
             error_text = _safe_str(invocation.get("error"))
             result_summary = _safe_str(invocation.get("result_summary"))
             payload_summary = (
-                _safe_str(payload.get("result_summary")) if isinstance(payload, Mapping) else None
+                _safe_str(payload.get("result_summary"))
+                if isinstance(payload, Mapping)
+                else None
             ) or (
-                _safe_str(payload.get("summary")) if isinstance(payload, Mapping) else None
+                _safe_str(payload.get("summary"))
+                if isinstance(payload, Mapping)
+                else None
             )
             detail = error_text or result_summary or payload_summary
             if status == "blocked":
@@ -4411,7 +4489,10 @@ def _summarise_required_tool_failure(
                 detail = detail or f"Required evidence tool failed: {tool_name}."
             detail_lower = detail.lower()
             failure_codes = [default_failed_code]
-            if "permission_denied" in detail_lower or "permission denied" in detail_lower:
+            if (
+                "permission_denied" in detail_lower
+                or "permission denied" in detail_lower
+            ):
                 failure_codes.insert(0, "required_evidence_permission_denied")
             elif "not authorised for conversation" in detail_lower or (
                 "not authorized for conversation" in detail_lower
@@ -4439,17 +4520,25 @@ def _extract_tool_invocation_target_ids(invocation: Mapping[str, Any]) -> list[s
     return _normalise_representation_target_tokens(
         payload.get("concept_id") if isinstance(payload, Mapping) else None,
         payload.get("file_copy_concept_id") if isinstance(payload, Mapping) else None,
-        payload.get("computer_file_copy_concept_id")
-        if isinstance(payload, Mapping)
-        else None,
+        (
+            payload.get("computer_file_copy_concept_id")
+            if isinstance(payload, Mapping)
+            else None
+        ),
         payload.get("url") if isinstance(payload, Mapping) else None,
         payload.get("source_url") if isinstance(payload, Mapping) else None,
         payload.get("arxiv_id") if isinstance(payload, Mapping) else None,
         arguments.get("concept_id") if isinstance(arguments, Mapping) else None,
-        arguments.get("file_copy_concept_id") if isinstance(arguments, Mapping) else None,
-        arguments.get("computer_file_copy_concept_id")
-        if isinstance(arguments, Mapping)
-        else None,
+        (
+            arguments.get("file_copy_concept_id")
+            if isinstance(arguments, Mapping)
+            else None
+        ),
+        (
+            arguments.get("computer_file_copy_concept_id")
+            if isinstance(arguments, Mapping)
+            else None
+        ),
         arguments.get("url") if isinstance(arguments, Mapping) else None,
         arguments.get("source_url") if isinstance(arguments, Mapping) else None,
         arguments.get("arxiv_id") if isinstance(arguments, Mapping) else None,
@@ -4640,9 +4729,11 @@ def _materialise_required_effects_from_contract(
                 "No required representation tool execution was observed."
                 if contract_intent == "representation"
                 or _is_representation_effect_type(_safe_str(effect.get("effect_type")))
-                else "Required evidence was not retrieved."
-                if _is_evidence_effect_type(_safe_str(effect.get("effect_type")))
-                else "Required effect was not observed."
+                else (
+                    "Required evidence was not retrieved."
+                    if _is_evidence_effect_type(_safe_str(effect.get("effect_type")))
+                    else "Required effect was not observed."
+                )
             )
         )
         status_reason = default_not_executed_reason
@@ -4656,13 +4747,12 @@ def _materialise_required_effects_from_contract(
         is_representation_effect = contract_intent == "representation" or (
             _is_representation_effect_type(_safe_str(effect.get("effect_type")))
         )
-        default_missing_failure_code = (
-            _safe_str(effect.get("missing_failure_code"))
-            or (
-                f"{domain_id}_representation_not_executed"
-                if is_representation_effect
-                else f"{effect_slug}_not_executed"
-            )
+        default_missing_failure_code = _safe_str(
+            effect.get("missing_failure_code")
+        ) or (
+            f"{domain_id}_representation_not_executed"
+            if is_representation_effect
+            else f"{effect_slug}_not_executed"
         )
         first_success_tool: str | None = None
         matching_success_payloads: list[Mapping[str, Any]] = []
@@ -4685,8 +4775,8 @@ def _materialise_required_effects_from_contract(
                 successful_other_target = True
 
         if required_tools_match == "all":
-            success_requirement_met = (
-                len(successful_required_tools) == len(required_tools)
+            success_requirement_met = len(successful_required_tools) == len(
+                required_tools
             )
         else:
             success_requirement_met = bool(successful_required_tools)
@@ -4698,7 +4788,9 @@ def _materialise_required_effects_from_contract(
                 payloads=matching_success_payloads,
             )
             if is_representation_effect and isinstance(payload_verdict, Mapping):
-                effect_status = _safe_str(payload_verdict.get("status")) or "not_satisfied"
+                effect_status = (
+                    _safe_str(payload_verdict.get("status")) or "not_satisfied"
+                )
                 status_reason = _safe_str(payload_verdict.get("status_reason")) or (
                     "Representation payload verification failed."
                 )
@@ -4771,16 +4863,12 @@ def _extract_mutation_metadata_from_invocation(
     invocation: Mapping[str, Any],
 ) -> dict[str, Any] | None:
     """Extract mutation-relevant metadata from a single write tool invocation."""
-    tool_name = _safe_str(invocation.get("tool")) or _safe_str(
-        invocation.get("method")
-    )
+    tool_name = _safe_str(invocation.get("tool")) or _safe_str(invocation.get("method"))
     if not tool_name or not _is_write_tool(tool_name):
         return None
 
     payload = _extract_tool_invocation_payload(invocation)
-    status = _classify_tool_invocation_status(
-        invocation=invocation, payload=payload
-    )
+    status = _classify_tool_invocation_status(invocation=invocation, payload=payload)
     targets = _extract_tool_invocation_target_ids(invocation)
 
     predicates: list[str] = []
@@ -4883,12 +4971,8 @@ def _build_tool_authored_mutation_effects(
         if effect_status == "not_satisfied":
             failure_codes = [f"kb_mutation_{tool_name.lower()}_failed"]
 
-        target_detail = (
-            f" targeting {', '.join(targets[:2])}" if targets else ""
-        )
-        predicate_detail = (
-            f" ({', '.join(predicates[:2])})" if predicates else ""
-        )
+        target_detail = f" targeting {', '.join(targets[:2])}" if targets else ""
+        predicate_detail = f" ({', '.join(predicates[:2])})" if predicates else ""
 
         effect: dict[str, Any] = {
             "effect_id": f"mutation_{index + 1}",
@@ -5050,11 +5134,15 @@ def _build_postcondition_checks(
                 "check_type": (
                     "tool_execution_observed"
                     if effect_type == "tool_execution"
-                    else "workflow_execution_observed"
-                    if effect_type == "workflow_execution"
-                    else "scholarly_representation_observed"
-                    if _is_representation_effect_type(effect_type)
-                    else "predicate_exists"
+                    else (
+                        "workflow_execution_observed"
+                        if effect_type == "workflow_execution"
+                        else (
+                            "scholarly_representation_observed"
+                            if _is_representation_effect_type(effect_type)
+                            else "predicate_exists"
+                        )
+                    )
                 ),
                 "check_tool": "derived.turn_execution",
                 "check_payload": {},
@@ -5222,7 +5310,8 @@ def _derive_completion_gate(
                 (
                     _REPRESENTATION_FAILURE_REASON_MAP.get(code)
                     for code in blocking_failure_codes
-                    if isinstance(code, str) and code in _REPRESENTATION_FAILURE_REASON_MAP
+                    if isinstance(code, str)
+                    and code in _REPRESENTATION_FAILURE_REASON_MAP
                 ),
                 None,
             )
@@ -5311,8 +5400,13 @@ def _derive_completion_gate(
             blocking_failure_codes = _normalise_failure_codes(
                 execution_signal_blocker.get("failure_codes")
             )
-            single_failure_code = _safe_str(execution_signal_blocker.get("failure_code"))
-            if single_failure_code and single_failure_code not in blocking_failure_codes:
+            single_failure_code = _safe_str(
+                execution_signal_blocker.get("failure_code")
+            )
+            if (
+                single_failure_code
+                and single_failure_code not in blocking_failure_codes
+            ):
                 blocking_failure_codes.append(single_failure_code)
             decision = (
                 _safe_str(execution_signal_blocker.get("decision"))
@@ -5329,7 +5423,9 @@ def _derive_completion_gate(
                 {
                     "effect_id": _safe_str(execution_signal_blocker.get("effect_id"))
                     or "effect_execution_signal_1",
-                    "effect_type": _safe_str(execution_signal_blocker.get("effect_type"))
+                    "effect_type": _safe_str(
+                        execution_signal_blocker.get("effect_type")
+                    )
                     or "tool_execution",
                     "status": _safe_str(execution_signal_blocker.get("status"))
                     or "not_executed",
@@ -5371,9 +5467,7 @@ def _derive_completion_gate(
         "completion_outcome": (
             "success"
             if decision == "completed"
-            else "inconclusive"
-            if decision == "partial"
-            else "failure"
+            else "inconclusive" if decision == "partial" else "failure"
         ),
     }
     return {
@@ -5425,7 +5519,9 @@ def build_turn_execution_record(
         selected_workflow_id = _safe_str(workflow_routing.get("workflow_id"))
         selector_verdict = _safe_str(workflow_routing.get("verdict"))
         raw_source = (_safe_str(workflow_routing.get("source")) or "default").lower()
-        selector_source = "workflow_selector" if raw_source == "selector" else raw_source
+        selector_source = (
+            "workflow_selector" if raw_source == "selector" else raw_source
+        )
 
     (
         serialised_invocations,
@@ -5546,7 +5642,9 @@ def build_turn_execution_record(
     if isinstance(latest_progress, Mapping):
         raw_events = latest_progress.get("diagnostic_events")
         if isinstance(raw_events, list):
-            diagnostic_events = [item for item in raw_events if isinstance(item, Mapping)]
+            diagnostic_events = [
+                item for item in raw_events if isinstance(item, Mapping)
+            ]
         try:
             retry["attempts"] = int(latest_progress.get("retry_attempts") or 0)
         except Exception:
@@ -5601,51 +5699,57 @@ def build_turn_execution_record(
         execution_summary_with_contract["required_effects_contract_domain"] = _safe_str(
             representation_effects_contract.get("domain_profile_id")
         )
-        execution_summary_with_contract["required_effects_contract_domain_concept_id"] = _safe_str(
-            representation_effects_contract.get("domain_profile_concept_id")
-        )
+        execution_summary_with_contract[
+            "required_effects_contract_domain_concept_id"
+        ] = _safe_str(representation_effects_contract.get("domain_profile_concept_id"))
         execution_summary_with_contract["required_effects_contract_intent"] = _safe_str(
             representation_effects_contract.get("intent_class")
         )
-        execution_summary_with_contract["required_effects_contract_profile_source"] = _safe_str(
-            representation_effects_contract.get("profile_source")
+        execution_summary_with_contract["required_effects_contract_profile_source"] = (
+            _safe_str(representation_effects_contract.get("profile_source"))
         )
-        execution_summary_with_contract["required_effects_contract_profile_version_hash"] = _safe_str(
-            representation_effects_contract.get("profile_version_hash")
-        )
+        execution_summary_with_contract[
+            "required_effects_contract_profile_version_hash"
+        ] = _safe_str(representation_effects_contract.get("profile_version_hash"))
         execution_summary_with_contract["required_effects_declared_count"] = len(
             representation_effects_contract.get("required_effects") or []
         )
         profile_resolution = representation_effects_contract.get("profile_resolution")
         if isinstance(profile_resolution, Mapping):
-            execution_summary_with_contract["required_effects_contract_profile_requested_ids"] = _dedupe_string_sequence(
+            execution_summary_with_contract[
+                "required_effects_contract_profile_requested_ids"
+            ] = _dedupe_string_sequence(
                 profile_resolution.get("requested_profile_concept_ids") or []
             )
-            execution_summary_with_contract["required_effects_contract_profile_loaded_ids"] = _dedupe_string_sequence(
+            execution_summary_with_contract[
+                "required_effects_contract_profile_loaded_ids"
+            ] = _dedupe_string_sequence(
                 profile_resolution.get("loaded_profile_concept_ids") or []
             )
-            execution_summary_with_contract["required_effects_contract_profile_selected_id"] = _safe_str(
-                profile_resolution.get("selected_profile_concept_id")
+            execution_summary_with_contract[
+                "required_effects_contract_profile_selected_id"
+            ] = _safe_str(profile_resolution.get("selected_profile_concept_id"))
+            execution_summary_with_contract["required_effects_contract_fail_closed"] = (
+                bool(profile_resolution.get("fail_closed"))
             )
-            execution_summary_with_contract["required_effects_contract_fail_closed"] = bool(
-                profile_resolution.get("fail_closed")
-            )
-            execution_summary_with_contract["required_effects_contract_fail_closed_reason"] = _safe_str(
-                profile_resolution.get("fail_closed_reason")
-            )
-    execution_summary_with_contract["search_evidence_count"] = len(search_evidence_payload)
+            execution_summary_with_contract[
+                "required_effects_contract_fail_closed_reason"
+            ] = _safe_str(profile_resolution.get("fail_closed_reason"))
+    execution_summary_with_contract["search_evidence_count"] = len(
+        search_evidence_payload
+    )
     if isinstance(workflow_required_effects_contract, Mapping):
         execution_summary_with_contract["workflow_required_effects_contract_id"] = (
             _safe_str(workflow_required_effects_contract.get("contract_id"))
         )
-        execution_summary_with_contract["workflow_required_effects_declared_count"] = len(
-            workflow_required_effects_contract.get("required_effects") or []
+        execution_summary_with_contract["workflow_required_effects_declared_count"] = (
+            len(workflow_required_effects_contract.get("required_effects") or [])
         )
         execution_summary_with_contract["workflow_required_effects_contract_source"] = (
             workflow_required_effects_contract_source
         )
-    execution_summary_with_contract["workflow_required_effects_materialised_count"] = len(
-        workflow_required_effects
+    execution_summary_with_contract["workflow_required_effects_materialised_count"] = (
+        len(workflow_required_effects)
     )
 
     record_payload = {
@@ -5660,7 +5764,9 @@ def build_turn_execution_record(
         "created_at_utc": _normalise_iso_timestamp(interaction_timestamp_utc),
         "prompt": {
             "preview": (
-                prompt_text[:1000] if isinstance(prompt_text, str) else _safe_str(prompt_text)
+                prompt_text[:1000]
+                if isinstance(prompt_text, str)
+                else _safe_str(prompt_text)
             ),
             "sha256": _hash_text(prompt_text),
             "source": "user_message",
@@ -5740,7 +5846,10 @@ def _ensure_turn_execution_indexes(collection) -> None:
                 )
             if "effect_status_created_desc" not in existing_indexes:
                 collection.create_index(
-                    [("required_effects.status", ASCENDING), ("created_at_utc", DESCENDING)],
+                    [
+                        ("required_effects.status", ASCENDING),
+                        ("created_at_utc", DESCENDING),
+                    ],
                     name="effect_status_created_desc",
                 )
             if "workflow_created_desc" not in existing_indexes:
@@ -6094,9 +6203,9 @@ def build_turn_execution_namespace_coverage_report(
             "history.llm_debug_data": 1,
         }
         try:
-            session_cursor = chat_history_coll.find(session_query, session_projection).limit(
-                session_limit
-            )
+            session_cursor = chat_history_coll.find(
+                session_query, session_projection
+            ).limit(session_limit)
         except Exception:
             session_cursor = []
 
@@ -6159,7 +6268,9 @@ def build_turn_execution_namespace_coverage_report(
                     history_request_ids.add(record_request_id)
 
         projected_query = {"namespace": namespace_value}
-        projected_records_total = _safe_count_documents(turn_records_coll, projected_query)
+        projected_records_total = _safe_count_documents(
+            turn_records_coll, projected_query
+        )
         projected_projection = {
             "request_id": 1,
             "created_at_utc": 1,
@@ -6211,16 +6322,25 @@ def build_turn_execution_namespace_coverage_report(
                 projected_doc.get("created_at_utc")
             )
             if created_at_utc:
-                if projected_created_min is None or created_at_utc < projected_created_min:
+                if (
+                    projected_created_min is None
+                    or created_at_utc < projected_created_min
+                ):
                     projected_created_min = created_at_utc
-                if projected_created_max is None or created_at_utc > projected_created_max:
+                if (
+                    projected_created_max is None
+                    or created_at_utc > projected_created_max
+                ):
                     projected_created_max = created_at_utc
 
         overlap_count = len(history_request_ids.intersection(projected_request_ids))
         history_request_id_count = len(history_request_ids)
 
         namespace_gaps: list[dict[str, Any]] = []
-        if assistant_messages_scanned > 0 and assistant_messages_with_turn_execution_record == 0:
+        if (
+            assistant_messages_scanned > 0
+            and assistant_messages_with_turn_execution_record == 0
+        ):
             namespace_gaps.append(
                 {
                     "gap_id": "no_embedded_turn_execution_record_in_history",
@@ -6523,7 +6643,9 @@ def backfill_turn_execution_records_from_chat_history(
                 continue
             role = message.get("role")
             if role == "user":
-                latest_user_prompt = _safe_str(message.get("content")) or latest_user_prompt
+                latest_user_prompt = (
+                    _safe_str(message.get("content")) or latest_user_prompt
+                )
                 continue
             if role != "assistant":
                 continue
@@ -6607,15 +6729,18 @@ def backfill_turn_execution_records_from_chat_history(
                 if not isinstance(workflow_selection, dict):
                     workflow_selection = {}
                     record["workflow_selection"] = workflow_selection
-                if (
-                    not _safe_str(workflow_selection.get("selected_workflow_id"))
-                    and isinstance(workflow_routing, Mapping)
-                ):
-                    inferred_workflow_id = _safe_str(workflow_routing.get("workflow_id"))
+                if not _safe_str(
+                    workflow_selection.get("selected_workflow_id")
+                ) and isinstance(workflow_routing, Mapping):
+                    inferred_workflow_id = _safe_str(
+                        workflow_routing.get("workflow_id")
+                    )
                     inferred_verdict = _safe_str(workflow_routing.get("verdict"))
                     inferred_source = _safe_str(workflow_routing.get("source"))
                     if inferred_workflow_id:
-                        workflow_selection["selected_workflow_id"] = inferred_workflow_id
+                        workflow_selection["selected_workflow_id"] = (
+                            inferred_workflow_id
+                        )
                     if inferred_verdict:
                         workflow_selection["selector_verdict"] = inferred_verdict
                     if inferred_source:
