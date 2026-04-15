@@ -92,7 +92,7 @@ describe('LLM debug popup workflow execution hook', () => {
         expect(auxSection.classList.contains('hidden')).toBe(false);
     });
 
-    test('prefers turn_execution_diagnostics for popup copy payload', async () => {
+    test('prefers turn_execution_diagnostics for popup copy payload and preserves selector telemetry', async () => {
         const { setLlmDebugDataForTurn, showLlmDebugPopup } = require(chatTabModulePath);
 
         const turnId = 'assistant-456';
@@ -110,6 +110,28 @@ describe('LLM debug popup workflow execution hook', () => {
                 progress_events: [],
                 phase_history: [],
                 tool_history: [],
+                workflow_routing_diagnostics: {
+                    schema_version: 'workflow_routing_diagnostics.v1',
+                    selected_workflow_id: '#V#concept_search_instance_retrieval_workflow',
+                    selector_verdict: 'rag_selected',
+                    selector_source: 'selector',
+                    selector: {
+                        prompt_id: '#V#chat_turn_classifier_prompt',
+                        requested_prompt_ids: ['#V#chat_turn_classifier_prompt'],
+                        prompt: {
+                            text: 'Current user request:\nTell me about myself.',
+                            char_count: 42
+                        },
+                        candidate_list: {
+                            text: '- #V#concept_search_instance_retrieval_workflow',
+                            char_count: 47
+                        },
+                        response: {
+                            text: '{"workflow_id":"#V#concept_search_instance_retrieval_workflow"}',
+                            char_count: 65
+                        }
+                    }
+                },
                 stage_diagnostics: [
                     {
                         stage_id: 'workflow_discovery',
@@ -129,6 +151,35 @@ describe('LLM debug popup workflow execution hook', () => {
         expect(payload.request_id).toBe('req-456');
         expect(payload.prompt_preview).toBe('hello');
         expect(payload.workflow_discovery).toEqual({ matches: [{ concept_id: '#V#demo' }] });
+        expect(payload.workflow_routing_diagnostics).toEqual({
+            schema_version: 'workflow_routing_diagnostics.v1',
+            selected_workflow_id: '#V#concept_search_instance_retrieval_workflow',
+            selector_verdict: 'rag_selected',
+            selector_source: 'selector',
+            selector: {
+                prompt_id: '#V#chat_turn_classifier_prompt',
+                requested_prompt_ids: ['#V#chat_turn_classifier_prompt'],
+                prompt_provenance: null,
+                prompt: {
+                    text: 'Current user request:\nTell me about myself.',
+                    preview: null,
+                    char_count: 42,
+                    preview_truncated: false
+                },
+                candidate_list: {
+                    text: '- #V#concept_search_instance_retrieval_workflow',
+                    preview: null,
+                    char_count: 47,
+                    preview_truncated: false
+                },
+                response: {
+                    text: '{"workflow_id":"#V#concept_search_instance_retrieval_workflow"}',
+                    preview: null,
+                    char_count: 65,
+                    preview_truncated: false
+                }
+            }
+        });
         expect(payload.stage_diagnostics).toEqual([
             expect.objectContaining({
                 stage_id: 'workflow_discovery',

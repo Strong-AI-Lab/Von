@@ -1351,6 +1351,80 @@ function getWorkflowRoutingDiagnostics(progressLike) {
     return null;
 }
 
+function buildThinkingSelectorDiagnosticsSnapshot(workflowRoutingDiagnostics) {
+    const routingDiagnostics = getWorkflowRoutingDiagnostics(workflowRoutingDiagnostics);
+    const selector = (
+        routingDiagnostics?.selector
+        && typeof routingDiagnostics.selector === 'object'
+    )
+        ? routingDiagnostics.selector
+        : null;
+    if (!selector) {
+        return null;
+    }
+
+    const prompt = normaliseThinkingDiagnosticCapture(selector.prompt);
+    const candidateList = normaliseThinkingDiagnosticCapture(selector.candidate_list);
+    const response = normaliseThinkingDiagnosticCapture(selector.response);
+    const promptId = normaliseThinkingActivityString(selector.prompt_id) || null;
+    const requestedPromptIds = Array.isArray(selector.requested_prompt_ids)
+        ? selector.requested_prompt_ids
+            .map((value) => normaliseThinkingActivityString(value))
+            .filter(Boolean)
+        : [];
+    const promptProvenance = (
+        selector.prompt_provenance
+        && typeof selector.prompt_provenance === 'object'
+    )
+        ? { ...selector.prompt_provenance }
+        : null;
+
+    if (
+        !prompt
+        && !candidateList
+        && !response
+        && !promptId
+        && requestedPromptIds.length === 0
+        && !promptProvenance
+    ) {
+        return null;
+    }
+
+    return {
+        prompt_id: promptId,
+        requested_prompt_ids: requestedPromptIds,
+        prompt_provenance: promptProvenance,
+        prompt,
+        candidate_list: candidateList,
+        response
+    };
+}
+
+function buildWorkflowRoutingDiagnosticsLocatorSnapshot(progressLike) {
+    const routingDiagnostics = getWorkflowRoutingDiagnostics(progressLike);
+    if (!routingDiagnostics) {
+        return null;
+    }
+
+    const selector = buildThinkingSelectorDiagnosticsSnapshot(routingDiagnostics);
+    const selectedWorkflowId = deriveSelectedWorkflowIdFromRoutingDiagnostics(routingDiagnostics);
+    const selectorVerdict = deriveWorkflowSelectorVerdictFromRoutingDiagnostics(routingDiagnostics);
+    const selectorSource = deriveWorkflowSelectorSourceFromRoutingDiagnostics(routingDiagnostics);
+
+    if (!selector && !selectedWorkflowId && !selectorVerdict && !selectorSource) {
+        return null;
+    }
+
+    return {
+        schema_version: normaliseThinkingActivityString(routingDiagnostics.schema_version)
+            || 'workflow_routing_diagnostics.v1',
+        selected_workflow_id: selectedWorkflowId || null,
+        selector_verdict: selectorVerdict || null,
+        selector_source: selectorSource || null,
+        selector
+    };
+}
+
 function deriveSelectedWorkflowIdFromRoutingDiagnostics(workflowRoutingDiagnostics) {
     if (!workflowRoutingDiagnostics || typeof workflowRoutingDiagnostics !== 'object') {
         return null;
@@ -4339,6 +4413,9 @@ function buildThinkingWorkflowStageDiagnosticData(stageId, stageLabel, request) 
     const stageRoutingNarrative = buildWorkflowRoutingNarrative(stageRoutingProgress, workflowDiscovery, {
         includeNoMatchTransition: true,
     });
+    const selectorDiagnostics = buildThinkingSelectorDiagnosticsSnapshot(
+        stageRoutingProgress.workflow_routing_diagnostics
+    );
     const latestLlmExchange = buildThinkingLiveLlmExchange(
         cleanStageId,
         stageDiagnostic,
@@ -4539,6 +4616,13 @@ function buildThinkingWorkflowStageDiagnosticData(stageId, stageLabel, request) 
                 .map((value) => normaliseThinkingActivityString(value))
                 .filter(Boolean)
             : stageRoutingNarrative.context.dispatchTerminalUnresolvedRequiredInputs;
+        data.selector_prompt_id = selectorDiagnostics?.prompt_id || null;
+        data.selector_requested_prompt_ids = Array.isArray(selectorDiagnostics?.requested_prompt_ids)
+            ? selectorDiagnostics.requested_prompt_ids.slice()
+            : [];
+        data.selector_prompt = selectorDiagnostics?.prompt || null;
+        data.selector_candidate_list = selectorDiagnostics?.candidate_list || null;
+        data.selector_response = selectorDiagnostics?.response || null;
     }
 
     if (cleanStageId === 'tool_execute') {
@@ -4862,6 +4946,26 @@ function renderThinkingWorkflowStageDiagnosticDataHTML(data, workflowDiscovery =
             'Unresolved required inputs',
             data.dispatch_terminal_unresolved_required_inputs
         ));
+        sections.push(buildThinkingDiagnosticListHTML(
+            'Requested selector prompt ids',
+            data.selector_requested_prompt_ids,
+            { code: true }
+        ));
+        sections.push(buildThinkingDiagnosticTextSectionHTML(
+            'Selector prompt',
+            data.selector_prompt?.text || data.selector_prompt?.preview,
+            { codeBlock: true }
+        ));
+        sections.push(buildThinkingDiagnosticTextSectionHTML(
+            'Selector candidate list',
+            data.selector_candidate_list?.text || data.selector_candidate_list?.preview,
+            { codeBlock: true }
+        ));
+        sections.push(buildThinkingDiagnosticTextSectionHTML(
+            'Selector response',
+            data.selector_response?.text || data.selector_response?.preview,
+            { codeBlock: true }
+        ));
     } else if (data.stage_id === 'workflow_dispatch_prepare') {
         const selectedWorkflowHtml = renderWorkflowDisplayHtml(
             data.selected_workflow_id,
@@ -4904,6 +5008,21 @@ function renderThinkingWorkflowStageDiagnosticDataHTML(data, workflowDiscovery =
             'Pre-dispatch checks',
             buildThinkingPreDispatchStepLines(data.pre_dispatch)
         ));
+        sections.push(buildThinkingDiagnosticListHTML(
+            'Requested selector prompt ids',
+            data.selector_requested_prompt_ids,
+            { code: true }
+        ));
+        sections.push(buildThinkingDiagnosticTextSectionHTML(
+            'Selector prompt',
+            data.selector_prompt?.text || data.selector_prompt?.preview,
+            { codeBlock: true }
+        ));
+        sections.push(buildThinkingDiagnosticTextSectionHTML(
+            'Selector candidate list',
+            data.selector_candidate_list?.text || data.selector_candidate_list?.preview,
+            { codeBlock: true }
+        ));
     } else if (data.stage_id === 'tool_plan') {
         const selectedWorkflowHtml = renderWorkflowDisplayHtml(
             data.selected_workflow_id,
@@ -4932,6 +5051,21 @@ function renderThinkingWorkflowStageDiagnosticDataHTML(data, workflowDiscovery =
         sections.push(buildThinkingDiagnosticListHTML(
             'Tool planning failure codes',
             data.tool_execution?.failure_codes
+        ));
+        sections.push(buildThinkingDiagnosticListHTML(
+            'Requested selector prompt ids',
+            data.selector_requested_prompt_ids,
+            { code: true }
+        ));
+        sections.push(buildThinkingDiagnosticTextSectionHTML(
+            'Selector prompt',
+            data.selector_prompt?.text || data.selector_prompt?.preview,
+            { codeBlock: true }
+        ));
+        sections.push(buildThinkingDiagnosticTextSectionHTML(
+            'Selector candidate list',
+            data.selector_candidate_list?.text || data.selector_candidate_list?.preview,
+            { codeBlock: true }
         ));
     } else if (data.stage_id === 'tool_execute') {
         facts.push(
@@ -24702,6 +24836,11 @@ function buildLlmDebugLocatorPayload({ turnId, debugData, metadata, workflowExec
             : ((debugData.workflow_discovery && typeof debugData.workflow_discovery === 'object')
                 ? debugData.workflow_discovery
                 : null),
+        workflow_routing_diagnostics: buildWorkflowRoutingDiagnosticsLocatorSnapshot(
+            (turnExecutionDiagnostics && typeof turnExecutionDiagnostics === 'object')
+                ? turnExecutionDiagnostics
+                : debugData
+        ),
         stage_diagnostics: Array.isArray(turnExecutionDiagnostics?.stage_diagnostics)
             ? turnExecutionDiagnostics.stage_diagnostics
             : null,
