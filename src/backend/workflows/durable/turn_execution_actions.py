@@ -9,7 +9,7 @@ JVNAUTOSCI-1763:
 from __future__ import annotations
 
 import logging
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from ..action_registry import (
     ActionSpec,
@@ -19,7 +19,11 @@ from ..action_registry import (
 )
 from ..subworkflow_contracts import WORKFLOW_SUBWORKFLOW_FAILURE_MODE_CAPTURE
 from .turn_execution_runtime_support import (
+    _bounded_snapshot,
     build_turn_execution_selected_workflow_outputs,
+    build_turn_recovery_tool_batch_outputs,
+    _coerce_non_empty_text,
+    _summarise_tool_batch_result_payload,
     run_turn_execution_completion_gate,
     run_turn_execution_critic,
 )
@@ -28,8 +32,94 @@ logger = logging.getLogger(__name__)
 
 TURN_EXECUTION_ROUTE_ACTION_ID = "turn_execution.route"
 TURN_EXECUTION_EXECUTE_SELECTED_ACTION_ID = "turn_execution.execute_selected"
+TURN_EXECUTION_EXECUTE_TOOL_BATCH_ACTION_ID = "turn_execution.execute_tool_batch"
 TURN_EXECUTION_CRITIC_ACTION_ID = "turn_execution.critic"
 TURN_EXECUTION_COMPLETION_GATE_ACTION_ID = "turn_execution.completion_gate"
+_DEFAULT_RECOVERY_TOOL_BATCH_CAP = 4
+_MAX_RECOVERY_TOOL_BATCH_CAP = 8
+_DISALLOWED_DIRECT_TOOL_BATCH_ACTION_PREFIXES: tuple[str, ...] = (
+    "turn_execution.",
+    "workflow_control.",
+)
+_DISALLOWED_DIRECT_TOOL_BATCH_ACTION_IDS: frozenset[str] = frozenset(
+    {"workflow_invoke_subworkflow", "llm.action"}
+)
+
+
+def _normalise_tool_batch_cap(
+    raw_value: Any,
+    *,
+    environment_cap: Any,
+) -> int:
+    try:
+        requested = int(raw_value)
+    except (TypeError, ValueError):
+        requested = _DEFAULT_RECOVERY_TOOL_BATCH_CAP
+    requested = max(1, min(_MAX_RECOVERY_TOOL_BATCH_CAP, requested))
+    try:
+        env_cap = int(environment_cap)
+    except (TypeError, ValueError):
+        env_cap = _DEFAULT_RECOVERY_TOOL_BATCH_CAP
+    env_cap = max(1, min(_MAX_RECOVERY_TOOL_BATCH_CAP, env_cap))
+    return max(1, min(requested, env_cap))
+
+
+def _normalise_tool_batch_calls(raw_value: Any) -> list[dict[str, Any]]:
+    raw_calls = raw_value
+    if isinstance(raw_value, Mapping) and isinstance(raw_value.get("tool_calls"), Sequence):
+        raw_calls = raw_value.get("tool_calls")
+    if not isinstance(raw_calls, Sequence) or isinstance(
+        raw_calls, (str, bytes, bytearray)
+    ):
+        return []
+
+    calls: list[dict[str, Any]] = []
+    for item in raw_calls:
+        if not isinstance(item, Mapping):
+            continue
+        tool_name = _coerce_non_empty_text(
+            item.get("tool")
+            or item.get("action_id")
+            or item.get("name")
+            or item.get("method")
+        )
+        if not tool_name:
+            continue
+        payload = item.get("arguments")
+        if not isinstance(payload, Mapping):
+            payload = item.get("payload")
+        payload_map = dict(payload) if isinstance(payload, Mapping) else {}
+        calls.append(
+            {
+                "tool": tool_name,
+                "payload": payload_map,
+            }
+        )
+    return calls
+
+
+def _is_disallowed_direct_tool_batch_action(tool_name: str | None) -> bool:
+    cleaned = (
+        str(tool_name).strip()
+        if isinstance(tool_name, str) and str(tool_name).strip()
+        else ""
+    )
+    if not cleaned:
+        return True
+    if cleaned in _DISALLOWED_DIRECT_TOOL_BATCH_ACTION_IDS:
+        return True
+    return any(
+        cleaned.startswith(prefix)
+        for prefix in _DISALLOWED_DIRECT_TOOL_BATCH_ACTION_PREFIXES
+    )
+
+
+def _extract_tool_batch_result_payload(outputs: Mapping[str, Any]) -> Any:
+    for key in ("result", "mcp_result"):
+        payload = outputs.get(key)
+        if payload is not None:
+            return payload
+    return outputs
 
 
 def _build_turn_execution_route_handler() -> Any:
@@ -206,6 +296,137 @@ def _build_turn_execution_execute_selected_handler() -> Any:
     return _handle
 
 
+def _build_turn_execution_execute_tool_batch_handler(
+    registry: ActionRegistry,
+) -> Any:
+    def _handle(request: WorkflowActionRequest) -> WorkflowActionResult:
+        raw_tool_calls = request.inputs.get("tool_calls")
+        if raw_tool_calls is None:
+            tool_calls_context_key = (
+                _coerce_non_empty_text(request.inputs.get("tool_calls_context_key"))
+                or "turn_next_action_tool_calls"
+            )
+            raw_tool_calls = request.data.get(tool_calls_context_key)
+        requested_tool_calls = _normalise_tool_batch_calls(raw_tool_calls)
+        max_calls = _normalise_tool_batch_cap(
+            request.inputs.get("tool_batch_cap"),
+            environment_cap=request.environment.max_tool_invocations,
+        )
+
+        execution_records: list[dict[str, Any]] = []
+        for tool_call in requested_tool_calls[:max_calls]:
+            tool_name = _coerce_non_empty_text(tool_call.get("tool"))
+            raw_payload = tool_call.get("payload")
+            payload = (
+                {
+                    str(key): value
+                    for key, value in raw_payload.items()
+                    if isinstance(key, str)
+                }
+                if isinstance(raw_payload, Mapping)
+                else {}
+            )
+            if _is_disallowed_direct_tool_batch_action(tool_name):
+                execution_records.append(
+                    {
+                        "tool": tool_name or "unknown",
+                        "payload": _bounded_snapshot(payload),
+                        "status": "failed",
+                        "error": "recovery_tool_batch_disallowed_action",
+                    }
+                )
+                continue
+
+            tool_context = {
+                str(key): value
+                for key, value in request.data.items()
+                if isinstance(key, str)
+            }
+            result = registry.execute(
+                tool_name or "",
+                inputs=payload,
+                context=tool_context,
+                env=request.environment,
+                trace=request.trace,
+                workflow_id=request.workflow_id,
+                workflow_state_id=request.workflow_state_id,
+                workflow_state_metadata=request.workflow_state_metadata,
+            )
+            result_payload = _extract_tool_batch_result_payload(result.outputs)
+            result_summary = _summarise_tool_batch_result_payload(result_payload)
+            error_text = (
+                _coerce_non_empty_text(result.error)
+                or (
+                    _coerce_non_empty_text(result_payload.get("error"))
+                    if isinstance(result_payload, Mapping)
+                    else None
+                )
+                or (
+                    _coerce_non_empty_text(result_payload.get("error_code"))
+                    if isinstance(result_payload, Mapping)
+                    else None
+                )
+            )
+
+            record: dict[str, Any] = {
+                "tool": tool_name or "unknown",
+                "payload": _bounded_snapshot(payload),
+                "status": "ok" if result.ok else "failed",
+            }
+            if result.duration_ms is not None:
+                record["duration_ms"] = float(result.duration_ms)
+            if result_summary:
+                record["result_summary"] = result_summary
+            if error_text:
+                record["error"] = error_text
+            if result_payload is not None:
+                record["result_preview"] = _bounded_snapshot(result_payload)
+            execution_records.append(record)
+
+        outputs = build_turn_recovery_tool_batch_outputs(
+            requested_tool_calls=requested_tool_calls[:max_calls],
+            invocation_records=execution_records,
+            existing_invocations=(
+                request.data.get("invocations")
+                if isinstance(request.data.get("invocations"), list)
+                else []
+            ),
+            existing_tool_messages=(
+                request.data.get("tool_messages")
+                if isinstance(request.data.get("tool_messages"), list)
+                else []
+            ),
+            selected_workflow_trace=(
+                request.data.get("selected_workflow_trace")
+                if isinstance(request.data.get("selected_workflow_trace"), Mapping)
+                else None
+            ),
+            selected_workflow_id=request.data.get("selected_workflow_id"),
+            reasoning=_coerce_non_empty_text(request.data.get("turn_next_action_reasoning")),
+            omitted_call_count=max(0, len(requested_tool_calls) - max_calls),
+        )
+        outputs.update(
+            {
+                "turn_recovery_attempted": True,
+                "turn_recovery_last_decision": (
+                    _coerce_non_empty_text(request.data.get("turn_next_action_type"))
+                    or "execute_tool_batch"
+                ),
+                "turn_recovery_last_reasoning": _coerce_non_empty_text(
+                    request.data.get("turn_next_action_reasoning")
+                )
+                or "",
+                "turn_recovery_last_target_workflow_id": _coerce_non_empty_text(
+                    request.data.get("turn_next_action_target_workflow_id")
+                )
+                or "",
+            }
+        )
+        return WorkflowActionResult(outputs=outputs)
+
+    return _handle
+
+
 def _build_turn_execution_critic_handler() -> Any:
     def _handle(request: WorkflowActionRequest) -> WorkflowActionResult:
         return run_turn_execution_critic(
@@ -245,6 +466,17 @@ def register_turn_execution_actions(registry: ActionRegistry) -> None:
             action_id=TURN_EXECUTION_EXECUTE_SELECTED_ACTION_ID,
             handler=_build_turn_execution_execute_selected_handler(),
             description="Execute the selected capability workflow with supervision.",
+        )
+    )
+
+    registry.register_if_absent(
+        ActionSpec(
+            action_id=TURN_EXECUTION_EXECUTE_TOOL_BATCH_ACTION_ID,
+            handler=_build_turn_execution_execute_tool_batch_handler(registry),
+            description=(
+                "Execute a bounded direct recovery tool batch and return the turn "
+                "to narration/verification surfaces."
+            ),
         )
     )
 

@@ -192,6 +192,183 @@ def _render_selected_workflow_artefact_lines(data: Mapping[str, Any]) -> list[st
     return lines
 
 
+def _bounded_snapshot(
+    value: Any,
+    *,
+    max_depth: int = 3,
+    max_items: int = 6,
+    max_string_length: int = 320,
+    _depth: int = 0,
+) -> Any:
+    if _depth >= max_depth:
+        if isinstance(value, Mapping):
+            return {"_truncated": "mapping"}
+        if isinstance(value, Sequence) and not isinstance(
+            value, (str, bytes, bytearray)
+        ):
+            return ["_truncated"]
+        text = value if isinstance(value, str) else repr(value)
+        return (
+            text[:max_string_length] + "..."
+            if isinstance(text, str) and len(text) > max_string_length
+            else text
+        )
+
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+
+    if isinstance(value, str):
+        return (
+            value[:max_string_length] + "..."
+            if len(value) > max_string_length
+            else value
+        )
+
+    if isinstance(value, Mapping):
+        bounded: dict[str, Any] = {}
+        count = 0
+        for key, item in value.items():
+            if not isinstance(key, str) or not key:
+                continue
+            if count >= max_items:
+                bounded["_truncated_items"] = max(0, len(value) - max_items)
+                break
+            bounded[key] = _bounded_snapshot(
+                item,
+                max_depth=max_depth,
+                max_items=max_items,
+                max_string_length=max_string_length,
+                _depth=_depth + 1,
+            )
+            count += 1
+        return bounded
+
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        items = list(value[:max_items]) if not isinstance(value, list) else value[:max_items]
+        bounded_items = [
+            _bounded_snapshot(
+                item,
+                max_depth=max_depth,
+                max_items=max_items,
+                max_string_length=max_string_length,
+                _depth=_depth + 1,
+            )
+            for item in items
+        ]
+        if len(value) > max_items:
+            bounded_items.append(f"... (+{len(value) - max_items} more)")
+        return bounded_items
+
+    text = repr(value)
+    return text[:max_string_length] + "..." if len(text) > max_string_length else text
+
+
+def _summarise_tool_batch_result_payload(payload: Any) -> str | None:
+    if isinstance(payload, Mapping):
+        if payload.get("success") is False:
+            error_text = _coerce_non_empty_text(
+                payload.get("error")
+                or payload.get("error_code")
+                or payload.get("message")
+            )
+            return f"Error: {error_text}" if error_text else "Error"
+        for field_name in ("response_text", "final_response", "summary", "message"):
+            candidate = _coerce_non_empty_text(payload.get(field_name))
+            if candidate and not _looks_like_machine_json_text(candidate):
+                return candidate
+        concept_id = _coerce_non_empty_text(payload.get("concept_id"))
+        if concept_id:
+            return concept_id
+        results = payload.get("results")
+        if isinstance(results, list):
+            return (
+                f"{len(results)} result{'s' if len(results) != 1 else ''}"
+                if results
+                else None
+            )
+        items = payload.get("items")
+        if isinstance(items, list):
+            return (
+                f"{len(items)} item{'s' if len(items) != 1 else ''}"
+                if items
+                else None
+            )
+    if isinstance(payload, list):
+        return (
+            f"{len(payload)} item{'s' if len(payload) != 1 else ''}"
+            if payload
+            else None
+        )
+    return None
+
+
+def _derive_tool_batch_user_response(
+    invocation_records: Sequence[Mapping[str, Any]],
+) -> str | None:
+    candidate_texts: list[str] = []
+    seen_candidates: set[str] = set()
+
+    for invocation in invocation_records[:6]:
+        if not isinstance(invocation, Mapping):
+            continue
+        result_preview = invocation.get("result_preview")
+        if isinstance(result_preview, Mapping):
+            for field_name in ("response_text", "final_response", "summary", "message"):
+                candidate = _coerce_non_empty_text(result_preview.get(field_name))
+                if not candidate or _looks_like_machine_json_text(candidate):
+                    continue
+                lowered = candidate.lower()
+                if lowered in seen_candidates:
+                    continue
+                seen_candidates.add(lowered)
+                candidate_texts.append(candidate)
+        result_summary = _coerce_non_empty_text(invocation.get("result_summary"))
+        if result_summary and not result_summary.lower().startswith("error:"):
+            lowered = result_summary.lower()
+            if lowered not in seen_candidates:
+                seen_candidates.add(lowered)
+                candidate_texts.append(result_summary)
+
+    if not candidate_texts:
+        return None
+    if len(candidate_texts) == 1:
+        return candidate_texts[0]
+    return "\n".join(candidate_texts[:3])
+
+
+def _render_tool_batch_message_content(
+    invocation_record: Mapping[str, Any],
+) -> str:
+    tool_name = _coerce_non_empty_text(invocation_record.get("tool")) or "tool"
+    lines = [f"Tool: {tool_name}"]
+    error_text = _coerce_non_empty_text(invocation_record.get("error"))
+    result_summary = _coerce_non_empty_text(invocation_record.get("result_summary"))
+    payload = invocation_record.get("payload")
+    result_preview = invocation_record.get("result_preview")
+
+    if isinstance(payload, Mapping):
+        payload_text = json.dumps(
+            _bounded_snapshot(payload),
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
+        lines.append(f"Arguments: {payload_text}")
+    if result_summary:
+        lines.append(f"Result: {result_summary}")
+    elif error_text:
+        lines.append(f"Error: {error_text}")
+    if result_preview is not None and not result_summary:
+        preview_text = json.dumps(
+            _bounded_snapshot(result_preview),
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
+        lines.append(f"Output: {preview_text}")
+
+    content = "\n".join(lines)
+    return content[:1200] + "..." if len(content) > 1200 else content
+
+
 def render_selected_workflow_user_response(
     *,
     selected_workflow_id: str | None,
@@ -489,6 +666,144 @@ def build_turn_execution_selected_workflow_outputs(
         outputs["current_response"] = current_response
     if response_text:
         outputs["response_text"] = response_text
+    return outputs
+
+
+def build_turn_recovery_tool_batch_outputs(
+    *,
+    requested_tool_calls: Sequence[Mapping[str, Any]],
+    invocation_records: Sequence[Mapping[str, Any]],
+    existing_invocations: Sequence[Mapping[str, Any]] | None = None,
+    existing_tool_messages: Sequence[Mapping[str, Any]] | None = None,
+    selected_workflow_trace: Mapping[str, Any] | None = None,
+    selected_workflow_id: str | None = None,
+    reasoning: str | None = None,
+    omitted_call_count: int = 0,
+) -> dict[str, Any]:
+    """Build the canonical recovery-tool-batch context surface.
+
+    Keep this payload bounded and user-facing enough for narration while making
+    the direct recovery action schema visible to later diagnostics.
+    """
+
+    clean_selected_workflow_id = _safe_str(selected_workflow_id)
+    bounded_tool_calls = _bounded_snapshot(list(requested_tool_calls), max_items=4)
+    bounded_invocations = _bounded_snapshot(list(invocation_records), max_items=4)
+    successful_count = sum(
+        1
+        for record in invocation_records
+        if isinstance(record, Mapping)
+        and _coerce_non_empty_text(record.get("status")) == "ok"
+    )
+    failed_records = [
+        record
+        for record in invocation_records
+        if isinstance(record, Mapping)
+        and _coerce_non_empty_text(record.get("status")) not in {None, "ok"}
+    ]
+    first_error = next(
+        (
+            _coerce_non_empty_text(record.get("error"))
+            for record in failed_records
+            if isinstance(record, Mapping)
+            and _coerce_non_empty_text(record.get("error"))
+        ),
+        None,
+    )
+    derived_user_response = _derive_tool_batch_user_response(invocation_records)
+    status = "completed"
+    if failed_records:
+        status = "completed_with_failures"
+    if not invocation_records:
+        status = "invalid"
+
+    execution_payload: dict[str, Any] = {
+        "schema_version": "conversation_turn_recovery_tool_batch_result.v1",
+        "action_type": "execute_tool_batch",
+        "status": status,
+        "selected_workflow_id": clean_selected_workflow_id,
+        "requested_tool_call_count": len(requested_tool_calls),
+        "executed_tool_call_count": len(invocation_records),
+        "successful_tool_call_count": successful_count,
+        "failed_tool_call_count": len(failed_records),
+        "tool_calls": bounded_tool_calls,
+        "tool_invocations": bounded_invocations,
+    }
+    if omitted_call_count > 0:
+        execution_payload["omitted_tool_call_count"] = max(0, int(omitted_call_count))
+    if reasoning:
+        execution_payload["reasoning"] = reasoning
+    if first_error:
+        execution_payload["error"] = first_error
+    if derived_user_response:
+        execution_payload["response_text"] = derived_user_response
+
+    batch_tool_messages = [
+        {"role": "tool", "content": _render_tool_batch_message_content(record)}
+        for record in invocation_records
+        if isinstance(record, Mapping)
+    ]
+    combined_invocations = [
+        {
+            str(key): value
+            for key, value in item.items()
+            if isinstance(key, str)
+        }
+        for item in (existing_invocations or [])
+        if isinstance(item, Mapping)
+    ] + [
+        {
+            str(key): value
+            for key, value in item.items()
+            if isinstance(key, str)
+        }
+        for item in invocation_records
+        if isinstance(item, Mapping)
+    ]
+    combined_tool_messages = [
+        {
+            str(key): value
+            for key, value in item.items()
+            if isinstance(key, str)
+        }
+        for item in (existing_tool_messages or [])
+        if isinstance(item, Mapping)
+    ] + batch_tool_messages
+
+    merged_selected_workflow_trace = (
+        {
+            str(key): value
+            for key, value in selected_workflow_trace.items()
+            if isinstance(key, str)
+        }
+        if isinstance(selected_workflow_trace, Mapping)
+        else {}
+    )
+    merged_selected_workflow_trace["selected_execution_mode"] = "recovery_tool_batch"
+    merged_selected_workflow_trace["recovery_action_type"] = "execute_tool_batch"
+    merged_selected_workflow_trace["recovery_tool_batch_execution"] = dict(
+        execution_payload
+    )
+
+    outputs: dict[str, Any] = {
+        "completion_report": dict(execution_payload),
+        "turn_recovery_tool_batch_execution": dict(execution_payload),
+        "selected_workflow_trace": merged_selected_workflow_trace,
+        "invocations": combined_invocations,
+        "tool_messages": combined_tool_messages,
+        "response_text": "",
+        "final_response": "",
+        "current_response": "",
+        "selected_workflow_user_response": derived_user_response or "",
+        "selected_workflow_completed": len(failed_records) == 0,
+        "selected_workflow_child_failed": bool(failed_records),
+        "selected_workflow_final_state": (
+            "recovery_tool_batch_completed"
+            if not failed_records
+            else "recovery_tool_batch_completed_with_failures"
+        ),
+        "selected_workflow_error": first_error or "",
+    }
     return outputs
 
 

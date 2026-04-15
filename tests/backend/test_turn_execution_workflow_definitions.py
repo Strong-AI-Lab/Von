@@ -1,8 +1,11 @@
 from unittest.mock import MagicMock
 
 from src.backend.workflows.action_registry import (
+    ActionSpec,
     ActionRegistry,
     WorkflowEnvironment,
+    WorkflowActionRequest,
+    WorkflowActionResult,
 )
 from src.backend.workflows.definitions import (
     CONCEPT_SUGGESTION_PREFLIGHT_WORKFLOW_ID,
@@ -15,6 +18,9 @@ from src.backend.workflows.definitions import (
 )
 from src.backend.workflows.durable.control_flow_actions import (
     register_control_flow_actions,
+)
+from src.backend.workflows.durable.turn_execution_actions import (
+    register_turn_execution_actions,
 )
 from src.backend.workflows.engine import WORKFLOW_STEP_EXECUTION_MODE_LLM
 from src.backend.workflows.engine import (
@@ -104,6 +110,7 @@ def test_conversation_turn_workflow_uses_deterministic_critic_and_gate() -> None
     assert "completion_gate" in workflow.states
     assert "recovery_decision" in workflow.states
     assert "apply_recovery_retry" in workflow.states
+    assert "apply_recovery_tool_batch" in workflow.states
     assert "apply_recovery_answer" in workflow.states
     assert "apply_recovery_follow_up" in workflow.states
     assert "failed" in workflow.states
@@ -160,6 +167,11 @@ def test_conversation_turn_workflow_uses_deterministic_critic_and_gate() -> None
         and field.get("context_key") == "turn_recovery_last_target_workflow_id"
         for field in recovery_context_fields
     )
+    assert any(
+        isinstance(field, dict)
+        and field.get("context_key") == "turn_recovery_tool_batch_execution"
+        for field in recovery_context_fields
+    )
     recovery_mappings = recovery_decision.metadata.get("tool_output_context_mappings") or []
     assert any(
         isinstance(mapping, dict)
@@ -176,7 +188,19 @@ def test_conversation_turn_workflow_uses_deterministic_critic_and_gate() -> None
         for mapping in recovery_mappings
     )
     assert any(
+        isinstance(mapping, dict)
+        and mapping.get("context_key") == "turn_next_action_tool_calls"
+        and mapping.get("tool_output_field")
+        == "validated_json.turn_next_action.tool_calls"
+        for mapping in recovery_mappings
+    )
+    assert any(
         t.to_state == "apply_recovery_retry" and t.reason == "retry_execution"
+        for t in recovery_decision.transitions
+    )
+    assert any(
+        t.to_state == "apply_recovery_tool_batch"
+        and t.reason == "execute_tool_batch"
         for t in recovery_decision.transitions
     )
     assert any(
@@ -206,6 +230,16 @@ def test_conversation_turn_workflow_uses_deterministic_critic_and_gate() -> None
     assert any(
         t.to_state == "execution" and t.reason == "recovery_retry_prepared"
         for t in recovery_retry.transitions
+    )
+
+    recovery_tool_batch = workflow.states["apply_recovery_tool_batch"]
+    assert recovery_tool_batch.actions[0].action_id == "turn_execution.execute_tool_batch"
+    tool_batch_inputs = recovery_tool_batch.actions[0].inputs
+    assert tool_batch_inputs.get("tool_calls_context_key") == "turn_next_action_tool_calls"
+    assert tool_batch_inputs.get("tool_batch_cap") == 4
+    assert any(
+        t.to_state == "narration" and t.reason == "recovery_tool_batch_executed"
+        for t in recovery_tool_batch.transitions
     )
 
     recovery_answer = workflow.states["apply_recovery_answer"]
@@ -326,7 +360,8 @@ def test_conversation_turn_recovery_can_complete_with_direct_answer() -> None:
     llm_client.generate.return_value = (
         '{"turn_next_action":{"action_type":"respond_with_answer",'
         '"target_workflow_id":null,'
-        '"response_text":"You are Michael Witbrock."},'
+        '"response_text":"You are Michael Witbrock.",'
+        '"tool_calls":null},'
         '"reasoning":"Authenticated actor context already grounds the answer."}'
     )
 
@@ -343,3 +378,111 @@ def test_conversation_turn_recovery_can_complete_with_direct_answer() -> None:
     assert result.data["response_text"] == "You are Michael Witbrock."
     assert result.data["final_response"] == "You are Michael Witbrock."
     assert result.data["selected_workflow_user_response"] == "You are Michael Witbrock."
+
+
+def test_conversation_turn_recovery_can_execute_direct_tool_batch() -> None:
+    workflow = build_authoritative_test_workflow_definition(
+        CONVERSATION_TURN_EXECUTION_WORKFLOW_ID
+    )
+    recovery_definition = WorkflowDefinition(
+        workflow_id=workflow.workflow_id,
+        initial_state="recovery_decision",
+        states={
+            "recovery_decision": WorkflowStateSpec(
+                state_id="recovery_decision",
+                actions=(
+                    WorkflowActionInvocation(
+                        action_id="llm.action",
+                        inputs=workflow.states["recovery_decision"].actions[0].inputs,
+                        execution_mode=WORKFLOW_STEP_EXECUTION_MODE_LLM,
+                        prompt_contract={
+                            "prompt_text": "Return JSON only with a turn_next_action."
+                        },
+                        llm_policy=workflow.states["recovery_decision"].actions[0].llm_policy,
+                        validation_policy=workflow.states["recovery_decision"]
+                        .actions[0]
+                        .validation_policy,
+                    ),
+                ),
+                transitions=workflow.states["recovery_decision"].transitions,
+                terminal=workflow.states["recovery_decision"].terminal,
+                metadata=workflow.states["recovery_decision"].metadata,
+            ),
+            **{
+                state_id: workflow.states[state_id]
+                for state_id in (
+                    "apply_recovery_tool_batch",
+                    "narration",
+                    "critic",
+                    "completion_gate",
+                    "completed",
+                    "failed",
+                )
+            },
+        },
+        termination_states=workflow.termination_states,
+        purpose=workflow.purpose,
+        metadata=workflow.metadata,
+    )
+
+    captured_payloads: list[dict[str, object]] = []
+
+    def _handle_lookup_current_user(
+        request: WorkflowActionRequest,
+    ) -> WorkflowActionResult:
+        captured_payloads.append(dict(request.inputs))
+        return WorkflowActionResult(
+            outputs={
+                "result": {
+                    "response_text": "The current authenticated user is Michael Witbrock."
+                }
+            }
+        )
+
+    registry = ActionRegistry()
+    register_control_flow_actions(registry, definition_loader=lambda _wid: None)
+    register_turn_execution_actions(registry)
+    registry.register_if_absent(
+        ActionSpec(
+            action_id="test.lookup_current_user",
+            handler=_handle_lookup_current_user,
+            description="Return the current authenticated user for testing.",
+        )
+    )
+
+    llm_client = MagicMock()
+    llm_client.generate.side_effect = [
+        (
+            '{"turn_next_action":{"action_type":"execute_tool_batch",'
+            '"target_workflow_id":null,'
+            '"response_text":null,'
+            '"tool_calls":[{"tool":"test.lookup_current_user","arguments":{}}]},'
+            '"reasoning":"A direct identity lookup is enough."}'
+        ),
+        "The current authenticated user is Michael Witbrock.",
+    ]
+
+    result = WorkflowExecutor(registry=registry, max_transitions=12).run(
+        recovery_definition,
+        environment=WorkflowEnvironment(llm_client=llm_client),
+        data={"user_prompt": "tell me about the current user"},
+    )
+
+    assert result.completed is True
+    assert result.final_state == "completed"
+    assert captured_payloads == [{}]
+    assert result.data["turn_next_action_type"] == "execute_tool_batch"
+    assert result.data["turn_recovery_last_decision"] == "execute_tool_batch"
+    assert result.data["selected_workflow_user_response"] == (
+        "The current authenticated user is Michael Witbrock."
+    )
+    assert result.data["response_text"] == (
+        "The current authenticated user is Michael Witbrock."
+    )
+    assert result.data["final_response"] == (
+        "The current authenticated user is Michael Witbrock."
+    )
+    completion_report = result.data["completion_report"]
+    assert completion_report["action_type"] == "execute_tool_batch"
+    assert completion_report["executed_tool_call_count"] == 1
+    assert result.data["invocations"][0]["tool"] == "test.lookup_current_user"

@@ -1604,6 +1604,30 @@
                     {
                       "kind": "context_value_equals",
                       "key": "turn_next_action_type",
+                      "value": "execute_tool_batch"
+                    },
+                    {
+                      "kind": "context_exists",
+                      "key": "turn_next_action_tool_calls",
+                      "expected": true
+                    },
+                    {
+                      "kind": "context_is_null",
+                      "key": "turn_next_action_tool_calls",
+                      "expected": false
+                    }
+                  ]
+                },
+                "reason": "execute_tool_batch",
+                "to_state": "apply_recovery_tool_batch"
+              },
+              {
+                "condition_spec": {
+                  "kind": "all",
+                  "conditions": [
+                    {
+                      "kind": "context_value_equals",
+                      "key": "turn_next_action_type",
                       "value": "respond_with_answer"
                     },
                     {
@@ -1713,6 +1737,10 @@
                   "label": "Previous Recovery Reasoning"
                 },
                 {
+                  "context_key": "turn_recovery_tool_batch_execution",
+                  "label": "Previous Recovery Tool Batch"
+                },
+                {
                   "context_key": "response_text",
                   "label": "Current User-Facing Response"
                 }
@@ -1741,6 +1769,11 @@
                 "concept_id": "#V#workflow_mapping_turn_execution_recovery_decision_validated_json_turn_next_action_response_text_to_turn_next_action_response_text",
                 "context_key": "turn_next_action_response_text",
                 "tool_output_field": "validated_json.turn_next_action.response_text"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_recovery_decision_validated_json_turn_next_action_tool_calls_to_turn_next_action_tool_calls",
+                "context_key": "turn_next_action_tool_calls",
+                "tool_output_field": "validated_json.turn_next_action.tool_calls"
               },
               {
                 "concept_id": "#V#workflow_mapping_turn_execution_recovery_decision_validated_json_reasoning_to_turn_next_action_reasoning",
@@ -1776,6 +1809,7 @@
               "turn_next_action_type",
               "turn_next_action_target_workflow_id",
               "turn_next_action_response_text",
+              "turn_next_action_tool_calls",
               "turn_next_action_reasoning",
               "turn_recovery_decision",
               "turn_recovery_target_workflow_id",
@@ -1850,6 +1884,49 @@
               "final_response",
               "current_response",
               "selected_workflow_user_response"
+            ]
+          },
+          {
+            "action_id": "turn_execution.execute_tool_batch",
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "recovery_tool_batch_executed",
+                "to_state": "narration"
+              }
+            ],
+            "execution_mode": "deterministic",
+            "state_id": "apply_recovery_tool_batch",
+            "static_input_bindings": [
+              [
+                "tool_calls_context_key",
+                "turn_next_action_tool_calls"
+              ],
+              [
+                "tool_batch_cap",
+                4
+              ]
+            ],
+            "writes_context_keys": [
+              "completion_report",
+              "turn_recovery_tool_batch_execution",
+              "selected_workflow_trace",
+              "invocations",
+              "tool_messages",
+              "response_text",
+              "final_response",
+              "current_response",
+              "selected_workflow_user_response",
+              "selected_workflow_completed",
+              "selected_workflow_child_failed",
+              "selected_workflow_final_state",
+              "selected_workflow_error",
+              "turn_recovery_attempted",
+              "turn_recovery_last_decision",
+              "turn_recovery_last_reasoning",
+              "turn_recovery_last_target_workflow_id"
             ]
           },
           {
