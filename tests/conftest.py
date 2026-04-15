@@ -7,7 +7,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from src.backend.utils.pytest_lane_catalogue import classify_test_path, iter_registered_markers
+from src.backend.utils.pytest_lane_catalogue import classify_test_path, iter_registered_markers  # noqa: E402
 
 
 # -----------------------------------------------------------------------------
