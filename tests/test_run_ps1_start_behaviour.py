@@ -1,34 +1,12 @@
 from __future__ import annotations
 
 import json
-import shutil
-import subprocess
 from pathlib import Path
-from typing import Any
 
-import pytest
+from tests.powershell_test_utils import ps_quote, run_powershell_result
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-POWERSHELL_EXE = shutil.which("powershell") or shutil.which("pwsh")
-
-
-def _ps_quote(value: str) -> str:
-    return "'" + value.replace("'", "''") + "'"
-
-
-def _run_powershell_json(script: str) -> dict[str, Any]:
-    if not POWERSHELL_EXE:
-        pytest.skip("PowerShell is required for run.ps1 launcher-path tests")
-
-    completed = subprocess.run(
-        [POWERSHELL_EXE, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return json.loads(completed.stdout.strip().splitlines()[-1])
 
 
 def test_run_ps1_force_browser_reopens_for_existing_server(tmp_path: Path) -> None:
@@ -36,13 +14,13 @@ def test_run_ps1_force_browser_reopens_for_existing_server(tmp_path: Path) -> No
 
     script = f"""
 $ErrorActionPreference = 'Stop'
-Set-Location {_ps_quote(str(REPO_ROOT))}
-. {_ps_quote(str(REPO_ROOT / 'run.ps1'))} help -NoBackupMigrate *> $null
+Set-Location {ps_quote(str(REPO_ROOT))}
+. {ps_quote(str(REPO_ROOT / 'run.ps1'))} help -NoBackupMigrate *> $null
 $script:Logs = New-Object System.Collections.Generic.List[string]
 $script:BrowserTargets = New-Object System.Collections.Generic.List[string]
 function global:Write-LauncherLog {{
     param([string]$Msg)
-    $script:Logs.Add($Msg) | Out-Null
+    $script:Logs.Add([string]$Msg) | Out-Null
 }}
 function global:Get-ExistingProcess {{
     [pscustomobject]@{{ Id = 4242 }}
@@ -55,7 +33,7 @@ function global:Open-VonBrowserIfNeeded {{
 $script:ForceBrowser = $true
 $script:NoBrowser = $false
 $script:Port = 5000
-$script:PidFile = {_ps_quote(str(pid_file))}
+$script:PidFile = {ps_quote(str(pid_file))}
 @(
     'PID=4242',
     'PORT=5123',
@@ -66,10 +44,9 @@ $result = [ordered]@{{
     logs = @($script:Logs)
     browser_targets = @($script:BrowserTargets)
 }}
-$result | ConvertTo-Json -Depth 6 -Compress
 """.strip()
 
-    payload = _run_powershell_json(script)
+    payload, _ = run_powershell_result(repo_root=REPO_ROOT, script=script)
 
     assert payload["browser_targets"] == ["5123"]
     assert any("Already running (PID=4242)." in line for line in payload["logs"])
@@ -78,12 +55,12 @@ $result | ConvertTo-Json -Depth 6 -Compress
 def test_run_ps1_healthy_start_follow_ups_open_browser_before_purity() -> None:
     script = f"""
 $ErrorActionPreference = 'Stop'
-Set-Location {_ps_quote(str(REPO_ROOT))}
-. {_ps_quote(str(REPO_ROOT / 'run.ps1'))} help -NoBackupMigrate *> $null
+Set-Location {ps_quote(str(REPO_ROOT))}
+. {ps_quote(str(REPO_ROOT / 'run.ps1'))} help -NoBackupMigrate *> $null
 $script:CallOrder = New-Object System.Collections.Generic.List[string]
 function global:Open-VonBrowserIfNeeded {{
     param([int]$TargetPort = $Port)
-    $script:CallOrder.Add(\"browser:$TargetPort\") | Out-Null
+    $script:CallOrder.Add("browser:$TargetPort") | Out-Null
     $true
 }}
 function global:Start-WorkflowPurityCheckNonBlocking {{
@@ -95,10 +72,9 @@ Invoke-VonHealthyStartFollowUps -TargetPort 5111
 $result = [ordered]@{{
     call_order = @($script:CallOrder)
 }}
-$result | ConvertTo-Json -Depth 6 -Compress
 """.strip()
 
-    payload = _run_powershell_json(script)
+    payload, _ = run_powershell_result(repo_root=REPO_ROOT, script=script)
 
     assert payload["call_order"] == ["browser:5111", "purity"]
 
@@ -106,8 +82,8 @@ $result | ConvertTo-Json -Depth 6 -Compress
 def test_run_ps1_apply_launcher_switch_compatibility_honours_double_dash_flags() -> None:
     script = f"""
 $ErrorActionPreference = 'Stop'
-Set-Location {_ps_quote(str(REPO_ROOT))}
-. {_ps_quote(str(REPO_ROOT / 'run.ps1'))} help -NoBackupMigrate *> $null
+Set-Location {ps_quote(str(REPO_ROOT))}
+. {ps_quote(str(REPO_ROOT / 'run.ps1'))} help -NoBackupMigrate *> $null
 $script:ForceBrowser = $false
 $script:NoBrowser = $false
 $script:ChromeBeta = $false
@@ -117,10 +93,9 @@ $result = [ordered]@{{
     no_browser = [bool]$script:NoBrowser
     chrome_beta = [bool]$script:ChromeBeta
 }}
-$result | ConvertTo-Json -Depth 6 -Compress
 """.strip()
 
-    payload = _run_powershell_json(script)
+    payload, _ = run_powershell_result(repo_root=REPO_ROOT, script=script)
 
     assert payload["force_browser"] is True
     assert payload["no_browser"] is False
@@ -158,34 +133,50 @@ def test_run_ps1_reports_previous_purity_failure_once(tmp_path: Path) -> None:
 
     script = f"""
 $ErrorActionPreference = 'Stop'
-Set-Location {_ps_quote(str(REPO_ROOT))}
-. {_ps_quote(str(REPO_ROOT / 'run.ps1'))} help -NoBackupMigrate *> $null
-$script:RunDir = {_ps_quote(str(run_dir))}
-$script:LogsDir = {_ps_quote(str(logs_dir))}
-$script:WorkflowPurityPidFile = {_ps_quote(str(run_dir / 'workflow_purity_check.pid'))}
-$script:WorkflowPurityResultFile = {_ps_quote(str(result_path))}
-$script:WorkflowPurityReportedFile = {_ps_quote(str(run_dir / 'workflow_purity_check_last_reported.txt'))}
+Set-Location {ps_quote(str(REPO_ROOT))}
+. {ps_quote(str(REPO_ROOT / 'run.ps1'))} help -NoBackupMigrate *> $null
+$script:RunDir = {ps_quote(str(run_dir))}
+$script:LogsDir = {ps_quote(str(logs_dir))}
+$script:WorkflowPurityPidFile = {ps_quote(str(run_dir / 'workflow_purity_check.pid'))}
+$script:WorkflowPurityResultFile = {ps_quote(str(result_path))}
+$script:WorkflowPurityReportedFile = {ps_quote(str(run_dir / 'workflow_purity_check_last_reported.txt'))}
 $script:Logs = New-Object System.Collections.Generic.List[string]
 function global:Write-LauncherLog {{
     param([string]$Msg)
-    $script:Logs.Add($Msg) | Out-Null
+    if ($script:Logs.Count -lt 100) {{
+        $script:Logs.Add([string]$Msg) | Out-Null
+    }}
 }}
 Report-WorkflowPurityCheckStatus
 Report-WorkflowPurityCheckStatus
 $result = [ordered]@{{
     logs = @($script:Logs)
-    reported_marker = Get-Content -Raw -Path $script:WorkflowPurityReportedFile
+    reported_marker = [string](Get-Content -Raw -Path $script:WorkflowPurityReportedFile)
 }}
-$result | ConvertTo-Json -Depth 8 -Compress
 """.strip()
 
-    payload = _run_powershell_json(script)
+    payload, _ = run_powershell_result(repo_root=REPO_ROOT, script=script)
     logs = payload["logs"]
 
     assert sum("Previous workflow purity check failed" in line for line in logs) == 1
     assert any("Workflow purity gate failed." in line for line in logs)
     assert "2026-04-11T20:00:03" in payload["reported_marker"]
     assert "|1|failed" in payload["reported_marker"]
+
+
+def test_run_ps1_file_backed_result_transport_ignores_stdout_json() -> None:
+    script = """
+$result = [ordered]@{
+    mode = 'file-backed'
+    count = 1
+}
+Write-Output '{"misleading":"stdout-json"}'
+""".strip()
+
+    payload, completed = run_powershell_result(repo_root=REPO_ROOT, script=script)
+
+    assert payload == {"mode": "file-backed", "count": 1}
+    assert '{"misleading":"stdout-json"}' in completed.stdout
 
 
 def test_run_ps1_stale_process_cleanup_uses_file_backed_helper(tmp_path: Path) -> None:
@@ -205,27 +196,28 @@ def test_run_ps1_stale_process_cleanup_uses_file_backed_helper(tmp_path: Path) -
 
     script = f"""
 $ErrorActionPreference = 'Stop'
-Set-Location {_ps_quote(str(REPO_ROOT))}
-. {_ps_quote(str(REPO_ROOT / 'run.ps1'))} help -NoBackupMigrate *> $null
+Set-Location {ps_quote(str(REPO_ROOT))}
+. {ps_quote(str(REPO_ROOT / 'run.ps1'))} help -NoBackupMigrate *> $null
 $script:Logs = New-Object System.Collections.Generic.List[string]
 function global:Write-LauncherLog {{
     param([string]$Msg)
-    $script:Logs.Add($Msg) | Out-Null
+    $script:Logs.Add([string]$Msg) | Out-Null
 }}
 function global:Get-ProjectPythonExecutable {{
-    {_ps_quote(str(fake_python))}
+    {ps_quote(str(fake_python))}
 }}
 Stop-PythonProcessesByScript -ScriptRelativePath 'src/backend/utilities/rag_indexing_worker.py' -Label 'RAG Worker'
 $result = [ordered]@{{
     logs = @($script:Logs)
-    arg_log = (Get-Content -Raw -Path {_ps_quote(str(arg_log))}).Trim()
+    arg_log = (Get-Content -Raw -Path {ps_quote(str(arg_log))}).Trim()
 }}
-$result | ConvertTo-Json -Depth 6 -Compress
 """.strip()
 
-    payload = _run_powershell_json(script)
+    payload, _ = run_powershell_result(repo_root=REPO_ROOT, script=script)
 
     assert "cleanup_stale_python_processes.py" in payload["arg_log"]
     assert "rag_indexing_worker.py" in payload["arg_log"]
     assert "-c" not in payload["arg_log"]
-    assert not any("WARN: Failed stale-process cleanup" in line for line in payload["logs"])
+    assert not any(
+        "WARN: Failed stale-process cleanup" in line for line in payload["logs"]
+    )

@@ -1,23 +1,15 @@
 from __future__ import annotations
 
 import json
-import shutil
-import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-import pytest
-
 from scripts import backup_von_db
+from tests.powershell_test_utils import ps_quote, run_powershell_result
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-POWERSHELL_EXE = shutil.which("powershell") or shutil.which("pwsh")
-
-
-def _ps_quote(value: str) -> str:
-    return "'" + value.replace("'", "''") + "'"
 
 
 def _receipt_payload(
@@ -46,9 +38,6 @@ def _write_receipt(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _run_daily_backup_probe(tmp_path: Path, setup_script: str) -> dict[str, Any]:
-    if not POWERSHELL_EXE:
-        pytest.skip("PowerShell is required for run.ps1 launcher-path tests")
-
     run_dir = tmp_path / ".run"
     backup_root = tmp_path / "backups"
     receipt_path = run_dir / "last_successful_backup_receipt.json"
@@ -56,10 +45,10 @@ def _run_daily_backup_probe(tmp_path: Path, setup_script: str) -> dict[str, Any]
 
     script = f"""
 $ErrorActionPreference = 'Stop'
-Set-Location {_ps_quote(str(REPO_ROOT))}
-. {_ps_quote(str(REPO_ROOT / 'run.ps1'))} help *> $null
-$script:RunDir = {_ps_quote(str(run_dir))}
-$script:BackupRoot = {_ps_quote(str(backup_root))}
+Set-Location {ps_quote(str(REPO_ROOT))}
+. {ps_quote(str(REPO_ROOT / 'run.ps1'))} help *> $null
+$script:RunDir = {ps_quote(str(run_dir))}
+$script:BackupRoot = {ps_quote(str(backup_root))}
 New-Item -ItemType Directory -Force -Path $script:RunDir | Out-Null
 New-Item -ItemType Directory -Force -Path $script:BackupRoot | Out-Null
 Remove-Item Env:VON_BACKUP_SCHEDULE -ErrorAction SilentlyContinue
@@ -82,8 +71,8 @@ function global:Start-Job {{
     $script:LastStartJobArgs = @($ArgumentList)
     [pscustomobject]@{{ Name = $Name; State = 'Mocked' }}
 }}
-$receiptPath = {_ps_quote(str(receipt_path))}
-$legacyPath = {_ps_quote(str(legacy_path))}
+$receiptPath = {ps_quote(str(receipt_path))}
+$legacyPath = {ps_quote(str(legacy_path))}
 {setup_script}
 Invoke-DailyBackupIfDue
 $result = [ordered]@{{
@@ -93,17 +82,10 @@ $result = [ordered]@{{
     legacy = if (Test-Path -LiteralPath $legacyPath) {{ (Get-Content -LiteralPath $legacyPath -Raw).Trim() }} else {{ $null }}
     start_job_args = @($script:LastStartJobArgs)
 }}
-$result | ConvertTo-Json -Depth 10 -Compress
 """.strip()
 
-    completed = subprocess.run(
-        [POWERSHELL_EXE, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return json.loads(completed.stdout.strip())
+    payload, _ = run_powershell_result(repo_root=REPO_ROOT, script=script)
+    return payload
 
 
 def test_run_ps1_repairs_launcher_receipt_from_newer_validated_artifact_receipt(
@@ -193,7 +175,7 @@ def test_run_ps1_cron_skip_uses_launcher_receipt(tmp_path: Path) -> None:
     schedule = f"{now.minute} {now.hour} * * *"
     result = _run_daily_backup_probe(
         tmp_path,
-        f"$env:VON_BACKUP_SCHEDULE = {_ps_quote(schedule)}",
+        f"$env:VON_BACKUP_SCHEDULE = {ps_quote(schedule)}",
     )
 
     assert result["start_job_calls"] == 0
