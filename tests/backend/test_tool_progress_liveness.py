@@ -294,6 +294,106 @@ def test_progress_endpoint_retains_legacy_session_scope_without_window_header(
     assert body.get("phase_label") == "Building context"
 
 
+def test_progress_endpoint_recovers_session_scoped_progress_after_auth_scope_shift(
+    monkeypatch,
+) -> None:
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+    app.register_blueprint(von_routes.von_bp, url_prefix="/von")
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.get_show_tool_use_during_thinking",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: "#V#test_user",
+    )
+
+    client = app.test_client()
+    with client.session_transaction() as flask_session:
+        flask_session["tool_progress_scope"] = "legacy_cookie_scope"
+
+    von_routes._set_tool_progress(
+        "anon:session:legacy_cookie_scope",
+        "req-auth-shift",
+        {
+            "status": "thinking",
+            "phase": "workflow_dispatch",
+            "phase_label": "Selecting workflow",
+            "request_id": "req-auth-shift",
+        },
+    )
+
+    with von_routes._TOOL_PROGRESS_LOCK:
+        von_routes._TOOL_PROGRESS.clear()
+
+    response = client.get("/von/progress/req-auth-shift")
+    assert response.status_code == 200
+
+    body = response.get_json()
+    assert isinstance(body, dict)
+    assert body.get("request_id") == "req-auth-shift"
+    assert body.get("stage") == "workflow_dispatch"
+    assert body.get("phase_label") == "Selecting workflow"
+    assert body.get("resolved_scope_key") == "anon:session:legacy_cookie_scope"
+    assert body.get("progress_source") == "alternate_scope_fallback"
+
+
+def test_progress_endpoint_prefers_freshest_alternate_scope_payload(monkeypatch) -> None:
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+    app.register_blueprint(von_routes.von_bp, url_prefix="/von")
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.get_show_tool_use_during_thinking",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: "#V#test_user",
+    )
+
+    clock = _set_clock(monkeypatch, start=4000.0)
+    client = app.test_client()
+    with client.session_transaction() as flask_session:
+        flask_session["tool_progress_scope"] = "legacy_cookie_scope"
+
+    von_routes._set_tool_progress(
+        "user:#V#test_user",
+        "req-freshest-scope",
+        {
+            "status": "thinking",
+            "phase": "context_build",
+            "phase_label": "Building context",
+            "request_id": "req-freshest-scope",
+        },
+    )
+
+    clock["now"] += 1.0
+    von_routes._set_tool_progress(
+        "anon:session:legacy_cookie_scope",
+        "req-freshest-scope",
+        {
+            "status": "thinking",
+            "phase": "workflow_discovery",
+            "phase_label": "Searching for workflows",
+            "request_id": "req-freshest-scope",
+        },
+    )
+
+    response = client.get("/von/progress/req-freshest-scope")
+    assert response.status_code == 200
+
+    body = response.get_json()
+    assert isinstance(body, dict)
+    assert body.get("request_id") == "req-freshest-scope"
+    assert body.get("stage") == "workflow_discovery"
+    assert body.get("phase_label") == "Searching for workflows"
+    assert body.get("resolved_scope_key") == "anon:session:legacy_cookie_scope"
+    assert body.get("progress_source") == "alternate_scope_fallback"
+
+
 def test_response_finalising_payload_includes_useful_detail() -> None:
     payload = von_routes._build_response_finalising_tool_progress_payload(
         request_id="req-finalise",

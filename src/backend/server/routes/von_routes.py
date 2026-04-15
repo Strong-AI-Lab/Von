@@ -2594,6 +2594,115 @@ def _get_tool_progress_scope_key() -> str:
     return f"{_TOOL_PROGRESS_SESSION_SCOPE_PREFIX}{session.get('tool_progress_scope')}"
 
 
+def _get_tool_progress_bootstrap_scope_key() -> str:
+    """Return a lightweight early-request progress scope key.
+
+    This avoids header-based authenticated-user validation so the first visible
+    progress write can happen before any potentially slow identity lookup
+    finishes. If the server session already carries an authenticated user,
+    preserve that stable user-scoped key; otherwise prefer the current window.
+    """
+
+    session_user = _progress_str(session.get("user_concept_id"))
+    if session_user:
+        return f"user:{session_user}"
+
+    window_session_id = _normalise_tool_progress_window_session_id(
+        request.headers.get(_WINDOW_SESSION_HEADER_NAME)
+    )
+    if window_session_id:
+        return f"{_TOOL_PROGRESS_WINDOW_SCOPE_PREFIX}{window_session_id}"
+
+    if "tool_progress_scope" not in session:
+        session["tool_progress_scope"] = secrets.token_urlsafe(16)
+
+    return f"{_TOOL_PROGRESS_SESSION_SCOPE_PREFIX}{session.get('tool_progress_scope')}"
+
+
+def _build_tool_progress_scope_candidates(
+    *,
+    explicit_scope_key: str | None = None,
+    user_concept_id: str | None = None,
+    window_session_id: str | None = None,
+    anonymous_session_id: str | None = None,
+) -> list[str]:
+    candidates: list[str] = []
+
+    explicit_scope = _progress_str(explicit_scope_key)
+    if explicit_scope:
+        candidates.append(explicit_scope)
+
+    user_id = _progress_str(user_concept_id)
+    if user_id:
+        candidates.append(f"user:{user_id}")
+
+    window_id = _normalise_tool_progress_window_session_id(window_session_id)
+    if window_id:
+        candidates.append(f"{_TOOL_PROGRESS_WINDOW_SCOPE_PREFIX}{window_id}")
+
+    anonymous_id = _progress_str(anonymous_session_id)
+    if anonymous_id:
+        candidates.append(f"{_TOOL_PROGRESS_SESSION_SCOPE_PREFIX}{anonymous_id}")
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        deduped.append(candidate)
+    return deduped
+
+
+def _tool_progress_state_ordering_key(
+    state: Mapping[str, Any],
+) -> tuple[int, float, float, float]:
+    sequence_no = _progress_number(state.get("sequence_no"))
+    updated_at_epoch = _progress_number(state.get("updated_at_epoch"))
+    elapsed_ms = _progress_number(state.get("elapsed_ms"))
+    has_ordering = any(
+        value is not None for value in (sequence_no, updated_at_epoch, elapsed_ms)
+    )
+    return (
+        1 if has_ordering else 0,
+        float(sequence_no if sequence_no is not None else -1.0),
+        float(updated_at_epoch if updated_at_epoch is not None else -1.0),
+        float(elapsed_ms if elapsed_ms is not None else -1.0),
+    )
+
+
+def _resolve_tool_progress_state_from_scope_candidates(
+    *,
+    request_id: str,
+    explicit_scope_key: str | None = None,
+    user_concept_id: str | None = None,
+    window_session_id: str | None = None,
+    anonymous_session_id: str | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    best_state: dict[str, Any] | None = None
+    best_scope_key: str | None = None
+    best_ordering_key: tuple[int, float, float, float] | None = None
+
+    for candidate_scope_key in _build_tool_progress_scope_candidates(
+        explicit_scope_key=explicit_scope_key,
+        user_concept_id=user_concept_id,
+        window_session_id=window_session_id,
+        anonymous_session_id=anonymous_session_id,
+    ):
+        candidate_state = _get_tool_progress(candidate_scope_key, request_id)
+        if not isinstance(candidate_state, dict):
+            continue
+        ordering_key = _tool_progress_state_ordering_key(candidate_state)
+        if best_state is None or ordering_key > cast(
+            tuple[int, float, float, float], best_ordering_key
+        ):
+            best_state = dict(candidate_state)
+            best_scope_key = candidate_scope_key
+            best_ordering_key = ordering_key
+
+    return best_state, best_scope_key
+
+
 @von_bp.route("/api/files/upload", methods=["POST"])
 def upload_file_to_blob_store_and_vontology():
     """Upload a user-provided file into the configured blob store and register it in Vontology.
@@ -3674,7 +3783,24 @@ def get_generation_progress(request_id: str):
         return jsonify({"error": "Invalid request_id"}), 400
 
     scope_key = _get_tool_progress_scope_key()
-    state = _get_tool_progress(scope_key, request_id.strip())
+    resolved_user_concept_id = None
+    if scope_key.startswith("user:"):
+        resolved_user_concept_id = _progress_str(scope_key[len("user:") :])
+    else:
+        resolved_user_concept_id = _progress_str(session.get("user_concept_id"))
+
+    window_session_id = _normalise_tool_progress_window_session_id(
+        request.headers.get(_WINDOW_SESSION_HEADER_NAME)
+    )
+    anonymous_session_id = _progress_str(session.get("tool_progress_scope"))
+
+    state, resolved_scope_key = _resolve_tool_progress_state_from_scope_candidates(
+        request_id=request_id.strip(),
+        explicit_scope_key=scope_key,
+        user_concept_id=resolved_user_concept_id,
+        window_session_id=window_session_id,
+        anonymous_session_id=anonymous_session_id,
+    )
     if not state:
         try:
             show_tool_use_progress = bool(get_show_tool_use_during_thinking())
@@ -3694,7 +3820,15 @@ def get_generation_progress(request_id: str):
             202,
         )
 
-    return jsonify(_serialise_tool_progress_state(state)), 200
+    serialised_state = _serialise_tool_progress_state(state)
+    if (
+        isinstance(resolved_scope_key, str)
+        and resolved_scope_key
+        and resolved_scope_key != scope_key
+    ):
+        serialised_state["resolved_scope_key"] = resolved_scope_key
+        serialised_state["progress_source"] = "alternate_scope_fallback"
+    return jsonify(serialised_state), 200
 
 
 # ----------------- Background Tasks (JVNAUTOSCI-1038) -----------------
@@ -7804,18 +7938,47 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     )
 
-    progress_scope_key = _get_tool_progress_scope_key()
+    progress_scope_key = _get_tool_progress_bootstrap_scope_key()
+    progress_mirror_scope_keys: list[str] = []
     show_tool_use_progress = False
     try:
         show_tool_use_progress = bool(get_show_tool_use_during_thinking())
     except Exception:
         show_tool_use_progress = False
 
+    def _register_progress_mirror_scope(scope_key: str | None) -> None:
+        clean_scope_key = _progress_str(scope_key)
+        if (
+            not clean_scope_key
+            or clean_scope_key == progress_scope_key
+            or clean_scope_key in progress_mirror_scope_keys
+        ):
+            return
+        progress_mirror_scope_keys.append(clean_scope_key)
+
+        current_state = _get_tool_progress(progress_scope_key, request_id)
+        if isinstance(current_state, dict):
+            _set_tool_progress(clean_scope_key, request_id, current_state)
+
+    def _emit_generate_progress(update: Mapping[str, Any] | None) -> None:
+        if not show_tool_use_progress:
+            return
+        payload = (
+            dict(update) if isinstance(update, Mapping) else {"status": "unknown"}
+        )
+        payload.setdefault("request_id", request_id)
+
+        seen_scope_keys: set[str] = set()
+        for target_scope_key in [progress_scope_key, *progress_mirror_scope_keys]:
+            clean_scope_key = _progress_str(target_scope_key)
+            if not clean_scope_key or clean_scope_key in seen_scope_keys:
+                continue
+            seen_scope_keys.add(clean_scope_key)
+            _set_tool_progress(clean_scope_key, request_id, dict(payload))
+
     progress_goal_label = _build_progress_goal_label(prompt_text=prompt_text)
     if show_tool_use_progress:
-        _set_tool_progress(
-            progress_scope_key,
-            request_id,
+        _emit_generate_progress(
             _build_request_initialising_tool_progress_payload(
                 request_id=request_id,
                 goal_label=progress_goal_label,
@@ -7924,6 +8087,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         # Store user_concept_id in session for history tracking
         if user_concept_id:
             session["user_concept_id"] = user_concept_id
+            _register_progress_mirror_scope(f"user:{user_concept_id}")
     except Exception:
         user_concept_id = None
         org_concept_id = None
@@ -8009,9 +8173,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
     if history_user_id:
         if show_tool_use_progress:
-            _set_tool_progress(
-                progress_scope_key,
-                request_id,
+            _emit_generate_progress(
                 {
                     "status": "thinking",
                     "phase": "context_build",
@@ -8094,9 +8256,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             batch_cap = int(get_internal_mcp_tool_batch_cap())
         except Exception:
             batch_cap = 4
-        _set_tool_progress(
-            progress_scope_key,
-            request_id,
+        _emit_generate_progress(
             {
                 "status": "thinking",
                 "phase": "context_build",
@@ -8133,9 +8293,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         )
     except Exception as e:
         if show_tool_use_progress:
-            _set_tool_progress(
-                progress_scope_key,
-                request_id,
+            _emit_generate_progress(
                 {
                     "status": "error",
                     "phase": "context_build",
@@ -8664,9 +8822,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             continuation_context=workflow_continuation_context,
         )
         if show_tool_use_progress and progress_goal_label:
-            _set_tool_progress(
-                progress_scope_key,
-                request_id,
+            _emit_generate_progress(
                 {
                     "status": "thinking",
                     "phase": "context_build",
@@ -9204,7 +9360,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 return
             payload = dict(info) if isinstance(info, Mapping) else {"status": "unknown"}
             payload.setdefault("request_id", request_id)
-            _set_tool_progress(progress_scope_key, request_id, payload)
+            _emit_generate_progress(payload)
 
         tool_invocations: list[dict[str, Any]] = []
         conversation_turn_instance_state = _GenerateConversationTurnInstanceState()
@@ -9248,14 +9404,12 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                             else {"status": "unknown"}
                         )
                         payload.setdefault("request_id", request_id)
-                        _set_tool_progress(progress_scope_key, request_id, payload)
+                        _emit_generate_progress(payload)
 
                     progress_tracker = ProgressTracker(callback=_progress_update)
 
                 if show_tool_use_progress:
-                    _set_tool_progress(
-                        progress_scope_key,
-                        request_id,
+                    _emit_generate_progress(
                         {
                             "status": "orchestrator_start",
                             "stage": "workflow_dispatch_prepare",
@@ -9377,9 +9531,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 rag_trace["tool_results_included_in_prompt"] = bool(tool_messages)
 
                 if show_tool_use_progress:
-                    _set_tool_progress(
-                        progress_scope_key,
-                        request_id,
+                    _emit_generate_progress(
                         {
                             "status": "orchestrator_end",
                             "stage": "orchestrator_end",
@@ -9413,9 +9565,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 ]
 
                 if show_tool_use_progress:
-                    _set_tool_progress(
-                        progress_scope_key,
-                        request_id,
+                    _emit_generate_progress(
                         {
                             "status": "error",
                             "phase": "error",
@@ -9553,9 +9703,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             if needs_screen_backfill:
                 screen_backfill_second_pass_attempted = True
                 if show_tool_use_progress:
-                    _set_tool_progress(
-                        progress_scope_key,
-                        request_id,
+                    _emit_generate_progress(
                         {
                             "status": "phase_transition",
                             "phase": "screen_backfill",
@@ -10207,9 +10355,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             try:
                 spoken_backfill_second_pass_attempted = True
                 if show_tool_use_progress:
-                    _set_tool_progress(
-                        progress_scope_key,
-                        request_id,
+                    _emit_generate_progress(
                         {
                             "status": "phase_transition",
                             "phase": "narration",
@@ -10698,9 +10844,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             # Buttonify is intentionally LLM-only: no heuristic preflight/fallback.
             buttonify_preflight_enabled = False
             if show_tool_use_progress:
-                _set_tool_progress(
-                    progress_scope_key,
-                    request_id,
+                _emit_generate_progress(
                     {
                         "status": "workflow",
                         "request_id": request_id,
@@ -11037,11 +11181,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 tool_message_count=len(tool_messages),
                 persist_history=bool(history_user_id),
             )
-            _set_tool_progress(
-                progress_scope_key,
-                request_id,
-                response_finalising_payload,
-            )
+            _emit_generate_progress(response_finalising_payload)
 
         tool_progress_snapshot = _snapshot_tool_progress_for_request(
             progress_scope_key, request_id
@@ -11251,11 +11391,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             _stop_tool_progress_heartbeat(
                 progress_heartbeat_stop_event, progress_heartbeat_thread
             )
-            _set_tool_progress(
-                progress_scope_key,
-                request_id,
-                final_progress_payload,
-            )
+            _emit_generate_progress(final_progress_payload)
 
         _finalise_generate_conversation_turn_instance(
             state=conversation_turn_instance_state,
@@ -11295,16 +11431,14 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 _stop_tool_progress_heartbeat(
                     progress_heartbeat_stop_event, progress_heartbeat_thread
                 )
-                _set_tool_progress(
-                    _get_tool_progress_scope_key(),
-                    request_id if "request_id" in locals() else "unknown",
+                _emit_generate_progress(
                     {
                         "status": "error",
                         "request_id": (
                             request_id if "request_id" in locals() else "unknown"
                         ),
                         "error": str(e),
-                    },
+                    }
                 )
             except Exception:
                 pass
