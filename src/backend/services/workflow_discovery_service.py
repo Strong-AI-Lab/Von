@@ -559,7 +559,6 @@ def _build_keyword_fallback_queries(
         ],
     )
     if arxiv_ids:
-        primary_arxiv_id = arxiv_ids[0]
         candidates.extend(
             [
                 "arxiv workflow",
@@ -567,9 +566,9 @@ def _build_keyword_fallback_queries(
                 "arxiv paper representation workflow",
                 "scholarly paper workflow",
                 "scholarly paper representation workflow",
-                f"arxiv {primary_arxiv_id}",
             ]
         )
+        candidates.extend(f"arxiv {arxiv_id}" for arxiv_id in arxiv_ids)
 
     deduped: list[str] = []
     seen: set[str] = set()

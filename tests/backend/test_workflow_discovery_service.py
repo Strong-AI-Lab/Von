@@ -299,6 +299,18 @@ class TestKeywordFallbackQueries:
         assert "arxiv workflow" in queries
         assert "arxiv 2602.20478" in queries
 
+    def test_adds_every_arxiv_id_to_fallback_queries_for_multi_target_prompt(self) -> None:
+        queries = _build_keyword_fallback_queries(
+            (
+                "Represent https://arxiv.org/abs/2602.20478 and "
+                "https://arxiv.org/abs/2501.00663."
+            ),
+            [],
+        )
+
+        assert "arxiv 2602.20478" in queries
+        assert "arxiv 2501.00663" in queries
+
     def test_adds_talk_and_seminar_queries_for_presentation_prompt(self) -> None:
         queries = _build_keyword_fallback_queries(
             "Can you make the workflow for adding academic talks now?",

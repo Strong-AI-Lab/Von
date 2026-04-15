@@ -382,7 +382,45 @@ def test_project_launch_inputs_from_continuation_context_projects_stable_artefac
     )
 
     assert projected == {
+        "file_copy_concept_ids": ["#V#uploaded_file_copy_abc123"],
         "file_copy_concept_id": "#V#uploaded_file_copy_abc123",
+        "concept_ids": ["#V#uploaded_file_copy_abc123"],
+        "source_uris": ["https://arxiv.org/abs/2502.14996"],
         "source_uri": "https://arxiv.org/abs/2502.14996",
+        "arxiv_ids": ["2502.14996"],
         "arxiv_id": "2502.14996",
+    }
+
+
+def test_project_launch_inputs_from_continuation_context_preserves_plural_targets() -> None:
+    projected = service.project_launch_inputs_from_continuation_context(
+        {
+            "unresolved_required_effects": [
+                {
+                    "targets": [
+                        "#V#paper_alpha",
+                        "#V#paper_beta",
+                        "https://arxiv.org/abs/2502.14996",
+                        "https://arxiv.org/abs/2502.14997",
+                    ]
+                }
+            ],
+            "required_effects_contract": {
+                "artefact_context": {
+                    "urls": [
+                        "https://arxiv.org/abs/2502.14996",
+                        "https://arxiv.org/abs/2502.14997",
+                    ]
+                }
+            },
+        }
+    )
+
+    assert projected == {
+        "concept_ids": ["#V#paper_alpha", "#V#paper_beta"],
+        "source_uris": [
+            "https://arxiv.org/abs/2502.14996",
+            "https://arxiv.org/abs/2502.14997",
+        ],
+        "arxiv_ids": ["2502.14996", "2502.14997"],
     }

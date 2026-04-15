@@ -8,7 +8,7 @@ workflow evidence rather than loose prompt-shape guessing.
 from __future__ import annotations
 
 import re
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from .arxiv_paper_link_service import extract_arxiv_id_candidates
 from .file_copy_reference_service import is_file_copy_concept_id
@@ -756,22 +756,42 @@ def project_launch_inputs_from_continuation_context(
         return {}
 
     projected: dict[str, Any] = {}
+
+    def _project_targets(
+        plural_key: str,
+        targets: Sequence[str],
+        *,
+        singular_key: str | None = None,
+    ) -> None:
+        cleaned = [str(target) for target in targets if _safe_str(target)]
+        if not cleaned:
+            return
+        projected[plural_key] = cleaned
+        if singular_key and len(cleaned) == 1:
+            projected[singular_key] = cleaned[0]
+
     file_copy_targets = extract_file_copy_targets_from_continuation_context(
         continuation_context
     )
-    if len(file_copy_targets) == 1:
-        projected["file_copy_concept_id"] = file_copy_targets[0]
+    _project_targets(
+        "file_copy_concept_ids",
+        file_copy_targets,
+        singular_key="file_copy_concept_id",
+    )
+
+    concept_targets = extract_concept_targets_from_continuation_context(
+        continuation_context
+    )
+    _project_targets("concept_ids", concept_targets)
 
     url_targets = extract_url_targets_from_continuation_context(continuation_context)
-    if len(url_targets) == 1:
-        projected["source_uri"] = url_targets[0]
+    _project_targets("source_uris", url_targets, singular_key="source_uri")
 
     arxiv_ids = extract_arxiv_id_candidates(
         continuation_context.get("required_effects_contract"),
         continuation_context.get("unresolved_required_effects"),
         url_targets,
     )
-    if len(arxiv_ids) == 1:
-        projected["arxiv_id"] = arxiv_ids[0]
+    _project_targets("arxiv_ids", arxiv_ids, singular_key="arxiv_id")
 
     return projected

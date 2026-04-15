@@ -601,9 +601,13 @@ def test_generate_arxiv_continuation_turn_projects_authoritative_launch_inputs(
     assert isinstance(body, dict)
     assert body.get("response") == "Downloaded and represented the paper."
     assert captured_data["source_uri"] == "https://arxiv.org/abs/2501.00663"
+    assert captured_data["source_uris"] == ["https://arxiv.org/abs/2501.00663"]
     assert captured_data["arxiv_id"] == "2501.00663"
+    assert captured_data["arxiv_ids"] == ["2501.00663"]
     assert captured_data["workflow_continuation_launch_inputs"] == {
+        "source_uris": ["https://arxiv.org/abs/2501.00663"],
         "source_uri": "https://arxiv.org/abs/2501.00663",
+        "arxiv_ids": ["2501.00663"],
         "arxiv_id": "2501.00663",
     }
 
