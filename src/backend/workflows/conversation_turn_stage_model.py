@@ -158,6 +158,17 @@ _NON_FORMAL_STAGE_SPECS: tuple[_StageSpec, ...] = (
         runtime_aliases=("apply_recovery_retry", "recovery_retry_prepare"),
     ),
     _StageSpec(
+        stage_id="recovery_answer_prepare",
+        stage_label="Prepare recovery answer",
+        order=108,
+        stage_kind="non_formal",
+        boundary_type="recovery",
+        stage_concept_id="#V#conversation_turn_stage_recovery_answer_prepare",
+        workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+        workflow_state_id="apply_recovery_answer",
+        runtime_aliases=("apply_recovery_answer", "recovery_answer_prepare"),
+    ),
+    _StageSpec(
         stage_id="recovery_follow_up_prepare",
         stage_label="Prepare recovery follow-up",
         order=109,

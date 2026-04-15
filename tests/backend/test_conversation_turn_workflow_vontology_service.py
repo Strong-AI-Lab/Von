@@ -96,8 +96,9 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     assert isinstance(recovery_text, str)
     assert "recovery-decision policy" in recovery_text
     assert "next best bounded automated step" in recovery_text
-    assert "`decision`" in recovery_text
-    assert "`\"retry_execution\"` or `\"respond_with_follow_up\"`" in recovery_text
+    assert "`turn_next_action`" in recovery_text
+    assert "`action_type`" in recovery_text
+    assert "`\"retry_execution\"`, `\"respond_with_answer\"`, or `\"respond_with_follow_up\"`" in recovery_text
 
 
 def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_links(
@@ -214,6 +215,10 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
         workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
         state_id="apply_recovery_follow_up",
     )
+    recovery_answer_step_id = authority_service._step_concept_id(
+        workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+        state_id="apply_recovery_answer",
+    )
     transition_targets = {transition.to_state for transition in completion_gate.transitions}
     assert execution_step_id not in transition_targets
     assert recovery_decision_step_id in transition_targets
@@ -221,7 +226,22 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     recovery_transition_targets = {
         transition.to_state for transition in recovery_decision.transitions
     }
+    assert recovery_answer_step_id in recovery_transition_targets
     assert recovery_follow_up_step_id in recovery_transition_targets
+    recovery_mappings = recovery_decision.metadata.get("tool_output_context_mappings") or []
+    assert any(
+        mapping.get("context_key") == "turn_next_action"
+        and mapping.get("tool_output_field") == "validated_json.turn_next_action"
+        for mapping in recovery_mappings
+        if isinstance(mapping, dict)
+    )
+    assert any(
+        mapping.get("context_key") == "turn_next_action_type"
+        and mapping.get("tool_output_field")
+        == "validated_json.turn_next_action.action_type"
+        for mapping in recovery_mappings
+        if isinstance(mapping, dict)
+    )
 
     narration_step_id = authority_service._step_concept_id(
         workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,

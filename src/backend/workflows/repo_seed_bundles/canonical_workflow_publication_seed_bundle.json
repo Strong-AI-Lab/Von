@@ -1574,17 +1574,17 @@
                   "conditions": [
                     {
                       "kind": "context_value_equals",
-                      "key": "turn_recovery_decision",
+                      "key": "turn_next_action_type",
                       "value": "retry_execution"
                     },
                     {
                       "kind": "context_exists",
-                      "key": "turn_recovery_target_workflow_id",
+                      "key": "turn_next_action_target_workflow_id",
                       "expected": true
                     },
                     {
                       "kind": "context_is_null",
-                      "key": "turn_recovery_target_workflow_id",
+                      "key": "turn_next_action_target_workflow_id",
                       "expected": false
                     },
                     {
@@ -1596,6 +1596,30 @@
                 },
                 "reason": "retry_execution",
                 "to_state": "apply_recovery_retry"
+              },
+              {
+                "condition_spec": {
+                  "kind": "all",
+                  "conditions": [
+                    {
+                      "kind": "context_value_equals",
+                      "key": "turn_next_action_type",
+                      "value": "respond_with_answer"
+                    },
+                    {
+                      "kind": "context_exists",
+                      "key": "turn_next_action_response_text",
+                      "expected": true
+                    },
+                    {
+                      "kind": "context_is_null",
+                      "key": "turn_next_action_response_text",
+                      "expected": false
+                    }
+                  ]
+                },
+                "reason": "respond_with_answer",
+                "to_state": "apply_recovery_answer"
               },
               {
                 "condition_spec": {
@@ -1699,14 +1723,39 @@
             ],
             "tool_output_mapping_specs": [
               {
-                "concept_id": "#V#workflow_mapping_turn_execution_recovery_decision_validated_json_decision_to_turn_recovery_decision",
-                "context_key": "turn_recovery_decision",
-                "tool_output_field": "validated_json.decision"
+                "concept_id": "#V#workflow_mapping_turn_execution_recovery_decision_validated_json_turn_next_action_to_turn_next_action",
+                "context_key": "turn_next_action",
+                "tool_output_field": "validated_json.turn_next_action"
               },
               {
-                "concept_id": "#V#workflow_mapping_turn_execution_recovery_decision_validated_json_target_workflow_id_to_turn_recovery_target_workflow_id",
+                "concept_id": "#V#workflow_mapping_turn_execution_recovery_decision_validated_json_turn_next_action_action_type_to_turn_next_action_type",
+                "context_key": "turn_next_action_type",
+                "tool_output_field": "validated_json.turn_next_action.action_type"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_recovery_decision_validated_json_turn_next_action_target_workflow_id_to_turn_next_action_target_workflow_id",
+                "context_key": "turn_next_action_target_workflow_id",
+                "tool_output_field": "validated_json.turn_next_action.target_workflow_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_recovery_decision_validated_json_turn_next_action_response_text_to_turn_next_action_response_text",
+                "context_key": "turn_next_action_response_text",
+                "tool_output_field": "validated_json.turn_next_action.response_text"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_recovery_decision_validated_json_reasoning_to_turn_next_action_reasoning",
+                "context_key": "turn_next_action_reasoning",
+                "tool_output_field": "validated_json.reasoning"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_recovery_decision_validated_json_turn_next_action_action_type_to_turn_recovery_decision",
+                "context_key": "turn_recovery_decision",
+                "tool_output_field": "validated_json.turn_next_action.action_type"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_recovery_decision_validated_json_turn_next_action_target_workflow_id_to_turn_recovery_target_workflow_id",
                 "context_key": "turn_recovery_target_workflow_id",
-                "tool_output_field": "validated_json.target_workflow_id"
+                "tool_output_field": "validated_json.turn_next_action.target_workflow_id"
               },
               {
                 "concept_id": "#V#workflow_mapping_turn_execution_recovery_decision_validated_json_reasoning_to_turn_recovery_reasoning",
@@ -1714,15 +1763,20 @@
                 "tool_output_field": "validated_json.reasoning"
               },
               {
-                "concept_id": "#V#workflow_mapping_turn_execution_recovery_decision_validated_json_response_text_to_turn_recovery_response_text",
+                "concept_id": "#V#workflow_mapping_turn_execution_recovery_decision_validated_json_turn_next_action_response_text_to_turn_recovery_response_text",
                 "context_key": "turn_recovery_response_text",
-                "tool_output_field": "validated_json.response_text"
+                "tool_output_field": "validated_json.turn_next_action.response_text"
               }
             ],
             "validation_policy": {
               "output_format": "json_value"
             },
             "writes_context_keys": [
+              "turn_next_action",
+              "turn_next_action_type",
+              "turn_next_action_target_workflow_id",
+              "turn_next_action_response_text",
+              "turn_next_action_reasoning",
               "turn_recovery_decision",
               "turn_recovery_target_workflow_id",
               "turn_recovery_reasoning",
@@ -1749,7 +1803,7 @@
                 [
                   {
                     "key": "selected_workflow_id",
-                    "value_from_context": "turn_recovery_target_workflow_id"
+                    "value_from_context": "turn_next_action_target_workflow_id"
                   },
                   {
                     "key": "turn_recovery_attempted",
@@ -1757,15 +1811,15 @@
                   },
                   {
                     "key": "turn_recovery_last_decision",
-                    "value_from_context": "turn_recovery_decision"
+                    "value_from_context": "turn_next_action_type"
                   },
                   {
                     "key": "turn_recovery_last_reasoning",
-                    "value_from_context": "turn_recovery_reasoning"
+                    "value_from_context": "turn_next_action_reasoning"
                   },
                   {
                     "key": "turn_recovery_last_target_workflow_id",
-                    "value_from_context": "turn_recovery_target_workflow_id"
+                    "value_from_context": "turn_next_action_target_workflow_id"
                   },
                   {
                     "key": "response_text",
@@ -1805,6 +1859,69 @@
                 "condition_spec": {
                   "kind": "always"
                 },
+                "reason": "recovery_answer_ready",
+                "to_state": "completed"
+              }
+            ],
+            "execution_mode": "deterministic",
+            "state_id": "apply_recovery_answer",
+            "static_input_bindings": [
+              [
+                "assignments",
+                [
+                  {
+                    "key": "response_text",
+                    "value_from_context": "turn_next_action_response_text"
+                  },
+                  {
+                    "key": "final_response",
+                    "value_from_context": "turn_next_action_response_text"
+                  },
+                  {
+                    "key": "current_response",
+                    "value_from_context": "turn_next_action_response_text"
+                  },
+                  {
+                    "key": "selected_workflow_user_response",
+                    "value_from_context": "turn_next_action_response_text"
+                  },
+                  {
+                    "key": "turn_recovery_attempted",
+                    "value": true
+                  },
+                  {
+                    "key": "turn_recovery_last_decision",
+                    "value_from_context": "turn_next_action_type"
+                  },
+                  {
+                    "key": "turn_recovery_last_reasoning",
+                    "value_from_context": "turn_next_action_reasoning"
+                  },
+                  {
+                    "key": "turn_recovery_last_target_workflow_id",
+                    "value_from_context": "turn_next_action_target_workflow_id"
+                  }
+                ]
+              ]
+            ],
+            "writes_context_keys": [
+              "response_text",
+              "final_response",
+              "current_response",
+              "selected_workflow_user_response",
+              "turn_recovery_attempted",
+              "turn_recovery_last_decision",
+              "turn_recovery_last_reasoning",
+              "turn_recovery_last_target_workflow_id"
+            ]
+          },
+          {
+            "action_id": "workflow_control.context_set",
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
                 "reason": "recovery_follow_up_ready",
                 "to_state": "failed"
               }
@@ -1817,15 +1934,15 @@
                 [
                   {
                     "key": "response_text",
-                    "value_from_context": "turn_recovery_response_text"
+                    "value_from_context": "turn_next_action_response_text"
                   },
                   {
                     "key": "final_response",
-                    "value_from_context": "turn_recovery_response_text"
+                    "value_from_context": "turn_next_action_response_text"
                   },
                   {
                     "key": "current_response",
-                    "value_from_context": "turn_recovery_response_text"
+                    "value_from_context": "turn_next_action_response_text"
                   },
                   {
                     "key": "turn_recovery_attempted",
@@ -1833,15 +1950,15 @@
                   },
                   {
                     "key": "turn_recovery_last_decision",
-                    "value_from_context": "turn_recovery_decision"
+                    "value_from_context": "turn_next_action_type"
                   },
                   {
                     "key": "turn_recovery_last_reasoning",
-                    "value_from_context": "turn_recovery_reasoning"
+                    "value_from_context": "turn_next_action_reasoning"
                   },
                   {
                     "key": "turn_recovery_last_target_workflow_id",
-                    "value_from_context": "turn_recovery_target_workflow_id"
+                    "value_from_context": "turn_next_action_target_workflow_id"
                   }
                 ]
               ]

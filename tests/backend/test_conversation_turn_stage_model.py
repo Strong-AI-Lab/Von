@@ -8,6 +8,7 @@ from src.backend.workflows.conversation_turn_stage_model import (
 from src.backend.workflows.definitions import (
     CHAT_BUTTONIFY_WORKFLOW_ID,
     CHAT_ASSISTANT_WORKFLOW_ID,
+    CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
     TOOL_CALLING_WORKFLOW_ID,
     TURN_COMPLETION_GATE_WORKFLOW_ID,
 )
@@ -74,6 +75,17 @@ def _patch_stage_catalogue(monkeypatch: pytest.MonkeyPatch) -> None:
             workflow_id=TURN_COMPLETION_GATE_WORKFLOW_ID,
             workflow_state_id="completion_gate",
             runtime_aliases=("completion_gate",),
+        ),
+        stage_model._StageSpec(
+            stage_id="recovery_answer_prepare",
+            stage_label="Prepare recovery answer",
+            order=108,
+            stage_kind="non_formal",
+            boundary_type="recovery",
+            stage_concept_id="#V#conversation_turn_stage_recovery_answer_prepare",
+            workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+            workflow_state_id="apply_recovery_answer",
+            runtime_aliases=("apply_recovery_answer", "recovery_answer_prepare"),
         ),
         stage_model._StageSpec(
             stage_id="buttonify",
@@ -187,6 +199,19 @@ def test_stage_path_maps_response_finalising_runtime_stage() -> None:
     assert len(path) == 1
     assert path[0]["stage_id"] == "response_finalising"
     assert path[0]["runtime_stage_normalised"] == "response_finalising"
+
+
+def test_stage_path_maps_recovery_answer_runtime_stage() -> None:
+    result = build_conversation_turn_stage_path(
+        runtime_stages=["apply_recovery_answer"],
+        workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+    )
+
+    assert result["has_unmapped_runtime_stages"] is False
+    path = result["path"]
+    assert len(path) == 1
+    assert path[0]["stage_id"] == "recovery_answer_prepare"
+    assert path[0]["runtime_stage_normalised"] == "apply_recovery_answer"
 
 
 def test_stage_path_prefers_mapped_execution_workflow_over_route_hint() -> None:

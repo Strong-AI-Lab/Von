@@ -110,8 +110,9 @@ def _ensure_conversation_turn_prompt_support(
                 name="Turn execution recovery decision prompt",
                 description=(
                     "Canonical recovery prompt for choosing the next best "
-                    "bounded workflow route from accumulated turn evidence, "
-                    "or emitting an explicit follow-up response when no "
+                    "bounded executable turn-next-action from accumulated turn "
+                    "evidence, including a workflow retry, a direct grounded "
+                    "answer, or an explicit follow-up response when no "
                     "further automated route is likely to help."
                 ),
                 parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
