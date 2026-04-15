@@ -90,6 +90,64 @@ def test_persist_memory_handler_surfaces_remediation_routing(monkeypatch):
     assert result.outputs["maintenance_follow_up_requested"] is False
 
 
+def test_evidence_bundle_handler_surfaces_format_over_content_diagnostic(monkeypatch):
+    from src.backend.workflows.durable import episode_evaluation_workflow as mod
+
+    monkeypatch.setattr(
+        mod,
+        "build_episode_critic_evidence_bundle",
+        lambda **kwargs: {
+            "success": True,
+            "ready_for_critic": True,
+            "fail_closed": False,
+            "episode_locator": {
+                "request_id": "req-1890",
+                "workflow_id": "#V#chat_assistant_workflow",
+                "namespace": "#V#user@org",
+            },
+            "source_resolution": {"resolved_request_id": "req-1890"},
+            "expected_context": {"allowed_tool_families": ["search"]},
+            "observed_evidence": {"turn_execution_record": {"request_id": "req-1890"}},
+            "capability_gaps": [],
+            "fail_closed_reason_codes": [],
+            "bundle_receipt": {"sha256": "bundle-receipt"},
+            "format_over_content_diagnostic": {
+                "status": "suspected",
+                "summary": "Structured output may have displaced nuance.",
+                "confidence": 0.68,
+                "reason_codes": [
+                    "structured_output_contract_present",
+                    "grounded_tool_path_unused",
+                ],
+                "selected_model": "gpt-5.4-mini",
+                "observed_stage_id": "selector_decision",
+                "raw_response_format": "json_object",
+            },
+        },
+    )
+
+    handler = mod._build_evidence_bundle_handler()
+    result = handler(
+        _request(
+            {
+                "request_id": "req-1890",
+                "namespace": "#V#user@org",
+            }
+        )
+    )
+
+    assert result.ok
+    diagnostic = result.outputs["format_over_content_diagnostic"]
+    assert diagnostic["status"] == "suspected"
+    assert diagnostic["selected_model"] == "gpt-5.4-mini"
+    fallback = result.outputs["episode_critic_fallback_assessment"]
+    assert fallback["format_over_content_diagnostic"]["status"] == "suspected"
+    assert any(
+        "output contract" in recommendation.lower()
+        for recommendation in fallback["recommendations"]
+    )
+
+
 def test_persist_memory_handler_emits_maintenance_launch_payload(monkeypatch):
     from src.backend.workflows.durable import episode_evaluation_workflow as mod
 

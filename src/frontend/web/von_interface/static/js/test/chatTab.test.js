@@ -2137,6 +2137,150 @@ describe('thinking activity history normalisation', () => {
         expect(html).toContain('Sent');
     });
 
+    test('renders expected-outcome and selector stages with context-lineage diagnostics', () => {
+        const request = {
+            clientRequestId: 'req-1888',
+            promptRaw: 'What papers of mine do you know about?',
+            latestProgress: {
+                status: 'llm_call_start',
+                stage: 'selector_decision',
+                phase: 'selector_decision',
+                model: 'gpt-5-mini',
+                provider: 'openai',
+                llm_request_state: 'sent',
+                llm_request: {
+                    prompt: {
+                        text: 'Select the best workflow for this grounded authorship question.',
+                        char_count: 61
+                    },
+                    context_summary: {
+                        message_count: 4,
+                        leading_system_message_count: 2,
+                        role_counts: { system: 2, user: 1, assistant: 1 },
+                        total_content_chars: 220
+                    },
+                    context_lineage: {
+                        base_context_source: 'augmented_context',
+                        insertion_strategy: 'after_leading_system',
+                        stage_added_message_count: 1,
+                        stage_added_messages: [
+                            { role: 'system', preview: 'Expected answer contract for this turn:' }
+                        ],
+                        base_context_summary: {
+                            message_count: 3,
+                            role_counts: { system: 1, user: 1, assistant: 1 },
+                            total_content_chars: 180
+                        },
+                        stage_context_summary: {
+                            message_count: 4,
+                            role_counts: { system: 2, user: 1, assistant: 1 },
+                            total_content_chars: 220
+                        }
+                    },
+                    context_message_count: 4
+                }
+            },
+            workflowSelection: {
+                selected_workflow_id: '#V#chat_assistant_workflow',
+                selected_workflow_name: 'Chat assistant workflow',
+                selector_verdict: 'direct_response',
+                selector_source: 'selector',
+                workflow_match_count: 0,
+                workflow_candidate_count: 2
+            },
+            workflowRoutingDiagnostics: {
+                schema_version: 'workflow_routing_diagnostics.v1',
+                selected_workflow_id: '#V#chat_assistant_workflow',
+                selector: {
+                    prompt_id: '#V#workflow_selector_prompt',
+                    requested_prompt_ids: ['#V#workflow_selector_prompt'],
+                    prompt: {
+                        text: 'Select the best workflow for this grounded authorship question.',
+                        char_count: 61
+                    },
+                    candidate_list: {
+                        text: '- #V#chat_assistant_workflow\n- #V#scholarly_paper_representation_workflow',
+                        char_count: 78
+                    },
+                    response: { text: '#V#chat_assistant_workflow', char_count: 25 }
+                }
+            },
+            workflowStagePath: {
+                path: [
+                    { stage_id: 'expected_outcome_inference', stage_label: 'Infer expected outcome' },
+                    { stage_id: 'selector_preparation', stage_label: 'Prepare selector context' },
+                    { stage_id: 'selector_decision', stage_label: 'Select workflow' }
+                ]
+            },
+            stageDiagnostics: [
+                {
+                    stage_id: 'expected_outcome_inference',
+                    diagnostics: {
+                        stage_id: 'expected_outcome_inference',
+                        stage_label: 'Infer expected outcome',
+                        latest_result_summary: 'Grounded authorship answer contract captured',
+                        latest_llm_exchange: {
+                            entry_type: 'live_llm_request',
+                            prompt_preview: {
+                                text: 'Infer what would count as a grounded answer to the user.',
+                                char_count: 58
+                            },
+                            response_preview: {
+                                text: 'Only list papers that can be justified as authored by the user; prefer explicit uncertainty to unsupported inclusion.',
+                                char_count: 116
+                            }
+                        }
+                    }
+                },
+                {
+                    stage_id: 'selector_preparation',
+                    diagnostics: {
+                        stage_id: 'selector_preparation',
+                        stage_label: 'Prepare selector context',
+                        latest_llm_exchange: {
+                            entry_type: 'workflow_selector_prompt',
+                            prompt_id: '#V#workflow_selector_prompt',
+                            requested_prompt_ids: ['#V#workflow_selector_prompt'],
+                            prompt_preview: {
+                                text: 'Select the best workflow for this grounded authorship question.',
+                                char_count: 61
+                            },
+                            candidate_list_preview: {
+                                text: '- #V#chat_assistant_workflow\n- #V#scholarly_paper_representation_workflow',
+                                char_count: 78
+                            },
+                            context_lineage: {
+                                base_context_source: 'augmented_context',
+                                stage_added_message_count: 1
+                            }
+                        }
+                    }
+                }
+            ]
+        };
+
+        const diagnosticsPayload = __testOnly_buildThinkingDiagnosticsPayload(request);
+        expect(diagnosticsPayload.stage_diagnostics).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                stage_id: 'selector_decision',
+                diagnostics: expect.objectContaining({
+                    llm_context_lineage: expect.objectContaining({
+                        base_context_source: 'augmented_context',
+                        stage_added_message_count: 1
+                    })
+                })
+            })
+        ]));
+
+        const html = __testOnly_renderThinkingCardBodyHTML(request);
+        expect(html).toContain('Infer expected outcome');
+        expect(html).toContain('Prepare selector context');
+        expect(html).toContain('Select workflow');
+        expect(html).toContain('Context lineage');
+        expect(html).toContain('Base context source: Augmented context');
+        expect(html).toContain('Expected answer contract for this turn:');
+    });
+
     test('renders preserved stage diagnostics when workflow stage path is absent', () => {
         const html = __testOnly_renderThinkingCardBodyHTML({
             latestProgress: {
@@ -2958,7 +3102,7 @@ describe('thinking card toggle accessibility', () => {
                         <button type="button" class="thinking-card-size-button" data-thinking-role="size-decrease" aria-hidden="true">−</button>
                         <button type="button" class="thinking-card-size-button" data-thinking-role="size-increase" aria-hidden="true">+</button>
                         <button id="retryThinkingButton" type="button" data-thinking-role="retry" aria-hidden="true">Retry</button>
-                        <button id="copyThinkingDiagnosticsButton" type="button" data-thinking-role="copy" aria-hidden="true">Copy diagnostics</button>
+                        <button id="copyThinkingDiagnosticsButton" type="button" data-thinking-role="copy" aria-hidden="true">Copy diagnostic snapshot</button>
                         <button id="abortButton" type="button" data-thinking-role="abort" aria-hidden="true"></button>
                     </div>
                     <div class="thinking-card-body" id="loadingIndicatorDetail" data-thinking-role="detail" aria-live="polite"></div>
@@ -3649,7 +3793,7 @@ describe('active thinking card manual resize persistence', () => {
                         <button type="button" class="thinking-card-size-button" data-thinking-role="size-decrease" aria-hidden="false">−</button>
                         <button type="button" class="thinking-card-size-button" data-thinking-role="size-increase" aria-hidden="false">+</button>
                         <button id="retryThinkingButton" type="button" data-thinking-role="retry" aria-hidden="true">Retry</button>
-                        <button id="copyThinkingDiagnosticsButton" type="button" data-thinking-role="copy" aria-hidden="false">Copy diagnostics</button>
+                        <button id="copyThinkingDiagnosticsButton" type="button" data-thinking-role="copy" aria-hidden="false">Copy diagnostic snapshot</button>
                         <button id="abortButton" type="button" data-thinking-role="abort" aria-hidden="false"></button>
                     </div>
                     <div class="thinking-card-body" id="loadingIndicatorDetail" data-thinking-role="detail" aria-live="polite"></div>
@@ -3761,7 +3905,7 @@ describe('copy diagnostics button visibility on preserved finished card', () => 
                         <button type="button" class="thinking-card-size-button" data-thinking-role="size-decrease" aria-hidden="true">−</button>
                         <button type="button" class="thinking-card-size-button" data-thinking-role="size-increase" aria-hidden="true">+</button>
                         <button id="retryThinkingButton" type="button" data-thinking-role="retry" aria-hidden="true">Retry</button>
-                        <button id="copyThinkingDiagnosticsButton" type="button" data-thinking-role="copy" aria-hidden="true">Copy diagnostics</button>
+                        <button id="copyThinkingDiagnosticsButton" type="button" data-thinking-role="copy" aria-hidden="true">Copy diagnostic snapshot</button>
                         <button id="abortButton" type="button" data-thinking-role="abort" aria-hidden="true"></button>
                     </div>
                     <div class="thinking-card-body" id="loadingIndicatorDetail" data-thinking-role="detail" aria-live="polite"></div>
@@ -3815,9 +3959,9 @@ describe('copy diagnostics button visibility on preserved finished card', () => 
 
         // Full dismissal should reset
         __testOnly_setThinkingState(false, {});
-        expect(copyBtn.textContent).toBe('Copy diagnostics');
-        expect(copyBtn.getAttribute('title')).toBe('Copy diagnostics');
-        expect(copyBtn.getAttribute('aria-label')).toBe('Copy diagnostics');
+        expect(copyBtn.textContent).toBe('Copy diagnostic snapshot');
+        expect(copyBtn.getAttribute('title')).toBe('Copy diagnostic snapshot');
+        expect(copyBtn.getAttribute('aria-label')).toBe('Copy diagnostic snapshot');
         expect(copyBtn.classList.contains('copy-json-copied')).toBe(false);
     });
 
@@ -3855,7 +3999,7 @@ describe('copy diagnostics button visibility on preserved finished card', () => 
         expect(copyBtn.getAttribute('aria-label')).toBe('Copied to clipboard');
 
         jest.advanceTimersByTime(2300);
-        expect(copyBtn.textContent).toBe('Copy diagnostics');
+        expect(copyBtn.textContent).toBe('Copy diagnostic snapshot');
         expect(copyBtn.classList.contains('copy-json-copied')).toBe(false);
     });
 
@@ -3923,6 +4067,7 @@ describe('copy diagnostics button visibility on preserved finished card', () => 
 
         const payload = __testOnly_buildDiagnosticsExportRequestPayload();
 
+        expect(payload.capture_scope).toBe('current_diagnostic_snapshot');
         expect(payload.diagnostics.active_thinking).toEqual(expect.objectContaining({
             request_id: 'request-export'
         }));

@@ -216,7 +216,24 @@ def test_upsert_episode_critique_memory_projection_persists_document(monkeypatch
         "namespace": "#V#user@org",
         "session_id": "sess-1607-1",
         "subject_episode": {"episode_id": "wfep_123", "workflow_id": "#V#workflow"},
-        "critic": {"verdict": "pass", "confidence": 1.0, "unresolved_check_count": 0},
+        "critic": {
+            "verdict": "pass",
+            "confidence": 1.0,
+            "unresolved_check_count": 0,
+            "format_over_content_diagnostic": {
+                "status": "suspected",
+                "summary": "Structured output may have displaced nuance.",
+                "confidence": 0.67,
+                "reason_codes": [
+                    "structured_output_contract_present",
+                    "grounded_tool_path_unused",
+                ],
+                "selected_model": "gpt-5.4-mini",
+                "selected_provider": "openai",
+                "observed_stage_id": "selector_decision",
+                "raw_response_format": "json_object",
+            },
+        },
         "implicated": {
             "workflow_ids": ["#V#workflow"],
             "tool_names": ["search_concepts"],
@@ -268,6 +285,16 @@ def test_upsert_episode_critique_memory_projection_persists_document(monkeypatch
     assert stored["improvement_suggestion_count"] == 1
     assert stored["improvement_suggestion_categories"] == ["tool_addition"]
     assert stored["improvement_target_tool_names"] == ["search_web"]
+    assert stored["format_over_content_status"] == "suspected"
+    assert stored["format_over_content_confidence"] == 0.67
+    assert stored["format_over_content_reason_codes"] == [
+        "structured_output_contract_present",
+        "grounded_tool_path_unused",
+    ]
+    assert stored["format_over_content_model"] == "gpt-5.4-mini"
+    assert stored["format_over_content_provider"] == "openai"
+    assert stored["format_over_content_stage_id"] == "selector_decision"
+    assert stored["format_over_content_raw_response_format"] == "json_object"
 
 
 def test_build_episode_assessment_state_normalises_improvement_suggestions():
@@ -318,6 +345,49 @@ def test_build_episode_assessment_state_normalises_improvement_suggestions():
     assert suggestions[1]["category"] == "critic_self_improvement"
     assert suggestions[1]["target_surface"] == "episode_critic"
     assert suggestions[1]["recursion_level"] == 1
+
+
+def test_build_episode_assessment_state_preserves_format_over_content_diagnostic():
+    from src.backend.services import episode_critique_memory_service as svc
+
+    state = svc.build_episode_critique_memory_state_from_episode_assessment(
+        evidence_bundle={
+            "episode_locator": {
+                "request_id": "req-1890",
+                "workflow_id": "#V#chat_assistant_workflow",
+                "namespace": "#V#user@org",
+            },
+            "format_over_content_diagnostic": {
+                "status": "suspected",
+                "summary": "Structured output may have displaced nuance.",
+                "confidence": 0.72,
+                "reason_codes": [
+                    "structured_output_contract_present",
+                    "grounded_tool_path_unused",
+                ],
+                "selected_model": "gpt-5.4-mini",
+                "observed_stage_id": "selector_decision",
+                "raw_response_format": "json_object",
+            },
+            "capability_gaps": [],
+        },
+        assessment={
+            "verdict": "fail",
+            "summary": "The response was tidy but insufficiently grounded.",
+        },
+    )
+
+    assert state is not None
+    diagnostic = state["critic"]["format_over_content_diagnostic"]
+    assert diagnostic["status"] == "suspected"
+    assert diagnostic["confidence"] == 0.72
+    assert diagnostic["reason_codes"] == [
+        "structured_output_contract_present",
+        "grounded_tool_path_unused",
+    ]
+    assert diagnostic["selected_model"] == "gpt-5.4-mini"
+    assert diagnostic["observed_stage_id"] == "selector_decision"
+    assert diagnostic["raw_response_format"] == "json_object"
 
 
 def test_list_recent_workflow_improvement_suggestions_filters_and_flattens(monkeypatch):

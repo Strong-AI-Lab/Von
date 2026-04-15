@@ -49,6 +49,17 @@ logger = logging.getLogger(__name__)
 EPISODE_CRITIC_EVIDENCE_BUNDLE_SCHEMA_VERSION = "episode_critic_evidence_bundle.v1"
 _DEFAULT_NEIGHBOUR_MESSAGE_COUNT = 2
 _MAX_NEIGHBOUR_MESSAGE_COUNT = 6
+_STRUCTURED_RESPONSE_FORMATS = frozenset(
+    {
+        "json",
+        "json_array",
+        "json_object",
+        "dict",
+        "list",
+        "array",
+        "object",
+    }
+)
 
 _DEFAULT_SECTION_LIMITS: dict[str, int] = {
     "max_string_chars": 1000,
@@ -1182,6 +1193,205 @@ def _build_routing_quality_signals(
     }
 
 
+def _build_format_over_content_diagnostic(
+    *,
+    turn_record: Mapping[str, Any] | None,
+    selected_llm_debug: Mapping[str, Any] | None,
+    expected_context: Mapping[str, Any] | None,
+    tool_ledger: Mapping[str, Any] | None,
+    fail_closed_reason_codes: Sequence[str],
+) -> dict[str, Any] | None:
+    if not isinstance(turn_record, Mapping):
+        return None
+
+    routing_diagnostics = _mapping_or_empty(turn_record.get("workflow_routing_diagnostics"))
+    selector = _mapping_or_empty(routing_diagnostics.get("selector"))
+    dispatch = _mapping_or_empty(routing_diagnostics.get("dispatch"))
+    completion_gate = _mapping_or_empty(turn_record.get("completion_gate"))
+    routing_quality_signals = (
+        _mapping_or_empty(expected_context.get("routing_quality_signals"))
+        if isinstance(expected_context, Mapping)
+        else {}
+    )
+    selection_metadata = _mapping_or_empty(selector.get("selection_metadata"))
+    selected_model_candidate = _mapping_or_empty(selector.get("selected_model_candidate"))
+
+    raw_response_format = (
+        _safe_str(selection_metadata.get("raw_response_format"))
+        or _safe_str(selector.get("raw_response_format"))
+    )
+    raw_response_format_lower = (raw_response_format or "").lower()
+    structured_selection_detected = bool(
+        selection_metadata.get("structured_selection_detected")
+    )
+    structured_output_signal = structured_selection_detected or (
+        raw_response_format_lower in _STRUCTURED_RESPONSE_FORMATS
+    )
+
+    selected_model = _safe_str(selector.get("model_name")) or (
+        _safe_str(selected_llm_debug.get("model"))
+        if isinstance(selected_llm_debug, Mapping)
+        else None
+    )
+    selected_provider = (
+        _safe_str(selected_model_candidate.get("provider"))
+        or _safe_str(selected_model_candidate.get("provider_name"))
+        or _safe_str(selected_model_candidate.get("llm_provider"))
+        or _safe_str(selected_model_candidate.get("provider_id"))
+    )
+
+    allowed_tool_families = (
+        _normalise_string_list(expected_context.get("allowed_tool_families"))
+        if isinstance(expected_context, Mapping)
+        else []
+    )
+    allowed_tool_names = (
+        _normalise_string_list(expected_context.get("allowed_tool_names"))
+        if isinstance(expected_context, Mapping)
+        else []
+    )
+    grounded_tool_path_available = bool(
+        {"search", "retrieval"}.intersection(
+            {item.lower() for item in allowed_tool_families}
+        )
+    ) or any(
+        tool_name.lower().startswith(("search_", "retrieve_", "query_"))
+        for tool_name in allowed_tool_names
+    )
+
+    tool_invocation_count = (
+        int(tool_ledger.get("tool_invocation_count") or 0)
+        if isinstance(tool_ledger, Mapping)
+        else 0
+    )
+    search_evidence_count = (
+        int(tool_ledger.get("search_evidence_count") or 0)
+        if isinstance(tool_ledger, Mapping)
+        else 0
+    )
+    grounded_tool_path_unused = grounded_tool_path_available and (
+        tool_invocation_count <= 0 and search_evidence_count <= 0
+    )
+
+    completion_requires_follow_up = bool(completion_gate.get("requires_follow_up"))
+    dispatch_zero_execution = bool(dispatch.get("zero_tools_executed"))
+    dispatch_failure_codes = _normalise_string_list(dispatch.get("failure_codes"))
+    completion_gate_failure_codes = _normalise_string_list(
+        completion_gate.get("blocking_failure_codes")
+    )
+    routing_alternatives_present = bool(
+        _normalise_string_list(routing_quality_signals.get("unselected_routing_match_ids"))
+    )
+    parse_or_repair_pressure = bool(
+        selector.get("fallback_used")
+        or int(selector.get("model_failure_count") or 0) > 0
+        or _safe_str(selector.get("prompt_failure_reason"))
+    )
+
+    if fail_closed_reason_codes:
+        return {
+            "status": "insufficient_evidence",
+            "summary": (
+                "Episode evidence was incomplete, so format-over-content pressure "
+                "cannot be diagnosed reliably."
+            ),
+            "confidence": 0.0,
+            "reason_codes": [
+                "episode_bundle_fail_closed",
+                *list(fail_closed_reason_codes)[:6],
+            ],
+            "selected_model": selected_model,
+            "selected_provider": selected_provider,
+            "observed_stage_id": "selector_decision" if structured_output_signal else None,
+            "raw_response_format": raw_response_format,
+            "structured_output_signal": structured_output_signal,
+            "grounded_tool_path_available": grounded_tool_path_available,
+            "grounded_tool_path_unused": grounded_tool_path_unused,
+            "tool_invocation_count": tool_invocation_count,
+            "search_evidence_count": search_evidence_count,
+        }
+
+    if not structured_output_signal:
+        return {
+            "status": "not_indicated",
+            "summary": (
+                "The retained episode evidence does not show a structured-output "
+                "contract strong enough to blame for the content failure."
+            ),
+            "confidence": 0.18,
+            "reason_codes": ["no_structured_output_signal"],
+            "selected_model": selected_model,
+            "selected_provider": selected_provider,
+            "observed_stage_id": None,
+            "raw_response_format": raw_response_format,
+            "structured_output_signal": False,
+            "grounded_tool_path_available": grounded_tool_path_available,
+            "grounded_tool_path_unused": grounded_tool_path_unused,
+            "tool_invocation_count": tool_invocation_count,
+            "search_evidence_count": search_evidence_count,
+        }
+
+    contributing_reason_codes: list[str] = ["structured_output_contract_present"]
+    if grounded_tool_path_unused:
+        contributing_reason_codes.append("grounded_tool_path_unused")
+    if dispatch_zero_execution:
+        contributing_reason_codes.append("dispatch_zero_execution")
+    if completion_requires_follow_up:
+        contributing_reason_codes.append("completion_requires_follow_up")
+    if dispatch_failure_codes:
+        contributing_reason_codes.append("dispatch_failure_recorded")
+    if completion_gate_failure_codes:
+        contributing_reason_codes.append("completion_gate_failure_recorded")
+    if routing_alternatives_present:
+        contributing_reason_codes.append("routing_alternatives_present")
+    if parse_or_repair_pressure:
+        contributing_reason_codes.append("parse_or_repair_pressure_observed")
+
+    supporting_symptom_count = max(0, len(contributing_reason_codes) - 1)
+    if supporting_symptom_count <= 0:
+        return {
+            "status": "not_indicated",
+            "summary": (
+                "A structured output contract was present, but the retained evidence "
+                "does not show that it materially displaced the most useful content."
+            ),
+            "confidence": 0.22,
+            "reason_codes": [
+                "structured_output_contract_present",
+                "no_content_pressure_symptom_detected",
+            ],
+            "selected_model": selected_model,
+            "selected_provider": selected_provider,
+            "observed_stage_id": "selector_decision",
+            "raw_response_format": raw_response_format,
+            "structured_output_signal": True,
+            "grounded_tool_path_available": grounded_tool_path_available,
+            "grounded_tool_path_unused": grounded_tool_path_unused,
+            "tool_invocation_count": tool_invocation_count,
+            "search_evidence_count": search_evidence_count,
+        }
+
+    confidence = min(0.85, 0.38 + (supporting_symptom_count * 0.11))
+    return {
+        "status": "suspected",
+        "summary": (
+            "Structured-output pressure on the selected model may have contributed "
+            "to a content-poor episode outcome."
+        ),
+        "confidence": round(confidence, 2),
+        "reason_codes": contributing_reason_codes[:8],
+        "selected_model": selected_model,
+        "selected_provider": selected_provider,
+        "observed_stage_id": "selector_decision",
+        "raw_response_format": raw_response_format,
+        "structured_output_signal": True,
+        "grounded_tool_path_available": grounded_tool_path_available,
+        "grounded_tool_path_unused": grounded_tool_path_unused,
+        "tool_invocation_count": tool_invocation_count,
+        "search_evidence_count": search_evidence_count,
+    }
+
+
 def build_episode_critic_evidence_bundle(
     *,
     request_id: str | None = None,
@@ -1496,6 +1706,15 @@ def build_episode_critic_evidence_bundle(
         gap["gap_id"] for gap in capability_gaps if gap.get("required") is True
     ]
     fail_closed = bool(fail_closed_reason_codes)
+    format_over_content_diagnostic = _build_format_over_content_diagnostic(
+        turn_record=turn_record if isinstance(turn_record, Mapping) else None,
+        selected_llm_debug=selected_llm_debug,
+        expected_context=bounded_expected_context
+        if isinstance(bounded_expected_context, Mapping)
+        else None,
+        tool_ledger=tool_ledger if isinstance(tool_ledger, Mapping) else None,
+        fail_closed_reason_codes=fail_closed_reason_codes,
+    )
 
     source_resolution = {
         "turn_execution_record_source": turn_record_source,
@@ -1548,6 +1767,12 @@ def build_episode_critic_evidence_bundle(
             if isinstance(receipt, Mapping)
         },
     }
+    if isinstance(format_over_content_diagnostic, Mapping):
+        bundle_receipt_payload["derived_diagnostics"] = {
+            "format_over_content_diagnostic_sha256": _hash_payload(
+                format_over_content_diagnostic
+            )
+        }
     bundle_receipt = {
         "sha256": _hash_payload(bundle_receipt_payload),
         "section_count": len(receipts),
@@ -1570,6 +1795,7 @@ def build_episode_critic_evidence_bundle(
         "receipts": receipts,
         "bundle_receipt": bundle_receipt,
         "capability_gaps": capability_gaps,
+        "format_over_content_diagnostic": format_over_content_diagnostic,
     }
 
 

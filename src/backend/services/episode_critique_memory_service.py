@@ -436,6 +436,71 @@ def _build_memory_id(*, request_id: str, episode_id: str | None) -> str:
     return f"#V#episode_critique_memory_{digest}"
 
 
+def _normalise_format_over_content_diagnostic(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+
+    status = _safe_str(value.get("status"))
+    summary = _safe_str(value.get("summary"))
+    reason_codes = _normalise_strings(value.get("reason_codes"), limit=20)
+    confidence = _safe_float(value.get("confidence"))
+    selected_model = _safe_str(value.get("selected_model"))
+    selected_provider = _safe_str(value.get("selected_provider"))
+    observed_stage_id = _safe_str(value.get("observed_stage_id"))
+    raw_response_format = _safe_str(value.get("raw_response_format"))
+
+    if not any(
+        (
+            status,
+            summary,
+            reason_codes,
+            confidence is not None,
+            selected_model,
+            selected_provider,
+            observed_stage_id,
+            raw_response_format,
+        )
+    ):
+        return None
+
+    diagnostic: dict[str, Any] = {}
+    if status:
+        diagnostic["status"] = status
+    if summary:
+        diagnostic["summary"] = summary
+    if confidence is not None:
+        diagnostic["confidence"] = confidence
+    if reason_codes:
+        diagnostic["reason_codes"] = reason_codes
+    if selected_model:
+        diagnostic["selected_model"] = selected_model
+    if selected_provider:
+        diagnostic["selected_provider"] = selected_provider
+    if observed_stage_id:
+        diagnostic["observed_stage_id"] = observed_stage_id
+    if raw_response_format:
+        diagnostic["raw_response_format"] = raw_response_format
+    if "structured_output_signal" in value:
+        diagnostic["structured_output_signal"] = bool(value.get("structured_output_signal"))
+    if "grounded_tool_path_available" in value:
+        diagnostic["grounded_tool_path_available"] = bool(
+            value.get("grounded_tool_path_available")
+        )
+    if "grounded_tool_path_unused" in value:
+        diagnostic["grounded_tool_path_unused"] = bool(
+            value.get("grounded_tool_path_unused")
+        )
+    if "tool_invocation_count" in value:
+        diagnostic["tool_invocation_count"] = _safe_int(
+            value.get("tool_invocation_count")
+        )
+    if "search_evidence_count" in value:
+        diagnostic["search_evidence_count"] = _safe_int(
+            value.get("search_evidence_count")
+        )
+    return diagnostic
+
+
 def _get_concept_or_none(concept_id: str) -> dict[str, Any] | None:
     try:
         concept = get_concept_by_concept_id_exact(concept_id)
@@ -960,6 +1025,10 @@ def build_episode_critique_memory_state_from_episode_assessment(
         assessment=assessment,
         evidence_bundle=evidence_bundle,
     )
+    format_over_content_diagnostic = _normalise_format_over_content_diagnostic(
+        assessment.get("format_over_content_diagnostic")
+        or evidence_bundle.get("format_over_content_diagnostic")
+    )
     summary = _safe_str(assessment.get("summary"))
     created_at_utc = _utcnow_iso()
     updated_at_utc = created_at_utc
@@ -975,6 +1044,29 @@ def build_episode_critique_memory_state_from_episode_assessment(
         "section_receipts": _mapping_or_empty(evidence_bundle.get("receipts")),
         "assessment_sha256": _hash_payload(assessment),
     }
+
+    critic_state: dict[str, Any] = {
+        "workflow_id": EPISODE_EVALUATION_WORKFLOW_ID,
+        "summary": {
+            "summary": summary,
+            "maintenance_follow_up_recommended": bool(
+                assessment.get("maintenance_follow_up_recommended")
+            ),
+            "root_cause_count": len(
+                [
+                    item
+                    for item in (assessment.get("root_causes") or [])
+                    if isinstance(item, Mapping)
+                ]
+            ),
+        },
+        "verdict": verdict,
+        "confidence": confidence,
+        "unresolved_check_count": unresolved_check_count,
+        "assessment": dict(assessment),
+    }
+    if format_over_content_diagnostic is not None:
+        critic_state["format_over_content_diagnostic"] = format_over_content_diagnostic
 
     state: dict[str, Any] = {
         "schema_version": EPISODE_CRITIQUE_MEMORY_SCHEMA_VERSION,
@@ -998,26 +1090,7 @@ def build_episode_critique_memory_state_from_episode_assessment(
             "namespace": resolved_namespace,
             "workflow_definition_identity": workflow_identity,
         },
-        "critic": {
-            "workflow_id": EPISODE_EVALUATION_WORKFLOW_ID,
-            "summary": {
-                "summary": summary,
-                "maintenance_follow_up_recommended": bool(
-                    assessment.get("maintenance_follow_up_recommended")
-                ),
-                "root_cause_count": len(
-                    [
-                        item
-                        for item in (assessment.get("root_causes") or [])
-                        if isinstance(item, Mapping)
-                    ]
-                ),
-            },
-            "verdict": verdict,
-            "confidence": confidence,
-            "unresolved_check_count": unresolved_check_count,
-            "assessment": dict(assessment),
-        },
+        "critic": critic_state,
         "completion_gate": {},
         "implicated": {
             "workflow_ids": workflow_ids,
@@ -1141,6 +1214,19 @@ def build_episode_critique_memory_state_from_turn(
     )
     now_iso = _utcnow_iso()
     created_at_utc = _safe_str(record.get("created_at_utc")) or now_iso
+    format_over_content_diagnostic = _normalise_format_over_content_diagnostic(
+        critic.get("format_over_content_diagnostic")
+    )
+
+    critic_state: dict[str, Any] = {
+        "workflow_id": _safe_str(critic.get("workflow_id")),
+        "summary": critic_summary,
+        "verdict": verdict,
+        "confidence": confidence,
+        "unresolved_check_count": unresolved_check_count,
+    }
+    if format_over_content_diagnostic is not None:
+        critic_state["format_over_content_diagnostic"] = format_over_content_diagnostic
 
     state: dict[str, Any] = {
         "schema_version": EPISODE_CRITIQUE_MEMORY_SCHEMA_VERSION,
@@ -1168,13 +1254,7 @@ def build_episode_critique_memory_state_from_turn(
                 episode_payload.get("workflow_definition_identity")
             ),
         },
-        "critic": {
-            "workflow_id": _safe_str(critic.get("workflow_id")),
-            "summary": critic_summary,
-            "verdict": verdict,
-            "confidence": confidence,
-            "unresolved_check_count": unresolved_check_count,
-        },
+        "critic": critic_state,
         "completion_gate": completion_gate,
         "implicated": {
             "workflow_ids": implicated_workflow_ids,
@@ -1248,6 +1328,9 @@ def _build_episode_critique_memory_projection(
     evidence_receipts = _mapping_or_empty(state.get("evidence_receipts"))
     routing = _mapping_or_empty(state.get("routing"))
     critic_summary = _mapping_or_empty(critic.get("summary"))
+    format_over_content_diagnostic = _mapping_or_empty(
+        critic.get("format_over_content_diagnostic")
+    )
     improvement_suggestions = _normalise_episode_improvement_suggestions(
         state.get("improvement_suggestions"),
         default_workflow_id=_safe_str(subject_episode.get("workflow_id")),
@@ -1271,6 +1354,31 @@ def _build_episode_critique_memory_projection(
         "critic_summary_text": _safe_str(critic_summary.get("summary")),
         "confidence": _safe_float(critic.get("confidence")),
         "unresolved_check_count": _safe_int(critic.get("unresolved_check_count")),
+        "format_over_content_status": _safe_str(
+            format_over_content_diagnostic.get("status")
+        ),
+        "format_over_content_summary": _safe_str(
+            format_over_content_diagnostic.get("summary")
+        ),
+        "format_over_content_confidence": _safe_float(
+            format_over_content_diagnostic.get("confidence")
+        ),
+        "format_over_content_reason_codes": _normalise_strings(
+            format_over_content_diagnostic.get("reason_codes"),
+            limit=20,
+        ),
+        "format_over_content_model": _safe_str(
+            format_over_content_diagnostic.get("selected_model")
+        ),
+        "format_over_content_provider": _safe_str(
+            format_over_content_diagnostic.get("selected_provider")
+        ),
+        "format_over_content_stage_id": _safe_str(
+            format_over_content_diagnostic.get("observed_stage_id")
+        ),
+        "format_over_content_raw_response_format": _safe_str(
+            format_over_content_diagnostic.get("raw_response_format")
+        ),
         "implicated_workflow_ids": _normalise_strings(
             implicated.get("workflow_ids"),
             limit=30,

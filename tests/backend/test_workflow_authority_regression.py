@@ -295,6 +295,10 @@ def test_build_stage_authority_summary_preserves_bounded_llm_exchange_summaries(
             "prompt_id": "#V#chat_turn_classifier_prompt",
             "requested_prompt_ids": ["#V#chat_turn_classifier_prompt"],
             "prompt": {"text": "Select workflow", "char_count": 15},
+            "context_lineage": {
+                "base_context_source": "augmented_context",
+                "stage_added_message_count": 1,
+            },
             "candidate_list": {
                 "text": "- #V#tool_calling_workflow",
                 "char_count": 24,
@@ -362,6 +366,10 @@ def test_build_stage_authority_summary_preserves_bounded_llm_exchange_summaries(
             "workflow_id": "#V#tool_calling_workflow",
             "verdict": "rag_selected",
             "selection_source": "selector",
+            "context_lineage": {
+                "base_context_source": "augmented_context",
+                "stage_added_message_count": 2,
+            },
             "response": {
                 "text": "#V#tool_calling_workflow",
                 "char_count": 24,
@@ -372,35 +380,61 @@ def test_build_stage_authority_summary_preserves_bounded_llm_exchange_summaries(
         },
     ]
 
-    summary = build_stage_authority_summary(
+    prompt_summary = build_stage_authority_summary(
+        stage_id="selector_preparation",
+        aux_entries=entries,
+    )
+    decision_summary = build_stage_authority_summary(
+        stage_id="selector_decision",
+        aux_entries=entries,
+    )
+
+    assert prompt_summary["llm_exchange_record_count"] == 1
+    assert prompt_summary["llm_exchange_entry_types"] == [
+        "workflow_selector_prompt",
+    ]
+    assert prompt_summary["llm_exchange_summary_truncated_count"] == 0
+    assert prompt_summary["llm_exchange_summaries"][0]["prompt_id"] == (
+        "#V#chat_turn_classifier_prompt"
+    )
+    assert prompt_summary["latest_llm_exchange"]["context_lineage"] == {
+        "base_context_source": "augmented_context",
+        "stage_added_message_count": 1,
+    }
+
+    assert decision_summary["llm_exchange_record_count"] == 1
+    assert decision_summary["llm_exchange_entry_types"] == [
+        "workflow_selector",
+    ]
+    assert decision_summary["llm_exchange_summary_truncated_count"] == 0
+    assert decision_summary["latest_llm_exchange"]["entry_type"] == "workflow_selector"
+    assert decision_summary["latest_llm_exchange"]["response_preview"]["text"] == (
+        "#V#tool_calling_workflow"
+    )
+    assert decision_summary["latest_llm_exchange"]["context_lineage"] == {
+        "base_context_source": "augmented_context",
+        "stage_added_message_count": 2,
+    }
+
+    dispatch_summary = build_stage_authority_summary(
         stage_id="workflow_dispatch",
         aux_entries=entries,
     )
 
-    assert summary["llm_exchange_record_count"] == 3
-    assert summary["llm_exchange_entry_types"] == [
-        "workflow_selector_prompt",
+    assert dispatch_summary["llm_exchange_record_count"] == 1
+    assert dispatch_summary["llm_exchange_entry_types"] == [
         "workflow_model_policy_stage",
-        "workflow_selector",
     ]
-    assert summary["llm_exchange_summary_truncated_count"] == 0
-    assert summary["llm_exchange_summaries"][0]["prompt_id"] == (
-        "#V#chat_turn_classifier_prompt"
-    )
-    assert summary["llm_exchange_summaries"][1]["selected_model"] == "gpt-5-mini"
-    assert summary["llm_exchange_summaries"][1]["requested_model"] == "gpt-5.4-mini"
-    assert summary["llm_exchange_summaries"][1]["selection_mode"] == (
+    assert dispatch_summary["llm_exchange_summaries"][0]["selected_model"] == "gpt-5-mini"
+    assert dispatch_summary["llm_exchange_summaries"][0]["requested_model"] == "gpt-5.4-mini"
+    assert dispatch_summary["llm_exchange_summaries"][0]["selection_mode"] == (
         "policy_primary_override"
     )
-    assert summary["llm_exchange_summaries"][1]["explicit_stage_model_override"] is True
-    assert summary["llm_exchange_summaries"][1]["failure_kinds"] == [
+    assert dispatch_summary["llm_exchange_summaries"][0]["explicit_stage_model_override"] is True
+    assert dispatch_summary["llm_exchange_summaries"][0]["failure_kinds"] == [
         "provider_unreachable"
     ]
-    assert summary["llm_exchange_summaries"][1]["response_preview"]["text"] == (
-        "#V#tool_calling_workflow"
-    )
-    assert summary["latest_llm_exchange"]["entry_type"] == "workflow_selector"
-    assert summary["latest_llm_exchange"]["response_preview"]["text"] == (
+    assert dispatch_summary["llm_exchange_summaries"][0]["response_preview"]["text"] == (
         "#V#tool_calling_workflow"
     )
 

@@ -23,8 +23,8 @@ _PROMPT_SEMANTIC_DECISION_SOURCES = frozenset(
     }
 )
 _STAGELESS_LLM_ENTRY_STAGE_MAP = {
-    "workflow_selector_prompt": "workflow_dispatch",
-    "workflow_selector": "workflow_dispatch",
+    "workflow_selector_prompt": "selector_preparation",
+    "workflow_selector": "selector_decision",
     "workflow_selector_override": "workflow_dispatch",
 }
 _STAGE_LLM_EXCHANGE_SUMMARY_LIMIT = 5
@@ -245,6 +245,16 @@ def _build_llm_exchange_summary(
     requested_prompt_ids = _collect_unique_strings(entry.get("requested_prompt_ids"))
     if requested_prompt_ids:
         summary["requested_prompt_ids"] = requested_prompt_ids
+
+    raw_context_lineage = entry.get("context_lineage")
+    if isinstance(raw_context_lineage, Mapping):
+        context_lineage = {
+            str(key): value
+            for key, value in raw_context_lineage.items()
+            if isinstance(key, str)
+        }
+        if context_lineage:
+            summary["context_lineage"] = context_lineage
 
     candidate_entries = entry.get("candidate_entries")
     candidate_entry_count = _safe_int(

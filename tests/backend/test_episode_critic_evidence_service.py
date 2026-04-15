@@ -142,6 +142,10 @@ def test_episode_critic_bundle_fails_closed_when_core_context_is_missing(monkeyp
     assert "selected_llm_debug_missing" in result["fail_closed_reason_codes"]
     assert "neighbouring_context_missing" in result["fail_closed_reason_codes"]
     assert "workflow_definition_identity_missing" in result["fail_closed_reason_codes"]
+    diagnostic = result["format_over_content_diagnostic"]
+    assert diagnostic["status"] == "insufficient_evidence"
+    assert "episode_bundle_fail_closed" in diagnostic["reason_codes"]
+    assert "selected_llm_debug_missing" in diagnostic["reason_codes"]
 
 
 def test_episode_critic_bundle_supports_workflow_terminal_instances_without_turn_record(
@@ -313,3 +317,170 @@ def test_episode_critic_bundle_surfaces_routing_quality_signals(monkeypatch):
     )
     assert "dispatch_zero_execution" in signals["diagnostic_flags"]
     assert "completion_requires_follow_up" in signals["diagnostic_flags"]
+
+
+def test_episode_critic_bundle_surfaces_format_over_content_suspicion(monkeypatch):
+    from src.backend.services import episode_critic_evidence_service as svc
+
+    turn_record = {
+        "request_id": "req-critic-format-1",
+        "session_id": "sess-critic-format-1",
+        "namespace": "#V#user@org",
+        "user_id": "#V#user",
+        "workflow_selection": {
+            "selected_workflow_id": "#V#chat_assistant_workflow",
+            "selector_verdict": "rag_default",
+            "selector_source": "selector",
+            "selection_rationale": "selector_selected_default_candidate",
+        },
+        "workflow_routing_diagnostics": {
+            "selected_workflow_id": "#V#chat_assistant_workflow",
+            "selector_verdict": "rag_default",
+            "selector_source": "selector",
+            "selection_rationale": "selector_selected_default_candidate",
+            "discovery": {
+                "routing_match_ids": [
+                    "#V#scholarly_paper_representation_workflow",
+                    "#V#chat_assistant_workflow",
+                ]
+            },
+            "selector": {
+                "prompt_id": "#V#chat_turn_classifier_prompt",
+                "requested_prompt_ids": ["#V#chat_turn_classifier_prompt"],
+                "model_name": "gpt-5.4-mini",
+                "raw_response_format": "json_object",
+                "selection_metadata": {
+                    "raw_response_format": "json_object",
+                    "structured_selection_detected": True,
+                },
+                "selected_model_candidate": {
+                    "provider": "openai",
+                    "model": "gpt-5.4-mini",
+                },
+            },
+            "dispatch": {
+                "selected_execution_mode": "direct_response",
+                "dispatch_terminal_status": "follow_up_required",
+                "zero_tools_executed": True,
+                "failure_codes": ["tool_dispatch_handoff_zero_execution"],
+            },
+        },
+        "execution": {
+            "tool_invocations": [],
+            "search_evidence": [],
+            "required_effects_contract": {},
+        },
+        "required_effects": [],
+        "postcondition_checks": [],
+        "completion_gate": {
+            "decision": "follow_up_required",
+            "requires_follow_up": True,
+            "blocking_failure_codes": ["tool_dispatch_handoff_zero_execution"],
+        },
+        "critic": {
+            "workflow_id": "#V#kb_mutation_postcondition_critic_workflow",
+        },
+    }
+
+    monkeypatch.setattr(svc, "_load_turn_execution_record", lambda **_: turn_record)
+    monkeypatch.setattr(
+        svc,
+        "_resolve_history_context",
+        lambda **_: {
+            "user_id": "#V#user",
+            "session_id": "sess-critic-format-1",
+            "namespace": "#V#user@org",
+            "org_id": "#V#org",
+            "history": [
+                {"role": "user", "content": "What papers of mine do you know about?"},
+                {
+                    "role": "assistant",
+                    "content": "Draft analysis",
+                    "timestamp": "2026-03-29T04:00:00Z",
+                    "llm_debug_data": {
+                        "request_id": "req-critic-format-1",
+                        "model": "gpt-5.4-mini",
+                        "workflow_discovery": {"match_count": 2},
+                        "tool_invocations": [],
+                        "search_evidence": [],
+                        "turn_execution_diagnostics": {
+                            "latest_progress": {"phase": "completed"},
+                            "workflow_stage_path": {
+                                "path": [{"stage_id": "selector_decision"}]
+                            },
+                        },
+                        "llm_allowed_tools": ["search_concepts"],
+                        "allowed_write_tools": [],
+                    },
+                },
+            ],
+            "target_index": 1,
+            "target_message": {
+                "role": "assistant",
+                "content": "Draft analysis",
+                "timestamp": "2026-03-29T04:00:00Z",
+            },
+            "target_llm_debug": {
+                "request_id": "req-critic-format-1",
+                "model": "gpt-5.4-mini",
+                "workflow_discovery": {"match_count": 2},
+                "tool_invocations": [],
+                "search_evidence": [],
+                "turn_execution_diagnostics": {
+                    "latest_progress": {"phase": "completed"},
+                    "workflow_stage_path": {
+                        "path": [{"stage_id": "selector_decision"}]
+                    },
+                },
+                "llm_allowed_tools": ["search_concepts"],
+                "allowed_write_tools": [],
+            },
+            "prompt_text": "What papers of mine do you know about?",
+        },
+    )
+    monkeypatch.setattr(
+        svc,
+        "get_latest_workflow_use_episode",
+        lambda **_: {
+            "episode_id": "wfep-format-1",
+            "workflow_id": "#V#chat_assistant_workflow",
+        },
+    )
+    monkeypatch.setattr(
+        svc,
+        "_resolve_workflow_definition_identity",
+        lambda **_: (
+            {
+                "workflow_id": "#V#chat_assistant_workflow",
+                "definition_hash": "wf-format-hash",
+                "source": "runtime_registry",
+            },
+            "workflow_registry",
+        ),
+    )
+
+    class _StubManager:
+        def get_instance(self, _instance_id):
+            return None
+
+        def list_instances(self, **_kwargs):
+            return []
+
+    monkeypatch.setattr(svc, "WorkflowInstanceManager", lambda: _StubManager())
+
+    result = svc.build_episode_critic_evidence_bundle(
+        request_id="req-critic-format-1"
+    )
+
+    assert result["success"] is True
+    diagnostic = result["format_over_content_diagnostic"]
+    assert diagnostic["status"] == "suspected"
+    assert diagnostic["selected_model"] == "gpt-5.4-mini"
+    assert diagnostic["selected_provider"] == "openai"
+    assert diagnostic["observed_stage_id"] == "selector_decision"
+    assert diagnostic["raw_response_format"] == "json_object"
+    assert diagnostic["grounded_tool_path_available"] is True
+    assert diagnostic["grounded_tool_path_unused"] is True
+    assert "structured_output_contract_present" in diagnostic["reason_codes"]
+    assert "grounded_tool_path_unused" in diagnostic["reason_codes"]
+    assert "completion_requires_follow_up" in diagnostic["reason_codes"]

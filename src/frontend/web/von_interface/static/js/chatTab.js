@@ -2380,7 +2380,7 @@ function createRetainedThinkingCardWrapper(turnId) {
                     aria-label="Show more thinking details" title="Show more thinking details">+</button>
                 <button class="btn thinking-card-action" type="button"
                     data-thinking-role="copy" aria-hidden="false"
-                    aria-label="Copy diagnostics" title="Copy diagnostics">Copy diagnostics</button>
+                    aria-label="Copy diagnostic snapshot" title="Copy diagnostic snapshot">Copy diagnostic snapshot</button>
             </div>
             <div class="thinking-card-body" data-thinking-role="detail" id="${escapeHtml(detailId)}" aria-live="polite"></div>
         </div>
@@ -4304,6 +4304,9 @@ function buildThinkingLiveLlmExchange(stageId, stageDiagnostic, latestStageEvent
                 llm_request_prepared_at_utc: normaliseThinkingActivityString(candidate.llm_request_prepared_at_utc) || null,
                 llm_request_sent_at_utc: normaliseThinkingActivityString(candidate.llm_request_sent_at_utc) || null,
                 llm_first_output_at_utc: normaliseThinkingActivityString(candidate.llm_first_output_at_utc) || null,
+                context_lineage: (candidate.context_lineage && typeof candidate.context_lineage === 'object')
+                    ? { ...candidate.context_lineage }
+                    : null,
                 response_preview: normaliseThinkingDiagnosticCapture(candidate.response_preview || candidate.llm_response_preview)
             };
         }
@@ -4321,6 +4324,9 @@ function buildThinkingLiveLlmExchange(stageId, stageDiagnostic, latestStageEvent
             prompt_preview: normaliseThinkingDiagnosticCapture(llmRequest?.prompt),
             context_summary: (llmRequest?.context_summary && typeof llmRequest.context_summary === 'object')
                 ? { ...llmRequest.context_summary }
+                : null,
+            context_lineage: (llmRequest?.context_lineage && typeof llmRequest.context_lineage === 'object')
+                ? { ...llmRequest.context_lineage }
                 : null,
             context_message_count: Number.isFinite(llmRequest?.context_message_count)
                 ? Number(llmRequest.context_message_count)
@@ -4387,6 +4393,72 @@ function buildThinkingLlmContextSummaryLines(summary) {
         lines.push(`${Number(summary.total_content_chars)} content chars`);
     }
     return lines;
+}
+
+function buildThinkingLlmContextLineageLines(lineage) {
+    if (!lineage || typeof lineage !== 'object') {
+        return [];
+    }
+    const lines = [];
+    const baseContextSource = normaliseThinkingActivityString(lineage.base_context_source);
+    if (baseContextSource) {
+        lines.push(`Base context source: ${formatThinkingActivityFallbackLabel(baseContextSource)}`);
+    }
+    const insertionStrategy = normaliseThinkingActivityString(lineage.insertion_strategy);
+    if (insertionStrategy) {
+        lines.push(`Insertion strategy: ${formatThinkingActivityFallbackLabel(insertionStrategy)}`);
+    }
+    if (Number.isFinite(lineage.stage_added_message_count)) {
+        lines.push(
+            formatThinkingCountLabel(
+                Number(lineage.stage_added_message_count),
+                'stage-added message'
+            )
+        );
+    }
+    const baseContextSummaryLines = buildThinkingLlmContextSummaryLines(lineage.base_context_summary);
+    if (baseContextSummaryLines.length > 0) {
+        lines.push(`Base context: ${baseContextSummaryLines.join(', ')}`);
+    }
+    const stageContextSummaryLines = buildThinkingLlmContextSummaryLines(lineage.stage_context_summary);
+    if (stageContextSummaryLines.length > 0) {
+        lines.push(`Stage context: ${stageContextSummaryLines.join(', ')}`);
+    }
+    if (lineage.trimmed === true) {
+        lines.push('Stage context was trimmed before sending');
+    }
+    const stageAddedMessages = Array.isArray(lineage.stage_added_messages)
+        ? lineage.stage_added_messages.filter((entry) => entry && typeof entry === 'object')
+        : [];
+    for (const entry of stageAddedMessages.slice(0, 3)) {
+        const role = normaliseThinkingActivityString(entry.role) || 'message';
+        const preview = normaliseThinkingActivityString(entry.preview);
+        const content = normaliseThinkingActivityString(entry.content);
+        const snippet = preview || content;
+        if (snippet) {
+            lines.push(`${formatThinkingActivityFallbackLabel(role)} added: ${snippet}`);
+        }
+    }
+    return lines;
+}
+
+function buildThinkingCaptureSummaryText(capture, fallback = '') {
+    if (!capture || typeof capture !== 'object') {
+        return fallback;
+    }
+    const preview = normaliseThinkingActivityString(capture.preview);
+    if (preview) {
+        return preview;
+    }
+    const text = normaliseThinkingActivityString(capture.text);
+    if (!text) {
+        return fallback;
+    }
+    const collapsed = text.replace(/\s+/g, ' ').trim();
+    if (collapsed.length <= 120) {
+        return collapsed;
+    }
+    return `${collapsed.slice(0, 117).trimEnd()}...`;
 }
 
 function buildThinkingWorkflowStageDiagnosticData(stageId, stageLabel, request) {
@@ -4485,6 +4557,9 @@ function buildThinkingWorkflowStageDiagnosticData(stageId, stageLabel, request) 
         llm_response_preview: llmResponsePreview,
         llm_context_summary: (latestLlmExchange?.context_summary && typeof latestLlmExchange.context_summary === 'object')
             ? { ...latestLlmExchange.context_summary }
+            : null,
+        llm_context_lineage: (latestLlmExchange?.context_lineage && typeof latestLlmExchange.context_lineage === 'object')
+            ? { ...latestLlmExchange.context_lineage }
             : null,
         llm_context_message_count: Number.isFinite(latestLlmExchange?.context_message_count)
             ? Number(latestLlmExchange.context_message_count)
@@ -4592,7 +4667,9 @@ function buildThinkingWorkflowStageDiagnosticData(stageId, stageLabel, request) 
     }
 
     if (
-        cleanStageId === 'workflow_dispatch_prepare'
+        cleanStageId === 'selector_preparation'
+        || cleanStageId === 'selector_decision'
+        || cleanStageId === 'workflow_dispatch_prepare'
         || cleanStageId === 'workflow_dispatch'
         || cleanStageId === 'plain_response'
         || cleanStageId === 'tool_plan'
@@ -4890,7 +4967,50 @@ function renderThinkingWorkflowStageDiagnosticDataHTML(data, workflowDiscovery =
         sections.push(buildThinkingDiagnosticListHTML('Fallback queries', data.keyword_fallback_queries, { code: true }));
         sections.push(buildThinkingDiagnosticListHTML('Errors', data.errors));
         sections.push(renderThinkingDiagnosticWorkflowCandidatesHTML(data.candidates, workflowDiscovery));
-    } else if (data.stage_id === 'workflow_dispatch' || data.stage_id === 'plain_response') {
+    } else if (data.stage_id === 'expected_outcome_inference') {
+        const inferredContractSummary = buildThinkingCaptureSummaryText(
+            data.llm_response_preview,
+            data.latest_result_summary || ''
+        );
+        facts.push(
+            { label: 'Inference target', value: 'What would count as a grounded successful answer for this turn' },
+            {
+                label: 'Inferred contract summary',
+                value: inferredContractSummary
+            }
+        );
+    } else if (data.stage_id === 'selector_preparation') {
+        facts.push(
+            { label: 'Selector prompt id', value: data.selector_prompt_id },
+            {
+                label: 'Requested selector prompt ids',
+                value: Array.isArray(data.selector_requested_prompt_ids)
+                    ? data.selector_requested_prompt_ids.length
+                    : ''
+            },
+            {
+                label: 'Selector prompt readiness',
+                value: data.selector_prompt?.text || data.selector_prompt?.preview
+                    ? 'Prepared'
+                    : 'Unavailable'
+            }
+        );
+        sections.push(buildThinkingDiagnosticListHTML(
+            'Requested selector prompt ids',
+            data.selector_requested_prompt_ids,
+            { code: true }
+        ));
+        sections.push(buildThinkingDiagnosticTextSectionHTML(
+            'Selector prompt',
+            data.selector_prompt?.text || data.selector_prompt?.preview,
+            { codeBlock: true }
+        ));
+        sections.push(buildThinkingDiagnosticTextSectionHTML(
+            'Selector candidate list',
+            data.selector_candidate_list?.text || data.selector_candidate_list?.preview,
+            { codeBlock: true }
+        ));
+    } else if (data.stage_id === 'selector_decision' || data.stage_id === 'workflow_dispatch' || data.stage_id === 'plain_response') {
         const selectedWorkflowHtml = renderWorkflowDisplayHtml(
             data.selected_workflow_id,
             data.selected_workflow_name,
@@ -5192,6 +5312,10 @@ function renderThinkingWorkflowStageDiagnosticDataHTML(data, workflowDiscovery =
         'Context summary',
         buildThinkingLlmContextSummaryLines(data.llm_context_summary)
     ));
+    sections.push(buildThinkingDiagnosticListHTML(
+        'Context lineage',
+        buildThinkingLlmContextLineageLines(data.llm_context_lineage)
+    ));
     sections.push(buildThinkingDiagnosticTextSectionHTML(
         'Latest output preview',
         data.llm_response_preview?.preview || data.llm_response_preview?.text
@@ -5471,6 +5595,79 @@ function buildWorkflowStageDetailPresentation(stageId, request) {
         return {
             text: routingNarrative.text,
             html: routingNarrative.html
+        };
+    }
+
+    if (cleanStageId === 'expected_outcome_inference') {
+        const inferredContractSummary = buildThinkingCaptureSummaryText(
+            stageData?.llm_response_preview,
+            normaliseThinkingActivityString(stageData?.latest_result_summary)
+        );
+        if (inferredContractSummary) {
+            return {
+                text: `Inferring success criteria Â· ${inferredContractSummary}`,
+                html: `Inferring success criteria Â· ${escapeHtml(inferredContractSummary)}`
+            };
+        }
+        return {
+            text: 'Inferring what a grounded successful answer should satisfy',
+            html: 'Inferring what a grounded successful answer should satisfy'
+        };
+    }
+
+    if (cleanStageId === 'selector_preparation') {
+        const requestState = formatThinkingLlmRequestState(stageData?.llm_request_state);
+        const textBits = ['Preparing selector context'];
+        const htmlBits = ['Preparing selector context'];
+        if (requestState) {
+            textBits.push(requestState);
+            htmlBits.push(escapeHtml(requestState));
+        }
+        if (buildThinkingCaptureSummaryText(stageData?.selector_prompt)) {
+            textBits.push('prompt ready');
+            htmlBits.push('prompt ready');
+        }
+        return {
+            text: textBits.join(' Â· '),
+            html: htmlBits.join(' Â· ')
+        };
+    }
+
+    if (cleanStageId === 'selector_decision') {
+        const workflowText = formatWorkflowDisplayText(
+            stageData?.selected_workflow_id,
+            stageData?.selected_workflow_name,
+            workflowDiscovery
+        );
+        const workflowHtml = renderWorkflowDisplayHtml(
+            stageData?.selected_workflow_id,
+            stageData?.selected_workflow_name,
+            workflowDiscovery
+        ) || escapeHtml(workflowText || '');
+        const selectorVerdict = normaliseThinkingActivityString(stageData?.workflow_selector_verdict);
+        if (workflowText) {
+            const textBits = [`Selected ${workflowText}`];
+            const htmlBits = [`Selected ${workflowHtml}`];
+            if (selectorVerdict) {
+                const formattedVerdict = formatThinkingActivityFallbackLabel(selectorVerdict);
+                textBits.push(formattedVerdict);
+                htmlBits.push(escapeHtml(formattedVerdict));
+            }
+            return {
+                text: textBits.join(' Â· '),
+                html: htmlBits.join(' Â· ')
+            };
+        }
+        const requestState = formatThinkingLlmRequestState(stageData?.llm_request_state);
+        if (requestState) {
+            return {
+                text: `Evaluating workflow candidates Â· ${requestState}`,
+                html: `Evaluating workflow candidates Â· ${escapeHtml(requestState)}`
+            };
+        }
+        return {
+            text: 'Evaluating workflow candidates',
+            html: 'Evaluating workflow candidates'
         };
     }
 
@@ -22194,9 +22391,9 @@ function setThinkingState(isThinking, request = activeChatRequest, options = {})
     if (copyDiagnosticsButton) {
         copyDiagnosticsButton.setAttribute('aria-hidden', (isThinking || preserveFinishedCard) ? 'false' : 'true');
         if (!isThinking && !preserveFinishedCard) {
-            copyDiagnosticsButton.textContent = 'Copy diagnostics';
-            copyDiagnosticsButton.setAttribute('title', 'Copy diagnostics');
-            copyDiagnosticsButton.setAttribute('aria-label', 'Copy diagnostics');
+            copyDiagnosticsButton.textContent = 'Copy diagnostic snapshot';
+            copyDiagnosticsButton.setAttribute('title', 'Copy diagnostic snapshot');
+            copyDiagnosticsButton.setAttribute('aria-label', 'Copy diagnostic snapshot');
             copyDiagnosticsButton.classList.remove(
                 'success-feedback',
                 'error-feedback',
@@ -22481,11 +22678,12 @@ function buildDiagnosticsExportRequestPayload() {
     const latestEntry = getLatestLlmDebugEntryForExport();
     const latestDebug = latestEntry ? buildSanitisedLlmDebugExportPayload(latestEntry.debugData) : null;
 
-    return {
-        schema_version: 'diagnostic_export_request.v1',
-        generated_at_utc: new Date().toISOString(),
-        trigger: 'keyboard_shortcut',
-        shortcut: DIAGNOSTICS_EXPORT_SHORTCUT_HINT,
+        return {
+            schema_version: 'diagnostic_export_request.v1',
+            capture_scope: 'current_diagnostic_snapshot',
+            generated_at_utc: new Date().toISOString(),
+            trigger: 'keyboard_shortcut',
+            shortcut: DIAGNOSTICS_EXPORT_SHORTCUT_HINT,
         session_id: activeChatSessionId || null,
         diagnostics: {
             active_thinking: activeThinking,
@@ -22533,7 +22731,7 @@ async function exportDiagnosticsSnapshotFromShortcut() {
             throw new Error(body?.error || `HTTP ${response.status}`);
         }
         const savedPath = body.path || 'data/diagnostic_latest.json';
-        showToast(`Diagnostics exported to ${savedPath}`, 'success');
+        showToast(`Diagnostic snapshot exported to ${savedPath}`, 'success');
         return true;
     } catch (error) {
         console.error('[chatTab] Failed to export diagnostics snapshot:', error);
@@ -22591,7 +22789,7 @@ async function copyActiveThinkingDiagnostics(button = null, requestOverride = nu
     const text = JSON.stringify(payload, null, 2);
     if (button instanceof HTMLButtonElement) {
         return copyJsonTextWithButtonFeedback(button, text, {
-            fallbackLabel: 'Copy diagnostics'
+            fallbackLabel: 'Copy diagnostic snapshot'
         });
     }
 
@@ -23806,13 +24004,13 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
                 const copyDiagnosticsButton = document.createElement('button');
                 copyDiagnosticsButton.className = 'btn-mini chat-error-copy-diagnostics-btn';
                 copyDiagnosticsButton.type = 'button';
-                copyDiagnosticsButton.textContent = 'Copy diagnostics';
+                copyDiagnosticsButton.textContent = 'Copy diagnostic snapshot';
                 copyDiagnosticsButton.title = 'Copy structured diagnostics as JSON';
                 copyDiagnosticsButton.addEventListener('click', () => {
                     void copyJsonPayloadToClipboard(
                         options.diagnosticsPayload,
                         copyDiagnosticsButton,
-                        'Copy diagnostics'
+                        'Copy diagnostic snapshot'
                     );
                 });
                 messageHeader.appendChild(copyDiagnosticsButton);

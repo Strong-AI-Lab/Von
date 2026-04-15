@@ -189,6 +189,9 @@ def _build_fallback_assessment(bundle: Mapping[str, Any]) -> dict[str, Any]:
     gap_codes = _normalise_string_list(bundle.get("fail_closed_reason_codes"), limit=40)
     locator = _mapping_or_empty(bundle.get("episode_locator"))
     workflow_id = _clean_text(locator.get("workflow_id"))
+    format_over_content_diagnostic = _mapping_or_empty(
+        bundle.get("format_over_content_diagnostic")
+    )
     recommendations = [
         "Inspect the retained episode evidence receipts before making a stronger judgement."
     ]
@@ -196,11 +199,15 @@ def _build_fallback_assessment(bundle: Mapping[str, Any]) -> dict[str, Any]:
         recommendations.append(
             "Close the capability gaps so the critic can evaluate the episode authoritatively."
         )
+    elif _clean_text(format_over_content_diagnostic.get("status")) == "suspected":
+        recommendations.append(
+            "Review whether the selected model and output contract over-favoured tidy structure over the most useful content."
+        )
     if workflow_id:
         recommendations.append(
             f"Review the reusable behaviour surfaces around {workflow_id} before applying a repair."
         )
-    return {
+    result = {
         "verdict": "inconclusive",
         "confidence": 0.0,
         "unresolved_check_count": len(gap_codes),
@@ -219,6 +226,9 @@ def _build_fallback_assessment(bundle: Mapping[str, Any]) -> dict[str, Any]:
             workflow_id=workflow_id,
         ),
     }
+    if format_over_content_diagnostic:
+        result["format_over_content_diagnostic"] = format_over_content_diagnostic
+    return result
 
 
 def _build_evidence_bundle_handler():
@@ -275,6 +285,9 @@ def _build_evidence_bundle_handler():
             "expected_context": bundle.get("expected_context"),
             "observed_evidence": _mapping_or_empty(bundle.get("observed_evidence")),
             "capability_gaps": list(bundle.get("capability_gaps") or []),
+            "format_over_content_diagnostic": _mapping_or_empty(
+                bundle.get("format_over_content_diagnostic")
+            ),
             "fail_closed_reason_codes": list(bundle.get("fail_closed_reason_codes") or []),
             "selected_workflow_id": _clean_text(locator.get("workflow_id")),
             "request_id": _clean_text(locator.get("request_id")) or request_id,

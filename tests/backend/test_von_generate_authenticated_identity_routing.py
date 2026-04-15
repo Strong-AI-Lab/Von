@@ -40,6 +40,36 @@ class _IdentityLLM:
         return "You are Test User (#V#test_user)."
 
 
+class _AuthorshipLLM:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def generate(self, prompt, context=None, model=None):
+        self.calls.append(
+            {"prompt": prompt, "context": list(context or []), "model": model}
+        )
+        if isinstance(prompt, str) and "expected-success inference policy" in prompt:
+            return (
+                '{"expected_outcome_summary":"Answer only with papers that can be grounded to the user.",'
+                '"grounding_requirement":"Only mention papers when authorship or ownership is grounded.",'
+                '"precision_policy":"Prefer omission or explicit uncertainty over speculative recall.",'
+                '"selector_guidance":"Prefer grounded retrieval or verification only when the current context is insufficient.",'
+                '"answering_guidance":"List only grounded papers and say clearly when the available context is incomplete.",'
+                '"reasoning":"Ownership-style paper questions are precision-sensitive and should not include unsupported papers."}'
+            )
+        if isinstance(prompt, str) and prompt.strip() == "Select workflow":
+            return (
+                '{"workflow_id":"#V#chat_assistant_workflow",'
+                '"confidence":0.88,'
+                '"reasoning":"This can be answered directly from the currently accessible grounded context if the answer stays precise."}'
+            )
+        return (
+            "I can only confirm papers that are grounded in the current context. "
+            "From what I can verify here, the available context is incomplete, and "
+            "I would rather say that clearly than guess."
+        )
+
+
 class _GatewayStub:
     enabled = True
 
@@ -47,7 +77,7 @@ class _GatewayStub:
         return {}
 
 
-def _make_app(monkeypatch, *, llm: _IdentityLLM) -> Flask:
+def _make_app(monkeypatch, *, llm: _IdentityLLM | _AuthorshipLLM) -> Flask:
     import src.backend.workflows.durable.registry_factory as registry_factory
 
     monkeypatch.setattr(registry_factory, "discover_workflow_ids", lambda: [])
@@ -271,3 +301,116 @@ def test_generate_authenticated_organisation_turn_uses_direct_response_and_prese
         if isinstance(message, dict)
     )
     assert "CURRENT ORGANISATION CONTEXT: Test Org (#V#test_org)" in context_text
+
+
+def test_generate_authorship_turn_prefers_grounded_omission_over_unsupported_paper_inclusion(
+    monkeypatch,
+) -> None:
+    llm = _AuthorshipLLM()
+    monkeypatch.setattr(
+        "src.backend.services.workflow_discovery_service.discover_workflows_for_turn",
+        lambda prompt_text, *_args, **_kwargs: {
+            "query": prompt_text,
+            "requested_query": prompt_text,
+            "search_sources": ["capability_index"],
+            "candidate_count": 1,
+            "match_count": 1,
+            "matches": [
+                {
+                    "concept_id": CHAT_ASSISTANT_WORKFLOW_ID,
+                    "name": "Chat Assistant Workflow",
+                    "description": "General conversational workflow.",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "is_policy_safe": True,
+                    "routing_eligible": True,
+                    "routing_profile": {"role": "execution"},
+                }
+            ],
+            "candidates": [
+                {
+                    "concept_id": CHAT_ASSISTANT_WORKFLOW_ID,
+                    "name": "Chat Assistant Workflow",
+                    "description": "General conversational workflow.",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "is_policy_safe": True,
+                    "routing_eligible": True,
+                    "routing_profile": {"role": "execution"},
+                }
+            ],
+            "routing_matches": [
+                {
+                    "concept_id": CHAT_ASSISTANT_WORKFLOW_ID,
+                    "name": "Chat Assistant Workflow",
+                    "description": "General conversational workflow.",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "is_policy_safe": True,
+                    "routing_eligible": True,
+                    "routing_profile": {"role": "execution"},
+                }
+            ],
+        },
+        raising=False,
+    )
+    app = _make_app(monkeypatch, llm=llm)
+
+    client = app.test_client()
+    response = client.post(
+        "/von/generate", json={"prompt": "What papers of mine do you know about?"}
+    )
+    assert response.status_code == 200
+
+    body = response.get_json()
+    assert isinstance(body, dict)
+    response_text = str(body.get("response") or "")
+    assert "Titans" not in response_text
+    assert "incomplete" in response_text.lower()
+
+    llm_debug = body.get("llm_debug") or {}
+    workflow_routing = llm_debug.get("workflow_routing") or {}
+    assert workflow_routing.get("workflow_id") == CHAT_ASSISTANT_WORKFLOW_ID
+    assert workflow_routing.get("source") == "selector"
+
+    diagnostics = llm_debug.get("turn_execution_diagnostics") or {}
+    stage_model = diagnostics.get("workflow_stage_model") or {}
+    stage_entries = stage_model.get("stages") or []
+    stage_by_id = {
+        str(entry.get("stage_id")): entry
+        for entry in stage_entries
+        if isinstance(entry, dict) and entry.get("stage_id")
+    }
+    assert "expected_outcome_inference" in stage_by_id
+    assert "selector_preparation" in stage_by_id
+    assert "selector_decision" in stage_by_id
+    timing_breakdown = diagnostics.get("timing_breakdown") or {}
+    assert any(
+        str(entry.get("stage")) == "plain_response"
+        for entry in (timing_breakdown.get("stages") or [])
+        if isinstance(entry, dict)
+    )
+
+    turn_record = llm_debug.get("turn_execution_record") or {}
+    execution = turn_record.get("execution") or {}
+    selected_workflow_trace = execution.get("selected_workflow_trace") or {}
+    assert selected_workflow_trace.get("selected_execution_mode") == "direct_response"
+    direct_response_context_lineage = (
+        selected_workflow_trace.get("direct_response_context_lineage") or {}
+    )
+    assert direct_response_context_lineage.get("base_context_source") == (
+        "augmented_context"
+    )
+    assert (
+        direct_response_context_lineage.get("stage_added_message_count") or 0
+    ) >= 1
+    assert any(
+        "Expected answer contract for this turn"
+        in str(message.get("content_preview") or "")
+        for message in (direct_response_context_lineage.get("stage_added_messages") or [])
+        if isinstance(message, dict)
+    )
+    expected_outcome_contract = selected_workflow_trace.get("expected_outcome_contract") or {}
+    assert expected_outcome_contract.get("precision_policy") == (
+        "Prefer omission or explicit uncertainty over speculative recall."
+    )
