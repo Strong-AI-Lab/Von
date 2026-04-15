@@ -227,6 +227,67 @@ class WorkflowSelector:
                 lookup[concept_id] = entry
         return lookup
 
+    @staticmethod
+    def _is_selector_default_candidate(entry: Mapping[str, Any]) -> bool:
+        candidate_source = str(entry.get("candidate_source") or "").strip()
+        candidate_reason = str(entry.get("candidate_reason") or "").strip()
+        return candidate_source == "selector_default" or candidate_reason in {
+            "builtin_selector_candidate",
+            "default_workflow_fallback",
+        }
+
+    def _resolve_single_specialised_candidate_recovery(
+        self,
+        *,
+        candidate_workflow_ids: Sequence[str],
+        candidate_entries: Sequence[Mapping[str, Any]] | None,
+    ) -> dict[str, str] | None:
+        """Recover the only eligible specialised candidate from selector fallback.
+
+        This recovery is intentionally narrow: it only applies when the selector
+        has already fallen back because its output was invalid or unmatched, and
+        the candidate surface already contains exactly one non-default,
+        routing-eligible, executable, policy-safe specialised workflow.
+        """
+
+        candidate_lookup = {
+            str(workflow_id).strip().lower(): str(workflow_id).strip()
+            for workflow_id in candidate_workflow_ids
+            if isinstance(workflow_id, str) and str(workflow_id).strip()
+        }
+        if not candidate_lookup:
+            return None
+
+        eligible_specialised_candidates: dict[str, dict[str, str]] = {}
+        for entry in candidate_entries or ():
+            if not isinstance(entry, Mapping):
+                continue
+            concept_id = str(entry.get("concept_id") or "").strip()
+            if not concept_id:
+                continue
+            matched_workflow_id = candidate_lookup.get(concept_id.lower())
+            if not matched_workflow_id:
+                continue
+            if matched_workflow_id.lower() == self._default_workflow_id.lower():
+                continue
+            if self._is_selector_default_candidate(entry):
+                continue
+            if entry.get("routing_eligible") is False:
+                continue
+            if entry.get("is_executable") is False:
+                continue
+            if entry.get("is_policy_safe") is False:
+                continue
+            eligible_specialised_candidates[matched_workflow_id.lower()] = {
+                "workflow_id": matched_workflow_id,
+                "name": str(entry.get("name") or "").strip() or matched_workflow_id,
+                "candidate_source": str(entry.get("candidate_source") or "").strip(),
+            }
+
+        if len(eligible_specialised_candidates) != 1:
+            return None
+        return next(iter(eligible_specialised_candidates.values()))
+
     @classmethod
     def _derive_disqualifying_reason_for_generic_selection(
         cls,
@@ -851,6 +912,43 @@ class WorkflowSelector:
             selection_metadata["reasoning_override_workflow_id"] = reasoning_candidate
             workflow_id = reasoning_candidate
             verdict = "rag_selected"
+        recovered_candidate = None
+        if verdict == "rag_default":
+            recovered_candidate = self._resolve_single_specialised_candidate_recovery(
+                candidate_workflow_ids=candidate_ids,
+                candidate_entries=candidate_entries,
+            )
+        if recovered_candidate is not None:
+            prior_selection_resolution = (
+                str(selection_metadata.get("selection_resolution") or "").strip() or None
+            )
+            prior_workflow_id = workflow_id
+            workflow_id = recovered_candidate["workflow_id"]
+            verdict = "rag_selected"
+            confidence_score = min(confidence_score, 0.3)
+            selection_metadata["selection_resolution"] = (
+                "single_specialised_candidate_recovery_from_selector_fallback"
+            )
+            if prior_selection_resolution:
+                selection_metadata["selection_resolution_prior"] = (
+                    prior_selection_resolution
+                )
+            selection_metadata["selector_contract_recovery_applied"] = True
+            selection_metadata["recovered_from_workflow_id"] = prior_workflow_id
+            selection_metadata["recovered_candidate_workflow_id"] = workflow_id
+            selection_metadata["recovered_candidate_name"] = (
+                recovered_candidate["name"]
+            )
+            if recovered_candidate.get("candidate_source"):
+                selection_metadata["recovered_candidate_source"] = (
+                    recovered_candidate["candidate_source"]
+                )
+            selection_metadata["eligible_specialised_candidate_ids"] = [workflow_id]
+            reasoning = (
+                "Selector returned off-contract or unmatched output, so the only "
+                "eligible specialised candidate already present in the selector "
+                "candidate set was selected instead."
+            )
         selection_metadata["selected_workflow_id"] = workflow_id
 
         if not reasoning:

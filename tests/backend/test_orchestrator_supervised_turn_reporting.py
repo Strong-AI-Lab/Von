@@ -573,28 +573,29 @@ def test_turn_execution_route_recovers_single_discovered_execution_workflow_afte
     assert result.outputs["selected_workflow_id"] == selected_workflow_id
     assert result.outputs["workflow_routing"]["workflow_id"] == selected_workflow_id
     assert result.outputs["workflow_routing"]["verdict"] == "rag_selected"
-    assert result.outputs["workflow_routing"]["source"] == "selector_override"
+    assert result.outputs["workflow_routing"]["source"] == "selector"
     assert (
         result.outputs["selected_workflow_trace"]["selector_selection_metadata"][
             "selection_resolution"
         ]
+        == "single_specialised_candidate_recovery_from_selector_fallback"
+    )
+    assert (
+        result.outputs["selected_workflow_trace"]["selector_selection_metadata"][
+            "selection_resolution_prior"
+        ]
         == "default_workflow_fallback"
     )
-    selector_override = result.outputs["selected_workflow_trace"]["selector_override"]
     assert (
-        selector_override["reason"]
-        == "selector_default_recovered_to_single_discovered_execution_workflow"
+        result.outputs["selected_workflow_trace"]["selector_selection_metadata"][
+            "recovered_candidate_workflow_id"
+        ]
+        == selected_workflow_id
     )
-    assert selector_override["recovered_candidate_workflow_id"] == selected_workflow_id
-    override_entry = next(
-        entry
+    assert not any(
+        isinstance(entry, dict) and entry.get("type") == "workflow_selector_override"
         for entry in aux_llm_calls
-        if isinstance(entry, dict)
-        and entry.get("type") == "workflow_selector_override"
-        and entry.get("reason")
-        == "selector_default_recovered_to_single_discovered_execution_workflow"
     )
-    assert override_entry["selected_workflow_id"] == selected_workflow_id
 
 
 def test_execute_selected_promotes_child_result_snapshot_into_completion_report(

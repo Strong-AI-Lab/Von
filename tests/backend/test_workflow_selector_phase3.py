@@ -360,6 +360,186 @@ class TestSelectionConfidenceReasoning:
         assert "requested_candidate_workflow_id" not in result.selection_metadata
         assert "unmatched_candidate_workflow_id" not in result.selection_metadata
 
+    def test_single_specialised_candidate_recovers_from_off_contract_prose(self):
+        selector = _build_selector(default_workflow_id=_CHAT_WORKFLOW)
+        selected_workflow_id = "#V#concept_search_instance_retrieval_workflow"
+        result = selector.resolve_selection(
+            raw_response=(
+                "I'm not sure which workflow you would like me to select. "
+                "Please let me know what you would like to accomplish!"
+            ),
+            prompt_id=None,
+            prompt_used="test",
+            discovered_workflow_ids=[
+                selected_workflow_id,
+                _CHAT_WORKFLOW,
+                _TOOL_WORKFLOW,
+            ],
+            candidate_entries=[
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Concept Search Instance Retrieval Workflow",
+                    "candidate_source": "workflow_discovery",
+                    "routing_eligible": True,
+                    "is_executable": True,
+                    "is_policy_safe": True,
+                    "routing_profile": {"role": "retrieval"},
+                },
+                {
+                    "concept_id": _CHAT_WORKFLOW,
+                    "name": "Chat Assistant Workflow",
+                    "candidate_source": "selector_default",
+                    "candidate_reason": "default_workflow_fallback",
+                },
+                {
+                    "concept_id": _TOOL_WORKFLOW,
+                    "name": "Tool Calling Workflow",
+                    "candidate_source": "selector_default",
+                    "candidate_reason": "builtin_selector_candidate",
+                },
+            ],
+        )
+
+        assert result.workflow_id == selected_workflow_id
+        assert result.verdict == "rag_selected"
+        assert result.selection_metadata.get("selection_resolution") == (
+            "single_specialised_candidate_recovery_from_selector_fallback"
+        )
+        assert result.selection_metadata.get("selection_resolution_prior") == (
+            "default_workflow_fallback"
+        )
+        assert result.selection_metadata.get("recovered_candidate_workflow_id") == (
+            selected_workflow_id
+        )
+        assert result.selection_metadata.get("selector_contract_recovery_applied") is True
+        assert result.reasoning.startswith(
+            "Selector returned off-contract or unmatched output"
+        )
+
+    def test_single_specialised_candidate_recovers_from_off_contract_tool_call_json(
+        self,
+    ):
+        selector = _build_selector(default_workflow_id=_CHAT_WORKFLOW)
+        selected_workflow_id = "#V#concept_search_instance_retrieval_workflow"
+        result = selector.resolve_selection(
+            raw_response=(
+                "```json\n"
+                '{\n  "tool_name": "vontology_concept_search",\n'
+                '  "arguments": {"query": "current user"}\n'
+                "}\n```"
+            ),
+            prompt_id=None,
+            prompt_used="test",
+            discovered_workflow_ids=[
+                selected_workflow_id,
+                _CHAT_WORKFLOW,
+                _TOOL_WORKFLOW,
+            ],
+            candidate_entries=[
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Concept Search Instance Retrieval Workflow",
+                    "candidate_source": "workflow_discovery",
+                    "routing_eligible": True,
+                    "is_executable": True,
+                    "is_policy_safe": True,
+                    "routing_profile": {"role": "retrieval"},
+                },
+                {
+                    "concept_id": _CHAT_WORKFLOW,
+                    "name": "Chat Assistant Workflow",
+                    "candidate_source": "selector_default",
+                    "candidate_reason": "default_workflow_fallback",
+                },
+                {
+                    "concept_id": _TOOL_WORKFLOW,
+                    "name": "Tool Calling Workflow",
+                    "candidate_source": "selector_default",
+                    "candidate_reason": "builtin_selector_candidate",
+                },
+            ],
+        )
+
+        assert result.workflow_id == selected_workflow_id
+        assert result.verdict == "rag_selected"
+        assert result.selection_metadata.get("selection_resolution") == (
+            "single_specialised_candidate_recovery_from_selector_fallback"
+        )
+        assert result.selection_metadata.get("selection_resolution_prior") == (
+            "default_workflow_fallback"
+        )
+        assert result.selection_metadata.get("recovered_candidate_workflow_id") == (
+            selected_workflow_id
+        )
+
+    def test_single_specialised_candidate_recovers_from_unmatched_candidate_request(
+        self,
+    ):
+        selector = _build_selector(default_workflow_id=_CHAT_WORKFLOW)
+        selected_workflow_id = "#V#concept_search_instance_retrieval_workflow"
+        excluded_workflow_id = "#V#specialised_vontology_search_workflow"
+        result = selector.resolve_selection(
+            raw_response=json.dumps(
+                {
+                    "workflow_id": excluded_workflow_id,
+                    "confidence": 0.88,
+                    "reasoning": "This specialised workflow best matches the request.",
+                }
+            ),
+            prompt_id=None,
+            prompt_used="test",
+            discovered_workflow_ids=[
+                selected_workflow_id,
+                _CHAT_WORKFLOW,
+                _TOOL_WORKFLOW,
+            ],
+            candidate_entries=[
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Concept Search Instance Retrieval Workflow",
+                    "candidate_source": "workflow_discovery",
+                    "routing_eligible": True,
+                    "is_executable": True,
+                    "is_policy_safe": True,
+                    "routing_profile": {"role": "retrieval"},
+                },
+                {
+                    "concept_id": excluded_workflow_id,
+                    "name": "Specialised Vontology Search Workflow",
+                    "candidate_source": "workflow_discovery",
+                    "routing_eligible": False,
+                },
+                {
+                    "concept_id": _CHAT_WORKFLOW,
+                    "name": "Chat Assistant Workflow",
+                    "candidate_source": "selector_default",
+                    "candidate_reason": "default_workflow_fallback",
+                },
+                {
+                    "concept_id": _TOOL_WORKFLOW,
+                    "name": "Tool Calling Workflow",
+                    "candidate_source": "selector_default",
+                    "candidate_reason": "builtin_selector_candidate",
+                },
+            ],
+        )
+
+        assert result.workflow_id == selected_workflow_id
+        assert result.verdict == "rag_selected"
+        assert result.confidence_score <= 0.3
+        assert result.selection_metadata.get("selection_resolution") == (
+            "single_specialised_candidate_recovery_from_selector_fallback"
+        )
+        assert result.selection_metadata.get("selection_resolution_prior") == (
+            "default_workflow_fallback_unmatched_candidate"
+        )
+        assert result.selection_metadata.get("requested_candidate_workflow_id") == (
+            excluded_workflow_id
+        )
+        assert result.selection_metadata.get("unmatched_candidate_workflow_id") == (
+            excluded_workflow_id
+        )
+
     def test_generic_builtin_selection_derives_disqualifying_reason_from_candidate_evidence(
         self,
     ):

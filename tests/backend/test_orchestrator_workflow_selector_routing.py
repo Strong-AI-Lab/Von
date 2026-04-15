@@ -7075,10 +7075,10 @@ def test_bare_arxiv_url_selector_default_recovers_to_single_discovered_execution
     assert result.workflow_routing is not None
     assert result.workflow_routing.workflow_id == selected_workflow_id
     assert result.workflow_routing.verdict == "rag_selected"
-    assert result.workflow_routing.source == "selector_override"
+    assert result.workflow_routing.source == "selector"
     assert result.response_text == "Executed via recovered arXiv representation workflow."
     assert (
-        "only eligible specialised discovered execution workflow"
+        "only eligible specialised candidate already present"
         in (result.workflow_routing.reasoning or "").lower()
     )
 
@@ -7087,8 +7087,11 @@ def test_bare_arxiv_url_selector_default_recovers_to_single_discovered_execution
         for entry in result.aux_llm_calls
         if isinstance(entry, dict) and entry.get("type") == "workflow_selector"
     )
-    assert selector_entry["workflow_id"] == CHAT_ASSISTANT_WORKFLOW_ID
+    assert selector_entry["workflow_id"] == selected_workflow_id
     assert selector_entry["selection_metadata"]["selection_resolution"] == (
+        "single_specialised_candidate_recovery_from_selector_fallback"
+    )
+    assert selector_entry["selection_metadata"]["selection_resolution_prior"] == (
         "default_workflow_fallback"
     )
     candidate_entries = selector_entry.get("candidate_entries") or []
@@ -7100,20 +7103,120 @@ def test_bare_arxiv_url_selector_default_recovers_to_single_discovered_execution
     assert candidate_order.index(selected_workflow_id) < candidate_order.index(
         CHAT_ASSISTANT_WORKFLOW_ID
     )
+    assert selector_entry["selection_metadata"]["recovered_candidate_workflow_id"] == (
+        selected_workflow_id
+    )
+    aux_types = [
+        entry.get("type") for entry in result.aux_llm_calls if isinstance(entry, dict)
+    ]
+    assert "workflow_selector_override" not in aux_types
 
-    override_entry = next(
+
+def test_single_specialised_retrieval_candidate_recovers_inside_selector_boundary(
+    monkeypatch,
+):
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    selected_workflow_id = "#V#concept_search_instance_retrieval_workflow"
+    _register_terminal_custom_workflow(
+        orchestrator,
+        workflow_id=selected_workflow_id,
+        purpose=(
+            "Retrieve the represented concept facts for the authenticated current "
+            "user and answer from those facts."
+        ),
+    )
+    _stub_execute_workflow_result(
+        monkeypatch,
+        orchestrator,
+        expected_workflow_id=selected_workflow_id,
+        data={"response_text": "Retrieved current-user concept details."},
+        passthrough_unmatched=True,
+    )
+
+    result = orchestrator.run(
+        prompt="Tell me about myself.",
+        context=[],
+        llm_client=_CapturingLLM(
+            [
+                (
+                    "I'm not sure which workflow you would like me to select.\n\n"
+                    "Are you looking to search for information or manage tasks?"
+                ),
+                "Retrieved current-user concept details.",
+            ]
+        ),
+        model=None,
+        user_namespace="#V#user",
+        workflow_discovery_result={
+            "matches": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Concept Search Instance Retrieval Workflow",
+                    "description": (
+                        "Retrieve represented facts about a specific concept or "
+                        "instance from the Vontology."
+                    ),
+                    "match_source": "capability_index",
+                    "confidence_score": 1.0,
+                    "relevance_score": 1.0,
+                    "routing_eligible": True,
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "candidate_source": "workflow_discovery",
+                    "routing_profile": {"role": "retrieval"},
+                }
+            ],
+            "candidates": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Concept Search Instance Retrieval Workflow",
+                    "description": (
+                        "Retrieve represented facts about a specific concept or "
+                        "instance from the Vontology."
+                    ),
+                    "match_source": "capability_index",
+                    "confidence_score": 1.0,
+                    "relevance_score": 1.0,
+                    "routing_eligible": True,
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "candidate_source": "workflow_discovery",
+                    "routing_profile": {"role": "retrieval"},
+                }
+            ],
+            "match_count": 1,
+        },
+    )
+
+    assert result.workflow_routing is not None
+    assert result.workflow_routing.workflow_id == selected_workflow_id
+    assert result.workflow_routing.verdict == "rag_selected"
+    assert result.workflow_routing.source == "selector"
+    assert result.response_text == "Retrieved current-user concept details."
+    assert (
+        "only eligible specialised candidate already present"
+        in (result.workflow_routing.reasoning or "").lower()
+    )
+
+    selector_entry = next(
         entry
         for entry in result.aux_llm_calls
-        if isinstance(entry, dict)
-        and entry.get("type") == "workflow_selector_override"
-        and entry.get("reason")
-        == "selector_default_recovered_to_single_discovered_execution_workflow"
+        if isinstance(entry, dict) and entry.get("type") == "workflow_selector"
     )
-    assert override_entry["selected_workflow_id"] == selected_workflow_id
-    assert override_entry["recovered_candidate_workflow_id"] == selected_workflow_id
-    assert override_entry["eligible_specialised_candidate_ids"] == [
+    assert selector_entry["workflow_id"] == selected_workflow_id
+    assert selector_entry["selection_metadata"]["selection_resolution"] == (
+        "single_specialised_candidate_recovery_from_selector_fallback"
+    )
+    assert selector_entry["selection_metadata"]["selection_resolution_prior"] == (
+        "default_workflow_fallback"
+    )
+    assert selector_entry["selection_metadata"]["recovered_candidate_workflow_id"] == (
         selected_workflow_id
+    )
+    aux_types = [
+        entry.get("type") for entry in result.aux_llm_calls if isinstance(entry, dict)
     ]
+    assert "workflow_selector_override" not in aux_types
 
 
 def test_generic_tool_fallback_records_disqualifying_reason_for_specialised_candidate(

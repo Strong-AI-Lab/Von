@@ -463,17 +463,20 @@ def test_generate_bare_arxiv_url_recovers_from_selector_clarification_to_special
     workflow_routing = llm_debug.get("workflow_routing") or {}
     assert workflow_routing.get("workflow_id") == ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
     assert workflow_routing.get("verdict") == "rag_selected"
-    assert workflow_routing.get("source") == "selector_override"
+    assert workflow_routing.get("source") == "selector"
 
     selected_workflow_trace = llm_debug.get("selected_workflow_trace") or {}
-    selector_override = selected_workflow_trace.get("selector_override") or {}
-    assert (
-        selector_override.get("reason")
-        == "selector_default_recovered_to_single_discovered_execution_workflow"
+    selector_metadata = selected_workflow_trace.get("selector_selection_metadata") or {}
+    assert selector_metadata.get("selection_resolution") == (
+        "single_specialised_candidate_recovery_from_selector_fallback"
     )
-    assert selector_override.get("recovered_candidate_workflow_id") == (
+    assert selector_metadata.get("selection_resolution_prior") == (
+        "default_workflow_fallback"
+    )
+    assert selector_metadata.get("recovered_candidate_workflow_id") == (
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
     )
+    assert selected_workflow_trace.get("selector_override") in ({}, None)
 
     turn_record = llm_debug.get("turn_execution_record") or {}
     completion_report = turn_record.get("completion_report") or {}
