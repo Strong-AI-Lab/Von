@@ -9,10 +9,12 @@ import base64
 from src.backend.integrations.internal_mcp.catalogue import (
     _jira_search,
     _jira_get_issue,
+    _jira_get_bulk_operation_progress,
     _jira_get_transitions,
     _jira_add_comment,
     _jira_add_attachment,
     _jira_create_issue,
+    _jira_move_issue,
     _jira_update_issue,
     _jira_link_issue,
     _jira_delete_issue_link,
@@ -27,11 +29,13 @@ def test_jira_methods_registered_in_catalogue():
     assert "jira_search" in names
     assert "jira_get_issue" in names
     assert "jira_get_project_issue_types" in names
+    assert "jira_get_bulk_operation_progress" in names
     assert "jira_get_transitions" in names
     assert "jira_add_comment" in names
     assert "jira_add_attachment" in names
     assert "jira_create_issue" in names
     assert "jira_update_issue" in names
+    assert "jira_move_issue" in names
     assert "jira_link_issue" in names
     assert "jira_delete_issue_link" in names
     assert "jira_transition" in names
@@ -48,6 +52,10 @@ def test_jira_handlers_require_minimum_fields():
     err_issue = _jira_get_issue(issue_key=None)
     assert err_issue.get("success") is False
     assert "issue_key" in err_issue.get("error", "")
+
+    err_bulk_progress = _jira_get_bulk_operation_progress(task_id=None)
+    assert err_bulk_progress.get("success") is False
+    assert "task_id" in err_bulk_progress.get("error", "")
 
     err_transitions = _jira_get_transitions(issue_key=None)
     assert err_transitions.get("success") is False
@@ -80,6 +88,10 @@ def test_jira_handlers_require_minimum_fields():
     assert err_update.get("success") is False
     assert "issue_key" in err_update.get("error", "")
 
+    err_move = _jira_move_issue(issue_key=None)
+    assert err_move.get("success") is False
+    assert "issue_key" in err_move.get("error", "")
+
     err_link = _jira_link_issue(link_type="Blocks")
     assert err_link.get("success") is False
     assert "link_type" in err_link.get("error", "")
@@ -111,6 +123,28 @@ def _team_managed_project_issue_type_context(project_key: str) -> dict:
             {"id": "10124", "name": "Subtask", "subtask": True},
         ],
     }
+
+
+def _jira_issue_payload(
+    issue_key: str,
+    *,
+    issue_type_id: str,
+    issue_type_name: str,
+    subtask: bool,
+    project_key: str = "JVNAUTOSCI",
+    parent_issue_key: str | None = None,
+) -> dict:
+    fields = {
+        "project": {"key": project_key},
+        "issuetype": {
+            "id": issue_type_id,
+            "name": issue_type_name,
+            "subtask": subtask,
+        },
+    }
+    if isinstance(parent_issue_key, str):
+        fields["parent"] = {"key": parent_issue_key}
+    return {"key": issue_key, "fields": fields}
 
 
 def test_jira_write_tools_allowlist_and_dry_run_defaults(monkeypatch):
@@ -398,6 +432,187 @@ def test_jira_get_project_issue_types_through_gateway_invoke(monkeypatch):
     assert payload.get("project_key") == "JVNAUTOSCI"
     assert payload.get("project_style") == "next-gen"
     assert payload.get("available_issue_type_names") == ["Task", "Epic", "Subtask"]
+
+
+def test_jira_move_issue_dry_run_infers_subtask_from_parent(monkeypatch):
+    class _FakeProxy:
+        async def get_issue(self, *, issue_key: str, fields=None, expand=None):
+            assert fields == ["project", "issuetype", "parent"]
+            assert expand is None
+            if issue_key == "JVNAUTOSCI-1874":
+                return _jira_issue_payload(
+                    issue_key,
+                    issue_type_id="10122",
+                    issue_type_name="Task",
+                    subtask=False,
+                )
+            if issue_key == "JVNAUTOSCI-1873":
+                return _jira_issue_payload(
+                    issue_key,
+                    issue_type_id="10122",
+                    issue_type_name="Task",
+                    subtask=False,
+                )
+            raise AssertionError(f"unexpected issue_key: {issue_key}")
+
+        async def get_project_issue_types(self, *, project_key: str):
+            assert project_key == "JVNAUTOSCI"
+            return _team_managed_project_issue_type_context(project_key)
+
+    async def _fake_get_jira_proxy():
+        return _FakeProxy()
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.jira_proxy_mcp.get_jira_proxy",
+        _fake_get_jira_proxy,
+    )
+
+    result = _jira_move_issue(
+        issue_key="JVNAUTOSCI-1874",
+        target_parent_issue_key="JVNAUTOSCI-1873",
+    )
+
+    assert result.get("success") is True
+    assert result.get("dry_run") is True
+    assert result.get("executed") is False
+    assert result.get("target_issue_type_name") == "Subtask"
+    assert result.get("target_issue_type_id") == "10124"
+    assert result.get("target_parent_issue_key") == "JVNAUTOSCI-1873"
+    assert result.get("move_preflight", {}).get("mapping_key") == (
+        "JVNAUTOSCI,10124,JVNAUTOSCI-1873"
+    )
+    assert (
+        result.get("proposed_payload", {})
+        .get("targetToSourcesMapping", {})
+        .get("JVNAUTOSCI,10124,JVNAUTOSCI-1873", {})
+        .get("issueIdsOrKeys")
+        == ["JVNAUTOSCI-1874"]
+    )
+
+
+def test_jira_get_bulk_operation_progress_through_gateway_invoke(monkeypatch):
+    from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
+    from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
+
+    class _FakeProxy:
+        async def get_bulk_operation_progress(self, *, task_id: str):
+            assert task_id == "9001"
+            return {
+                "taskId": "9001",
+                "status": "RUNNING",
+                "progressPercent": 65,
+            }
+
+    async def _fake_get_jira_proxy():
+        return _FakeProxy()
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.jira_proxy_mcp.get_jira_proxy",
+        _fake_get_jira_proxy,
+    )
+
+    gateway = InternalMCPGateway(
+        catalogue=build_default_catalogue(),
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+
+    result = gateway.invoke(
+        "jira_get_bulk_operation_progress",
+        {"task_id": "9001"},
+    )
+    payload = result.payload
+    assert payload.get("success") is True
+    assert payload.get("task_id") == "9001"
+    assert payload.get("status") == "RUNNING"
+    assert payload.get("terminal") is False
+
+
+def test_jira_move_issue_await_completion_through_gateway_invoke(monkeypatch):
+    from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
+    from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
+
+    progress_states = [
+        {
+            "taskId": "9001",
+            "status": "RUNNING",
+            "progressPercent": 10,
+        },
+        {
+            "taskId": "9001",
+            "status": "COMPLETE",
+            "progressPercent": 100,
+        },
+    ]
+
+    class _FakeProxy:
+        async def get_issue(self, *, issue_key: str, fields=None, expand=None):
+            assert fields == ["project", "issuetype", "parent"]
+            assert expand is None
+            if issue_key == "JVNAUTOSCI-1874":
+                return _jira_issue_payload(
+                    issue_key,
+                    issue_type_id="10122",
+                    issue_type_name="Task",
+                    subtask=False,
+                )
+            if issue_key == "JVNAUTOSCI-1873":
+                return _jira_issue_payload(
+                    issue_key,
+                    issue_type_id="10122",
+                    issue_type_name="Task",
+                    subtask=False,
+                )
+            raise AssertionError(f"unexpected issue_key: {issue_key}")
+
+        async def get_project_issue_types(self, *, project_key: str):
+            assert project_key == "JVNAUTOSCI"
+            return _team_managed_project_issue_type_context(project_key)
+
+        async def move_issue(self, *, payload):
+            mapping = payload.get("targetToSourcesMapping", {})
+            assert "JVNAUTOSCI,10124,JVNAUTOSCI-1873" in mapping
+            return {"taskId": "9001"}
+
+        async def get_bulk_operation_progress(self, *, task_id: str):
+            assert task_id == "9001"
+            return progress_states.pop(0)
+
+    async def _fake_get_jira_proxy():
+        return _FakeProxy()
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.jira_proxy_mcp.get_jira_proxy",
+        _fake_get_jira_proxy,
+    )
+
+    gateway = InternalMCPGateway(
+        catalogue=build_default_catalogue(),
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+
+    result = gateway.invoke(
+        "jira_move_issue",
+        {
+            "issue_key": "JVNAUTOSCI-1874",
+            "target_parent_issue_key": "JVNAUTOSCI-1873",
+            "dry_run": False,
+            "approved": True,
+            "await_completion": True,
+            "poll_interval_seconds": 0.01,
+            "timeout_seconds": 1.0,
+        },
+    )
+    payload = result.payload
+    assert payload.get("success") is True
+    assert payload.get("dry_run") is False
+    assert payload.get("executed") is True
+    assert payload.get("bulk_task_id") == "9001"
+    assert payload.get("target_issue_type_name") == "Subtask"
+    assert payload.get("awaited_completion") is True
+    assert payload.get("bulk_progress", {}).get("status") == "COMPLETE"
+    assert payload.get("bulk_progress", {}).get("terminal") is True
 
 
 def test_jira_delete_issue_link_success_through_gateway_invoke(monkeypatch):

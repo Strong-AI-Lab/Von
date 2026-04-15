@@ -88,11 +88,13 @@ if TYPE_CHECKING:
         _jira_create_issue,
         _jira_delete_issue_link,
         _jira_get_auth_config,
+        _jira_get_bulk_operation_progress,
         _jira_get_issue,
         _jira_get_project_issue_types,
         _jira_get_myself,
         _jira_get_transitions,
         _jira_link_issue,
+        _jira_move_issue,
         _jira_search,
         _jira_transition_issue,
         _jira_update_issue,
@@ -332,11 +334,13 @@ _bind_imports(
         "_jira_create_issue",
         "_jira_delete_issue_link",
         "_jira_get_auth_config",
+        "_jira_get_bulk_operation_progress",
         "_jira_get_issue",
         "_jira_get_project_issue_types",
-        "_jira_get_transitions",
         "_jira_get_myself",
+        "_jira_get_transitions",
         "_jira_link_issue",
+        "_jira_move_issue",
         "_jira_search",
         "_jira_transition_issue",
         "_jira_update_issue",
@@ -3053,6 +3057,17 @@ async def _handle_jira_get_project_issue_types(
     )
 
 
+async def _handle_jira_get_bulk_operation_progress(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _jira_get_bulk_operation_progress,
+        arguments,
+        tool_family_label="Jira",
+        suggestions=["Check Jira authentication and network connectivity"],
+    )
+
+
 async def _handle_jira_get_transitions(arguments: dict[str, Any]) -> list[TextContent]:
     return _run_catalogue_proxy_handler(
         _jira_get_transitions,
@@ -3101,6 +3116,15 @@ async def _handle_jira_create_issue(arguments: dict[str, Any]) -> list[TextConte
 async def _handle_jira_update_issue(arguments: dict[str, Any]) -> list[TextContent]:
     return _run_catalogue_proxy_handler(
         _jira_update_issue,
+        arguments,
+        tool_family_label="Jira",
+        suggestions=["Check Jira authentication and network connectivity"],
+    )
+
+
+async def _handle_jira_move_issue(arguments: dict[str, Any]) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _jira_move_issue,
         arguments,
         tool_family_label="Jira",
         suggestions=["Check Jira authentication and network connectivity"],
@@ -4178,12 +4202,14 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "jira_search": _handle_jira_search,
     "jira_get_issue": _handle_jira_get_issue,
     "jira_get_project_issue_types": _handle_jira_get_project_issue_types,
+    "jira_get_bulk_operation_progress": _handle_jira_get_bulk_operation_progress,
     "jira_get_transitions": _handle_jira_get_transitions,
     "jira_add_comment": _handle_jira_add_comment,
     "jira_add_attachment": _handle_jira_add_attachment,
     "jira_transition": _handle_jira_transition,
     "jira_create_issue": _handle_jira_create_issue,
     "jira_update_issue": _handle_jira_update_issue,
+    "jira_move_issue": _handle_jira_move_issue,
     "jira_link_issue": _handle_jira_link_issue,
     "jira_delete_issue_link": _handle_jira_delete_issue_link,
     "jira_get_myself": _handle_jira_get_myself,

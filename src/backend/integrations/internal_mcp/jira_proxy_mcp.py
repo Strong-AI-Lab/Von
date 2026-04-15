@@ -146,6 +146,14 @@ class JiraMCPProxy:
             "jira_update_issue", {"issue_key": issue_key, "payload": payload}
         )
 
+    async def move_issue(self, *, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return await self._call("jira_move_issue", {"payload": payload})
+
+    async def get_bulk_operation_progress(self, *, task_id: str) -> Dict[str, Any]:
+        return await self._call(
+            "jira_get_bulk_operation_progress", {"task_id": task_id}
+        )
+
     async def link_issue(self, *, payload: Dict[str, Any]) -> Dict[str, Any]:
         return await self._call("jira_link_issue", {"payload": payload})
 

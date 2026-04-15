@@ -72,6 +72,7 @@ _WRITE_TOOL_NAMES = {
     "jira_add_attachment",
     "jira_add_comment",
     "jira_create_issue",
+    "jira_move_issue",
     "jira_link_issue",
     "jira_transition",
     "jira_update_issue",
@@ -105,6 +106,7 @@ _WRITE_TOOL_NAMES = {
 
 _READ_ONLY_JIRA_TOOLS = {
     "jira_get_auth_config",
+    "jira_get_bulk_operation_progress",
     "jira_get_issue",
     "jira_get_project_issue_types",
     "jira_get_myself",
@@ -130,6 +132,7 @@ _VERIFICATION_READ_TOOL_NAMES = {
     "get_tree",
     "issue_read",
     "jira_get_issue",
+    "jira_get_bulk_operation_progress",
     "jira_get_project_issue_types",
     "jira_get_myself",
     "jira_get_transitions",

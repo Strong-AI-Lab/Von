@@ -169,6 +169,11 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "category": "jira",
         "display_template": "Updated: {key}",
     },
+    "jira_move_issue": {
+        "salience": "high",
+        "category": "jira",
+        "display_template": "Moved: {issue_key}",
+    },
     "jira_add_comment": {
         "salience": "high",
         "category": "jira",
@@ -272,6 +277,11 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "salience": "medium",
         "category": "jira",
         "display_template": "Issue types: {project_key}",
+    },
+    "jira_get_bulk_operation_progress": {
+        "salience": "medium",
+        "category": "jira",
+        "display_template": "Bulk task: {task_id}",
     },
     "jira_get_transitions": {
         "salience": "medium",

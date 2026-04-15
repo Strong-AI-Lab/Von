@@ -5,11 +5,13 @@ from pathlib import Path
 JIRA_TOOL_NAMES = {
     "jira_search",
     "jira_get_issue",
+    "jira_get_bulk_operation_progress",
     "jira_get_transitions",
     "jira_add_comment",
     "jira_add_attachment",
     "jira_transition",
     "jira_create_issue",
+    "jira_move_issue",
     "jira_update_issue",
     "jira_link_issue",
     "jira_delete_issue_link",

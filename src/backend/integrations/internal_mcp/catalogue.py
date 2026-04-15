@@ -15732,6 +15732,52 @@ def _jira_get_project_issue_types_input_schema() -> Schema:
     )
 
 
+def _jira_get_bulk_operation_progress_input_schema() -> Schema:
+    return Schema(
+        required={"task_id": str},
+        optional={},
+        allow_unknown=True,
+        description=(
+            "jira_get_bulk_operation_progress input: task_id (str, required). "
+            "Reads the progress state for an asynchronous Jira bulk operation."
+        ),
+    )
+
+
+def _jira_move_issue_input_schema() -> Schema:
+    return Schema(
+        required={"issue_key": str},
+        optional={
+            "target_project_key": (str, type(None)),
+            "target_issue_type": (str, type(None)),
+            "target_parent_issue_key": (str, type(None)),
+            "send_bulk_notification": (bool, type(None)),
+            "infer_field_defaults": (bool, type(None)),
+            "infer_status_defaults": (bool, type(None)),
+            "infer_subtask_type_default": (bool, type(None)),
+            "target_mandatory_fields": (list, type(None)),
+            "target_status": (list, type(None)),
+            "await_completion": (bool, type(None)),
+            "poll_interval_seconds": (int, float, type(None)),
+            "timeout_seconds": (int, float, type(None)),
+            "dry_run": (bool,),
+            "approved": (bool,),
+            "execute": (bool,),
+            "request_id": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "jira_move_issue input: issue_key (required) plus optional target_project_key, "
+            "target_issue_type, and target_parent_issue_key. Supports Task->Subtask conversion "
+            "and Jira bulk move/convert via guardrails. Optional flags: send_bulk_notification, "
+            "infer_field_defaults, infer_status_defaults, infer_subtask_type_default, "
+            "target_mandatory_fields, target_status, await_completion, poll_interval_seconds, "
+            "timeout_seconds. Guardrails: dry_run (default true), approved, execute "
+            "(requires VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1)."
+        ),
+    )
+
+
 def _jira_get_transitions_input_schema() -> Schema:
     return Schema(
         required={"issue_key": str},
@@ -19865,6 +19911,58 @@ def _jira_get_project_issue_types(**kwargs):
         )
 
 
+def _jira_get_bulk_operation_progress(**kwargs):
+    from .jira_proxy_mcp import get_jira_proxy, JiraProxyError
+
+    task_id = kwargs.get("task_id")
+    if not isinstance(task_id, str) or not task_id.strip():
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: task_id",
+            details={"missing": ["task_id"]},
+            suggestions=[
+                "Provide the Jira bulk-operation task ID returned by jira_move_issue"
+            ],
+        )
+
+    task_id_norm = task_id.strip()
+
+    async def _async_get_progress():
+        proxy = await get_jira_proxy()
+        return await proxy.get_bulk_operation_progress(task_id=task_id_norm)
+
+    try:
+        result = _run_async_compat(_async_get_progress)
+    except JiraProxyError as exc:
+        return make_error_response(
+            "jira_proxy_error",
+            str(exc),
+            details={
+                "exception_type": "JiraProxyError",
+                "task_id": task_id_norm,
+            },
+            suggestions=["Check Jira connectivity and authentication"],
+        )
+
+    if isinstance(result, dict):
+        payload: dict[str, Any] = dict(result)
+        payload.setdefault("success", True)
+        payload["task_id"] = (
+            str(payload.get("taskId")).strip()
+            if str(payload.get("taskId") or "").strip()
+            else task_id_norm
+        )
+        payload["terminal"] = _jira_bulk_status_is_terminal(payload.get("status"))
+        return payload
+
+    return {
+        "success": True,
+        "task_id": task_id_norm,
+        "terminal": False,
+        "result": result,
+    }
+
+
 def _jira_get_transitions(**kwargs):
     from .jira_proxy_mcp import get_jira_proxy, JiraProxyError
 
@@ -20243,6 +20341,602 @@ def _jira_issue_type_unavailable_error(
         },
         suggestions=suggestions,
     )
+
+
+def _jira_issue_type_records(issue_type_context: Any) -> list[dict[str, Any]]:
+    if not isinstance(issue_type_context, dict):
+        return []
+
+    records: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for field_name in ("creatable_issue_types", "project_issue_types"):
+        values = issue_type_context.get(field_name)
+        if not isinstance(values, list):
+            continue
+        for item in values:
+            if not isinstance(item, dict):
+                continue
+            issue_type_id = str(item.get("id") or "").strip()
+            issue_type_name = str(item.get("name") or "").strip()
+            if not issue_type_id and not issue_type_name:
+                continue
+            key = (issue_type_id, issue_type_name.casefold())
+            if key in seen:
+                continue
+            seen.add(key)
+            records.append(dict(item))
+    return records
+
+
+def _jira_issue_type_record_matches(
+    record: Mapping[str, Any], requested_issue_type: str
+) -> bool:
+    requested = requested_issue_type.strip()
+    if not requested:
+        return False
+
+    issue_type_id = record.get("id")
+    if isinstance(issue_type_id, (str, int)) and str(issue_type_id).strip() == requested:
+        return True
+
+    issue_type_name = record.get("name")
+    return (
+        isinstance(issue_type_name, str)
+        and issue_type_name.strip().casefold() == requested.casefold()
+    )
+
+
+def _jira_resolve_issue_type_record(
+    issue_type_context: Any,
+    *,
+    requested_issue_type: str | None = None,
+    require_subtask: bool | None = None,
+) -> dict[str, Any] | None:
+    records = _jira_issue_type_records(issue_type_context)
+    if not records:
+        return None
+
+    if isinstance(requested_issue_type, str) and requested_issue_type.strip():
+        for record in records:
+            if _jira_issue_type_record_matches(record, requested_issue_type):
+                if require_subtask is None or bool(record.get("subtask")) is require_subtask:
+                    return record
+        return None
+
+    if require_subtask is None:
+        return None
+
+    filtered = [
+        record for record in records if bool(record.get("subtask")) is require_subtask
+    ]
+    if len(filtered) == 1:
+        return filtered[0]
+    return None
+
+
+def _jira_extract_issue_context(issue_payload: Any) -> dict[str, Any] | None:
+    if not isinstance(issue_payload, dict):
+        return None
+
+    issue_key = issue_payload.get("key")
+    if not isinstance(issue_key, str) or not issue_key.strip():
+        return None
+
+    fields = issue_payload.get("fields")
+    if not isinstance(fields, dict):
+        fields = {}
+
+    project_key = _jira_project_from_issue_key(issue_key)
+    project = fields.get("project")
+    if isinstance(project, dict):
+        project_key = (
+            str(project.get("key")).strip().upper()
+            if str(project.get("key") or "").strip()
+            else project_key
+        )
+
+    issue_type = fields.get("issuetype")
+    issue_type_id: str | None = None
+    issue_type_name: str | None = None
+    issue_type_is_subtask = False
+    if isinstance(issue_type, dict):
+        raw_id = issue_type.get("id")
+        if isinstance(raw_id, (str, int)) and str(raw_id).strip():
+            issue_type_id = str(raw_id).strip()
+        raw_name = issue_type.get("name")
+        if isinstance(raw_name, str) and raw_name.strip():
+            issue_type_name = raw_name.strip()
+        issue_type_is_subtask = bool(issue_type.get("subtask"))
+
+    parent_issue_key: str | None = None
+    parent = fields.get("parent")
+    if isinstance(parent, dict):
+        raw_parent_key = parent.get("key")
+        if isinstance(raw_parent_key, str) and raw_parent_key.strip():
+            parent_issue_key = raw_parent_key.strip()
+
+    return {
+        "issue_key": issue_key.strip(),
+        "project_key": project_key,
+        "issue_type_id": issue_type_id,
+        "issue_type_name": issue_type_name,
+        "is_subtask": issue_type_is_subtask,
+        "parent_issue_key": parent_issue_key,
+        "raw_issue": issue_payload,
+    }
+
+
+def _jira_get_issue_context(issue_key: str) -> dict[str, Any] | dict[str, Any]:
+    issue_payload = _jira_get_issue(
+        issue_key=issue_key,
+        fields=["project", "issuetype", "parent"],
+    )
+    if not isinstance(issue_payload, dict):
+        return make_error_response(
+            "jira_issue_preflight_failed",
+            f"Jira issue preflight for '{issue_key}' returned an unexpected response",
+            details={"response_type": type(issue_payload).__name__},
+        )
+    if issue_payload.get("success") is False and issue_payload.get("error"):
+        return make_error_response(
+            "jira_issue_preflight_failed",
+            f"Could not read Jira issue '{issue_key}' for move preflight",
+            details={"issue_key": issue_key, "preflight_result": issue_payload},
+            suggestions=["Check Jira connectivity and authentication"],
+        )
+
+    issue_context = _jira_extract_issue_context(issue_payload)
+    if issue_context is None:
+        return make_error_response(
+            "jira_issue_preflight_failed",
+            f"Jira issue '{issue_key}' did not return the project/type fields required for move preflight",
+            details={"issue_key": issue_key, "issue_payload": issue_payload},
+        )
+    return issue_context
+
+
+def _jira_bulk_status_is_terminal(status: Any) -> bool:
+    if not isinstance(status, str):
+        return False
+    return status.strip().upper() not in {
+        "SUBMITTED",
+        "PENDING",
+        "ENQUEUED",
+        "RUNNING",
+        "IN_PROGRESS",
+    }
+
+
+def _jira_build_move_mapping_key(
+    *,
+    target_project_key: str,
+    target_issue_type_id: str,
+    target_parent_issue_key: str | None,
+) -> str:
+    parts = [target_project_key.strip().upper(), target_issue_type_id.strip()]
+    if isinstance(target_parent_issue_key, str) and target_parent_issue_key.strip():
+        parts.append(target_parent_issue_key.strip().upper())
+    return ",".join(parts)
+
+
+def _jira_move_issue(**kwargs):
+    import logging
+    import time
+    from .jira_proxy_mcp import get_jira_proxy, JiraProxyError
+
+    logger = logging.getLogger(__name__)
+
+    issue_key = kwargs.get("issue_key")
+    if not isinstance(issue_key, str) or not issue_key.strip():
+        return make_error_response(
+            "MISSING_PARAMS",
+            "Missing required parameter: issue_key",
+            suggestions=["Provide a Jira issue key such as JVNAUTOSCI-1874"],
+        )
+
+    issue_key_norm = issue_key.strip().upper()
+    source_project_key = _jira_project_from_issue_key(issue_key_norm)
+    if not source_project_key:
+        return make_error_response(
+            "INVALID_ISSUE_KEY",
+            "Invalid issue_key format; expected PROJECT-123",
+            suggestions=["Use the format PROJECT-123 for issue keys"],
+        )
+
+    dry_run = bool(kwargs.get("dry_run", True))
+    approved = bool(kwargs.get("approved", False))
+    execute = bool(kwargs.get("execute", False))
+    request_id = kwargs.get("request_id")
+
+    source_issue_context = _jira_get_issue_context(issue_key_norm)
+    if source_issue_context.get("success") is False:
+        return source_issue_context
+
+    source_issue_type_name = source_issue_context.get("issue_type_name")
+    source_issue_type_id = source_issue_context.get("issue_type_id")
+    source_parent_issue_key = source_issue_context.get("parent_issue_key")
+    source_is_subtask = bool(source_issue_context.get("is_subtask"))
+
+    target_project_key: str | None = None
+    target_project_key_raw = kwargs.get("target_project_key")
+    if isinstance(target_project_key_raw, str) and target_project_key_raw.strip():
+        target_project_key = target_project_key_raw.strip().upper()
+
+    target_parent_issue_key: str | None = None
+    explicit_parent_issue_key = kwargs.get("target_parent_issue_key")
+    if isinstance(explicit_parent_issue_key, str) and explicit_parent_issue_key.strip():
+        target_parent_issue_key = explicit_parent_issue_key.strip().upper()
+    elif (
+        source_is_subtask
+        and isinstance(source_parent_issue_key, str)
+        and source_parent_issue_key.strip()
+    ):
+        target_parent_issue_key = source_parent_issue_key.strip().upper()
+
+    target_parent_context: dict[str, Any] | None = None
+    if isinstance(target_parent_issue_key, str) and target_parent_issue_key:
+        if target_parent_issue_key == issue_key_norm:
+            return make_error_response(
+                "invalid_parent_issue",
+                "target_parent_issue_key cannot be the same as issue_key",
+                details={"issue_key": issue_key_norm},
+            )
+        target_parent_context = _jira_get_issue_context(target_parent_issue_key)
+        if target_parent_context.get("success") is False:
+            return target_parent_context
+        parent_project_key = target_parent_context.get("project_key")
+        if isinstance(parent_project_key, str) and parent_project_key:
+            if target_project_key and target_project_key != parent_project_key:
+                return make_error_response(
+                    "jira_move_parent_project_mismatch",
+                    (
+                        "target_project_key does not match the project of "
+                        "target_parent_issue_key"
+                    ),
+                    details={
+                        "issue_key": issue_key_norm,
+                        "target_project_key": target_project_key,
+                        "target_parent_issue_key": target_parent_issue_key,
+                        "parent_project_key": parent_project_key,
+                    },
+                    suggestions=[
+                        "Omit target_project_key to infer it from the parent issue",
+                        "Use a parent issue that belongs to the requested target project",
+                    ],
+                )
+            target_project_key = parent_project_key
+
+    if not target_project_key:
+        target_project_key = source_project_key
+
+    guardrail_projects = [source_project_key]
+    if target_project_key not in guardrail_projects:
+        guardrail_projects.append(target_project_key)
+
+    guardrail_error = _jira_write_guardrails(
+        action="move_issue",
+        project_keys=guardrail_projects,
+        dry_run=dry_run,
+        approved=approved,
+        execute=execute,
+    )
+    if guardrail_error is not None:
+        return guardrail_error
+
+    if isinstance(request_id, str) and request_id.strip() and not dry_run:
+        cached = _jira_cache_get("jira_move_issue", request_id.strip())
+        if cached is not None:
+            cached["reused"] = True
+            return cached
+
+    target_issue_type_context = _jira_get_project_issue_types(
+        project_key=target_project_key
+    )
+    if target_issue_type_context.get("success") is not True:
+        return make_error_response(
+            "jira_issue_type_preflight_failed",
+            (
+                f"Could not verify target issue types for Jira project "
+                f"'{target_project_key}'."
+            ),
+            details={
+                "issue_key": issue_key_norm,
+                "target_project_key": target_project_key,
+                "preflight_result": target_issue_type_context,
+            },
+            suggestions=[
+                "Check Jira connectivity and authentication",
+                "Verify the target project key is correct",
+            ],
+        )
+
+    requested_target_issue_type = kwargs.get("target_issue_type")
+    target_issue_type_record: dict[str, Any] | None = None
+    if (
+        isinstance(requested_target_issue_type, str)
+        and requested_target_issue_type.strip()
+    ):
+        target_issue_type_record = _jira_resolve_issue_type_record(
+            target_issue_type_context,
+            requested_issue_type=requested_target_issue_type.strip(),
+        )
+        if target_issue_type_record is None:
+            return _jira_issue_type_unavailable_error(
+                project_key=target_project_key,
+                requested_issue_type=requested_target_issue_type.strip(),
+                issue_type_context=target_issue_type_context,
+            )
+    elif target_parent_issue_key:
+        if source_is_subtask:
+            if isinstance(source_issue_type_id, str) and source_issue_type_id:
+                target_issue_type_record = _jira_resolve_issue_type_record(
+                    target_issue_type_context,
+                    requested_issue_type=source_issue_type_id,
+                    require_subtask=True,
+                )
+            if target_issue_type_record is None and isinstance(
+                source_issue_type_name, str
+            ):
+                target_issue_type_record = _jira_resolve_issue_type_record(
+                    target_issue_type_context,
+                    requested_issue_type=source_issue_type_name,
+                    require_subtask=True,
+                )
+        if target_issue_type_record is None:
+            target_issue_type_record = _jira_resolve_issue_type_record(
+                target_issue_type_context,
+                require_subtask=True,
+            )
+        if target_issue_type_record is None:
+            subtask_names = [
+                str(record.get("name")).strip()
+                for record in _jira_issue_type_records(target_issue_type_context)
+                if bool(record.get("subtask"))
+                and str(record.get("name") or "").strip()
+            ]
+            return make_error_response(
+                "jira_move_target_issue_type_ambiguous",
+                (
+                    "A target_parent_issue_key was provided, but the target project does "
+                    "not have a uniquely inferable subtask issue type."
+                ),
+                details={
+                    "issue_key": issue_key_norm,
+                    "target_project_key": target_project_key,
+                    "available_subtask_issue_types": subtask_names,
+                    "issue_type_context": target_issue_type_context,
+                },
+                suggestions=[
+                    "Provide target_issue_type explicitly",
+                    "Ensure the target project has exactly one subtask issue type if automatic conversion is desired",
+                ],
+            )
+    else:
+        if isinstance(source_issue_type_id, str) and source_issue_type_id:
+            target_issue_type_record = _jira_resolve_issue_type_record(
+                target_issue_type_context,
+                requested_issue_type=source_issue_type_id,
+            )
+        if target_issue_type_record is None and isinstance(source_issue_type_name, str):
+            target_issue_type_record = _jira_resolve_issue_type_record(
+                target_issue_type_context,
+                requested_issue_type=source_issue_type_name,
+            )
+        if target_issue_type_record is None:
+            requested = (
+                source_issue_type_name
+                if isinstance(source_issue_type_name, str) and source_issue_type_name
+                else str(source_issue_type_id or "")
+            )
+            return _jira_issue_type_unavailable_error(
+                project_key=target_project_key,
+                requested_issue_type=requested or "source issue type",
+                issue_type_context=target_issue_type_context,
+            )
+
+    target_issue_type_id = str(target_issue_type_record.get("id") or "").strip()
+    target_issue_type_name = str(target_issue_type_record.get("name") or "").strip()
+    target_is_subtask = bool(target_issue_type_record.get("subtask"))
+    if not target_issue_type_id or not target_issue_type_name:
+        return make_error_response(
+            "jira_move_target_issue_type_invalid",
+            "Resolved target issue type did not include a usable Jira id and name",
+            details={
+                "issue_key": issue_key_norm,
+                "target_project_key": target_project_key,
+                "target_issue_type_record": target_issue_type_record,
+            },
+        )
+
+    if target_is_subtask and not target_parent_issue_key:
+        return make_error_response(
+            "jira_move_parent_required",
+            (
+                "A target parent issue is required when converting or moving an issue "
+                "to a subtask issue type."
+            ),
+            details={
+                "issue_key": issue_key_norm,
+                "target_project_key": target_project_key,
+                "target_issue_type": target_issue_type_name,
+            },
+            suggestions=[
+                "Provide target_parent_issue_key",
+                "If the issue should remain a top-level task, choose a non-subtask target_issue_type",
+            ],
+        )
+
+    if not target_is_subtask:
+        target_parent_issue_key = None
+        target_parent_context = None
+
+    mapping_key = _jira_build_move_mapping_key(
+        target_project_key=target_project_key,
+        target_issue_type_id=target_issue_type_id,
+        target_parent_issue_key=target_parent_issue_key,
+    )
+
+    mapping_payload: dict[str, Any] = {
+        "issueIdsOrKeys": [issue_key_norm],
+        "inferFieldDefaults": bool(kwargs.get("infer_field_defaults", True)),
+        "inferStatusDefaults": bool(kwargs.get("infer_status_defaults", True)),
+        "inferSubtaskTypeDefault": bool(
+            kwargs.get("infer_subtask_type_default", True)
+        ),
+    }
+    target_mandatory_fields = kwargs.get("target_mandatory_fields")
+    if isinstance(target_mandatory_fields, list) and target_mandatory_fields:
+        mapping_payload["targetMandatoryFields"] = target_mandatory_fields
+    target_status = kwargs.get("target_status")
+    if isinstance(target_status, list) and target_status:
+        mapping_payload["targetStatus"] = target_status
+
+    move_payload: dict[str, Any] = {
+        "targetToSourcesMapping": {mapping_key: mapping_payload}
+    }
+    if "send_bulk_notification" in kwargs:
+        move_payload["sendBulkNotification"] = bool(
+            kwargs.get("send_bulk_notification")
+        )
+
+    preflight = {
+        "source_issue": source_issue_context,
+        "target_project_issue_types": target_issue_type_context,
+        "target_project_key": target_project_key,
+        "target_issue_type": {
+            "id": target_issue_type_id,
+            "name": target_issue_type_name,
+            "subtask": target_is_subtask,
+            "requested": (
+                requested_target_issue_type.strip()
+                if isinstance(requested_target_issue_type, str)
+                and requested_target_issue_type.strip()
+                else None
+            ),
+        },
+        "target_parent_issue": target_parent_context,
+        "mapping_key": mapping_key,
+    }
+
+    if dry_run:
+        return {
+            "success": True,
+            "dry_run": True,
+            "executed": False,
+            "action": "move_issue",
+            "issue_key": issue_key_norm,
+            "target_project_key": target_project_key,
+            "target_issue_type_id": target_issue_type_id,
+            "target_issue_type_name": target_issue_type_name,
+            "target_parent_issue_key": target_parent_issue_key,
+            "move_preflight": preflight,
+            "proposed_payload": move_payload,
+        }
+
+    await_completion = bool(kwargs.get("await_completion", False))
+    try:
+        poll_interval_seconds = float(kwargs.get("poll_interval_seconds", 2.0))
+    except (TypeError, ValueError):
+        poll_interval_seconds = 2.0
+    poll_interval_seconds = max(0.1, poll_interval_seconds)
+
+    try:
+        timeout_seconds = float(
+            kwargs.get("timeout_seconds", 60.0 if await_completion else 0.0)
+        )
+    except (TypeError, ValueError):
+        timeout_seconds = 60.0 if await_completion else 0.0
+    timeout_seconds = max(0.0, timeout_seconds)
+
+    async def _async_move():
+        proxy = await get_jira_proxy()
+        return await proxy.move_issue(payload=move_payload)
+
+    try:
+        logger.info(
+            "[jira_write] move_issue key=%s target=%s type=%s parent=%s",
+            issue_key_norm,
+            target_project_key,
+            target_issue_type_name,
+            target_parent_issue_key,
+        )
+        result = _run_async_compat(_async_move)
+    except JiraProxyError as exc:
+        return make_error_response("JIRA_ERROR", str(exc))
+
+    response_payload: dict[str, Any] = (
+        dict(result) if isinstance(result, dict) else {"result": result}
+    )
+    response_payload.setdefault("success", True)
+    response_payload["dry_run"] = False
+    response_payload["executed"] = True
+    response_payload["action"] = "move_issue"
+    response_payload["issue_key"] = issue_key_norm
+    response_payload["target_project_key"] = target_project_key
+    response_payload["target_issue_type_id"] = target_issue_type_id
+    response_payload["target_issue_type_name"] = target_issue_type_name
+    response_payload["target_parent_issue_key"] = target_parent_issue_key
+    response_payload["move_preflight"] = preflight
+
+    bulk_task_id = response_payload.get("taskId") or response_payload.get("task_id")
+    if isinstance(bulk_task_id, (str, int)) and str(bulk_task_id).strip():
+        response_payload["bulk_task_id"] = str(bulk_task_id).strip()
+
+    if await_completion and response_payload.get("bulk_task_id"):
+        bulk_task_id = str(response_payload["bulk_task_id"]).strip()
+
+        async def _async_progress():
+            proxy = await get_jira_proxy()
+            return await proxy.get_bulk_operation_progress(task_id=bulk_task_id)
+
+        deadline = time.monotonic() + timeout_seconds
+        last_progress: dict[str, Any] | None = None
+        while True:
+            try:
+                progress_result = _run_async_compat(_async_progress)
+            except JiraProxyError as exc:
+                return make_error_response(
+                    "JIRA_ERROR",
+                    str(exc),
+                    details={
+                        "issue_key": issue_key_norm,
+                        "bulk_task_id": bulk_task_id,
+                    },
+                )
+
+            if isinstance(progress_result, dict):
+                last_progress = dict(progress_result)
+                last_progress.setdefault("success", True)
+                last_progress["task_id"] = bulk_task_id
+                last_progress["terminal"] = _jira_bulk_status_is_terminal(
+                    last_progress.get("status")
+                )
+                if last_progress["terminal"]:
+                    response_payload["awaited_completion"] = True
+                    response_payload["bulk_progress"] = last_progress
+                    break
+
+            if time.monotonic() >= deadline:
+                response_payload["awaited_completion"] = True
+                response_payload["bulk_progress"] = last_progress
+                response_payload["completion_timeout"] = True
+                response_payload["success"] = False
+                response_payload["error"] = (
+                    f"Timed out while waiting for Jira bulk move task "
+                    f"'{bulk_task_id}' to complete"
+                )
+                response_payload["error_code"] = "jira_bulk_operation_timeout"
+                response_payload["suggestions"] = [
+                    "Poll jira_get_bulk_operation_progress with the returned bulk_task_id",
+                    "Increase timeout_seconds if a longer wait is acceptable",
+                ]
+                break
+
+            time.sleep(poll_interval_seconds)
+
+    if isinstance(request_id, str) and request_id.strip():
+        _jira_cache_set("jira_move_issue", request_id.strip(), response_payload)
+    return response_payload
 
 
 def _jira_create_issue(**kwargs):
@@ -24519,12 +25213,16 @@ def build_default_catalogue() -> MethodCatalogue:
     jira_get_project_issue_types_output_schema = (
         _jira_get_project_issue_types_output_schema()
     )
+    jira_get_bulk_operation_progress_output_schema = _jira_generic_output_schema(
+        "get_bulk_operation_progress"
+    )
     jira_get_transitions_output_schema = _jira_generic_output_schema("get_transitions")
     jira_add_comment_output_schema = _jira_generic_output_schema("add_comment")
     jira_add_attachment_output_schema = _jira_add_attachment_output_schema()
     jira_transition_output_schema = _jira_generic_output_schema("transition")
     jira_create_issue_output_schema = _jira_generic_output_schema("create_issue")
     jira_update_issue_output_schema = _jira_generic_output_schema("update_issue")
+    jira_move_issue_output_schema = _jira_generic_output_schema("move_issue")
     jira_link_issue_output_schema = _jira_generic_output_schema("link_issue")
     jira_delete_issue_link_output_schema = _jira_generic_output_schema(
         "delete_issue_link"
@@ -25847,6 +26545,18 @@ def build_default_catalogue() -> MethodCatalogue:
             ),
         ),
         MethodDefinition(
+            name="jira_get_bulk_operation_progress",
+            handler=_jira_get_bulk_operation_progress,
+            input_schema=_jira_get_bulk_operation_progress_input_schema(),
+            output_schema=jira_get_bulk_operation_progress_output_schema,
+            category="read",
+            timeout_sec=15.0,
+            description=(
+                "Read the progress state of a previously submitted Jira bulk operation. "
+                "Use this with the bulk_task_id returned by jira_move_issue."
+            ),
+        ),
+        MethodDefinition(
             name="jira_get_transitions",
             handler=_jira_get_transitions,
             input_schema=_jira_get_transitions_input_schema(),
@@ -25900,6 +26610,19 @@ def build_default_catalogue() -> MethodCatalogue:
                 "Update a Jira issue with safety guardrails. Default dry_run=true (no mutation). "
                 "Writes are blocked unless the issue belongs to an allow-listed project. "
                 "To execute, pass dry_run=false and either approved=true or execute=true with VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1."
+            ),
+        ),
+        MethodDefinition(
+            name="jira_move_issue",
+            handler=_jira_move_issue,
+            input_schema=_jira_move_issue_input_schema(),
+            output_schema=jira_move_issue_output_schema,
+            category="write",
+            timeout_sec=30.0,
+            description=(
+                "Move or convert a Jira issue through the bulk-move API with guardrails. "
+                "Supports task-to-subtask conversion under a parent, project/type preflight, "
+                "optional dry-run payload preview, and optional completion polling."
             ),
         ),
         MethodDefinition(

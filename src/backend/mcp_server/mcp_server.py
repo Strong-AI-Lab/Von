@@ -367,6 +367,13 @@ def jira_get_project_issue_types(project_key: str) -> Dict[str, Any]:
     return response
 
 
+def jira_get_bulk_operation_progress(task_id: str) -> Dict[str, Any]:
+    task_id_str = str(task_id or "").strip()
+    if not task_id_str:
+        return {"success": False, "error": "task_id is required"}
+    return jira_get(f"bulk/queue/{task_id_str}")
+
+
 def jira_add_attachment(
     *,
     issue_key: str,
@@ -974,6 +981,22 @@ async def list_tools() -> List[types.Tool]:
             },
         ),
         types.Tool(
+            name="jira_get_bulk_operation_progress",
+            description=(
+                "Read the progress state for a previously submitted Jira bulk operation task."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "Bulk-operation task ID returned by Jira.",
+                    }
+                },
+                "required": ["task_id"],
+            },
+        ),
+        types.Tool(
             name="jira_create_issue",
             description=(
                 "Create a Jira issue via POST /rest/api/3/issue. "
@@ -1009,6 +1032,23 @@ async def list_tools() -> List[types.Tool]:
                     },
                 },
                 "required": ["issue_key", "payload"],
+            },
+        ),
+        types.Tool(
+            name="jira_move_issue",
+            description=(
+                "Submit a Jira bulk move request via POST /rest/api/3/bulk/issues/move. "
+                "The caller must provide the exact Jira payload dict."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "payload": {
+                        "type": "object",
+                        "description": "Jira bulk move payload to send as JSON body.",
+                    }
+                },
+                "required": ["payload"],
             },
         ),
         types.Tool(
@@ -1228,6 +1268,12 @@ async def call_tool(
         text = json.dumps(result, indent=2)
         return [types.TextContent(type="text", text=text)]
 
+    elif name == "jira_get_bulk_operation_progress":
+        task_id = arguments["task_id"]
+        result = jira_get_bulk_operation_progress(str(task_id))
+        text = json.dumps(result, indent=2)
+        return [types.TextContent(type="text", text=text)]
+
     elif name == "jira_create_issue":
         payload = arguments["payload"]
         if not isinstance(payload, dict):
@@ -1262,6 +1308,18 @@ async def call_tool(
                     payload["fields"]["description"]
                 )
         result = jira_put(f"issue/{issue_key}", payload)
+        text = json.dumps(result, indent=2)
+        return [types.TextContent(type="text", text=text)]
+
+    elif name == "jira_move_issue":
+        payload = arguments["payload"]
+        if not isinstance(payload, dict):
+            error = {
+                "success": False,
+                "error": "payload must be an object",
+            }
+            return [types.TextContent(type="text", text=json.dumps(error, indent=2))]
+        result = jira_post("bulk/issues/move", payload)
         text = json.dumps(result, indent=2)
         return [types.TextContent(type="text", text=text)]
 

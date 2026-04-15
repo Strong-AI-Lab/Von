@@ -2356,6 +2356,23 @@
             }
         },
         {
+            "name": "jira_get_bulk_operation_progress",
+            "description": "Read the progress state of a previously submitted Jira bulk operation. Use this with the bulk_task_id returned by jira_move_issue.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "task_id"
+                ],
+                "additionalProperties": true,
+                "description": "jira_get_bulk_operation_progress input: task_id (str, required). Reads the progress state for an asynchronous Jira bulk operation."
+            }
+        },
+        {
             "name": "jira_get_issue",
             "description": "Fetch full details for a Jira issue by key (e.g., JVNAUTOSCI-123). Use when you need issue fields, summary, status, metadata, or expanded sections such as changelog.",
             "inputSchema": {
@@ -2485,6 +2502,114 @@
                 ],
                 "additionalProperties": true,
                 "description": "jira_link_issue input: link_type (required; e.g. 'Relates'). Preferred issue fields: source_issue_key + target_issue_key (source maps to Jira inwardIssue; target maps to Jira outwardIssue). Backward-compatible fields: inward_issue_key + outward_issue_key. Optional comment. Guardrails: dry_run (default true), approved, execute (requires VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1)."
+            }
+        },
+        {
+            "name": "jira_move_issue",
+            "description": "Move or convert a Jira issue through the bulk-move API with guardrails. Supports task-to-subtask conversion under a parent, project/type preflight, optional dry-run payload preview, and optional completion polling.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "issue_key": {
+                        "type": "string"
+                    },
+                    "target_project_key": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "target_issue_type": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "target_parent_issue_key": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "send_bulk_notification": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    },
+                    "infer_field_defaults": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    },
+                    "infer_status_defaults": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    },
+                    "infer_subtask_type_default": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    },
+                    "target_mandatory_fields": {
+                        "type": [
+                            "array",
+                            "null"
+                        ],
+                        "items": {}
+                    },
+                    "target_status": {
+                        "type": [
+                            "array",
+                            "null"
+                        ],
+                        "items": {}
+                    },
+                    "await_completion": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    },
+                    "poll_interval_seconds": {
+                        "type": [
+                            "integer",
+                            "number",
+                            "null"
+                        ]
+                    },
+                    "timeout_seconds": {
+                        "type": [
+                            "integer",
+                            "number",
+                            "null"
+                        ]
+                    },
+                    "dry_run": {
+                        "type": "boolean"
+                    },
+                    "approved": {
+                        "type": "boolean"
+                    },
+                    "execute": {
+                        "type": "boolean"
+                    },
+                    "request_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "issue_key"
+                ],
+                "additionalProperties": true,
+                "description": "jira_move_issue input: issue_key (required) plus optional target_project_key, target_issue_type, and target_parent_issue_key. Supports Task->Subtask conversion and Jira bulk move/convert via guardrails. Optional flags: send_bulk_notification, infer_field_defaults, infer_status_defaults, infer_subtask_type_default, target_mandatory_fields, target_status, await_completion, poll_interval_seconds, timeout_seconds. Guardrails: dry_run (default true), approved, execute (requires VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1)."
             }
         },
         {
