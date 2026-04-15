@@ -1589,8 +1589,8 @@
                     },
                     {
                       "kind": "context_flag",
-                      "key": "turn_recovery_attempted",
-                      "expected": false
+                      "key": "completion_gate_repeat_eligible",
+                      "expected": true
                     }
                   ]
                 },
@@ -1689,8 +1689,16 @@
                   "label": "Completion Report"
                 },
                 {
+                  "context_key": "required_effects",
+                  "label": "Required Effects"
+                },
+                {
                   "context_key": "completion_gate_decision",
                   "label": "Completion Gate Decision"
+                },
+                {
+                  "context_key": "completion_gate_evidence_payload",
+                  "label": "Completion Gate Evidence"
                 },
                 {
                   "context_key": "completion_gate_decision_reason",
@@ -1731,6 +1739,14 @@
                 {
                   "context_key": "turn_recovery_last_target_workflow_id",
                   "label": "Previous Recovery Target Workflow"
+                },
+                {
+                  "context_key": "turn_recovery_last_target_token",
+                  "label": "Previous Recovery Target"
+                },
+                {
+                  "context_key": "turn_recovery_retry_selection",
+                  "label": "Retry Target Selection"
                 },
                 {
                   "context_key": "turn_recovery_last_reasoning",
@@ -1819,7 +1835,7 @@
             "state_id": "recovery_decision"
           },
           {
-            "action_id": "workflow_control.context_set",
+            "action_id": "turn_execution.prepare_recovery_retry",
             "conditional_transitions": [
               {
                 "condition_spec": {
@@ -1831,55 +1847,21 @@
             ],
             "execution_mode": "deterministic",
             "state_id": "apply_recovery_retry",
-            "static_input_bindings": [
-              [
-                "assignments",
-                [
-                  {
-                    "key": "selected_workflow_id",
-                    "value_from_context": "turn_next_action_target_workflow_id"
-                  },
-                  {
-                    "key": "turn_recovery_attempted",
-                    "value": true
-                  },
-                  {
-                    "key": "turn_recovery_last_decision",
-                    "value_from_context": "turn_next_action_type"
-                  },
-                  {
-                    "key": "turn_recovery_last_reasoning",
-                    "value_from_context": "turn_next_action_reasoning"
-                  },
-                  {
-                    "key": "turn_recovery_last_target_workflow_id",
-                    "value_from_context": "turn_next_action_target_workflow_id"
-                  },
-                  {
-                    "key": "response_text",
-                    "value": ""
-                  },
-                  {
-                    "key": "final_response",
-                    "value": ""
-                  },
-                  {
-                    "key": "current_response",
-                    "value": ""
-                  },
-                  {
-                    "key": "selected_workflow_user_response",
-                    "value": ""
-                  }
-                ]
-              ]
-            ],
             "writes_context_keys": [
               "selected_workflow_id",
+              "workflow_continuation_launch_inputs",
               "turn_recovery_attempted",
               "turn_recovery_last_decision",
               "turn_recovery_last_reasoning",
               "turn_recovery_last_target_workflow_id",
+              "turn_recovery_last_target_token",
+              "turn_recovery_last_effect_id",
+              "turn_recovery_retry_selection",
+              "source_uri",
+              "arxiv_id",
+              "file_copy_concept_id",
+              "concept_id",
+              "paper_concept_id",
               "response_text",
               "final_response",
               "current_response",
@@ -1894,7 +1876,7 @@
                   "kind": "always"
                 },
                 "reason": "recovery_tool_batch_executed",
-                "to_state": "narration"
+                "to_state": "critic"
               }
             ],
             "execution_mode": "deterministic",

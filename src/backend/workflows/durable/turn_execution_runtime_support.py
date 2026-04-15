@@ -656,6 +656,12 @@ def build_turn_execution_selected_workflow_outputs(
         "selected_workflow_error": _safe_str(failure_detail),
         "selected_workflow_user_response_available": bool(derived_user_response),
     }
+    child_invocations = child_outputs_map.get("invocations")
+    if isinstance(child_invocations, list):
+        outputs["invocations"] = list(child_invocations)
+    child_tool_messages = child_outputs_map.get("tool_messages")
+    if isinstance(child_tool_messages, list):
+        outputs["tool_messages"] = list(child_tool_messages)
     if clean_selected_workflow_id:
         outputs["selected_workflow_id"] = clean_selected_workflow_id
     if derived_user_response:
@@ -791,9 +797,9 @@ def build_turn_recovery_tool_batch_outputs(
         "selected_workflow_trace": merged_selected_workflow_trace,
         "invocations": combined_invocations,
         "tool_messages": combined_tool_messages,
-        "response_text": "",
-        "final_response": "",
-        "current_response": "",
+        "response_text": derived_user_response or "",
+        "final_response": derived_user_response or "",
+        "current_response": derived_user_response or "",
         "selected_workflow_user_response": derived_user_response or "",
         "selected_workflow_completed": len(failed_records) == 0,
         "selected_workflow_child_failed": bool(failed_records),

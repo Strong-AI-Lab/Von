@@ -1,5 +1,6 @@
 from unittest.mock import MagicMock
 
+from representation_intent_regression_helpers import patch_representation_profile_loader
 from src.backend.workflows.action_registry import (
     ActionSpec,
     ActionRegistry,
@@ -19,6 +20,9 @@ from src.backend.workflows.definitions import (
 from src.backend.workflows.durable.control_flow_actions import (
     register_control_flow_actions,
 )
+from src.backend.workflows.durable.subworkflow_actions import (
+    register_subworkflow_actions,
+)
 from src.backend.workflows.durable.turn_execution_actions import (
     register_turn_execution_actions,
 )
@@ -28,6 +32,7 @@ from src.backend.workflows.engine import (
     WorkflowDefinition,
     WorkflowExecutor,
     WorkflowStateSpec,
+    WorkflowTransitionSpec,
 )
 from workflow_test_support import (
     build_authoritative_test_workflow_definition,
@@ -198,6 +203,15 @@ def test_conversation_turn_workflow_uses_deterministic_critic_and_gate() -> None
         t.to_state == "apply_recovery_retry" and t.reason == "retry_execution"
         for t in recovery_decision.transitions
     )
+    retry_transition = next(
+        t for t in recovery_decision.transitions if t.reason == "retry_execution"
+    )
+    retry_conditions = retry_transition.condition_spec.get("conditions") or []
+    assert {
+        "kind": "context_flag",
+        "key": "completion_gate_repeat_eligible",
+        "expected": True,
+    } in retry_conditions
     assert any(
         t.to_state == "apply_recovery_tool_batch"
         and t.reason == "execute_tool_batch"
@@ -215,18 +229,7 @@ def test_conversation_turn_workflow_uses_deterministic_critic_and_gate() -> None
     )
 
     recovery_retry = workflow.states["apply_recovery_retry"]
-    assert recovery_retry.actions[0].action_id == "workflow_control.context_set"
-    retry_inputs = recovery_retry.actions[0].inputs
-    retry_assignments = retry_inputs.get("assignments")
-    assert isinstance(retry_assignments, list)
-    assert {
-        "key": "selected_workflow_id",
-        "value_from_context": "turn_next_action_target_workflow_id",
-    } in retry_assignments
-    assert {"key": "response_text", "value": ""} in retry_assignments
-    assert {"key": "final_response", "value": ""} in retry_assignments
-    assert {"key": "current_response", "value": ""} in retry_assignments
-    assert {"key": "selected_workflow_user_response", "value": ""} in retry_assignments
+    assert recovery_retry.actions[0].action_id == "turn_execution.prepare_recovery_retry"
     assert any(
         t.to_state == "execution" and t.reason == "recovery_retry_prepared"
         for t in recovery_retry.transitions
@@ -238,7 +241,7 @@ def test_conversation_turn_workflow_uses_deterministic_critic_and_gate() -> None
     assert tool_batch_inputs.get("tool_calls_context_key") == "turn_next_action_tool_calls"
     assert tool_batch_inputs.get("tool_batch_cap") == 4
     assert any(
-        t.to_state == "narration" and t.reason == "recovery_tool_batch_executed"
+        t.to_state == "critic" and t.reason == "recovery_tool_batch_executed"
         for t in recovery_tool_batch.transitions
     )
 
@@ -486,3 +489,195 @@ def test_conversation_turn_recovery_can_execute_direct_tool_batch() -> None:
     assert completion_report["action_type"] == "execute_tool_batch"
     assert completion_report["executed_tool_call_count"] == 1
     assert result.data["invocations"][0]["tool"] == "test.lookup_current_user"
+
+
+def test_conversation_turn_recovery_retry_progresses_across_multiple_prompt_targets(
+    monkeypatch,
+) -> None:
+    patch_representation_profile_loader(monkeypatch)
+    workflow = build_authoritative_test_workflow_definition(
+        CONVERSATION_TURN_EXECUTION_WORKFLOW_ID
+    )
+
+    def _fake_selected_workflow_definition() -> WorkflowDefinition:
+        return WorkflowDefinition(
+            workflow_id="#V#fake_multi_target_paper_workflow",
+            initial_state="materialise",
+            states={
+                "materialise": WorkflowStateSpec(
+                    state_id="materialise",
+                    actions=(WorkflowActionInvocation(action_id="test.materialise_target"),),
+                    terminal=True,
+                )
+            },
+            termination_states=("materialise",),
+        )
+
+    definitions = {
+        "#V#fake_multi_target_paper_workflow": _fake_selected_workflow_definition(),
+    }
+    execution_to_narration = next(
+        transition
+        for transition in workflow.states["execution"].transitions
+        if transition.to_state == "narration"
+    )
+    recovery_definition = WorkflowDefinition(
+        workflow_id=workflow.workflow_id,
+        initial_state="execution",
+        states={
+            "execution": WorkflowStateSpec(
+                state_id="execution",
+                actions=workflow.states["execution"].actions,
+                transitions=(
+                    WorkflowTransitionSpec(
+                        to_state="critic",
+                        condition=execution_to_narration.condition,
+                        condition_spec=execution_to_narration.condition_spec,
+                        description=execution_to_narration.description,
+                        reason=execution_to_narration.reason,
+                    ),
+                ),
+                terminal=False,
+                metadata=workflow.states["execution"].metadata,
+            ),
+            "critic": workflow.states["critic"],
+            "completion_gate": workflow.states["completion_gate"],
+            "recovery_decision": WorkflowStateSpec(
+                state_id="recovery_decision",
+                actions=(
+                    WorkflowActionInvocation(
+                        action_id="llm.action",
+                        inputs=workflow.states["recovery_decision"].actions[0].inputs,
+                        execution_mode=WORKFLOW_STEP_EXECUTION_MODE_LLM,
+                        prompt_contract={
+                            "prompt_text": "Return JSON only with a turn_next_action."
+                        },
+                        llm_policy=workflow.states["recovery_decision"].actions[0].llm_policy,
+                        validation_policy=workflow.states["recovery_decision"]
+                        .actions[0]
+                        .validation_policy,
+                    ),
+                ),
+                transitions=workflow.states["recovery_decision"].transitions,
+                terminal=workflow.states["recovery_decision"].terminal,
+                metadata=workflow.states["recovery_decision"].metadata,
+            ),
+            "apply_recovery_retry": workflow.states["apply_recovery_retry"],
+            "apply_recovery_answer": workflow.states["apply_recovery_answer"],
+            "apply_recovery_follow_up": workflow.states["apply_recovery_follow_up"],
+            "completed": workflow.states["completed"],
+            "failed": workflow.states["failed"],
+        },
+        termination_states=workflow.termination_states,
+        purpose=workflow.purpose,
+        metadata=workflow.metadata,
+    )
+
+    processed_targets: list[str] = []
+
+    def _handle_materialise_target(
+        request: WorkflowActionRequest,
+    ) -> WorkflowActionResult:
+        from src.backend.services.arxiv_paper_link_service import extract_arxiv_id_candidates
+
+        raw_target = request.data.get("arxiv_id") or request.data.get("source_uri")
+        if not isinstance(raw_target, str) or not raw_target.strip():
+            prompt_candidates = extract_arxiv_id_candidates(request.data.get("prompt"))
+            raw_target = prompt_candidates[0] if prompt_candidates else ""
+        target = str(raw_target).strip()
+        processed_targets.append(target)
+        return WorkflowActionResult(
+            outputs={
+                "response_text": f"Handled {target}",
+                "completion_report": {
+                    "schema_version": "selected_workflow_result.v1",
+                    "workflow_id": "#V#fake_multi_target_paper_workflow",
+                    "response_text": f"Handled {target}",
+                },
+                "invocations": [
+                    {
+                        "tool": "download_paper",
+                        "arguments": {"arxiv_id": target},
+                        "payload": {"success": True, "arxiv_id": target},
+                    },
+                    {
+                        "tool": "materialise_scholarly_representation_for_file_copy",
+                        "arguments": {"arxiv_id": target},
+                        "payload": {
+                            "success": True,
+                            "arxiv_id": target,
+                            "scholarly_representation": {
+                                "attempted": True,
+                                "verified": True,
+                            },
+                        },
+                    },
+                ],
+                "tool_messages": [],
+            }
+        )
+
+    registry = ActionRegistry()
+    register_control_flow_actions(
+        registry,
+        definition_loader=lambda workflow_id: definitions.get(workflow_id),
+    )
+    register_subworkflow_actions(
+        registry,
+        definition_loader=lambda workflow_id: definitions.get(workflow_id),
+    )
+    register_turn_execution_actions(registry)
+    registry.register_if_absent(
+        ActionSpec(
+            action_id="test.materialise_target",
+            handler=_handle_materialise_target,
+            description="Materialise one synthetic paper target for recovery-loop tests.",
+        )
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.registry_factory.get_shared_durable_action_registry",
+        lambda: registry,
+    )
+
+    llm_client = MagicMock()
+    llm_client.generate.return_value = (
+        '{"turn_next_action":{"action_type":"retry_execution",'
+        '"target_workflow_id":"#V#fake_multi_target_paper_workflow",'
+        '"response_text":null,'
+        '"tool_calls":null},'
+        '"reasoning":"Another unresolved paper target remains, so retry the same workflow on the next target."}'
+    )
+
+    result = WorkflowExecutor(registry=registry, max_transitions=16).run(
+        recovery_definition,
+        environment=WorkflowEnvironment(llm_client=llm_client),
+        data={
+            "prompt": (
+                "eprint version: https://arxiv.org/abs/2310.03714\n"
+                "arXiv preprint version: https://arxiv.org/abs/2308.03688"
+            ),
+            "user_prompt": (
+                "eprint version: https://arxiv.org/abs/2310.03714\n"
+                "arXiv preprint version: https://arxiv.org/abs/2308.03688"
+            ),
+            "selected_workflow_id": "#V#fake_multi_target_paper_workflow",
+        },
+    )
+
+    assert result.completed is True
+    assert result.final_state == "completed"
+    assert processed_targets == ["2310.03714", "2308.03688"]
+    assert result.data["turn_recovery_last_target_token"] == (
+        "https://arxiv.org/abs/2308.03688"
+    )
+    assert result.data["selected_workflow_id"] == "#V#fake_multi_target_paper_workflow"
+    assert len(result.data["invocations"]) == 4
+    assert [invocation["arguments"]["arxiv_id"] for invocation in result.data["invocations"]] == [
+        "2310.03714",
+        "2310.03714",
+        "2308.03688",
+        "2308.03688",
+    ]
+    required_effects = result.data["required_effects"]
+    assert [effect["status"] for effect in required_effects] == ["satisfied", "satisfied"]
+    assert result.data["completion_gate_requires_follow_up"] is False

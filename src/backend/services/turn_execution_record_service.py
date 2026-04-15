@@ -4019,6 +4019,86 @@ def _build_representation_required_effect_template(
     }
 
 
+def _classify_prompt_representation_target_source(target: str) -> str:
+    lowered = target.lower()
+    if lowered.startswith("http://") or lowered.startswith("https://"):
+        return "url"
+    if extract_arxiv_id_candidates(target):
+        return "url"
+    if lowered.startswith("#v#") and "file_copy" in lowered:
+        return "file_copy"
+    return "unknown"
+
+
+def _build_prompt_representation_targets(
+    *,
+    prompt_text: str,
+    aux_llm_calls: Sequence[Mapping[str, Any]] | None,
+    profile_id: str,
+) -> tuple[list[str], dict[str, Any]]:
+    file_copy_ids = _dedupe_string_sequence(
+        [
+            *_extract_file_copy_concept_ids_from_text(prompt_text),
+            *_extract_required_file_copy_ids_from_aux(aux_llm_calls),
+        ]
+    )
+    urls = _extract_urls_from_text(prompt_text)
+    arxiv_ids = extract_arxiv_id_candidates(prompt_text)
+    url_arxiv_ids = extract_arxiv_id_candidates(*urls)
+    url_arxiv_lookup = {item.lower() for item in url_arxiv_ids}
+    extra_arxiv_ids = (
+        [
+            arxiv_id
+            for arxiv_id in arxiv_ids
+            if arxiv_id.lower() not in url_arxiv_lookup
+        ]
+        if profile_id == "paper"
+        else []
+    )
+    targets = _dedupe_string_sequence([*file_copy_ids, *urls, *extra_arxiv_ids])
+    artefact_context = {
+        "file_copy_ids": file_copy_ids,
+        "urls": urls,
+        "arxiv_ids": _dedupe_string_sequence([*url_arxiv_ids, *extra_arxiv_ids]),
+        "source_hints": _extract_representation_source_hints(prompt_text),
+    }
+    return targets, artefact_context
+
+
+def _build_prompt_representation_effects(
+    *,
+    profile: Mapping[str, Any],
+    targets: Sequence[str],
+) -> list[dict[str, Any]]:
+    effects: list[dict[str, Any]] = []
+    profile_id = _safe_str(profile.get("profile_id")) or "representation"
+    for index, target in enumerate(_dedupe_string_sequence(targets), start=1):
+        target_source = _classify_prompt_representation_target_source(target)
+        required_tools = _resolve_representation_required_tools(
+            profile=profile,
+            artefact_source=target_source,
+        )
+        if not required_tools:
+            continue
+        effect = _build_representation_required_effect_template(
+            profile=profile,
+            required_tools=required_tools,
+            targets=[target],
+        )
+        effect["effect_id"] = f"effect_{profile_id}_representation_{index}"
+        effect["artefact_source"] = target_source
+        effect["required_tools_match"] = "all" if len(required_tools) > 1 else "any"
+        effect["status"] = "not_executed"
+        effect["status_reason"] = (
+            "No required representation tool execution was observed."
+        )
+        effect["failure_code"] = f"{profile_id}_representation_not_executed"
+        effect["failure_codes"] = [f"{profile_id}_representation_not_executed"]
+        effect["prompt_target"] = target
+        effects.append(effect)
+    return effects
+
+
 def _build_fail_closed_representation_effect(
     *,
     failure_code: str,
@@ -4083,9 +4163,120 @@ def _build_representation_required_effects_contract(
     prompt_text: Any,
     aux_llm_calls: Sequence[Mapping[str, Any]] | None,
 ) -> dict[str, Any] | None:
-    del prompt_text
     continuation_context = _extract_applied_workflow_continuation_context(aux_llm_calls)
-    return _representation_contract_from_continuation_context(continuation_context)
+    continuation_contract = _representation_contract_from_continuation_context(
+        continuation_context
+    )
+    if isinstance(continuation_contract, Mapping):
+        return continuation_contract
+
+    prompt_value = _safe_str(prompt_text)
+    if not prompt_value or prompt_explicitly_denies_write(prompt_value):
+        return None
+
+    prompt_requests_representation = _prompt_requests_representation_action(prompt_value)
+    low_risk_arxiv_representation = _prompt_implies_low_risk_arxiv_representation(
+        prompt_value,
+        aux_llm_calls=aux_llm_calls,
+    )
+    prompt_arxiv_ids = extract_arxiv_id_candidates(prompt_value)
+    low_risk_arxiv_target_list = (
+        low_risk_arxiv_representation and len(prompt_arxiv_ids) > 1
+    )
+    if not prompt_requests_representation and not low_risk_arxiv_target_list:
+        return None
+
+    profiles, diagnostics = _load_representation_domain_profiles_from_vontology()
+    profile = _select_representation_domain_profile(
+        prompt_value,
+        profiles=profiles,
+    )
+    if profile is None and low_risk_arxiv_target_list:
+        profile = next(
+            (
+                dict(item)
+                for item in profiles
+                if (_safe_str(item.get("profile_id")) or "").lower() == "paper"
+            ),
+            None,
+        )
+    if profile is None:
+        return None
+
+    profile_id = _safe_str(profile.get("profile_id")) or "representation"
+    targets, artefact_context = _build_prompt_representation_targets(
+        prompt_text=prompt_value,
+        aux_llm_calls=aux_llm_calls,
+        profile_id=profile_id,
+    )
+    if not targets:
+        return None
+
+    required_effects = _build_prompt_representation_effects(
+        profile=profile,
+        targets=targets,
+    )
+    if not required_effects:
+        failure_code = f"{profile_id}_representation_requirements_missing"
+        required_effects = [
+            _build_fail_closed_representation_effect(
+                failure_code=failure_code,
+                status_reason=(
+                    "Representation contract profile did not resolve any required tools "
+                    "for the detected prompt targets."
+                ),
+                targets=targets,
+            )
+        ]
+        fail_closed = True
+        fail_closed_reason = failure_code
+    else:
+        fail_closed = False
+        fail_closed_reason = ""
+
+    profile_resolution = {
+        "requested_profile_concept_ids": _dedupe_string_sequence(
+            diagnostics.get("requested_concept_ids") or []
+        )
+        if isinstance(diagnostics, Mapping)
+        else [],
+        "loaded_profile_concept_ids": _dedupe_string_sequence(
+            diagnostics.get("loaded_concept_ids") or []
+        )
+        if isinstance(diagnostics, Mapping)
+        else [],
+        "selected_profile_concept_id": _safe_str(profile.get("profile_concept_id")),
+        "selected_profile_id": profile_id,
+        "fail_closed": fail_closed,
+        "fail_closed_reason": fail_closed_reason,
+    }
+    default_decision_policy = profile.get("default_decision_policy")
+    contract_payload: dict[str, Any] = {
+        "schema_version": _REPRESENTATION_CONTRACT_SCHEMA_VERSION,
+        "contract_id": f"prompt_representation_{profile_id}_{_hash_payload(targets) or 'targets'}",
+        "intent_class": "representation",
+        "domain_profile_id": profile_id,
+        "domain_profile_concept_id": _safe_str(profile.get("profile_concept_id")),
+        "artefact_context": artefact_context,
+        "profile_source": (
+            _safe_str(diagnostics.get("representation_profile_source"))
+            if isinstance(diagnostics, Mapping)
+            else ""
+        ),
+        "profile_version_hash": (
+            _safe_str(diagnostics.get("profile_version_hash"))
+            if isinstance(diagnostics, Mapping)
+            else ""
+        ),
+        "profile_resolution": profile_resolution,
+        "default_decision_policy": (
+            dict(default_decision_policy)
+            if isinstance(default_decision_policy, Mapping)
+            else dict(_REPRESENTATION_DEFAULT_DECISION_POLICY_FALLBACK)
+        ),
+        "required_effects": required_effects,
+    }
+    return contract_payload
 
 
 def _load_workflow_required_effects_contract(

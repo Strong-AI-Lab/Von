@@ -541,14 +541,17 @@ def test_turn_execution_critic_flags_missing_scholarly_representation(monkeypatc
     assert isinstance(required_effects, list)
     assert len(required_effects) == 1
     effect = required_effects[0]
-    assert effect.get("effect_type") == "tool_execution"
+    assert effect.get("effect_type") == "scholarly_representation"
     assert effect.get("status") == "not_executed"
-    assert effect.get("failure_code") == "tool_dispatch_boundary_missing"
+    assert effect.get("failure_code") == "paper_representation_not_executed"
 
     completion_gate = record.get("completion_gate")
     assert isinstance(completion_gate, dict)
     assert completion_gate.get("decision") == "escalation_required"
-    assert completion_gate.get("decision_reason") == "Required tool execution was not observed."
+    assert (
+        completion_gate.get("decision_reason")
+        == "No required representation tool execution was observed."
+    )
     assert completion_gate.get("safe_to_claim_completion") is False
 
 

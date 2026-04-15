@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 TURN_EXECUTION_ROUTE_ACTION_ID = "turn_execution.route"
 TURN_EXECUTION_EXECUTE_SELECTED_ACTION_ID = "turn_execution.execute_selected"
 TURN_EXECUTION_EXECUTE_TOOL_BATCH_ACTION_ID = "turn_execution.execute_tool_batch"
+TURN_EXECUTION_PREPARE_RECOVERY_RETRY_ACTION_ID = "turn_execution.prepare_recovery_retry"
 TURN_EXECUTION_CRITIC_ACTION_ID = "turn_execution.critic"
 TURN_EXECUTION_COMPLETION_GATE_ACTION_ID = "turn_execution.completion_gate"
 _DEFAULT_RECOVERY_TOOL_BATCH_CAP = 4
@@ -120,6 +121,99 @@ def _extract_tool_batch_result_payload(outputs: Mapping[str, Any]) -> Any:
         if payload is not None:
             return payload
     return outputs
+
+
+def _coerce_required_effect_targets(raw_value: Any) -> list[str]:
+    if not isinstance(raw_value, Sequence) or isinstance(
+        raw_value, (str, bytes, bytearray)
+    ):
+        return []
+    targets: list[str] = []
+    seen: set[str] = set()
+    for item in raw_value:
+        text = _coerce_non_empty_text(item)
+        if not text:
+            continue
+        lowered = text.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        targets.append(text)
+    return targets
+
+
+def _select_unresolved_recovery_target(
+    required_effects: Sequence[Mapping[str, Any]] | None,
+    *,
+    previous_target_token: str | None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    unresolved: list[tuple[dict[str, Any], str]] = []
+    for effect in required_effects or ():
+        if not isinstance(effect, Mapping):
+            continue
+        status = (_coerce_non_empty_text(effect.get("status")) or "").lower()
+        if status not in {"not_executed", "not_satisfied"}:
+            continue
+        for target in _coerce_required_effect_targets(effect.get("targets")):
+            unresolved.append((dict(effect), target))
+
+    if not unresolved:
+        return None, None
+
+    previous_target = (_coerce_non_empty_text(previous_target_token) or "").lower()
+    if previous_target:
+        for effect, target in unresolved:
+            if target.lower() != previous_target:
+                return effect, target
+    effect, target = unresolved[0]
+    return effect, target
+
+
+def _build_recovery_retry_launch_inputs(target_token: str | None) -> dict[str, Any]:
+    launch_inputs: dict[str, Any] = {
+        "source_uri": None,
+        "arxiv_id": None,
+        "file_copy_concept_id": None,
+        "concept_id": None,
+        "paper_concept_id": None,
+    }
+    target = _coerce_non_empty_text(target_token)
+    if not target:
+        return launch_inputs
+
+    lowered = target.lower()
+    if lowered.startswith("http://") or lowered.startswith("https://"):
+        launch_inputs["source_uri"] = target
+        try:
+            from ...services.arxiv_paper_link_service import extract_arxiv_id_candidates
+
+            candidates = extract_arxiv_id_candidates(target)
+        except Exception:
+            candidates = []
+        if candidates:
+            launch_inputs["arxiv_id"] = candidates[0]
+        return launch_inputs
+
+    try:
+        from ...services.arxiv_paper_link_service import extract_arxiv_id_candidates
+
+        arxiv_candidates = extract_arxiv_id_candidates(target)
+    except Exception:
+        arxiv_candidates = []
+    if arxiv_candidates:
+        arxiv_id = arxiv_candidates[0]
+        launch_inputs["arxiv_id"] = arxiv_id
+        launch_inputs["source_uri"] = f"https://arxiv.org/abs/{arxiv_id}"
+        return launch_inputs
+
+    if lowered.startswith("#v#") and "file_copy" in lowered:
+        launch_inputs["file_copy_concept_id"] = target
+        launch_inputs["concept_id"] = target
+        return launch_inputs
+
+    if lowered.startswith("#v#"):
+        launch_inputs["concept_id"] = target
+    return launch_inputs
 
 
 def _build_turn_execution_route_handler() -> Any:
@@ -292,6 +386,33 @@ def _build_turn_execution_execute_selected_handler() -> Any:
                 else request.data.get("workflow_discovery")
             ),
         )
+        raw_existing_invocations = request.data.get("invocations")
+        existing_invocations = (
+            list(raw_existing_invocations)
+            if isinstance(raw_existing_invocations, list)
+            else []
+        )
+        raw_new_invocations = outputs.get("invocations")
+        new_invocations = (
+            list(raw_new_invocations) if isinstance(raw_new_invocations, list) else []
+        )
+        if existing_invocations:
+            outputs["invocations"] = [*existing_invocations, *new_invocations]
+
+        raw_existing_tool_messages = request.data.get("tool_messages")
+        existing_tool_messages = (
+            list(raw_existing_tool_messages)
+            if isinstance(raw_existing_tool_messages, list)
+            else []
+        )
+        raw_new_tool_messages = outputs.get("tool_messages")
+        new_tool_messages = (
+            list(raw_new_tool_messages)
+            if isinstance(raw_new_tool_messages, list)
+            else []
+        )
+        if existing_tool_messages:
+            outputs["tool_messages"] = [*existing_tool_messages, *new_tool_messages]
         return WorkflowActionResult(outputs=outputs)
     return _handle
 
@@ -427,6 +548,80 @@ def _build_turn_execution_execute_tool_batch_handler(
     return _handle
 
 
+def _build_turn_execution_prepare_recovery_retry_handler() -> Any:
+    def _handle(request: WorkflowActionRequest) -> WorkflowActionResult:
+        target_workflow_id = _coerce_non_empty_text(
+            request.data.get("turn_next_action_target_workflow_id")
+            or request.data.get("selected_workflow_id")
+        )
+        if not target_workflow_id:
+            return WorkflowActionResult(
+                status="failed",
+                error="turn_recovery_retry_target_workflow_missing",
+            )
+
+        required_effects = (
+            request.data.get("required_effects")
+            if isinstance(request.data.get("required_effects"), list)
+            else []
+        )
+        selected_effect, target_token = _select_unresolved_recovery_target(
+            required_effects,
+            previous_target_token=_coerce_non_empty_text(
+                request.data.get("turn_recovery_last_target_token")
+            ),
+        )
+        launch_inputs = _build_recovery_retry_launch_inputs(target_token)
+        selection_payload = {
+            "selected_target_token": target_token,
+            "selected_effect_id": (
+                _coerce_non_empty_text(selected_effect.get("effect_id"))
+                if isinstance(selected_effect, Mapping)
+                else None
+            ),
+            "selected_effect_type": (
+                _coerce_non_empty_text(selected_effect.get("effect_type"))
+                if isinstance(selected_effect, Mapping)
+                else None
+            ),
+            "launch_inputs": dict(launch_inputs),
+            "selection_reason": (
+                "selected_next_unresolved_target"
+                if target_token
+                else "no_unresolved_target_found"
+            ),
+        }
+
+        outputs: dict[str, Any] = {
+            "selected_workflow_id": target_workflow_id,
+            "workflow_continuation_launch_inputs": dict(launch_inputs),
+            "turn_recovery_attempted": True,
+            "turn_recovery_last_decision": (
+                _coerce_non_empty_text(request.data.get("turn_next_action_type"))
+                or "retry_execution"
+            ),
+            "turn_recovery_last_reasoning": _coerce_non_empty_text(
+                request.data.get("turn_next_action_reasoning")
+            )
+            or "",
+            "turn_recovery_last_target_workflow_id": target_workflow_id,
+            "turn_recovery_last_target_token": target_token or "",
+            "turn_recovery_last_effect_id": _coerce_non_empty_text(
+                selection_payload.get("selected_effect_id")
+            )
+            or "",
+            "turn_recovery_retry_selection": selection_payload,
+            "response_text": "",
+            "final_response": "",
+            "current_response": "",
+            "selected_workflow_user_response": "",
+        }
+        outputs.update(launch_inputs)
+        return WorkflowActionResult(outputs=outputs)
+
+    return _handle
+
+
 def _build_turn_execution_critic_handler() -> Any:
     def _handle(request: WorkflowActionRequest) -> WorkflowActionResult:
         return run_turn_execution_critic(
@@ -476,6 +671,17 @@ def register_turn_execution_actions(registry: ActionRegistry) -> None:
             description=(
                 "Execute a bounded direct recovery tool batch and return the turn "
                 "to narration/verification surfaces."
+            ),
+        )
+    )
+
+    registry.register_if_absent(
+        ActionSpec(
+            action_id=TURN_EXECUTION_PREPARE_RECOVERY_RETRY_ACTION_ID,
+            handler=_build_turn_execution_prepare_recovery_retry_handler(),
+            description=(
+                "Prepare the next bounded recovery retry by selecting the next "
+                "unresolved target and projecting singular launch inputs."
             ),
         )
     )

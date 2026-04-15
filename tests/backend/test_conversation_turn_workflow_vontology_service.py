@@ -98,6 +98,8 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     assert "next best bounded automated step" in recovery_text
     assert "`turn_next_action`" in recovery_text
     assert "`action_type`" in recovery_text
+    assert "completion_gate_repeat_eligible" in recovery_text
+    assert "unresolved mechanically extractable targets remain" in recovery_text
     assert (
         "`\"retry_execution\"`, `\"execute_tool_batch\"`, "
         "`\"respond_with_answer\"`, or `\"respond_with_follow_up\"`"
@@ -201,6 +203,10 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
         for field in recovery_context_fields
     )
     assert any(
+        isinstance(field, dict) and field.get("context_key") == "required_effects"
+        for field in recovery_context_fields
+    )
+    assert any(
         isinstance(field, dict)
         and field.get("context_key") == "turn_recovery_last_reasoning"
         for field in recovery_context_fields
@@ -239,6 +245,10 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     recovery_tool_batch = turn_definition.states[recovery_tool_batch_step_id]
     recovery_tool_batch_action = recovery_tool_batch.actions[0]
     assert recovery_tool_batch_action.action_id == "turn_execution.execute_tool_batch"
+    recovery_tool_batch_targets = {
+        transition.to_state for transition in recovery_tool_batch.transitions
+    }
+    assert critic_step_id in recovery_tool_batch_targets
     recovery_mappings = recovery_decision.metadata.get("tool_output_context_mappings") or []
     assert any(
         mapping.get("context_key") == "turn_next_action"

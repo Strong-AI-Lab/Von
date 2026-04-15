@@ -3,7 +3,9 @@ from __future__ import annotations
 import pytest
 
 from representation_intent_regression_helpers import (
+    assert_low_risk_default_policy,
     build_turn_record as _build_record,
+    patch_representation_profile_loader,
 )
 from src.backend.workflows.engine import WorkflowDefinition
 
@@ -118,7 +120,7 @@ def _stub_shared_workflow_registry(monkeypatch):
     )
     monkeypatch.setattr(
         "src.backend.services.turn_execution_record_service.build_conversation_turn_stage_path",
-        lambda runtime_stages, workflow_id=None: {
+        lambda runtime_stages, workflow_id=None, selected_workflow_id=None: {
             "schema_version": "conversation_turn_stage_path.v1",
             "workflow_id": workflow_id,
             "workflow_id_source": "test_stub",
@@ -129,25 +131,38 @@ def _stub_shared_workflow_registry(monkeypatch):
     )
 
 
-def test_prompt_only_representation_request_does_not_emit_required_effects_contract() -> None:
+@pytest.fixture(autouse=True)
+def _patch_representation_profiles(monkeypatch):
+    patch_representation_profile_loader(monkeypatch)
+
+
+def test_prompt_file_copy_representation_request_emits_required_effects_contract() -> None:
     record = _build_record(
         prompt_text="Fully represent the corresponding paper from #V#uploaded_file_copy_abc123."
     )
 
     execution = record.get("execution")
     assert isinstance(execution, dict)
-    assert execution.get("required_effects_contract") is None
+    contract = execution.get("required_effects_contract")
+    assert isinstance(contract, dict)
+    assert contract.get("domain_profile_id") == "paper"
+    assert contract.get("artefact_context", {}).get("file_copy_ids") == [
+        "#V#uploaded_file_copy_abc123"
+    ]
+    assert_low_risk_default_policy(contract)
 
     required_effects = record.get("required_effects") or []
-    assert all(
-        str(effect.get("effect_type") or "") not in {"scholarly_representation"}
-        and not str(effect.get("effect_type") or "").startswith("representation_")
-        for effect in required_effects
-        if isinstance(effect, dict)
-    )
+    assert len(required_effects) == 1
+    effect = required_effects[0]
+    assert effect.get("effect_type") == "scholarly_representation"
+    assert effect.get("targets") == ["#V#uploaded_file_copy_abc123"]
+    assert effect.get("required_tools") == [
+        "materialise_scholarly_representation_for_file_copy"
+    ]
+    assert effect.get("required_tools_match") == "any"
 
 
-def test_prompt_tool_requirement_telemetry_alone_does_not_emit_required_effects_contract() -> None:
+def test_prompt_tool_requirement_telemetry_can_supply_missing_target_ids() -> None:
     record = _build_record(
         aux_llm_calls=[
             {
@@ -161,39 +176,71 @@ def test_prompt_tool_requirement_telemetry_alone_does_not_emit_required_effects_
 
     execution = record.get("execution")
     assert isinstance(execution, dict)
-    assert execution.get("required_effects_contract") is None
+    contract = execution.get("required_effects_contract")
+    assert isinstance(contract, dict)
+    assert contract.get("artefact_context", {}).get("file_copy_ids") == [
+        "#V#uploaded_file_copy_abc123"
+    ]
+    required_effects = record.get("required_effects") or []
+    assert len(required_effects) == 1
+    assert required_effects[0].get("targets") == ["#V#uploaded_file_copy_abc123"]
 
 
-def test_read_only_representation_tool_activity_does_not_create_representation_contract_without_continuation() -> None:
+def test_prompt_targeted_representation_request_emits_required_effects_contract() -> None:
     record = _build_record(
         prompt_text="Represent this person profile from this CV file #V#uploaded_file_copy_person_1.",
-        tool_invocations=[
-            {
-                "tool": "interpret_file_copy",
-                "payload": {
-                    "success": True,
-                    "concept_id": "#V#uploaded_file_copy_person_1",
-                    "person_representation": {
-                        "attempted": True,
-                        "verified": True,
-                        "person_concept_id": "#V#person_jane_doe_1234abcd",
-                    },
-                },
-            }
-        ],
     )
 
     execution = record.get("execution")
     assert isinstance(execution, dict)
-    assert execution.get("required_effects_contract") is None
+    contract = execution.get("required_effects_contract")
+    assert isinstance(contract, dict)
+    assert contract.get("domain_profile_id") == "person"
+    assert_low_risk_default_policy(contract)
+    assert contract.get("artefact_context", {}).get("file_copy_ids") == [
+        "#V#uploaded_file_copy_person_1"
+    ]
 
     required_effects = record.get("required_effects") or []
-    assert all(
-        str(effect.get("effect_type") or "") not in {"scholarly_representation"}
-        and not str(effect.get("effect_type") or "").startswith("representation_")
-        for effect in required_effects
-        if isinstance(effect, dict)
+    assert len(required_effects) == 1
+    effect = required_effects[0]
+    assert effect.get("effect_type") == "representation_person"
+    assert effect.get("targets") == ["#V#uploaded_file_copy_person_1"]
+    assert effect.get("status") == "not_executed"
+
+
+def test_low_risk_arxiv_prompt_list_emits_one_required_effect_per_target() -> None:
+    record = _build_record(
+        prompt_text=(
+            "eprint version: https://arxiv.org/abs/2310.03714\n"
+            "arXiv preprint version: https://arxiv.org/abs/2308.03688"
+        ),
+        response_text="Still working on it.",
     )
+
+    execution = record.get("execution")
+    assert isinstance(execution, dict)
+    contract = execution.get("required_effects_contract")
+    assert isinstance(contract, dict)
+    assert contract.get("domain_profile_id") == "paper"
+    assert contract.get("artefact_context", {}).get("urls") == [
+        "https://arxiv.org/abs/2310.03714",
+        "https://arxiv.org/abs/2308.03688",
+    ]
+    assert_low_risk_default_policy(contract)
+
+    required_effects = record.get("required_effects") or []
+    assert len(required_effects) == 2
+    assert [effect.get("targets") for effect in required_effects] == [
+        ["https://arxiv.org/abs/2310.03714"],
+        ["https://arxiv.org/abs/2308.03688"],
+    ]
+    assert all(effect.get("required_tools_match") == "all" for effect in required_effects)
+    assert all(effect.get("status") == "not_executed" for effect in required_effects)
+
+    completion_gate = record.get("completion_gate") or {}
+    assert completion_gate.get("requires_follow_up") is True
+    assert completion_gate.get("safe_to_claim_completion") is False
 
 
 def test_continuation_context_reuses_representation_contract() -> None:
