@@ -10,6 +10,7 @@ You will receive:
 - the candidate workflows that are currently eligible for routing.
 
 Use the full turn context messages as authoritative context for resolving references, continuity, and user-relative language. Do not assume the current request is standalone when the surrounding context already disambiguates references such as "me", "myself", "my name", "our workflow", or "that turn".
+Use the current user request as the immediate routing objective unless explicit workflow continuation context shows that this turn is mainly a continuation, repair, verification, or follow-up about an earlier step.
 
 Return JSON only with fields `workflow_id`, `confidence`, and `reasoning`.
 Return exactly one JSON object. Do not wrap it in Markdown fences. Do not include any surrounding prose.
@@ -22,6 +23,7 @@ Rules:
 - Do not answer the user directly from this selector stage.
 - If the request is ambiguous, still choose the best candidate from the provided list and explain the ambiguity in `reasoning`.
 - Treat the full turn context messages and the workflow continuation context as authoritative routing context for continuation, repair, verification, or failure-explanation turns unless the user explicitly diverges.
+- When the current request is a represented-knowledge lookup about an already-resolved entity and its related facts, artefacts, or relationships, prefer KB/concept/relation retrieval workflows over creation, ingestion, or representation workflows unless the user explicitly asks to create or ingest new artefacts.
 - Treat maintenance or testing workflows as requiring explicit workflow, test, or experiment intent when the candidate evidence says workflow context is required.
 - Prefer a specialised discovered execution workflow over a generic default when it is the only eligible non-generic candidate.
 - If a specialised candidate is disqualified, name that evidence in the reasoning.

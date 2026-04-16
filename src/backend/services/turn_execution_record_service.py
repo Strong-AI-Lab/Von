@@ -3323,7 +3323,13 @@ def _summarise_tool_execution_context(
             _safe_str(latest_workflow_instance_submission.get("workflow_id"))
             or dispatch_workflow_id
         )
-        selected_execution_mode = selected_execution_mode or "custom_workflow"
+        if not selected_execution_mode:
+            if tool_route_selected:
+                selected_execution_mode = "tool_pipeline"
+            elif plain_response_route_selected:
+                selected_execution_mode = "direct_response"
+            else:
+                selected_execution_mode = "custom_workflow"
         dispatch_terminal_status = "failed"
         dispatch_terminal_failure_reason = (
             submission_reason_code or "workflow_instance_submission_failed"
@@ -3351,6 +3357,7 @@ def _summarise_tool_execution_context(
     if not dispatch_workflow_id and selected_execution_mode in {
         "direct_response",
         "custom_workflow",
+        "tool_pipeline",
     }:
         dispatch_workflow_id = selected_workflow_id or ""
     custom_workflow_execution = _build_custom_workflow_execution_summary(

@@ -384,6 +384,16 @@ def test_generate_authorship_turn_prefers_grounded_omission_over_unsupported_pap
     assert "expected_outcome_inference" in stage_by_id
     assert "selector_preparation" in stage_by_id
     assert "selector_decision" in stage_by_id
+    stage_diagnostics = diagnostics.get("stage_diagnostics") or []
+    if stage_diagnostics:
+        stage_diagnostic_ids = {
+            str(entry.get("stage_id"))
+            for entry in stage_diagnostics
+            if isinstance(entry, dict) and entry.get("stage_id")
+        }
+        assert "expected_outcome_inference" in stage_diagnostic_ids
+        assert "selector_preparation" in stage_diagnostic_ids
+        assert "selector_decision" in stage_diagnostic_ids
     timing_breakdown = diagnostics.get("timing_breakdown") or {}
     assert any(
         str(entry.get("stage")) == "plain_response"
@@ -401,16 +411,18 @@ def test_generate_authorship_turn_prefers_grounded_omission_over_unsupported_pap
     assert direct_response_context_lineage.get("base_context_source") == (
         "augmented_context"
     )
-    assert (
-        direct_response_context_lineage.get("stage_added_message_count") or 0
-    ) >= 1
+    assert (direct_response_context_lineage.get("stage_added_message_count") or 0) >= 1
     assert any(
         "Expected answer contract for this turn"
         in str(message.get("content_preview") or "")
-        for message in (direct_response_context_lineage.get("stage_added_messages") or [])
+        for message in (
+            direct_response_context_lineage.get("stage_added_messages") or []
+        )
         if isinstance(message, dict)
     )
-    expected_outcome_contract = selected_workflow_trace.get("expected_outcome_contract") or {}
+    expected_outcome_contract = (
+        selected_workflow_trace.get("expected_outcome_contract") or {}
+    )
     assert expected_outcome_contract.get("precision_policy") == (
         "Prefer omission or explicit uncertainty over speculative recall."
     )

@@ -24,6 +24,13 @@ _SPOKEN_BLOCK_RE = re.compile(
     r"<spoken>\s*(.*?)\s*</spoken>",
     flags=re.DOTALL | re.IGNORECASE,
 )
+_CONVERSATION_TURN_LLM_TELEMETRY_STATES = frozenset(
+    {
+        "expected_outcome_inference",
+        "selector_decision",
+        "recovery_decision",
+    }
+)
 
 
 def _context_string(value: Any) -> str:
@@ -80,6 +87,15 @@ def _coerce_context_telemetry(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, Mapping):
         return None
     return {str(key): item for key, item in value.items() if isinstance(key, str)}
+
+
+def _conversation_turn_llm_phase_override(
+    request: WorkflowActionRequest,
+) -> str | None:
+    workflow_state_id = _context_string(request.workflow_state_id)
+    if workflow_state_id in _CONVERSATION_TURN_LLM_TELEMETRY_STATES:
+        return workflow_state_id
+    return None
 
 
 def _resolve_user_context_ids(
@@ -828,6 +844,22 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
         )
 
     stage = _llm_stage(llm_policy_map, request)
+    emit_phase_transition = (
+        request.data.get("emit_phase_transition")
+        if callable(request.data.get("emit_phase_transition"))
+        else None
+    )
+    telemetry_phase = _conversation_turn_llm_phase_override(request)
+    if callable(emit_phase_transition) and telemetry_phase:
+        emit_phase_transition(
+            telemetry_phase,
+            extra={
+                "result_summary": (
+                    "Running the authoritative LLM reasoning step for this turn stage"
+                ),
+                "workflow_state_id": telemetry_phase,
+            },
+        )
     if not request.environment.gateway:
         return _run_direct_llm_step(
             request=request,

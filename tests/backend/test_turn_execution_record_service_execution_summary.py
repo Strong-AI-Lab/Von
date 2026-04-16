@@ -36,7 +36,9 @@ def test_worker_unavailable_failure_code_only_applies_to_tool_routes() -> None:
     )
 
 
-def test_worker_unavailable_pre_dispatch_prepare_heartbeat_does_not_emit_tool_failure() -> None:
+def test_worker_unavailable_pre_dispatch_prepare_heartbeat_does_not_emit_tool_failure() -> (
+    None
+):
     summary = _summarise_tool_execution_context(
         workflow_routing={
             "workflow_id": "#V#tool_calling_workflow",
@@ -132,7 +134,9 @@ def test_tool_execution_summary_uses_tool_call_end_events_for_executed_count() -
     assert summary["executed_count"] == 1
 
 
-def test_tool_execution_summary_marks_missing_dispatch_boundary_after_tool_selection() -> None:
+def test_tool_execution_summary_marks_missing_dispatch_boundary_after_tool_selection() -> (
+    None
+):
     summary = _summarise_tool_execution_context(
         workflow_routing={
             "workflow_id": "#V#tool_calling_workflow",
@@ -160,7 +164,9 @@ def test_tool_execution_summary_marks_missing_dispatch_boundary_after_tool_selec
     assert "tool_dispatch_boundary_missing" in list(summary.get("failure_codes") or [])
 
 
-def test_tool_execution_summary_marks_missing_dispatch_boundary_after_custom_selection() -> None:
+def test_tool_execution_summary_marks_missing_dispatch_boundary_after_custom_selection() -> (
+    None
+):
     summary = _summarise_tool_execution_context(
         workflow_routing={
             "workflow_id": "#V#arxiv_paper_representation_workflow",
@@ -192,7 +198,9 @@ def test_tool_execution_summary_marks_missing_dispatch_boundary_after_custom_sel
     assert summary["custom_workflow_execution"]["observed"] is False
 
 
-def test_custom_workflow_summary_uses_selected_workflow_trace_when_dispatch_events_missing() -> None:
+def test_custom_workflow_summary_uses_selected_workflow_trace_when_dispatch_events_missing() -> (
+    None
+):
     summary = _summarise_tool_execution_context(
         workflow_routing={
             "workflow_id": "#V#arxiv_paper_representation_workflow",
@@ -297,7 +305,9 @@ def test_tool_execution_summary_preserves_local_handoff_failure_reason() -> None
 
     assert summary["workflow_handoff_started"] is False
     assert summary["workflow_handoff_failure_reason"] == "tool_pipeline_setup_exception"
-    assert summary["dispatch_terminal_failure_reason"] == "tool_pipeline_setup_exception"
+    assert (
+        summary["dispatch_terminal_failure_reason"] == "tool_pipeline_setup_exception"
+    )
     assert summary["failure_codes"] == [
         "tool_pipeline_setup_exception",
         "tool_dispatch_not_started",
@@ -305,7 +315,9 @@ def test_tool_execution_summary_preserves_local_handoff_failure_reason() -> None
     assert summary["last_successful_boundary"] == "workflow_terminal"
 
 
-def test_tool_execution_summary_preserves_custom_workflow_first_step_failure_locality() -> None:
+def test_tool_execution_summary_preserves_custom_workflow_first_step_failure_locality() -> (
+    None
+):
     summary = _summarise_tool_execution_context(
         workflow_routing={
             "workflow_id": "#V#meeting_invitation_testing_workflow",
@@ -428,7 +440,9 @@ def test_tool_execution_summary_preserves_custom_workflow_first_step_failure_loc
     assert summary["zero_tool_execution_expected"] is False
 
 
-def test_tool_execution_summary_promotes_authoritative_submission_failure_to_dispatch_failure() -> None:
+def test_tool_execution_summary_promotes_authoritative_submission_failure_to_dispatch_failure() -> (
+    None
+):
     summary = _summarise_tool_execution_context(
         workflow_routing={
             "workflow_id": "#V#conversation_turn_execution_workflow",
@@ -474,7 +488,58 @@ def test_tool_execution_summary_promotes_authoritative_submission_failure_to_dis
     )
 
 
-def test_tool_execution_summary_records_custom_workflow_action_and_side_effect_evidence() -> None:
+def test_tool_execution_summary_keeps_tool_pipeline_mode_for_submission_failure_without_boundaries() -> (
+    None
+):
+    summary = _summarise_tool_execution_context(
+        workflow_routing={
+            "workflow_id": "#V#tool_calling_workflow",
+            "verdict": "rag_selected",
+        },
+        turn_execution_diagnostics={
+            "latest_progress": {
+                "counters": {"tools_started": 0, "tools_completed": 0},
+                "diagnostic_events": [],
+            }
+        },
+        aux_llm_calls=[
+            {
+                "type": "workflow_selector",
+                "workflow_id": "#V#tool_calling_workflow",
+                "verdict": "rag_selected",
+            },
+            {
+                "type": "workflow_instance_submission",
+                "workflow_id": "#V#tool_calling_workflow",
+                "status": "submission_failed",
+                "reason_code": "workflow_not_runnable",
+                "error": (
+                    "Workflow #V#tool_calling_workflow is not runnable because the "
+                    "tool pipeline boundary was missing."
+                ),
+                "submission": {
+                    "verification": {
+                        "runnable_verification_success": False,
+                    }
+                },
+            },
+        ],
+        serialised_invocations=[],
+    )
+
+    assert summary["selected_execution_mode"] == "tool_pipeline"
+    assert summary["dispatch_workflow_id"] == "#V#tool_calling_workflow"
+    assert summary["dispatch_terminal_status"] == "failed"
+    assert summary["dispatch_terminal_failure_reason"] == "workflow_not_runnable"
+    assert "tool_dispatch_boundary_missing" in list(summary.get("failure_codes") or [])
+    assert "custom_workflow_dispatch_not_started" not in list(
+        summary.get("failure_codes") or []
+    )
+
+
+def test_tool_execution_summary_records_custom_workflow_action_and_side_effect_evidence() -> (
+    None
+):
     summary = _summarise_tool_execution_context(
         workflow_routing={
             "workflow_id": "#V#workflow_creation_workflow",
@@ -594,7 +659,9 @@ def test_tool_execution_summary_records_custom_workflow_action_and_side_effect_e
     assert summary["zero_tool_execution_expected"] is True
 
 
-def test_turn_execution_record_keeps_custom_workflow_execution_consistent_across_surfaces() -> None:
+def test_turn_execution_record_keeps_custom_workflow_execution_consistent_across_surfaces() -> (
+    None
+):
     aux_llm_calls = [
         {
             "type": "workflow_dispatch_boundary",
@@ -671,7 +738,9 @@ def test_turn_execution_record_keeps_custom_workflow_execution_consistent_across
         prompt_text="Create the workflow definition.",
         response_text="Workflow created.",
         interaction_timestamp_utc="2026-03-24T01:00:00Z",
-        workflow_discovery={"matches": [{"concept_id": "#V#workflow_creation_workflow"}]},
+        workflow_discovery={
+            "matches": [{"concept_id": "#V#workflow_creation_workflow"}]
+        },
         workflow_routing={
             "workflow_id": "#V#workflow_creation_workflow",
             "verdict": "rag_selected",
@@ -689,7 +758,15 @@ def test_turn_execution_record_keeps_custom_workflow_execution_consistent_across
 
     summary = record["execution"]["summary"]
     dispatch = record["workflow_routing_diagnostics"]["dispatch"]
-    assert summary["custom_workflow_execution"] == dispatch["custom_workflow_execution"]
+    summary_custom_execution = dict(summary["custom_workflow_execution"])
+    dispatch_custom_execution = dict(dispatch["custom_workflow_execution"])
+    assert {
+        key: summary_custom_execution.get(key)
+        for key in dispatch_custom_execution.keys()
+    } == dispatch_custom_execution
+    assert summary_custom_execution["completion_report_source"] is None
+    assert summary_custom_execution["error"] is None
+    assert summary_custom_execution["result_snapshot"] is None
     assert summary["zero_tool_reason_code"] == "custom_workflow_actions_handled_turn"
     assert dispatch["zero_tool_reason_code"] == "custom_workflow_actions_handled_turn"
     assert dispatch["custom_workflow_execution"]["durable_side_effects"] == [
@@ -704,7 +781,9 @@ def test_turn_execution_record_keeps_custom_workflow_execution_consistent_across
     ]
 
 
-def test_turn_record_uses_selected_workflow_trace_for_supervised_custom_failure() -> None:
+def test_turn_record_uses_selected_workflow_trace_for_supervised_custom_failure() -> (
+    None
+):
     record = build_turn_execution_record(
         request_id="req-selected-trace-failure",
         session_id="session-selected-trace-failure",
@@ -774,7 +853,9 @@ def test_turn_record_uses_selected_workflow_trace_for_supervised_custom_failure(
     )
 
 
-def test_build_workflow_routing_diagnostics_preserves_selector_exchange_and_dispatch_events() -> None:
+def test_build_workflow_routing_diagnostics_preserves_selector_exchange_and_dispatch_events() -> (
+    None
+):
     diagnostics = build_workflow_routing_diagnostics(
         workflow_discovery={
             "query": "meeting invitation testing workflow",
@@ -1105,9 +1186,15 @@ def test_build_workflow_routing_diagnostics_preserves_selector_exchange_and_disp
     assert diagnostics["dispatch"]["last_successful_boundary"] == "contract_resolution"
 
 
-def test_build_workflow_routing_diagnostics_preserves_local_handoff_failure_details() -> None:
+def test_build_workflow_routing_diagnostics_preserves_local_handoff_failure_details() -> (
+    None
+):
     diagnostics = build_workflow_routing_diagnostics(
-        workflow_discovery={"query": "Run the testing workflow", "matches": [], "candidates": []},
+        workflow_discovery={
+            "query": "Run the testing workflow",
+            "matches": [],
+            "candidates": [],
+        },
         workflow_routing={
             "workflow_id": "#V#tool_calling_workflow",
             "verdict": "rag_selected",
@@ -1197,7 +1284,9 @@ def test_build_workflow_routing_diagnostics_preserves_local_handoff_failure_deta
     )
 
 
-def test_build_workflow_routing_diagnostics_derives_capability_index_timeout_cause() -> None:
+def test_build_workflow_routing_diagnostics_derives_capability_index_timeout_cause() -> (
+    None
+):
     diagnostics = build_workflow_routing_diagnostics(
         workflow_discovery={
             "query": "Download and represent https://arxiv.org/abs/2411.04983",
@@ -1258,7 +1347,9 @@ def test_build_turn_execution_correctness_summary_marks_successful_completion() 
     assert summary["metric_labels"]["false_success"] is False
 
 
-def test_build_turn_execution_correctness_summary_marks_plain_response_misrouting() -> None:
+def test_build_turn_execution_correctness_summary_marks_plain_response_misrouting() -> (
+    None
+):
     summary = build_turn_execution_correctness_summary(
         completion_gate={
             "decision": "escalation_required",
@@ -1289,7 +1380,9 @@ def test_build_turn_execution_correctness_summary_marks_plain_response_misroutin
     assert summary["selection_labels"]["plain_response_route_selected"] is True
 
 
-def test_build_turn_execution_correctness_summary_marks_launchability_fallback_misrouting() -> None:
+def test_build_turn_execution_correctness_summary_marks_launchability_fallback_misrouting() -> (
+    None
+):
     summary = build_turn_execution_correctness_summary(
         completion_gate={
             "decision": "escalation_required",
@@ -1333,7 +1426,9 @@ def test_build_turn_execution_correctness_summary_marks_launchability_fallback_m
     assert summary["selection_labels"]["launchability_degraded_tool_route"] is True
 
 
-def test_build_turn_execution_correctness_summary_marks_submission_failure_false_success() -> None:
+def test_build_turn_execution_correctness_summary_marks_submission_failure_false_success() -> (
+    None
+):
     summary = build_turn_execution_correctness_summary(
         completion_gate={
             "decision": "completed",
@@ -1371,7 +1466,9 @@ def test_build_turn_execution_correctness_summary_marks_submission_failure_false
     assert summary["metric_labels"]["false_success"] is True
 
 
-def test_build_turn_execution_correctness_summary_marks_missing_custom_dispatch_false_success() -> None:
+def test_build_turn_execution_correctness_summary_marks_missing_custom_dispatch_false_success() -> (
+    None
+):
     summary = build_turn_execution_correctness_summary(
         completion_gate={
             "decision": "completed",

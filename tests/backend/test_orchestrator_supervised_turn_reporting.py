@@ -211,9 +211,208 @@ def test_turn_execution_route_discovers_when_prefilled_payload_is_empty(
     assert result.outputs["workflow_discovery_result"]["requested_query"] == (
         "https://example.com/resource"
     )
+    assert result.outputs["workflow_discovery_result"]["discovery_query_input"] == (
+        "https://example.com/resource"
+    )
     assert (
         CHAT_ASSISTANT_WORKFLOW_ID
         in result.outputs["selected_workflow_trace"]["selector_candidate_ids"]
+    )
+
+
+def test_turn_execution_route_refreshes_prefilled_discovery_when_effective_query_changes(
+    monkeypatch,
+) -> None:
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
+        gateway=cast(Any, _DummyGateway()),
+        selector_enabled=True,
+    )
+    refreshed_workflow_id = "#V#concept_search_instance_retrieval_workflow"
+    discovered_queries: list[str] = []
+
+    def _discover_workflows_for_turn(
+        user_input: str,
+        *,
+        namespace: str | None = None,
+        workflow_registry: Any | None = None,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        discovered_queries.append(user_input)
+        assert namespace == "#V#user"
+        assert workflow_registry is orchestrator._workflow_registry
+        assert "Turn-intent routing guidance:" in user_input
+        assert "concept/relation retrieval" in user_input.lower()
+        return {
+            "query": user_input,
+            "requested_query": "stale query",
+            "search_sources": ["capability_index"],
+            "candidate_count": 1,
+            "match_count": 1,
+            "matches": [
+                {
+                    "concept_id": refreshed_workflow_id,
+                    "name": "Concept Search Instance Retrieval Workflow",
+                    "description": (
+                        "Retrieve represented facts about a specific concept or "
+                        "instance from the Vontology."
+                    ),
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "is_policy_safe": True,
+                    "routing_eligible": True,
+                    "routing_profile": {"role": "retrieval"},
+                    "candidate_source": "capability_index",
+                }
+            ],
+            "candidates": [
+                {
+                    "concept_id": refreshed_workflow_id,
+                    "name": "Concept Search Instance Retrieval Workflow",
+                    "description": (
+                        "Retrieve represented facts about a specific concept or "
+                        "instance from the Vontology."
+                    ),
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "is_policy_safe": True,
+                    "routing_eligible": True,
+                    "routing_profile": {"role": "retrieval"},
+                    "candidate_source": "capability_index",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_discovery_service.discover_workflows_for_turn",
+        _discover_workflows_for_turn,
+    )
+
+    class _CapturingRouteLLM:
+        def generate(self, prompt, context=None, model=None):
+            if prompt == "Select workflow":
+                return refreshed_workflow_id
+            raise AssertionError(f"Unexpected selector prompt: {prompt!r}")
+
+    result = orchestrator._action_turn_execution_route(
+        SimpleNamespace(
+            data={
+                "user_prompt": "What papers of mine do you know about?",
+                "workflow_discovery_result": {
+                    "requested_query": "What papers of mine do you know about?",
+                    "query": "What papers of mine do you know about?",
+                    "search_sources": ["capability_index"],
+                    "candidate_count": 1,
+                    "match_count": 1,
+                    "matches": [
+                        {
+                            "concept_id": "#V#scholarly_paper_representation_workflow",
+                            "name": "Scholarly Paper Representation Workflow",
+                            "description": (
+                                "Canonical durable workflow for representing scholarly "
+                                "papers from file-copy artefacts, metadata, and "
+                                "verification requirements."
+                            ),
+                            "is_executable": True,
+                            "executability_reason": "executable_now",
+                            "is_policy_safe": True,
+                            "routing_eligible": True,
+                            "routing_profile": {"role": "execution"},
+                            "candidate_source": "capability_index",
+                        }
+                    ],
+                    "candidates": [
+                        {
+                            "concept_id": "#V#scholarly_paper_representation_workflow",
+                            "name": "Scholarly Paper Representation Workflow",
+                            "description": (
+                                "Canonical durable workflow for representing scholarly "
+                                "papers from file-copy artefacts, metadata, and "
+                                "verification requirements."
+                            ),
+                            "is_executable": True,
+                            "executability_reason": "executable_now",
+                            "is_policy_safe": True,
+                            "routing_eligible": True,
+                            "routing_profile": {"role": "execution"},
+                            "candidate_source": "capability_index",
+                        }
+                    ],
+                },
+                "turn_expected_outcome_summary": (
+                    "Answer only with represented facts grounded to the referenced "
+                    "user concept."
+                ),
+                "turn_expected_grounding_requirement": (
+                    "Ground authorship or ownership claims in represented concept "
+                    "relations."
+                ),
+                "turn_expected_precision_policy": (
+                    "Prefer explicit uncertainty over speculative recall."
+                ),
+                "turn_selector_guidance": (
+                    "Treat this as concept/relation retrieval for the referenced "
+                    "entity rather than artefact creation or representation."
+                ),
+                "turn_expected_outcome_reasoning": (
+                    "The request asks what is already known about an entity and its "
+                    "related artefacts, so concept/relation retrieval should outrank "
+                    "representation workflows."
+                ),
+                "workflow_discovery": None,
+                "policy_state": SimpleNamespace(
+                    enabled=False,
+                    policy=None,
+                    policy_id=None,
+                    predicate_id=None,
+                    errors=(),
+                ),
+                "registry_snapshot": None,
+                "llm_calls": [],
+                "aux_llm_calls": [],
+                "augmented_context": [
+                    {
+                        "role": "system",
+                        "content": "CURRENT USER CONTEXT: Test User (#V#test_user)",
+                    },
+                    {
+                        "role": "user",
+                        "content": "What papers of mine do you know about?",
+                    },
+                ],
+            },
+            environment=SimpleNamespace(
+                user_namespace="#V#user",
+                llm_client=_CapturingRouteLLM(),
+                model="test-model",
+            ),
+        )
+    )
+
+    assert result.status == "success"
+    assert len(discovered_queries) == 1
+    assert result.outputs["selected_workflow_id"] == refreshed_workflow_id
+    refreshed_discovery = result.outputs["workflow_discovery_result"]
+    assert refreshed_discovery["requested_query"] == (
+        "What papers of mine do you know about?"
+    )
+    assert refreshed_discovery["discovery_query_input"] == discovered_queries[0]
+    assert refreshed_discovery["query"] == discovered_queries[0]
+    assert refreshed_discovery["query_enrichment_applied"] is True
+    assert refreshed_discovery["query_enrichment_source"] == (
+        "turn_expected_outcome_contract"
+    )
+    assert refreshed_discovery["discovery_refreshed"] is True
+    assert refreshed_discovery["discovery_refresh_reason"] == (
+        "effective_query_changed"
+    )
+    assert (
+        refreshed_workflow_id
+        in result.outputs["selected_workflow_trace"]["selector_candidate_ids"]
+    )
+    assert (
+        "#V#scholarly_paper_representation_workflow"
+        not in result.outputs["selected_workflow_trace"]["selector_candidate_ids"]
     )
 
 
@@ -302,7 +501,13 @@ def test_prepare_selector_context_emits_prompt_and_grounding_contract(
     )
     lineage = result.outputs["selector_context_lineage"]
     assert lineage["base_context_source"] == "augmented_context"
-    assert lineage["stage_added_message_count"] == 2
+    assert lineage["stage_added_message_count"] == 3
+    assert any(
+        isinstance(message, dict)
+        and "Current turn request to route" in str(message.get("content_preview") or "")
+        for message in (lineage.get("stage_added_messages") or [])
+        if isinstance(message, dict)
+    )
     prepare_entry = next(
         entry
         for entry in aux_llm_calls
@@ -315,6 +520,7 @@ def test_prepare_selector_context_emits_prompt_and_grounding_contract(
         for entry in aux_llm_calls
         if isinstance(entry, dict) and entry.get("type") == "workflow_selector_prompt"
     )
+    assert prompt_entry["stage"] == "selector_preparation"
     assert prompt_entry["prompt_id"] == "#V#chat_turn_classifier_prompt"
     assert "#V#chat_assistant_workflow" in (
         ((prompt_entry.get("candidate_list") or {}).get("text")) or ""
@@ -408,6 +614,11 @@ def test_turn_execution_route_reuses_augmented_context_for_selector_and_tracks_l
         and message.get("content") == "What is my name?"
         for message in selector_context
     )
+    assert any(
+        isinstance(message, dict)
+        and "Current turn request to route" in str(message.get("content") or "")
+        for message in selector_context
+    )
 
     stage_summary = next(
         entry
@@ -418,7 +629,7 @@ def test_turn_execution_route_reuses_augmented_context_for_selector_and_tracks_l
     )
     request = stage_summary["request"]
     assert request["context_lineage"]["base_context_source"] == "augmented_context"
-    assert request["context_lineage"]["stage_added_message_count"] == 1
+    assert request["context_lineage"]["stage_added_message_count"] == 2
     assert request["context_summary"]["message_count"] == len(selector_context)
     assert (
         result.outputs["selected_workflow_trace"]["selector_context_lineage"][
@@ -426,6 +637,37 @@ def test_turn_execution_route_reuses_augmented_context_for_selector_and_tracks_l
         ]
         == "augmented_context"
     )
+
+
+def test_supervised_turn_propagates_completion_gate_retry_budget(
+    monkeypatch,
+) -> None:
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _DummyGateway()))
+    orchestrator._completion_gate_loop_max_attempts = 3
+    captured: dict[str, Any] = {}
+
+    def _execute_workflow(*args, **kwargs):
+        captured["data"] = kwargs.get("data")
+        return SimpleNamespace(
+            completed=True,
+            final_state="completed",
+            error=None,
+            data={"response_text": "Done.", "completion_report": {"completed": True}},
+        )
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
+
+    result = orchestrator.execute_conversation_turn_supervised(
+        prompt="Represent this paper.",
+        context=None,
+        llm_client=_DummyLLM(),
+        model="test-model",
+    )
+
+    workflow_data = captured.get("data")
+    assert isinstance(workflow_data, dict)
+    assert workflow_data.get("completion_gate_loop_max_attempts") == 3
+    assert result.response_text == "Done."
 
 
 def test_turn_execution_route_uses_prepared_selector_response_without_extra_llm_call(

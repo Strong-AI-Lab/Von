@@ -112,3 +112,53 @@ def test_execute_llm_step_passes_context_lineage_to_gateway_llm(
         "base_context_source": "augmented_context",
         "stage_added_message_count": 1,
     }
+
+
+def test_execute_llm_step_emits_phase_transition_for_conversation_turn_stage(
+    monkeypatch,
+) -> None:
+    transitions: list[dict[str, object]] = []
+
+    class _StubOrchestrator:
+        def _run_llm_with_fallbacks(self, **kwargs):
+            return ('{"ok": true}', "test-model", None)
+
+    monkeypatch.setattr(
+        "src.backend.workflows.llm_step_executor._build_gateway_runtime",
+        lambda request: (_StubOrchestrator(), object(), None, None, None),
+    )
+
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=MagicMock(),
+            gateway=object(),
+            model="test-model",
+        ),
+        data={
+            "emit_phase_transition": (
+                lambda phase, *, extra=None: transitions.append(
+                    {"phase": phase, "extra": extra}
+                )
+            )
+        },
+        workflow_state_id="selector_decision",
+        prompt_contract={"prompt_text": "Return JSON only."},
+        validation_policy={"output_format": "json_value"},
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "success"
+    assert transitions == [
+        {
+            "phase": "selector_decision",
+            "extra": {
+                "result_summary": (
+                    "Running the authoritative LLM reasoning step for this turn stage"
+                ),
+                "workflow_state_id": "selector_decision",
+            },
+        }
+    ]

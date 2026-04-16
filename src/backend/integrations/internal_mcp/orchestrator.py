@@ -20726,6 +20726,24 @@ class InternalMCPChatOrchestrator:
 
             return stages
 
+        def _extract_stage_tokens_from_aux_entries(entries: Any) -> list[str]:
+            if not isinstance(entries, list):
+                return []
+            stages: list[str] = []
+            for entry in entries:
+                if not isinstance(entry, Mapping):
+                    continue
+                stage = _safe_scalar_text(entry.get("stage"))
+                if stage:
+                    stages.append(stage)
+                    continue
+                entry_type = _safe_scalar_text(entry.get("type"))
+                if entry_type == "workflow_selector_prompt":
+                    stages.append("selector_preparation")
+                elif entry_type == "workflow_selector":
+                    stages.append("selector_decision")
+            return stages
+
         def _collect_turn_runtime_stage_sequence(
             *,
             workflow_data: Any,
@@ -20761,6 +20779,11 @@ class InternalMCPChatOrchestrator:
                                     runtime_stages.append(phase)
                                 if stage:
                                     runtime_stages.append(stage)
+                runtime_stages.extend(
+                    _extract_stage_tokens_from_aux_entries(
+                        workflow_data.get("aux_llm_calls")
+                    )
+                )
 
             for diagnostics_payload in diagnostics_sources:
                 runtime_stages.extend(
@@ -22347,6 +22370,165 @@ class InternalMCPChatOrchestrator:
         return [{"role": "system", "content": "\n".join(lines)}]
 
     @staticmethod
+    def _build_turn_discovery_query_text(
+        *,
+        turn_text: str,
+        expected_outcome_contract: Mapping[str, Any] | None,
+    ) -> str:
+        clean_turn_text = turn_text.strip() if isinstance(turn_text, str) else ""
+        if not clean_turn_text:
+            return ""
+
+        contract = (
+            expected_outcome_contract
+            if isinstance(expected_outcome_contract, Mapping)
+            else {}
+        )
+        guidance_lines: list[str] = []
+        for label, key in (
+            ("Success target", "summary"),
+            ("Grounding requirement", "grounding_requirement"),
+            ("Precision policy", "precision_policy"),
+            ("Routing guidance", "selector_guidance"),
+            ("Reasoning", "reasoning"),
+        ):
+            value = contract.get(key)
+            if isinstance(value, str) and value.strip():
+                guidance_lines.append(f"- {label}: {value.strip()}")
+
+        if not guidance_lines:
+            return clean_turn_text
+
+        return f"{clean_turn_text}\n\n" "Turn-intent routing guidance:\n" + "\n".join(
+            guidance_lines
+        )
+
+    @staticmethod
+    def _turn_discovery_query_is_enriched(
+        *,
+        requested_query: str,
+        discovery_query_input: str,
+    ) -> bool:
+        clean_requested = (
+            requested_query.strip() if isinstance(requested_query, str) else ""
+        )
+        clean_discovery_input = (
+            discovery_query_input.strip()
+            if isinstance(discovery_query_input, str)
+            else ""
+        )
+        return bool(
+            clean_requested
+            and clean_discovery_input
+            and clean_discovery_input != clean_requested
+        )
+
+    @classmethod
+    def _should_refresh_turn_workflow_discovery_result(
+        cls,
+        *,
+        workflow_discovery_result: Mapping[str, Any] | None,
+        requested_query: str,
+        discovery_query_input: str,
+    ) -> bool:
+        if (
+            not isinstance(workflow_discovery_result, Mapping)
+            or not workflow_discovery_result
+        ):
+            return False
+        if not cls._turn_discovery_query_is_enriched(
+            requested_query=requested_query,
+            discovery_query_input=discovery_query_input,
+        ):
+            return False
+
+        existing_requested_query = str(
+            workflow_discovery_result.get("requested_query") or ""
+        ).strip()
+        existing_discovery_query_input = str(
+            workflow_discovery_result.get("discovery_query_input") or ""
+        ).strip()
+        existing_query = str(workflow_discovery_result.get("query") or "").strip()
+        enrichment_source = str(
+            workflow_discovery_result.get("query_enrichment_source") or ""
+        ).strip()
+
+        if (
+            existing_requested_query == requested_query
+            and existing_discovery_query_input == discovery_query_input
+        ):
+            return False
+        if (
+            enrichment_source == "turn_expected_outcome_contract"
+            and existing_requested_query == requested_query
+            and existing_query == discovery_query_input
+        ):
+            return False
+        return True
+
+    @classmethod
+    def _annotate_turn_workflow_discovery_result(
+        cls,
+        *,
+        workflow_discovery_result: Mapping[str, Any] | None,
+        requested_query: str,
+        discovery_query_input: str,
+        refreshed: bool = False,
+    ) -> dict[str, Any]:
+        payload = cls._copy_string_key_mapping(workflow_discovery_result) or {}
+        if not payload:
+            return {}
+
+        clean_requested_query = (
+            requested_query.strip() if isinstance(requested_query, str) else ""
+        )
+        clean_discovery_query_input = (
+            discovery_query_input.strip()
+            if isinstance(discovery_query_input, str)
+            else ""
+        )
+
+        if clean_requested_query:
+            payload["requested_query"] = clean_requested_query
+        if clean_discovery_query_input:
+            payload["discovery_query_input"] = clean_discovery_query_input
+
+        existing_query = payload.get("query")
+        if not isinstance(existing_query, str) or not existing_query.strip():
+            payload["query"] = clean_discovery_query_input or clean_requested_query
+
+        if cls._turn_discovery_query_is_enriched(
+            requested_query=clean_requested_query,
+            discovery_query_input=clean_discovery_query_input,
+        ):
+            payload["query_enrichment_applied"] = True
+            payload["query_enrichment_source"] = "turn_expected_outcome_contract"
+            if refreshed:
+                payload["discovery_refreshed"] = True
+                payload["discovery_refresh_reason"] = "effective_query_changed"
+
+        return payload
+
+    @staticmethod
+    def _build_turn_current_request_stage_message(
+        turn_text: str,
+    ) -> dict[str, str] | None:
+        clean_turn_text = turn_text.strip() if isinstance(turn_text, str) else ""
+        if not clean_turn_text:
+            return None
+        return {
+            "role": "system",
+            "content": (
+                "Current turn request to route:\n"
+                f"{clean_turn_text}\n\n"
+                "Use the surrounding turn context to resolve references and "
+                "continuity, but keep this request as the immediate routing "
+                "objective unless explicit continuation context requires "
+                "otherwise."
+            ),
+        }
+
+    @staticmethod
     def _build_selector_prompt_from_context(
         data: Mapping[str, Any],
     ) -> WorkflowSelectionPrompt:
@@ -22439,21 +22621,43 @@ class InternalMCPChatOrchestrator:
         if not isinstance(prompt_text, str) or not prompt_text.strip():
             prompt_text = data.get("prompt")
         prompt_text = str(prompt_text or "").strip()
+        expected_outcome_contract = self._build_turn_expected_outcome_contract(data)
+        discovery_query_text = self._build_turn_discovery_query_text(
+            turn_text=prompt_text,
+            expected_outcome_contract=expected_outcome_contract,
+        )
+        discovery_query_input = discovery_query_text or prompt_text
 
         raw_discovery = data.get("workflow_discovery_result")
         if not isinstance(raw_discovery, Mapping):
             raw_discovery = data.get("workflow_discovery")
+        refresh_discovery = self._should_refresh_turn_workflow_discovery_result(
+            workflow_discovery_result=raw_discovery,
+            requested_query=prompt_text,
+            discovery_query_input=discovery_query_input,
+        )
         workflow_discovery_result: dict[str, Any]
-        if isinstance(raw_discovery, Mapping) and raw_discovery:
-            workflow_discovery_result = dict(raw_discovery)
+        if (
+            isinstance(raw_discovery, Mapping)
+            and raw_discovery
+            and not refresh_discovery
+        ):
+            workflow_discovery_result = self._annotate_turn_workflow_discovery_result(
+                workflow_discovery_result=raw_discovery,
+                requested_query=prompt_text,
+                discovery_query_input=discovery_query_input,
+            )
         elif prompt_text:
             discovered = discover_workflows_for_turn(
-                prompt_text,
+                discovery_query_input,
                 namespace=env.user_namespace,
                 workflow_registry=self._workflow_registry,
             )
-            workflow_discovery_result = (
-                dict(discovered) if isinstance(discovered, Mapping) else {}
+            workflow_discovery_result = self._annotate_turn_workflow_discovery_result(
+                workflow_discovery_result=discovered,
+                requested_query=prompt_text,
+                discovery_query_input=discovery_query_input,
+                refreshed=refresh_discovery,
             )
         else:
             workflow_discovery_result = {}
@@ -22516,9 +22720,17 @@ class InternalMCPChatOrchestrator:
             and not isinstance(augmented_context_raw, (str, bytes, bytearray))
             else ()
         )
-        selector_stage_messages = self._build_turn_expected_outcome_stage_messages(
-            data=data,
-            stage="selector_preparation",
+        selector_stage_messages: list[dict[str, str]] = []
+        current_turn_message = self._build_turn_current_request_stage_message(
+            prompt_text
+        )
+        if isinstance(current_turn_message, dict):
+            selector_stage_messages.append(current_turn_message)
+        selector_stage_messages.extend(
+            self._build_turn_expected_outcome_stage_messages(
+                data=data,
+                stage="selector_preparation",
+            )
         )
         if (
             isinstance(selector_prompt.prompt_text, str)
@@ -22609,6 +22821,19 @@ class InternalMCPChatOrchestrator:
     ) -> WorkflowActionResult:
         data = request.data
         aux_llm_calls = data.get("aux_llm_calls")
+        emit_phase_transition_raw = data.get("emit_phase_transition")
+        emit_phase_transition = (
+            cast(Callable[..., Any], emit_phase_transition_raw)
+            if callable(emit_phase_transition_raw)
+            else None
+        )
+        if callable(emit_phase_transition):
+            emit_phase_transition(
+                "selector_preparation",
+                extra={
+                    "result_summary": "Preparing selector context from turn intent, expected outcome, and discovered workflows",
+                },
+            )
         prepare_start = time.perf_counter()
         outputs = self._prepare_turn_selector_context_outputs(request)
         duration_ms = int((time.perf_counter() - prepare_start) * 1000)
@@ -22654,6 +22879,7 @@ class InternalMCPChatOrchestrator:
             aux_llm_calls.append(
                 {
                     "type": "workflow_selector_prompt",
+                    "stage": "selector_preparation",
                     "prompt_id": outputs.get("selector_prompt_id"),
                     "requested_prompt_ids": list(
                         outputs.get("selector_requested_prompt_ids") or []
@@ -23206,6 +23432,12 @@ class InternalMCPChatOrchestrator:
                 payload["error"] = error.strip()
             aux_llm_calls.append(payload)
 
+        if selected_workflow_id:
+            _append_dispatch_boundary(
+                boundary="execution_mode_selected",
+                status="selected",
+            )
+
         continuation_context = child_workflow_data.get("continuation_context")
         if isinstance(continuation_context, Mapping) and bool(
             continuation_context.get("applied")
@@ -23260,10 +23492,6 @@ class InternalMCPChatOrchestrator:
             )
             context_telemetry["selected_execution_mode"] = "direct_response"
             try:
-                _append_dispatch_boundary(
-                    boundary="execution_mode_selected",
-                    status="selected",
-                )
                 if callable(emit_phase_transition):
                     emit_phase_transition(
                         self.PHASE_PLAIN_RESPONSE,
@@ -23448,55 +23676,95 @@ class InternalMCPChatOrchestrator:
                     "error": failure_detail,
                 }
         elif selected_workflow_id:
-            child_result = self.execute_workflow(
-                selected_workflow_id,
-                data=child_workflow_data,
-                llm_client=env.llm_client,
-                model=getattr(env, "model", None),
-                user_namespace=env.user_namespace,
-                auxiliary_system_prompt=getattr(env, "auxiliary_system_prompt", None),
-                trace=request.trace,
-                environment=env,
-                conversation_session_id=data.get("conversation_session_id"),
-                turn_id=data.get("turn_id"),
-                episode_source="conversation_turn_selected_workflow",
+            _append_dispatch_boundary(
+                boundary="workflow_handoff",
+                status="started",
             )
-            if child_result is None:
-                failure_detail = (
-                    f"selected_workflow_definition_not_found:{selected_workflow_id}"
+            try:
+                child_result = self.execute_workflow(
+                    selected_workflow_id,
+                    data=child_workflow_data,
+                    llm_client=env.llm_client,
+                    model=getattr(env, "model", None),
+                    user_namespace=env.user_namespace,
+                    auxiliary_system_prompt=getattr(
+                        env, "auxiliary_system_prompt", None
+                    ),
+                    trace=request.trace,
+                    environment=env,
+                    conversation_session_id=data.get("conversation_session_id"),
+                    turn_id=data.get("turn_id"),
+                    episode_source="conversation_turn_selected_workflow",
                 )
-                final_state = "definition_not_found"
+            except Exception as exc:
+                completed = False
+                final_state = "selected_workflow_execution_exception"
+                failure_detail = str(exc)
+                child_outputs = {
+                    "selected_execution_mode": selected_execution_mode
+                    or "custom_workflow",
+                    "workflow_execution_summary": {
+                        "schema_version": "workflow_execution_summary.v1",
+                        "workflow_id": selected_workflow_id,
+                        "completed": False,
+                        "final_state": final_state,
+                        "selected_execution_mode": selected_execution_mode
+                        or "custom_workflow",
+                        "error": failure_detail,
+                    },
+                }
+                child_result_snapshot = {
+                    "selected_execution_mode": selected_execution_mode
+                    or "custom_workflow",
+                    "final_state": final_state,
+                    "error": failure_detail,
+                }
             else:
-                child_outputs = (
-                    dict(child_result.data)
-                    if isinstance(getattr(child_result, "data", None), Mapping)
-                    else {}
-                )
-                rendered_child_response_text = (
-                    self._render_custom_workflow_response_text(
-                        workflow_id=selected_workflow_id,
-                        workflow_result=child_result,
+                if child_result is None:
+                    failure_detail = (
+                        f"selected_workflow_definition_not_found:{selected_workflow_id}"
                     )
-                )
-                completed = _workflow_result_effective_completed(child_result)
-                final_state = (
-                    str(child_result.final_state).strip()
-                    if isinstance(getattr(child_result, "final_state", None), str)
-                    else None
-                )
-                failure_detail = _extract_explicit_workflow_failure_detail(
-                    child_result
-                ) or (
-                    child_result.error if isinstance(child_result.error, str) else None
-                )
-                child_result_snapshot = _build_workflow_execution_aux_result_snapshot(
-                    child_result
-                )
+                    final_state = "definition_not_found"
+                else:
+                    child_outputs = (
+                        dict(child_result.data)
+                        if isinstance(getattr(child_result, "data", None), Mapping)
+                        else {}
+                    )
+                    rendered_child_response_text = (
+                        self._render_custom_workflow_response_text(
+                            workflow_id=selected_workflow_id,
+                            workflow_result=child_result,
+                        )
+                    )
+                    completed = _workflow_result_effective_completed(child_result)
+                    final_state = (
+                        str(child_result.final_state).strip()
+                        if isinstance(getattr(child_result, "final_state", None), str)
+                        else None
+                    )
+                    failure_detail = _extract_explicit_workflow_failure_detail(
+                        child_result
+                    ) or (
+                        child_result.error
+                        if isinstance(child_result.error, str)
+                        else None
+                    )
+                    child_result_snapshot = (
+                        _build_workflow_execution_aux_result_snapshot(child_result)
+                    )
+            _append_dispatch_boundary(
+                boundary="workflow_terminal",
+                status="completed" if completed else "failed",
+                final_state_value=final_state,
+                completed_value=completed,
+                error=failure_detail if not completed else None,
+            )
         else:
             failure_detail = "turn_execution_no_workflow_selected"
             final_state = "no_selected_workflow"
 
-        if selected_execution_mode == "direct_response":
+        if selected_workflow_id:
             dispatch_payload: dict[str, Any] = (
                 {
                     str(key): value
@@ -23508,12 +23776,11 @@ class InternalMCPChatOrchestrator:
                 if isinstance(workflow_routing_payload.get("dispatch"), Mapping)
                 else {}
             )
-            dispatch_payload["selected_execution_mode"] = "direct_response"
-            if selected_workflow_id:
-                dispatch_payload.setdefault(
-                    "selected_workflow_id", selected_workflow_id
-                )
-                dispatch_payload["dispatch_workflow_id"] = selected_workflow_id
+            dispatch_payload["selected_execution_mode"] = (
+                selected_execution_mode or "custom_workflow"
+            )
+            dispatch_payload.setdefault("selected_workflow_id", selected_workflow_id)
+            dispatch_payload["dispatch_workflow_id"] = selected_workflow_id
             if isinstance(final_state, str) and final_state.strip():
                 dispatch_payload["final_state"] = final_state
             dispatch_payload["completed"] = bool(completed)
@@ -23838,7 +24105,9 @@ class InternalMCPChatOrchestrator:
             "completion_gate_loop_retry_reason": None,
             "completion_gate_loop_stop_reason": None,
             "completion_gate_loop_attempts": 0,
-            "completion_gate_loop_max_attempts": 0,
+            "completion_gate_loop_max_attempts": int(
+                self._completion_gate_loop_max_attempts
+            ),
             "completion_gate_loop_started_monotonic": float(time.monotonic()),
             "completion_gate_loop_elapsed_ms": 0,
             "completion_gate_loop_max_elapsed_ms": int(
@@ -25661,6 +25930,7 @@ class InternalMCPChatOrchestrator:
                 aux_llm_calls.append(
                     {
                         "type": "workflow_selector",
+                        "stage": "selector_decision",
                         "workflow_id": selector_selection.workflow_id,
                         "verdict": selector_selection.verdict,
                         "selection_source": selection_source,
@@ -25900,6 +26170,7 @@ class InternalMCPChatOrchestrator:
                 aux_llm_calls.append(
                     {
                         "type": "workflow_selector",
+                        "stage": "selector_decision",
                         "workflow_id": CHAT_ASSISTANT_WORKFLOW_ID,
                         "verdict": "selector_exception",
                         "selection_source": "default",
