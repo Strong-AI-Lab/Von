@@ -91,9 +91,7 @@ def _normalise_string_tuple(values: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(
         sorted(
             dict.fromkeys(
-                str(item or "").strip()
-                for item in values
-                if str(item or "").strip()
+                str(item or "").strip() for item in values if str(item or "").strip()
             )
         )
     )
@@ -120,7 +118,12 @@ def _prune_shadowed_static_input_bindings(
 def _extract_context_binding_key(value: Any) -> str | None:
     if not isinstance(value, dict):
         return None
-    for key in ("$context_key", "context_key", "workflow_context_key", "from_context_key"):
+    for key in (
+        "$context_key",
+        "context_key",
+        "workflow_context_key",
+        "from_context_key",
+    ):
         candidate = str(value.get(key) or "").strip()
         if candidate:
             return candidate
@@ -168,9 +171,7 @@ def _resolve_missing_required_authority_surfaces(
             resolve_workflow_launch_input_contract(workflow_id)
         )
         if not isinstance(launch_input_contract, dict):
-            missing_surfaces.append(
-                _REQUIRED_AUTHORITY_SURFACE_LAUNCH_INPUT_CONTRACT
-            )
+            missing_surfaces.append(_REQUIRED_AUTHORITY_SURFACE_LAUNCH_INPUT_CONTRACT)
 
     relation_specs = (
         workflow_text_relations.get(workflow_id)
@@ -268,11 +269,11 @@ def _stable_loaded_action_surface(
             if action is not None
             else None
         ),
-        "prompt_concept_ids": authority_service._extract_publication_prompt_concept_ids(
-            action
-        )
-        if action is not None
-        else (),
+        "prompt_concept_ids": (
+            authority_service._extract_publication_prompt_concept_ids(action)
+            if action is not None
+            else ()
+        ),
         "llm_policy": (
             dict(runtime_details.llm_policy)
             if isinstance(runtime_details.llm_policy, dict)
@@ -489,13 +490,37 @@ def _stable_expected_transition_surface(step: Any) -> list[dict[str, Any]]:
             }
         )
     for attribute_name, reason, condition_spec in (
-        ("on_failure_state", "on_failure", {"kind": "context_flag", "key": "last_action_failed", "expected": True}),
-        ("on_unknown_state", "on_unknown", {"kind": "context_flag", "key": "last_action_unknown", "expected": True}),
-        ("on_approval_required_state", "on_approval_required", {"kind": "context_flag", "key": "approval_required", "expected": True}),
+        (
+            "on_failure_state",
+            "on_failure",
+            {"kind": "context_flag", "key": "last_action_failed", "expected": True},
+        ),
+        (
+            "on_unknown_state",
+            "on_unknown",
+            {"kind": "context_flag", "key": "last_action_unknown", "expected": True},
+        ),
+        (
+            "on_approval_required_state",
+            "on_approval_required",
+            {"kind": "context_flag", "key": "approval_required", "expected": True},
+        ),
         ("on_break_state", "on_break", {"kind": "control_signal", "signal": "break"}),
-        ("on_continue_state", "on_continue", {"kind": "control_signal", "signal": "continue"}),
-        ("on_true_state", "on_true", {"kind": "transition_result_truth", "expected": True}),
-        ("on_false_state", "on_false", {"kind": "transition_result_truth", "expected": False}),
+        (
+            "on_continue_state",
+            "on_continue",
+            {"kind": "control_signal", "signal": "continue"},
+        ),
+        (
+            "on_true_state",
+            "on_true",
+            {"kind": "transition_result_truth", "expected": True},
+        ),
+        (
+            "on_false_state",
+            "on_false",
+            {"kind": "transition_result_truth", "expected": False},
+        ),
         ("next_state", "next_step", {"kind": "always"}),
     ):
         target_state = str(getattr(step, attribute_name, "") or "").strip()
@@ -585,7 +610,7 @@ def _context_input_mapping_specs_match(
         for tool_param, context_key, required in (loaded_specs or ())
     }
     expected_mapping: dict[tuple[str, str], tuple[bool, str | None]] = {}
-    for tool_param, context_key, required in (expected_specs or ()):
+    for tool_param, context_key, required in expected_specs or ():
         key = (str(tool_param), str(context_key))
         if not key[0] or not key[1]:
             continue
@@ -612,14 +637,11 @@ def _context_input_mapping_specs_match(
                 mapping_doc = concept_service.get_concept_by_concept_id(concept_id)
             except Exception:
                 return False
-        mapping_spec = (
-            ((mapping_doc or {}).get("concept_data") or {}).get("workflow_mapping_spec")
-            or {}
-        )
+        mapping_spec = ((mapping_doc or {}).get("concept_data") or {}).get(
+            "workflow_mapping_spec"
+        ) or {}
         stored_required = (
-            mapping_spec.get("required")
-            if isinstance(mapping_spec, dict)
-            else None
+            mapping_spec.get("required") if isinstance(mapping_spec, dict) else None
         )
 
         if expected_required:
@@ -647,9 +669,7 @@ def _state_metadata_subset_matches(
             return False
         if key == "reads_context_keys":
             expected_keys = {
-                str(item).strip()
-                for item in (value or [])
-                if str(item).strip()
+                str(item).strip() for item in (value or []) if str(item).strip()
             }
             loaded_keys = {
                 str(item).strip()
@@ -910,7 +930,11 @@ def _validate_existing_materialisation(
             if str(status.get("issue_code") or "").strip()
         }
     )
-    already_current = bool(target_workflow_ids) and not drift_workflow_ids
+    already_current = (
+        bool(target_workflow_ids)
+        and not drift_workflow_ids
+        and not bundle_snapshot_drift_workflow_ids
+    )
 
     return (
         already_current,
@@ -922,9 +946,7 @@ def _validate_existing_materialisation(
             "drift_workflow_ids": drift_workflow_ids,
             "issue_codes": issue_codes,
             "workflow_status_by_id": workflow_status_by_id,
-            "bundle_snapshot_drift_detected": bool(
-                bundle_snapshot_drift_workflow_ids
-            ),
+            "bundle_snapshot_drift_detected": bool(bundle_snapshot_drift_workflow_ids),
             "bundle_snapshot_drift_workflow_ids": bundle_snapshot_drift_workflow_ids,
             "bundle_snapshot_issue_codes": bundle_snapshot_issue_codes,
             "bundle_snapshot_status_by_id": bundle_snapshot_status_by_id,
@@ -1051,9 +1073,12 @@ def bootstrap_repo_seed_workflow_bundle(
         publication_report["materialisation_status"] = (
             "current"
             if already_current and not force_republish
-            else "forced_republish"
-            if force_republish and not materialisation_preflight.get("drift_detected")
-            else "repaired_from_repo_seed"
+            else (
+                "forced_republish"
+                if force_republish
+                and not materialisation_preflight.get("drift_detected")
+                else "repaired_from_repo_seed"
+            )
         )
         publication_report["drift_detected"] = bool(
             materialisation_preflight.get("drift_detected")
@@ -1077,7 +1102,9 @@ def bootstrap_repo_seed_workflow_bundle(
             materialisation_preflight.get("bundle_snapshot_issue_codes") or []
         )
 
-        should_apply_seed_bundle_mutations = not (already_current and not force_republish)
+        should_apply_seed_bundle_mutations = not (
+            already_current and not force_republish
+        )
         if should_apply_seed_bundle_mutations:
             for workflow_id, spec in publication_specs.items():
                 type_ids = tuple(workflow_type_ids.get(workflow_id) or ())
@@ -1098,9 +1125,7 @@ def bootstrap_repo_seed_workflow_bundle(
                         managed_by=managed_by,
                     )
 
-                launch_input_contract = workflow_launch_input_contracts.get(
-                    workflow_id
-                )
+                launch_input_contract = workflow_launch_input_contracts.get(workflow_id)
                 if isinstance(launch_input_contract, dict):
                     upsert_singleton_text_relation(
                         subject_concept_id=workflow_id,
@@ -1142,8 +1167,7 @@ def bootstrap_repo_seed_workflow_bundle(
                             source_tag=source_tag,
                             managed_by=managed_by,
                             state_id=(
-                                str(getattr(step, "state_id", "") or "").strip()
-                                or None
+                                str(getattr(step, "state_id", "") or "").strip() or None
                             ),
                         )
 
@@ -1169,8 +1193,7 @@ def bootstrap_repo_seed_workflow_bundle(
                 if warning_items:
                     raise RuntimeError(
                         "repo_seed_workflow_graph_warnings_present:"
-                        f"{workflow_id}:"
-                        + ",".join(warning_items)
+                        f"{workflow_id}:" + ",".join(warning_items)
                     )
 
                 definition = load_workflow_definition_from_vontology(workflow_id)

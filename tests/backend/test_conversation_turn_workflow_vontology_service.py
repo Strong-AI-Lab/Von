@@ -4,6 +4,7 @@ from typing import Any
 
 import pytest
 
+from src.backend.services import concept_service
 from src.backend.services.conversation_turn_workflow_vontology_service import (
     _ensure_conversation_turn_prompt_support,
     bootstrap_canonical_conversation_turn_workflows,
@@ -452,3 +453,72 @@ def test_turn_and_episode_prompt_authority_resolve_on_live_surface(
     assert prompt_contract.get("resolved_prompt_concept_id") == (
         EPISODE_EVALUATION_PROMPT_CONCEPT_ID
     )
+
+
+def test_bootstrap_repairs_bundle_snapshot_drift_for_conversation_turn_workflow_family(
+    _reset_mock_db: Any,
+) -> None:
+    bootstrap_canonical_conversation_turn_workflows()
+
+    definition = load_workflow_definition_from_vontology(
+        CONVERSATION_TURN_EXECUTION_WORKFLOW_ID
+    )
+    assert definition is not None
+
+    routing_step_id = authority_service._step_concept_id(
+        workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+        state_id="routing",
+    )
+    expected_outcome_step_id = authority_service._step_concept_id(
+        workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+        state_id="expected_outcome_inference",
+    )
+    assert definition.initial_state == expected_outcome_step_id
+
+    workflow_concept = concept_service.get_concept_by_concept_id(
+        CONVERSATION_TURN_EXECUTION_WORKFLOW_ID
+    )
+    assert workflow_concept is not None
+    relationships = dict(workflow_concept.get("relationships") or {})
+    for alias in (
+        "#V#hasInitialStep",
+        "hasInitialStep",
+        "#V#has_initial_step",
+        "has_initial_step",
+    ):
+        relationships.pop(alias, None)
+    relationships["#V#hasInitialStep"] = [routing_step_id]
+    concept_service.update_concept(
+        CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+        {"relationships": relationships},
+    )
+
+    drifted_definition = load_workflow_definition_from_vontology(
+        CONVERSATION_TURN_EXECUTION_WORKFLOW_ID
+    )
+    assert drifted_definition is not None
+    assert drifted_definition.initial_state == routing_step_id
+
+    repair_report = bootstrap_canonical_conversation_turn_workflows()
+    publication = repair_report.get("publication") or {}
+    assert publication.get("materialisation_status") == "repaired_from_repo_seed"
+    assert publication.get("skipped") is not True
+    assert publication.get("drift_detected") is True
+    assert publication.get("drift_workflow_ids") == []
+    assert publication.get("issue_codes") == []
+    assert publication.get("bundle_snapshot_drift_detected") is True
+    assert CONVERSATION_TURN_EXECUTION_WORKFLOW_ID in (
+        publication.get("bundle_snapshot_drift_workflow_ids") or []
+    )
+    assert "definition_mismatch" in (
+        publication.get("bundle_snapshot_issue_codes") or []
+    )
+    assert CONVERSATION_TURN_EXECUTION_WORKFLOW_ID in (
+        publication.get("published_workflow_ids") or []
+    )
+
+    repaired_definition = load_workflow_definition_from_vontology(
+        CONVERSATION_TURN_EXECUTION_WORKFLOW_ID
+    )
+    assert repaired_definition is not None
+    assert repaired_definition.initial_state == expected_outcome_step_id
