@@ -3,8 +3,22 @@
 from __future__ import annotations
 
 import json
+from typing import Any, cast
 
-from src.backend.integrations.internal_mcp.schemas import Schema, coerce_payload_types
+from src.backend.integrations.internal_mcp.orchestrator import (
+    InternalMCPChatOrchestrator,
+)
+from src.backend.integrations.internal_mcp.gateway import (
+    InternalMCPGateway,
+    MethodCatalogue,
+    MethodDefinition,
+)
+from src.backend.integrations.internal_mcp.schemas import (
+    Schema,
+    coerce_payload_types,
+    validate_payload,
+)
+from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
 
 
 def test_coerce_json_array_string_to_list() -> None:
@@ -67,3 +81,92 @@ def test_coerce_null_string_to_none_when_allowed() -> None:
 
     assert coerced["concepts"] is None
     assert any("string to None" in w for w in warnings)
+
+
+def test_gateway_invoke_coerces_numeric_strings_without_mutating_caller_payload() -> (
+    None
+):
+    """Gateway invoke should share the same primitive coercion support as orchestrator preflight."""
+
+    observed: dict[str, object] = {}
+
+    def _handler(*, query: str, top_k: int | None = None) -> dict[str, object]:
+        observed["query"] = query
+        observed["top_k"] = top_k
+        observed["top_k_type"] = type(top_k).__name__
+        return {"success": True, "query": query, "top_k": top_k}
+
+    catalogue = MethodCatalogue()
+    catalogue.register(
+        MethodDefinition(
+            name="search_proxy",
+            handler=_handler,
+            input_schema=Schema(
+                required={"query": str},
+                optional={"top_k": int},
+                allow_unknown=False,
+                description="Search proxy input.",
+            ),
+            output_schema=Schema(
+                required={"success": bool, "query": str},
+                optional={"top_k": (int, type(None))},
+                allow_unknown=False,
+                description="Search proxy output.",
+            ),
+        )
+    )
+    gateway = InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+    caller_payload = {"query": "papers of mine", "top_k": "10"}
+
+    result = gateway.invoke("search_proxy", caller_payload)
+
+    assert caller_payload["top_k"] == "10"
+    assert observed["query"] == "papers of mine"
+    assert observed["top_k"] == 10
+    assert observed["top_k_type"] == "int"
+    assert result.payload["success"] is True
+    assert result.payload["top_k"] == 10
+
+
+def test_tool_schema_lookup_accepts_json_schema_metadata() -> None:
+    """Tool-call preflight should understand JSON Schema-shaped metadata too."""
+
+    class _JsonSchemaGateway:
+        enabled = True
+
+        def describe_methods(self) -> dict[str, object]:
+            return {
+                "test.lookup_current_user_papers": {
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "user_concept_id": {"type": "string"},
+                            "top_k": {"type": "integer"},
+                        },
+                        "required": ["user_concept_id"],
+                        "description": "Grounded current-user paper lookup.",
+                    }
+                }
+            }
+
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=cast(Any, _JsonSchemaGateway())
+    )
+    schema = orchestrator._tool_schema_for_name(
+        "test.lookup_current_user_papers",
+        orchestrator._gateway.describe_methods(),
+    )
+
+    assert schema is not None
+    assert schema.required["user_concept_id"] is str
+    assert schema.optional["top_k"] is int
+    ok, errors = validate_payload(
+        schema,
+        {"user_concept_id": "#V#test_user", "top_k": 3},
+    )
+    assert ok is True
+    assert errors == []

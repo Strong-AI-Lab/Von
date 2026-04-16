@@ -13,6 +13,13 @@ from src.backend.workflows.durable.workflow_creation_workflow import (
 from src.backend.workflows.write_tool_policy import (
     WORKFLOW_EXECUTION_SIDE_EFFECT_POLICY_SCHEMA_VERSION,
 )
+from src.backend.integrations.internal_mcp.gateway import (
+    InternalMCPGateway,
+    MethodCatalogue,
+    MethodDefinition,
+)
+from src.backend.integrations.internal_mcp.schemas import Schema
+from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
 
 
 class _FakeGateway:
@@ -24,8 +31,7 @@ class _FakeGateway:
 
     def describe_methods(self):
         return {
-            name: {"category": category}
-            for name, category in self._definitions.items()
+            name: {"category": category} for name, category in self._definitions.items()
         }
 
     def get_method_definition(self, method_name: str):
@@ -44,7 +50,7 @@ class _FakeGateway:
 
 
 def _theory_bounded_policy(*, allow_write_tools=None):
-    payload = {
+    payload: dict[str, object] = {
         "schema_version": WORKFLOW_EXECUTION_SIDE_EFFECT_POLICY_SCHEMA_VERSION,
         "mode": "theory_bounded",
         "testing_theory_id": "#V#theory_guardrail_test",
@@ -156,3 +162,78 @@ def test_workflow_creation_fallback_allows_read_tool_in_theory_scope():
     assert fake_gateway.invocations == [
         ("fetch_concept", {"concept_id": "#V#paper", "namespace": "#V#sandbox_ns"})
     ]
+
+
+def test_durable_fallback_coerces_numeric_like_tool_payload_fields(monkeypatch):
+    observed: dict[str, object] = {}
+
+    def _search_handler(
+        *, query: str, top_k: int | None = None, namespace: str | None = None
+    ) -> dict[str, object]:
+        observed["query"] = query
+        observed["top_k"] = top_k
+        observed["top_k_type"] = type(top_k).__name__
+        observed["namespace"] = namespace
+        return {
+            "success": True,
+            "query": query,
+            "top_k": top_k,
+            "namespace": namespace,
+        }
+
+    catalogue = MethodCatalogue()
+    catalogue.register(
+        MethodDefinition(
+            name="search_knowledge_base",
+            handler=_search_handler,
+            input_schema=Schema(
+                required={"query": str},
+                optional={"top_k": int, "namespace": str},
+                allow_unknown=False,
+                description="Search KB input.",
+            ),
+            output_schema=Schema(
+                required={"success": bool, "query": str},
+                optional={
+                    "top_k": (int, type(None)),
+                    "namespace": (str, type(None)),
+                },
+                allow_unknown=False,
+                description="Search KB output.",
+            ),
+            category="read",
+        )
+    )
+    gateway = InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.registry_factory._get_or_build_durable_mcp_gateway",
+        lambda: gateway,
+    )
+
+    request = WorkflowActionRequest(
+        action_id="search_knowledge_base",
+        inputs={"query": "papers of mine", "top_k": "10"},
+        environment=WorkflowEnvironment(
+            llm_client=None,
+            gateway=gateway,
+            user_namespace="#V#sandbox_ns",
+            user_concept_id="#V#tester",
+        ),
+        data={},
+        workflow_id="#V#conversation_turn_execution_workflow",
+        workflow_state_id="apply_recovery_tool_batch",
+        workflow_state_metadata={},
+    )
+
+    result = _durable_mcp_fallback_action(request)
+
+    assert result.status == "success"
+    assert observed["query"] == "papers of mine"
+    assert observed["top_k"] == 10
+    assert observed["top_k_type"] == "int"
+    assert observed["namespace"] == "#V#sandbox_ns"
+    assert result.outputs["mcp_result"]["top_k"] == 10
