@@ -1,0 +1,261 @@
+{
+  "schema_version": "live_kb_tool_prompt_bank.v1",
+  "description": "Prompt bank for live /von/generate sampling of turns that should draw on LLM knowledge, KB knowledge, and optional Jira/web/arXiv tools.",
+  "prompts": [
+    {
+      "id": "what_papers_of_mine_do_you_know_about",
+      "category": "entity_relative_kb_lookup",
+      "prompt": "What papers of mine do you know about?",
+      "knowledge_surfaces": [
+        "kb"
+      ],
+      "likely_tools": [
+        "search_knowledge_base"
+      ]
+    },
+    {
+      "id": "research_interests_and_collaborators",
+      "category": "profile_and_network_summary",
+      "prompt": "What do you know about my current research interests, and how do they connect to my collaborators?",
+      "knowledge_surfaces": [
+        "kb"
+      ],
+      "likely_tools": [
+        "search_knowledge_base"
+      ]
+    },
+    {
+      "id": "most_relevant_people_for_my_neurosymbolic_work",
+      "category": "network_ranking",
+      "prompt": "Who in my network seems most relevant to my work on neuro-symbolic agents, and why?",
+      "knowledge_surfaces": [
+        "kb"
+      ],
+      "likely_tools": [
+        "search_knowledge_base"
+      ]
+    },
+    {
+      "id": "students_or_collaborators_and_relationships",
+      "category": "relation_lookup",
+      "prompt": "What students or collaborators of mine are represented in the KB, and what is my relationship to each?",
+      "knowledge_surfaces": [
+        "kb"
+      ],
+      "likely_tools": [
+        "search_knowledge_base"
+      ]
+    },
+    {
+      "id": "papers_talks_projects_clustered_by_theme",
+      "category": "theme_synthesis",
+      "prompt": "What talks, papers, and projects of mine seem to cluster around the same theme?",
+      "knowledge_surfaces": [
+        "kb"
+      ],
+      "likely_tools": [
+        "search_knowledge_base"
+      ]
+    },
+    {
+      "id": "represented_self_facts_vs_inferences",
+      "category": "epistemic_summary",
+      "prompt": "Tell me about myself as represented here, but separate established facts from likely inferences.",
+      "knowledge_surfaces": [
+        "kb"
+      ],
+      "likely_tools": [
+        "search_knowledge_base"
+      ]
+    },
+    {
+      "id": "closest_kb_papers_to_recent_arxiv_interests",
+      "category": "personalised_arxiv_recommendation",
+      "prompt": "Which papers in my KB are closest to my recent arXiv interests, and what newer arXiv papers should I read next?",
+      "knowledge_surfaces": [
+        "kb",
+        "arxiv"
+      ],
+      "likely_tools": [
+        "search_knowledge_base",
+        "search_arxiv"
+      ]
+    },
+    {
+      "id": "compare_my_papers_with_latest_arxiv_reasoning_work",
+      "category": "external_comparison",
+      "prompt": "Compare the papers of mine you know about with the latest arXiv work on neuro-symbolic reasoning.",
+      "knowledge_surfaces": [
+        "kb",
+        "arxiv"
+      ],
+      "likely_tools": [
+        "search_knowledge_base",
+        "search_arxiv"
+      ]
+    },
+    {
+      "id": "recent_arxiv_like_my_continual_learning_and_symbolic_memory_interests",
+      "category": "personalised_arxiv_recommendation",
+      "prompt": "I’m interested in papers like mine on continual learning and symbolic memory. Find recent arXiv papers and explain the overlap.",
+      "knowledge_surfaces": [
+        "kb",
+        "arxiv"
+      ],
+      "likely_tools": [
+        "search_knowledge_base",
+        "search_arxiv"
+      ]
+    },
+    {
+      "id": "which_arxiv_papers_should_i_ingest_into_the_kb",
+      "category": "kb_growth_recommendation",
+      "prompt": "What arXiv papers should I ingest into the KB because they are especially relevant to my existing work?",
+      "knowledge_surfaces": [
+        "kb",
+        "arxiv"
+      ],
+      "likely_tools": [
+        "search_knowledge_base",
+        "search_arxiv"
+      ]
+    },
+    {
+      "id": "my_papers_with_follow_on_work_this_year",
+      "category": "external_follow_on_search",
+      "prompt": "Do you know about any of my papers that have likely follow-on work on arXiv this year?",
+      "knowledge_surfaces": [
+        "kb",
+        "arxiv"
+      ],
+      "likely_tools": [
+        "search_knowledge_base",
+        "search_arxiv"
+      ]
+    },
+    {
+      "id": "recent_developments_i_should_care_about",
+      "category": "personalised_web_relevance",
+      "prompt": "Given what you know about my work, what are the most relevant developments this month in agent memory and workflow orchestration?",
+      "knowledge_surfaces": [
+        "kb",
+        "web"
+      ],
+      "likely_tools": [
+        "search_knowledge_base",
+        "search_web"
+      ]
+    },
+    {
+      "id": "companies_labs_projects_outside_kb_closest_to_ours",
+      "category": "external_landscape_scan",
+      "prompt": "What companies, labs, or projects outside our KB are working on ideas closest to ours?",
+      "knowledge_surfaces": [
+        "kb",
+        "web"
+      ],
+      "likely_tools": [
+        "search_knowledge_base",
+        "search_web"
+      ]
+    },
+    {
+      "id": "recent_news_or_releases_i_should_care_about",
+      "category": "personalised_web_relevance",
+      "prompt": "Based on my represented interests, what recent news or releases should I probably care about?",
+      "knowledge_surfaces": [
+        "kb",
+        "web"
+      ],
+      "likely_tools": [
+        "search_knowledge_base",
+        "search_web"
+      ]
+    },
+    {
+      "id": "open_source_projects_relevant_to_my_represented_themes",
+      "category": "external_landscape_scan",
+      "prompt": "What open-source projects released recently look most aligned with the research themes already in my KB?",
+      "knowledge_surfaces": [
+        "kb",
+        "web"
+      ],
+      "likely_tools": [
+        "search_knowledge_base",
+        "search_web"
+      ]
+    },
+    {
+      "id": "which_open_jira_tasks_connect_to_my_papers_and_projects",
+      "category": "kb_jira_cross_reference",
+      "prompt": "Which of my open Jira tasks seem most closely connected to the papers and projects you know about me?",
+      "knowledge_surfaces": [
+        "kb",
+        "jira"
+      ],
+      "likely_tools": [
+        "search_knowledge_base",
+        "jira_search",
+        "jira_get_issue"
+      ]
+    },
+    {
+      "id": "summarise_jvnautosci_1891_in_context_of_my_work",
+      "category": "jira_contextual_summary",
+      "prompt": "Summarise JVNAUTOSCI-1891 in the context of my existing papers, workflows, and research goals.",
+      "knowledge_surfaces": [
+        "kb",
+        "jira"
+      ],
+      "likely_tools": [
+        "search_knowledge_base",
+        "jira_get_issue"
+      ]
+    },
+    {
+      "id": "open_jira_issues_relevant_to_paper_ingestion_retrieval_or_recommendation",
+      "category": "jira_contextual_summary",
+      "prompt": "What open Jira issues are most relevant to my represented work on paper ingestion, retrieval, or recommendation?",
+      "knowledge_surfaces": [
+        "kb",
+        "jira"
+      ],
+      "likely_tools": [
+        "search_knowledge_base",
+        "jira_search"
+      ]
+    },
+    {
+      "id": "research_briefing_my_papers_recent_arxiv_and_jira",
+      "category": "multi_surface_briefing",
+      "prompt": "Prepare a short research briefing for me: my represented papers, relevant recent arXiv work, and any linked Jira tasks.",
+      "knowledge_surfaces": [
+        "kb",
+        "arxiv",
+        "jira"
+      ],
+      "likely_tools": [
+        "search_knowledge_base",
+        "search_arxiv",
+        "jira_search"
+      ]
+    },
+    {
+      "id": "next_three_research_actions_using_kb_jira_and_recent_literature",
+      "category": "multi_surface_planning",
+      "prompt": "Given what you know about me, what should be my next three research actions, supported by KB evidence, Jira state, and recent external literature?",
+      "knowledge_surfaces": [
+        "kb",
+        "jira",
+        "arxiv",
+        "web"
+      ],
+      "likely_tools": [
+        "search_knowledge_base",
+        "jira_search",
+        "search_arxiv",
+        "search_web"
+      ]
+    }
+  ]
+}
