@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict
+from typing import Any, Dict, cast
 from unittest.mock import MagicMock, patch
 
 
@@ -25,6 +25,7 @@ from src.backend.workflows.action_registry import (
 )
 from src.backend.workflows.definitions import TODO_REFRESH_WORKFLOW_ID
 from src.backend.workflows.engine import WorkflowExecutor
+from src.backend.services.prompt_template_service import RenderedPrompt
 from workflow_test_support import (
     build_authoritative_test_workflow_definition,
 )
@@ -84,6 +85,55 @@ def _build_orchestrator_stub():
     stub._logger = logging.getLogger("test_todo_refresh")
     # Set the class-level TTL attribute for testing (default 3600).
     stub._TODO_CACHE_TTL_SECONDS = 3600
+    prompt_templates = {
+        "#V#todo_refresh_extract_tasks_prompt": (
+            "Analyse the following email digest and extract actionable to-do items.\n\n"
+            "EMAILS:\n{email_digest}"
+        ),
+        "#V#todo_refresh_extract_tasks_system_prompt": (
+            "You extract actionable tasks from emails. Reply ONLY with a JSON array."
+        ),
+        "#V#todo_refresh_prioritise_prompt": (
+            "Given these tasks, assign a priority to each.\n\n"
+            "Tasks:\n{task_summaries}"
+        ),
+        "#V#todo_refresh_prioritise_system_prompt": (
+            "You prioritise tasks. Reply ONLY with a JSON array."
+        ),
+    }
+
+    class _PromptTemplateStub:
+        def render_prompt(
+            self,
+            concept_ids,
+            *,
+            variables=None,
+            fallback=None,
+            max_chars=None,
+        ):
+            for prompt_id in concept_ids or ():
+                template = prompt_templates.get(str(prompt_id))
+                if not template:
+                    continue
+                text = template
+                for key, value in dict(variables or {}).items():
+                    text = text.replace("{" + key + "}", str(value))
+                return RenderedPrompt(
+                    prompt_id=str(prompt_id),
+                    text=text,
+                    variables=dict(variables or {}),
+                    truncated=False,
+                )
+            if fallback is None:
+                return None
+            return RenderedPrompt(
+                prompt_id=None,
+                text=str(fallback),
+                variables=dict(variables or {}),
+                truncated=False,
+            )
+
+    stub._prompt_templates = cast(Any, _PromptTemplateStub())
     return stub
 
 

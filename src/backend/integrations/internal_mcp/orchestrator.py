@@ -41,7 +41,10 @@ from ...languagemodels.structured_tool_calling import (
     LLMResponse,
     ToolDefinition,
 )
-from src.backend.services.prompt_template_service import PromptTemplateService
+from src.backend.services.prompt_template_service import (
+    PromptTemplateService,
+    RenderedPrompt,
+)
 from src.backend.services.workflow_override_policy_service import (
     WorkflowOverrideDecision,
     assess_workflow_routing_candidate_policy,
@@ -1550,6 +1553,10 @@ class CancellationRequested(Exception):
         super().__init__(f"Cancellation requested for task {task_id or 'unknown'}")
 
 
+class AuthoritativePromptUnavailableError(RuntimeError):
+    """Raised when a Vontology-governed prompt required for orchestration is unavailable."""
+
+
 class InternalMCPChatOrchestrator:
     """Simple loop that allows the Von assistant to call internal tools."""
 
@@ -1588,24 +1595,16 @@ class InternalMCPChatOrchestrator:
     _SALIENT_PREFLIGHT_MAX_TOTAL_PREDICATES = 24
     _SALIENT_PREFLIGHT_MAX_ANCESTOR_DEPTH = 2
     _SALIENT_PREFLIGHT_MAX_TYPE_EXPANSIONS = 24
-    _TOOL_CALL_REPAIR_PROMPT = (
-        "You are a strict tool-call repairer for an MCP agent.\n"
-        "Return ONLY a JSON object or JSON array of tool-call objects.\n"
-        "Do NOT include prose, markdown fences, or explanations.\n\n"
-        "Each tool call must follow:\n"
-        '{{"action": "call_tool", "tool": "tool_name", "payload": {{"param": "value"}}}}\n\n'
-        "Constraints:\n"
-        "- Use only tools that appear in the available tool list.\n"
-        "- Ensure payload types match the schema (e.g. integers are integers).\n"
-        "- If you cannot produce a valid tool call, return an empty JSON array [].\n\n"
-        "Available tools:\n"
-        "{tool_list}\n\n"
-        "Validation errors to fix:\n"
-        "{errors}\n\n"
-        "Original tool-call JSON:\n"
-        "{raw_tool_call}\n"
-    )
     _TOOL_CALL_REPAIR_PROMPTS = ("#V#tool_call_repair_prompt",)
+    _TURN_CURRENT_REQUEST_STAGE_PROMPTS = ("#V#turn_current_request_stage_prompt",)
+    _TODO_REFRESH_EXTRACT_TASKS_PROMPTS = ("#V#todo_refresh_extract_tasks_prompt",)
+    _TODO_REFRESH_EXTRACT_TASKS_SYSTEM_PROMPTS = (
+        "#V#todo_refresh_extract_tasks_system_prompt",
+    )
+    _TODO_REFRESH_PRIORITISE_PROMPTS = ("#V#todo_refresh_prioritise_prompt",)
+    _TODO_REFRESH_PRIORITISE_SYSTEM_PROMPTS = (
+        "#V#todo_refresh_prioritise_system_prompt",
+    )
 
     # --- Tool-use progress phases (JVNAUTOSCI-984) ---
     # Used to provide phase-aware status updates during tool execution.
@@ -1635,18 +1634,6 @@ class InternalMCPChatOrchestrator:
         PHASE_ERROR: "Error",
     }
 
-    _FALLBACK_MISSING_TOOL_CALL_PROMPT = (
-        "You are a strict classifier for an agent system that can call tools via JSON.\n"
-        "Your job: decide whether the assistant response *promises* to call tools (or says it is about to do so) "
-        "but does not actually emit a tool-call JSON object/array.\n\n"
-        "Rules:\n"
-        "- Answer ONLY 'YES' or 'NO'.\n"
-        "- Answer YES if the response contains phrases like 'I will', 'I’m going to', 'Proceeding now', 'Invoking', "
-        "or similar action narration *and* references tool-like actions (search, fetch, create/update, MCP, ontology).\n"
-        "- Answer NO for normal explanations, summaries, or questions that are not claiming to execute tools now.\n\n"
-        "Assistant response:\n"
-        "{response}\n"
-    )
     _MISSING_TOOL_CLASSIFIER_PROMPTS = ("#V#missing_tool_call_classifier_prompt",)
     _MISSING_TOOL_RETRY_PROMPTS = ("#V#missing_tool_call_retry_prompt",)
     _TURN_SELECTOR_PROMPTS = ("#V#chat_turn_classifier_prompt",)
@@ -1768,12 +1755,6 @@ class InternalMCPChatOrchestrator:
         ("context_search", "search"),
         ("extract_url", "search"),
         ("resilient_extract_url", "search"),
-        ("search_arxiv", "arxiv"),
-        ("download_paper", "arxiv"),
-        ("finalise_cached_paper", "arxiv"),
-        ("materialise_scholarly_representation_for_file_copy", "arxiv"),
-        ("read_paper", "arxiv"),
-        ("list_papers", "arxiv"),
         ("task_", "task"),
         ("create_task", "task"),
         ("list_my_tasks", "task"),
@@ -1853,7 +1834,6 @@ class InternalMCPChatOrchestrator:
                 "news",
             ),
         ),
-        ("arxiv", ("arxiv", "paper", "pdf", "doi", "preprint")),
         ("task", ("task", "to-do", "todo", "assignment", "assignee", "due date")),
         ("conversation", ("shared conversation", "invite", "chat session")),
         (
@@ -3777,20 +3757,45 @@ class InternalMCPChatOrchestrator:
                 duration_ms=0.0,
             )
 
-        rendered_prompt = self._prompt_templates.render_prompt(
+        rendered_prompt = self._render_authoritative_prompt(
             self._MISSING_TOOL_RETRY_PROMPTS,
             variables={},
-            fallback=self._missing_tool_call_retry_prompt(),
             max_chars=4000,
+            error_context="missing_tool_call_retry",
         )
-        prompt_text = (
-            rendered_prompt.text
-            if rendered_prompt is not None
-            else self._missing_tool_call_retry_prompt()
-        )
+        if rendered_prompt is None:
+            if emit_progress_cb is not None:
+                emit_progress_cb(
+                    {
+                        "status": "retry_end",
+                        "stage": "tool_recovery",
+                        "retry_attempts": retry_attempts,
+                        "retry_budget": retry_budget,
+                        "retry_remaining": retries_remaining_after,
+                        "success": False,
+                        "result_summary": "authoritative_prompt_unavailable",
+                    }
+                )
+            return WorkflowActionResult(
+                outputs={
+                    "response_text": data.get("response_text"),
+                    "tool_calls": data.get("tool_calls"),
+                    "missing_tool_call_retry_success": False,
+                    "tool_call_parse_error": data.get("tool_call_parse_error"),
+                    "missing_tool_call_retry_attempts": retry_attempts,
+                    "missing_tool_call_retry_budget": retry_budget,
+                    "missing_tool_call_retry_remaining": retries_remaining_after,
+                    "missing_tool_call_retry_suppressed": True,
+                    "missing_tool_call_retry_stop_reason": "prompt_unavailable",
+                    "missing_tool_call_recovery_outcome": "retry_prompt_unavailable",
+                    "result": False,
+                },
+                duration_ms=0.0,
+            )
+        prompt_text = rendered_prompt.text
         if request.trace is not None:
             request.trace.record_prompt(
-                prompt_id=rendered_prompt.prompt_id if rendered_prompt else None,
+                prompt_id=rendered_prompt.prompt_id,
                 resolved_prompt=prompt_text,
                 variables={},
             )
@@ -5241,16 +5246,30 @@ class InternalMCPChatOrchestrator:
 
         email_digest = "\n---\n".join(digest_parts)
 
-        extraction_prompt = (
-            "You are an expert personal assistant.  Analyse the following email "
-            "messages and extract actionable to-do items.  For each task, provide:\n"
-            "- title: a short (~10 word) task title\n"
-            "- description: 1-2 sentence description of what needs to be done\n"
-            "- source_email_index: which email number (1-based) it came from\n\n"
-            "Return your answer as a JSON array of objects.  If there are no "
-            "actionable items, return an empty array [].\n\n"
-            "EMAILS:\n" + email_digest
+        extraction_prompt = self._render_authoritative_prompt(
+            self._TODO_REFRESH_EXTRACT_TASKS_PROMPTS,
+            variables={"email_digest": email_digest},
+            max_chars=12000,
+            error_context="todo_refresh_extract_tasks",
+            required=False,
         )
+        extraction_system_prompt = self._render_authoritative_prompt(
+            self._TODO_REFRESH_EXTRACT_TASKS_SYSTEM_PROMPTS,
+            variables={},
+            max_chars=2000,
+            error_context="todo_refresh_extract_tasks_system",
+            required=False,
+        )
+        if extraction_prompt is None or extraction_system_prompt is None:
+            self._logger.warning(
+                "[todo_refresh] Authoritative extraction prompt unavailable"
+            )
+            return WorkflowActionResult(
+                outputs={
+                    "extracted_tasks": [],
+                    "todo_refresh_extraction_prompt_available": False,
+                }
+            )
 
         llm_client = request.environment.llm_client
         model = request.environment.model
@@ -5260,14 +5279,11 @@ class InternalMCPChatOrchestrator:
 
         try:
             llm_response = llm_client.generate(
-                prompt=extraction_prompt,
+                prompt=extraction_prompt.text,
                 context=[
                     {
                         "role": "system",
-                        "content": (
-                            "You extract actionable tasks from emails.  "
-                            "Reply ONLY with a JSON array.  No markdown fences."
-                        ),
+                        "content": extraction_system_prompt.text,
                     },
                 ],
                 model=model,
@@ -5360,23 +5376,38 @@ class InternalMCPChatOrchestrator:
             ],
             indent=2,
         )
-        prioritise_prompt = (
-            "Given these tasks, assign a priority to each: low, medium, high, "
-            "or critical.  Consider urgency, deadlines, and importance.\n\n"
-            "Tasks:\n" + task_summaries + "\n\n"
-            "Return a JSON array of objects with keys: index, priority."
+        prioritise_prompt = self._render_authoritative_prompt(
+            self._TODO_REFRESH_PRIORITISE_PROMPTS,
+            variables={"task_summaries": task_summaries},
+            max_chars=8000,
+            error_context="todo_refresh_prioritise",
+            required=False,
         )
+        prioritise_system_prompt = self._render_authoritative_prompt(
+            self._TODO_REFRESH_PRIORITISE_SYSTEM_PROMPTS,
+            variables={},
+            max_chars=2000,
+            error_context="todo_refresh_prioritise_system",
+            required=False,
+        )
+        if prioritise_prompt is None or prioritise_system_prompt is None:
+            return WorkflowActionResult(
+                outputs={
+                    "prioritised_tasks": extracted,
+                    "todo_refresh_prioritisation_prompt_available": False,
+                }
+            )
 
         llm_client = request.environment.llm_client
         model = request.environment.model
 
         try:
             llm_response = llm_client.generate(
-                prompt=prioritise_prompt,
+                prompt=prioritise_prompt.text,
                 context=[
                     {
                         "role": "system",
-                        "content": "You prioritise tasks.  Reply ONLY with a JSON array.",
+                        "content": prioritise_system_prompt.text,
                     },
                 ],
                 model=model,
@@ -9468,7 +9499,7 @@ class InternalMCPChatOrchestrator:
             "jira",
             "github",
             "gmail",
-            "arxiv",
+            "document",
             "task",
             "conversation",
             "renderer",
@@ -9482,14 +9513,7 @@ class InternalMCPChatOrchestrator:
             name = str(raw_name or "").strip()
             if not name or not is_tool_visible(name):
                 continue
-            metadata = catalogue.get(name)
-            category = (
-                str(metadata.get("category")).strip().lower()
-                if isinstance(metadata, Mapping)
-                and isinstance(metadata.get("category"), str)
-                and str(metadata.get("category")).strip()
-                else self._structured_tool_family_for_name(name)
-            )
+            category = self._structured_tool_family_for_name(name)
             families.setdefault(category, []).append(name)
 
         ordered_families = [
@@ -9533,13 +9557,13 @@ class InternalMCPChatOrchestrator:
         # Inform agent about authentication status and tool availability
         auth_status = ""
         if user_namespace:
-            auth_status = f"\n\n🔐 AUTHENTICATION STATUS: Authenticated (namespace: {user_namespace})\nRAG tools (rag_list_collections, search_knowledge_base, rag_list_indexed, rag_get_item) are AVAILABLE.\n"
+            auth_status = (
+                "AUTHENTICATION STATUS: Authenticated "
+                f"(namespace: {user_namespace}). RAG tools available."
+            )
         else:
             auth_status = (
-                "\n\n⚠️ AUTHENTICATION STATUS: NOT AUTHENTICATED\n"
-                "RAG tools (rag_list_collections, search_knowledge_base, rag_list_indexed, rag_get_item) are UNAVAILABLE.\n"
-                "These tools require user authentication to prevent cross-user data access.\n"
-                "If user asks about their RAG data/sessions/indexed content, explain they need to log in first.\n"
+                "AUTHENTICATION STATUS: Not authenticated. " "RAG tools unavailable."
             )
 
         max_invocations = int(getattr(self, "_max_tool_invocations", 0))
@@ -9589,66 +9613,14 @@ class InternalMCPChatOrchestrator:
             )
         )
         if not base_message:
-            base_message = (
-                "You have access to internal MCP tools.\n\n"
-                "{auth_status}\n"
-                "⚠️ WHEN TO USE TOOLS (CHECK THESE FIRST) ⚠️\n"
-                "If user asks for RECENT, CURRENT, LATEST, NEW, or BREAKING information → USE search_web\n"
-                'If user mentions specific dates (2024+, 2025+, "this year", "this month") → USE search_web\n'
-                'If user explicitly says "search", "look up", "find information on" → USE search_web\n'
-                'If user asks "what\'s new", "recent developments", "latest research" → USE search_web\n'
-                "If user provides a URL to analyse or extract page content from → USE extract_url (or resilient_extract_url for JS-heavy/blocked pages)\n"
-                "If user provides a direct file/download URL and wants durable artefact ingestion or file-copy registration → USE import_url_file_copy, not extract_url\n"
-                "If user asks a direct factual question needing verification → USE qna_search\n"
-                "If searching within specific domain/context (e.g., site:example.com) → USE context_search\n"
-                "ARXIV TOOL ROUTING:\n"
-                "- To search arXiv by author/topic/keywords → USE search_arxiv\n"
-                "- To list papers already cached locally / already stored → USE list_papers\n"
-                "- To download a specific arXiv PDF, store it durably, and optionally register a file-copy record → USE download_paper (requires arxiv_id)\n"
-                "- To upload a PDF that is already cached and register a file-copy record → USE finalise_cached_paper (requires arxiv_id)\n"
-                "- To materialise the scholarly-paper concept from an existing file copy → USE materialise_scholarly_representation_for_file_copy (requires concept_id/file_copy_concept_id)\n"
-                "- To read/summarise an already-downloaded paper → USE read_paper (requires arxiv_id)\n"
-                'If user asks "what\'s in my RAG store?" or asks about RAG *collections/sources* → USE rag_list_collections\n'
-                'If user asks about RAG sessions ("how many", "what\'s indexed", "list sessions") → USE rag_list_indexed (often with collection=...)\n'
-                "If user wants to see RAG content from a specific session → USE rag_get_item (often with collection=...)\n"
-                "If user wants semantic/topic search over indexed content → USE search_knowledge_base\n\n"
-                "CRITICAL: Your training data has a cutoff date. For anything described as current/recent/new, "
-                "you MUST use search tools to get up-to-date information.\n\n"
-                "HOW TO INVOKE A TOOL:\n"
-                "Respond with EITHER a single tool-call JSON object OR a JSON array of tool-call objects:\n"
-                "Single:\n"
-                '{"action": "call_tool", "tool": "tool_name", "payload": {"param": "value"}}\n'
-                "Batch (preferred for multi-step workflows; keep it small):\n"
-                '[{"action": "call_tool", "tool": "tool_a", "payload": {}}, {"action": "call_tool", "tool": "tool_b", "payload": {}}]\n\n'
-                "INVOCATION RULES:\n"
-                "- DO NOT explain what you're going to do - just do it\n"
-                "- DO NOT output JSON as an example or description - only output JSON when you want to invoke a tool NOW\n"
-                "- DO NOT say 'I will call' or 'Let me call' - just call it\n"
-                "- You MAY batch multiple tool calls in ONE message as a JSON array (keep it to <= {batch_cap} calls)\n"
-                "- After you receive the tool result (role 'tool'), respond naturally to the user\n\n"
-                "VONTOLOGY KINDS & PREDICATES (MUST FOLLOW):\n"
-                "- Predicates are a distinct logical kind. A usable predicate MUST satisfy: is_an_instance_of #V#predicate (or a predicate subtype).\n"
-                "- Do NOT treat predicates as types or individuals. Predicatehood is NOT inferred from is_a_type_of.\n"
-                "- Types are defined by is_a_type_of. A concept can also be is_an_instance_of #V#type, but that does NOT make it an individual.\n"
-                "- If a concept is NOT a predicate, NOT a type, and DOES have is_an_instance_of, then it is an individual.\n"
-                "- Before using a predicate in add_relationship: fetch_concept(predicate_id) and confirm is_an_instance_of includes #V#predicate (or subtype).\n\n"
-                "CONCEPT ID CANONICALISATION (MUST FOLLOW):\n"
-                "- Concept IDs are canonicalised: lowercase, non-alphanumeric runs become single underscore\n"
-                '- CamelCase is collapsed: "BusinessTrip" → #V#businesstrip\n'
-                '- Spaces become underscores: "Business Trip" → #V#business_trip\n'
-                '- Hyphens become underscores: "Business-Trip" → #V#business_trip\n'
-                "- ALWAYS use the concept_id from tool responses for subsequent operations\n"
-                '- If creation fails with "already exists", use the canonical_id from the error response\n'
-                "- Before referencing parent types, use fetch_concept or concept_exists to get the exact ID\n"
-                "- DO NOT guess IDs - verify them first\n\n"
-                "VERIFICATION & CONSISTENCY RULES:\n"
-                "- If the user doubts whether a specific concept_id exists (e.g. '#V#...') or challenges a claim about Vontology state, ALWAYS verify first using fetch_concept (or search_concepts) before responding.\n"
-                "- Do NOT reply with prose-only 'we should verify' / 'I will not assert unless I can verify' without actually calling a tool.\n\n"
-                "If you output JSON, the system will execute that tool call immediately.\n\n"
-                "IMPORTANT: arXiv paper conversions (PDF to markdown) can take 5-10 minutes.\n"
-                "If read_paper fails, the paper may still be converting. Check with list_papers.\n\n"
-                "Available tools:\n"
-                "{listing}"
+            self._last_base_system_prompt_telemetry = {
+                "type": "base_system_prompt",
+                "source": "unavailable",
+                "prompt_type_id": self._BASE_SYSTEM_PROMPT_TYPE_ID,
+                "prompt_concept_id": "",
+            }
+            raise AuthoritativePromptUnavailableError(
+                "base_system_prompt_missing_or_empty"
             )
 
         base_message = self._inject_prompt_variable(
@@ -9665,18 +9637,10 @@ class InternalMCPChatOrchestrator:
         )
         if identity_lines:
             base_message = f"{base_message.rstrip()}\n\n" + "\n".join(identity_lines)
-        if "INTERNAL EXECUTION GUARDRAILS:" not in base_message:
-            base_message = (
-                f"{base_message.rstrip()}\n\n"
-                "INTERNAL EXECUTION GUARDRAILS:\n"
-                "- Treat tool-invocation and batch caps as internal loop-safety guardrails, not as a user-facing reason to stop.\n"
-                "- Do NOT mention budgets, caps, or internal limits unless the user explicitly asks for diagnostics.\n"
-                "- If work remains unresolved, explain the concrete blocker or next best action instead of citing internal caps.\n"
-            )
 
         self._last_base_system_prompt_telemetry = {
             "type": "base_system_prompt",
-            "source": "vontology" if base_prompt_concept_id else "code_fallback",
+            "source": "vontology",
             "prompt_type_id": self._BASE_SYSTEM_PROMPT_TYPE_ID,
             "prompt_concept_id": base_prompt_concept_id or "",
         }
@@ -9697,7 +9661,7 @@ class InternalMCPChatOrchestrator:
     def _load_base_system_prompt_from_vontology(
         self, *, preferred_language: str | None = None
     ) -> tuple[str | None, str | None]:
-        """Load the base system prompt from Vontology (best effort)."""
+        """Load the authoritative base system prompt from Vontology."""
         try:
             from src.backend.services.concept_search_service import search_concepts
         except Exception:
@@ -9951,6 +9915,61 @@ class InternalMCPChatOrchestrator:
             _sync_current_prompt_instance(best_concept_id, current_ids)
 
         return best_prompt, best_concept_id
+
+    def _render_authoritative_prompt(
+        self,
+        prompt_ids: Sequence[str],
+        *,
+        variables: Mapping[str, Any],
+        max_chars: int,
+        error_context: str,
+        required: bool = False,
+    ) -> RenderedPrompt | None:
+        try:
+            rendered = self._prompt_templates.render_prompt(
+                prompt_ids,
+                variables=dict(variables),
+                fallback=None,
+                max_chars=max_chars,
+            )
+        except Exception as exc:
+            if required:
+                raise AuthoritativePromptUnavailableError(
+                    f"{error_context}_prompt_render_failed:{exc}"
+                ) from exc
+            self._logger.info(
+                "[mcp_orchestrator] Authoritative prompt render failed for %s (%s): %s",
+                error_context,
+                ", ".join(
+                    prompt_id
+                    for prompt_id in prompt_ids
+                    if isinstance(prompt_id, str) and prompt_id.strip()
+                ),
+                exc,
+            )
+            return None
+
+        if (
+            rendered is None
+            or not isinstance(rendered.text, str)
+            or not rendered.text.strip()
+        ):
+            if required:
+                raise AuthoritativePromptUnavailableError(
+                    f"{error_context}_prompt_missing_or_empty"
+                )
+            self._logger.info(
+                "[mcp_orchestrator] Authoritative prompt missing or empty for %s (%s)",
+                error_context,
+                ", ".join(
+                    prompt_id
+                    for prompt_id in prompt_ids
+                    if isinstance(prompt_id, str) and prompt_id.strip()
+                ),
+            )
+            return None
+
+        return rendered
 
     def _consume_base_system_prompt_telemetry(self) -> dict[str, Any] | None:
         telemetry = self._last_base_system_prompt_telemetry
@@ -13267,24 +13286,10 @@ class InternalMCPChatOrchestrator:
         return f"{prompt_text.rstrip()}\n\n{key.replace('_', ' ').title()}:\n{value}\n"
 
     def _get_missing_tool_call_detector(self) -> Optional[_MissingToolCallDetectorSpec]:
-        """Load the missing-tool-call detector spec from the Vontology (best effort)."""
-
-        fallback_enabled = os.getenv(
-            "VON_MISSING_TOOL_CALL_CLASSIFIER_FALLBACK", "1"
-        ).lower() in {"1", "true"}
-
-        def _fallback_spec() -> Optional[_MissingToolCallDetectorSpec]:
-            if not fallback_enabled:
-                return None
-            return _MissingToolCallDetectorSpec(
-                action_id="fallback_missing_tool_call_detector",
-                prompt_id=None,
-                prompt_text=self._FALLBACK_MISSING_TOOL_CALL_PROMPT,
-                model=None,
-            )
+        """Load the missing-tool-call detector spec from Vontology."""
 
         if self._missing_tool_call_detector_loaded:
-            return self._missing_tool_call_detector or _fallback_spec()
+            return self._missing_tool_call_detector
 
         self._missing_tool_call_detector_loaded = True
 
@@ -13309,8 +13314,8 @@ class InternalMCPChatOrchestrator:
             action = None
 
         if not isinstance(action, Mapping):
-            self._missing_tool_call_detector = _fallback_spec()
-            return self._missing_tool_call_detector
+            self._missing_tool_call_detector = None
+            return None
 
         prompt_id = self._first_relationship_value(action, "#V#uses_prompt")
         model_id = self._first_relationship_value(action, "#V#uses_llm_model")
@@ -13325,8 +13330,8 @@ class InternalMCPChatOrchestrator:
                 self._MISSING_TOOL_CALL_ACTION_ID,
                 prompt_id or "",
             )
-            self._missing_tool_call_detector = _fallback_spec()
-            return self._missing_tool_call_detector
+            self._missing_tool_call_detector = None
+            return None
 
         self._missing_tool_call_detector = _MissingToolCallDetectorSpec(
             action_id=self._MISSING_TOOL_CALL_ACTION_ID,
@@ -14236,9 +14241,8 @@ class InternalMCPChatOrchestrator:
                 }
             return {}
 
-        if (
-            raw_schema.get("type") == "object"
-            and isinstance(raw_schema.get("properties"), Mapping)
+        if raw_schema.get("type") == "object" and isinstance(
+            raw_schema.get("properties"), Mapping
         ):
             return _schema_from_json_schema(raw_schema)
 
@@ -14435,7 +14439,6 @@ class InternalMCPChatOrchestrator:
             "schedule_id",
             "binding_id",
             "instance_id",
-            "arxiv_id",
         )
         parts: list[str] = []
         for key in ordered_keys:
@@ -14775,17 +14778,15 @@ class InternalMCPChatOrchestrator:
             "errors": "\n".join(f"- {err}" for err in errors),
             "raw_tool_call": (current_response[:4000] if current_response else ""),
         }
-        rendered_prompt = self._prompt_templates.render_prompt(
+        rendered_prompt = self._render_authoritative_prompt(
             self._TOOL_CALL_REPAIR_PROMPTS,
             variables=variables,
-            fallback=self._TOOL_CALL_REPAIR_PROMPT.format(**variables),
             max_chars=4000,
+            error_context="tool_call_repair",
         )
-        prompt_text = (
-            rendered_prompt.text
-            if rendered_prompt is not None
-            else self._TOOL_CALL_REPAIR_PROMPT.format(**variables)
-        )
+        if rendered_prompt is None:
+            return None
+        prompt_text = rendered_prompt.text
 
         try:
             aux_llm_calls.append(
@@ -15792,23 +15793,6 @@ class InternalMCPChatOrchestrator:
             return None
 
         # --- Search tools (MEDIUM salience) ---
-        if tool_lower == "search_arxiv":
-            papers = payload.get("papers") or payload.get("results") or []
-            if isinstance(papers, list):
-                count = len(papers)
-                if count == 0:
-                    return "No papers found"
-                titles = [
-                    str(p.get("title", ""))[:25] for p in papers[:2] if p.get("title")
-                ]
-                if titles:
-                    summary = ", ".join(titles)
-                    if count > 2:
-                        summary += f" (+{count - 2})"
-                    return f"Found: {summary}"
-                return f"{count} paper{'s' if count != 1 else ''}"
-            return None
-
         if tool_lower == "search_web":
             results = payload.get("results") or payload.get("items") or []
             if isinstance(results, list):
@@ -15840,6 +15824,20 @@ class InternalMCPChatOrchestrator:
                 return f"{len(results)} result{'s' if len(results) != 1 else ''}"
             return None
 
+        if tool_lower.startswith("search_"):
+            results = (
+                payload.get("results")
+                or payload.get("items")
+                or payload.get("papers")
+                or []
+            )
+            if isinstance(results, list):
+                count = len(results)
+                if count == 0:
+                    return "No results"
+                return f"{count} result{'s' if count != 1 else ''}"
+            return None
+
         # --- Gmail tools (MEDIUM salience) ---
         if tool_lower == "gmail_list_messages":
             messages = payload.get("messages") or payload.get("results") or []
@@ -15869,9 +15867,13 @@ class InternalMCPChatOrchestrator:
             return None
 
         if tool_lower == "download_paper":
-            arxiv_id = payload.get("arxiv_id") or payload.get("paper_id")
-            if arxiv_id:
-                return f"Downloaded: {arxiv_id}"
+            paper_id = (
+                payload.get("paper_id")
+                or payload.get("document_id")
+                or payload.get("id")
+            )
+            if paper_id:
+                return f"Downloaded: {paper_id}"
             if payload.get("success"):
                 return "Paper downloaded"
             return None
@@ -16180,10 +16182,6 @@ class InternalMCPChatOrchestrator:
             context["outward"] = str(
                 payload.get("outwardIssue") or payload.get("outward")
             )
-
-        # ArXiv fields
-        if payload.get("arxiv_id"):
-            context["arxiv_id"] = str(payload["arxiv_id"])
 
         # URL fields
         for key in ("url", "extracted_url", "source_url"):
@@ -19895,7 +19893,6 @@ class InternalMCPChatOrchestrator:
                     "jira",
                     "confluence",
                     "gmail",
-                    "arxiv",
                 )
             )
 
@@ -19998,18 +19995,6 @@ class InternalMCPChatOrchestrator:
             classifier_verdict=classifier_verdict,
             retry_reason=retry_reason,
             tool_call_parse_error=tool_call_parse_error,
-        )
-
-    def _missing_tool_call_retry_prompt(self) -> str:
-        return (
-            "Your previous message described an action that requires MCP tools, but you did not emit a tool call. "
-            "NOW respond with ONLY a tool-call JSON object or a JSON array of tool-call objects. "
-            "Choose a tool that matches the user's request. Low-risk additive Vontology writes may proceed by default unless the user explicitly denied them. "
-            "If the user provided a canonical arXiv ID/URL, treat that as sufficient permission for additive paper acquisition/file-copy registration and call download_paper with the arxiv_id (do NOT call list_papers). "
-            "Scholarly-paper materialisation from an existing file copy requires the explicit materialise_scholarly_representation_for_file_copy tool. "
-            "Destructive writes still require explicit confirmation. "
-            "No prose. No Markdown. Do NOT wrap the JSON in ``` fences (including ```json). "
-            "The first character MUST be an opening curly brace or an opening square bracket, and the response must contain only valid JSON."
         )
 
     @staticmethod
@@ -20228,7 +20213,7 @@ class InternalMCPChatOrchestrator:
 
         This is intentionally narrow: we force write tools only when the prompt
         itself establishes a deterministic required-effect path, such as
-        additive arXiv materialisation from a canonical source.
+        explicit file-copy concept materialisation from a canonical local identifier.
         """
 
         last_user_text: str | None = None
@@ -22375,7 +22360,10 @@ class InternalMCPChatOrchestrator:
         workflow_discovery_result: Mapping[str, Any] | None,
         available_inputs: Mapping[str, Any] | None,
     ) -> dict[str, dict[str, Any]]:
-        if not isinstance(workflow_discovery_result, Mapping) or not workflow_discovery_result:
+        if (
+            not isinstance(workflow_discovery_result, Mapping)
+            or not workflow_discovery_result
+        ):
             return {}
         probes: dict[str, dict[str, Any]] = {}
         for candidate in self._extract_discovery_candidates(workflow_discovery_result):
@@ -22574,9 +22562,7 @@ class InternalMCPChatOrchestrator:
                 item["routing_eligible"] = False
                 item["candidate_reason"] = "discovered_workflow_excluded"
                 item["routing_exclusion_reason"] = (
-                    self._turn_launchability_exclusion_reason(
-                        turn_launchability_probe
-                    )
+                    self._turn_launchability_exclusion_reason(turn_launchability_probe)
                 )
                 excluded.append(item)
                 continue
@@ -22793,23 +22779,27 @@ class InternalMCPChatOrchestrator:
 
         return payload
 
-    @staticmethod
     def _build_turn_current_request_stage_message(
+        self,
         turn_text: str,
     ) -> dict[str, str] | None:
         clean_turn_text = turn_text.strip() if isinstance(turn_text, str) else ""
         if not clean_turn_text:
             return None
+        rendered = self._render_authoritative_prompt(
+            self._TURN_CURRENT_REQUEST_STAGE_PROMPTS,
+            variables={"turn_text": clean_turn_text},
+            max_chars=3000,
+            error_context="turn_current_request_stage",
+            required=True,
+        )
+        if rendered is None:
+            raise AuthoritativePromptUnavailableError(
+                "turn_current_request_stage_prompt_missing_or_empty"
+            )
         return {
             "role": "system",
-            "content": (
-                "Current turn request to route:\n"
-                f"{clean_turn_text}\n\n"
-                "Use the surrounding turn context to resolve references and "
-                "continuity, but keep this request as the immediate routing "
-                "objective unless explicit continuation context requires "
-                "otherwise."
-            ),
+            "content": rendered.text,
         }
 
     @staticmethod
@@ -22960,21 +22950,27 @@ class InternalMCPChatOrchestrator:
             and not isinstance(augmented_context_raw, (str, bytes, bytearray))
             else ()
         )
-        candidate_turn_launchability = self._build_discovered_candidate_turn_launchability(
-            workflow_discovery_result=workflow_discovery_result,
-            available_inputs=self._build_turn_launchability_probe_inputs(
-                prompt_text=prompt_text,
-                augmented_context=augmented_context,
+        candidate_turn_launchability = (
+            self._build_discovered_candidate_turn_launchability(
                 workflow_discovery_result=workflow_discovery_result,
-                continuation_context=raw_continuation_context,
-                user_namespace=env.user_namespace,
-                user_concept_id=(
-                    str(data.get("user_concept_id") or "").strip() or None
+                available_inputs=self._build_turn_launchability_probe_inputs(
+                    prompt_text=prompt_text,
+                    augmented_context=augmented_context,
+                    workflow_discovery_result=workflow_discovery_result,
+                    continuation_context=raw_continuation_context,
+                    user_namespace=env.user_namespace,
+                    user_concept_id=(
+                        str(data.get("user_concept_id") or "").strip() or None
+                    ),
+                    org_concept_id=(
+                        str(data.get("org_concept_id") or "").strip() or None
+                    ),
+                    gmail_profile=(
+                        str(data.get("gmail_profile") or "").strip() or None
+                    ),
+                    base_data=data if isinstance(data, Mapping) else None,
                 ),
-                org_concept_id=(str(data.get("org_concept_id") or "").strip() or None),
-                gmail_profile=(str(data.get("gmail_profile") or "").strip() or None),
-                base_data=data if isinstance(data, Mapping) else None,
-            ),
+            )
         )
         (
             discovered_matches,
@@ -24126,7 +24122,7 @@ class InternalMCPChatOrchestrator:
 
         JVNAUTOSCI-1763: This is the 'Supervised Path' where the workflow
         owns the turn lifecycle, supports real-time narration, and reports
-        durable outcomes (e.g. arXiv ingestion reports).
+        durable outcomes (e.g. ingestion or retrieval workflow reports).
         """
         from ...workflows.action_registry import WorkflowEnvironment
 
@@ -25891,22 +25887,24 @@ class InternalMCPChatOrchestrator:
                 payload["workflow_routing"] = None
             return payload
 
-        candidate_turn_launchability = self._build_discovered_candidate_turn_launchability(
-            workflow_discovery_result=workflow_discovery_result,
-            available_inputs=self._build_turn_launchability_probe_inputs(
-                prompt_text=prompt,
-                augmented_context=augmented_context,
+        candidate_turn_launchability = (
+            self._build_discovered_candidate_turn_launchability(
                 workflow_discovery_result=workflow_discovery_result,
-                continuation_context=(
-                    workflow_continuation_payload
-                    if isinstance(workflow_continuation_payload, Mapping)
-                    else None
+                available_inputs=self._build_turn_launchability_probe_inputs(
+                    prompt_text=prompt,
+                    augmented_context=augmented_context,
+                    workflow_discovery_result=workflow_discovery_result,
+                    continuation_context=(
+                        workflow_continuation_payload
+                        if isinstance(workflow_continuation_payload, Mapping)
+                        else None
+                    ),
+                    user_namespace=user_namespace,
+                    user_concept_id=user_concept_id,
+                    org_concept_id=org_concept_id,
+                    gmail_profile=gmail_profile or self._default_gmail_profile,
                 ),
-                user_namespace=user_namespace,
-                user_concept_id=user_concept_id,
-                org_concept_id=org_concept_id,
-                gmail_profile=gmail_profile or self._default_gmail_profile,
-            ),
+            )
         )
 
         def _prepare_selector_candidates_local() -> tuple[
@@ -29059,12 +29057,10 @@ class InternalMCPChatOrchestrator:
                     _first_text_or_safe(
                         document_row.get("document_id"),
                         document_row.get("paper_id"),
-                        document_row.get("arxiv_id"),
                         document_row.get("id"),
                         document_row.get("session_id"),
                         document_row.get("concept_id"),
                         payload_fallback.get("document_id"),
-                        payload_fallback.get("arxiv_id"),
                     )
                     or f"{source_tool}_document_{len(documents) + 1}"
                 )

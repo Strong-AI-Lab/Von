@@ -120,7 +120,9 @@ def test_build_workflow_purity_report_counts_runtime_and_code_impurity(
             "#V#custom_runtime_workflow": "custom",
         }
     )
-    baseline_path = tmp_path / "tests" / "backend" / "fixtures" / "workflow_purity_baseline.json"
+    baseline_path = (
+        tmp_path / "tests" / "backend" / "fixtures" / "workflow_purity_baseline.json"
+    )
     baseline_path.parent.mkdir(parents=True, exist_ok=True)
     baseline_path.write_text(
         json.dumps(
@@ -131,6 +133,7 @@ def test_build_workflow_purity_report_counts_runtime_and_code_impurity(
                     "remaining_python_workflow_family_count": 3,
                     "python_authored_canonical_workflow_source_count": 2,
                     "python_authored_workflow_prompt_source_count": 2,
+                    "python_authored_support_prompt_source_count": 0,
                     "direct_instance_create_callsite_count": 3,
                     "env_event_binding_count": 0,
                     "legacy_selector_mode_count": 1,
@@ -142,6 +145,8 @@ def test_build_workflow_purity_report_counts_runtime_and_code_impurity(
                     "vontology_first_seed_fallback_violation_count": 0,
                     "workflow_id_special_case_count": 0,
                     "supervised_fail_open_fallback_count": 0,
+                    "support_surface_policy_contract_violation_count": 0,
+                    "synthesized_launch_contract_count": 0,
                 },
             }
         ),
@@ -159,6 +164,7 @@ def test_build_workflow_purity_report_counts_runtime_and_code_impurity(
         "remaining_python_workflow_family_count": 3,
         "python_authored_canonical_workflow_source_count": 2,
         "python_authored_workflow_prompt_source_count": 0,
+        "python_authored_support_prompt_source_count": 0,
         "direct_instance_create_callsite_count": 0,
         "env_event_binding_count": 0,
         "legacy_selector_mode_count": 1,
@@ -168,15 +174,14 @@ def test_build_workflow_purity_report_counts_runtime_and_code_impurity(
         "vontology_first_seed_fallback_violation_count": 0,
         "workflow_id_special_case_count": 0,
         "supervised_fail_open_fallback_count": 0,
+        "support_surface_policy_contract_violation_count": 0,
+        "synthesized_launch_contract_count": 0,
     }
-    assert (
-        report["details"]["non_vontology_discoverable_workflow_ids"]
-        == [
-            "#V#chat_assistant_workflow",
-            "#V#custom_runtime_workflow",
-            "#V#tool_calling_workflow",
-        ]
-    )
+    assert report["details"]["non_vontology_discoverable_workflow_ids"] == [
+        "#V#chat_assistant_workflow",
+        "#V#custom_runtime_workflow",
+        "#V#tool_calling_workflow",
+    ]
     family_files = report["details"]["remaining_python_workflow_family_files"]
     assert [item["path"] for item in family_files] == [
         "src/backend/services/paper_representation_workflow_vontology_service.py",
@@ -210,7 +215,9 @@ def test_build_workflow_purity_report_counts_runtime_and_code_impurity(
     assert report["baseline"]["comparison"]["regression_detected"] is False
 
 
-def test_build_workflow_purity_report_flags_baseline_regressions(tmp_path: Path) -> None:
+def test_build_workflow_purity_report_flags_baseline_regressions(
+    tmp_path: Path,
+) -> None:
     _write(
         "src/backend/workflows/definitions.py",
         "def register_default_workflows(registry):\n    return registry\n",
@@ -227,7 +234,9 @@ def test_build_workflow_purity_report_flags_baseline_regressions(tmp_path: Path)
         root=tmp_path,
     )
 
-    baseline_path = tmp_path / "tests" / "backend" / "fixtures" / "workflow_purity_baseline.json"
+    baseline_path = (
+        tmp_path / "tests" / "backend" / "fixtures" / "workflow_purity_baseline.json"
+    )
     baseline_path.parent.mkdir(parents=True, exist_ok=True)
     baseline_path.write_text(
         json.dumps(
@@ -238,6 +247,7 @@ def test_build_workflow_purity_report_flags_baseline_regressions(tmp_path: Path)
                     "remaining_python_workflow_family_count": 0,
                     "python_authored_canonical_workflow_source_count": 0,
                     "python_authored_workflow_prompt_source_count": 0,
+                    "python_authored_support_prompt_source_count": 0,
                     "direct_instance_create_callsite_count": 0,
                     "env_event_binding_count": 0,
                     "legacy_selector_mode_count": 0,
@@ -247,6 +257,8 @@ def test_build_workflow_purity_report_flags_baseline_regressions(tmp_path: Path)
                     "vontology_first_seed_fallback_violation_count": 0,
                     "workflow_id_special_case_count": 0,
                     "supervised_fail_open_fallback_count": 0,
+                    "support_surface_policy_contract_violation_count": 0,
+                    "synthesized_launch_contract_count": 0,
                 },
             }
         ),
@@ -273,7 +285,9 @@ def test_build_workflow_purity_report_flags_baseline_regressions(tmp_path: Path)
 def test_build_workflow_purity_report_does_not_resolve_lazy_registrations(
     tmp_path: Path,
 ) -> None:
-    baseline_path = tmp_path / "tests" / "backend" / "fixtures" / "workflow_purity_baseline.json"
+    baseline_path = (
+        tmp_path / "tests" / "backend" / "fixtures" / "workflow_purity_baseline.json"
+    )
     baseline_path.parent.mkdir(parents=True, exist_ok=True)
     baseline_path.write_text(
         json.dumps(
@@ -284,6 +298,7 @@ def test_build_workflow_purity_report_does_not_resolve_lazy_registrations(
                     "remaining_python_workflow_family_count": 0,
                     "python_authored_canonical_workflow_source_count": 0,
                     "python_authored_workflow_prompt_source_count": 0,
+                    "python_authored_support_prompt_source_count": 0,
                     "direct_instance_create_callsite_count": 0,
                     "env_event_binding_count": 0,
                     "legacy_selector_mode_count": 0,
@@ -295,6 +310,8 @@ def test_build_workflow_purity_report_does_not_resolve_lazy_registrations(
                     "vontology_first_seed_fallback_violation_count": 0,
                     "workflow_id_special_case_count": 0,
                     "supervised_fail_open_fallback_count": 0,
+                    "support_surface_policy_contract_violation_count": 0,
+                    "synthesized_launch_contract_count": 0,
                 },
             }
         ),
@@ -305,7 +322,9 @@ def test_build_workflow_purity_report_does_not_resolve_lazy_registrations(
 
     def _unexpected_loader(workflow_id: str):
         loader_calls.append(workflow_id)
-        raise AssertionError("purity reporting must not resolve lazy workflow definitions")
+        raise AssertionError(
+            "purity reporting must not resolve lazy workflow definitions"
+        )
 
     registry = WorkflowRegistry(definition_loader=_unexpected_loader)
     registry.register_lazy(
@@ -343,7 +362,9 @@ def test_build_workflow_purity_report_flags_repo_seed_authority_drift(
         ),
         root=tmp_path,
     )
-    baseline_path = tmp_path / "tests" / "backend" / "fixtures" / "workflow_purity_baseline.json"
+    baseline_path = (
+        tmp_path / "tests" / "backend" / "fixtures" / "workflow_purity_baseline.json"
+    )
     baseline_path.parent.mkdir(parents=True, exist_ok=True)
     baseline_path.write_text(
         json.dumps(
@@ -354,6 +375,7 @@ def test_build_workflow_purity_report_flags_repo_seed_authority_drift(
                     "remaining_python_workflow_family_count": 0,
                     "python_authored_canonical_workflow_source_count": 0,
                     "python_authored_workflow_prompt_source_count": 0,
+                    "python_authored_support_prompt_source_count": 0,
                     "direct_instance_create_callsite_count": 0,
                     "env_event_binding_count": 0,
                     "legacy_selector_mode_count": 0,
@@ -363,6 +385,8 @@ def test_build_workflow_purity_report_flags_repo_seed_authority_drift(
                     "vontology_first_seed_fallback_violation_count": 0,
                     "workflow_id_special_case_count": 0,
                     "supervised_fail_open_fallback_count": 0,
+                    "support_surface_policy_contract_violation_count": 0,
+                    "synthesized_launch_contract_count": 0,
                 },
             }
         ),
@@ -399,7 +423,9 @@ def test_build_workflow_purity_report_allows_episode_seed_bootstrap_service(
         ),
         root=tmp_path,
     )
-    baseline_path = tmp_path / "tests" / "backend" / "fixtures" / "workflow_purity_baseline.json"
+    baseline_path = (
+        tmp_path / "tests" / "backend" / "fixtures" / "workflow_purity_baseline.json"
+    )
     baseline_path.parent.mkdir(parents=True, exist_ok=True)
     baseline_path.write_text(
         json.dumps(
@@ -410,6 +436,7 @@ def test_build_workflow_purity_report_allows_episode_seed_bootstrap_service(
                     "remaining_python_workflow_family_count": 0,
                     "python_authored_canonical_workflow_source_count": 0,
                     "python_authored_workflow_prompt_source_count": 0,
+                    "python_authored_support_prompt_source_count": 0,
                     "direct_instance_create_callsite_count": 0,
                     "env_event_binding_count": 0,
                     "legacy_selector_mode_count": 0,
@@ -419,6 +446,8 @@ def test_build_workflow_purity_report_allows_episode_seed_bootstrap_service(
                     "vontology_first_seed_fallback_violation_count": 0,
                     "workflow_id_special_case_count": 0,
                     "supervised_fail_open_fallback_count": 0,
+                    "support_surface_policy_contract_violation_count": 0,
+                    "synthesized_launch_contract_count": 0,
                 },
             }
         ),
@@ -449,7 +478,9 @@ def test_build_workflow_purity_report_allows_conversation_turn_seed_bootstrap_se
         ),
         root=tmp_path,
     )
-    baseline_path = tmp_path / "tests" / "backend" / "fixtures" / "workflow_purity_baseline.json"
+    baseline_path = (
+        tmp_path / "tests" / "backend" / "fixtures" / "workflow_purity_baseline.json"
+    )
     baseline_path.parent.mkdir(parents=True, exist_ok=True)
     baseline_path.write_text(
         json.dumps(
@@ -460,6 +491,7 @@ def test_build_workflow_purity_report_allows_conversation_turn_seed_bootstrap_se
                     "remaining_python_workflow_family_count": 0,
                     "python_authored_canonical_workflow_source_count": 0,
                     "python_authored_workflow_prompt_source_count": 0,
+                    "python_authored_support_prompt_source_count": 0,
                     "direct_instance_create_callsite_count": 0,
                     "env_event_binding_count": 0,
                     "legacy_selector_mode_count": 0,
@@ -469,6 +501,8 @@ def test_build_workflow_purity_report_allows_conversation_turn_seed_bootstrap_se
                     "vontology_first_seed_fallback_violation_count": 0,
                     "workflow_id_special_case_count": 0,
                     "supervised_fail_open_fallback_count": 0,
+                    "support_surface_policy_contract_violation_count": 0,
+                    "synthesized_launch_contract_count": 0,
                 },
             }
         ),
@@ -499,7 +533,9 @@ def test_build_workflow_purity_report_flags_workflow_id_special_case_branches(
         ),
         root=tmp_path,
     )
-    baseline_path = tmp_path / "tests" / "backend" / "fixtures" / "workflow_purity_baseline.json"
+    baseline_path = (
+        tmp_path / "tests" / "backend" / "fixtures" / "workflow_purity_baseline.json"
+    )
     baseline_path.parent.mkdir(parents=True, exist_ok=True)
     baseline_path.write_text(
         json.dumps(
@@ -510,6 +546,7 @@ def test_build_workflow_purity_report_flags_workflow_id_special_case_branches(
                     "remaining_python_workflow_family_count": 0,
                     "python_authored_canonical_workflow_source_count": 0,
                     "python_authored_workflow_prompt_source_count": 0,
+                    "python_authored_support_prompt_source_count": 0,
                     "direct_instance_create_callsite_count": 0,
                     "env_event_binding_count": 0,
                     "legacy_selector_mode_count": 0,
@@ -519,6 +556,8 @@ def test_build_workflow_purity_report_flags_workflow_id_special_case_branches(
                     "vontology_first_seed_fallback_violation_count": 0,
                     "workflow_id_special_case_count": 0,
                     "supervised_fail_open_fallback_count": 0,
+                    "support_surface_policy_contract_violation_count": 0,
+                    "synthesized_launch_contract_count": 0,
                 },
             }
         ),
@@ -555,7 +594,9 @@ def test_build_workflow_purity_report_flags_supervised_fail_open_fallbacks(
         ),
         root=tmp_path,
     )
-    baseline_path = tmp_path / "tests" / "backend" / "fixtures" / "workflow_purity_baseline.json"
+    baseline_path = (
+        tmp_path / "tests" / "backend" / "fixtures" / "workflow_purity_baseline.json"
+    )
     baseline_path.parent.mkdir(parents=True, exist_ok=True)
     baseline_path.write_text(
         json.dumps(
@@ -566,6 +607,7 @@ def test_build_workflow_purity_report_flags_supervised_fail_open_fallbacks(
                     "remaining_python_workflow_family_count": 0,
                     "python_authored_canonical_workflow_source_count": 0,
                     "python_authored_workflow_prompt_source_count": 0,
+                    "python_authored_support_prompt_source_count": 0,
                     "direct_instance_create_callsite_count": 0,
                     "env_event_binding_count": 0,
                     "legacy_selector_mode_count": 0,
@@ -575,6 +617,8 @@ def test_build_workflow_purity_report_flags_supervised_fail_open_fallbacks(
                     "vontology_first_seed_fallback_violation_count": 0,
                     "workflow_id_special_case_count": 0,
                     "supervised_fail_open_fallback_count": 0,
+                    "support_surface_policy_contract_violation_count": 0,
+                    "synthesized_launch_contract_count": 0,
                 },
             }
         ),
@@ -623,7 +667,9 @@ def test_build_workflow_purity_report_flags_vontology_first_seed_contract_violat
         ),
         root=tmp_path,
     )
-    baseline_path = tmp_path / "tests" / "backend" / "fixtures" / "workflow_purity_baseline.json"
+    baseline_path = (
+        tmp_path / "tests" / "backend" / "fixtures" / "workflow_purity_baseline.json"
+    )
     baseline_path.parent.mkdir(parents=True, exist_ok=True)
     baseline_path.write_text(
         json.dumps(
@@ -634,6 +680,7 @@ def test_build_workflow_purity_report_flags_vontology_first_seed_contract_violat
                     "remaining_python_workflow_family_count": 0,
                     "python_authored_canonical_workflow_source_count": 0,
                     "python_authored_workflow_prompt_source_count": 0,
+                    "python_authored_support_prompt_source_count": 0,
                     "direct_instance_create_callsite_count": 0,
                     "env_event_binding_count": 0,
                     "legacy_selector_mode_count": 0,
@@ -643,6 +690,8 @@ def test_build_workflow_purity_report_flags_vontology_first_seed_contract_violat
                     "vontology_first_seed_fallback_violation_count": 0,
                     "workflow_id_special_case_count": 0,
                     "supervised_fail_open_fallback_count": 0,
+                    "support_surface_policy_contract_violation_count": 0,
+                    "synthesized_launch_contract_count": 0,
                 },
             }
         ),
@@ -669,15 +718,17 @@ def test_build_workflow_purity_report_flags_python_authored_workflow_prompt_sour
     _write(
         "src/backend/services/workflow_gap_vontology_service.py",
         (
-            "WORKFLOW_GAP_ANALYSIS_PROMPT = \"Return JSON that analyses the gap and "
-            "proposes reusable workflow behaviour for the user request.\"\n\n"
+            'WORKFLOW_GAP_ANALYSIS_PROMPT = "Return JSON that analyses the gap and '
+            'proposes reusable workflow behaviour for the user request."\n\n'
             "def _build_candidate_prompt_template():\n"
-            "    return \"Create a candidate workflow prompt body with acceptance checks "
-            "and recent-turn context.\"\n"
+            '    return "Create a candidate workflow prompt body with acceptance checks '
+            'and recent-turn context."\n'
         ),
         root=tmp_path,
     )
-    baseline_path = tmp_path / "tests" / "backend" / "fixtures" / "workflow_purity_baseline.json"
+    baseline_path = (
+        tmp_path / "tests" / "backend" / "fixtures" / "workflow_purity_baseline.json"
+    )
     baseline_path.parent.mkdir(parents=True, exist_ok=True)
     baseline_path.write_text(
         json.dumps(
@@ -688,6 +739,7 @@ def test_build_workflow_purity_report_flags_python_authored_workflow_prompt_sour
                     "remaining_python_workflow_family_count": 0,
                     "python_authored_canonical_workflow_source_count": 0,
                     "python_authored_workflow_prompt_source_count": 0,
+                    "python_authored_support_prompt_source_count": 0,
                     "direct_instance_create_callsite_count": 0,
                     "env_event_binding_count": 0,
                     "legacy_selector_mode_count": 0,
@@ -697,6 +749,8 @@ def test_build_workflow_purity_report_flags_python_authored_workflow_prompt_sour
                     "vontology_first_seed_fallback_violation_count": 0,
                     "workflow_id_special_case_count": 0,
                     "supervised_fail_open_fallback_count": 0,
+                    "support_surface_policy_contract_violation_count": 0,
+                    "synthesized_launch_contract_count": 0,
                 },
             }
         ),
@@ -723,4 +777,77 @@ def test_build_workflow_purity_report_flags_python_authored_workflow_prompt_sour
             "symbol": "_build_candidate_prompt_template",
             "line": 3,
         },
+    ]
+
+
+def test_build_workflow_purity_report_flags_core_support_prompt_and_policy_drift(
+    tmp_path: Path,
+) -> None:
+    _write(
+        "src/backend/integrations/internal_mcp/orchestrator.py",
+        (
+            "class Orchestrator:\n"
+            "    def build_prompt(self):\n"
+            '        return """Current turn request to route:\\n'
+            "Use the surrounding turn context to resolve references and continuity.\\n"
+            "Keep this request as the immediate routing objective.\\n"
+            '"""\n\n'
+            "    def mark_source(self):\n"
+            "        return {'source': 'code_fallback', 'topic': 'arxiv'}\n"
+        ),
+        root=tmp_path,
+    )
+    baseline_path = (
+        tmp_path / "tests" / "backend" / "fixtures" / "workflow_purity_baseline.json"
+    )
+    baseline_path.parent.mkdir(parents=True, exist_ok=True)
+    baseline_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "workflow_purity_baseline.v1",
+                "counters": {
+                    "built_in_registration_count": 0,
+                    "remaining_python_workflow_family_count": 0,
+                    "python_authored_canonical_workflow_source_count": 0,
+                    "python_authored_workflow_prompt_source_count": 0,
+                    "python_authored_support_prompt_source_count": 0,
+                    "direct_instance_create_callsite_count": 0,
+                    "env_event_binding_count": 0,
+                    "legacy_selector_mode_count": 0,
+                    "builtin_capability_override_count": 0,
+                    "non_vontology_discoverable_workflow_count": 0,
+                    "repo_seed_authority_drift_path_count": 0,
+                    "vontology_first_seed_fallback_violation_count": 0,
+                    "workflow_id_special_case_count": 0,
+                    "supervised_fail_open_fallback_count": 0,
+                    "support_surface_policy_contract_violation_count": 0,
+                    "synthesized_launch_contract_count": 0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = build_workflow_purity_report(
+        registry=None,
+        project_root=tmp_path,
+        baseline_path=baseline_path,
+    )
+
+    assert report["counters"]["python_authored_support_prompt_source_count"] == 1
+    support_prompt_sources = report["details"]["python_authored_support_prompt_sources"]
+    assert support_prompt_sources[0]["path"] == (
+        "src/backend/integrations/internal_mcp/orchestrator.py"
+    )
+    assert support_prompt_sources[0]["line"] == 3
+    assert str(support_prompt_sources[0]["preview"]).startswith(
+        "Current turn request to route:\n"
+        "Use the surrounding turn context to resolve references and continuity.\n"
+        "Keep this request"
+    )
+    support_contracts = report["details"]["support_surface_policy_contracts"]
+    assert report["counters"]["support_surface_policy_contract_violation_count"] == 2
+    assert sorted(item["pattern"] for item in support_contracts["violations"]) == [
+        "code_fallback_source_marker",
+        "domain_specific_arxiv_literal",
     ]

@@ -7,15 +7,17 @@
     "legacy_selector_mode_count": 0,
     "non_vontology_discoverable_workflow_count": 0,
     "python_authored_canonical_workflow_source_count": 0,
+    "python_authored_support_prompt_source_count": 0,
     "python_authored_workflow_prompt_source_count": 0,
     "remaining_python_workflow_family_count": 0,
     "repo_seed_authority_drift_path_count": 1,
     "supervised_fail_open_fallback_count": 0,
-    "synthesized_launch_contract_count": 14,
+    "support_surface_policy_contract_violation_count": 0,
+    "synthesized_launch_contract_count": 0,
     "vontology_first_seed_fallback_violation_count": 0,
     "workflow_id_special_case_count": 0
   },
-  "generated_at_utc": "2026-04-11T07:55:35.760617+00:00",
+  "generated_at_utc": "2026-04-16T10:58:00.411134+00:00",
   "report_schema_version": "workflow_purity_report.v1",
   "schema_version": "workflow_purity_baseline.v1"
 }
