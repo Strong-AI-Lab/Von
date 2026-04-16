@@ -278,6 +278,8 @@ class WorkflowSelector:
                 continue
             if entry.get("is_policy_safe") is False:
                 continue
+            if entry.get("turn_launchable") is False:
+                continue
             eligible_specialised_candidates[matched_workflow_id.lower()] = {
                 "workflow_id": matched_workflow_id,
                 "name": str(entry.get("name") or "").strip() or matched_workflow_id,
@@ -1162,8 +1164,16 @@ class WorkflowSelector:
             concept_id.lower(): concept_id for concept_id in entry_lookup.keys()
         }
 
+        structured_candidate = cls._extract_json_candidate(str(raw_response or ""))
+        if structured_candidate:
+            concept_id = cls._extract_any_workflow_concept_id(structured_candidate)
+            if concept_id:
+                matched_workflow_id = entry_id_lookup.get(concept_id.lower())
+                if matched_workflow_id:
+                    return matched_workflow_id
+                return concept_id
+
         for surface in (
-            cls._extract_json_candidate(str(raw_response or "")),
             raw_candidate_label,
             str(raw_response or ""),
         ):

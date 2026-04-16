@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any, cast
 
 from flask import Flask
@@ -9,7 +10,69 @@ from orchestrator_test_harness import (
     _stub_stage_path,
     build_db_independent_orchestrator,
 )
-from src.backend.workflows.definitions import CHAT_ASSISTANT_WORKFLOW_ID
+from src.backend.workflows.definitions import (
+    CHAT_ASSISTANT_WORKFLOW_ID,
+    TOOL_CALLING_WORKFLOW_ID,
+)
+
+SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID = (
+    "#V#scholarly_paper_representation_workflow"
+)
+
+
+def _build_discovery_result(
+    *,
+    prompt_text: str,
+    workflow_id: str,
+    name: str,
+    description: str,
+    role: str = "execution",
+) -> dict[str, Any]:
+    entry = {
+        "concept_id": workflow_id,
+        "name": name,
+        "description": description,
+        "is_executable": True,
+        "executability_reason": "executable_now",
+        "is_policy_safe": True,
+        "routing_eligible": True,
+        "routing_profile": {"role": role},
+    }
+    return {
+        "query": prompt_text,
+        "requested_query": prompt_text,
+        "search_sources": ["capability_index"],
+        "candidate_count": 1,
+        "match_count": 1,
+        "matches": [dict(entry)],
+        "candidates": [dict(entry)],
+        "routing_matches": [dict(entry)],
+    }
+
+
+def _tool_calling_discovery(prompt_text: str, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+    return _build_discovery_result(
+        prompt_text=prompt_text,
+        workflow_id=TOOL_CALLING_WORKFLOW_ID,
+        name="Tool Calling Workflow",
+        description="General conversational tool workflow.",
+    )
+
+
+def _paper_representation_discovery(
+    prompt_text: str,
+    *_args: Any,
+    **_kwargs: Any,
+) -> dict[str, Any]:
+    return _build_discovery_result(
+        prompt_text=prompt_text,
+        workflow_id=SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID,
+        name="Scholarly Paper Representation Workflow",
+        description=(
+            "Canonical durable workflow for representing scholarly papers from "
+            "file-copy artefacts, metadata, and verification requirements."
+        ),
+    )
 
 
 class _IdentityLLM:
@@ -29,7 +92,7 @@ class _IdentityLLM:
                 '"answering_guidance":"If grounded identity context is available, answer directly and concisely.",'
                 '"reasoning":"Authenticated identity questions should be answered from grounded actor or organisation context."}'
             )
-        if isinstance(prompt, str) and prompt.strip() == "Select workflow":
+        if isinstance(prompt, str) and prompt.strip().startswith("Select workflow"):
             return (
                 '{"workflow_id":"#V#chat_assistant_workflow",'
                 '"confidence":0.91,'
@@ -57,7 +120,7 @@ class _AuthorshipLLM:
                 '"answering_guidance":"List only grounded papers and say clearly when the available context is incomplete.",'
                 '"reasoning":"Ownership-style paper questions are precision-sensitive and should not include unsupported papers."}'
             )
-        if isinstance(prompt, str) and prompt.strip() == "Select workflow":
+        if isinstance(prompt, str) and prompt.strip().startswith("Select workflow"):
             return (
                 '{"workflow_id":"#V#chat_assistant_workflow",'
                 '"confidence":0.88,'
@@ -77,7 +140,188 @@ class _GatewayStub:
         return {}
 
 
-def _make_app(monkeypatch, *, llm: _IdentityLLM | _AuthorshipLLM) -> Flask:
+class _EntityLookupGatewayStub:
+    enabled = True
+
+    def __init__(self) -> None:
+        self.invocations: list[dict[str, Any]] = []
+
+    def describe_methods(self) -> dict[str, Any]:
+        return {
+            "test.lookup_current_user_papers": {
+                "description": "Return grounded paper records for the current user.",
+                "category": "read",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "user_concept_id": {"type": "string"},
+                    },
+                },
+            }
+        }
+
+    def invoke(self, tool_name: str, payload: dict[str, Any]):
+        self.invocations.append({"tool": tool_name, "payload": dict(payload)})
+        if tool_name != "test.lookup_current_user_papers":
+            raise AssertionError(f"Unexpected tool call: {tool_name}")
+        return SimpleNamespace(
+            payload={
+                "success": True,
+                "papers": [
+                    {
+                        "concept_id": "#V#paper_test_1",
+                        "title": "Test Paper",
+                    }
+                ],
+                "response_text": "Grounded paper retrieved for Test User.",
+            },
+            duration_ms=5,
+        )
+
+
+class _AffiliationLookupGatewayStub:
+    enabled = True
+
+    def __init__(self) -> None:
+        self.invocations: list[dict[str, Any]] = []
+
+    def describe_methods(self) -> dict[str, Any]:
+        return {
+            "test.lookup_entity_affiliation": {
+                "description": "Return grounded affiliation facts for a named entity.",
+                "category": "read",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "entity_name": {"type": "string"},
+                    },
+                },
+            }
+        }
+
+    def invoke(self, tool_name: str, payload: dict[str, Any]):
+        self.invocations.append({"tool": tool_name, "payload": dict(payload)})
+        if tool_name != "test.lookup_entity_affiliation":
+            raise AssertionError(f"Unexpected tool call: {tool_name}")
+        return SimpleNamespace(
+            payload={
+                "success": True,
+                "entity_name": "Michael Witbrock",
+                "organisation": "Test Org",
+                "response_text": "Michael Witbrock is affiliated with Test Org.",
+            },
+            duration_ms=5,
+        )
+
+
+class _EntityRelativeToolPipelineLLM:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def generate(self, prompt, context=None, model=None):
+        context_messages = list(context or [])
+        self.calls.append(
+            {"prompt": prompt, "context": context_messages, "model": model}
+        )
+        context_text = "\n".join(
+            str(message.get("content") or "")
+            for message in context_messages
+            if isinstance(message, dict)
+        )
+        if isinstance(prompt, str) and "expected-success inference policy" in prompt:
+            return (
+                '{"expected_outcome_summary":"Answer using grounded represented facts about the authenticated user.",'
+                '"grounding_requirement":"Use represented user-linked evidence before claiming authorship or ownership.",'
+                '"precision_policy":"Prefer explicit uncertainty over unsupported attribution.",'
+                '"selector_guidance":"Prefer tool-based concept or relation retrieval when grounded user-linked facts are not already explicit in context.",'
+                '"answering_guidance":"Retrieve grounded user-linked facts before answering, and state clearly when no grounded facts are found.",'
+                '"reasoning":"Entity-relative KB lookup turns should retrieve represented relations instead of asking the user for identifiers when authenticated context exists."}'
+            )
+        if isinstance(prompt, str) and prompt.strip().startswith("Select workflow"):
+            return (
+                '{"workflow_id":"#V#tool_calling_workflow",'
+                '"confidence":0.93,'
+                '"reasoning":"This is an entity-relative KB lookup that should execute grounded retrieval before answering."}'
+            )
+        if prompt == "What papers of mine do you know about?":
+            if (
+                "Expected answer contract for this turn" in context_text
+                and "CURRENT USER CONTEXT: Test User (#V#test_user)" in context_text
+            ):
+                return (
+                    '{"action":"call_tool","tool":"test.lookup_current_user_papers",'
+                    '"payload":{"user_concept_id":"#V#test_user"}}'
+                )
+            return "I don’t have enough information to identify any of your papers yet."
+        if isinstance(prompt, str) and prompt.startswith(
+            "Provide a final answer to the user now that the tool result is available."
+        ):
+            if "Expected answer contract for this turn" not in context_text:
+                return "I don’t have enough information to identify any of your papers yet."
+            return "I know about one grounded paper for you: Test Paper."
+        return "I know about one grounded paper for you: Test Paper."
+
+
+class _ExplicitEntityRelationLookupLLM:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def generate(self, prompt, context=None, model=None):
+        context_messages = list(context or [])
+        self.calls.append(
+            {"prompt": prompt, "context": context_messages, "model": model}
+        )
+        context_text = "\n".join(
+            str(message.get("content") or "")
+            for message in context_messages
+            if isinstance(message, dict)
+        )
+        if isinstance(prompt, str) and "expected-success inference policy" in prompt:
+            return (
+                '{"expected_outcome_summary":"Answer with grounded represented facts about the named entity.",'
+                '"grounding_requirement":"Only state relationships that are grounded in represented facts or retrieved evidence.",'
+                '"precision_policy":"Prefer explicit uncertainty over unsupported relationship claims.",'
+                '"selector_guidance":"Prefer concept, relation, or tool-based retrieval over generic chat when represented lookup is required.",'
+                '"answering_guidance":"Retrieve the grounded relationship before answering, and say clearly when no grounded relation is found.",'
+                '"reasoning":"Explicit entity-relation lookup turns should retrieve represented facts instead of answering from unsupported recall."}'
+            )
+        if isinstance(prompt, str) and prompt.strip().startswith("Select workflow"):
+            return (
+                '{"workflow_id":"#V#tool_calling_workflow",'
+                '"confidence":0.94,'
+                '"reasoning":"This is a grounded represented-knowledge lookup that should retrieve the relation before answering."}'
+            )
+        if (
+            prompt
+            == "Which organisation is Michael Witbrock affiliated with in the represented knowledge?"
+        ):
+            if "Expected answer contract for this turn" in context_text:
+                return (
+                    '{"action":"call_tool","tool":"test.lookup_entity_affiliation",'
+                    '"payload":{"entity_name":"Michael Witbrock"}}'
+                )
+            return "I don’t have enough grounded information yet."
+        if isinstance(prompt, str) and prompt.startswith(
+            "Provide a final answer to the user now that the tool result is available."
+        ):
+            if "Expected answer contract for this turn" not in context_text:
+                return "I don’t have enough grounded information yet."
+            return "Michael Witbrock is affiliated with Test Org."
+        return "Michael Witbrock is affiliated with Test Org."
+
+
+def _make_app(
+    monkeypatch,
+    *,
+    llm: (
+        _IdentityLLM
+        | _AuthorshipLLM
+        | _EntityRelativeToolPipelineLLM
+        | _ExplicitEntityRelationLookupLLM
+    ),
+    gateway_override: Any | None = None,
+    discovery_override: Any | None = None,
+) -> Flask:
     import src.backend.workflows.durable.registry_factory as registry_factory
 
     monkeypatch.setattr(registry_factory, "discover_workflow_ids", lambda: [])
@@ -145,49 +389,12 @@ def _make_app(monkeypatch, *, llm: _IdentityLLM | _AuthorshipLLM) -> Flask:
     )
     monkeypatch.setattr(
         "src.backend.services.workflow_discovery_service.discover_workflows_for_turn",
-        lambda *_args, **_kwargs: {
-            "query": "Who am I?",
-            "requested_query": "Who am I?",
-            "search_sources": ["capability_index"],
-            "candidate_count": 1,
-            "match_count": 1,
-            "matches": [
-                {
-                    "concept_id": CHAT_ASSISTANT_WORKFLOW_ID,
-                    "name": "Chat Assistant Workflow",
-                    "description": "General conversational workflow.",
-                    "is_executable": True,
-                    "executability_reason": "executable_now",
-                    "is_policy_safe": True,
-                    "routing_eligible": True,
-                    "routing_profile": {"role": "execution"},
-                }
-            ],
-            "candidates": [
-                {
-                    "concept_id": CHAT_ASSISTANT_WORKFLOW_ID,
-                    "name": "Chat Assistant Workflow",
-                    "description": "General conversational workflow.",
-                    "is_executable": True,
-                    "executability_reason": "executable_now",
-                    "is_policy_safe": True,
-                    "routing_eligible": True,
-                    "routing_profile": {"role": "execution"},
-                }
-            ],
-            "routing_matches": [
-                {
-                    "concept_id": CHAT_ASSISTANT_WORKFLOW_ID,
-                    "name": "Chat Assistant Workflow",
-                    "description": "General conversational workflow.",
-                    "is_executable": True,
-                    "executability_reason": "executable_now",
-                    "is_policy_safe": True,
-                    "routing_eligible": True,
-                    "routing_profile": {"role": "execution"},
-                }
-            ],
-        },
+        discovery_override or (lambda prompt_text, *_args, **_kwargs: _build_discovery_result(
+            prompt_text=prompt_text,
+            workflow_id=CHAT_ASSISTANT_WORKFLOW_ID,
+            name="Chat Assistant Workflow",
+            description="General conversational workflow.",
+        )),
         raising=False,
     )
     monkeypatch.setattr(
@@ -203,7 +410,7 @@ def _make_app(monkeypatch, *, llm: _IdentityLLM | _AuthorshipLLM) -> Flask:
         }.get(concept_id),
     )
 
-    gateway = _GatewayStub()
+    gateway = gateway_override if gateway_override is not None else _GatewayStub()
     orchestrator = build_db_independent_orchestrator(
         monkeypatch,
         gateway=cast(Any, gateway),
@@ -426,3 +633,153 @@ def test_generate_authorship_turn_prefers_grounded_omission_over_unsupported_pap
     assert expected_outcome_contract.get("precision_policy") == (
         "Prefer omission or explicit uncertainty over speculative recall."
     )
+
+
+def test_generate_entity_relative_tool_pipeline_threads_expected_contract_into_tool_planning(
+    monkeypatch,
+) -> None:
+    llm = _EntityRelativeToolPipelineLLM()
+    gateway = _EntityLookupGatewayStub()
+    app = _make_app(
+        monkeypatch,
+        llm=llm,
+        gateway_override=gateway,
+        discovery_override=_tool_calling_discovery,
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/von/generate", json={"prompt": "What papers of mine do you know about?"}
+    )
+    assert response.status_code == 200
+
+    body = response.get_json()
+    assert isinstance(body, dict)
+    response_text = str(body.get("response") or "")
+    assert "Test Paper" in response_text
+
+    llm_debug = body.get("llm_debug") or {}
+    tool_invocations = llm_debug.get("tool_invocations") or []
+    lookup_records = [
+        record
+        for record in tool_invocations
+        if isinstance(record, dict)
+        and (record.get("tool") or record.get("method"))
+        == "test.lookup_current_user_papers"
+    ]
+    assert lookup_records
+
+    assert gateway.invocations
+
+    turn_record = llm_debug.get("turn_execution_record") or {}
+    execution = turn_record.get("execution") or {}
+    selected_workflow_trace = execution.get("selected_workflow_trace") or {}
+    assert selected_workflow_trace.get("selected_execution_mode") == "tool_pipeline"
+
+    tool_plan_call = next(
+        call
+        for call in llm.calls
+        if call.get("prompt") == "What papers of mine do you know about?"
+    )
+    tool_plan_context_text = "\n".join(
+        str(message.get("content") or "")
+        for message in (tool_plan_call.get("context") or [])
+        if isinstance(message, dict)
+    )
+    assert "Expected answer contract for this turn" in tool_plan_context_text
+    assert "CURRENT USER CONTEXT: Test User (#V#test_user)" in tool_plan_context_text
+
+
+def test_generate_entity_relative_lookup_excludes_non_launchable_representation_workflow(
+    monkeypatch,
+) -> None:
+    llm = _EntityRelativeToolPipelineLLM()
+    gateway = _EntityLookupGatewayStub()
+    app = _make_app(
+        monkeypatch,
+        llm=llm,
+        gateway_override=gateway,
+        discovery_override=_paper_representation_discovery,
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/von/generate", json={"prompt": "What papers of mine do you know about?"}
+    )
+    assert response.status_code == 200
+
+    body = response.get_json()
+    assert isinstance(body, dict)
+    response_text = str(body.get("response") or "")
+    assert "Test Paper" in response_text
+    assert gateway.invocations
+
+    llm_debug = body.get("llm_debug") or {}
+    tool_invocations = llm_debug.get("tool_invocations") or []
+    assert any(
+        isinstance(record, dict)
+        and (record.get("tool") or record.get("method"))
+        == "test.lookup_current_user_papers"
+        for record in tool_invocations
+    )
+
+    diagnostics = llm_debug.get("turn_execution_diagnostics") or {}
+    routing_diagnostics = diagnostics.get("workflow_routing_diagnostics") or {}
+    discovery = routing_diagnostics.get("discovery") or {}
+    assert SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID in (
+        discovery.get("candidate_ids") or []
+    )
+
+    turn_record = llm_debug.get("turn_execution_record") or {}
+    execution = turn_record.get("execution") or {}
+    selected_workflow_trace = execution.get("selected_workflow_trace") or {}
+    assert selected_workflow_trace.get("selected_execution_mode") == "tool_pipeline"
+    assert SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID not in (
+        selected_workflow_trace.get("selector_candidate_ids") or []
+    )
+    assert SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID in (
+        selected_workflow_trace.get("excluded_candidate_ids") or []
+    )
+
+
+def test_generate_explicit_entity_relation_lookup_uses_grounded_tool_pipeline(
+    monkeypatch,
+) -> None:
+    llm = _ExplicitEntityRelationLookupLLM()
+    gateway = _AffiliationLookupGatewayStub()
+    app = _make_app(
+        monkeypatch,
+        llm=llm,
+        gateway_override=gateway,
+        discovery_override=_tool_calling_discovery,
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/von/generate",
+        json={
+            "prompt": (
+                "Which organisation is Michael Witbrock affiliated with in the "
+                "represented knowledge?"
+            )
+        },
+    )
+    assert response.status_code == 200
+
+    body = response.get_json()
+    assert isinstance(body, dict)
+    assert body.get("response") == "Michael Witbrock is affiliated with Test Org."
+
+    llm_debug = body.get("llm_debug") or {}
+    tool_invocations = llm_debug.get("tool_invocations") or []
+    assert any(
+        isinstance(record, dict)
+        and (record.get("tool") or record.get("method"))
+        == "test.lookup_entity_affiliation"
+        for record in tool_invocations
+    )
+
+    turn_record = llm_debug.get("turn_execution_record") or {}
+    execution = turn_record.get("execution") or {}
+    selected_workflow_trace = execution.get("selected_workflow_trace") or {}
+    assert selected_workflow_trace.get("selected_execution_mode") == "tool_pipeline"

@@ -1269,6 +1269,8 @@ def _build_selector_single_discovered_execution_recovery_payload(
             continue
         if candidate.get("is_policy_safe") is False:
             continue
+        if candidate.get("turn_launchable") is False:
+            continue
         candidate_role = _normalise_selector_candidate_role(candidate)
         if candidate_role not in {None, "", "execution"}:
             continue
@@ -5895,6 +5897,17 @@ class InternalMCPChatOrchestrator:
             if isinstance(data.get("missing_tool_call_recovery_outcome"), str)
             else None
         )
+        tool_plan_stage_messages = self._build_turn_expected_outcome_stage_messages(
+            data=data,
+            stage="tool_call",
+        )
+        tool_plan_context, tool_plan_context_telemetry = self._build_stage_llm_context(
+            base_context=augmented_context,
+            stage="tool_call",
+            base_context_source="augmented_context",
+            stage_messages=tool_plan_stage_messages,
+        )
+        data["tool_plan_context_lineage"] = dict(tool_plan_context_telemetry)
         method_catalogue_for_requirements = data.get("method_catalogue")
         if not isinstance(method_catalogue_for_requirements, Mapping):
             try:
@@ -5925,7 +5938,7 @@ class InternalMCPChatOrchestrator:
                 if isinstance(method_catalogue_for_requirements, Mapping)
                 else None
             ),
-            context_messages=augmented_context,
+            context_messages=tool_plan_context,
             tool_invocations=(),
             url_requirement=(
                 prompt_requirement_url_policy
@@ -5979,7 +5992,7 @@ class InternalMCPChatOrchestrator:
                 llm_response, tool_call_model, _ = self._run_llm_with_tools_fallbacks(
                     stage="tool_call",
                     prompt=prompt,
-                    context=augmented_context,
+                    context=tool_plan_context,
                     tool_definitions=tool_definitions,
                     default_client=llm_client,
                     default_model=tool_call_model,
@@ -5998,6 +6011,7 @@ class InternalMCPChatOrchestrator:
                         else None
                     ),
                     required_prompt_tools=required_prompt_tools,
+                    context_telemetry=tool_plan_context_telemetry,
                 )
                 if llm_response.tool_calls:
                     response = llm_response.text_response or ""
@@ -6027,7 +6041,7 @@ class InternalMCPChatOrchestrator:
             response, tool_call_model, _ = self._run_llm_with_fallbacks(
                 stage="tool_call",
                 prompt=prompt,
-                context=augmented_context,
+                context=tool_plan_context,
                 default_client=llm_client,
                 default_model=tool_call_model,
                 policy_state=policy_state,
@@ -6038,6 +6052,7 @@ class InternalMCPChatOrchestrator:
                 aux_log=aux_llm_calls,
                 record_llm_call=record_llm_call,
                 emit_progress=emit_progress_cb,
+                context_telemetry=tool_plan_context_telemetry,
             )
             tool_calls = None
             has_valid_tool_call = False
@@ -7219,6 +7234,17 @@ class InternalMCPChatOrchestrator:
             augmented_context,
             max_chars=self._follow_up_context_chars,
         )
+        follow_up_stage_messages = self._build_turn_expected_outcome_stage_messages(
+            data=data,
+            stage="summariser",
+        )
+        follow_up_context, follow_up_context_telemetry = self._build_stage_llm_context(
+            base_context=follow_up_context,
+            stage="summariser",
+            base_context_source="follow_up_context",
+            stage_messages=follow_up_stage_messages,
+        )
+        data["tool_follow_up_context_lineage"] = dict(follow_up_context_telemetry)
         summariser_model = model_for_stage("summariser")
         current_response, summariser_model, _ = self._run_llm_with_fallbacks(
             stage="summariser",
@@ -7234,6 +7260,7 @@ class InternalMCPChatOrchestrator:
             aux_log=aux_llm_calls,
             record_llm_call=record_llm_call,
             emit_progress=emit_progress_cb,
+            context_telemetry=follow_up_context_telemetry,
         )
 
         # Check if the summariser response contains more tool calls.
@@ -14118,6 +14145,70 @@ class InternalMCPChatOrchestrator:
         tool_name: str,
         method_catalogue: Mapping[str, Any],
     ) -> McpSchema | None:
+        def _json_schema_expected_type(value: Any) -> Any:
+            if isinstance(value, str):
+                return {
+                    "string": str,
+                    "integer": int,
+                    "number": (int, float),
+                    "boolean": bool,
+                    "array": list,
+                    "object": dict,
+                    "null": type(None),
+                }.get(value.strip().lower(), object)
+            if isinstance(value, Sequence) and not isinstance(
+                value, (str, bytes, bytearray)
+            ):
+                candidates: list[type] = []
+                seen: set[type] = set()
+                for item in value:
+                    resolved = _json_schema_expected_type(item)
+                    if isinstance(resolved, tuple):
+                        for nested in resolved:
+                            if isinstance(nested, type) and nested not in seen:
+                                seen.add(nested)
+                                candidates.append(nested)
+                    elif isinstance(resolved, type) and resolved not in seen:
+                        seen.add(resolved)
+                        candidates.append(resolved)
+                return tuple(candidates) or object
+            return object
+
+        def _schema_from_json_schema(raw_json_schema: Mapping[str, Any]) -> McpSchema:
+            properties = raw_json_schema.get("properties")
+            if not isinstance(properties, Mapping):
+                properties = {}
+            required_names = {
+                str(item).strip()
+                for item in (raw_json_schema.get("required") or [])
+                if isinstance(item, str) and str(item).strip()
+            }
+            required_fields: dict[str, Any] = {}
+            optional_fields: dict[str, Any] = {}
+            for field_name, field_schema in properties.items():
+                if not isinstance(field_name, str) or not field_name.strip():
+                    continue
+                expected = (
+                    _json_schema_expected_type(field_schema.get("type"))
+                    if isinstance(field_schema, Mapping)
+                    else object
+                )
+                if field_name in required_names:
+                    required_fields[field_name] = expected
+                else:
+                    optional_fields[field_name] = expected
+            additional_properties = raw_json_schema.get("additionalProperties")
+            return McpSchema(
+                required=required_fields,
+                optional=optional_fields,
+                allow_unknown=bool(additional_properties),
+                description=(
+                    raw_json_schema.get("description")
+                    if isinstance(raw_json_schema.get("description"), str)
+                    else None
+                ),
+            )
+
         get_definition = getattr(self._gateway, "get_method_definition", None)
         if callable(get_definition):
             definition = get_definition(tool_name)
@@ -14144,6 +14235,12 @@ class InternalMCPChatOrchestrator:
                     item: object for item in value if isinstance(item, str) and item
                 }
             return {}
+
+        if (
+            raw_schema.get("type") == "object"
+            and isinstance(raw_schema.get("properties"), Mapping)
+        ):
+            return _schema_from_json_schema(raw_schema)
 
         return McpSchema(
             required=_coerce_fields(raw_schema.get("required") or {}),
@@ -22123,11 +22220,188 @@ class InternalMCPChatOrchestrator:
             return []
         return [dict(item) for item in raw_candidates if isinstance(item, Mapping)]
 
+    @staticmethod
+    def _copy_turn_launchability_inputs(
+        value: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        if not isinstance(value, Mapping):
+            return {}
+        copied: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str) or not key.strip() or callable(item):
+                continue
+            copied[key] = item
+        return copied
+
+    @classmethod
+    def _build_turn_launchability_probe_inputs(
+        cls,
+        *,
+        prompt_text: str,
+        augmented_context: Sequence[Mapping[str, Any]] | None,
+        workflow_discovery_result: Mapping[str, Any] | None,
+        continuation_context: Mapping[str, Any] | None = None,
+        user_namespace: str | None = None,
+        user_concept_id: str | None = None,
+        org_concept_id: str | None = None,
+        gmail_profile: str | None = None,
+        base_data: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        inputs = cls._copy_turn_launchability_inputs(base_data)
+        clean_prompt_text = prompt_text.strip() if isinstance(prompt_text, str) else ""
+        if clean_prompt_text:
+            inputs["prompt"] = clean_prompt_text
+            inputs.setdefault("user_prompt", clean_prompt_text)
+        if isinstance(augmented_context, Sequence) and not isinstance(
+            augmented_context, (str, bytes, bytearray)
+        ):
+            inputs["augmented_context"] = list(augmented_context)
+        if isinstance(workflow_discovery_result, Mapping) and workflow_discovery_result:
+            inputs["workflow_discovery_result"] = dict(workflow_discovery_result)
+        if isinstance(continuation_context, Mapping) and continuation_context:
+            continuation_payload = dict(continuation_context)
+            inputs["continuation_context"] = continuation_payload
+            try:
+                from ...services.workflow_continuation_service import (
+                    project_launch_inputs_from_continuation_context,
+                )
+
+                projected_inputs = project_launch_inputs_from_continuation_context(
+                    continuation_payload
+                )
+            except Exception:
+                projected_inputs = {}
+            if isinstance(projected_inputs, Mapping) and projected_inputs:
+                inputs["workflow_continuation_launch_inputs"] = dict(projected_inputs)
+                for key, value in projected_inputs.items():
+                    if isinstance(key, str) and key.strip():
+                        inputs.setdefault(key, value)
+        if isinstance(user_namespace, str) and user_namespace.strip():
+            inputs.setdefault("user_namespace", user_namespace.strip())
+        if isinstance(user_concept_id, str) and user_concept_id.strip():
+            inputs.setdefault("user_concept_id", user_concept_id.strip())
+        if isinstance(org_concept_id, str) and org_concept_id.strip():
+            inputs.setdefault("org_concept_id", org_concept_id.strip())
+        if isinstance(gmail_profile, str) and gmail_profile.strip():
+            inputs.setdefault("gmail_profile", gmail_profile.strip())
+        return inputs
+
+    @staticmethod
+    def _summarise_turn_launchability_probe(
+        probe: Mapping[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if not isinstance(probe, Mapping):
+            return None
+        launch_input_resolution = probe.get("launch_input_resolution")
+        launch_input_summary = (
+            {
+                str(key): value
+                for key, value in launch_input_resolution.items()
+                if isinstance(key, str)
+                and key
+                in {
+                    "status",
+                    "contract_source",
+                    "resolved_inputs",
+                    "unresolved_required_inputs",
+                }
+            }
+            if isinstance(launch_input_resolution, Mapping)
+            else {}
+        )
+        pre_action_validation = probe.get("pre_action_validation")
+        pre_action_summary = (
+            {
+                str(key): value
+                for key, value in pre_action_validation.items()
+                if isinstance(key, str)
+                and key in {"applied", "ok", "reason_code", "symbol", "message"}
+            }
+            if isinstance(pre_action_validation, Mapping)
+            else {}
+        )
+        return {
+            "launchable": bool(probe.get("launchable")),
+            "initial_state_id": (
+                str(probe.get("initial_state_id") or "").strip() or None
+            ),
+            "launch_input_resolution": launch_input_summary,
+            "pre_action_validation": pre_action_summary,
+        }
+
+    @staticmethod
+    def _turn_launchability_exclusion_reason(
+        probe: Mapping[str, Any] | None,
+    ) -> str:
+        if not isinstance(probe, Mapping):
+            return "not_launchable_from_current_turn_inputs"
+        launch_input_resolution_raw = probe.get("launch_input_resolution")
+        launch_input_resolution: dict[str, Any] = (
+            {
+                str(key): value
+                for key, value in launch_input_resolution_raw.items()
+                if isinstance(key, str)
+            }
+            if isinstance(launch_input_resolution_raw, Mapping)
+            else {}
+        )
+        unresolved_required_inputs = launch_input_resolution.get(
+            "unresolved_required_inputs"
+        )
+        if isinstance(unresolved_required_inputs, list) and unresolved_required_inputs:
+            return "launch_input_contract_unresolved_for_current_turn"
+        pre_action_validation_raw = probe.get("pre_action_validation")
+        pre_action_validation: dict[str, Any] = (
+            {
+                str(key): value
+                for key, value in pre_action_validation_raw.items()
+                if isinstance(key, str)
+            }
+            if isinstance(pre_action_validation_raw, Mapping)
+            else {}
+        )
+        if pre_action_validation.get("applied") and not bool(
+            pre_action_validation.get("ok")
+        ):
+            reason_code = str(pre_action_validation.get("reason_code") or "").strip()
+            if reason_code:
+                return f"launch_precondition_failed_for_current_turn:{reason_code}"
+            return "launch_precondition_failed_for_current_turn"
+        return "not_launchable_from_current_turn_inputs"
+
+    def _build_discovered_candidate_turn_launchability(
+        self,
+        *,
+        workflow_discovery_result: Mapping[str, Any] | None,
+        available_inputs: Mapping[str, Any] | None,
+    ) -> dict[str, dict[str, Any]]:
+        if not isinstance(workflow_discovery_result, Mapping) or not workflow_discovery_result:
+            return {}
+        probes: dict[str, dict[str, Any]] = {}
+        for candidate in self._extract_discovery_candidates(workflow_discovery_result):
+            concept_id = str(candidate.get("concept_id") or "").strip()
+            if not concept_id or concept_id in _SELECTOR_GENERIC_WORKFLOW_IDS:
+                continue
+            if (
+                self._selected_workflow_execution_mode(selected_workflow_id=concept_id)
+                != "custom_workflow"
+            ):
+                continue
+            probe = self._probe_workflow_launchability_for_inputs(
+                concept_id,
+                available_inputs=available_inputs,
+            )
+            probes[concept_id] = (
+                dict(probe) if isinstance(probe, Mapping) else {"launchable": False}
+            )
+        return probes
+
     def _prepare_selector_discovered_matches(
         self,
         workflow_discovery_result: Mapping[str, Any],
         *,
         turn_text: str,
+        candidate_turn_launchability: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Filter discovered workflows to executable + routing-policy-safe defaults.
 
@@ -22207,6 +22481,20 @@ class InternalMCPChatOrchestrator:
                 ).strip()
                 or "discovered_workflow_candidate"
             )
+            turn_launchability_probe = None
+            if isinstance(candidate_turn_launchability, Mapping):
+                raw_probe = candidate_turn_launchability.get(concept_id)
+                if isinstance(raw_probe, Mapping):
+                    turn_launchability_probe = dict(raw_probe)
+            if turn_launchability_probe is not None:
+                turn_launchability_summary = self._summarise_turn_launchability_probe(
+                    turn_launchability_probe
+                )
+                if turn_launchability_summary:
+                    item["turn_launchability"] = turn_launchability_summary
+                    item["turn_launchable"] = bool(
+                        turn_launchability_summary.get("launchable")
+                    )
 
             preserved_routing_eligible = candidate.get("routing_eligible")
             if isinstance(preserved_routing_eligible, bool):
@@ -22278,6 +22566,18 @@ class InternalMCPChatOrchestrator:
                 item["routing_eligible"] = False
                 item["candidate_reason"] = "discovered_workflow_excluded"
                 item["routing_exclusion_reason"] = suitability_reason
+                excluded.append(item)
+                continue
+            if turn_launchability_probe is not None and not bool(
+                turn_launchability_probe.get("launchable")
+            ):
+                item["routing_eligible"] = False
+                item["candidate_reason"] = "discovered_workflow_excluded"
+                item["routing_exclusion_reason"] = (
+                    self._turn_launchability_exclusion_reason(
+                        turn_launchability_probe
+                    )
+                )
                 excluded.append(item)
                 continue
 
@@ -22353,12 +22653,26 @@ class InternalMCPChatOrchestrator:
         if precision_policy:
             lines.append(f"- Precision policy: {precision_policy}")
 
-        if stage in {"selector_preparation", "selector_decision", "workflow_dispatch"}:
+        if stage in {
+            "selector_preparation",
+            "selector_decision",
+            "workflow_dispatch",
+            "tool_call",
+            "tool_plan",
+        }:
             selector_guidance = contract.get("selector_guidance")
             if selector_guidance:
                 lines.append(f"- Selector guidance: {selector_guidance}")
 
-        if stage in {"plain_response", "narration", "recovery_decision"}:
+        if stage in {
+            "plain_response",
+            "narration",
+            "recovery_decision",
+            "tool_call",
+            "tool_plan",
+            "summariser",
+            "tool_follow_up",
+        }:
             answering_guidance = contract.get("answering_guidance")
             if answering_guidance:
                 lines.append(f"- Answering guidance: {answering_guidance}")
@@ -22376,32 +22690,7 @@ class InternalMCPChatOrchestrator:
         expected_outcome_contract: Mapping[str, Any] | None,
     ) -> str:
         clean_turn_text = turn_text.strip() if isinstance(turn_text, str) else ""
-        if not clean_turn_text:
-            return ""
-
-        contract = (
-            expected_outcome_contract
-            if isinstance(expected_outcome_contract, Mapping)
-            else {}
-        )
-        guidance_lines: list[str] = []
-        for label, key in (
-            ("Success target", "summary"),
-            ("Grounding requirement", "grounding_requirement"),
-            ("Precision policy", "precision_policy"),
-            ("Routing guidance", "selector_guidance"),
-            ("Reasoning", "reasoning"),
-        ):
-            value = contract.get(key)
-            if isinstance(value, str) and value.strip():
-                guidance_lines.append(f"- {label}: {value.strip()}")
-
-        if not guidance_lines:
-            return clean_turn_text
-
-        return f"{clean_turn_text}\n\n" "Turn-intent routing guidance:\n" + "\n".join(
-            guidance_lines
-        )
+        return clean_turn_text
 
     @staticmethod
     def _turn_discovery_query_is_enriched(
@@ -22436,35 +22725,30 @@ class InternalMCPChatOrchestrator:
             or not workflow_discovery_result
         ):
             return False
-        if not cls._turn_discovery_query_is_enriched(
-            requested_query=requested_query,
-            discovery_query_input=discovery_query_input,
-        ):
-            return False
-
+        clean_requested_query = (
+            requested_query.strip() if isinstance(requested_query, str) else ""
+        )
+        clean_discovery_query_input = (
+            discovery_query_input.strip()
+            if isinstance(discovery_query_input, str)
+            else ""
+        )
         existing_requested_query = str(
             workflow_discovery_result.get("requested_query") or ""
         ).strip()
         existing_discovery_query_input = str(
-            workflow_discovery_result.get("discovery_query_input") or ""
+            workflow_discovery_result.get("discovery_query_input")
+            or workflow_discovery_result.get("query")
+            or ""
         ).strip()
-        existing_query = str(workflow_discovery_result.get("query") or "").strip()
-        enrichment_source = str(
-            workflow_discovery_result.get("query_enrichment_source") or ""
-        ).strip()
-
+        if clean_requested_query and existing_requested_query != clean_requested_query:
+            return True
         if (
-            existing_requested_query == requested_query
-            and existing_discovery_query_input == discovery_query_input
+            clean_discovery_query_input
+            and existing_discovery_query_input != clean_discovery_query_input
         ):
-            return False
-        if (
-            enrichment_source == "turn_expected_outcome_contract"
-            and existing_requested_query == requested_query
-            and existing_query == discovery_query_input
-        ):
-            return False
-        return True
+            return True
+        return False
 
     @classmethod
     def _annotate_turn_workflow_discovery_result(
@@ -22503,9 +22787,9 @@ class InternalMCPChatOrchestrator:
         ):
             payload["query_enrichment_applied"] = True
             payload["query_enrichment_source"] = "turn_expected_outcome_contract"
-            if refreshed:
-                payload["discovery_refreshed"] = True
-                payload["discovery_refresh_reason"] = "effective_query_changed"
+        if refreshed:
+            payload["discovery_refreshed"] = True
+            payload["discovery_refresh_reason"] = "effective_query_changed"
 
         return payload
 
@@ -22662,28 +22946,45 @@ class InternalMCPChatOrchestrator:
         else:
             workflow_discovery_result = {}
 
-        discovered_matches: list[dict[str, Any]] = []
-        excluded_discovered_matches: list[dict[str, Any]] = []
-        if workflow_discovery_result:
-            (
-                discovered_matches,
-                excluded_discovered_matches,
-            ) = self._prepare_selector_discovered_matches(
-                workflow_discovery_result,
-                turn_text=prompt_text,
-            )
-
-        selector_candidate_matches = self._merge_selector_candidates(
-            discovered_matches,
-            self._build_selector_default_candidates(),
-        )
-
         continuation_routing_context_text = None
         raw_continuation_context = data.get("continuation_context")
         if isinstance(raw_continuation_context, Mapping):
             raw_text = raw_continuation_context.get("selector_routing_context_text")
             if isinstance(raw_text, str) and raw_text.strip():
                 continuation_routing_context_text = raw_text.strip()
+
+        augmented_context_raw = data.get("augmented_context")
+        augmented_context = (
+            cast(Sequence[Mapping[str, Any]], augmented_context_raw)
+            if isinstance(augmented_context_raw, Sequence)
+            and not isinstance(augmented_context_raw, (str, bytes, bytearray))
+            else ()
+        )
+        candidate_turn_launchability = self._build_discovered_candidate_turn_launchability(
+            workflow_discovery_result=workflow_discovery_result,
+            available_inputs=self._build_turn_launchability_probe_inputs(
+                prompt_text=prompt_text,
+                augmented_context=augmented_context,
+                workflow_discovery_result=workflow_discovery_result,
+                continuation_context=raw_continuation_context,
+                user_namespace=env.user_namespace,
+                user_concept_id=(
+                    str(data.get("user_concept_id") or "").strip() or None
+                ),
+                org_concept_id=(str(data.get("org_concept_id") or "").strip() or None),
+                gmail_profile=(str(data.get("gmail_profile") or "").strip() or None),
+                base_data=data if isinstance(data, Mapping) else None,
+            ),
+        )
+        (
+            discovered_matches,
+            excluded_discovered_matches,
+            selector_candidate_matches,
+        ) = self._prepare_selector_candidates(
+            workflow_discovery_result=workflow_discovery_result,
+            prompt=prompt_text,
+            candidate_turn_launchability=candidate_turn_launchability,
+        )
 
         selector_prompt = WorkflowSelectionPrompt(
             prompt_id=None,
@@ -22712,14 +23013,6 @@ class InternalMCPChatOrchestrator:
                 discovered_workflows=selector_candidate_matches or None,
                 continuation_routing_context_text=continuation_routing_context_text,
             )
-
-        augmented_context_raw = data.get("augmented_context")
-        augmented_context = (
-            cast(Sequence[Mapping[str, Any]], augmented_context_raw)
-            if isinstance(augmented_context_raw, Sequence)
-            and not isinstance(augmented_context_raw, (str, bytes, bytearray))
-            else ()
-        )
         selector_stage_messages: list[dict[str, str]] = []
         current_turn_message = self._build_turn_current_request_stage_message(
             prompt_text
@@ -25598,6 +25891,24 @@ class InternalMCPChatOrchestrator:
                 payload["workflow_routing"] = None
             return payload
 
+        candidate_turn_launchability = self._build_discovered_candidate_turn_launchability(
+            workflow_discovery_result=workflow_discovery_result,
+            available_inputs=self._build_turn_launchability_probe_inputs(
+                prompt_text=prompt,
+                augmented_context=augmented_context,
+                workflow_discovery_result=workflow_discovery_result,
+                continuation_context=(
+                    workflow_continuation_payload
+                    if isinstance(workflow_continuation_payload, Mapping)
+                    else None
+                ),
+                user_namespace=user_namespace,
+                user_concept_id=user_concept_id,
+                org_concept_id=org_concept_id,
+                gmail_profile=gmail_profile or self._default_gmail_profile,
+            ),
+        )
+
         def _prepare_selector_candidates_local() -> tuple[
             list[dict[str, Any]],
             list[dict[str, Any]],
@@ -25606,6 +25917,7 @@ class InternalMCPChatOrchestrator:
             return self._prepare_selector_candidates(
                 workflow_discovery_result=workflow_discovery_result,
                 prompt=prompt,
+                candidate_turn_launchability=candidate_turn_launchability,
             )
 
         (
@@ -32735,6 +33047,7 @@ class InternalMCPChatOrchestrator:
         *,
         workflow_discovery_result: Mapping[str, Any] | None,
         prompt: str,
+        candidate_turn_launchability: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> tuple[
         list[dict[str, Any]],
         list[dict[str, Any]],
@@ -32749,6 +33062,7 @@ class InternalMCPChatOrchestrator:
             ) = self._prepare_selector_discovered_matches(
                 workflow_discovery_result,
                 turn_text=prompt,
+                candidate_turn_launchability=candidate_turn_launchability,
             )
         local_selector_candidate_matches = self._merge_selector_candidates(
             local_discovered_matches,
@@ -32760,11 +33074,11 @@ class InternalMCPChatOrchestrator:
             local_selector_candidate_matches,
         )
 
-    def _probe_custom_workflow_launchability(
+    def _probe_workflow_launchability_for_inputs(
         self,
         workflow_id: str | None,
         *,
-        build_custom_workflow_dispatch_data: Callable[..., Mapping[str, Any]],
+        available_inputs: Mapping[str, Any] | None,
     ) -> dict[str, Any]:
         clean_workflow_id = (
             workflow_id.strip()
@@ -32798,10 +33112,11 @@ class InternalMCPChatOrchestrator:
                 },
             }
 
-        raw_probe_data = build_custom_workflow_dispatch_data(
-            workflow_id_override=clean_workflow_id
+        probe_data = (
+            self._copy_turn_launchability_inputs(available_inputs)
+            if isinstance(available_inputs, Mapping)
+            else {}
         )
-        probe_data = dict(raw_probe_data) if isinstance(raw_probe_data, Mapping) else {}
         workflow_metadata = getattr(workflow_def, "metadata", None)
 
         launch_input_contract = (
@@ -32931,6 +33246,23 @@ class InternalMCPChatOrchestrator:
             "launch_input_resolution": launch_input_summary,
             "pre_action_validation": pre_action_summary,
         }
+
+    def _probe_custom_workflow_launchability(
+        self,
+        workflow_id: str | None,
+        *,
+        build_custom_workflow_dispatch_data: Callable[..., Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        raw_probe_data = build_custom_workflow_dispatch_data(
+            workflow_id_override=workflow_id
+        )
+        probe_inputs = (
+            dict(raw_probe_data) if isinstance(raw_probe_data, Mapping) else {}
+        )
+        return self._probe_workflow_launchability_for_inputs(
+            workflow_id,
+            available_inputs=probe_inputs,
+        )
 
     def _maybe_apply_narration_routing(
         self,

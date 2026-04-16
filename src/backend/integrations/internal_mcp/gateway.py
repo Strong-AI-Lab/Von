@@ -6,7 +6,12 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, Mapping, MutableMapping, Optional
 
-from .schemas import Schema, validate_payload, SchemaValidationError
+from .schemas import (
+    Schema,
+    SchemaValidationError,
+    coerce_payload_types,
+    validate_payload,
+)
 from .transport import InternalMCPTransport, TransportResult
 
 logger = logging.getLogger(__name__)
@@ -151,9 +156,21 @@ class InternalMCPGateway:
         if not self._enabled:
             raise GatewayDisabledError("Internal MCP gateway is disabled.")
 
-        payload_dict: MutableMapping[str, Any] = payload or {}
+        payload_dict: MutableMapping[str, Any] = dict(payload or {})
         definition = self._catalogue.get(method_name)
         self.register_metrics_if_missing(method_name)
+
+        payload_dict, coercion_warnings = coerce_payload_types(
+            definition.input_schema,
+            payload_dict,
+        )
+        if coercion_warnings:
+            logger.debug(
+                "%s coerced payload for %s: %s",
+                self._log_tag,
+                method_name,
+                "; ".join(coercion_warnings),
+            )
 
         ok, errors = validate_payload(definition.input_schema, payload_dict)
         if not ok:
