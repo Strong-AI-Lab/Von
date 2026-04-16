@@ -381,6 +381,17 @@ For local browser acceptance work, the implemented pseudouser path from
   - use the workflow-driven fixture, verification, and cleanup helpers rather
     than ad-hoc setup/teardown code
 
+### 7.7 Real-path server replay and telemetry loop
+
+For user-visible route, selector, workflow, or answer-path defects, use the
+repeatable replay-and-diagnosis loop described in:
+
+- `docs/engineering/real_path_server_replay_and_telemetry_loop.md`
+
+That note is the preferred operational runbook when you need to keep replaying
+the real server path, inspecting exact turn telemetry, and iterating until the
+behaviour is both user-correct and telemetry-consistent.
+
 ## 8. Practical Refactoring and Consistency Habits
 
 - Search first before adding helpers or parallel pathways.
