@@ -209,6 +209,73 @@ def test_durable_executor_uses_scoped_active_model_and_context_defaults() -> Non
     )
 
 
+def test_durable_executor_prefers_requested_model_override_from_instance_inputs() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#durable_requested_model_override",
+        initial_state="capture",
+        states={
+            "capture": WorkflowStateSpec(
+                state_id="capture",
+                actions=(WorkflowActionInvocation(action_id="capture.action"),),
+                terminal=True,
+            ),
+        },
+    )
+
+    captured: dict[str, object] = {}
+    requested_client = MagicMock(name="requested_client")
+    registry = ActionRegistry()
+
+    def capture_handler(request: WorkflowActionRequest) -> WorkflowActionResult:
+        captured["model"] = request.environment.model
+        captured["requested_model"] = request.data.get("requested_model")
+        captured["requested_client_type"] = request.data.get("requested_client_type")
+        return WorkflowActionResult(outputs={"captured": True})
+
+    registry.register(ActionSpec(action_id="capture.action", handler=capture_handler))
+
+    manager = MagicMock()
+    instance = _build_instance(definition.workflow_id)
+    instance.inputs = {
+        "requested_model": "gemma4:26b",
+        "requested_client_type": "ollama",
+    }
+    manager.get_instance.return_value = instance
+    manager.is_cancelled.return_value = False
+    manager.extend_lock.return_value = True
+    manager.checkpoint.return_value = True
+
+    executor = DurableWorkflowExecutor(registry=registry, instance_manager=manager)
+
+    with (
+        patch(
+            "src.backend.languagemodels.llm_interface.get_llm_client",
+            return_value=requested_client,
+        ) as get_llm_client,
+        patch(
+            "src.backend.languagemodels.llm_interface.get_active_model_name",
+        ) as get_active_model_name,
+    ):
+        result = executor.run_durable(
+            "instance-1",
+            definition,
+            resume_from_checkpoint=False,
+        )
+
+    assert result.completed is True
+    assert captured == {
+        "model": "gemma4:26b",
+        "requested_model": "gemma4:26b",
+        "requested_client_type": "ollama",
+    }
+    get_llm_client.assert_called_once_with(
+        client_type="ollama",
+        user_concept_id=instance.user_id,
+        org_concept_id=instance.org_id,
+    )
+    get_active_model_name.assert_not_called()
+
+
 def test_durable_executor_routes_to_on_failure_recovery() -> None:
     """Failed actions should transition via `on_failure` when defined."""
     definition = WorkflowDefinition(

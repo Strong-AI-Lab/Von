@@ -110,6 +110,12 @@ def _resolve_user_context_ids(
     return user_concept_id, org_concept_id
 
 
+def _prefer_default_model_for_request(request: WorkflowActionRequest) -> bool:
+    requested_model = _context_string(request.data.get("requested_model"))
+    requested_client_type = _context_string(request.data.get("requested_client_type"))
+    return bool(requested_model or requested_client_type)
+
+
 def _resolve_prompt_from_policy_context(
     *,
     llm_policy: Mapping[str, Any],
@@ -728,6 +734,7 @@ def _run_gateway_llm_step_no_tools(
     orchestrator, policy_state, registry_snapshot, user_concept_id, org_concept_id = (
         _build_gateway_runtime(request)
     )
+    prefer_default_model = _prefer_default_model_for_request(request)
     llm_calls: list[dict[str, Any]] = []
     aux_llm_calls: list[dict[str, Any]] = []
     context_messages_key = _context_string(
@@ -787,6 +794,7 @@ def _run_gateway_llm_step_no_tools(
             record_llm_call=_record_llm_call,
             emit_progress=emit_progress,
             context_telemetry=context_telemetry,
+            prefer_default_model=prefer_default_model,
         )
     )
 
@@ -940,6 +948,7 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
             else []
         ),
     )
+    prefer_default_model = _prefer_default_model_for_request(request)
     selected_models: dict[str, str | None] = {}
 
     def _model_for_stage(inner_stage: str) -> Optional[str]:
@@ -950,6 +959,7 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
             registry_snapshot=registry_snapshot,
             user_concept_id=user_concept_id,
             org_concept_id=org_concept_id,
+            prefer_default_model=prefer_default_model,
         )
         selected_models[inner_stage] = model_name
         return model_name
@@ -1071,6 +1081,7 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
         or "workflow_step",
         "workflow_episode_stage": request.data.get("workflow_episode_stage") or stage,
         "model_for_stage": _model_for_stage,
+        "prefer_default_model": prefer_default_model,
         "record_llm_call": _record_llm_call,
         "emit_progress": (
             request.data.get("emit_progress")

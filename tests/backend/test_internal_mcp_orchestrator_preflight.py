@@ -3,6 +3,7 @@ from typing import Any, cast
 import pytest
 
 from src.backend.integrations.internal_mcp.orchestrator import (
+    AuthoritativePromptUnavailableError,
     InternalMCPChatOrchestrator,
 )
 from src.backend.workflows.action_registry import (
@@ -46,6 +47,16 @@ class _CapturingLLM:
         return "ok"
 
 
+_TEST_BASE_PROMPT = (
+    "You have access to internal MCP tools.\n\n"
+    "{auth_status}\n"
+    "INTERNAL EXECUTION GUARDRAILS:\n"
+    "- Do NOT mention budgets, caps, or internal limits unless the user explicitly asks for diagnostics.\n"
+    "Available tools:\n"
+    "{listing}"
+)
+
+
 def _seed_authoritative_conversation_turn_registry(monkeypatch) -> None:
     def _build_registry(*, defer_parity_work: bool = True) -> WorkflowRegistry:
         assert defer_parity_work is True
@@ -68,6 +79,18 @@ def _stub_shared_runtime_registries(monkeypatch):
     _seed_authoritative_conversation_turn_registry(monkeypatch)
 
 
+@pytest.fixture(autouse=True)
+def _stub_authoritative_base_prompt(monkeypatch):
+    monkeypatch.setattr(
+        InternalMCPChatOrchestrator,
+        "_load_base_system_prompt_from_vontology",
+        lambda self, preferred_language=None: (
+            _TEST_BASE_PROMPT,
+            "#V#test_base_prompt",
+        ),
+    )
+
+
 def test_orchestrator_constructor_uses_shared_runtime_registries(monkeypatch):
     workflow_registry = WorkflowRegistry()
     durable_actions = ActionRegistry()
@@ -82,9 +105,7 @@ def test_orchestrator_constructor_uses_shared_runtime_registries(monkeypatch):
 
     monkeypatch.setattr(
         "src.backend.integrations.internal_mcp.orchestrator.get_shared_workflow_registry_read_only",
-        lambda *, defer_parity_work=True: calls.append(
-            ("workflow", defer_parity_work)
-        )
+        lambda *, defer_parity_work=True: calls.append(("workflow", defer_parity_work))
         or workflow_registry,
     )
     monkeypatch.setattr(
@@ -114,7 +135,7 @@ def test_instruction_message_uses_internal_guardrail_wording_without_budget_leak
     monkeypatch.setattr(
         orchestrator,
         "_load_base_system_prompt_from_vontology",
-        lambda preferred_language=None: (None, None),
+        lambda preferred_language=None: (_TEST_BASE_PROMPT, "#V#test_base_prompt"),
     )
 
     instruction = orchestrator._instruction_message(preferred_language="en")
@@ -153,7 +174,7 @@ def test_instruction_message_keeps_tool_index_compact_for_large_catalogue(
     monkeypatch.setattr(
         orchestrator,
         "_load_base_system_prompt_from_vontology",
-        lambda preferred_language=None: (None, None),
+        lambda preferred_language=None: (_TEST_BASE_PROMPT, "#V#test_base_prompt"),
     )
 
     instruction = orchestrator._instruction_message(preferred_language="en")
@@ -162,6 +183,49 @@ def test_instruction_message_keeps_tool_index_compact_for_large_catalogue(
     assert "tool_000" in instruction
     assert "tool_159" in instruction
     assert len(instruction) < 12_000
+
+
+def test_instruction_message_requires_authoritative_base_prompt(monkeypatch):
+    orchestrator = object.__new__(InternalMCPChatOrchestrator)
+    orchestrator._gateway = cast(Any, _CapturingGateway())
+    orchestrator._max_tool_invocations = 30
+    orchestrator._tool_batch_cap = 10
+    orchestrator._last_base_system_prompt_telemetry = None
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_load_base_system_prompt_from_vontology",
+        lambda preferred_language=None: (None, None),
+    )
+
+    with pytest.raises(AuthoritativePromptUnavailableError):
+        orchestrator._instruction_message(preferred_language="en")
+
+
+def test_instruction_message_does_not_emit_arxiv_family_labels(monkeypatch):
+    class _PaperGateway(_CapturingGateway):
+        def describe_methods(self):
+            return {
+                "search_arxiv": {"description": "Search papers"},
+                "download_paper": {"description": "Download paper"},
+            }
+
+    orchestrator = object.__new__(InternalMCPChatOrchestrator)
+    orchestrator._gateway = cast(Any, _PaperGateway())
+    orchestrator._max_tool_invocations = 30
+    orchestrator._tool_batch_cap = 10
+    orchestrator._last_base_system_prompt_telemetry = None
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_load_base_system_prompt_from_vontology",
+        lambda preferred_language=None: (_TEST_BASE_PROMPT, "#V#test_base_prompt"),
+    )
+
+    instruction = orchestrator._instruction_message(preferred_language="en")
+
+    assert "search_arxiv" in instruction
+    assert "- arxiv:" not in instruction.lower()
 
 
 def test_orchestrator_injects_deterministic_preflight_context(monkeypatch):
@@ -796,7 +860,9 @@ def test_preflight_session_memory_keeps_context_for_two_follow_up_turns(monkeypa
 def test_annotation_candidates_surface_in_preflight_telemetry_and_prompt(monkeypatch):
     """JVNAUTOSCI-991: annotation candidates should be visible in planning context."""
 
-    def _fake_search_concepts(*, query="", instance_of=None, filter_kind=None, **_kwargs):
+    def _fake_search_concepts(
+        *, query="", instance_of=None, filter_kind=None, **_kwargs
+    ):
         if instance_of == "#V#conversation_preflight_predicate":
             return {"results": []}
         return {"results": []}
@@ -815,7 +881,12 @@ def test_annotation_candidates_surface_in_preflight_telemetry_and_prompt(monkeyp
     ):
         return [
             {
-                "span": {"start": 0, "end": 10, "text": "John Smith", "type": "#V#person"},
+                "span": {
+                    "start": 0,
+                    "end": 10,
+                    "text": "John Smith",
+                    "type": "#V#person",
+                },
                 "suggested_type_id": "#V#person",
                 "candidates": [
                     {"concept_id": "#V#john_smith", "name": "John Smith"},
@@ -911,7 +982,9 @@ def test_annotation_candidates_surface_in_preflight_telemetry_and_prompt(monkeyp
 def test_annotation_candidates_reused_across_two_follow_up_turns(monkeypatch):
     """JVNAUTOSCI-991: session memory should retain annotation candidates."""
 
-    def _fake_search_concepts(*, query="", instance_of=None, filter_kind=None, **_kwargs):
+    def _fake_search_concepts(
+        *, query="", instance_of=None, filter_kind=None, **_kwargs
+    ):
         if instance_of == "#V#conversation_preflight_predicate":
             return {"results": []}
         return {"results": []}
@@ -933,7 +1006,12 @@ def test_annotation_candidates_reused_across_two_follow_up_turns(monkeypatch):
             return []
         return [
             {
-                "span": {"start": 0, "end": 10, "text": "John Smith", "type": "#V#person"},
+                "span": {
+                    "start": 0,
+                    "end": 10,
+                    "text": "John Smith",
+                    "type": "#V#person",
+                },
                 "suggested_type_id": "#V#person",
                 "candidates": [
                     {"concept_id": "#V#john_smith", "name": "John Smith"},
@@ -1063,9 +1141,13 @@ def test_salient_predicates_by_type_surface_in_preflight(monkeypatch):
         if predicate != "hasName":
             return []
         if concept_id == "#V#authored_by":
-            return [{"text": "authored by", "lang": "en", "context": {"name_type": "NL"}}]
+            return [
+                {"text": "authored by", "lang": "en", "context": {"name_type": "NL"}}
+            ]
         if concept_id == "#V#published_in":
-            return [{"text": "published in", "lang": "en", "context": {"name_type": "NL"}}]
+            return [
+                {"text": "published in", "lang": "en", "context": {"name_type": "NL"}}
+            ]
         return []
 
     monkeypatch.setattr(
@@ -1122,7 +1204,8 @@ def test_salient_predicates_by_type_surface_in_preflight(monkeypatch):
     assert "#V#scientific_paper" in (telemetry.get("salient_type_candidate_ids") or [])
     salient_by_type = telemetry.get("salient_predicates_by_type") or []
     assert any(
-        isinstance(group, dict) and group.get("type_concept_id") == "#V#scientific_paper"
+        isinstance(group, dict)
+        and group.get("type_concept_id") == "#V#scientific_paper"
         for group in salient_by_type
     )
     assert "#V#authored_by" in (telemetry.get("salient_predicate_ids") or [])
@@ -1134,7 +1217,9 @@ def test_salient_predicates_by_type_surface_in_preflight(monkeypatch):
         and item.get("source_path") == "salient_predicate_for_type"
         for item in predicate_suggestions
     )
-    assert "salient_predicate_for_type" in (telemetry.get("final_suggestion_paths") or [])
+    assert "salient_predicate_for_type" in (
+        telemetry.get("final_suggestion_paths") or []
+    )
 
     context_messages = llm.calls[0]["context"] or []
     preflight_text = next(
@@ -1300,9 +1385,17 @@ def test_rag_candidates_surface_in_preflight_telemetry_and_prompt(monkeypatch):
         if predicate != "hasName":
             return []
         if concept_id == "#V#scientific_paper":
-            return [{"text": "Scientific Paper", "lang": "en", "context": {"name_type": "NL"}}]
+            return [
+                {
+                    "text": "Scientific Paper",
+                    "lang": "en",
+                    "context": {"name_type": "NL"},
+                }
+            ]
         if concept_id == "#V#authored_by":
-            return [{"text": "authored by", "lang": "en", "context": {"name_type": "NL"}}]
+            return [
+                {"text": "authored by", "lang": "en", "context": {"name_type": "NL"}}
+            ]
         return []
 
     monkeypatch.setattr(
@@ -1414,7 +1507,11 @@ def test_rag_candidates_surface_in_preflight_telemetry_and_prompt(monkeypatch):
         conversation_session_id="session-989-rag",
     )
 
-    rag_calls = [call for call in gateway.invocations if call.get("tool") == "search_knowledge_base"]
+    rag_calls = [
+        call
+        for call in gateway.invocations
+        if call.get("tool") == "search_knowledge_base"
+    ]
     assert rag_calls, "expected preflight to invoke RAG search"
     rag_payload = rag_calls[0].get("payload") or {}
     assert rag_payload.get("top_k") == orchestrator._RAG_PREFLIGHT_TOP_K
@@ -1435,7 +1532,10 @@ def test_rag_candidates_surface_in_preflight_telemetry_and_prompt(monkeypatch):
     assert isinstance(telemetry.get("rag_query"), str)
     assert telemetry.get("rag_selected_concept_id") == "#V#scientific_paper"
     assert "#V#scientific_paper" in (telemetry.get("rag_selected_concept_ids") or [])
-    assert len(telemetry.get("rag_candidates") or []) == orchestrator._RAG_PREFLIGHT_MAX_CANDIDATES
+    assert (
+        len(telemetry.get("rag_candidates") or [])
+        == orchestrator._RAG_PREFLIGHT_MAX_CANDIDATES
+    )
     assert "rag_concept_text_search" in (telemetry.get("final_suggestion_paths") or [])
 
     rag_candidates = telemetry.get("rag_candidates") or []
@@ -1714,7 +1814,9 @@ def test_specialised_preflight_active_mode_applies_fallback_suggestions(monkeypa
     assert telemetry.get("specialised_preflight_workflow_invoked") is True
     assert telemetry.get("specialised_preflight_recommendation") == "go_adopted"
 
-    applied_types = telemetry.get("specialised_preflight_applied_type_suggestions") or []
+    applied_types = (
+        telemetry.get("specialised_preflight_applied_type_suggestions") or []
+    )
     applied_predicates = (
         telemetry.get("specialised_preflight_applied_predicate_suggestions") or []
     )
@@ -1844,13 +1946,17 @@ def test_preflight_stage_authorities_classify_mechanical_stages_correctly(
     }
     for stage_name in mechanical_stages:
         if stage_name in stages_by_name:
-            assert stages_by_name[stage_name]["decision_source"] != "prompt_semantic_inference", (
-                f"Stage {stage_name} should not be classified as prompt_semantic_inference"
-            )
+            assert (
+                stages_by_name[stage_name]["decision_source"]
+                != "prompt_semantic_inference"
+            ), f"Stage {stage_name} should not be classified as prompt_semantic_inference"
 
     # Only topic_keyword_extraction should be prompt_semantic_inference.
     assert "topic_keyword_extraction" in stages_by_name
-    assert stages_by_name["topic_keyword_extraction"]["decision_source"] == "prompt_semantic_inference"
+    assert (
+        stages_by_name["topic_keyword_extraction"]["decision_source"]
+        == "prompt_semantic_inference"
+    )
 
     # Each sub-stage entry must have required fields.
     for item in stage_authorities:

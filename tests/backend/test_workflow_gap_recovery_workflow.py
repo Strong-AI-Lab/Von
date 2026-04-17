@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -245,6 +246,373 @@ def test_execute_candidate_uses_canonical_cap_default_when_env_cap_missing(
     )
 
 
+def test_execute_candidate_recovers_authored_json_guidance_from_step_inputs(
+    monkeypatch,
+) -> None:
+    import json
+    import src.backend.workflows.durable.workflow_gap_recovery_workflow as mod
+
+    captured: dict[str, object] = {}
+
+    class _FakeOrchestrator:
+        def __init__(
+            self,
+            *,
+            gateway,
+            max_tool_invocations,
+            default_gmail_profile=None,
+        ) -> None:
+            captured["max_tool_invocations"] = max_tool_invocations
+            del gateway, default_gmail_profile
+
+        def run(self, **kwargs):
+            captured["run_kwargs"] = dict(kwargs)
+            return OrchestratorResult(
+                response_text="Grounded response.",
+                extra_messages=(),
+                tool_invocations=(),
+                aux_llm_calls=(),
+                llm_calls=(),
+            )
+
+    def _fake_render(**kwargs):
+        captured["prompt_variables"] = dict(kwargs["variables"])
+        return SimpleNamespace(text="Candidate prompt"), {"error": None}
+
+    monkeypatch.setattr(mod, "render_workflow_gap_candidate_prompt", _fake_render)
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.orchestrator.InternalMCPChatOrchestrator",
+        _FakeOrchestrator,
+    )
+
+    registry = ActionRegistry()
+    register_workflow_gap_recovery_actions(registry)
+    result = registry.execute(
+        WORKFLOW_GAP_EXECUTE_CANDIDATE_ACTION_ID,
+        inputs={
+            "prompt_concept_id": "#V#candidate_gap_prompt",
+            "prompt": "Please answer from represented evidence.",
+            "workflow_guidance_json": json.dumps(
+                [
+                    "Resolve the represented concept.",
+                    "Surface explicit relation evidence.",
+                ]
+            ),
+            "acceptance_requirements_json": json.dumps(
+                [
+                    "Ground the answer in represented evidence.",
+                    "Name explicit related entities when present.",
+                ]
+            ),
+        },
+        context={},
+        env=WorkflowEnvironment(
+            llm_client=object(),
+            gateway=SimpleNamespace(enabled=True),
+            model="gpt-5.2-chat-latest",
+        ),
+    )
+
+    assert result.status == "success"
+    prompt_variables = cast(dict[str, Any], captured["prompt_variables"])
+    assert json.loads(prompt_variables["workflow_guidance_json"]) == [
+        "Resolve the represented concept.",
+        "Surface explicit relation evidence.",
+    ]
+    assert json.loads(prompt_variables["acceptance_requirements_json"]) == [
+        "Ground the answer in represented evidence.",
+        "Name explicit related entities when present.",
+    ]
+
+
+def test_execute_candidate_prefetches_authenticated_grounding_when_authored(
+    monkeypatch,
+) -> None:
+    import src.backend.workflows.durable.workflow_gap_recovery_workflow as mod
+
+    captured: dict[str, object] = {}
+
+    class _FakeGateway:
+        enabled = True
+
+        def invoke(self, tool_name: str, payload: dict[str, Any]):
+            captured["prefetch_tool_name"] = tool_name
+            captured["prefetch_payload"] = dict(payload)
+            return SimpleNamespace(
+                payload={
+                    "concept_id": "#V#user",
+                    "name": "Michael Witbrock",
+                    "relations": {
+                        "relations_found": 2,
+                        "relations": [
+                            {
+                                "predicate_id": "hasDescription",
+                                "relation_kind": "text",
+                                "text_value": {
+                                    "text": "Research interests include automated reasoning and context modelling."
+                                },
+                            },
+                            {
+                                "predicate_id": "#V#supervises_phd_student",
+                                "relation_kind": "binary",
+                                "target_previews": {
+                                    "#V#timothy_pistotti": {
+                                        "name": "Timothy Pistotti"
+                                    }
+                                },
+                            },
+                        ],
+                    },
+                },
+                duration_ms=8,
+            )
+
+    class _FakeOrchestrator:
+        def __init__(
+            self,
+            *,
+            gateway,
+            max_tool_invocations,
+            default_gmail_profile=None,
+        ) -> None:
+            captured["max_tool_invocations"] = max_tool_invocations
+            del gateway, default_gmail_profile
+
+        def run(self, **kwargs):
+            captured["run_kwargs"] = dict(kwargs)
+            return OrchestratorResult(
+                response_text="Grounded response.",
+                extra_messages=(),
+                tool_invocations=({"tool": "search_concepts"},),
+                aux_llm_calls=(),
+                llm_calls=(),
+            )
+
+    monkeypatch.setattr(
+        mod,
+        "render_workflow_gap_candidate_prompt",
+        lambda **_kwargs: (
+            SimpleNamespace(text="Candidate prompt"),
+            {"error": None},
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.orchestrator.InternalMCPChatOrchestrator",
+        _FakeOrchestrator,
+    )
+
+    registry = ActionRegistry()
+    register_workflow_gap_recovery_actions(registry)
+    result = registry.execute(
+        WORKFLOW_GAP_EXECUTE_CANDIDATE_ACTION_ID,
+        inputs={
+            "prompt_concept_id": "#V#candidate_gap_prompt",
+            "prompt": "What do you know about my current research interests, and how do they connect to my collaborators?",
+            "workflow_gap_prefetch_profile": "authenticated_concept_relations",
+        },
+        context={},
+        env=WorkflowEnvironment(
+            llm_client=object(),
+            gateway=_FakeGateway(),
+            model="gpt-5.2-chat-latest",
+            user_namespace="#V#user@org",
+            user_concept_id="#V#user",
+        ),
+    )
+
+    assert result.status == "success"
+    assert captured["prefetch_tool_name"] == "fetch_concept"
+    assert captured["max_tool_invocations"] == 0
+    run_kwargs = cast(dict[str, Any], captured["run_kwargs"])
+    auxiliary_prompt = cast(str, run_kwargs["auxiliary_system_prompt"])
+    assert "Authoritative represented evidence pre-fetched for this workflow" in auxiliary_prompt
+    assert "Research interests include automated reasoning and context modelling." in auxiliary_prompt
+    assert "Timothy Pistotti" in auxiliary_prompt
+    tool_invocations = cast(list[dict[str, Any]], result.outputs["tool_invocations"])
+    assert tool_invocations[0]["tool"] == "fetch_concept"
+    assert tool_invocations[0]["source"] == "workflow_gap_prefetch"
+    assert tool_invocations[1]["tool"] == "search_concepts"
+    assert result.outputs["workflow_gap_prefetched_grounding_present"] is True
+    assert result.outputs["workflow_gap_prefetch_diagnostics"]["profile"] == (
+        "authenticated_concept_relations"
+    )
+
+
+def test_execute_candidate_uses_prefetched_authenticated_summary_when_available(
+    monkeypatch,
+) -> None:
+    import src.backend.workflows.durable.workflow_gap_recovery_workflow as mod
+
+    class _FakeGateway:
+        enabled = True
+
+        def invoke(self, tool_name: str, payload: dict[str, Any]):
+            del tool_name, payload
+            return SimpleNamespace(
+                payload={
+                    "concept_id": "#V#michael_witbrock",
+                    "name": "Michael Witbrock",
+                    "relations": {
+                        "relations": [
+                            {
+                                "predicate_id": "hasDescription",
+                                "relation_kind": "text",
+                                "text_value": {
+                                    "text": (
+                                        "# Michael Witbrock\n"
+                                        "He specialises in automated reasoning, "
+                                        "knowledge use, and natural language understanding."
+                                    )
+                                },
+                            },
+                            {
+                                "predicate_id": "#V#has_paper_matching_profile_json",
+                                "relation_kind": "text",
+                                "text_value": {
+                                    "text": json.dumps(
+                                        {
+                                            "stated_interest_terms": [
+                                                "context modelling",
+                                                "latent context variables",
+                                                "neuro-symbolic AI",
+                                            ]
+                                        }
+                                    )
+                                },
+                            },
+                            {
+                                "predicate_id": "#V#author_of",
+                                "relation_kind": "binary",
+                                "target_previews": {
+                                    "#V#concept_creation_agentic_workflow_design": {
+                                        "name": "Concept Creation Agentic Workflow Design",
+                                        "kind": "individual",
+                                    },
+                                    "#V#verified_entity_representation_agentic_workflow_design": {
+                                        "name": "Verified Entity Representation Agentic Workflow Design",
+                                        "kind": "individual",
+                                    },
+                                },
+                            },
+                            {
+                                "predicate_id": "#V#member_of_organisation",
+                                "relation_kind": "binary",
+                                "target_previews": {
+                                    "#V#university_of_auckland_strong_ai_lab": {
+                                        "name": "University Of Auckland Strong Ai Lab",
+                                        "kind": "individual",
+                                    }
+                                },
+                            },
+                            {
+                                "predicate_id": "#V#supervises_phd_student",
+                                "relation_kind": "binary",
+                                "target_previews": {
+                                    "#V#timothy_pistotti": {
+                                        "name": "Timothy Pistotti",
+                                        "kind": "individual",
+                                    }
+                                },
+                            },
+                            {
+                                "predicate_id": "related_to",
+                                "relation_kind": "binary",
+                                "target_previews": {
+                                    "#V#lu_yunli": {
+                                        "name": "Lu Yunli",
+                                        "kind": "individual",
+                                        "concept_id": "#V#lu_yunli",
+                                    },
+                                    "#V#eugpai_evaluation_proposal_preparation": {
+                                        "name": "Eugpai Evaluation Proposal Preparation",
+                                        "kind": "individual",
+                                        "concept_id": (
+                                            "#V#eugpai_evaluation_proposal_preparation"
+                                        ),
+                                    }
+                                },
+                            },
+                            {
+                                "predicate_id": "#V#has_google_scholar_profile",
+                                "relation_kind": "binary",
+                                "target_previews": {
+                                    "#V#google_scholar_profile_for_michael_witbrock": {
+                                        "name": "Google Scholar Profile For Michael Witbrock",
+                                        "kind": "individual",
+                                    }
+                                },
+                            },
+                        ]
+                    },
+                },
+                duration_ms=6,
+            )
+
+    class _FakeOrchestrator:
+        def __init__(
+            self,
+            *,
+            gateway,
+            max_tool_invocations,
+            default_gmail_profile=None,
+        ) -> None:
+            del gateway, max_tool_invocations, default_gmail_profile
+
+        def run(self, **_kwargs):
+            return OrchestratorResult(
+                response_text="I do not know who you are unless you tell me.",
+                extra_messages=(),
+                tool_invocations=(),
+                aux_llm_calls=(),
+                llm_calls=(),
+            )
+
+    monkeypatch.setattr(
+        mod,
+        "render_workflow_gap_candidate_prompt",
+        lambda **_kwargs: (
+            SimpleNamespace(text="Candidate prompt"),
+            {"error": None},
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.orchestrator.InternalMCPChatOrchestrator",
+        _FakeOrchestrator,
+    )
+
+    registry = ActionRegistry()
+    register_workflow_gap_recovery_actions(registry)
+    result = registry.execute(
+        WORKFLOW_GAP_EXECUTE_CANDIDATE_ACTION_ID,
+        inputs={
+            "prompt_concept_id": "#V#candidate_gap_prompt",
+            "prompt": "What do you know about my current research interests, and how do they connect to my collaborators?",
+            "workflow_gap_prefetch_profile": "authenticated_concept_relations",
+        },
+        context={},
+        env=WorkflowEnvironment(
+            llm_client=object(),
+            gateway=_FakeGateway(),
+            model="gpt-5.2-chat-latest",
+            user_namespace="#V#michael_witbrock@org",
+            user_concept_id="#V#michael_witbrock",
+        ),
+    )
+
+    assert result.status == "success"
+    response_text = cast(str, result.outputs["response_text"])
+    assert "Represented research-interest evidence for Michael Witbrock includes" in response_text
+    assert "context modelling" in response_text
+    assert "Profile description:" in response_text
+    assert "Concept Creation Agentic Workflow Design" in response_text
+    assert "University Of Auckland Strong Ai Lab" in response_text
+    assert "Timothy Pistotti (supervises PhD student)" in response_text
+    assert "Lu Yunli (related to)" in response_text
+    assert "Eugpai Evaluation Proposal Preparation" not in response_text
+    assert "I do not currently have" not in response_text
+    assert result.outputs["workflow_gap_prefetched_response_used"] is True
+
+
 def test_prepare_candidate_spec_uses_authored_gap_candidate_template(
     monkeypatch,
 ) -> None:
@@ -292,6 +660,9 @@ def test_prepare_candidate_spec_uses_authored_gap_candidate_template(
     assert candidate_spec["steps"][0]["inputs"]["prompt_concept_id"] == (
         result.outputs["candidate_prompt_concept_id"]
     )
+    assert "default_request_text" not in candidate_spec["steps"][0]["inputs"]
+    assert "default_recent_turns_json" not in candidate_spec["steps"][0]["inputs"]
+    assert "default_base_response_text" not in candidate_spec["steps"][0]["inputs"]
     assert result.outputs["candidate_prompt_concept_id"] == (
         mod.WORKFLOW_GAP_CANDIDATE_PROMPT_CONCEPT_ID
     )

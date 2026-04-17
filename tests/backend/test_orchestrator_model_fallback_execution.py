@@ -438,6 +438,105 @@ def test_run_llm_with_fallbacks_marks_explicit_policy_stage_override(
     )
 
 
+def test_run_llm_with_fallbacks_prefers_default_model_when_requested(
+    monkeypatch,
+) -> None:
+    orchestrator = _bare_orchestrator()
+    policy_state = _WorkflowModelPolicyState(
+        enabled=True,
+        policy={
+            "stages": {
+                "classifier": {
+                    "primary": "openai:gpt-4o-mini",
+                    "fallback": [],
+                }
+            }
+        },
+        policy_id="#V#default_workflow_model_policy",
+        predicate_id="#V#has_model_policy_json",
+        errors=(),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_probe_model_candidate_reachability",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_invoke_with_llm_heartbeat",
+        lambda *, call, **_kwargs: call(),
+    )
+
+    aux_log: list[Mapping[str, Any]] = []
+    response, model_name, telemetry = orchestrator._run_llm_with_fallbacks(
+        stage="workflow_dispatch",
+        policy_stage="classifier",
+        prompt="Select workflow",
+        context=[],
+        default_client=_SuccessfulClient(),
+        default_model="gemma4:26b",
+        policy_state=policy_state,
+        registry_snapshot=None,
+        user_concept_id=None,
+        org_concept_id=None,
+        llm_calls_log=[],
+        aux_log=aux_log,
+        record_llm_call=lambda **_payload: None,
+        emit_progress=None,
+        prefer_default_model=True,
+    )
+
+    assert response == '["Proceed", "Hold"]'
+    assert model_name == "gemma4:26b"
+    assert telemetry.get("source") == "active_llm"
+
+    stage_summary = next(
+        entry
+        for entry in aux_log
+        if entry.get("type") == "workflow_model_policy_stage"
+    )
+    assert stage_summary["requested_model"] == "gemma4:26b"
+    assert stage_summary["selection_mode"] == "preferred_default_model"
+    assert stage_summary["prefer_default_model"] is True
+    assert stage_summary["follows_active_llm"] is True
+
+
+def test_stage_model_candidates_stay_on_requested_default_model(monkeypatch) -> None:
+    orchestrator = _bare_orchestrator()
+    policy_state = _WorkflowModelPolicyState(
+        enabled=True,
+        policy={
+            "stages": {
+                "classifier": {
+                    "primary": "openai:gpt-4o-mini",
+                    "fallback": ["ollama:granite3.3:2b"],
+                }
+            }
+        },
+        policy_id="#V#default_workflow_model_policy",
+        predicate_id="#V#has_model_policy_json",
+        errors=(),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.settings_service.resolve_enabled_llm_settings",
+        lambda **_kwargs: [{"provider": "openai", "model": "gpt-5.4-mini"}],
+    )
+
+    candidates = orchestrator._stage_model_candidates(
+        stage="classifier",
+        default_model="gemma4:26b",
+        policy_state=policy_state,
+        registry_snapshot=None,
+        user_concept_id=None,
+        org_concept_id=None,
+        prefer_default_model=True,
+    )
+
+    assert [(candidate.source, candidate.provider, candidate.model) for candidate in candidates] == [
+        ("active_llm", None, "gemma4:26b")
+    ]
+
+
 def test_probe_model_candidate_reachability_uses_failure_cooldown_cache(
     monkeypatch,
 ) -> None:
@@ -649,6 +748,11 @@ def test_tool_calling_backfill_uses_compacted_follow_up_context(monkeypatch) -> 
     monkeypatch.setattr(
         orchestrator, "_resolve_environment_max_tool_invocations", lambda _env: 4
     )
+    monkeypatch.setattr(
+        orchestrator,
+        "_assess_missing_tool_call",
+        lambda **_kwargs: SimpleNamespace(retry_reason=None),
+    )
 
     augmented_context = [
         {"role": "system", "content": "system-one"},
@@ -689,7 +793,7 @@ def test_tool_calling_backfill_uses_compacted_follow_up_context(monkeypatch) -> 
             "prompt_for_requirements": "Run the follow-up step",
             "emit_progress": None,
         },
-        environment=SimpleNamespace(llm_client=object()),
+        environment=SimpleNamespace(llm_client=object(), model="gpt-test"),
     )
 
     result = orchestrator._action_tool_calling_backfill(request)

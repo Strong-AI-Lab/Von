@@ -71,6 +71,77 @@ from .instance_manager import WorkflowInstanceManager
 logger = logging.getLogger(__name__)
 
 
+def _coerce_non_empty_text(value: Any) -> str | None:
+    text = str(value).strip() if isinstance(value, str) else ""
+    return text or None
+
+
+def _infer_client_type_from_model(model_name: str | None) -> str | None:
+    model = _coerce_non_empty_text(model_name)
+    if not model:
+        return None
+    lowered = model.lower()
+    if lowered.startswith("openai:") or lowered.startswith(
+        ("gpt-", "o1-", "text-", "davinci", "curie", "babbage", "ada")
+    ):
+        return "openai"
+    if lowered.startswith("ollama:") or (
+        ":" in lowered and not lowered.startswith("ft:")
+    ):
+        return "ollama"
+    if lowered.startswith("gemini"):
+        return "gemini"
+    return None
+
+
+def _normalise_requested_model_name(
+    model_name: str | None,
+    *,
+    client_type: str | None,
+) -> str | None:
+    requested_model = _coerce_non_empty_text(model_name)
+    if not requested_model:
+        return None
+
+    from ...languagemodels.llm_interface import (
+        resolve_ollama_model_name,
+        resolve_openai_model_name,
+    )
+
+    if client_type == "openai":
+        return resolve_openai_model_name(requested_model) or requested_model
+    if client_type == "ollama":
+        return resolve_ollama_model_name(requested_model) or requested_model
+    return requested_model
+
+
+def _resolve_instance_runtime_model_context(
+    *,
+    context: Mapping[str, Any],
+    inputs: Mapping[str, Any],
+) -> tuple[str | None, str | None]:
+    requested_model = (
+        _coerce_non_empty_text(context.get("requested_model"))
+        or _coerce_non_empty_text(inputs.get("requested_model"))
+        or _coerce_non_empty_text(context.get("model"))
+        or _coerce_non_empty_text(inputs.get("model"))
+    )
+    requested_client_type = (
+        _coerce_non_empty_text(context.get("requested_client_type"))
+        or _coerce_non_empty_text(inputs.get("requested_client_type"))
+        or _coerce_non_empty_text(context.get("explicit_client_type"))
+        or _coerce_non_empty_text(inputs.get("explicit_client_type"))
+    )
+    inferred_client_type = requested_client_type or _infer_client_type_from_model(
+        requested_model
+    )
+    normalised_requested_model = _normalise_requested_model_name(
+        requested_model,
+        client_type=inferred_client_type,
+    )
+    return normalised_requested_model, inferred_client_type
+
+
 @dataclass
 class DurableWorkflowResult:
     """Result of a durable workflow execution."""
@@ -196,17 +267,28 @@ class DurableWorkflowExecutor:
         )
         from .registry_factory import _get_or_build_durable_mcp_gateway
 
+        requested_model, requested_client_type = _resolve_instance_runtime_model_context(
+            context=context,
+            inputs=instance.inputs,
+        )
+        effective_model = requested_model or get_active_model_name(
+            user_concept_id=instance.user_id,
+            org_concept_id=instance.org_id,
+        )
+        if requested_model:
+            context.setdefault("requested_model", requested_model)
+        if requested_client_type:
+            context.setdefault("requested_client_type", requested_client_type)
+
         llm_client = get_llm_client(
+            client_type=requested_client_type,
             user_concept_id=instance.user_id,
             org_concept_id=instance.org_id,
         )
         environment = WorkflowEnvironment(
             llm_client=llm_client,
             gateway=_get_or_build_durable_mcp_gateway(),
-            model=get_active_model_name(
-                user_concept_id=instance.user_id,
-                org_concept_id=instance.org_id,
-            ),
+            model=effective_model,
             user_namespace=instance.namespace,
             user_concept_id=instance.user_id,
             org_concept_id=instance.org_id,
@@ -223,6 +305,11 @@ class DurableWorkflowExecutor:
         if isinstance(environment.model, str) and environment.model.strip():
             default_model = environment.model.strip()
             trace.metadata["default_model"] = default_model
+            if requested_model:
+                trace.metadata["requested_model"] = requested_model
+                trace.metadata["requested_model_override_applied"] = True
+            if requested_client_type:
+                trace.metadata["requested_client_type"] = requested_client_type
             resolved_provider = resolve_provider_from_model_concept(default_model)
             if resolved_provider is None:
                 lowered_model = default_model.lower()

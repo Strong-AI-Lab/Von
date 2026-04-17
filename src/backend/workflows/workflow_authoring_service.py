@@ -262,6 +262,9 @@ def serialise_workflow_definition_to_authoring_spec(
             if isinstance(state_spec.metadata, Mapping) and state_spec.metadata
             else {}
         )
+        step_concept_id = _clean_text(metadata.get("workflow_step_concept_id"))
+        if step_concept_id:
+            row["concept_id"] = step_concept_id
         writes_context_keys = metadata.get("writes_context_keys")
         if isinstance(writes_context_keys, list) and writes_context_keys:
             row["writes_context_keys"] = [
@@ -282,6 +285,7 @@ def serialise_workflow_definition_to_authoring_spec(
             for key, value in metadata.items()
             if str(key)
             not in {
+                "workflow_step_concept_id",
                 "writes_context_keys",
                 "tool_output_context_mappings",
                 "mutation_authority",
@@ -372,6 +376,9 @@ def build_workflow_definition_from_authoring_spec(
 
         metadata_raw = raw_row.get("metadata")
         metadata = dict(metadata_raw) if isinstance(metadata_raw, Mapping) else {}
+        step_concept_id = _clean_text(raw_row.get("concept_id"))
+        if step_concept_id:
+            metadata["workflow_step_concept_id"] = step_concept_id
         writes_context_keys = raw_row.get("writes_context_keys")
         if isinstance(writes_context_keys, list):
             metadata["writes_context_keys"] = [

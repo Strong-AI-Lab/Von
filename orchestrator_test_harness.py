@@ -348,6 +348,7 @@ def build_db_independent_orchestrator(
     }
     expected_outcome_prompt_id = "#V#prompt_turn_execution_expected_outcome_inference"
     narration_prompt_id = "#V#prompt_turn_execution_narrate_completion_report"
+    turn_current_request_prompt_id = "#V#turn_current_request_stage_prompt"
 
     class _HarnessPromptTemplateService:
         def __init__(self, default_max_chars: int = 24000):
@@ -379,6 +380,23 @@ def build_db_independent_orchestrator(
                 return SimpleNamespace(
                     text=_load_narration_prompt_seed_text(),
                     prompt_id=narration_prompt_id,
+                    variables=dict(variables or {}),
+                    truncated=False,
+                )
+            if turn_current_request_prompt_id in requested_prompt_ids:
+                rendered = render_test_prompt_template(
+                    (
+                        "Current turn request to route:\n{turn_text}\n\n"
+                        "Use the surrounding turn context to resolve references "
+                        "and continuity, but keep this request as the immediate "
+                        "routing objective unless explicit continuation context "
+                        "requires otherwise."
+                    ),
+                    dict(variables or {}),
+                )
+                return SimpleNamespace(
+                    text=rendered,
+                    prompt_id=turn_current_request_prompt_id,
                     variables=dict(variables or {}),
                     truncated=False,
                 )
@@ -415,6 +433,22 @@ def build_db_independent_orchestrator(
                     dict(variables or {}),
                 ),
                 prompt_id=requested_prompt_ids[0] or TEST_WORKFLOW_SELECTOR_PROMPT_ID,
+                variables=dict(variables or {}),
+                truncated=False,
+            )
+        if turn_current_request_prompt_id in requested_prompt_ids:
+            return SimpleNamespace(
+                text=render_test_prompt_template(
+                    (
+                        "Current turn request to route:\n{turn_text}\n\n"
+                        "Use the surrounding turn context to resolve references "
+                        "and continuity, but keep this request as the immediate "
+                        "routing objective unless explicit continuation context "
+                        "requires otherwise."
+                    ),
+                    dict(variables or {}),
+                ),
+                prompt_id=turn_current_request_prompt_id,
                 variables=dict(variables or {}),
                 truncated=False,
             )

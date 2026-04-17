@@ -13095,6 +13095,327 @@ def _turn_execution_search_failures(**kwargs):
     )
 
 
+_RELATED_CONCEPT_NAME_PREDICATE_PRECEDENCE = (("hasName", "#V#hasName"),)
+_RELATED_CONCEPT_DESCRIPTION_PREDICATE_PRECEDENCE = (
+    ("hasDescription", "#V#hasDescription"),
+    ("hasContent", "#V#hasContent"),
+    ("hasNote", "#V#hasNote"),
+)
+_RAG_DEGRADED_EXCEPTION_TOKENS = (
+    "insufficient_quota",
+    "quota",
+    "embedding",
+    "/embeddings",
+    "rate limit",
+    "429",
+)
+
+
+def _parse_namespace_actor_context(
+    namespace: Any,
+) -> tuple[str | None, str | None]:
+    if not isinstance(namespace, str) or not namespace.strip():
+        return None, None
+    cleaned = namespace.strip()
+    if "@" not in cleaned:
+        return cleaned, None
+    user_part, org_part = cleaned.split("@", 1)
+    user_part = user_part.strip() or None
+    org_part = org_part.strip() or None
+    if org_part and not org_part.startswith("#V#"):
+        org_part = f"#V#{org_part}"
+    return user_part, org_part
+
+
+def _looks_like_rag_degraded_exception(exc: Exception) -> bool:
+    error_text = str(exc or "").strip().lower()
+    if not error_text:
+        return False
+    return any(token in error_text for token in _RAG_DEGRADED_EXCEPTION_TOKENS)
+
+
+def _build_degraded_search_knowledge_base_fallback(
+    *,
+    query_text: str,
+    elapsed_ms: int,
+    ns_report: Mapping[str, Any],
+    fallback_reason: str,
+) -> dict[str, Any]:
+    namespace = ns_report.get("namespace")
+    return {
+        "results": [],
+        "count": 0,
+        "elapsed_ms": max(0, int(elapsed_ms)),
+        "effective_namespace": namespace,
+        "effective_namespace_source": ns_report.get("namespace_source"),
+        "fallback_used": True,
+        "fallback_mode": "degraded_empty_results",
+        "fallback_reason": fallback_reason,
+        "query": query_text,
+        **ns_report,
+        "success": True,
+    }
+
+
+def _build_related_concepts_graph_fallback(
+    *,
+    concept_id: str,
+    top_k: int,
+    seed_text: str | None,
+    ns_report: Mapping[str, Any],
+    fallback_reason: str,
+) -> dict[str, Any]:
+    from ...security.access_control import (
+        override_current_organisation,
+        override_current_user,
+    )
+    from ...services.concept_relation_service import find_relations_with_argument
+    from ...services.concept_service import get_concept_by_concept_id
+    from ...services.text_value_service import (
+        get_preferred_text_for_concept,
+        get_preferred_texts_for_concepts,
+    )
+
+    namespace = ns_report.get("namespace")
+    user_part, org_part = _parse_namespace_actor_context(namespace)
+
+    with (
+        override_current_user(user_part),
+        override_current_organisation(org_part),
+    ):
+        concept_doc = get_concept_by_concept_id(concept_id)
+        if not isinstance(concept_doc, Mapping):
+            return make_error_response(
+                "concept_not_found",
+                f"Concept not found: {concept_id}",
+                details={"concept_id": concept_id, **ns_report},
+            )
+
+        preferred_name_rows = get_preferred_texts_for_concepts(
+            [concept_id],
+            predicate_precedence=_RELATED_CONCEPT_NAME_PREDICATE_PRECEDENCE,
+            preferred_languages=("en-NZ", "en"),
+            limit_per_concept=10,
+        )
+        preferred_description_row = get_preferred_text_for_concept(
+            concept_id,
+            predicate_precedence=_RELATED_CONCEPT_DESCRIPTION_PREDICATE_PRECEDENCE,
+            preferred_languages=("en-NZ", "en"),
+            limit=20,
+        )
+        relation_payload = find_relations_with_argument(
+            concept_id,
+            relation_kind="binary",
+            include_concept_preview=True,
+            limit=max(12, int(top_k or 10) * 6),
+        )
+
+        relation_rows = (
+            relation_payload.get("relations")
+            if isinstance(relation_payload, Mapping)
+            else None
+        )
+        if not isinstance(relation_rows, list):
+            relation_rows = []
+
+        candidate_relations: list[dict[str, Any]] = []
+        related_concept_ids: list[str] = []
+        seen_relation_keys: set[tuple[str, str, str]] = set()
+        for row in relation_rows:
+            if not isinstance(row, Mapping):
+                continue
+            predicate_id = str(row.get("predicate_concept_id") or "").strip()
+            source_id = str(row.get("source_concept_id") or "").strip()
+            target_value = row.get("target_value")
+            direction = ""
+            related_concept_id = ""
+            if (
+                source_id == concept_id
+                and isinstance(target_value, str)
+                and target_value.startswith("#V#")
+                and target_value != concept_id
+            ):
+                direction = "outgoing"
+                related_concept_id = target_value
+            elif (
+                isinstance(target_value, str)
+                and target_value == concept_id
+                and source_id
+                and source_id != concept_id
+            ):
+                direction = "incoming"
+                related_concept_id = source_id
+            if not direction or not related_concept_id:
+                continue
+            relation_key = (
+                direction,
+                predicate_id.lower(),
+                related_concept_id.lower(),
+            )
+            if relation_key in seen_relation_keys:
+                continue
+            seen_relation_keys.add(relation_key)
+            candidate_relations.append(
+                {
+                    "direction": direction,
+                    "predicate_id": predicate_id,
+                    "related_concept_id": related_concept_id,
+                }
+            )
+            related_concept_ids.append(related_concept_id)
+
+        preferred_name_rows.update(
+            get_preferred_texts_for_concepts(
+                related_concept_ids,
+                predicate_precedence=_RELATED_CONCEPT_NAME_PREDICATE_PRECEDENCE,
+                preferred_languages=("en-NZ", "en"),
+                limit_per_concept=10,
+            )
+        )
+        preferred_description_rows = get_preferred_texts_for_concepts(
+            [concept_id, *related_concept_ids],
+            predicate_precedence=_RELATED_CONCEPT_DESCRIPTION_PREDICATE_PRECEDENCE,
+            preferred_languages=("en-NZ", "en"),
+            limit_per_concept=20,
+        )
+
+    def _display_name(
+        resolved_concept_id: str,
+        concept_doc_value: Mapping[str, Any] | None,
+    ) -> str:
+        preferred_row = preferred_name_rows.get(resolved_concept_id)
+        preferred_text = (
+            preferred_row.get("text")
+            if isinstance(preferred_row, Mapping)
+            else None
+        )
+        if isinstance(preferred_text, str) and preferred_text.strip():
+            return preferred_text.strip()
+        if isinstance(concept_doc_value, Mapping):
+            doc_name = concept_doc_value.get("name")
+            if isinstance(doc_name, str) and doc_name.strip():
+                return doc_name.strip()
+        return resolved_concept_id
+
+    subject_name = _display_name(concept_id, concept_doc)
+    subject_description = (
+        preferred_description_row.get("text")
+        if isinstance(preferred_description_row, Mapping)
+        and isinstance(preferred_description_row.get("text"), str)
+        else None
+    )
+    if not subject_description:
+        subject_description_row = preferred_description_rows.get(concept_id)
+        subject_description = (
+            subject_description_row.get("text")
+            if isinstance(subject_description_row, Mapping)
+            and isinstance(subject_description_row.get("text"), str)
+            else None
+        )
+
+    results: list[dict[str, Any]] = []
+    if isinstance(subject_description, str) and subject_description.strip():
+        results.append(
+            {
+                "id": f"graph_text::{concept_id}::subject_description",
+                "score": 1.0,
+                "text": f"{subject_name}: {subject_description.strip()}",
+                "metadata": {
+                    "item_kind": "concept_text_fallback",
+                    "source_system": "vontology.text_relations",
+                    "concept_id": concept_id,
+                    "subject_concept_id": concept_id,
+                    "namespace": namespace,
+                    "namespace_source": ns_report.get("namespace_source"),
+                    "fallback_reason": fallback_reason,
+                },
+            }
+        )
+
+    bounded_relations = candidate_relations[: max(0, int(top_k or 10))]
+    for index, relation in enumerate(bounded_relations, start=1):
+        related_concept_id = relation["related_concept_id"]
+        related_description_row = preferred_description_rows.get(related_concept_id)
+        related_description = (
+            related_description_row.get("text")
+            if isinstance(related_description_row, Mapping)
+            and isinstance(related_description_row.get("text"), str)
+            else None
+        )
+        related_name = _display_name(related_concept_id, None)
+        predicate_id = relation["predicate_id"]
+        predicate_label = predicate_id.replace("#V#", "") if predicate_id else "related_to"
+        if relation["direction"] == "outgoing":
+            relation_text = (
+                f"{subject_name} has relation {predicate_label} with {related_name}."
+            )
+        else:
+            relation_text = (
+                f"{related_name} has relation {predicate_label} with {subject_name}."
+            )
+        if isinstance(related_description, str) and related_description.strip():
+            relation_text += f" {related_name}: {related_description.strip()}"
+        results.append(
+            {
+                "id": (
+                    f"graph_text::{concept_id}::{relation['direction']}::"
+                    f"{predicate_id or 'related_to'}::{related_concept_id}"
+                ),
+                "score": max(0.1, 0.99 - (index * 0.03)),
+                "text": relation_text,
+                "metadata": {
+                    "item_kind": "concept_relation_fallback",
+                    "source_system": "vontology.graph",
+                    "concept_id": related_concept_id,
+                    "subject_concept_id": concept_id,
+                    "predicate": predicate_id,
+                    "direction": relation["direction"],
+                    "namespace": namespace,
+                    "namespace_source": ns_report.get("namespace_source"),
+                    "fallback_reason": fallback_reason,
+                },
+            }
+        )
+
+    summary_bits: list[str] = []
+    if results and subject_description:
+        summary_bits.append("represented description text")
+    if bounded_relations:
+        summary_bits.append(
+            f"{len(bounded_relations)} related concept relation"
+            f"{'' if len(bounded_relations) == 1 else 's'}"
+        )
+    if summary_bits:
+        summary = (
+            f"Using graph/text fallback, I found {' and '.join(summary_bits)}"
+            f" for {subject_name}."
+        )
+    else:
+        summary = (
+            f"Using graph/text fallback, I found no accessible related concept"
+            f" evidence for {subject_name}."
+        )
+
+    return {
+        "success": True,
+        "concept_id": concept_id,
+        "seed_text": (
+            seed_text.strip()
+            if isinstance(seed_text, str) and seed_text.strip()
+            else subject_description
+        ),
+        "results": results,
+        "count": len(results),
+        "summary": summary,
+        "fallback_used": True,
+        "fallback_mode": "graph_text",
+        "fallback_reason": fallback_reason,
+        "effective_namespace": namespace,
+        "effective_namespace_source": ns_report.get("namespace_source"),
+        **ns_report,
+    }
+
+
 def _search_knowledge_base(**kwargs):
     from ...services.rag_service import get_rag_service, RAGBackendUnavailable
 
@@ -13109,19 +13430,22 @@ def _search_knowledge_base(**kwargs):
             suggestions=["Provide a search query string"],
         )
 
+    ns_report = _resolve_rag_namespace_from_kwargs(kwargs)
+    ns = ns_report.get("namespace")
+
+    # SECURITY: Require namespace for RAG search - prevents cross-user data leakage
+    ns_error = _rag_namespace_resolution_error(ns_report)
+    if ns_error is not None:
+        if ns_error.get("error") == "namespace_required":
+            ns_error["message"] = (
+                "RAG search requires authenticated user context (namespace)"
+            )
+        return ns_error
+
+    start = time.perf_counter()
+
     try:
         service = get_rag_service()  # Default backend
-        ns_report = _resolve_rag_namespace_from_kwargs(kwargs)
-        ns = ns_report.get("namespace")
-
-        # SECURITY: Require namespace for RAG search - prevents cross-user data leakage
-        ns_error = _rag_namespace_resolution_error(ns_report)
-        if ns_error is not None:
-            if ns_error.get("error") == "namespace_required":
-                ns_error["message"] = (
-                    "RAG search requires authenticated user context (namespace)"
-                )
-            return ns_error
 
         # Build permissions context from Flask session for org-scoped RAG filtering.
         # IMPORTANT: Use concept IDs (e.g. #V#user) rather than email/usernames.
@@ -13194,7 +13518,6 @@ def _search_knowledge_base(**kwargs):
         if isinstance(predicates, list):
             permissions_context["predicates"] = predicates
 
-        start = time.perf_counter()
         results = service.query(
             query_text=query_text,
             top_k=kwargs.get("top_k", 5),
@@ -13235,13 +13558,20 @@ def _search_knowledge_base(**kwargs):
             "success": True,
         }
     except RAGBackendUnavailable as e:
-        return make_error_response(
-            "rag_service_unavailable",
-            f"RAG service unavailable: {e}",
-            details={"exception_type": "RAGBackendUnavailable"},
-            suggestions=["Ensure RAG service is running and accessible"],
+        return _build_degraded_search_knowledge_base_fallback(
+            query_text=query_text,
+            elapsed_ms=int((time.perf_counter() - start) * 1000),
+            ns_report=ns_report,
+            fallback_reason=f"rag_service_unavailable:{type(e).__name__}",
         )
     except Exception as e:
+        if _looks_like_rag_degraded_exception(e):
+            return _build_degraded_search_knowledge_base_fallback(
+                query_text=query_text,
+                elapsed_ms=int((time.perf_counter() - start) * 1000),
+                ns_report=ns_report,
+                fallback_reason=f"rag_query_degraded:{type(e).__name__}",
+            )
         return make_error_response(
             "exception",
             f"Unexpected error: {e}",
@@ -15135,12 +15465,13 @@ def _get_related_concepts(**kwargs):
             seed_text = None
 
     if not isinstance(seed_text, str) or not seed_text.strip():
-        return {
-            "success": False,
-            "error": "missing_seed_text",
-            "message": "No hasDescription text found for concept; pass seed_text explicitly to proceed",
-            **ns_report,
-        }
+        return _build_related_concepts_graph_fallback(
+            concept_id=concept_id.strip(),
+            top_k=int(kwargs.get("top_k", 10)),
+            seed_text=None,
+            ns_report=ns_report,
+            fallback_reason="missing_seed_text",
+        )
 
     from ...services.rag_service import get_rag_service, RAGBackendUnavailable
 
@@ -15172,11 +15503,26 @@ def _get_related_concepts(**kwargs):
             permissions_context=permissions_context,
         )
     except RAGBackendUnavailable as e:
+        return _build_related_concepts_graph_fallback(
+            concept_id=concept_id.strip(),
+            top_k=int(kwargs.get("top_k", 10)),
+            seed_text=seed_text,
+            ns_report=ns_report,
+            fallback_reason=f"rag_service_unavailable:{type(e).__name__}",
+        )
+    except Exception as e:
+        if _looks_like_rag_degraded_exception(e):
+            return _build_related_concepts_graph_fallback(
+                concept_id=concept_id.strip(),
+                top_k=int(kwargs.get("top_k", 10)),
+                seed_text=seed_text,
+                ns_report=ns_report,
+                fallback_reason=f"rag_query_degraded:{type(e).__name__}",
+            )
         return make_error_response(
-            "rag_service_unavailable",
-            f"RAG service unavailable: {e}",
-            details={"exception_type": "RAGBackendUnavailable", **ns_report},
-            suggestions=["Check that the RAG service is running and configured"],
+            "exception",
+            f"Failed to resolve related concepts: {e}",
+            details={"exception_type": type(e).__name__, **ns_report},
         )
 
     filtered = []
@@ -21756,7 +22102,7 @@ def _chat_get_prompt_context(
     template_service = PromptTemplateService()
     classifier_prompt_id, classifier_prompt_text = template_service.resolve_prompt_text(
         orchestrator_cls._MISSING_TOOL_CLASSIFIER_PROMPTS,
-        fallback=orchestrator_cls._FALLBACK_MISSING_TOOL_CALL_PROMPT,
+        fallback=None,
         max_chars=max_chars_int,
     )
     retry_prompt_id, retry_prompt_text = template_service.resolve_prompt_text(

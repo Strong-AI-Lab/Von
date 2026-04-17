@@ -1,4 +1,6 @@
 
+from contextlib import nullcontext
+
 
 class _Cursor:
     def __init__(self, docs):
@@ -173,6 +175,124 @@ def test_search_knowledge_base_derives_permissions_context_from_namespace(monkey
         "user_id": "#V#michael_witbrock",
         "organisation_concept_id": "#V#university_of_auckland_strong_ai_lab",
     }
+
+
+def test_search_knowledge_base_degrades_when_embedding_backend_fails(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    class _FailingRAG:
+        def query(self, **_kwargs):
+            raise RuntimeError("insufficient_quota while calling /embeddings")
+
+    monkeypatch.setattr(
+        "src.backend.services.rag_service.get_rag_service",
+        lambda *_args, **_kwargs: _FailingRAG(),
+    )
+
+    result = cat._search_knowledge_base(query="workflow", namespace="#V#user@org")
+
+    assert result["success"] is True
+    assert result["fallback_used"] is True
+    assert result["fallback_mode"] == "degraded_empty_results"
+    assert result["count"] == 0
+    assert result["results"] == []
+    assert result["fallback_reason"] == "rag_query_degraded:RuntimeError"
+
+
+def test_get_related_concepts_falls_back_to_graph_text_when_rag_degrades(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    class _FailingRAG:
+        def query(self, **_kwargs):
+            raise RuntimeError("insufficient_quota while calling /embeddings")
+
+    def _preferred_rows(
+        subject_concept_ids,
+        *,
+        predicate_precedence=None,
+        **_kwargs,
+    ):
+        rows = {}
+        first_group = predicate_precedence[0] if predicate_precedence else ()
+        if "hasName" in first_group:
+            labels = {
+                "#V#michael_witbrock": "Michael Witbrock",
+                "#V#lu_yunli": "Lu Yunli",
+                "#V#timothy_pistotti": "Timothy Pistotti",
+            }
+        else:
+            labels = {
+                "#V#michael_witbrock": "Works on neuro-symbolic agents and memory systems.",
+                "#V#lu_yunli": "Collaborates on agent systems and applied AI.",
+                "#V#timothy_pistotti": "PhD student working on related representation problems.",
+            }
+        for concept_id in subject_concept_ids:
+            if concept_id in labels:
+                rows[concept_id] = {"text": labels[concept_id]}
+        return rows
+
+    monkeypatch.setattr(
+        "src.backend.services.rag_service.get_rag_service",
+        lambda *_args, **_kwargs: _FailingRAG(),
+    )
+    monkeypatch.setattr(
+        "src.backend.security.access_control.override_current_user",
+        lambda *_args, **_kwargs: nullcontext(),
+    )
+    monkeypatch.setattr(
+        "src.backend.security.access_control.override_current_organisation",
+        lambda *_args, **_kwargs: nullcontext(),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.concept_service.get_concept_by_concept_id",
+        lambda concept_id: {"concept_id": concept_id, "name": "Michael Witbrock"},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.text_value_service.get_preferred_text_for_concept",
+        lambda concept_id, **_kwargs: {
+            "text": "Works on neuro-symbolic agents and memory systems."
+        }
+        if concept_id == "#V#michael_witbrock"
+        else None,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.text_value_service.get_preferred_texts_for_concepts",
+        _preferred_rows,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.concept_relation_service.find_relations_with_argument",
+        lambda *_args, **_kwargs: {
+            "relations": [
+                {
+                    "source_concept_id": "#V#michael_witbrock",
+                    "predicate_concept_id": "#V#related_to",
+                    "target_value": "#V#lu_yunli",
+                },
+                {
+                    "source_concept_id": "#V#timothy_pistotti",
+                    "predicate_concept_id": "#V#supervises_phd_student",
+                    "target_value": "#V#michael_witbrock",
+                },
+            ]
+        },
+    )
+
+    result = cat._get_related_concepts(
+        concept_id="#V#michael_witbrock",
+        namespace="#V#michael_witbrock@university_of_auckland_strong_ai_lab",
+        seed_text="research interests and collaborators",
+        top_k=3,
+    )
+
+    assert result["success"] is True
+    assert result["fallback_used"] is True
+    assert result["fallback_mode"] == "graph_text"
+    assert result["fallback_reason"] == "rag_query_degraded:RuntimeError"
+    assert result["count"] == 3
+    assert "graph/text fallback" in result["summary"].lower()
+    texts = [row["text"] for row in result["results"]]
+    assert any("Lu Yunli" in text for text in texts)
+    assert any("Timothy Pistotti" in text for text in texts)
 
 
 def test_rag_list_collections_requires_namespace(monkeypatch):

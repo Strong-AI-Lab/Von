@@ -596,6 +596,588 @@ def _candidate_recent_turns(
     return recent_turns, _json_text(recent_turns)
 
 
+def _coerce_string_list_from_json(value: Any, *, max_items: int = 12) -> list[str]:
+    if isinstance(value, str):
+        parsed = _safe_json_load(value, fallback=None)
+        if isinstance(parsed, list):
+            return _coerce_string_list(parsed, max_items=max_items)
+        cleaned = _clean_text(value)
+        return [cleaned] if cleaned else []
+    return _coerce_string_list(value, max_items=max_items)
+
+
+def _resolve_candidate_string_list(
+    *,
+    inputs: Mapping[str, Any],
+    request_data: Mapping[str, Any],
+    direct_key: str,
+    json_key: str,
+    analysis_key: str,
+    max_items: int = 16,
+) -> list[str]:
+    for source in (
+        inputs.get(direct_key),
+        request_data.get(direct_key),
+        inputs.get(json_key),
+        request_data.get(json_key),
+        (
+            (request_data.get("workflow_gap_analysis_result") or {}).get(analysis_key)
+            if isinstance(request_data.get("workflow_gap_analysis_result"), Mapping)
+            else None
+        ),
+    ):
+        values = (
+            _coerce_string_list_from_json(source, max_items=max_items)
+            if isinstance(source, str)
+            else _coerce_string_list(source, max_items=max_items)
+        )
+        if values:
+            return values
+    return []
+
+
+def _prompt_appears_first_person(prompt: str) -> bool:
+    if not isinstance(prompt, str) or not prompt.strip():
+        return False
+    return bool(re.search(r"\b(i|me|my|mine|myself|our|ours|us)\b", prompt, re.IGNORECASE))
+
+
+def _build_workflow_gap_prefetch_tool_invocation(
+    *,
+    tool_name: str,
+    payload: Mapping[str, Any],
+    result_payload: Mapping[str, Any] | None,
+    duration_ms: Any = None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    if isinstance(result_payload, Mapping):
+        summary = {
+            "concept_id": _clean_text(result_payload.get("concept_id")),
+            "name": _clean_text(result_payload.get("name")),
+            "relations_found": (
+                int((result_payload.get("relations") or {}).get("relations_found") or 0)
+                if isinstance(result_payload.get("relations"), Mapping)
+                else 0
+            ),
+        }
+    invocation = {
+        "tool": tool_name,
+        "effective_payload": dict(payload),
+        "status": "failed" if error else "success",
+        "source": "workflow_gap_prefetch",
+        "result_summary": summary,
+    }
+    if duration_ms is not None:
+        invocation["duration_ms"] = duration_ms
+    if error:
+        invocation["error"] = error
+    return invocation
+
+
+def _build_authenticated_concept_grounding_text(payload: Mapping[str, Any]) -> str:
+    concept_id = _clean_text(payload.get("concept_id"))
+    concept_name = _clean_text(payload.get("name")) or concept_id or "Authenticated concept"
+    lines = [f"Authenticated focal concept: {concept_name}{f' ({concept_id})' if concept_id else ''}"]
+
+    relations_payload = payload.get("relations")
+    relations = (
+        list(relations_payload.get("relations") or [])
+        if isinstance(relations_payload, Mapping)
+        else []
+    )
+
+    descriptions: list[str] = []
+    relation_lines: list[str] = []
+    seen_relation_keys: set[str] = set()
+
+    for relation in relations:
+        if not isinstance(relation, Mapping):
+            continue
+        predicate_id = _clean_text(relation.get("predicate_id"))
+        relation_kind = _clean_text(relation.get("relation_kind"))
+        if relation_kind == "text" and predicate_id == "hasDescription":
+            text_value = relation.get("text_value")
+            text = (
+                _clean_text(text_value.get("text"))
+                if isinstance(text_value, Mapping)
+                else ""
+            )
+            if text:
+                descriptions.append(text)
+            continue
+        if relation_kind != "binary":
+            continue
+        target_previews = relation.get("target_previews")
+        if isinstance(target_previews, Mapping):
+            target_names = [
+                _clean_text((preview or {}).get("name"))
+                for preview in target_previews.values()
+                if isinstance(preview, Mapping) and _clean_text((preview or {}).get("name"))
+            ]
+        else:
+            target_names = _coerce_string_list(relation.get("target_values"), max_items=4)
+        target_names = [name for name in target_names if name]
+        if not target_names or len(target_names) > 4:
+            continue
+        if predicate_id in {
+            "specific_to_user",
+            "#V#specific_to_user",
+            "#V#has_paper_recommendation_assertion",
+            "#V#preferred_language",
+            "#V#has_email",
+        }:
+            continue
+        relation_key = f"{predicate_id.lower()}|{'|'.join(name.lower() for name in target_names)}"
+        if relation_key in seen_relation_keys:
+            continue
+        seen_relation_keys.add(relation_key)
+        relation_lines.append(
+            f"- {_titleise_slug(predicate_id)}: {', '.join(target_names[:4])}"
+        )
+        if len(relation_lines) >= 6:
+            break
+
+    if descriptions:
+        lines.append("Explicit description evidence:")
+        for description in descriptions[:2]:
+            compact = re.sub(r"\s+", " ", description).strip()
+            if compact:
+                lines.append(f"- {compact[:700]}")
+    if relation_lines:
+        lines.append("Explicit relation evidence:")
+        lines.extend(relation_lines)
+    return "\n".join(lines)
+
+
+def _join_human_list(items: Sequence[str]) -> str:
+    cleaned = [item.strip() for item in items if isinstance(item, str) and item.strip()]
+    if not cleaned:
+        return ""
+    if len(cleaned) == 1:
+        return cleaned[0]
+    if len(cleaned) == 2:
+        return f"{cleaned[0]} and {cleaned[1]}"
+    return f"{', '.join(cleaned[:-1])}, and {cleaned[-1]}"
+
+
+def _iter_prefetched_relation_rows(
+    payload: Mapping[str, Any],
+) -> list[Mapping[str, Any]]:
+    relations_payload = payload.get("relations")
+    relation_rows = (
+        list(relations_payload.get("relations") or [])
+        if isinstance(relations_payload, Mapping)
+        else []
+    )
+    return [row for row in relation_rows if isinstance(row, Mapping)]
+
+
+def _extract_prefetched_text_values(
+    payload: Mapping[str, Any],
+    *,
+    predicate_ids: Sequence[str],
+    max_items: int = 4,
+) -> list[str]:
+    target_predicates = {
+        _clean_text(predicate_id).lower()
+        for predicate_id in predicate_ids
+        if _clean_text(predicate_id)
+    }
+    if not target_predicates:
+        return []
+
+    values: list[str] = []
+    seen: set[str] = set()
+    for relation in _iter_prefetched_relation_rows(payload):
+        predicate_id = _clean_text(relation.get("predicate_id")).lower()
+        relation_kind = _clean_text(relation.get("relation_kind")).lower()
+        if predicate_id not in target_predicates or relation_kind != "text":
+            continue
+        text_value = relation.get("text_value")
+        text = (
+            _clean_text(text_value.get("text"))
+            if isinstance(text_value, Mapping)
+            else ""
+        )
+        lowered = text.lower()
+        if not text or lowered in seen:
+            continue
+        seen.add(lowered)
+        values.append(text)
+        if len(values) >= max_items:
+            return values
+    return values
+
+
+def _prefetched_preview_looks_like_person(preview: Mapping[str, Any]) -> bool:
+    if _clean_text(preview.get("kind")).lower() != "individual":
+        return False
+
+    name = _clean_text(preview.get("name"))
+    concept_id = _clean_text(preview.get("concept_id"))
+    lowered_blob = f"{name} {concept_id}".lower()
+    if any(
+        token in lowered_blob
+        for token in (
+            "diary",
+            "todo",
+            "proposal",
+            "workflow",
+            "team",
+            "lab",
+            "university",
+            "household",
+            "paper",
+            "profile",
+            "platform",
+            "event",
+            "panel",
+            "evaluation",
+            "form",
+            "file",
+            "copy",
+        )
+    ):
+        return False
+
+    name_tokens = [token for token in re.split(r"[^A-Za-z]+", name) if token]
+    if len(name_tokens) < 2 or len(name_tokens) > 4:
+        return False
+    return all(token[:1].isupper() for token in name_tokens if token[:1])
+
+
+def _extract_prefetched_relation_target_names(
+    payload: Mapping[str, Any],
+    *,
+    predicate_ids: Sequence[str],
+    max_items: int = 4,
+    require_individual_targets: bool = False,
+    require_person_targets: bool = False,
+    exclude_name_tokens: Sequence[str] = (),
+) -> list[str]:
+    target_predicates = {
+        _clean_text(predicate_id).lower()
+        for predicate_id in predicate_ids
+        if _clean_text(predicate_id)
+    }
+    if not target_predicates:
+        return []
+
+    excluded_tokens = {
+        token.strip().lower() for token in exclude_name_tokens if token.strip()
+    }
+    names: list[str] = []
+    seen: set[str] = set()
+    for relation in _iter_prefetched_relation_rows(payload):
+        predicate_id = _clean_text(relation.get("predicate_id")).lower()
+        if predicate_id not in target_predicates:
+            continue
+        target_previews = (
+            relation.get("target_previews")
+            if isinstance(relation.get("target_previews"), Mapping)
+            else {}
+        )
+        if not isinstance(target_previews, Mapping):
+            continue
+        for preview in target_previews.values():
+            if not isinstance(preview, Mapping):
+                continue
+            if require_individual_targets and (
+                _clean_text(preview.get("kind")).lower() != "individual"
+            ):
+                continue
+            if require_person_targets and not _prefetched_preview_looks_like_person(
+                preview
+            ):
+                continue
+            display_name = _clean_text(preview.get("name"))
+            lowered_name = display_name.lower()
+            if (
+                not display_name
+                or lowered_name in seen
+                or any(token in lowered_name for token in excluded_tokens)
+            ):
+                continue
+            seen.add(lowered_name)
+            names.append(display_name)
+            if len(names) >= max_items:
+                return names
+    return names
+
+
+def _extract_prefetched_relation_mentions(
+    payload: Mapping[str, Any],
+    *,
+    relation_specs: Sequence[tuple[str, str]],
+    max_items: int = 4,
+    require_person_targets: bool = False,
+) -> list[str]:
+    mentions: list[str] = []
+    seen: set[str] = set()
+    for predicate_id, relation_label in relation_specs:
+        names = _extract_prefetched_relation_target_names(
+            payload,
+            predicate_ids=(predicate_id,),
+            max_items=max_items,
+            require_individual_targets=True,
+            require_person_targets=require_person_targets,
+            exclude_name_tokens=("diary", "todo", "household"),
+        )
+        for name in names:
+            mention = f"{name} ({relation_label})"
+            lowered = mention.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            mentions.append(mention)
+            if len(mentions) >= max_items:
+                return mentions
+    return mentions
+
+
+def _extract_prefetched_interest_terms(
+    payload: Mapping[str, Any],
+    *,
+    max_items: int = 6,
+) -> list[str]:
+    terms: list[str] = []
+    seen: set[str] = set()
+    for raw_profile in _extract_prefetched_text_values(
+        payload,
+        predicate_ids=("#V#has_paper_matching_profile_json",),
+        max_items=2,
+    ):
+        try:
+            parsed = json.loads(raw_profile)
+        except Exception:
+            continue
+        if not isinstance(parsed, Mapping):
+            continue
+        for raw_term in parsed.get("stated_interest_terms") or []:
+            term = _clean_text(raw_term)
+            lowered = term.lower()
+            if not term or lowered in seen:
+                continue
+            seen.add(lowered)
+            terms.append(term)
+            if len(terms) >= max_items:
+                return terms
+    return terms
+
+
+def _extract_prefetched_description_snippets(
+    payload: Mapping[str, Any],
+    *,
+    max_items: int = 1,
+    max_chars: int = 240,
+) -> list[str]:
+    snippets: list[str] = []
+    seen: set[str] = set()
+    for raw_text in _extract_prefetched_text_values(
+        payload,
+        predicate_ids=("hasDescription",),
+        max_items=max_items,
+    ):
+        compact = re.sub(r"[#*_`]+", " ", raw_text)
+        compact = re.sub(r"\s+", " ", compact).strip()
+        if not compact:
+            continue
+        sentence_candidates = re.split(r"(?<=[.!?])\s+", compact)
+        snippet = next(
+            (candidate.strip() for candidate in sentence_candidates if candidate.strip()),
+            compact,
+        )
+        snippet = snippet[:max_chars].rstrip(" ,;:")
+        lowered = snippet.lower()
+        if not snippet or lowered in seen:
+            continue
+        seen.add(lowered)
+        snippets.append(snippet)
+        if len(snippets) >= max_items:
+            return snippets
+    return snippets
+
+
+def _render_authenticated_concept_prefetched_response(
+    *,
+    request_text: str,
+    payload: Mapping[str, Any] | None,
+) -> str:
+    if not isinstance(payload, Mapping):
+        return ""
+
+    display_name = _clean_text(payload.get("name")) or _clean_text(
+        payload.get("concept_id")
+    )
+    if not display_name:
+        return ""
+
+    prompt_lower = _clean_text(request_text).lower()
+    interest_terms = _extract_prefetched_interest_terms(payload, max_items=6)
+    description_snippets = _extract_prefetched_description_snippets(
+        payload,
+        max_items=1,
+    )
+    authored_titles = _extract_prefetched_relation_target_names(
+        payload,
+        predicate_ids=("#V#author_of",),
+        max_items=3,
+        exclude_name_tokens=("diary", "todo"),
+    )
+    affiliations = _extract_prefetched_relation_target_names(
+        payload,
+        predicate_ids=(
+            "#V#member_of_organisation",
+            "#V#member_of_faculty",
+            "#V#homeresearchorganisation",
+        ),
+        max_items=4,
+        exclude_name_tokens=("household",),
+    )
+    collaborator_mentions = _extract_prefetched_relation_mentions(
+        payload,
+        relation_specs=(
+            ("#V#supervises_phd_student", "supervises PhD student"),
+            ("related_to", "related to"),
+        ),
+        max_items=4,
+        require_person_targets=True,
+    )
+    scholar_profiles = _extract_prefetched_relation_target_names(
+        payload,
+        predicate_ids=("#V#has_google_scholar_profile",),
+        max_items=1,
+    )
+
+    lines: list[str]
+    if interest_terms:
+        lines = [
+            (
+                f"Represented research-interest evidence for {display_name} includes "
+                f"{_join_human_list(interest_terms)}."
+            )
+        ]
+    elif description_snippets:
+        lines = [f"Represented profile evidence for {display_name} includes:"]
+    else:
+        lines = [f"The represented evidence I can ground directly for {display_name} is:"]
+
+    if description_snippets:
+        lines.append(f"- Profile description: {description_snippets[0]}")
+    if authored_titles:
+        lines.append(f"- Authored works: {_join_human_list(authored_titles)}.")
+    if affiliations:
+        lines.append(f"- Affiliations and organisations: {_join_human_list(affiliations)}.")
+    if collaborator_mentions:
+        lines.append(
+            f"- Explicit related people: {_join_human_list(collaborator_mentions)}."
+        )
+    if scholar_profiles:
+        lines.append(
+            f"- Scholarly-profile evidence: {_join_human_list(scholar_profiles)}."
+        )
+
+    if "collaborat" in prompt_lower:
+        if collaborator_mentions:
+            lines.append(
+                "The grounded collaborator links above are explicit relationship "
+                "evidence. The current graph does not label a separate research "
+                "theme for each collaborator, so any finer per-collaborator theme "
+                "mapping would be inference rather than direct representation."
+            )
+        else:
+            lines.append(
+                "I do not currently see explicit collaborator relations beyond the "
+                "affiliation and artefact evidence above."
+            )
+
+    return "\n".join(lines)
+
+
+def _prefetch_candidate_grounding(
+    *,
+    request: WorkflowActionRequest,
+    inputs: Mapping[str, Any],
+    request_text: str,
+    user_concept_id: str,
+) -> tuple[
+    str,
+    list[dict[str, Any]],
+    dict[str, Any] | None,
+    Mapping[str, Any] | None,
+]:
+    profile = (
+        _clean_text(inputs.get("workflow_gap_prefetch_profile"))
+        or _clean_text(request.data.get("workflow_gap_prefetch_profile"))
+    ).lower()
+    if profile != "authenticated_concept_relations":
+        return "", [], None, None
+    if not user_concept_id or not _prompt_appears_first_person(request_text):
+        return "", [], {
+            "profile": profile,
+            "executed": False,
+            "reason": "prefetch_not_applicable",
+        }, None
+
+    gateway = request.environment.gateway
+    if gateway is None or not getattr(gateway, "enabled", False):
+        return "", [], {
+            "profile": profile,
+            "executed": False,
+            "reason": "gateway_unavailable",
+        }, None
+
+    payload: dict[str, Any] = {
+        "concept_id": user_concept_id,
+        "include_relations_arg1": True,
+        "include_text_relations_arg1": True,
+        "include_relations_any_arg": False,
+        "limit": 80,
+    }
+    user_namespace = _clean_text(request.environment.user_namespace)
+    if user_namespace:
+        payload["namespace"] = user_namespace
+
+    try:
+        result = gateway.invoke("fetch_concept", payload)
+        result_payload = (
+            dict(getattr(result, "payload", {}))
+            if isinstance(getattr(result, "payload", {}), Mapping)
+            else {}
+        )
+        evidence_text = _build_authenticated_concept_grounding_text(result_payload)
+        invocation = _build_workflow_gap_prefetch_tool_invocation(
+            tool_name="fetch_concept",
+            payload=payload,
+            result_payload=result_payload,
+            duration_ms=getattr(result, "duration_ms", None),
+        )
+        diagnostics = {
+            "profile": profile,
+            "executed": True,
+            "tool": "fetch_concept",
+            "concept_id": user_concept_id,
+            "evidence_present": bool(evidence_text),
+        }
+        return evidence_text, [invocation], diagnostics, result_payload
+    except Exception as exc:
+        invocation = _build_workflow_gap_prefetch_tool_invocation(
+            tool_name="fetch_concept",
+            payload=payload,
+            result_payload=None,
+            error=str(exc),
+        )
+        diagnostics = {
+            "profile": profile,
+            "executed": False,
+            "tool": "fetch_concept",
+            "concept_id": user_concept_id,
+            "error": str(exc),
+        }
+        return "", [invocation], diagnostics, None
+
+
 def _normalise_candidate_execution_inputs(
     request: WorkflowActionRequest,
 ) -> dict[str, Any]:
@@ -606,7 +1188,11 @@ def _normalise_candidate_execution_inputs(
             "workflow_gap_request_text",
             "workflow_gap_recent_turns",
             "workflow_gap_acceptance_requirements",
+            "workflow_gap_acceptance_requirements_json",
             "workflow_gap_base_response_text",
+            "workflow_gap_guidance",
+            "workflow_gap_guidance_json",
+            "workflow_gap_prefetch_profile",
             "workflow_gap_dry_run",
             "conversation_session_id",
             "turn_id",
@@ -617,6 +1203,38 @@ def _normalise_candidate_execution_inputs(
         }:
             merged[key] = value
     return merged
+
+
+def _strip_transient_candidate_execution_defaults(
+    workflow_spec: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Remove per-turn fallback payloads before publishing a reusable workflow."""
+
+    cleaned_spec = dict(workflow_spec)
+    raw_steps = workflow_spec.get("steps")
+    if not isinstance(raw_steps, list):
+        return cleaned_spec
+
+    cleaned_steps: list[Any] = []
+    for raw_step in raw_steps:
+        if not isinstance(raw_step, Mapping):
+            cleaned_steps.append(raw_step)
+            continue
+        cleaned_step = dict(raw_step)
+        inputs = raw_step.get("inputs")
+        if isinstance(inputs, Mapping):
+            cleaned_inputs = dict(inputs)
+            for transient_key in (
+                "default_request_text",
+                "default_recent_turns_json",
+                "default_base_response_text",
+            ):
+                cleaned_inputs.pop(transient_key, None)
+            cleaned_step["inputs"] = cleaned_inputs
+        cleaned_steps.append(cleaned_step)
+
+    cleaned_spec["steps"] = cleaned_steps
+    return cleaned_spec
 
 
 def _handle_collect_context(request: WorkflowActionRequest) -> WorkflowActionResult:
@@ -894,6 +1512,9 @@ def _handle_prepare_candidate_spec(request: WorkflowActionRequest) -> WorkflowAc
                 "gap_summary": gap_summary,
             },
         )
+        candidate_workflow_spec = _strip_transient_candidate_execution_defaults(
+            candidate_workflow_spec
+        )
     except Exception as exc:
         return WorkflowActionResult(
             status="failed",
@@ -1012,6 +1633,22 @@ def _handle_execute_candidate(request: WorkflowActionRequest) -> WorkflowActionR
         _clean_text(inputs.get("workflow_gap_base_response_text"))
         or _clean_text(inputs.get("default_base_response_text"))
     )
+    workflow_guidance = _resolve_candidate_string_list(
+        inputs=inputs,
+        request_data=request.data,
+        direct_key="workflow_gap_guidance",
+        json_key="workflow_guidance_json",
+        analysis_key="workflow_guidance",
+        max_items=16,
+    )
+    acceptance_requirements = _resolve_candidate_string_list(
+        inputs=inputs,
+        request_data=request.data,
+        direct_key="workflow_gap_acceptance_requirements",
+        json_key="acceptance_requirements_json",
+        analysis_key="acceptance_requirements",
+        max_items=16,
+    )
     rendered_prompt, prompt_diagnostics = render_workflow_gap_candidate_prompt(
         prompt_concept_id=prompt_concept_id,
         variables={
@@ -1046,28 +1683,10 @@ def _handle_execute_candidate(request: WorkflowActionRequest) -> WorkflowActionR
                 or "A reusable workflow gap may exist for this request."
             ),
             "workflow_guidance_json": _json_text(
-                _coerce_string_list(
-                    inputs.get("workflow_gap_guidance")
-                    or request.data.get("workflow_gap_guidance")
-                    or (
-                        (request.data.get("workflow_gap_analysis_result") or {}).get(
-                            "workflow_guidance"
-                        )
-                    ),
-                    max_items=16,
-                )
+                list(workflow_guidance)
             ),
             "acceptance_requirements_json": _json_text(
-                _coerce_string_list(
-                    inputs.get("workflow_gap_acceptance_requirements")
-                    or request.data.get("workflow_gap_acceptance_requirements")
-                    or (
-                        (request.data.get("workflow_gap_analysis_result") or {}).get(
-                            "acceptance_requirements"
-                        )
-                    ),
-                    max_items=16,
-                )
+                list(acceptance_requirements)
             ),
             "request_text": request_text,
             "recent_turns_json": recent_turns_json,
@@ -1093,26 +1712,21 @@ def _handle_execute_candidate(request: WorkflowActionRequest) -> WorkflowActionR
             error="workflow_gap_candidate_gateway_unavailable",
         )
 
-    from ...integrations.internal_mcp.orchestrator import InternalMCPChatOrchestrator
-
     dry_run = _coerce_bool(inputs.get("workflow_gap_dry_run"))
     if dry_run:
-        max_tool_invocations = 0
+        configured_max_tool_invocations = 0
     else:
         raw_max_tool_invocations = request.environment.max_tool_invocations
         try:
-            max_tool_invocations = (
+            configured_max_tool_invocations = (
                 INTERNAL_MCP_MAX_TOOL_INVOCATIONS_DEFAULT
                 if raw_max_tool_invocations is None
                 else int(raw_max_tool_invocations)
             )
         except Exception:
-            max_tool_invocations = INTERNAL_MCP_MAX_TOOL_INVOCATIONS_DEFAULT
-    orchestrator = InternalMCPChatOrchestrator(
-        gateway=gateway,
-        max_tool_invocations=max_tool_invocations,
-        default_gmail_profile=request.environment.default_gmail_profile,
-    )
+            configured_max_tool_invocations = (
+                INTERNAL_MCP_MAX_TOOL_INVOCATIONS_DEFAULT
+            )
     auxiliary_system_prompt = _clean_text(request.environment.auxiliary_system_prompt)
     candidate_system_prompt = rendered_prompt.text
     combined_auxiliary_prompt = (
@@ -1140,6 +1754,53 @@ def _handle_execute_candidate(request: WorkflowActionRequest) -> WorkflowActionR
         or _clean_text(request.environment.org_concept_id)
         or _clean_text(namespace_org_concept_id)
     )
+    (
+        grounding_text,
+        prefetched_tool_invocations,
+        prefetch_diagnostics,
+        prefetched_concept_payload,
+    ) = (
+        _prefetch_candidate_grounding(
+            request=request,
+            inputs=inputs,
+            request_text=request_text,
+            user_concept_id=resolved_user_concept_id,
+        )
+    )
+    if grounding_text:
+        combined_auxiliary_prompt = (
+            f"{combined_auxiliary_prompt}\n\n"
+            "Authoritative represented evidence pre-fetched for this workflow:\n"
+            f"{grounding_text}\n\n"
+            "Treat the evidence above as grounded represented context. Distinguish "
+            "explicit represented evidence from broader inference, and do not claim "
+            "that no represented data exists while this evidence is present."
+        )
+    prefetch_profile = (
+        _clean_text(inputs.get("workflow_gap_prefetch_profile"))
+        or _clean_text(request.data.get("workflow_gap_prefetch_profile"))
+    ).lower()
+    prefer_direct_grounded_response = bool(grounding_text) and (
+        prefetch_profile == "authenticated_concept_relations"
+    )
+    if prefer_direct_grounded_response:
+        combined_auxiliary_prompt = (
+            f"{combined_auxiliary_prompt}\n\n"
+            "Because authoritative represented evidence is already present for the "
+            "authenticated concept, answer directly from that evidence. Do not claim "
+            "that retrieval could not be completed while this evidence is available."
+        )
+
+    from ...integrations.internal_mcp.orchestrator import InternalMCPChatOrchestrator
+
+    max_tool_invocations = (
+        0 if (dry_run or prefer_direct_grounded_response) else configured_max_tool_invocations
+    )
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway,
+        max_tool_invocations=max_tool_invocations,
+        default_gmail_profile=request.environment.default_gmail_profile,
+    )
 
     nested_result = orchestrator.run(
         prompt=request_text,
@@ -1157,13 +1818,24 @@ def _handle_execute_candidate(request: WorkflowActionRequest) -> WorkflowActionR
         org_concept_id=resolved_org_concept_id or None,
     )
     response_text = _clean_text(nested_result.response_text)
+    prefetched_response_text = ""
+    if prefer_direct_grounded_response:
+        prefetched_response_text = _render_authenticated_concept_prefetched_response(
+            request_text=request_text,
+            payload=prefetched_concept_payload,
+        )
+    if prefetched_response_text:
+        response_text = prefetched_response_text
     return WorkflowActionResult(
         status="success",
         outputs={
             "candidate_response_present": bool(response_text),
             "response_text": response_text,
             "extra_messages": list(nested_result.extra_messages),
-            "tool_invocations": list(nested_result.tool_invocations),
+            "tool_invocations": [
+                *prefetched_tool_invocations,
+                *list(nested_result.tool_invocations),
+            ],
             "aux_llm_calls": list(nested_result.aux_llm_calls),
             "llm_calls": list(nested_result.llm_calls),
             "candidate_workflow_routing": (
@@ -1180,6 +1852,9 @@ def _handle_execute_candidate(request: WorkflowActionRequest) -> WorkflowActionR
             if isinstance(nested_result.render_plan, Mapping)
             else nested_result.render_plan,
             "workflow_gap_dry_run": dry_run,
+            "workflow_gap_prefetch_diagnostics": prefetch_diagnostics,
+            "workflow_gap_prefetched_grounding_present": bool(grounding_text),
+            "workflow_gap_prefetched_response_used": bool(prefetched_response_text),
         },
     )
 

@@ -190,6 +190,37 @@ The point of these scans is to protect Von from slowly reverting into a Python-f
 
 Use them to notice where the code shape is pushing in that direction, and to create the next structural tasks that keep workflow/Vontology authority, flexible LLM-led reasoning, and clear Python support surfaces aligned.
 
+### 10.1 Mechanical guardrails
+
+When the risk is specifically `support-surface semantic drift`, rely on
+mechanical regression gates instead of memory or good intentions alone.
+
+The workflow-purity report is not only for workflow publication drift. It is
+also the place to add deterministic counters and contracts for cases such as:
+
+- embedded prompt-like bodies in guarded orchestration support files
+- code-side fallback markers that imply hidden prompt authority
+- domain-specific literals in generic orchestration surfaces
+
+At the time of writing, the guarded counters are:
+
+- `python_authored_support_prompt_source_count`
+- `support_surface_policy_contract_violation_count`
+
+The rule is simple:
+
+- if a support surface needs authored wording, move that wording into
+  Vontology prompt text relations
+- if a support surface needs domain knowledge, obtain it through workflow,
+  prompt, KB, or tool metadata authority rather than literal Python branches
+- if a new drift pattern appears more than once, add a deterministic purity
+  counter or contract rather than trusting future agents to remember it
+
+These guardrails should be extended incrementally to the highest-risk support
+surfaces as they are cleaned up. They are not a proof that drift is impossible,
+but they materially reduce the chance of silently reintroducing conventional
+Python-first behaviour.
+
 ## 11. Broader engineering and research context
 
 This note is also motivated by a more general problem that appears to be emerging in current coding-agent practice.

@@ -6,6 +6,13 @@ from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
 )
 
+_TEST_BASE_PROMPT = (
+    "You have access to internal MCP tools.\n\n"
+    "{auth_status}\n"
+    "Available tools:\n"
+    "{listing}"
+)
+
 
 class _GatewayStub:
     enabled = True
@@ -14,13 +21,23 @@ class _GatewayStub:
         return {}
 
 
-def test_build_augmented_context_includes_effective_identity_context(monkeypatch) -> None:
+def test_build_augmented_context_includes_effective_identity_context(
+    monkeypatch,
+) -> None:
     monkeypatch.setattr(
         "src.backend.services.concept_service.get_concept_by_concept_id",
         lambda concept_id: {
             "#V#test_user": {"name": "Test User"},
             "#V#test_org": {"name": "Test Org"},
         }.get(concept_id),
+    )
+    monkeypatch.setattr(
+        InternalMCPChatOrchestrator,
+        "_load_base_system_prompt_from_vontology",
+        lambda self, preferred_language=None: (
+            _TEST_BASE_PROMPT,
+            "#V#test_base_prompt",
+        ),
     )
 
     orchestrator = InternalMCPChatOrchestrator(

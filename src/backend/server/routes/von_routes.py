@@ -208,6 +208,12 @@ def _env_int(name: str, default: int, *, min_value: int) -> int:
     return max(min_value, value)
 
 
+def _safe_log_preview(value: object, *, limit: int = 100) -> str:
+    text = value if isinstance(value, str) else str(value)
+    preview = text[: max(0, int(limit))]
+    return preview.encode("ascii", "backslashreplace").decode("ascii")
+
+
 _TOOL_PROGRESS_HEARTBEAT_INTERVAL_SEC = _env_int(
     "VON_TOOL_PROGRESS_HEARTBEAT_INTERVAL_SEC", 5, min_value=1
 )
@@ -7499,6 +7505,8 @@ def _build_generate_conversation_turn_instance_inputs(
     presenter_mode_requested: bool,
     request_gmail_profile: str | None,
     request_language: str,
+    requested_model: str | None,
+    requested_client_type: str | None,
     prompt_text: str,
     workflow_discovery_result: Mapping[str, Any] | None,
     workflow_continuation_context: Mapping[str, Any] | None,
@@ -7510,6 +7518,8 @@ def _build_generate_conversation_turn_instance_inputs(
         "presenter_mode_requested": presenter_mode_requested,
         "gmail_profile": request_gmail_profile,
         "preferred_language": request_language,
+        "requested_model": requested_model,
+        "requested_client_type": requested_client_type,
         "prompt_preview": prompt_text[:1000] if isinstance(prompt_text, str) else None,
         "workflow_discovery_result": (
             dict(workflow_discovery_result)
@@ -7600,6 +7610,8 @@ def _submit_generate_conversation_turn_instance(
     presenter_mode_requested: bool,
     request_gmail_profile: str | None,
     request_language: str,
+    requested_model: str | None,
+    requested_client_type: str | None,
     prompt_text: str,
     workflow_discovery_result: Mapping[str, Any] | None,
     workflow_continuation_context: Mapping[str, Any] | None,
@@ -7663,6 +7675,8 @@ def _submit_generate_conversation_turn_instance(
                 presenter_mode_requested=presenter_mode_requested,
                 request_gmail_profile=request_gmail_profile,
                 request_language=request_language,
+                requested_model=requested_model,
+                requested_client_type=requested_client_type,
                 prompt_text=prompt_text,
                 workflow_discovery_result=workflow_discovery_result,
                 workflow_continuation_context=workflow_continuation_context,
@@ -8849,7 +8863,10 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         )
         for i, msg in enumerate(enhanced_context):
             current_app.logger.info(
-                f"Message {i}: role={msg.get('role')}, content_preview={msg.get('content', '')[:100]}..."
+                "Message %s: role=%s, content_preview=%s...",
+                i,
+                msg.get("role"),
+                _safe_log_preview(msg.get("content", ""), limit=100),
             )
 
         orchestrator = current_app.config.get("INTERNAL_MCP_ORCHESTRATOR")
@@ -9589,6 +9606,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     presenter_mode_requested=presenter_mode_requested,
                     request_gmail_profile=request_gmail_profile,
                     request_language=request_language,
+                    requested_model=model_name,
+                    requested_client_type=explicit_client_type,
                     prompt_text=prompt_text,
                     workflow_discovery_result=workflow_discovery_result,
                     workflow_continuation_context=workflow_continuation_context,

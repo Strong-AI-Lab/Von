@@ -201,6 +201,134 @@ def test_validate_workflow_candidate_contract_only_profile_keeps_contract_validi
     assert validation["generation_safe_validation"]["valid"] is False
 
 
+def test_apply_workflow_authoring_spec_updates_existing_workflow_without_create_missing(
+    monkeypatch,
+) -> None:
+    publication_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        mod,
+        "preview_workflow_authoring_spec",
+        lambda workflow_id, **_kwargs: {
+            "workflow_id": workflow_id,
+            "preview": {"contract_validation": {"valid": True}},
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "_load_runtime_definition",
+        lambda workflow_id: (SimpleNamespace(workflow_id=workflow_id), "vontology", object()),
+    )
+    monkeypatch.setattr(mod, "_workflow_concept_exists", lambda _workflow_id: True)
+    monkeypatch.setattr(
+        mod,
+        "build_workflow_definition_from_authoring_spec",
+        lambda spec: SimpleNamespace(workflow_id=spec["workflow_id"]),
+    )
+    monkeypatch.setattr(
+        mod,
+        "publish_workflow_definition_from_definition",
+        lambda **kwargs: publication_calls.append(dict(kwargs)) or {"ok": True},
+    )
+
+    result = mod.apply_workflow_authoring_spec(
+        "#V#alpha_workflow",
+        authoring_spec={
+            "workflow_id": "#V#alpha_workflow",
+            "description": "Updated description",
+            "steps": [{"state_id": "start"}],
+        },
+    )
+
+    assert result["publication"] == {"ok": True}
+    assert publication_calls[0]["create_missing"] is False
+    assert publication_calls[0]["purpose"] == "Updated description"
+
+
+def test_apply_workflow_authoring_spec_creates_missing_workflow_when_absent(
+    monkeypatch,
+) -> None:
+    publication_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        mod,
+        "preview_workflow_authoring_spec",
+        lambda workflow_id, **_kwargs: {
+            "workflow_id": workflow_id,
+            "preview": {"contract_validation": {"valid": True}},
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "_load_runtime_definition",
+        lambda _workflow_id: (None, "unknown", object()),
+    )
+    monkeypatch.setattr(mod, "_workflow_concept_exists", lambda _workflow_id: False)
+    monkeypatch.setattr(
+        mod,
+        "build_workflow_definition_from_authoring_spec",
+        lambda spec: SimpleNamespace(workflow_id=spec["workflow_id"]),
+    )
+    monkeypatch.setattr(
+        mod,
+        "publish_workflow_definition_from_definition",
+        lambda **kwargs: publication_calls.append(dict(kwargs)) or {"ok": True},
+    )
+
+    mod.apply_workflow_authoring_spec(
+        "#V#new_workflow",
+        authoring_spec={
+            "workflow_id": "#V#new_workflow",
+            "description": "Create me",
+            "steps": [{"state_id": "start"}],
+        },
+    )
+
+    assert publication_calls[0]["create_missing"] is True
+
+
+def test_apply_workflow_authoring_spec_uses_existing_concept_when_runtime_load_is_missing(
+    monkeypatch,
+) -> None:
+    publication_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        mod,
+        "preview_workflow_authoring_spec",
+        lambda workflow_id, **_kwargs: {
+            "workflow_id": workflow_id,
+            "preview": {"contract_validation": {"valid": True}},
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "_load_runtime_definition",
+        lambda _workflow_id: (None, "unknown", object()),
+    )
+    monkeypatch.setattr(mod, "_workflow_concept_exists", lambda _workflow_id: True)
+    monkeypatch.setattr(
+        mod,
+        "build_workflow_definition_from_authoring_spec",
+        lambda spec: SimpleNamespace(workflow_id=spec["workflow_id"]),
+    )
+    monkeypatch.setattr(
+        mod,
+        "publish_workflow_definition_from_definition",
+        lambda **kwargs: publication_calls.append(dict(kwargs)) or {"ok": True},
+    )
+
+    mod.apply_workflow_authoring_spec(
+        "#V#existing_workflow",
+        authoring_spec={
+            "workflow_id": "#V#existing_workflow",
+            "description": "Repair me",
+            "steps": [{"state_id": "start"}],
+        },
+    )
+
+    assert publication_calls[0]["create_missing"] is False
+
+
 def test_build_workflow_catalogue_payload_uses_fast_listing_mode(monkeypatch) -> None:
     class _Registry:
         def all_workflow_ids(self):

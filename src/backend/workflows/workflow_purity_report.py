@@ -104,6 +104,24 @@ WORKFLOW_PROMPT_SOURCE_FUNCTION_PATTERNS = (
     re.compile(r"^_?ensure_.*prompt.*concept$"),
 )
 
+CORE_SUPPORT_PROMPT_SOURCE_FILES = (
+    "src/backend/integrations/internal_mcp/orchestrator.py",
+)
+
+CORE_SUPPORT_POLICY_CONTRACTS = (
+    {
+        "name": "orchestrator_support_surface_authority",
+        "path": "src/backend/integrations/internal_mcp/orchestrator.py",
+        "forbidden_patterns": {
+            "domain_specific_arxiv_literal": re.compile(r"\barxiv\b", re.IGNORECASE),
+            "code_fallback_source_marker": re.compile(
+                r"['\"]source['\"]\s*:\s*['\"]code_fallback['\"]",
+                re.IGNORECASE,
+            ),
+        },
+    },
+)
+
 REPO_SEED_AUTHORITY_SCAN_GLOBS = ("src/backend/**/*.py",)
 REPO_SEED_AUTHORITY_ALLOWED_PATHS = frozenset(
     {
@@ -128,7 +146,9 @@ REPO_SEED_AUTHORITY_PATTERNS = {
     "repo_seed_text_relations": re.compile(
         r"\bseed_canonical_workflow_text_relations\s*\("
     ),
-    "repo_seed_template_asset": re.compile(r"\bDEFAULT_REPO_SEED_TEMPLATE_ASSET_PATH\b"),
+    "repo_seed_template_asset": re.compile(
+        r"\bDEFAULT_REPO_SEED_TEMPLATE_ASSET_PATH\b"
+    ),
     "repo_seed_template_hydration": re.compile(
         r"\bensure_repo_seeded_workflow_template_bundle\s*\("
     ),
@@ -163,9 +183,7 @@ SEED_FALLBACK_ORDER_CONTRACTS = (
         "name": "workflow_template_bundle_vontology_first",
         "path": "src/backend/workflows/workflow_template_profile_service.py",
         "function": "load_workflow_template_bundle",
-        "authoritative_calls": (
-            "_load_vontology_workflow_template_bundle_cached",
-        ),
+        "authoritative_calls": ("_load_vontology_workflow_template_bundle_cached",),
         "fallback_calls": ("ensure_repo_seeded_workflow_template_bundle",),
     },
     {
@@ -224,6 +242,36 @@ def _collect_string_literals(node: ast.AST | None) -> list[str]:
         if isinstance(child, ast.Constant) and isinstance(child.value, str):
             strings.append(child.value)
     return strings
+
+
+def _annotate_ast_parents(tree: ast.AST) -> None:
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            setattr(child, "parent", parent)
+
+
+def _is_docstring_constant(node: ast.Constant) -> bool:
+    parent = getattr(node, "parent", None)
+    if not isinstance(parent, ast.Expr) or parent.value is not node:
+        return False
+    grandparent = getattr(parent, "parent", None)
+    return isinstance(
+        grandparent,
+        (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef),
+    )
+
+
+def _looks_like_embedded_support_prompt_body(text: str) -> bool:
+    candidate = str(text or "").strip()
+    if not candidate:
+        return False
+    if candidate.count("\n") < 2:
+        return False
+    return (
+        len(candidate) >= 120
+        and any(character.isspace() for character in candidate)
+        and _looks_like_python_authored_prompt_body((candidate,))
+    )
 
 
 def _looks_like_python_authored_prompt_body(strings: Sequence[str]) -> bool:
@@ -395,7 +443,10 @@ def _scan_python_workflow_family_files(project_root: Path) -> dict[str, Any]:
         for node in tree.body:
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
-            if any(pattern.match(node.name) for pattern in PYTHON_WORKFLOW_FAMILY_FUNCTION_PATTERNS):
+            if any(
+                pattern.match(node.name)
+                for pattern in PYTHON_WORKFLOW_FAMILY_FUNCTION_PATTERNS
+            ):
                 matched_symbols.append(node.name)
 
         if (
@@ -542,6 +593,90 @@ def _scan_python_authored_workflow_prompt_sources(
     }
 
 
+def _scan_python_authored_core_support_prompt_sources(
+    project_root: Path,
+) -> dict[str, Any]:
+    matches: list[dict[str, Any]] = []
+    for relative_path in CORE_SUPPORT_PROMPT_SOURCE_FILES:
+        path = project_root / relative_path
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8")
+        try:
+            tree = ast.parse(text, filename=relative_path)
+        except SyntaxError:
+            continue
+        _annotate_ast_parents(tree)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+                continue
+            if _is_docstring_constant(node):
+                continue
+            candidate = str(node.value or "")
+            if not _looks_like_embedded_support_prompt_body(candidate):
+                continue
+            matches.append(
+                {
+                    "path": relative_path,
+                    "line": int(getattr(node, "lineno", 0) or 0),
+                    "preview": candidate[:120],
+                }
+            )
+    return {
+        "source_count": len(matches),
+        "sources": matches,
+        "files": list(CORE_SUPPORT_PROMPT_SOURCE_FILES),
+    }
+
+
+def _scan_core_support_policy_contracts(project_root: Path) -> dict[str, Any]:
+    contracts: list[dict[str, Any]] = []
+    violations: list[dict[str, Any]] = []
+    for contract in CORE_SUPPORT_POLICY_CONTRACTS:
+        relative_path = str(contract["path"])
+        path = project_root / relative_path
+        if not path.exists():
+            contracts.append(
+                {
+                    "name": str(contract["name"]),
+                    "path": relative_path,
+                    "status": "file_missing",
+                    "violations": [],
+                }
+            )
+            continue
+        text = path.read_text(encoding="utf-8")
+        contract_violations: list[dict[str, Any]] = []
+        for pattern_name, pattern in dict(
+            contract.get("forbidden_patterns") or {}
+        ).items():
+            if not isinstance(pattern, re.Pattern):
+                continue
+            for match in pattern.finditer(text):
+                contract_violations.append(
+                    {
+                        "path": relative_path,
+                        "line": _line_number(text, match.start()),
+                        "pattern": str(pattern_name),
+                    }
+                )
+        contracts.append(
+            {
+                "name": str(contract["name"]),
+                "path": relative_path,
+                "status": "ok" if not contract_violations else "violation",
+                "violations": contract_violations,
+            }
+        )
+        violations.extend(contract_violations)
+    return {
+        "contract_count": len(contracts),
+        "violation_count": len(violations),
+        "contracts": contracts,
+        "violations": violations,
+    }
+
+
 def _scan_repo_seed_authority_drift(project_root: Path) -> dict[str, Any]:
     matches: list[dict[str, Any]] = []
     for path in _iter_files(project_root, REPO_SEED_AUTHORITY_SCAN_GLOBS):
@@ -646,10 +781,14 @@ def _scan_vontology_first_seed_fallback_contracts(project_root: Path) -> dict[st
 
         if fallback_positions:
             first_fallback_offset = min(fallback_positions.values())
-            first_fallback_line = start_line + _line_number(
-                function_text,
-                first_fallback_offset,
-            ) - 1
+            first_fallback_line = (
+                start_line
+                + _line_number(
+                    function_text,
+                    first_fallback_offset,
+                )
+                - 1
+            )
         else:
             first_fallback_offset = None
             first_fallback_line = None
@@ -671,9 +810,7 @@ def _scan_vontology_first_seed_fallback_contracts(project_root: Path) -> dict[st
         status = (
             "violation"
             if violation
-            else "no_fallback_calls_present"
-            if not fallback_positions
-            else "ok"
+            else "no_fallback_calls_present" if not fallback_positions else "ok"
         )
         contract_result = {
             "name": str(contract["name"]),
@@ -840,7 +977,10 @@ def _collect_registry_sources(registry: Any | None) -> dict[str, Any]:
         try:
             get_source = getattr(registry, "get_registration_source", None)
             if callable(get_source):
-                source = str(get_source(workflow_id, resolve_lazy=False) or "").strip() or "unknown"
+                source = (
+                    str(get_source(workflow_id, resolve_lazy=False) or "").strip()
+                    or "unknown"
+                )
             else:
                 registration = registry.get_registration(workflow_id)
                 if registration is not None:
@@ -856,11 +996,21 @@ def _collect_registry_sources(registry: Any | None) -> dict[str, Any]:
         # JVNAUTOSCI-1818: Track synthesized (virtual) launch contracts as impurities
         # to encourage migration to fully KB-based declarative contracts.
         try:
-            registration = registry.get_registration(workflow_id)
-            if registration and registration.definition:
-                metadata = registration.definition.metadata
-                if metadata.get("launch_contract_source") == "synthesized_from_initial_state":
-                    source_counts["synthesized_launch_contract_count"] = source_counts.get("synthesized_launch_contract_count", 0) + 1
+            peek_registration = getattr(registry, "peek_registration", None)
+            if callable(peek_registration):
+                registration = peek_registration(workflow_id)
+            else:
+                registration = registry.get_registration(workflow_id)
+            definition = getattr(registration, "definition", None)
+            if registration and definition is not None:
+                metadata = getattr(definition, "metadata", None)
+                if isinstance(metadata, Mapping) and (
+                    metadata.get("launch_contract_source")
+                    == "synthesized_from_initial_state"
+                ):
+                    source_counts["synthesized_launch_contract_count"] = (
+                        source_counts.get("synthesized_launch_contract_count", 0) + 1
+                    )
         except Exception:
             pass
 
@@ -898,7 +1048,9 @@ def compare_workflow_purity_to_baseline(
             "regression_detected": False,
         }
 
-    baseline_counters = baseline.get("counters", {}) if isinstance(baseline, Mapping) else {}
+    baseline_counters = (
+        baseline.get("counters", {}) if isinstance(baseline, Mapping) else {}
+    )
     if not isinstance(baseline_counters, Mapping):
         baseline_counters = {}
 
@@ -931,7 +1083,9 @@ def compare_workflow_purity_to_baseline(
     }
 
 
-def build_workflow_purity_baseline_snapshot(report: Mapping[str, Any]) -> dict[str, Any]:
+def build_workflow_purity_baseline_snapshot(
+    report: Mapping[str, Any],
+) -> dict[str, Any]:
     counters = report.get("counters", {})
     if not isinstance(counters, Mapping):
         counters = {}
@@ -997,10 +1151,14 @@ def build_workflow_purity_report(
         repo_root
     )
     workflow_prompt_sources = _scan_python_authored_workflow_prompt_sources(repo_root)
+    core_support_prompt_sources = _scan_python_authored_core_support_prompt_sources(
+        repo_root
+    )
     repo_seed_authority = _scan_repo_seed_authority_drift(repo_root)
     seed_fallback_contracts = _scan_vontology_first_seed_fallback_contracts(repo_root)
     workflow_id_special_cases = _scan_workflow_id_special_case_branches(repo_root)
     supervised_fail_open_fallbacks = _scan_supervised_fail_open_fallbacks(repo_root)
+    core_support_policy_contracts = _scan_core_support_policy_contracts(repo_root)
     builtin_capability_overrides = sorted(BUILTIN_WORKFLOW_CAPABILITIES)
 
     counters = {
@@ -1013,6 +1171,9 @@ def build_workflow_purity_report(
         ),
         "python_authored_workflow_prompt_source_count": int(
             workflow_prompt_sources.get("source_count", 0)
+        ),
+        "python_authored_support_prompt_source_count": int(
+            core_support_prompt_sources.get("source_count", 0)
         ),
         "direct_instance_create_callsite_count": int(
             direct_create.get("offending_callsite_count", 0)
@@ -1034,6 +1195,9 @@ def build_workflow_purity_report(
         ),
         "supervised_fail_open_fallback_count": int(
             supervised_fail_open_fallbacks.get("offending_match_count", 0)
+        ),
+        "support_surface_policy_contract_violation_count": int(
+            core_support_policy_contracts.get("violation_count", 0)
         ),
         "synthesized_launch_contract_count": int(
             source_counts.get("synthesized_launch_contract_count", 0)
@@ -1067,10 +1231,14 @@ def build_workflow_purity_report(
             "python_authored_workflow_prompt_sources": copy.deepcopy(
                 workflow_prompt_sources.get("sources", [])
             ),
+            "python_authored_support_prompt_sources": copy.deepcopy(
+                core_support_prompt_sources.get("sources", [])
+            ),
             "repo_seed_authority_drift": repo_seed_authority,
             "vontology_first_seed_fallback_contracts": seed_fallback_contracts,
             "workflow_id_special_cases": workflow_id_special_cases,
             "supervised_fail_open_fallbacks": supervised_fail_open_fallbacks,
+            "support_surface_policy_contracts": core_support_policy_contracts,
             "direct_instance_create": direct_create,
             "env_event_binding_authority": env_event_binding,
             "legacy_selector_support": legacy_selector,
@@ -1089,6 +1257,8 @@ def build_workflow_purity_report(
 
 __all__ = [
     "ALLOWED_DIRECT_INSTANCE_CREATE_CALLSITES",
+    "CORE_SUPPORT_POLICY_CONTRACTS",
+    "CORE_SUPPORT_PROMPT_SOURCE_FILES",
     "DIRECT_INSTANCE_CREATE_PATTERN",
     "ENV_EVENT_BINDING_AUTHORITY_PATTERNS",
     "LEGACY_SELECTOR_CONSTRUCT_PATTERNS",

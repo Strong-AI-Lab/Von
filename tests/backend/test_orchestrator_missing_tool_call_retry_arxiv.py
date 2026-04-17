@@ -8,6 +8,8 @@ from src.backend.integrations.internal_mcp.orchestrator import (
     _MissingToolCallDetectorSpec,
 )
 
+_TEST_CLASSIFIER_PROMPT = "Answer YES or NO for: {response}"
+
 
 class _Gateway:
     @staticmethod
@@ -59,7 +61,7 @@ def _build_orchestrator_stub() -> InternalMCPChatOrchestrator:
     orchestrator._missing_tool_call_detector = _MissingToolCallDetectorSpec(
         action_id="fallback_missing_tool_call_detector",
         prompt_id=None,
-        prompt_text=InternalMCPChatOrchestrator._FALLBACK_MISSING_TOOL_CALL_PROMPT,
+        prompt_text=_TEST_CLASSIFIER_PROMPT,
         model=None,
     )
     return orchestrator
@@ -104,12 +106,12 @@ def test_missing_tool_call_assessment_skips_classifier_when_fallback_detector_ma
     assert assessment.retry_reason == "heuristic missing tool call"
     assert assessment.classifier_invoked is False
     assert not _uses_missing_tool_call_classifier_prompt(
-        llm.calls, orchestrator._FALLBACK_MISSING_TOOL_CALL_PROMPT
+        llm.calls, _TEST_CLASSIFIER_PROMPT
     )
     assert llm.calls == []
 
 
-def test_missing_tool_call_retry_forces_download_paper_over_list_papers():
+def test_missing_tool_call_retry_does_not_force_domain_specific_download_tool():
     orchestrator = _build_orchestrator_stub()
 
     prompt = "Download arXiv:2506.16596 and store it as an artefact."
@@ -125,12 +127,10 @@ def test_missing_tool_call_retry_forces_download_paper_over_list_papers():
         user_prompt=prompt,
         missing_required_tools=["download_paper"],
     )
-    assert forced is not None
-    assert any(call["tool"] == "download_paper" for call in forced)
-    assert not any(call["tool"] == "list_papers" for call in forced)
+    assert forced is None
 
 
-def test_missing_tool_call_retry_forces_finalise_cached_paper_when_requested():
+def test_missing_tool_call_retry_does_not_force_domain_specific_finalise_tool():
     orchestrator = _build_orchestrator_stub()
 
     prompt = "Finalise cached arXiv:2506.16596v2 and store it as an artefact."
@@ -146,9 +146,7 @@ def test_missing_tool_call_retry_forces_finalise_cached_paper_when_requested():
         user_prompt=prompt,
         missing_required_tools=["finalise_cached_paper"],
     )
-    assert forced is not None
-    assert any(call["tool"] == "finalise_cached_paper" for call in forced)
-    assert not any(call["tool"] == "list_papers" for call in forced)
+    assert forced is None
 
 
 def test_missing_tool_call_retry_forces_explicit_scholarly_materialisation_tool():
@@ -157,9 +155,7 @@ def test_missing_tool_call_retry_forces_explicit_scholarly_materialisation_tool(
     forced = orchestrator._infer_missing_tool_call_retry_tool_calls(
         [],
         user_prompt="Represent the corresponding paper from #V#uploaded_file_copy_abc123.",
-        missing_required_tools=[
-            "materialise_scholarly_representation_for_file_copy"
-        ],
+        missing_required_tools=["materialise_scholarly_representation_for_file_copy"],
         missing_required_scholarly_representation_file_copy_ids=[
             "#V#uploaded_file_copy_abc123"
         ],

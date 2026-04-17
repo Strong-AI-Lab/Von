@@ -189,6 +189,25 @@ def _workflow_definition_loader(workflow_id: str):
         return None
 
 
+def _workflow_concept_exists(workflow_id: str) -> bool:
+    workflow_id_clean = _clean_text(workflow_id)
+    if not workflow_id_clean:
+        return False
+    try:
+        from ..db.repositories.concepts_repository import ConceptsRepository
+
+        return bool(
+            ConceptsRepository.find_one({"concept_id": workflow_id_clean}, {"_id": 1})
+        )
+    except Exception:
+        logger.debug(
+            "workflow studio concept existence check failed for %s",
+            workflow_id_clean,
+            exc_info=True,
+        )
+        return False
+
+
 def _load_runtime_definition(
     workflow_id: str,
 ) -> tuple[Any | None, str, Any]:
@@ -1618,9 +1637,16 @@ def apply_workflow_authoring_spec(
     purpose = _clean_text(
         authoring_spec.get("description") or authoring_spec.get("workflow_description")
     )
+    runtime_definition, _runtime_source, _registry = _load_runtime_definition(
+        _clean_text(workflow_id)
+    )
+    create_missing = not (
+        runtime_definition is not None
+        or _workflow_concept_exists(_clean_text(workflow_id))
+    )
     publication = publish_workflow_definition_from_definition(
         definition=definition,
-        create_missing=True,
+        create_missing=create_missing,
         purpose=purpose or None,
     )
     return {
