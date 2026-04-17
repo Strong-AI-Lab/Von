@@ -87,6 +87,22 @@ _WRITE_TOOL_NAMES = {
     "remove_relationships_bulk",
     "undo_relationship_removal",
     "sub_issue_write",
+    "task_add_attachment",
+    "task_add_comment",
+    "task_add_worklog",
+    "task_assign",
+    "task_bulk_update",
+    "task_create",
+    "task_create_subtask",
+    "task_delete",
+    "task_import_jira_issues",
+    "task_link",
+    "task_set_parent",
+    "task_transition",
+    "task_unassign",
+    "task_unlink",
+    "task_update_fields",
+    "task_update_status",
     "upsert_renderer_profile",
     "upsert_singleton_text_relation",
     "upsert_text_relation",
@@ -147,6 +163,14 @@ _VERIFICATION_READ_TOOL_NAMES = {
     "search_repositories",
     "search_users",
     "search_knowledge_base",
+    "task_get",
+    "task_get_history",
+    "task_get_transitions",
+    "task_list",
+    "task_list_attachments",
+    "task_list_comments",
+    "task_list_worklog",
+    "task_search",
     "vontology_concept_search",
     "workflow_get_instance",
     "workflow_get_schedule",
@@ -352,6 +376,11 @@ _AUX_REQUIRED_FILE_COPY_ID_FIELDS = (
     "required_scholarly_representation_for_file_copy_ids",
     "required_representation_for_file_copy_ids",
     "required_read_file_copy_ids",
+)
+_AUX_REQUIRED_TOOL_FIELDS = (
+    "required_tools",
+    "explicit_required_tools",
+    "contract_required_tools",
 )
 
 _REPRESENTATION_DEFAULT_DECISION_POLICY_FALLBACK = {
@@ -3745,6 +3774,29 @@ def _extract_required_file_copy_ids_from_aux(
     return _dedupe_string_sequence(concept_ids)
 
 
+def _extract_required_tool_names_from_aux(
+    aux_llm_calls: Sequence[Mapping[str, Any]] | None,
+) -> list[str]:
+    required_tools: list[str] = []
+    for entry in aux_llm_calls or ():
+        if not isinstance(entry, Mapping):
+            continue
+        entry_type = (_safe_str(entry.get("type")) or "").strip().lower()
+        if entry_type not in {
+            "prompt_tool_requirements",
+            "prompt_tool_requirements_preflight",
+        }:
+            continue
+        for field_name in _AUX_REQUIRED_TOOL_FIELDS:
+            raw_values = entry.get(field_name)
+            if not isinstance(raw_values, Sequence) or isinstance(
+                raw_values, (str, bytes)
+            ):
+                continue
+            required_tools.extend(raw_values)
+    return _dedupe_string_sequence(required_tools)
+
+
 def _extract_required_scholarly_file_copy_ids_from_aux(
     aux_llm_calls: Sequence[Mapping[str, Any]] | None,
 ) -> list[str]:
@@ -4215,21 +4267,32 @@ def _extract_applied_workflow_continuation_context(
     return None
 
 
-def _representation_contract_from_continuation_context(
+def _required_effects_contract_from_continuation_context(
     continuation_context: Mapping[str, Any] | None,
+    *,
+    intent_class: str | None = None,
 ) -> dict[str, Any] | None:
     if not isinstance(continuation_context, Mapping):
         return None
     contract = continuation_context.get("required_effects_contract")
     if not isinstance(contract, Mapping):
         return None
-    intent_class = _safe_str(contract.get("intent_class"))
+    contract_intent_class = _safe_str(contract.get("intent_class"))
     schema_version = _safe_str(contract.get("schema_version"))
-    if intent_class != "representation":
+    if intent_class and contract_intent_class != intent_class:
         return None
     if schema_version and schema_version != _REPRESENTATION_CONTRACT_SCHEMA_VERSION:
         return None
     return dict(contract)
+
+
+def _representation_contract_from_continuation_context(
+    continuation_context: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    return _required_effects_contract_from_continuation_context(
+        continuation_context,
+        intent_class="representation",
+    )
 
 
 def _build_representation_required_effects_contract(
@@ -4353,6 +4416,186 @@ def _build_representation_required_effects_contract(
         "required_effects": required_effects,
     }
     return contract_payload
+
+
+def _is_prompt_required_evidence_tool(tool_name: Any) -> bool:
+    cleaned = _safe_str(tool_name)
+    if not cleaned:
+        return False
+    lowered = cleaned.lower()
+    if lowered in _WRITE_TOOL_NAMES:
+        return False
+    if (
+        lowered in _SEARCH_EVIDENCE_TOOL_NAMES
+        or lowered in _VERIFICATION_READ_TOOL_NAMES
+        or lowered in _READ_ONLY_JIRA_TOOLS
+    ):
+        return True
+    return lowered.startswith(_VERIFICATION_READ_TOOL_PREFIXES) or lowered.startswith(
+        _SEARCH_EVIDENCE_TOOL_PREFIXES
+    )
+
+
+def _is_prompt_required_mutation_tool(tool_name: Any) -> bool:
+    cleaned = _safe_str(tool_name)
+    if not cleaned:
+        return False
+    return cleaned.lower() in _WRITE_TOOL_NAMES
+
+
+def _build_prompt_required_evidence_contract(
+    *,
+    prompt_text: Any,
+    aux_llm_calls: Sequence[Mapping[str, Any]] | None,
+    required_prompt_tools: Sequence[Any] | None = None,
+) -> dict[str, Any] | None:
+    continuation_context = _extract_applied_workflow_continuation_context(aux_llm_calls)
+    continuation_contract = _required_effects_contract_from_continuation_context(
+        continuation_context,
+        intent_class="evidence",
+    )
+    if isinstance(continuation_contract, Mapping):
+        return continuation_contract
+
+    tool_names = _dedupe_string_sequence(
+        [
+            *(required_prompt_tools or ()),
+            *_extract_required_tool_names_from_aux(aux_llm_calls),
+        ]
+    )
+    evidence_tools = [
+        tool_name
+        for tool_name in tool_names
+        if _is_prompt_required_evidence_tool(tool_name)
+    ]
+    if not evidence_tools:
+        return None
+
+    required_effects: list[dict[str, Any]] = []
+    for index, tool_name in enumerate(evidence_tools, start=1):
+        slug = re.sub(r"[^a-z0-9]+", "_", tool_name.lower()).strip("_") or "tool"
+        missing_code = f"prompt_required_evidence_{slug}_missing"
+        required_effects.append(
+            {
+                "effect_id": f"effect_prompt_required_evidence_{slug}_{index}",
+                "intent_origin": "prompt_required_effects_contract",
+                "effect_type": "required_evidence",
+                "description": (
+                    f"Observe required evidence retrieval via {tool_name}."
+                ),
+                "required_tools": [tool_name],
+                "required_tools_match": "all",
+                "targets": [],
+                "required_predicates": [],
+                "postcondition_required": True,
+                "postcondition_strategy": "execution_observed",
+                "status": "not_executed",
+                "status_reason": (
+                    f"Required evidence tool was not observed: {tool_name}."
+                ),
+                "missing_failure_code": missing_code,
+                "failed_failure_code": f"prompt_required_evidence_{slug}_failed",
+                "failure_code": missing_code,
+                "failure_codes": [missing_code],
+            }
+        )
+
+    prompt_preview = _safe_str(prompt_text)
+    return {
+        "schema_version": _REPRESENTATION_CONTRACT_SCHEMA_VERSION,
+        "contract_id": (
+            "prompt_required_evidence_"
+            f"{_hash_payload({'required_tools': evidence_tools, 'prompt': prompt_preview}) or 'tools'}"
+        ),
+        "intent_class": "evidence",
+        "domain_profile_id": "prompt_required_evidence",
+        "artefact_context": {
+            "required_tools": list(evidence_tools),
+            "prompt_preview": prompt_preview[:500] if prompt_preview else "",
+        },
+        "profile_source": "prompt_tool_requirements",
+        "default_decision_policy": dict(_REPRESENTATION_DEFAULT_DECISION_POLICY_FALLBACK),
+        "required_effects": required_effects,
+    }
+
+
+def _build_prompt_required_mutation_contract(
+    *,
+    prompt_text: Any,
+    aux_llm_calls: Sequence[Mapping[str, Any]] | None,
+    required_prompt_tools: Sequence[Any] | None = None,
+) -> dict[str, Any] | None:
+    continuation_context = _extract_applied_workflow_continuation_context(aux_llm_calls)
+    continuation_contract = _required_effects_contract_from_continuation_context(
+        continuation_context,
+        intent_class="mutation",
+    )
+    if isinstance(continuation_contract, Mapping):
+        return continuation_contract
+
+    prompt_preview = _safe_str(prompt_text)
+    if not prompt_preview or prompt_explicitly_denies_write(prompt_preview):
+        return None
+
+    tool_names = _dedupe_string_sequence(
+        [
+            *(required_prompt_tools or ()),
+            *_extract_required_tool_names_from_aux(aux_llm_calls),
+        ]
+    )
+    mutation_tools = [
+        tool_name
+        for tool_name in tool_names
+        if _is_prompt_required_mutation_tool(tool_name)
+    ]
+    if not mutation_tools:
+        return None
+
+    required_effects: list[dict[str, Any]] = []
+    for index, tool_name in enumerate(mutation_tools, start=1):
+        slug = re.sub(r"[^a-z0-9]+", "_", tool_name.lower()).strip("_") or "tool"
+        missing_code = f"prompt_required_mutation_{slug}_missing"
+        required_effects.append(
+            {
+                "effect_id": f"effect_prompt_required_mutation_{slug}_{index}",
+                "intent_origin": "prompt_required_effects_contract",
+                "effect_type": "required_mutation",
+                "description": (
+                    f"Observe required mutating tool execution via {tool_name}."
+                ),
+                "required_tools": [tool_name],
+                "required_tools_match": "all",
+                "targets": [],
+                "required_predicates": [],
+                "postcondition_required": True,
+                "postcondition_strategy": "execution_observed",
+                "status": "not_executed",
+                "status_reason": (
+                    f"Required mutating tool was not observed: {tool_name}."
+                ),
+                "missing_failure_code": missing_code,
+                "failed_failure_code": f"prompt_required_mutation_{slug}_failed",
+                "failure_code": missing_code,
+                "failure_codes": [missing_code],
+            }
+        )
+
+    return {
+        "schema_version": _REPRESENTATION_CONTRACT_SCHEMA_VERSION,
+        "contract_id": (
+            "prompt_required_mutation_"
+            f"{_hash_payload({'required_tools': mutation_tools, 'prompt': prompt_preview}) or 'tools'}"
+        ),
+        "intent_class": "mutation",
+        "domain_profile_id": "prompt_required_mutation",
+        "artefact_context": {
+            "required_tools": list(mutation_tools),
+            "prompt_preview": prompt_preview[:500],
+        },
+        "profile_source": "prompt_tool_requirements",
+        "default_decision_policy": dict(_REPRESENTATION_DEFAULT_DECISION_POLICY_FALLBACK),
+        "required_effects": required_effects,
+    }
 
 
 def _load_workflow_required_effects_contract(
@@ -5511,6 +5754,7 @@ def build_turn_execution_record(
     critic_verdict: Mapping[str, Any] | None = None,
     completion_gate_verdict: Mapping[str, Any] | None = None,
     completion_report: Mapping[str, Any] | None = None,
+    required_prompt_tools: Sequence[Any] | None = None,
 ) -> dict[str, Any]:
     resolved_actor_concept_id, actor_identity_source = _resolve_actor_concept_identity(
         actor_concept_id=actor_concept_id,
@@ -5570,6 +5814,20 @@ def build_turn_execution_record(
         prompt_text=prompt_text,
         aux_llm_calls=aux_llm_calls,
     )
+    prompt_required_mutation_contract = (
+        None
+        if isinstance(representation_effects_contract, Mapping)
+        else _build_prompt_required_mutation_contract(
+            prompt_text=prompt_text,
+            aux_llm_calls=aux_llm_calls,
+            required_prompt_tools=required_prompt_tools,
+        )
+    )
+    prompt_required_evidence_contract = _build_prompt_required_evidence_contract(
+        prompt_text=prompt_text,
+        aux_llm_calls=aux_llm_calls,
+        required_prompt_tools=required_prompt_tools,
+    )
     workflow_required_effects_contract, workflow_required_effects_contract_source = (
         _load_workflow_required_effects_contract(
             workflow_id=selected_workflow_id,
@@ -5577,6 +5835,20 @@ def build_turn_execution_record(
     )
     representation_effects = _materialise_required_effects_from_contract(
         contract=representation_effects_contract,
+        successful_tools=successful_tools,
+        failed_tools=failed_tools,
+        blocked_tools=blocked_tools,
+        tool_invocations=tool_invocations,
+    )
+    prompt_required_mutation_effects = _materialise_required_effects_from_contract(
+        contract=prompt_required_mutation_contract,
+        successful_tools=successful_tools,
+        failed_tools=failed_tools,
+        blocked_tools=blocked_tools,
+        tool_invocations=tool_invocations,
+    )
+    prompt_required_evidence_effects = _materialise_required_effects_from_contract(
+        contract=prompt_required_evidence_contract,
         successful_tools=successful_tools,
         failed_tools=failed_tools,
         blocked_tools=blocked_tools,
@@ -5592,6 +5864,8 @@ def build_turn_execution_record(
 
     required_effects: list[dict[str, Any]] = []
     required_effects.extend(representation_effects)
+    required_effects.extend(prompt_required_mutation_effects)
+    required_effects.extend(prompt_required_evidence_effects)
     required_effects.extend(workflow_required_effects)
 
     mutation_effects: list[dict[str, Any]] = []
@@ -5699,29 +5973,42 @@ def build_turn_execution_record(
         )
 
     execution_summary_with_contract = dict(execution_summary)
-    if isinstance(representation_effects_contract, Mapping):
+    primary_required_effects_contract = (
+        representation_effects_contract
+        if isinstance(representation_effects_contract, Mapping)
+        else (
+            prompt_required_mutation_contract
+            if isinstance(prompt_required_mutation_contract, Mapping)
+            else None
+        )
+    )
+    if primary_required_effects_contract is None and isinstance(
+        prompt_required_evidence_contract, Mapping
+    ):
+        primary_required_effects_contract = prompt_required_evidence_contract
+    if isinstance(primary_required_effects_contract, Mapping):
         execution_summary_with_contract["required_effects_contract_id"] = _safe_str(
-            representation_effects_contract.get("contract_id")
+            primary_required_effects_contract.get("contract_id")
         )
         execution_summary_with_contract["required_effects_contract_domain"] = _safe_str(
-            representation_effects_contract.get("domain_profile_id")
+            primary_required_effects_contract.get("domain_profile_id")
         )
         execution_summary_with_contract[
             "required_effects_contract_domain_concept_id"
-        ] = _safe_str(representation_effects_contract.get("domain_profile_concept_id"))
+        ] = _safe_str(primary_required_effects_contract.get("domain_profile_concept_id"))
         execution_summary_with_contract["required_effects_contract_intent"] = _safe_str(
-            representation_effects_contract.get("intent_class")
+            primary_required_effects_contract.get("intent_class")
         )
         execution_summary_with_contract["required_effects_contract_profile_source"] = (
-            _safe_str(representation_effects_contract.get("profile_source"))
+            _safe_str(primary_required_effects_contract.get("profile_source"))
         )
         execution_summary_with_contract[
             "required_effects_contract_profile_version_hash"
-        ] = _safe_str(representation_effects_contract.get("profile_version_hash"))
+        ] = _safe_str(primary_required_effects_contract.get("profile_version_hash"))
         execution_summary_with_contract["required_effects_declared_count"] = len(
-            representation_effects_contract.get("required_effects") or []
+            primary_required_effects_contract.get("required_effects") or []
         )
-        profile_resolution = representation_effects_contract.get("profile_resolution")
+        profile_resolution = primary_required_effects_contract.get("profile_resolution")
         if isinstance(profile_resolution, Mapping):
             execution_summary_with_contract[
                 "required_effects_contract_profile_requested_ids"
@@ -5790,7 +6077,8 @@ def build_turn_execution_record(
             "tool_invocations": serialised_invocations,
             "search_evidence": search_evidence_payload,
             "summary": execution_summary_with_contract,
-            "required_effects_contract": representation_effects_contract,
+            "required_effects_contract": primary_required_effects_contract,
+            "prompt_required_mutation_contract": prompt_required_mutation_contract,
             "workflow_required_effects_contract": workflow_required_effects_contract,
             "diagnostic_events": diagnostic_events,
             "retry": retry,

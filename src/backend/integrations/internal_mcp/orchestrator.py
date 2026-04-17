@@ -3556,6 +3556,15 @@ class InternalMCPChatOrchestrator:
         data = request.data
         aux_log = data.setdefault("aux_llm_calls", [])
         augmented_context = data.get("augmented_context") or []
+        successful_tool_names = self._extract_successful_tool_names(
+            cast(
+                Sequence[Mapping[str, Any]] | None,
+                data.get("invocations")
+                if isinstance(data.get("invocations"), Sequence)
+                and not isinstance(data.get("invocations"), (str, bytes, bytearray))
+                else None,
+            )
+        )
         missing_required_tools = data.get("missing_prompt_tools")
         if not isinstance(missing_required_tools, list):
             missing_required_tools = []
@@ -3726,6 +3735,76 @@ class InternalMCPChatOrchestrator:
         turn_expected_outcome_contract = self._build_turn_expected_outcome_contract(
             data
         )
+        missing_surface_notes: list[str] = []
+        if isinstance(turn_expected_outcome_contract, Mapping):
+            contract_text = "\n".join(
+                str(field_value).strip()
+                for field_name in (
+                    "summary",
+                    "grounding_requirement",
+                    "precision_policy",
+                    "selector_guidance",
+                    "answering_guidance",
+                    "reasoning",
+                )
+                for field_value in (turn_expected_outcome_contract.get(field_name),)
+                if isinstance(field_value, str) and str(field_value).strip()
+            ).lower()
+            if contract_text:
+                if (
+                    "jira" in contract_text
+                    and "jira_search" not in successful_tool_names
+                    and "jira_get_issue" not in successful_tool_names
+                ):
+                    missing_surface_notes.append(
+                        "A Jira retrieval step required by the turn contract has not been completed yet."
+                    )
+                if (
+                    "arxiv" in contract_text
+                    and "search_arxiv" not in successful_tool_names
+                ):
+                    missing_surface_notes.append(
+                        "An arXiv retrieval step required by the turn contract has not been completed yet."
+                    )
+                if (
+                    (
+                        "knowledge base" in contract_text
+                        or " in my kb" in contract_text
+                        or "represented" in contract_text
+                    )
+                    and "search_knowledge_base" not in successful_tool_names
+                    and "search_concepts" not in successful_tool_names
+                ):
+                    missing_surface_notes.append(
+                        "A represented-knowledge retrieval step required by the turn contract has not been completed yet."
+                    )
+                if (
+                    "task_create" in contract_text
+                    and "task_create" not in successful_tool_names
+                ):
+                    missing_surface_notes.append(
+                        "A task creation step required by the turn contract has not been completed yet."
+                    )
+        if successful_tool_names or missing_required_tools or missing_surface_notes:
+            retry_guidance_lines = ["Tool recovery context:"]
+            if successful_tool_names:
+                retry_guidance_lines.append(
+                    "- Already invoked successfully this turn: "
+                    + ", ".join(successful_tool_names)
+                )
+            if missing_required_tools:
+                retry_guidance_lines.append(
+                    "- Explicitly missing required tools: "
+                    + ", ".join(missing_required_tools)
+                )
+            retry_guidance_lines.extend(f"- {note}" for note in missing_surface_notes)
+            retry_guidance_lines.append(
+                "- Prefer emitting only the still-missing tool calls rather than repeating earlier successful retrieval steps."
+            )
+            retry_context = [
+                {"role": "system", "content": "\n".join(retry_guidance_lines)},
+                *retry_context,
+            ]
 
         forced = self._infer_missing_tool_call_retry_tool_calls(
             augmented_context,
@@ -3737,6 +3816,7 @@ class InternalMCPChatOrchestrator:
             missing_required_scholarly_representation_file_copy_ids=missing_required_scholarly_file_copy_ids,
             required_create_type_name=required_create_type_name,
             required_url_extraction_url=required_url_extraction_url,
+            invoked_tool_names=successful_tool_names,
         )
         if forced:
             import json
@@ -4165,6 +4245,7 @@ class InternalMCPChatOrchestrator:
             "missing_tool_call_retry_budget": data.get(
                 "missing_tool_call_retry_budget"
             ),
+            "invocations": data.get("invocations"),
             "required_prompt_tools": data.get("required_prompt_tools"),
             "required_prompt_fetch_concept_ids": data.get(
                 "required_prompt_fetch_concept_ids"
@@ -5693,6 +5774,22 @@ class InternalMCPChatOrchestrator:
             tool_invocations=(),
             url_requirement=url_requirement,
         )
+        explicit_required_tools = tuple(prompt_requirements.required_tools)
+        prompt_requirements = self._augment_prompt_requirements_with_turn_contract(
+            evaluation=prompt_requirements,
+            turn_expected_outcome_contract=self._build_turn_expected_outcome_contract(
+                data
+            ),
+            method_catalogue=(
+                method_catalogue if isinstance(method_catalogue, Mapping) else None
+            ),
+            tool_invocations=(),
+        )
+        contract_required_tools = [
+            tool_name
+            for tool_name in prompt_requirements.required_tools
+            if tool_name not in explicit_required_tools
+        ]
 
         self._store_prompt_requirement_evaluation(data, prompt_requirements)
         data["prompt_requirement_url_policy"] = dict(url_requirement)
@@ -5707,6 +5804,8 @@ class InternalMCPChatOrchestrator:
                         {
                             "type": "prompt_tool_requirements_preflight",
                             "stage": "tool_plan",
+                            "explicit_required_tools": list(explicit_required_tools),
+                            "contract_required_tools": list(contract_required_tools),
                             "required_tools": list(prompt_requirements.required_tools),
                             "required_url_extraction_tool": (
                                 prompt_requirements.required_url_extraction_tool
@@ -5721,12 +5820,12 @@ class InternalMCPChatOrchestrator:
                         component="internal_mcp_orchestrator",
                         function="_action_tool_calling_preflight_requirements",
                         decision_class="prompt_requirement_inference",
-                        decision_source="explicit_identifier_parse",
+                        decision_source="prompt_plus_turn_contract",
                         changed_outcome=bool(prompt_requirements.required_tools),
                         reason_code=(
-                            "explicit_prompt_tool_requirement_detected"
+                            "prompt_or_turn_contract_tool_requirement_detected"
                             if prompt_requirements.required_tools
-                            else "no_explicit_prompt_tool_requirement"
+                            else "no_prompt_or_turn_contract_tool_requirement"
                         ),
                         possible_inappropriate_python_code_use=False,
                     )
@@ -6086,6 +6185,18 @@ class InternalMCPChatOrchestrator:
                 if isinstance(prompt_requirement_url_policy, Mapping)
                 else None
             ),
+        )
+        prompt_requirements = self._augment_prompt_requirements_with_turn_contract(
+            evaluation=prompt_requirements,
+            turn_expected_outcome_contract=self._build_turn_expected_outcome_contract(
+                data
+            ),
+            method_catalogue=(
+                method_catalogue_for_requirements
+                if isinstance(method_catalogue_for_requirements, Mapping)
+                else None
+            ),
+            tool_invocations=(),
         )
         self._store_prompt_requirement_evaluation(data, prompt_requirements)
         required_prompt_tools = list(prompt_requirements.required_tools)
@@ -7579,6 +7690,18 @@ class InternalMCPChatOrchestrator:
                     else None
                 ),
             )
+            prompt_requirements = self._augment_prompt_requirements_with_turn_contract(
+                evaluation=prompt_requirements,
+                turn_expected_outcome_contract=self._build_turn_expected_outcome_contract(
+                    data
+                ),
+                method_catalogue=(
+                    method_catalogue_for_requirements
+                    if isinstance(method_catalogue_for_requirements, Mapping)
+                    else None
+                ),
+                tool_invocations=invocations_for_requirements,
+            )
             required_prompt_tools = list(prompt_requirements.required_tools)
             required_prompt_fetch_concept_ids = list(
                 prompt_requirements.required_fetch_concept_ids
@@ -7794,6 +7917,100 @@ class InternalMCPChatOrchestrator:
                             }
                         )
 
+                parent_forced_tool_calls = self._infer_missing_tool_call_retry_tool_calls(
+                    follow_up_context,
+                    user_prompt=(
+                        prompt_for_requirements
+                        if isinstance(prompt_for_requirements, str)
+                        else (
+                            data.get("prompt")
+                            if isinstance(data.get("prompt"), str)
+                            else ""
+                        )
+                    ),
+                    turn_expected_outcome_contract=(
+                        self._build_turn_expected_outcome_contract(data)
+                    ),
+                    missing_required_tools=missing_prompt_tools,
+                    missing_required_fetch_concept_ids=(
+                        missing_prompt_fetch_concept_ids
+                    ),
+                    missing_required_read_file_copy_ids=(
+                        missing_prompt_read_file_copy_ids
+                    ),
+                    missing_required_scholarly_representation_file_copy_ids=(
+                        missing_prompt_scholarly_representation_file_copy_ids
+                    ),
+                    required_create_type_name=required_prompt_create_type_name,
+                    required_url_extraction_url=(
+                        prompt_requirements.required_url_extraction_url
+                    ),
+                    invoked_tool_names=(
+                        self._extract_successful_tool_names(invocations_for_requirements)
+                    ),
+                )
+                if parent_forced_tool_calls:
+                    import json
+
+                    current_response = (
+                        json.dumps(parent_forced_tool_calls[0])
+                        if len(parent_forced_tool_calls) == 1
+                        else json.dumps(parent_forced_tool_calls)
+                    )
+                    missing_tool_call_retry_suppressed = False
+                    missing_tool_call_retry_stop_reason = None
+                    missing_tool_call_recovery_outcome = (
+                        "retry_succeeded_parent_fallback"
+                    )
+                    if isinstance(aux_llm_calls, list):
+                        try:
+                            aux_llm_calls.append(
+                                annotate_python_decision_event(
+                                    {
+                                        "type": "missing_tool_call_retry",
+                                        "path": "legacy",
+                                        "mechanism": "parent_retry_fallback",
+                                        "stage": "backfill",
+                                        "retry_reason": (
+                                            data.get("missing_tool_call_retry_reason")
+                                            or ""
+                                        ),
+                                        "response_preview": current_response[:800],
+                                    },
+                                    stage="missing_tool_recovery",
+                                    component="internal_mcp_orchestrator",
+                                    function="_action_tool_calling_backfill",
+                                    decision_class="missing_tool_call_retry",
+                                    decision_source="workflow_retry_parent_fallback",
+                                    changed_outcome=True,
+                                    reason_code="forced_tool_call_injected",
+                                    possible_inappropriate_python_code_use=False,
+                                )
+                            )
+                        except Exception:
+                            pass
+                    return WorkflowActionResult(
+                        outputs={
+                            "more_tool_calls": True,
+                            "tool_calls_present": True,
+                            "tool_calls_validated": False,
+                            "tool_calls": parent_forced_tool_calls,
+                            "current_response": current_response,
+                            "remaining_tool_calls": [],
+                            "missing_tool_call_retry_attempts": missing_tool_call_retry_attempts,
+                            "missing_tool_call_retry_budget": missing_tool_call_retry_budget,
+                            "missing_tool_call_retry_remaining": max(
+                                0,
+                                missing_tool_call_retry_budget
+                                - missing_tool_call_retry_attempts,
+                            ),
+                            "missing_tool_call_retry_suppressed": missing_tool_call_retry_suppressed,
+                            "missing_tool_call_retry_stop_reason": missing_tool_call_retry_stop_reason,
+                            "missing_tool_call_recovery_outcome": missing_tool_call_recovery_outcome,
+                            "result": True,
+                        }
+                    )
+
                 if interpretation.tool_call_parse_error is not None:
                     build_error = data.get("build_parse_error_result")
                     if callable(build_error):
@@ -7940,6 +8157,11 @@ class InternalMCPChatOrchestrator:
             critic_verdict=data.get("critic_verdict"),
             completion_gate_verdict=data.get("completion_gate_verdict"),
             completion_report=data.get("completion_report"),
+            required_prompt_tools=(
+                data.get("required_prompt_tools")
+                if isinstance(data.get("required_prompt_tools"), list)
+                else None
+            ),
         )
 
         completion_gate = turn_execution_record.get("completion_gate")
@@ -8880,6 +9102,16 @@ class InternalMCPChatOrchestrator:
         if not lowered:
             return "unknown"
 
+        if lowered in {
+            "list_papers",
+            "read_paper",
+            "get_paper_metadata",
+            "download_paper",
+            "finalise_cached_paper",
+            "materialise_scholarly_representation_for_file_copy",
+        } or "arxiv" in lowered:
+            return "arxiv"
+
         for prefix, family in cls._STRUCTURED_TOOL_FAMILY_PREFIXES:
             if lowered.startswith(prefix):
                 return family
@@ -8955,6 +9187,100 @@ class InternalMCPChatOrchestrator:
                 prompts.append(text)
         return prompts
 
+    @staticmethod
+    def _context_text_fragments(
+        context: Sequence[Mapping[str, Any]] | None,
+    ) -> list[str]:
+        if not isinstance(context, Sequence):
+            return []
+
+        fragments: list[str] = []
+        for message in context:
+            if not isinstance(message, Mapping):
+                continue
+            content = message.get("content")
+            if isinstance(content, str) and content.strip():
+                fragments.append(content.strip())
+        return fragments
+
+    @classmethod
+    def _should_suppress_task_family_hint(
+        cls,
+        *,
+        combined_text: str,
+        required_tools: Sequence[str],
+    ) -> bool:
+        required_lookup = {
+            str(tool_name).strip().lower()
+            for tool_name in required_tools
+            if isinstance(tool_name, str) and str(tool_name).strip()
+        }
+        if not required_lookup.intersection({"jira_search", "jira_get_issue"}):
+            return False
+        if not any(
+            token in combined_text
+            for token in (
+                "jira task",
+                "jira tasks",
+                "linked jira",
+                "jira issue",
+                "jira issues",
+                "task/jira",
+                "jira toolset",
+                "jira toolsets",
+            )
+        ):
+            return False
+        return not any(
+            token in combined_text
+            for token in (
+                "von task",
+                "internal task",
+                "my tasks",
+                "to-do",
+                "todo",
+                "task list",
+                "list_my_tasks",
+                "task_create",
+                "task_update_status",
+                "task_search",
+            )
+        )
+
+    @classmethod
+    def _relation_grounding_requested_for_structured_planner(
+        cls,
+        *,
+        prompt: str,
+        context: Sequence[Mapping[str, Any]] | None,
+    ) -> bool:
+        combined_text = "\n".join(
+            fragment.strip().lower()
+            for fragment in (
+                str(prompt or "").strip(),
+                *cls._context_text_fragments(context),
+            )
+            if isinstance(fragment, str) and fragment.strip()
+        )
+        if not combined_text:
+            return False
+        return any(
+            token in combined_text
+            for token in (
+                "concept/relation retrieval",
+                "relation retrieval",
+                "represented relation evidence",
+                "entity-relative relationship",
+                "authorship or ownership",
+                "author or owner",
+                "ownership relationship",
+                "belongs to the user",
+                "belonging to the user",
+                "grounded to the user",
+                "prefer kb/concept/relation retrieval tools over inventory/listing tools",
+            )
+        )
+
     @classmethod
     def _collect_structured_tool_family_hints(
         cls,
@@ -8980,13 +9306,21 @@ class InternalMCPChatOrchestrator:
             _add_hint(cls._structured_tool_family_for_name(tool_name))
 
         prompt_text = str(prompt or "").strip().lower()
-        context_text = ""
+        context_fragments = cls._context_text_fragments(context)
+        context_text = "\n".join(
+            text.strip().lower()
+            for text in context_fragments[-8:]
+            if isinstance(text, str) and text.strip()
+        )
         recent_user_prompts = cls._recent_user_prompts_from_context(context)
         if recent_user_prompts:
-            context_text = "\n".join(
+            recent_user_text = "\n".join(
                 text.strip().lower()
                 for text in recent_user_prompts[-8:]
                 if isinstance(text, str) and text.strip()
+            )
+            context_text = "\n".join(
+                fragment for fragment in (context_text, recent_user_text) if fragment
             )
 
         combined_text = "\n".join(
@@ -8998,6 +9332,12 @@ class InternalMCPChatOrchestrator:
                     _add_hint(family)
             if re.search(r"https?://\S+", combined_text):
                 _add_hint("search")
+            if cls._should_suppress_task_family_hint(
+                combined_text=combined_text,
+                required_tools=required_tools,
+            ):
+                hints = [family for family in hints if family != "task"]
+                seen.discard("task")
 
         return tuple(hints)
 
@@ -9101,6 +9441,7 @@ class InternalMCPChatOrchestrator:
                 continue
             seen_required.add(key)
             required_tools.append(candidate)
+        required_lookup = {tool_name.lower() for tool_name in required_tools}
 
         baseline_tools: list[str] = []
         seen_baseline: set[str] = set()
@@ -9126,6 +9467,17 @@ class InternalMCPChatOrchestrator:
         candidate_names: list[str] = []
         included_lookup: set[str] = set()
         excluded_reasons: dict[str, str] = {}
+        relation_grounding_requested = (
+            profile == "planner"
+            and self._relation_grounding_requested_for_structured_planner(
+                prompt=prompt,
+                context=context,
+            )
+        )
+
+        def _is_inventory_only_tool(tool_name: str) -> bool:
+            hint = get_tool_planner_hint(tool_name)
+            return isinstance(hint, str) and "inventory only" in hint.lower()
 
         def _mark_excluded(tool_name: str, reason: str) -> None:
             key = tool_name.lower()
@@ -9138,6 +9490,13 @@ class InternalMCPChatOrchestrator:
             if key in included_lookup:
                 return
             if key not in definitions_by_name:
+                return
+            if (
+                relation_grounding_requested
+                and key not in required_lookup
+                and _is_inventory_only_tool(tool_name)
+            ):
+                _mark_excluded(tool_name, "inventory_only_relation_grounding")
                 return
             if _is_write_tool(tool_name):
                 if write_explicitly_denied:
@@ -10551,6 +10910,33 @@ class InternalMCPChatOrchestrator:
 
         return concept_ids
 
+    @staticmethod
+    def _extract_successful_tool_names(
+        tool_invocations: Sequence[Mapping[str, Any]] | None,
+    ) -> list[str]:
+        """Return a stable list of tool names whose earlier attempts were usable."""
+
+        if not tool_invocations:
+            return []
+
+        names: list[str] = []
+        seen: set[str] = set()
+        for invocation in tool_invocations:
+            if not isinstance(invocation, Mapping):
+                continue
+            status = invocation.get("status")
+            if isinstance(status, str) and status.strip().lower() == "error":
+                continue
+            raw_tool = invocation.get("tool")
+            if not isinstance(raw_tool, str) or not raw_tool.strip():
+                continue
+            tool_name = raw_tool.strip().lower()
+            if tool_name in seen:
+                continue
+            seen.add(tool_name)
+            names.append(tool_name)
+        return names
+
     @classmethod
     def _extract_prompt_urls(cls, prompt_text: Any) -> list[str]:
         """Extract explicit URLs from prompt text without inferring read intent."""
@@ -10897,6 +11283,321 @@ class InternalMCPChatOrchestrator:
             scholarly_representation_intent=bool(
                 prompt_requirement_state.get("scholarly_representation_intent")
             ),
+            missing_tools=tuple(missing_tools),
+            missing_fetch_concept_ids=tuple(missing_fetch_concept_ids),
+            missing_read_file_copy_ids=tuple(missing_read_file_copy_ids),
+            missing_scholarly_representation_file_copy_ids=tuple(
+                missing_scholarly_representation_file_copy_ids
+            ),
+            missing_retry_reason=missing_retry_reason,
+        )
+
+    @classmethod
+    def _turn_contract_text_fragments(
+        cls,
+        turn_expected_outcome_contract: Mapping[str, Any] | None,
+    ) -> list[str]:
+        if not isinstance(turn_expected_outcome_contract, Mapping):
+            return []
+        fragments: list[str] = []
+        for field_name in (
+            "summary",
+            "grounding_requirement",
+            "precision_policy",
+            "selector_guidance",
+            "answering_guidance",
+            "reasoning",
+        ):
+            field_value = turn_expected_outcome_contract.get(field_name)
+            if isinstance(field_value, str) and field_value.strip():
+                fragments.append(field_value.strip())
+        return fragments
+
+    @classmethod
+    def _infer_turn_contract_required_tools(
+        cls,
+        *,
+        turn_expected_outcome_contract: Mapping[str, Any] | None,
+        method_catalogue: Mapping[str, Any] | None = None,
+    ) -> tuple[str, ...]:
+        contract_text = "\n".join(
+            fragment.lower()
+            for fragment in cls._turn_contract_text_fragments(
+                turn_expected_outcome_contract
+            )
+            if isinstance(fragment, str) and fragment.strip()
+        )
+        if not contract_text:
+            return ()
+
+        available_tools = {
+            str(tool_name).strip().lower()
+            for tool_name in (
+                method_catalogue.keys() if isinstance(method_catalogue, Mapping) else ()
+            )
+            if isinstance(tool_name, str) and str(tool_name).strip()
+        }
+        required_tools: list[str] = []
+        seen: set[str] = set()
+
+        def _add_tool(tool_name: str) -> None:
+            lowered = tool_name.strip().lower()
+            if not lowered or lowered in seen:
+                return
+            if available_tools and lowered not in available_tools:
+                return
+            seen.add(lowered)
+            required_tools.append(tool_name)
+
+        relation_grounding_requested = any(
+            token in contract_text
+            for token in (
+                "concept/relation retrieval",
+                "relation retrieval",
+                "represented relation evidence",
+                "authorship or ownership",
+                "author or owner",
+                "ownership relationship",
+                "grounded to the user",
+                "belongs to the user",
+                "belonging to the user",
+            )
+        )
+        kb_retrieval_requested = relation_grounding_requested or any(
+            token in contract_text
+            for token in (
+                "kb retrieval",
+                "kb/concept retrieval",
+                "knowledge base",
+                "represented knowledge",
+                "search_knowledge_base",
+            )
+        )
+
+        if kb_retrieval_requested:
+            _add_tool("search_knowledge_base")
+        if relation_grounding_requested or any(
+            token in contract_text
+            for token in (
+                "concept retrieval",
+                "search_concepts",
+                "represented papers",
+            )
+        ):
+            _add_tool("search_concepts")
+        if relation_grounding_requested:
+            _add_tool("find_relations_with_argument")
+        if "arxiv" in contract_text:
+            _add_tool("search_arxiv")
+        if any(
+            token in contract_text
+            for token in ("web search", "search_web", "public web", "external web")
+        ):
+            _add_tool("search_web")
+        if "jira" in contract_text:
+            _add_tool("jira_search")
+        for tool_name in (
+            "task_create",
+            "task_create_subtask",
+            "task_search",
+            "task_list",
+            "list_my_tasks",
+            "task_update_status",
+            "task_assign",
+            "message_create",
+            "message_list",
+        ):
+            if tool_name in contract_text:
+                _add_tool(tool_name)
+
+        return tuple(required_tools)
+
+    @classmethod
+    def _augment_prompt_requirements_with_turn_contract(
+        cls,
+        *,
+        evaluation: _PromptRequirementEvaluation,
+        turn_expected_outcome_contract: Mapping[str, Any] | None,
+        method_catalogue: Mapping[str, Any] | None = None,
+        tool_invocations: Sequence[Mapping[str, Any]] = (),
+    ) -> _PromptRequirementEvaluation:
+        if not isinstance(evaluation, _PromptRequirementEvaluation):
+            evaluation = _PromptRequirementEvaluation(
+                required_tools=tuple(
+                    str(item).strip()
+                    for item in (getattr(evaluation, "required_tools", ()) or ())
+                    if isinstance(item, str) and str(item).strip()
+                ),
+                required_url_extraction_tool=(
+                    str(getattr(evaluation, "required_url_extraction_tool")).strip()
+                    if isinstance(
+                        getattr(evaluation, "required_url_extraction_tool", None), str
+                    )
+                    and str(
+                        getattr(evaluation, "required_url_extraction_tool", None)
+                    ).strip()
+                    else None
+                ),
+                required_url_extraction_url=(
+                    str(getattr(evaluation, "required_url_extraction_url")).strip()
+                    if isinstance(
+                        getattr(evaluation, "required_url_extraction_url", None), str
+                    )
+                    and str(
+                        getattr(evaluation, "required_url_extraction_url", None)
+                    ).strip()
+                    else None
+                ),
+                required_fetch_concept_ids=tuple(
+                    str(item).strip()
+                    for item in (
+                        getattr(evaluation, "required_fetch_concept_ids", ()) or ()
+                    )
+                    if isinstance(item, str) and str(item).strip()
+                ),
+                required_read_file_copy_ids=tuple(
+                    str(item).strip()
+                    for item in (
+                        getattr(evaluation, "required_read_file_copy_ids", ()) or ()
+                    )
+                    if isinstance(item, str) and str(item).strip()
+                ),
+                required_scholarly_representation_file_copy_ids=tuple(
+                    str(item).strip()
+                    for item in (
+                        getattr(
+                            evaluation,
+                            "required_scholarly_representation_file_copy_ids",
+                            (),
+                        )
+                        or ()
+                    )
+                    if isinstance(item, str) and str(item).strip()
+                ),
+                required_create_type_name=(
+                    str(getattr(evaluation, "required_create_type_name")).strip()
+                    if isinstance(getattr(evaluation, "required_create_type_name", None), str)
+                    and str(
+                        getattr(evaluation, "required_create_type_name", None)
+                    ).strip()
+                    else None
+                ),
+                unavailable_required_tools=tuple(
+                    str(item).strip()
+                    for item in (
+                        getattr(evaluation, "unavailable_required_tools", ()) or ()
+                    )
+                    if isinstance(item, str) and str(item).strip()
+                ),
+                scholarly_representation_intent=bool(
+                    getattr(evaluation, "scholarly_representation_intent", False)
+                ),
+                missing_tools=tuple(
+                    str(item).strip()
+                    for item in (getattr(evaluation, "missing_tools", ()) or ())
+                    if isinstance(item, str) and str(item).strip()
+                ),
+                missing_fetch_concept_ids=tuple(
+                    str(item).strip()
+                    for item in (
+                        getattr(evaluation, "missing_fetch_concept_ids", ()) or ()
+                    )
+                    if isinstance(item, str) and str(item).strip()
+                ),
+                missing_read_file_copy_ids=tuple(
+                    str(item).strip()
+                    for item in (
+                        getattr(evaluation, "missing_read_file_copy_ids", ()) or ()
+                    )
+                    if isinstance(item, str) and str(item).strip()
+                ),
+                missing_scholarly_representation_file_copy_ids=tuple(
+                    str(item).strip()
+                    for item in (
+                        getattr(
+                            evaluation,
+                            "missing_scholarly_representation_file_copy_ids",
+                            (),
+                        )
+                        or ()
+                    )
+                    if isinstance(item, str) and str(item).strip()
+                ),
+                missing_retry_reason=(
+                    str(getattr(evaluation, "missing_retry_reason")).strip()
+                    if isinstance(getattr(evaluation, "missing_retry_reason", None), str)
+                    and str(getattr(evaluation, "missing_retry_reason", None)).strip()
+                    else None
+                ),
+            )
+
+        contract_required_tools = cls._infer_turn_contract_required_tools(
+            turn_expected_outcome_contract=turn_expected_outcome_contract,
+            method_catalogue=method_catalogue,
+        )
+        if not contract_required_tools:
+            return evaluation
+
+        merged_required_tools: list[str] = []
+        seen_required: set[str] = set()
+        for tool_name in (*evaluation.required_tools, *contract_required_tools):
+            lowered = str(tool_name).strip().lower()
+            if not lowered or lowered in seen_required:
+                continue
+            seen_required.add(lowered)
+            merged_required_tools.append(str(tool_name).strip())
+
+        available_tools = {
+            str(tool_name).strip().lower()
+            for tool_name in (
+                method_catalogue.keys() if isinstance(method_catalogue, Mapping) else ()
+            )
+            if isinstance(tool_name, str) and str(tool_name).strip()
+        }
+        unavailable_required_tools: list[str] = []
+        seen_unavailable: set[str] = set()
+        for tool_name in (*evaluation.unavailable_required_tools, *merged_required_tools):
+            lowered = str(tool_name).strip().lower()
+            if not lowered or lowered in seen_unavailable:
+                continue
+            if available_tools and lowered in available_tools:
+                continue
+            if not available_tools and lowered not in {
+                str(item).strip().lower()
+                for item in evaluation.unavailable_required_tools
+                if isinstance(item, str) and str(item).strip()
+            }:
+                continue
+            seen_unavailable.add(lowered)
+            unavailable_required_tools.append(lowered)
+
+        (
+            missing_tools,
+            missing_fetch_concept_ids,
+            missing_read_file_copy_ids,
+            missing_scholarly_representation_file_copy_ids,
+        ) = cls._derive_missing_prompt_requirements(
+            required_tools=tuple(merged_required_tools),
+            required_fetch_concept_ids=evaluation.required_fetch_concept_ids,
+            required_read_file_copy_ids=evaluation.required_read_file_copy_ids,
+            required_scholarly_representation_for_file_copy_ids=(
+                evaluation.required_scholarly_representation_file_copy_ids
+            ),
+            tool_invocations=tool_invocations,
+        )
+        missing_retry_reason = cls._build_missing_prompt_retry_reason(
+            missing_tools=missing_tools,
+            missing_fetch_concept_ids=missing_fetch_concept_ids,
+            missing_read_file_copy_ids=missing_read_file_copy_ids,
+            missing_scholarly_representation_file_copy_ids=(
+                missing_scholarly_representation_file_copy_ids
+            ),
+        )
+
+        return replace(
+            evaluation,
+            required_tools=tuple(merged_required_tools),
+            unavailable_required_tools=tuple(unavailable_required_tools),
             missing_tools=tuple(missing_tools),
             missing_fetch_concept_ids=tuple(missing_fetch_concept_ids),
             missing_read_file_copy_ids=tuple(missing_read_file_copy_ids),
@@ -15810,7 +16511,169 @@ class InternalMCPChatOrchestrator:
         tool_lower = tool_name.strip().lower()
         if tool_lower in {"search_concepts", "vontology_concept_search"}:
             return self._shape_search_concepts_payload_for_llm(payload)
+        if tool_lower == "search_web":
+            return self._shape_search_web_payload_for_llm(payload)
+        if tool_lower == "search_arxiv":
+            return self._shape_search_arxiv_payload_for_llm(payload)
+        if tool_lower == "jira_search":
+            return self._shape_jira_search_payload_for_llm(payload)
         return payload
+
+    @classmethod
+    def _shape_search_web_payload_for_llm(
+        cls,
+        payload: Mapping[str, Any],
+        *,
+        max_results: int = 4,
+        max_content_chars: int = 320,
+    ) -> dict[str, Any]:
+        raw_results = payload.get("results")
+        rows = (
+            [row for row in raw_results if isinstance(row, Mapping)]
+            if isinstance(raw_results, list)
+            else []
+        )
+        compact_rows: list[dict[str, Any]] = []
+        for row in rows[:max_results]:
+            compact_row: dict[str, Any] = {}
+            title = row.get("title")
+            if isinstance(title, str) and title.strip():
+                compact_row["title"] = title.strip()
+            url = row.get("url")
+            if isinstance(url, str) and url.strip():
+                compact_row["url"] = url.strip()
+            content = row.get("content")
+            if isinstance(content, str) and content.strip():
+                compact_row["snippet"] = content.strip()[:max_content_chars]
+            if compact_row:
+                compact_rows.append(compact_row)
+        return {
+            "_llm_view": "search_web_results.v1",
+            "query": (
+                str(payload.get("query")).strip()
+                if isinstance(payload.get("query"), str)
+                else None
+            ),
+            "result_count": len(rows),
+            "results": compact_rows,
+        }
+
+    @classmethod
+    def _shape_search_arxiv_payload_for_llm(
+        cls,
+        payload: Mapping[str, Any],
+        *,
+        max_results: int = 4,
+        max_abstract_chars: int = 480,
+        max_authors: int = 6,
+    ) -> dict[str, Any]:
+        raw_papers = payload.get("papers")
+        rows = (
+            [row for row in raw_papers if isinstance(row, Mapping)]
+            if isinstance(raw_papers, list)
+            else []
+        )
+        compact_rows: list[dict[str, Any]] = []
+        for row in rows[:max_results]:
+            compact_row: dict[str, Any] = {}
+            for key in ("id", "title", "published", "url", "resource_uri"):
+                value = row.get(key)
+                if isinstance(value, str) and value.strip():
+                    compact_row[key] = value.strip()
+            authors = row.get("authors")
+            if isinstance(authors, list):
+                author_names = [
+                    str(author).strip()
+                    for author in authors
+                    if isinstance(author, str) and str(author).strip()
+                ]
+                if author_names:
+                    compact_row["authors_preview"] = author_names[:max_authors]
+                    compact_row["author_count"] = len(author_names)
+            categories = row.get("categories")
+            if isinstance(categories, list):
+                compact_row["categories"] = [
+                    str(category).strip()
+                    for category in categories[:6]
+                    if isinstance(category, str) and str(category).strip()
+                ]
+            abstract = row.get("abstract")
+            if isinstance(abstract, str) and abstract.strip():
+                compact_row["abstract_preview"] = abstract.strip()[:max_abstract_chars]
+            if compact_row:
+                compact_rows.append(compact_row)
+        return {
+            "_llm_view": "search_arxiv_results.v1",
+            "query": (
+                str(payload.get("query")).strip()
+                if isinstance(payload.get("query"), str)
+                else None
+            ),
+            "total_results": payload.get("total_results"),
+            "papers": compact_rows,
+        }
+
+    @classmethod
+    def _shape_jira_search_payload_for_llm(
+        cls,
+        payload: Mapping[str, Any],
+        *,
+        max_results: int = 5,
+    ) -> dict[str, Any]:
+        raw_issues = payload.get("issues")
+        rows = (
+            [row for row in raw_issues if isinstance(row, Mapping)]
+            if isinstance(raw_issues, list)
+            else []
+        )
+        compact_rows: list[dict[str, Any]] = []
+        for row in rows[:max_results]:
+            compact_row: dict[str, Any] = {}
+            key = row.get("key")
+            if isinstance(key, str) and key.strip():
+                compact_row["key"] = key.strip()
+            raw_fields = row.get("fields")
+            fields_map = raw_fields if isinstance(raw_fields, Mapping) else {}
+            summary = fields_map.get("summary")
+            if isinstance(summary, str) and summary.strip():
+                compact_row["summary"] = summary.strip()
+            status_value = fields_map.get("status")
+            if isinstance(status_value, Mapping):
+                status_name = status_value.get("name")
+                if isinstance(status_name, str) and status_name.strip():
+                    compact_row["status"] = status_name.strip()
+            issue_type_value = fields_map.get("issuetype")
+            if isinstance(issue_type_value, Mapping):
+                issue_type_name = issue_type_value.get("name")
+                if isinstance(issue_type_name, str) and issue_type_name.strip():
+                    compact_row["issue_type"] = issue_type_name.strip()
+            assignee_value = fields_map.get("assignee")
+            if isinstance(assignee_value, Mapping):
+                display_name = assignee_value.get("displayName")
+                if isinstance(display_name, str) and display_name.strip():
+                    compact_row["assignee"] = display_name.strip()
+            updated = fields_map.get("updated")
+            if isinstance(updated, str) and updated.strip():
+                compact_row["updated"] = updated.strip()
+            labels = fields_map.get("labels")
+            if isinstance(labels, list):
+                compact_row["labels"] = [
+                    str(label).strip()
+                    for label in labels[:6]
+                    if isinstance(label, str) and str(label).strip()
+                ]
+            if compact_row:
+                compact_rows.append(compact_row)
+        return {
+            "_llm_view": "jira_search_results.v1",
+            "jql": (
+                str(payload.get("jql")).strip()
+                if isinstance(payload.get("jql"), str)
+                else None
+            ),
+            "total": payload.get("total"),
+            "issues": compact_rows,
+        }
 
     def _format_tool_result(
         self,
@@ -20398,7 +21261,6 @@ class InternalMCPChatOrchestrator:
     ) -> list[_ToolCallRequest] | None:
         """Build deterministic tool calls for still-missing explicit requirements."""
 
-        del context_messages
         if not missing_required_tools:
             return None
 
@@ -20418,11 +21280,38 @@ class InternalMCPChatOrchestrator:
             if isinstance(item, str) and str(item).strip()
         ]
 
-        concept_ids = self._extract_concept_ids_from_text(user_text)
+        context_fragments: list[str] = []
+        for message in context_messages or ():
+            if not isinstance(message, Mapping):
+                continue
+            content = message.get("content")
+            if isinstance(content, str) and content.strip():
+                context_fragments.append(content.strip())
+
+        combined_text = "\n".join([user_text, *context_fragments]).strip()
+        concept_ids = self._extract_concept_ids_from_text(combined_text or user_text)
         workflow_ids = [
             concept_id for concept_id in concept_ids if "workflow" in concept_id.lower()
         ]
         primary_workflow_id = workflow_ids[0] if workflow_ids else None
+        user_anchor_name: str | None = None
+        user_anchor_concept_id: str | None = None
+        user_anchor_match = re.search(
+            r"(?:current user context|current user)\s*:\s*([^\n(]+?)\s*\((#V#[^)]+)\)",
+            combined_text,
+            flags=re.IGNORECASE,
+        )
+        if user_anchor_match is not None:
+            user_anchor_name = user_anchor_match.group(1).strip() or None
+            user_anchor_concept_id = user_anchor_match.group(2).strip() or None
+        if user_anchor_concept_id is None:
+            candidate_concept_ids = [
+                concept_id
+                for concept_id in concept_ids
+                if "workflow" not in concept_id.lower()
+            ]
+            if candidate_concept_ids:
+                user_anchor_concept_id = candidate_concept_ids[0]
 
         forced_calls: list[_ToolCallRequest] = []
         for tool_name in missing_required_tools:
@@ -20472,6 +21361,57 @@ class InternalMCPChatOrchestrator:
                             "workflow_id": primary_workflow_id,
                             "limit": 5,
                         },
+                    }
+                )
+                continue
+
+            if name == "find_relations_with_argument":
+                if not user_anchor_concept_id:
+                    continue
+                forced_calls.append(
+                    {
+                        "action": "call_tool",
+                        "tool": name,
+                        "payload": {
+                            "concept_id": user_anchor_concept_id,
+                            "limit": 20,
+                        },
+                    }
+                )
+                continue
+
+            if name == "jira_search":
+                jql_clauses: list[str] = []
+                if user_anchor_concept_id:
+                    jql_clauses.append(f'text ~ "\\"{user_anchor_concept_id}\\""')
+                if user_anchor_name:
+                    jql_clauses.append(f'text ~ "\\"{user_anchor_name}\\""')
+                if not jql_clauses:
+                    continue
+                forced_calls.append(
+                    {
+                        "action": "call_tool",
+                        "tool": name,
+                        "payload": {
+                            "jql": " OR ".join(jql_clauses) + " ORDER BY updated DESC",
+                            "max_results": 10,
+                        },
+                    }
+                )
+                continue
+
+            if name == "task_create":
+                task_payload = self._build_task_create_retry_payload(
+                    user_text=user_text,
+                    assignee_concept_id=user_anchor_concept_id,
+                )
+                if not task_payload:
+                    continue
+                forced_calls.append(
+                    {
+                        "action": "call_tool",
+                        "tool": name,
+                        "payload": task_payload,
                     }
                 )
                 continue
@@ -20545,12 +21485,57 @@ class InternalMCPChatOrchestrator:
 
         return forced_calls or None
 
+    @staticmethod
+    def _build_task_create_retry_payload(
+        *,
+        user_text: str,
+        assignee_concept_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        prompt_text = str(user_text or "").strip()
+        if not prompt_text:
+            return None
+
+        extracted_title: str | None = None
+        for pattern in (
+            r"\bcreate(?:\s+me)?\s+(?:a|an)\s+([^.?!]+)",
+            r"\bmake(?:\s+me)?\s+(?:a|an)\s+([^.?!]+)",
+            r"\bbuild(?:\s+me)?\s+(?:a|an)\s+([^.?!]+)",
+        ):
+            match = re.search(pattern, prompt_text, flags=re.IGNORECASE)
+            if match is None:
+                continue
+            candidate = re.sub(r"\s+", " ", match.group(1)).strip(" \t\r\n.,:;\"'")
+            if candidate:
+                extracted_title = candidate
+                break
+
+        if not extracted_title:
+            first_sentence = re.split(r"(?<=[.?!])\s+", prompt_text, maxsplit=1)[0]
+            candidate = re.sub(r"\s+", " ", first_sentence).strip(" \t\r\n")
+            extracted_title = candidate or None
+
+        if not extracted_title:
+            return None
+
+        title = extracted_title[:120].rstrip()
+        if title and title[0].islower():
+            title = title[0].upper() + title[1:]
+
+        payload: dict[str, Any] = {
+            "title": title,
+            "description": prompt_text[:4000],
+        }
+        if isinstance(assignee_concept_id, str) and assignee_concept_id.strip():
+            payload["assignee_concept_id"] = assignee_concept_id.strip()
+        return payload
+
     def _infer_guided_retrieval_retry_tool_calls(
         self,
         *,
         user_text: str,
         context_messages: Sequence[Mapping[str, Any]] | None = None,
         expected_outcome_contract: Mapping[str, Any] | None = None,
+        invoked_tool_names: Sequence[str] | None = None,
     ) -> list[_ToolCallRequest] | None:
         """Force a small retrieval plan when workflow guidance names the steps.
 
@@ -20601,6 +21586,11 @@ class InternalMCPChatOrchestrator:
         }
         if not available_tools:
             return None
+        invoked_lookup = {
+            str(tool_name).strip().lower()
+            for tool_name in (invoked_tool_names or ())
+            if isinstance(tool_name, str) and str(tool_name).strip()
+        }
 
         wants_kb_search = (
             "search_knowledge_base" in combined_context
@@ -20637,7 +21627,11 @@ class InternalMCPChatOrchestrator:
             return None
 
         forced_calls: list[_ToolCallRequest] = []
-        if wants_kb_search and "search_knowledge_base" in available_tools:
+        if (
+            wants_kb_search
+            and "search_knowledge_base" in available_tools
+            and "search_knowledge_base" not in invoked_lookup
+        ):
             forced_calls.append(
                 {
                     "action": "call_tool",
@@ -20645,7 +21639,11 @@ class InternalMCPChatOrchestrator:
                     "payload": {"query": prompt_text, "top_k": 5},
                 }
             )
-        if wants_concept_search and "search_concepts" in available_tools:
+        if (
+            wants_concept_search
+            and "search_concepts" in available_tools
+            and "search_concepts" not in invoked_lookup
+        ):
             forced_calls.append(
                 {
                     "action": "call_tool",
@@ -20658,7 +21656,11 @@ class InternalMCPChatOrchestrator:
                     },
                 }
             )
-        if wants_web_search and "search_web" in available_tools:
+        if (
+            wants_web_search
+            and "search_web" in available_tools
+            and "search_web" not in invoked_lookup
+        ):
             forced_calls.append(
                 {
                     "action": "call_tool",
@@ -20666,7 +21668,11 @@ class InternalMCPChatOrchestrator:
                     "payload": {"query": prompt_text, "max_results": 5},
                 }
             )
-        if wants_arxiv_search and "search_arxiv" in available_tools:
+        if (
+            wants_arxiv_search
+            and "search_arxiv" in available_tools
+            and "search_arxiv" not in invoked_lookup
+        ):
             forced_calls.append(
                 {
                     "action": "call_tool",
@@ -20689,6 +21695,7 @@ class InternalMCPChatOrchestrator:
         ) = None,
         required_create_type_name: str | None = None,
         required_url_extraction_url: str | None = None,
+        invoked_tool_names: Sequence[str] | None = None,
     ) -> list[_ToolCallRequest] | None:
         """Best-effort deterministic recovery for common missing-tool-call cases.
 
@@ -20758,6 +21765,7 @@ class InternalMCPChatOrchestrator:
             user_text=last_user_text,
             context_messages=augmented_context,
             expected_outcome_contract=turn_expected_outcome_contract,
+            invoked_tool_names=invoked_tool_names,
         )
         if guided_retrieval_forced:
             return guided_retrieval_forced
@@ -23076,6 +24084,10 @@ class InternalMCPChatOrchestrator:
             data.get("turn_expected_outcome_profile")
         )
         profile = profile or {}
+        direct_contract = cls._copy_string_key_mapping(
+            data.get("turn_expected_outcome_contract")
+        )
+        direct_contract = direct_contract or {}
         selected_workflow_trace = data.get("selected_workflow_trace")
         trace_contract = cls._copy_string_key_mapping(
             selected_workflow_trace.get("expected_outcome_contract")
@@ -23089,6 +24101,8 @@ class InternalMCPChatOrchestrator:
                 value = data.get(key)
                 if not isinstance(value, str) or not value.strip():
                     value = profile.get(key)
+                if not isinstance(value, str) or not value.strip():
+                    value = direct_contract.get(key)
                 if not isinstance(value, str) or not value.strip():
                     value = trace_contract.get(key)
                 if isinstance(value, str) and value.strip():

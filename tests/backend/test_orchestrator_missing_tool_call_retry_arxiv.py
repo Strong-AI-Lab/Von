@@ -33,6 +33,18 @@ class _Gateway:
                 "category": "read",
                 "description": "Search arXiv papers",
             },
+            "jira_search": {
+                "category": "read",
+                "description": "Search Jira issues using JQL",
+            },
+            "task_create": {
+                "category": "write",
+                "description": "Create a Von task",
+            },
+            "task_search": {
+                "category": "read",
+                "description": "Search Von tasks",
+            },
             "download_paper": {
                 "category": "write",
                 "description": "Download an arXiv paper and store as an artefact",
@@ -306,6 +318,79 @@ def test_missing_tool_call_retry_forces_guided_concept_search_when_contract_name
     ]
 
 
+def test_turn_contract_required_tools_include_explicit_task_create():
+    required = InternalMCPChatOrchestrator._infer_turn_contract_required_tools(
+        turn_expected_outcome_contract={
+            "selector_guidance": (
+                "Use a task creation workflow (task_create) to represent the diary "
+                "entry as a persistent record in Vontology."
+            ),
+            "summary": "Create a diary entry task for today if one does not exist.",
+        },
+        method_catalogue=_Gateway.describe_methods(),
+    )
+
+    assert "task_create" in required
+
+
+def test_missing_tool_call_retry_forces_task_create_from_required_tool():
+    orchestrator = _build_orchestrator_stub()
+    prompt = (
+        "If I don't have one, please create me a diary entry for today. It should "
+        "record the work I've already done around 6am and 8:30am respectively, "
+        "and be open for further work on the rest of today."
+    )
+
+    forced = orchestrator._infer_missing_tool_call_retry_tool_calls(
+        [],
+        user_prompt=prompt,
+        missing_required_tools=["task_create"],
+    )
+
+    assert forced == [
+        {
+            "action": "call_tool",
+            "tool": "task_create",
+            "payload": {
+                "title": "Diary entry for today",
+                "description": prompt,
+            },
+        }
+    ]
+
+
+def test_missing_tool_call_retry_skips_guided_tools_already_invoked():
+    orchestrator = _build_orchestrator_stub()
+    prompt = (
+        "Prepare a short research briefing for me: my represented papers, "
+        "relevant recent arXiv work, and any linked Jira tasks."
+    )
+
+    forced = orchestrator._infer_missing_tool_call_retry_tool_calls(
+        [],
+        user_prompt=prompt,
+        turn_expected_outcome_contract={
+            "selector_guidance": (
+                "Use search_knowledge_base, search_concepts, search_web, and "
+                "search_arxiv to gather evidence for the briefing."
+            ),
+            "grounding_requirement": (
+                "Papers must be grounded in the KB, recent literature must be "
+                "verified via arXiv or web search, and Jira tasks must be "
+                "verified via Jira."
+            ),
+        },
+        invoked_tool_names=[
+            "search_knowledge_base",
+            "search_concepts",
+            "search_web",
+            "search_arxiv",
+        ],
+    )
+
+    assert forced is None
+
+
 def test_run_missing_tool_call_recovery_workflow_projects_turn_contract_from_trace():
     orchestrator = _build_orchestrator_stub()
 
@@ -403,6 +488,90 @@ def test_run_missing_tool_call_recovery_workflow_projects_turn_contract_from_tra
         workflow_context.get("turn_answering_guidance")
         == turn_contract["answering_guidance"]
     )
+
+
+def test_missing_tool_call_retry_injects_retry_context_for_missing_jira_surface():
+    orchestrator = _build_orchestrator_stub()
+    orchestrator._render_authoritative_prompt = cast(
+        Any,
+        lambda *args, **kwargs: SimpleNamespace(
+            text="Return the missing tool call only.",
+            prompt_id="#V#missing_tool_call_retry_prompt",
+        ),
+    )
+
+    llm = _CapturingLLM(
+        [
+            '{"action":"call_tool","tool":"jira_search","payload":{"jql":"project = JVNAUTOSCI ORDER BY updated DESC"}}'
+        ]
+    )
+
+    request = SimpleNamespace(
+        data={
+            "aux_llm_calls": [],
+            "augmented_context": [],
+            "user_prompt": (
+                "Prepare a short research briefing for me: my represented papers, "
+                "relevant recent arXiv work, and any linked Jira tasks."
+            ),
+            "response_text": "I have your papers and recent arXiv work.",
+            "missing_prompt_tools": [],
+            "turn_expected_outcome_contract": {
+                "summary": (
+                    "Return a short research briefing grounded in represented papers, "
+                    "recent arXiv work, and linked Jira tasks."
+                ),
+                "selector_guidance": (
+                    "Use KB retrieval, arXiv search, and Jira retrieval."
+                ),
+                "grounding_requirement": (
+                    "Jira tasks must be verified via the Jira toolset."
+                ),
+            },
+            "invocations": [
+                {"tool": "search_knowledge_base", "status": "ok"},
+                {"tool": "search_concepts", "status": "ok"},
+                {"tool": "search_web", "status": "ok"},
+                {"tool": "search_arxiv", "status": "ok"},
+            ],
+            "tool_calls": None,
+            "tool_call_parse_error": None,
+            "record_llm_call": None,
+            "policy_state": None,
+            "default_model": "gemma4:26b",
+            "registry_snapshot": {},
+            "missing_tool_call_retry_attempts": 0,
+            "missing_tool_call_retry_budget": 2,
+            "prefer_default_model": False,
+            "emit_progress": None,
+        },
+        environment=SimpleNamespace(
+            llm_client=llm,
+            model="gemma4:26b",
+            user_namespace="#V#michael_witbrock@university_of_auckland_strong_ai_lab",
+            auxiliary_system_prompt=None,
+        ),
+        trace=None,
+    )
+
+    result = orchestrator._action_missing_tool_call_retry(cast(Any, request))
+
+    assert result.outputs["missing_tool_call_retry_success"] is True
+    assert result.outputs["tool_calls"] == [
+        {
+            "action": "call_tool",
+            "tool": "jira_search",
+            "payload": {"jql": "project = JVNAUTOSCI ORDER BY updated DESC"},
+        }
+    ]
+    assert llm.calls
+    retry_context = llm.calls[0]["context"]
+    assert isinstance(retry_context, list) and retry_context
+    assert retry_context[0]["role"] == "system"
+    assert "jira retrieval step required by the turn contract" in retry_context[0][
+        "content"
+    ].lower()
+    assert "already invoked successfully this turn" in retry_context[0]["content"].lower()
 
 
 def test_tool_calling_plan_applies_parent_guided_retry_fallback_when_nested_recovery_returns_no_calls():
@@ -512,6 +681,150 @@ def test_tool_calling_plan_applies_parent_guided_retry_fallback_when_nested_reco
             },
         },
     ]
+
+
+def test_tool_calling_backfill_applies_parent_guided_retry_fallback_when_required_surfaces_remain():
+    orchestrator = _build_orchestrator_stub()
+
+    orchestrator._build_follow_up_llm_context = cast(
+        Any, lambda augmented_context, max_chars=4000: list(augmented_context or [])
+    )
+    orchestrator._build_stage_llm_context = cast(
+        Any, lambda **kwargs: (list(kwargs.get("base_context") or []), {})
+    )
+    orchestrator._run_llm_with_fallbacks = cast(
+        Any,
+        lambda **kwargs: (
+            "**Represented Papers**\\nNo papers found in authenticated context.\\n\\n"
+            "**Recent arXiv Work**\\nNo recent arXiv work found in authenticated context.\\n\\n"
+            "**Linked Jira Tasks**\\nNo Jira tasks found in authenticated context.",
+            "gemma4:26b",
+            None,
+        ),
+    )
+    orchestrator._run_missing_tool_call_recovery_workflow = cast(
+        Any, lambda **kwargs: {}
+    )
+    orchestrator._store_prompt_requirement_evaluation = cast(
+        Any, lambda data, prompt_requirements: None
+    )
+    orchestrator._augment_prompt_requirements_with_turn_contract = cast(
+        Any, lambda **kwargs: kwargs["evaluation"]
+    )
+
+    class _PromptRequirements:
+        required_tools = [
+            "search_knowledge_base",
+            "search_concepts",
+            "find_relations_with_argument",
+            "search_arxiv",
+            "jira_search",
+        ]
+        required_fetch_concept_ids: list[str] = []
+        required_read_file_copy_ids: list[str] = []
+        required_scholarly_representation_file_copy_ids: list[str] = []
+        required_create_type_name: str | None = None
+        required_url_extraction_tool: str | None = None
+        required_url_extraction_url: str | None = None
+        missing_tools = ["find_relations_with_argument", "jira_search"]
+        missing_fetch_concept_ids: list[str] = []
+        missing_read_file_copy_ids: list[str] = []
+        missing_scholarly_representation_file_copy_ids: list[str] = []
+        missing_retry_reason: str | None = "Required tools still missing after initial retrieval."
+
+    orchestrator._evaluate_prompt_requirements = cast(
+        Any, lambda **kwargs: _PromptRequirements()
+    )
+
+    request = SimpleNamespace(
+        data={
+            "prompt": (
+                "Prepare a short research briefing for me: my represented papers, "
+                "relevant recent arXiv work, and any linked Jira tasks."
+            ),
+            "augmented_context": [
+                {
+                    "role": "system",
+                    "content": (
+                        "CURRENT USER CONTEXT: Michael Witbrock (#V#michael_witbrock)"
+                    ),
+                }
+            ],
+            "policy_state": SimpleNamespace(enabled=False, policy=None),
+            "registry_snapshot": {},
+            "user_concept_id": "#V#michael_witbrock",
+            "org_concept_id": "#V#sail",
+            "model_for_stage": lambda stage: "gemma4:26b",
+            "record_llm_call": lambda **kwargs: None,
+            "aux_llm_calls": [],
+            "llm_calls": [],
+            "emit_progress": None,
+            "iteration_count": 4,
+            "remaining_tool_calls": [],
+            "invocations": [
+                {"tool": "search_knowledge_base", "status": "ok"},
+                {"tool": "search_concepts", "status": "ok"},
+                {"tool": "search_arxiv", "status": "ok"},
+            ],
+            "prompt_requirement_url_policy": {},
+            "missing_tool_call_retry_reason_override": (
+                "Required tools still missing after initial retrieval."
+            ),
+            "turn_selector_guidance": (
+                "Use represented knowledge retrieval, arXiv search, and Jira retrieval."
+            ),
+            "turn_expected_grounding_requirement": (
+                "Papers must be grounded through represented relation evidence, and "
+                "Jira tasks must be verified via Jira retrieval."
+            ),
+            "turn_expected_outcome_summary": (
+                "Return a short grounded research briefing covering represented papers, "
+                "recent arXiv work, and linked Jira tasks."
+            ),
+            "missing_tool_call_retry_attempts": 0,
+            "missing_tool_call_retry_budget": 2,
+            "prefer_default_model": False,
+        },
+        environment=SimpleNamespace(
+            llm_client=object(),
+            model="gemma4:26b",
+            max_tool_invocations=8,
+        ),
+        trace=None,
+        workflow_id="#V#tool_calling_workflow",
+        workflow_state_id="backfill",
+        workflow_state_metadata={},
+        action_id="tool_calling.backfill",
+    )
+
+    result = orchestrator._action_tool_calling_backfill(cast(Any, request))
+
+    assert result.outputs["more_tool_calls"] is True
+    assert result.outputs["tool_calls_present"] is True
+    assert result.outputs["missing_tool_call_recovery_outcome"] == (
+        "retry_succeeded_parent_fallback"
+    )
+    tool_calls = result.outputs["tool_calls"]
+    assert tool_calls == [
+        {
+            "action": "call_tool",
+            "tool": "find_relations_with_argument",
+            "payload": {
+                "concept_id": "#V#michael_witbrock",
+                "limit": 20,
+            },
+        },
+        {
+            "action": "call_tool",
+            "tool": "jira_search",
+            "payload": {
+                "jql": tool_calls[1]["payload"]["jql"],
+                "max_results": 10,
+            },
+        },
+    ]
+    assert '#V#michael_witbrock' in tool_calls[1]["payload"]["jql"]
+    assert "Michael Witbrock" in tool_calls[1]["payload"]["jql"]
 
 
 def test_missing_tool_call_retry_does_not_force_guided_retrieval_without_guidance():

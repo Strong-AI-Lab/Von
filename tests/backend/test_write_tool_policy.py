@@ -22,6 +22,12 @@ def test_classify_write_tool_risk_covers_policy_classes():
         classify_write_tool_risk("jira_create_issue")
         == WRITE_RISK_EXTERNAL_NON_VONTOLOGY
     )
+    assert classify_write_tool_risk("task_create") == WRITE_RISK_ADDITIVE_LOW_RISK
+    assert (
+        classify_write_tool_risk("task_update_status")
+        == WRITE_RISK_MUTATIVE_NON_DESTRUCTIVE
+    )
+    assert classify_write_tool_risk("task_delete") == WRITE_RISK_DESTRUCTIVE
     assert (
         classify_write_tool_risk("jira_move_issue")
         == WRITE_RISK_EXTERNAL_NON_VONTOLOGY
@@ -47,6 +53,26 @@ def test_bare_arxiv_url_allows_additive_download_by_default():
     assert "download_paper" in decision.allowed_tools
     assert decision.reason == REASON_DEFAULT_ALLOW_ADDITIVE_LOW_RISK
     tool_decision = decision.decision_for_tool("download_paper")
+    assert tool_decision is not None
+    assert tool_decision.allowed is True
+    assert tool_decision.requires_confirmation is False
+
+
+def test_explicit_task_create_uses_additive_low_risk_policy():
+    from src.backend.workflows.write_tool_policy import (
+        REASON_DEFAULT_ALLOW_ADDITIVE_LOW_RISK,
+        compute_allowed_write_tools,
+    )
+
+    decision = compute_allowed_write_tools(
+        prompt="Please create me a diary entry for today.",
+        requested_tools=["task_create"],
+        recent_user_prompts=[],
+    )
+
+    assert "task_create" in decision.allowed_tools
+    assert decision.reason == REASON_DEFAULT_ALLOW_ADDITIVE_LOW_RISK
+    tool_decision = decision.decision_for_tool("task_create")
     assert tool_decision is not None
     assert tool_decision.allowed is True
     assert tool_decision.requires_confirmation is False

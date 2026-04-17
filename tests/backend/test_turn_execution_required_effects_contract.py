@@ -517,6 +517,134 @@ def test_workflow_authored_required_evidence_contract_blocks_missing_locator(
     )
 
 
+def test_prompt_required_evidence_contract_blocks_missing_surface() -> None:
+    record = _build_record(
+        prompt_text=(
+            "Prepare a short research briefing for me: my represented papers, "
+            "relevant recent arXiv work, and any linked Jira tasks."
+        ),
+        response_text=(
+            "### User Papers\nNo user papers found.\n\n"
+            "### Recent arXiv\nNo recent arXiv papers found.\n\n"
+            "### Jira Tasks\nNo Jira tasks found."
+        ),
+        required_prompt_tools=[
+            "search_knowledge_base",
+            "search_concepts",
+            "search_arxiv",
+            "jira_search",
+        ],
+        tool_invocations=[
+            {"tool": "search_knowledge_base", "payload": {"success": True}},
+            {"tool": "search_concepts", "payload": {"success": True}},
+            {"tool": "search_arxiv", "payload": {"success": True}},
+        ],
+    )
+
+    execution = record.get("execution")
+    assert isinstance(execution, dict)
+    contract = execution.get("required_effects_contract")
+    assert isinstance(contract, dict)
+    assert contract.get("intent_class") == "evidence"
+    assert contract.get("domain_profile_id") == "prompt_required_evidence"
+
+    required_effects = record.get("required_effects")
+    assert isinstance(required_effects, list)
+    jira_effect = next(
+        effect
+        for effect in required_effects
+        if effect.get("required_tools") == ["jira_search"]
+    )
+    assert jira_effect.get("status") == "not_executed"
+    assert jira_effect.get("failure_code") == "prompt_required_evidence_jira_search_missing"
+
+    completion_gate = record.get("completion_gate") or {}
+    assert completion_gate.get("decision") == "escalation_required"
+    assert completion_gate.get("safe_to_claim_completion") is False
+    assert "prompt_required_evidence_jira_search_missing" in (
+        completion_gate.get("blocking_failure_codes") or []
+    )
+
+
+def test_prompt_required_mutation_contract_blocks_missing_task_create() -> None:
+    record = _build_record(
+        prompt_text=(
+            "If I don't have one, please create me a diary entry for today. "
+            "It should record the work I've already done."
+        ),
+        response_text=(
+            "I couldn't confirm the creation of your diary entry because the "
+            "verification of the details was inconclusive."
+        ),
+        required_prompt_tools=["task_create"],
+        tool_invocations=[
+            {
+                "tool": "jira_search",
+                "payload": {"success": True},
+            }
+        ],
+    )
+
+    execution = record.get("execution")
+    assert isinstance(execution, dict)
+    contract = execution.get("required_effects_contract")
+    assert isinstance(contract, dict)
+    assert contract.get("intent_class") == "mutation"
+    assert contract.get("domain_profile_id") == "prompt_required_mutation"
+
+    required_effects = record.get("required_effects")
+    assert isinstance(required_effects, list)
+    task_create_effect = next(
+        effect
+        for effect in required_effects
+        if effect.get("required_tools") == ["task_create"]
+    )
+    assert task_create_effect.get("status") == "not_executed"
+    assert task_create_effect.get("failure_code") == (
+        "prompt_required_mutation_task_create_missing"
+    )
+
+    completion_gate = record.get("completion_gate") or {}
+    assert completion_gate.get("decision") == "escalation_required"
+    assert completion_gate.get("safe_to_claim_completion") is False
+    assert "prompt_required_mutation_task_create_missing" in (
+        completion_gate.get("blocking_failure_codes") or []
+    )
+
+
+def test_prompt_required_mutation_contract_is_satisfied_by_task_create_execution() -> None:
+    record = _build_record(
+        prompt_text="Create a Von task for me titled 'Review replay results'.",
+        response_text="Review replay results (#V#task_123).",
+        required_prompt_tools=["task_create"],
+        tool_invocations=[
+            {
+                "tool": "task_create",
+                "payload": {
+                    "success": True,
+                    "task_concept_id": "#V#task_123",
+                    "title": "Review replay results",
+                },
+            }
+        ],
+    )
+
+    required_effects = record.get("required_effects")
+    assert isinstance(required_effects, list)
+    task_create_effect = next(
+        effect
+        for effect in required_effects
+        if effect.get("required_tools") == ["task_create"]
+    )
+    assert task_create_effect.get("status") == "satisfied"
+
+    completion_gate = record.get("completion_gate") or {}
+    assert completion_gate.get("decision") != "escalation_required"
+    assert "prompt_required_mutation_task_create_missing" not in (
+        completion_gate.get("blocking_failure_codes") or []
+    )
+
+
 def test_required_evidence_permission_denied_is_preserved_distinctly(
     monkeypatch,
 ) -> None:
