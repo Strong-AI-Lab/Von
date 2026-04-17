@@ -8,6 +8,7 @@ from src.backend.workflows.engine import (
     WorkflowStateSpec,
     WorkflowTransitionSpec,
 )
+from src.backend.workflows import workflow_concept_authority_service as authority_mod
 from src.backend.workflows.workflow_authoring_service import (
     build_workflow_definition_from_authoring_spec,
     serialise_workflow_definition_to_authoring_spec,
@@ -131,3 +132,58 @@ def test_build_workflow_definition_from_authoring_spec_accepts_plain_transition_
         "done",
         "failed",
     }
+
+
+def test_authoring_roundtrip_preserves_explicit_step_concept_ids():
+    definition = WorkflowDefinition(
+        workflow_id="#V#concept_search_instance_retrieval_workflow",
+        initial_state="execute",
+        states={
+            "execute": WorkflowStateSpec(
+                state_id="execute",
+                actions=(
+                    WorkflowActionInvocation(
+                        action_id="workflow_gap.execute_candidate",
+                        inputs={"prompt_concept_id": "#V#workflow_gap_candidate_execution_prompt"},
+                    ),
+                ),
+                transitions=(
+                    WorkflowTransitionSpec(
+                        to_state="completed",
+                        condition=lambda _ctx: True,
+                        condition_spec={"kind": "always"},
+                        reason="next_step",
+                    ),
+                ),
+                metadata={
+                    "workflow_step_concept_id": "#V#workflow_step_concept_search_instance_retrieval_workflow_execute_candidate"
+                },
+            ),
+            "completed": WorkflowStateSpec(
+                state_id="completed",
+                terminal=True,
+                metadata={
+                    "workflow_step_concept_id": "#V#workflow_step_concept_search_instance_retrieval_workflow_completed"
+                },
+            ),
+        },
+        termination_states=("completed",),
+        purpose="Existing workflow repair",
+    )
+
+    authoring_spec = serialise_workflow_definition_to_authoring_spec(definition)
+    rebuilt = build_workflow_definition_from_authoring_spec(authoring_spec)
+    concept_ids = authority_mod.publication_spec_step_concept_ids(
+        workflow_id=rebuilt.workflow_id,
+        spec=authority_mod._build_publication_spec_from_definition(rebuilt),
+    )
+
+    assert authoring_spec["steps"][0]["concept_id"] == (
+        "#V#workflow_step_concept_search_instance_retrieval_workflow_execute_candidate"
+    )
+    assert rebuilt.states["execute"].metadata["workflow_step_concept_id"] == (
+        "#V#workflow_step_concept_search_instance_retrieval_workflow_execute_candidate"
+    )
+    assert concept_ids[0] == (
+        "#V#workflow_step_concept_search_instance_retrieval_workflow_execute_candidate"
+    )

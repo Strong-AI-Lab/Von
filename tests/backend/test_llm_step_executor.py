@@ -66,6 +66,7 @@ def test_execute_llm_step_passes_context_lineage_to_gateway_llm(
         def _run_llm_with_fallbacks(self, **kwargs):
             captured["context"] = kwargs.get("context")
             captured["context_telemetry"] = kwargs.get("context_telemetry")
+            captured["prefer_default_model"] = kwargs.get("prefer_default_model")
             return ('{"ok": true}', "test-model", None)
 
     monkeypatch.setattr(
@@ -82,6 +83,7 @@ def test_execute_llm_step_passes_context_lineage_to_gateway_llm(
             model="test-model",
         ),
         data={
+            "requested_model": "gemma4:26b",
             "selector_context_messages": [
                 {"role": "system", "content": "Selector prompt"},
                 {"role": "user", "content": "Who am I?"},
@@ -112,6 +114,77 @@ def test_execute_llm_step_passes_context_lineage_to_gateway_llm(
         "base_context_source": "augmented_context",
         "stage_added_message_count": 1,
     }
+    assert captured["prefer_default_model"] is True
+
+
+def test_execute_llm_step_tool_mode_marks_user_model_preference(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _StubGateway:
+        def describe_methods(self) -> dict[str, object]:
+            return {}
+
+    class _StubOrchestrator:
+        def __init__(self, **_kwargs):
+            pass
+
+        def _load_workflow_model_policy(self, _preferred_language):
+            return object(), {}
+
+        def _select_model_for_stage(self, **kwargs):
+            captured["prefer_default_model"] = kwargs.get("prefer_default_model")
+            return kwargs.get("default_model")
+
+        def _action_tool_calling_plan(self, request):
+            captured["shared_prefer_default_model"] = request.data.get(
+                "prefer_default_model"
+            )
+            request.data["model_for_stage"]("tool_call")
+            return type(
+                "_Result",
+                (),
+                {
+                    "status": "success",
+                    "outputs": {
+                        "tool_calls_present": False,
+                        "orchestrator_result": {"response_text": '{"ok": true}'},
+                    },
+                },
+            )()
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.orchestrator.InternalMCPChatOrchestrator",
+        _StubOrchestrator,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.model_registry_service.get_model_registry_snapshot",
+        lambda: {},
+    )
+
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=MagicMock(),
+            gateway=_StubGateway(),
+            model="gemma4:26b",
+        ),
+        data={
+            "requested_model": "gemma4:26b",
+            "requested_client_type": "ollama",
+        },
+        prompt_contract={"prompt_text": "Return JSON only."},
+        llm_policy={"tool_mode": "allowed"},
+        validation_policy={"output_format": "json_value"},
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "success"
+    assert captured["shared_prefer_default_model"] is True
+    assert captured["prefer_default_model"] is True
 
 
 def test_execute_llm_step_emits_phase_transition_for_conversation_turn_stage(

@@ -3872,6 +3872,7 @@ class InternalMCPChatOrchestrator:
                 aux_log=aux_log,
                 record_llm_call=record_llm_call,
                 emit_progress=emit_progress_cb,
+                prefer_default_model=bool(data.get("prefer_default_model")),
             )
             duration_ms = (time.perf_counter() - llm_start) * 1000.0
         else:
@@ -4097,6 +4098,7 @@ class InternalMCPChatOrchestrator:
             "classifier_model": model_for_stage("classifier"),
             "policy_state": data.get("policy_state"),
             "default_model": default_model,
+            "prefer_default_model": bool(data.get("prefer_default_model")),
             "registry_snapshot": data.get("registry_snapshot"),
             "user_concept_id": data.get("user_concept_id"),
             "org_concept_id": data.get("org_concept_id"),
@@ -4648,6 +4650,7 @@ class InternalMCPChatOrchestrator:
                 aux_log=aux_llm_calls,
                 record_llm_call=record_llm_call,
                 emit_progress=emit_progress_cb,
+                prefer_default_model=bool(request.data.get("prefer_default_model")),
             )
         else:
             narration_response = request.environment.llm_client.generate(
@@ -4900,6 +4903,9 @@ class InternalMCPChatOrchestrator:
                             aux_log=aux_llm_calls,
                             record_llm_call=cast(Callable[..., Any], record_llm_call),
                             emit_progress=emit_progress_cb,
+                            prefer_default_model=bool(
+                                request.data.get("prefer_default_model")
+                            ),
                         )
                     )
                 except Exception as exc:
@@ -6043,6 +6049,7 @@ class InternalMCPChatOrchestrator:
                     ),
                     required_prompt_tools=required_prompt_tools,
                     context_telemetry=tool_plan_context_telemetry,
+                    prefer_default_model=bool(data.get("prefer_default_model")),
                 )
                 if llm_response.tool_calls:
                     response = llm_response.text_response or ""
@@ -6084,6 +6091,7 @@ class InternalMCPChatOrchestrator:
                 record_llm_call=record_llm_call,
                 emit_progress=emit_progress_cb,
                 context_telemetry=tool_plan_context_telemetry,
+                prefer_default_model=bool(data.get("prefer_default_model")),
             )
             tool_calls = None
             has_valid_tool_call = False
@@ -7292,6 +7300,7 @@ class InternalMCPChatOrchestrator:
             record_llm_call=record_llm_call,
             emit_progress=emit_progress_cb,
             context_telemetry=follow_up_context_telemetry,
+            prefer_default_model=bool(data.get("prefer_default_model")),
         )
 
         # Check if the summariser response contains more tool calls.
@@ -11091,6 +11100,7 @@ class InternalMCPChatOrchestrator:
         default_model: str | None,
         policy_state: _WorkflowModelPolicyState,
         registry_snapshot: Mapping[str, Any] | None,
+        prefer_default_model: bool = False,
     ) -> dict[str, Any]:
         requested_model = (
             default_model.strip()
@@ -11103,6 +11113,7 @@ class InternalMCPChatOrchestrator:
             metadata["requested_model"] = requested_model
         if requested_provider:
             metadata["requested_provider"] = requested_provider
+        metadata["prefer_default_model"] = bool(prefer_default_model)
 
         if selected_candidate is None:
             return metadata
@@ -11174,7 +11185,11 @@ class InternalMCPChatOrchestrator:
         if selection_mode is None:
             if selected_candidate.source == "active_llm":
                 follows_active_llm = True
-                selection_mode = "active_llm_default"
+                selection_mode = (
+                    "preferred_default_model"
+                    if prefer_default_model
+                    else "active_llm_default"
+                )
             elif selected_candidate.source == "enabled_settings":
                 selection_mode = "enabled_settings_candidate"
             elif selected_candidate.source == "policy":
@@ -11203,9 +11218,17 @@ class InternalMCPChatOrchestrator:
         registry_snapshot: Mapping[str, Any] | None = None,
         user_concept_id: Optional[str] = None,
         org_concept_id: Optional[str] = None,
+        prefer_default_model: bool = False,
     ) -> list[_ModelCandidate]:
         candidates: list[_ModelCandidate] = []
         enabled_candidates: list[_ModelCandidate] = []
+        active_llm_candidate = _ModelCandidate(
+            provider=None,
+            model=default_model,
+            raw="active_llm",
+            source="active_llm",
+            host=None,
+        )
         try:
             from src.backend.services.settings_service import (
                 resolve_enabled_llm_settings,
@@ -11237,17 +11260,17 @@ class InternalMCPChatOrchestrator:
                 )
             )
 
-        if not policy_state.enabled or not policy_state.policy:
+        # When the turn explicitly requested a model/client override, keep the
+        # LLM path on that user-chosen model instead of silently drifting back
+        # to policy or enabled-settings candidates later in the fallback chain.
+        if prefer_default_model and active_llm_candidate.model:
+            candidates.append(active_llm_candidate)
+        elif not policy_state.enabled or not policy_state.policy:
+            if prefer_default_model:
+                candidates.append(active_llm_candidate)
             candidates.extend(enabled_candidates)
-            candidates.append(
-                _ModelCandidate(
-                    provider=None,
-                    model=default_model,
-                    raw="active_llm",
-                    source="active_llm",
-                    host=None,
-                )
-            )
+            if not prefer_default_model:
+                candidates.append(active_llm_candidate)
         else:
             stages = None
             if policy_state.policy and isinstance(
@@ -11285,16 +11308,11 @@ class InternalMCPChatOrchestrator:
                     if fallback_candidate:
                         candidates.append(fallback_candidate)
 
+            if prefer_default_model:
+                candidates.insert(0, active_llm_candidate)
             candidates.extend(enabled_candidates)
-            candidates.append(
-                _ModelCandidate(
-                    provider=None,
-                    model=default_model,
-                    raw="active_llm",
-                    source="active_llm",
-                    host=None,
-                )
-            )
+            if not prefer_default_model:
+                candidates.append(active_llm_candidate)
 
         # De-duplicate by provider+model+host so the same model does not appear
         # multiple times merely because it was sourced from settings and active_llm.
@@ -11909,6 +11927,7 @@ class InternalMCPChatOrchestrator:
         registry_snapshot: Mapping[str, Any] | None = None,
         user_concept_id: Optional[str] = None,
         org_concept_id: Optional[str] = None,
+        prefer_default_model: bool = False,
     ) -> Optional[str]:
         candidates = self._stage_model_candidates(
             stage=stage,
@@ -11917,6 +11936,7 @@ class InternalMCPChatOrchestrator:
             registry_snapshot=registry_snapshot,
             user_concept_id=user_concept_id,
             org_concept_id=org_concept_id,
+            prefer_default_model=prefer_default_model,
         )
 
         for candidate in candidates:
@@ -12293,6 +12313,7 @@ class InternalMCPChatOrchestrator:
         record_llm_call: Callable[..., Any],
         emit_progress: Callable[[Mapping[str, Any]], None] | None = None,
         context_telemetry: Mapping[str, Any] | None = None,
+        prefer_default_model: bool = False,
     ) -> tuple[str, Optional[str], Mapping[str, Any]]:
         candidate_stage = policy_stage or stage
 
@@ -12303,6 +12324,7 @@ class InternalMCPChatOrchestrator:
             registry_snapshot=registry_snapshot,
             user_concept_id=user_concept_id,
             org_concept_id=org_concept_id,
+            prefer_default_model=prefer_default_model,
         )
 
         errors: list[Mapping[str, Any]] = []
@@ -12527,6 +12549,7 @@ class InternalMCPChatOrchestrator:
                     default_model=default_model,
                     policy_state=policy_state,
                     registry_snapshot=registry_snapshot,
+                    prefer_default_model=prefer_default_model,
                 )
                 aux_log.append(
                     {
@@ -12622,6 +12645,7 @@ class InternalMCPChatOrchestrator:
                 default_model=default_model,
                 policy_state=policy_state,
                 registry_snapshot=registry_snapshot,
+                prefer_default_model=prefer_default_model,
             )
             aux_log.append(
                 {
@@ -12763,6 +12787,7 @@ class InternalMCPChatOrchestrator:
         method_catalogue: Mapping[str, Any] | None = None,
         required_prompt_tools: Sequence[str] = (),
         context_telemetry: Mapping[str, Any] | None = None,
+        prefer_default_model: bool = False,
     ) -> tuple[LLMResponse, Optional[str], Mapping[str, Any]]:
         candidate_stage = stage
         candidates = self._stage_model_candidates(
@@ -12772,6 +12797,7 @@ class InternalMCPChatOrchestrator:
             registry_snapshot=registry_snapshot,
             user_concept_id=user_concept_id,
             org_concept_id=org_concept_id,
+            prefer_default_model=prefer_default_model,
         )
 
         errors: list[Mapping[str, Any]] = []
@@ -13137,6 +13163,7 @@ class InternalMCPChatOrchestrator:
                     default_model=default_model,
                     policy_state=policy_state,
                     registry_snapshot=registry_snapshot,
+                    prefer_default_model=prefer_default_model,
                 )
                 aux_log.append(
                     {
@@ -13233,6 +13260,7 @@ class InternalMCPChatOrchestrator:
                 default_model=default_model,
                 policy_state=policy_state,
                 registry_snapshot=registry_snapshot,
+                prefer_default_model=prefer_default_model,
             )
             aux_log.append(
                 {
@@ -14826,6 +14854,7 @@ class InternalMCPChatOrchestrator:
                 llm_calls_log=llm_calls_log,
                 aux_log=aux_llm_calls,
                 record_llm_call=record_llm_call,
+                prefer_default_model=bool(default_model),
             )
         else:
             repaired_response = llm_client.generate(
@@ -23389,6 +23418,7 @@ class InternalMCPChatOrchestrator:
                                 else None
                             ),
                             context_telemetry=selector_context_telemetry,
+                            prefer_default_model=bool(default_model),
                         )
                     )
                     prepared_outputs["selector_raw_response"] = selector_response_text
@@ -23850,6 +23880,7 @@ class InternalMCPChatOrchestrator:
                             record_llm_call=cast(Callable[..., Any], record_llm_call),
                             emit_progress=emit_progress,
                             context_telemetry=context_telemetry,
+                            prefer_default_model=bool(default_model),
                         )
                     )
                 else:
@@ -24307,6 +24338,7 @@ class InternalMCPChatOrchestrator:
             org_concept_id=org_concept_id,
             user_namespace=user_namespace,
         )
+        prefer_default_model = bool(model)
         augmented_context = self._build_augmented_context(
             context,
             user_namespace=user_namespace,
@@ -24324,6 +24356,7 @@ class InternalMCPChatOrchestrator:
                 registry_snapshot=registry_snapshot,
                 user_concept_id=user_concept_id,
                 org_concept_id=org_concept_id,
+                prefer_default_model=prefer_default_model,
             )
 
         env = WorkflowEnvironment(
@@ -24373,6 +24406,7 @@ class InternalMCPChatOrchestrator:
             "gmail_profile": gmail_profile or self._default_gmail_profile,
             "workflow_episode_source": "conversation_turn_supervised",
             "workflow_episode_stage": "conversation_turn",
+            "prefer_default_model": prefer_default_model,
             "model_for_stage": _model_for_stage,
             "record_llm_call": _record_llm_call,
             "emit_progress": _emit_progress_local,
@@ -25225,6 +25259,7 @@ class InternalMCPChatOrchestrator:
             org_concept_id=org_concept_id,
             user_namespace=user_namespace,
         )
+        prefer_default_model = bool(model)
 
         def _model_for_stage(stage: str) -> Optional[str]:
             return self._select_model_for_stage(
@@ -25234,6 +25269,7 @@ class InternalMCPChatOrchestrator:
                 registry_snapshot=registry_snapshot,
                 user_concept_id=user_concept_id,
                 org_concept_id=org_concept_id,
+                prefer_default_model=prefer_default_model,
             )
 
         def _summarise_tool_messages_for_critic(
@@ -25310,6 +25346,7 @@ class InternalMCPChatOrchestrator:
                     aux_log=aux_llm_calls,
                     record_llm_call=_record_llm_call,
                     emit_progress=_emit_progress_local,
+                    prefer_default_model=prefer_default_model,
                 )
             except Exception as exc:
                 aux_llm_calls.append(
@@ -25437,6 +25474,7 @@ class InternalMCPChatOrchestrator:
                 aux_log=aux_llm_calls,
                 record_llm_call=_record_llm_call,
                 emit_progress=_emit_progress_local,
+                prefer_default_model=prefer_default_model,
             )
             if trace_enabled and trace is not None:
                 llm_step.finish_success(
@@ -26164,6 +26202,7 @@ class InternalMCPChatOrchestrator:
                             record_llm_call=_record_llm_call,
                             emit_progress=_emit_selector_progress,
                             context_telemetry=selector_context_telemetry,
+                            prefer_default_model=prefer_default_model,
                         )
                     )
                     selector_selection = self._workflow_selector.resolve_selection(
@@ -32296,6 +32335,7 @@ class InternalMCPChatOrchestrator:
                 aux_log=aux_llm_calls,
                 record_llm_call=_record_llm_call,
                 emit_progress=_emit_progress_local,
+                prefer_default_model=prefer_default_model,
             )
             if trace_enabled and trace is not None:
                 llm_step.finish_success(
@@ -33333,6 +33373,7 @@ class InternalMCPChatOrchestrator:
                 "presenter_channels": {},
                 "policy_state": policy_state,
                 "default_model": _model_for_stage("narration"),
+                "prefer_default_model": True,
                 "registry_snapshot": registry_snapshot,
                 "user_concept_id": user_concept_id,
                 "org_concept_id": org_concept_id,

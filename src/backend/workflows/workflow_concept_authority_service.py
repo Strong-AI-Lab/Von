@@ -1029,6 +1029,14 @@ def _build_publication_spec_from_definition(
                 f"workflow_definition_multiple_actions_unsupported:{definition.workflow_id}:{state_id_text}"
             )
         action = actions[0] if actions else None
+        state_metadata = (
+            dict(state_spec.metadata)
+            if isinstance(state_spec.metadata, Mapping) and state_spec.metadata
+            else {}
+        )
+        step_concept_id = str(
+            state_metadata.get("workflow_step_concept_id") or ""
+        ).strip() or None
 
         action_id: str | None = None
         action_concept_id: str | None = None
@@ -1100,6 +1108,7 @@ def _build_publication_spec_from_definition(
         steps.append(
             _CanonicalStepPublicationSpec(
                 state_id=state_id_text,
+                concept_id=step_concept_id,
                 action_id=action_id,
                 action_concept_id=action_concept_id,
                 prompt_concept_ids=prompt_concept_ids,

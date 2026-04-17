@@ -197,3 +197,26 @@ def test_resolve_generate_requested_model_overrides_scoped_setting_with_explicit
 
     assert model_name == "llama3.1:8b"
     assert client_type == "ollama"
+
+
+def test_build_generate_conversation_turn_instance_inputs_preserves_requested_model() -> (
+    None
+):
+    import src.backend.server.routes.von_routes as von_routes
+
+    payload = von_routes._build_generate_conversation_turn_instance_inputs(
+        session_id="session-1",
+        request_id="request-1",
+        namespace_source="window_context",
+        presenter_mode_requested=False,
+        request_gmail_profile="profile-1",
+        request_language="en-NZ",
+        requested_model="gemma4:26b",
+        requested_client_type="ollama",
+        prompt_text="What do you know about my current research interests?",
+        workflow_discovery_result={"selected_workflow_id": "#V#concept_search"},
+        workflow_continuation_context={"applied": False},
+    )
+
+    assert payload["requested_model"] == "gemma4:26b"
+    assert payload["requested_client_type"] == "ollama"
