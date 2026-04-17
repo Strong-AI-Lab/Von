@@ -340,6 +340,53 @@ def test_progress_endpoint_recovers_session_scoped_progress_after_auth_scope_shi
     assert body.get("progress_source") == "alternate_scope_fallback"
 
 
+def test_progress_endpoint_recovers_window_scoped_progress_after_auth_scope_shift(
+    monkeypatch,
+) -> None:
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+    app.register_blueprint(von_routes.von_bp, url_prefix="/von")
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.get_show_tool_use_during_thinking",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: "#V#test_user",
+    )
+
+    window_session_id = "ws_progress_auth_scope_shift"
+    von_routes._set_tool_progress(
+        f"anon:window:{window_session_id}",
+        "req-window-auth-shift",
+        {
+            "status": "thinking",
+            "phase": "workflow_dispatch_prepare",
+            "phase_label": "Preparing workflow dispatch",
+            "request_id": "req-window-auth-shift",
+        },
+    )
+
+    with von_routes._TOOL_PROGRESS_LOCK:
+        von_routes._TOOL_PROGRESS.clear()
+
+    client = app.test_client()
+    response = client.get(
+        "/von/progress/req-window-auth-shift",
+        headers={"X-Von-Window-Session": window_session_id},
+    )
+    assert response.status_code == 200
+
+    body = response.get_json()
+    assert isinstance(body, dict)
+    assert body.get("request_id") == "req-window-auth-shift"
+    assert body.get("stage") == "workflow_dispatch_prepare"
+    assert body.get("phase_label") == "Preparing workflow dispatch"
+    assert body.get("resolved_scope_key") == f"anon:window:{window_session_id}"
+    assert body.get("progress_source") == "alternate_scope_fallback"
+
+
 def test_progress_endpoint_prefers_freshest_alternate_scope_payload(monkeypatch) -> None:
     app = Flask(__name__)
     app.secret_key = "test-secret"
@@ -392,6 +439,53 @@ def test_progress_endpoint_prefers_freshest_alternate_scope_payload(monkeypatch)
     assert body.get("phase_label") == "Searching for workflows"
     assert body.get("resolved_scope_key") == "anon:session:legacy_cookie_scope"
     assert body.get("progress_source") == "alternate_scope_fallback"
+
+
+def test_register_tool_progress_scope_aliases_copies_current_state_to_all_request_scopes(
+    monkeypatch,
+) -> None:
+    _set_clock(monkeypatch, start=5000.0)
+
+    mirror_scope_keys: list[str] = []
+    primary_scope_key = "anon:window:ws_scope_alias"
+    request_id = "req-scope-alias"
+
+    von_routes._set_tool_progress(
+        primary_scope_key,
+        request_id,
+        {
+            "status": "thinking",
+            "phase": "context_build",
+            "phase_label": "Building context",
+            "request_id": request_id,
+        },
+    )
+
+    returned_scope_keys = von_routes._register_tool_progress_scope_aliases(
+        request_id=request_id,
+        primary_scope_key=primary_scope_key,
+        mirror_scope_keys=mirror_scope_keys,
+        user_concept_id="#V#test_user",
+        window_session_id="ws_scope_alias",
+        anonymous_session_id="legacy_cookie_scope",
+    )
+
+    assert returned_scope_keys == [
+        "user:#V#test_user",
+        "anon:session:legacy_cookie_scope",
+    ]
+
+    user_scope_state = von_routes._get_tool_progress(
+        "user:#V#test_user", request_id
+    )
+    assert user_scope_state is not None
+    assert user_scope_state.get("stage") == "context_build"
+
+    session_scope_state = von_routes._get_tool_progress(
+        "anon:session:legacy_cookie_scope", request_id
+    )
+    assert session_scope_state is not None
+    assert session_scope_state.get("stage") == "context_build"
 
 
 def test_response_finalising_payload_includes_useful_detail() -> None:
@@ -2005,6 +2099,7 @@ def test_turn_execution_diagnostics_clear_stale_selector_prompt_failure_after_su
     }
     selector_success_entry = {
         "type": "workflow_selector",
+        "stage": "selector_decision",
         "workflow_id": selected_workflow_id,
         "verdict": "rag_selected",
         "selection_source": "selector",
@@ -2012,6 +2107,54 @@ def test_turn_execution_diagnostics_clear_stale_selector_prompt_failure_after_su
         "selection_rationale": "selector_selected_discovered_candidate",
     }
 
+    von_routes._set_tool_progress(
+        "scope-custom-workflow",
+        "req-custom-workflow",
+        {
+            "status": "thinking",
+            "phase": "selector_preparation",
+            "phase_label": "Preparing workflow selector",
+            "request_id": "req-custom-workflow",
+            "workflow_routing_aux": [
+                {
+                    **selector_prompt_entry,
+                    "stage": "selector_preparation",
+                }
+            ],
+            "counters": {"tools_started": 0, "tools_completed": 0},
+        },
+    )
+    clock["now"] += 0.1
+    von_routes._set_tool_progress(
+        "scope-custom-workflow",
+        "req-custom-workflow",
+        {
+            "status": "thinking",
+            "phase": "selector_decision",
+            "phase_label": "Workflow selector decision",
+            "request_id": "req-custom-workflow",
+            "selected_workflow_id": selected_workflow_id,
+            "selected_workflow_name": "Meeting invitation testing workflow",
+            "workflow_selector_verdict": "rag_selected",
+            "workflow_selector_source": "selector",
+            "workflow_selection_rationale": "selector_selected_discovered_candidate",
+            "workflow_routing": {
+                "workflow_id": selected_workflow_id,
+                "verdict": "rag_selected",
+                "source": "selector",
+                "selection_rationale": "selector_selected_discovered_candidate",
+            },
+            "workflow_routing_aux": [
+                {
+                    **selector_prompt_entry,
+                    "stage": "selector_preparation",
+                },
+                selector_success_entry,
+            ],
+            "counters": {"tools_started": 0, "tools_completed": 0},
+        },
+    )
+    clock["now"] += 0.1
     von_routes._set_tool_progress(
         "scope-custom-workflow",
         "req-custom-workflow",
@@ -2114,6 +2257,35 @@ def test_turn_execution_diagnostics_clear_stale_selector_prompt_failure_after_su
 
     stage_diagnostics = diagnostics.get("stage_diagnostics")
     assert isinstance(stage_diagnostics, list)
+    selector_preparation = next(
+        (
+            entry
+            for entry in stage_diagnostics
+            if isinstance(entry, dict) and entry.get("stage_id") == "selector_preparation"
+        ),
+        None,
+    )
+    assert selector_preparation is not None
+    assert selector_preparation.get("llm_exchange_record_count") == 1
+    assert selector_preparation.get("llm_exchange_entry_types") == [
+        "workflow_selector_prompt"
+    ]
+
+    selector_decision = next(
+        (
+            entry
+            for entry in stage_diagnostics
+            if isinstance(entry, dict) and entry.get("stage_id") == "selector_decision"
+        ),
+        None,
+    )
+    assert selector_decision is not None
+    assert selector_decision.get("llm_exchange_record_count") == 1
+    assert selector_decision.get("llm_exchange_entry_types") == ["workflow_selector"]
+    assert selector_decision.get("latest_llm_exchange", {}).get(
+        "response_preview", {}
+    ).get("text") == selected_workflow_id
+
     workflow_dispatch = next(
         (
             entry
@@ -2137,17 +2309,9 @@ def test_turn_execution_diagnostics_clear_stale_selector_prompt_failure_after_su
     assert workflow_dispatch.get("dispatch_terminal_failure_reason") == (
         "workflow_launch_input_resolution_failed"
     )
-    assert workflow_dispatch.get("llm_exchange_record_count") == 2
-    assert workflow_dispatch.get("llm_exchange_entry_types") == [
-        "workflow_selector_prompt",
-        "workflow_selector",
-    ]
-    assert workflow_dispatch.get("latest_llm_exchange", {}).get("entry_type") == (
-        "workflow_selector"
-    )
-    assert workflow_dispatch.get("latest_llm_exchange", {}).get(
-        "response_preview", {}
-    ).get("text") == selected_workflow_id
+    assert workflow_dispatch.get("llm_exchange_record_count") == 0
+    assert workflow_dispatch.get("llm_exchange_entry_types") == []
+    assert workflow_dispatch.get("latest_llm_exchange") is None
 
     activity_history = diagnostics.get("activity_history")
     assert isinstance(activity_history, list)

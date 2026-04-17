@@ -2601,31 +2601,67 @@ def _sanitise_diagnostic_export_payload(
         return f"<{type(value).__name__}>"
 
 
+def _normalise_tool_progress_scope_keys(
+    scope_keys: Sequence[str] | str | None,
+) -> list[str]:
+    raw_scope_keys: list[str | None]
+    if isinstance(scope_keys, str):
+        raw_scope_keys = [scope_keys]
+    elif isinstance(scope_keys, Sequence):
+        raw_scope_keys = [str(item) if isinstance(item, str) else None for item in scope_keys]
+    else:
+        raw_scope_keys = []
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for raw_scope_key in raw_scope_keys:
+        clean_scope_key = _progress_str(raw_scope_key)
+        if not clean_scope_key or clean_scope_key in seen:
+            continue
+        seen.add(clean_scope_key)
+        deduped.append(clean_scope_key)
+    return deduped
+
+
 def _start_tool_progress_heartbeat(
-    scope_key: str, request_id: str
+    scope_keys: Sequence[str] | str, request_id: str
 ) -> tuple[threading.Event, threading.Thread]:
     stop_event = threading.Event()
 
     def _heartbeat_loop() -> None:
         while not stop_event.wait(float(_TOOL_PROGRESS_HEARTBEAT_INTERVAL_SEC)):
             try:
-                current = _get_tool_progress(scope_key, request_id)
+                active_scope_keys = _normalise_tool_progress_scope_keys(scope_keys)
+                current = None
+                current_ordering_key: tuple[int, float, float, float] | None = None
+                for candidate_scope_key in active_scope_keys:
+                    candidate = _get_tool_progress(candidate_scope_key, request_id)
+                    if not isinstance(candidate, dict):
+                        continue
+                    ordering_key = _tool_progress_state_ordering_key(candidate)
+                    if current is None or ordering_key > cast(
+                        tuple[int, float, float, float], current_ordering_key
+                    ):
+                        current = dict(candidate)
+                        current_ordering_key = ordering_key
                 if not isinstance(current, dict):
                     continue
                 status = (_progress_str(current.get("status")) or "").lower()
                 if status in _TOOL_PROGRESS_TERMINAL_STATUSES:
                     break
-                _set_tool_progress(
-                    scope_key,
-                    request_id,
-                    {
-                        "status": "heartbeat",
-                        "request_id": request_id,
-                        "heartbeat_interval_sec": int(
-                            _TOOL_PROGRESS_HEARTBEAT_INTERVAL_SEC
-                        ),
-                    },
-                )
+                heartbeat_payload = {
+                    "status": "heartbeat",
+                    "request_id": request_id,
+                    "heartbeat_interval_sec": int(
+                        _TOOL_PROGRESS_HEARTBEAT_INTERVAL_SEC
+                    ),
+                }
+                for candidate_scope_key in active_scope_keys:
+                    _set_tool_progress(
+                        candidate_scope_key,
+                        request_id,
+                        dict(heartbeat_payload),
+                    )
             except Exception:
                 # Heartbeat is best-effort and must never break user requests.
                 continue
@@ -2763,6 +2799,34 @@ def _build_tool_progress_scope_candidates(
         seen.add(candidate)
         deduped.append(candidate)
     return deduped
+
+
+def _register_tool_progress_scope_aliases(
+    *,
+    request_id: str,
+    primary_scope_key: str | None,
+    mirror_scope_keys: list[str],
+    user_concept_id: str | None = None,
+    window_session_id: str | None = None,
+    anonymous_session_id: str | None = None,
+) -> list[str]:
+    primary_scope = _progress_str(primary_scope_key)
+    if not primary_scope:
+        return list(mirror_scope_keys)
+
+    current_state = _get_tool_progress(primary_scope, request_id)
+    for candidate_scope_key in _build_tool_progress_scope_candidates(
+        explicit_scope_key=primary_scope,
+        user_concept_id=user_concept_id,
+        window_session_id=window_session_id,
+        anonymous_session_id=anonymous_session_id,
+    ):
+        if candidate_scope_key == primary_scope or candidate_scope_key in mirror_scope_keys:
+            continue
+        mirror_scope_keys.append(candidate_scope_key)
+        if isinstance(current_state, dict):
+            _set_tool_progress(candidate_scope_key, request_id, dict(current_state))
+    return list(mirror_scope_keys)
 
 
 def _tool_progress_state_ordering_key(
@@ -8097,25 +8161,12 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
     progress_scope_key = _get_tool_progress_bootstrap_scope_key()
     progress_mirror_scope_keys: list[str] = []
+    request_window_session_id = request.headers.get(_WINDOW_SESSION_HEADER_NAME)
     show_tool_use_progress = False
     try:
         show_tool_use_progress = bool(get_show_tool_use_during_thinking())
     except Exception:
         show_tool_use_progress = False
-
-    def _register_progress_mirror_scope(scope_key: str | None) -> None:
-        clean_scope_key = _progress_str(scope_key)
-        if (
-            not clean_scope_key
-            or clean_scope_key == progress_scope_key
-            or clean_scope_key in progress_mirror_scope_keys
-        ):
-            return
-        progress_mirror_scope_keys.append(clean_scope_key)
-
-        current_state = _get_tool_progress(progress_scope_key, request_id)
-        if isinstance(current_state, dict):
-            _set_tool_progress(clean_scope_key, request_id, current_state)
 
     def _emit_generate_progress(update: Mapping[str, Any] | None) -> None:
         if not show_tool_use_progress:
@@ -8133,6 +8184,13 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
     progress_goal_label = _build_progress_goal_label(prompt_text=prompt_text)
     if show_tool_use_progress:
+        _register_tool_progress_scope_aliases(
+            request_id=request_id,
+            primary_scope_key=progress_scope_key,
+            mirror_scope_keys=progress_mirror_scope_keys,
+            window_session_id=request_window_session_id,
+            anonymous_session_id=_progress_str(session.get("tool_progress_scope")),
+        )
         _emit_generate_progress(
             _build_request_initialising_tool_progress_payload(
                 request_id=request_id,
@@ -8233,20 +8291,28 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             )
 
         # JVNAUTOSCI-1011: Use window session context if available
-        window_session_id = request.headers.get("X-Von-Window-Session")
         effective = get_effective_context(
-            window_session_id, dict(session), user_concept_id
+            request_window_session_id, dict(session), user_concept_id
         )
         org_concept_id = effective.get("organisation_id")
 
         # Store user_concept_id in session for history tracking
         if user_concept_id:
             session["user_concept_id"] = user_concept_id
-            _register_progress_mirror_scope(f"user:{user_concept_id}")
     except Exception:
         user_concept_id = None
         org_concept_id = None
         effective = {}
+
+    if show_tool_use_progress:
+        _register_tool_progress_scope_aliases(
+            request_id=request_id,
+            primary_scope_key=progress_scope_key,
+            mirror_scope_keys=progress_mirror_scope_keys,
+            user_concept_id=user_concept_id,
+            window_session_id=request_window_session_id,
+            anonymous_session_id=_progress_str(session.get("tool_progress_scope")),
+        )
 
     role_in_org = effective.get("role") if isinstance(effective, dict) else None
 
@@ -8474,7 +8540,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
     if show_tool_use_progress and not background_mode:
         progress_heartbeat_stop_event, progress_heartbeat_thread = (
-            _start_tool_progress_heartbeat(progress_scope_key, request_id)
+            _start_tool_progress_heartbeat(
+                [progress_scope_key, *progress_mirror_scope_keys], request_id
+            )
         )
 
     try:
@@ -11481,6 +11549,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 "tool_use_progress": {
                     "enabled": show_tool_use_progress,
                     "request_id": request_id,
+                    "scope_keys": _normalise_tool_progress_scope_keys(
+                        [progress_scope_key, *progress_mirror_scope_keys]
+                    ),
                     "diagnostic_summary": _build_tool_progress_compact_summary(
                         tool_progress_snapshot
                     ),
