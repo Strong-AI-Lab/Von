@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-DEFAULT_CONVERSATION_TURN_LLM_TIMEOUT_SEC = 30.0
+# Conversation-turn stages can include large selector and recovery prompts.
+# The user-facing local models we exercise in real-path testing, especially
+# `gemma4:26b`, can legitimately need a little longer than 30 seconds for
+# those stages without being wedged.
+DEFAULT_CONVERSATION_TURN_LLM_TIMEOUT_SEC = 45.0
 
 
 def coerce_conversation_turn_llm_timeout_sec(raw_timeout: Any) -> float | None:

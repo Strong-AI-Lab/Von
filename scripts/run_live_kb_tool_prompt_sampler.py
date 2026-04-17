@@ -34,7 +34,7 @@ import requests
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:5000"
-DEFAULT_MODEL = ""
+DEFAULT_MODEL = "gemma4:26b"
 DEFAULT_USER_CONCEPT_ID = "#V#michael_witbrock"
 DEFAULT_ORGANISATION_CONCEPT_ID = "university_of_auckland_strong_ai_lab"
 DEFAULT_SESSION_NAME = "JVNAUTOSCI-1894 live prompt sample"
@@ -1175,8 +1175,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--model",
         default=DEFAULT_MODEL,
         help=(
-            "Optional explicit model override. Leave unset to let /von/generate "
-            "use the active user-facing model for the authenticated session."
+            "Explicit model override for the replay. Defaults to Ollama "
+            "`gemma4:26b` for the JVNAUTOSCI-1894 replay programme. Pass an "
+            "empty string to omit the override and let /von/generate use the "
+            "active user-facing model for the authenticated session."
         ),
     )
     parser.add_argument("--timeout-seconds", type=float, default=900.0)

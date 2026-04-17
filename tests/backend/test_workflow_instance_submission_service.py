@@ -91,8 +91,10 @@ def _make_action_registry(*, supports_action: bool, fallback: bool = False) -> M
     registry.has_fallback_handler.return_value = fallback
     if supports_action:
         registry.has.return_value = True
+        registry.all_action_ids.return_value = ["tool.initial"]
     else:
         registry.has.return_value = False
+        registry.all_action_ids.return_value = []
     return registry
 
 
@@ -569,6 +571,68 @@ def test_verify_workflow_runnable_accepts_turn_execution_runtime_support_actions
     assert verification.runnable_verification_success is True
     assert set(verification.discovered_action_ids) == set(workflow_action_ids)
     assert verification.unsupported_action_ids == ()
+    assert verification.contract_validation is not None
+    assert verification.contract_validation.get("valid") is True
+
+
+def test_verify_workflow_runnable_accepts_orchestrator_registry_override() -> None:
+    workflow_action_ids = (
+        "tool_calling.preflight_requirements",
+        "tool_calling.respond",
+    )
+    graph = {
+        "workflow_id": "#V#tool_calling_workflow",
+        "initial_step": "#V#start",
+        "steps": [
+            {
+                "step_id": "#V#start",
+                "name": "Start",
+                "invokes_action": workflow_action_ids[0],
+            }
+        ],
+        "edges": [],
+        "warnings": [],
+    }
+    definition = WorkflowDefinition(
+        workflow_id="#V#tool_calling_workflow",
+        initial_state="#V#start",
+        states={
+            "#V#start": WorkflowStateSpec(
+                state_id="#V#start",
+                actions=tuple(
+                    WorkflowActionInvocation(action_id=action_id)
+                    for action_id in workflow_action_ids
+                ),
+                terminal=True,
+            )
+        },
+        termination_states=("#V#start",),
+    )
+    shared_registry = _make_action_registry(supports_action=False, fallback=True)
+    override_registry = _make_action_registry(supports_action=True, fallback=True)
+    override_registry.all_action_ids.return_value = list(workflow_action_ids)
+
+    with patch(
+        "src.backend.workflows.durable.workflow_instance_submission_service.build_workflow_process_graph_from_definition",
+        return_value=graph,
+    ), patch(
+        "src.backend.workflows.durable.registry_factory.get_shared_workflow_registry_read_only",
+        return_value=_make_registry(
+            definition,
+            workflow_id="#V#tool_calling_workflow",
+        ),
+    ), patch(
+        "src.backend.workflows.durable.registry_factory.get_shared_durable_action_registry",
+        return_value=shared_registry,
+    ):
+        verification = verify_workflow_runnable(
+            "#V#tool_calling_workflow",
+            action_registry_override=override_registry,
+        )
+
+    assert verification.runnable_verification_success is True
+    assert verification.unsupported_action_ids == ()
+    assert set(verification.discovered_action_ids) == set(workflow_action_ids)
     assert verification.contract_validation is not None
     assert verification.contract_validation.get("valid") is True
 

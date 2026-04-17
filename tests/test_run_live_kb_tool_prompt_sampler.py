@@ -13,6 +13,10 @@ def test_prompt_bank_file_matches_embedded_payload() -> None:
     assert file_payload == sampler.PROMPT_BANK_PAYLOAD
 
 
+def test_default_model_override_is_ollama_gemma4() -> None:
+    assert sampler.DEFAULT_MODEL == "gemma4:26b"
+
+
 def test_evaluate_user_happiness_flags_dispatch_failure() -> None:
     evaluation = sampler._evaluate_user_happiness(
         prompt_entry={

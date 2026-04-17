@@ -365,6 +365,65 @@ def test_execute_workflow_persists_completed_durable_instance_with_turn_summary(
     assert completion_state.get("loop_stall_max_elapsed_ms") == 1_000
 
 
+def test_execute_workflow_submits_with_merged_action_registry(monkeypatch) -> None:
+    orchestrator = _build_orchestrator()
+    _register_test_workflow(orchestrator, workflow_id="#V#tool_calling_workflow")
+    fake_manager = _FakeWorkflowInstanceManager()
+    submission_kwargs: list[dict[str, Any]] = []
+
+    def _fake_submit_verified_workflow_instance(**kwargs: Any):
+        submission_kwargs.append(dict(kwargs))
+        return WorkflowInstanceSubmissionResult(
+            success=True,
+            workflow_id=str(kwargs.get("workflow_id") or ""),
+            status="pending",
+            instance_id="wf-inst-1",
+            verification={
+                "preflight_passed": True,
+                "postflight_passed": True,
+                "runnable_verification_success": True,
+            },
+            created_new=True,
+        )
+
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.workflow_instance_submission_service.submit_verified_workflow_instance",
+        _fake_submit_verified_workflow_instance,
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: fake_manager,
+    )
+    monkeypatch.setattr(
+        orchestrator._workflow_executor,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            completed=True,
+            final_state="completed",
+            error=None,
+            data={"response_text": "Done."},
+        ),
+    )
+
+    orchestrator.execute_workflow(
+        "#V#tool_calling_workflow",
+        data={
+            "prompt": "Find research themes.",
+            "user_concept_id": "#V#user",
+            "org_concept_id": "#V#org",
+        },
+        llm_client=object(),
+        model="gemma4:26b",
+        user_namespace="#V#user@org",
+    )
+
+    assert submission_kwargs
+    submitted_registry = submission_kwargs[0].get("action_registry_override")
+    assert submitted_registry is orchestrator._action_registry
+    assert submitted_registry is not None
+    assert submitted_registry.has("tool_calling.respond") is True
+
+
 def test_execute_workflow_marks_failure_like_terminal_state_as_failed(
     monkeypatch,
 ) -> None:

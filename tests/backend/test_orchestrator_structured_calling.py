@@ -9,6 +9,8 @@ This test suite validates:
 5. Tool definition conversion from MCP catalog to ToolDefinition format
 """
 
+import json
+from types import SimpleNamespace
 from typing import Any, List, Mapping, Optional, Sequence, cast
 from unittest.mock import MagicMock
 
@@ -24,6 +26,7 @@ from src.backend.languagemodels.structured_tool_calling.types import (
     ToolCall,
     ToolDefinition,
 )
+from src.backend.workflows.action_registry import WorkflowEnvironment
 from src.backend.workflows.definitions import TOOL_CALLING_WORKFLOW_ID
 from src.backend.workflows.workflow_selector import (
     WorkflowSelection,
@@ -534,6 +537,71 @@ def test_call_id_tracing_in_structured_path(orchestrator):
     assert result.tool_invocations[0]["call_id"] == "call_abc123"
 
 
+def test_tool_calling_respond_surfaces_tool_evidence_in_outputs(
+    orchestrator, mock_gateway
+):
+    llm_client = MockLLMClientWithTools(should_use_structured=True)
+    request = SimpleNamespace(
+        action_id="tool_calling.respond",
+        environment=WorkflowEnvironment(
+            llm_client=llm_client,
+            gateway=mock_gateway,
+            model="gpt-4",
+            user_namespace="#V#test_user",
+        ),
+        data={
+            "prompt": "Find test concept",
+            "augmented_context": [],
+            "policy_state": _WorkflowModelPolicyState(
+                enabled=False,
+                policy=None,
+                policy_id=None,
+                predicate_id=None,
+                errors=(),
+            ),
+            "registry_snapshot": None,
+            "user_concept_id": "#V#test_user",
+            "org_concept_id": "#V#test_org",
+            "recent_user_prompts": ["Find test concept"],
+            "conversation_session_id": "chat-1895",
+            "turn_id": "turn-1895",
+            "method_catalogue": mock_gateway.describe_methods(),
+            "model_for_stage": lambda _stage: "gpt-4",
+            "record_llm_call": lambda **_kwargs: None,
+            "emit_progress": lambda _info: None,
+            "emit_phase_transition": lambda _phase, extra=None: None,
+            "check_cancellation": lambda: None,
+            "build_parse_error_result": lambda *args, **kwargs: None,
+            "build_validation_error_result": lambda *args, **kwargs: None,
+            "aux_llm_calls": [],
+            "llm_calls": [],
+            "invocations": [],
+            "tool_messages": [],
+            "iteration_count": 0,
+            "allowed_write_tools": set(),
+        },
+        trace=None,
+        workflow_id=TOOL_CALLING_WORKFLOW_ID,
+        workflow_state_id="respond",
+        workflow_state_metadata={},
+    )
+
+    result = orchestrator._action_tool_calling_respond(request)
+
+    assert result.ok
+    outputs = result.outputs
+    invocations = outputs.get("invocations")
+    assert isinstance(invocations, list)
+    assert len(invocations) == 1
+    assert invocations[0]["tool"] == "search_knowledge_base"
+    assert outputs.get("iteration_count") == 1
+
+    tool_messages = outputs.get("tool_messages")
+    assert isinstance(tool_messages, list)
+    assert len(tool_messages) == 1
+    assert json.loads(tool_messages[0]["content"])["tool"] == "search_knowledge_base"
+
+
 def test_tool_definition_conversion_accepts_list_schema():
     """Regression: accept list-based required/optional schema summaries."""
     from src.backend.integrations.internal_mcp.orchestrator import (
@@ -980,9 +1048,9 @@ def test_structured_candidate_resolver_readds_required_tool_deterministically():
 
     lowered = {name.lower() for name in first.candidate_tool_names}
     assert "write_tool_029" in lowered
-    assert any(
-        warning == "required_tool_readded:write_tool_029"
-        for warning in first.warnings
+    assert not any(
+        reason == "cap_truncation" and name.lower() == "write_tool_029"
+        for name, reason in first.excluded_tools
     )
     assert second.candidate_tool_names == first.candidate_tool_names
 
@@ -1098,8 +1166,112 @@ def test_structured_candidate_resolver_uses_context_for_entity_relative_kb_hints
     assert "search_knowledge_base" in lowered
     assert "resolve_concept_by_name" in lowered
     assert "find_relations_with_argument" in lowered
-    assert "vontology" in resolution.hinted_families
+    assert "vontology" not in resolution.hinted_families
     assert "arxiv" not in resolution.hinted_families
+
+
+def test_structured_candidate_resolver_caps_hinted_kb_web_planner_sets():
+    """Hybrid KB+web prompts should not drag the full hinted catalogue into planning."""
+
+    from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
+
+    gateway = MagicMock(spec=InternalMCPGateway)
+    gateway.enabled = True
+    catalogue: dict[str, dict[str, Any]] = {
+        "search_knowledge_base": {
+            "name": "search_knowledge_base",
+            "description": "Search represented knowledge",
+            "input_schema": {"required": {"query": str}, "optional": {}, "allow_unknown": True},
+            "output_schema": None,
+            "category": "read",
+        },
+        "search_web": {
+            "name": "search_web",
+            "description": "Search the web",
+            "input_schema": {"required": {"query": str}, "optional": {}, "allow_unknown": True},
+            "output_schema": None,
+            "category": "read",
+        },
+        "fetch_concept": {
+            "name": "fetch_concept",
+            "description": "Fetch one concept",
+            "input_schema": {"required": {"concept_id": str}, "optional": {}, "allow_unknown": True},
+            "output_schema": None,
+            "category": "read",
+        },
+    }
+    for index in range(40):
+        catalogue[f"search_misc_{index:03d}"] = {
+            "name": f"search_misc_{index:03d}",
+            "description": "Generic search helper",
+            "input_schema": {"required": {"query": str}, "optional": {}, "allow_unknown": True},
+            "output_schema": None,
+            "category": "read",
+        }
+        catalogue[f"rag_misc_{index:03d}"] = {
+            "name": f"rag_misc_{index:03d}",
+            "description": "Generic KB helper",
+            "input_schema": {"required": {"query": str}, "optional": {}, "allow_unknown": True},
+            "output_schema": None,
+            "category": "read",
+        }
+        catalogue[f"concept_misc_{index:03d}"] = {
+            "name": f"concept_misc_{index:03d}",
+            "description": "Generic Vontology helper",
+            "input_schema": {"required": {"query": str}, "optional": {}, "allow_unknown": True},
+            "output_schema": None,
+            "category": "read",
+        }
+    for index in range(20):
+        catalogue[f"concept_write_{index:03d}"] = {
+            "name": f"concept_write_{index:03d}",
+            "description": "Generic Vontology mutation helper",
+            "input_schema": {
+                "required": {"concept_id": str},
+                "optional": {},
+                "allow_unknown": True,
+            },
+            "output_schema": None,
+            "category": "write",
+        }
+    gateway.describe_methods.return_value = catalogue
+
+    orch = InternalMCPChatOrchestrator(gateway=gateway)
+    tool_defs = orch._convert_mcp_tools_to_structured_definitions(
+        method_catalogue=catalogue
+    )
+    resolution = orch._resolve_structured_tool_candidates(
+        prompt=(
+            "What open-source projects released recently look most aligned with "
+            "the research themes already in my KB?"
+        ),
+        context=[
+            {
+                "role": "system",
+                "content": (
+                    "Selector guidance: first use RAG/Vontology tools to extract "
+                    "research themes from the user's KB, then use search_web to "
+                    "find recent releases."
+                ),
+            }
+        ],
+        stage="tool_call",
+        workflow_action_id="tool_calling.respond",
+        provider="openai",
+        tool_definitions=tool_defs,
+        method_catalogue=catalogue,
+        required_prompt_tools=[],
+    )
+
+    lowered = {name.lower() for name in resolution.candidate_tool_names}
+    assert "search_knowledge_base" in lowered
+    assert "search_web" in lowered
+    assert "fetch_concept" in lowered
+    assert not any(name.startswith("concept_write_") for name in lowered)
+    assert len(resolution.candidate_tool_names) <= 16
+    assert any(
+        warning == "family_hint_cap_applied:16" for warning in resolution.warnings
+    )
 
 
 if __name__ == "__main__":

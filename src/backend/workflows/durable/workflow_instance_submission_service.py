@@ -539,6 +539,7 @@ def _build_runnable_cache_key(
     definition_identity: Mapping[str, Any] | None,
     fallback_enabled: bool,
     fallback_tool_names: Sequence[str],
+    action_registry_action_ids: Sequence[str],
     feature_signature: Mapping[str, Any],
 ) -> tuple[str | None, str]:
     definition_hash = ""
@@ -554,6 +555,13 @@ def _build_runnable_cache_key(
         "fallback_enabled": bool(fallback_enabled),
         "fallback_tool_hash": _stable_json_hash(
             {"tools": sorted(str(name) for name in fallback_tool_names if str(name))}
+        ),
+        "action_registry_hash": _stable_json_hash(
+            {
+                "action_ids": sorted(
+                    str(name) for name in action_registry_action_ids if str(name)
+                )
+            }
         ),
         "feature_signature": dict(feature_signature),
         "cache_generation": _current_runnable_cache_generation(),
@@ -786,7 +794,11 @@ def _verify_workflow_runnable_uncached(
     )
 
 
-def verify_workflow_runnable(workflow_id: str) -> WorkflowRunnableVerification:
+def verify_workflow_runnable(
+    workflow_id: str,
+    *,
+    action_registry_override: Any | None = None,
+) -> WorkflowRunnableVerification:
     """Evaluate whether a workflow is runnable in the current runtime context."""
 
     verify_started = perf_counter()
@@ -844,10 +856,21 @@ def verify_workflow_runnable(workflow_id: str) -> WorkflowRunnableVerification:
             authoritative_definition=None,
         )
 
-        action_registry = get_shared_durable_action_registry()
+        action_registry = (
+            action_registry_override
+            if action_registry_override is not None
+            else get_shared_durable_action_registry()
+        )
         fallback_enabled = action_registry.has_fallback_handler()
         fallback_tool_names = (
             _internal_mcp_method_names() if fallback_enabled else frozenset()
+        )
+        action_registry_action_ids = tuple(
+            sorted(
+                str(action_id)
+                for action_id in getattr(action_registry, "all_action_ids", lambda: [])()
+                if isinstance(action_id, str) and action_id.strip()
+            )
         )
         prep_ms = round((perf_counter() - prep_started) * 1000.0, 3)
 
@@ -857,6 +880,7 @@ def verify_workflow_runnable(workflow_id: str) -> WorkflowRunnableVerification:
             definition_identity=definition_identity,
             fallback_enabled=fallback_enabled,
             fallback_tool_names=tuple(sorted(fallback_tool_names)),
+            action_registry_action_ids=action_registry_action_ids,
             feature_signature=feature_signature,
         )
         stale_evicted = _evict_stale_workflow_entries(
@@ -1018,6 +1042,7 @@ def submit_verified_workflow_instance(
     source_event_type: str | None = None,
     source_event_id: str | None = None,
     event_idempotency_key: str | None = None,
+    action_registry_override: Any | None = None,
 ) -> WorkflowInstanceSubmissionResult:
     """Create a durable workflow instance only when runnable verification passes."""
 
@@ -1081,7 +1106,10 @@ def submit_verified_workflow_instance(
             },
             created_new=None,
         )
-    preflight = verify_workflow_runnable(workflow_id)
+    preflight = verify_workflow_runnable(
+        workflow_id,
+        action_registry_override=action_registry_override,
+    )
     verification_payload = _build_submission_verification_payload(
         preflight=preflight,
         postflight=None,
@@ -1188,7 +1216,14 @@ def submit_verified_workflow_instance(
 
     # Idempotent event reuse should not retroactively fail a previously created
     # instance if the workflow definition drifts after the original launch.
-    postflight = preflight if not created_new else verify_workflow_runnable(workflow_id)
+    postflight = (
+        preflight
+        if not created_new
+        else verify_workflow_runnable(
+            workflow_id,
+            action_registry_override=action_registry_override,
+        )
+    )
     verification_payload = _build_submission_verification_payload(
         preflight=preflight,
         postflight=postflight,

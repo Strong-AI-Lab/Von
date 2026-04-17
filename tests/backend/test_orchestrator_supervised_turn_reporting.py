@@ -770,6 +770,84 @@ def test_supervised_turn_seeds_conversation_turn_llm_timeout_override(
     assert result.response_text == "Done."
 
 
+def test_supervised_turn_seeds_requested_model_for_workflow_llm_steps(
+    monkeypatch,
+) -> None:
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _DummyGateway()))
+    _stub_base_system_prompt(monkeypatch, orchestrator)
+    captured: dict[str, Any] = {}
+
+    def _execute_workflow(*args, **kwargs):
+        captured["data"] = kwargs.get("data")
+        return SimpleNamespace(
+            completed=True,
+            final_state="completed",
+            error=None,
+            data={"response_text": "Done.", "completion_report": {"completed": True}},
+        )
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
+
+    result = orchestrator.execute_conversation_turn_supervised(
+        prompt="Find recent open-source projects.",
+        context=None,
+        llm_client=_DummyLLM(),
+        model="gemma4:26b",
+    )
+
+    workflow_data = captured.get("data")
+    assert isinstance(workflow_data, dict)
+    assert workflow_data.get("requested_model") == "gemma4:26b"
+    assert result.response_text == "Done."
+
+
+def test_supervised_turn_surfaces_workflow_tool_outputs(
+    monkeypatch,
+) -> None:
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _DummyGateway()))
+    _stub_base_system_prompt(monkeypatch, orchestrator)
+
+    def _execute_workflow(*args, **kwargs):
+        return SimpleNamespace(
+            completed=True,
+            final_state="completed",
+            error=None,
+            data={
+                "response_text": "Done.",
+                "tool_messages": [
+                    {"role": "tool", "content": "KB lookup completed."},
+                ],
+                "invocations": [
+                    {
+                        "tool": "search_knowledge_base",
+                        "arguments": {"query": "research themes"},
+                    }
+                ],
+                "completion_report": {"completed": True},
+            },
+        )
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
+
+    result = orchestrator.execute_conversation_turn_supervised(
+        prompt="Find relevant open-source projects.",
+        context=None,
+        llm_client=_DummyLLM(),
+        model="gemma4:26b",
+    )
+
+    assert result.response_text == "Done."
+    assert list(result.tool_invocations) == [
+        {
+            "tool": "search_knowledge_base",
+            "arguments": {"query": "research themes"},
+        }
+    ]
+    assert list(result.extra_messages) == [
+        {"role": "tool", "content": "KB lookup completed."}
+    ]
+
+
 def test_turn_execution_route_uses_prepared_selector_response_without_extra_llm_call(
     monkeypatch,
 ) -> None:

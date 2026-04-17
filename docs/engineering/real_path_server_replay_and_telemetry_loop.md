@@ -242,6 +242,11 @@ Before the first replay:
    - local branch/commit identity for the checkout you ran from;
    - server-reported version/branch/commit when the server exposes them.
 
+For the current `JVNAUTOSCI-1894` replay programme, the default scripted model
+override should be Ollama `gemma4:26b` unless a task explicitly requires a
+different model or a controlled A/B comparison. If you deliberately omit that
+override, record the reason.
+
 For browser follow-up, also record the visible user-facing model/provider shown
 in the UI when that surface exposes one. If the scripted replay and browser
 surface appear to be using different models, say so explicitly rather than
@@ -315,6 +320,9 @@ For each replayed prompt:
    - browser-visible model/provider, if a browser pass is part of the run;
    - local branch/commit for the checkout you ran from;
    - server-reported version/branch/commit when the server exposes them.
+   For the current replay programme, the default scripted requested model
+   should normally be Ollama `gemma4:26b`, and the browser pass should be
+   switched to the same visible model where practical before you judge parity.
 6. Fetch the persisted evidence:
    - `turn_execution_get_diagnostics`
    - `chat_history_get_debug_entry`
