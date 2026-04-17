@@ -88,6 +88,7 @@ def test_evaluate_user_happiness_accepts_grounded_tool_answer() -> None:
         "jira_search",
     ]
 
+
 def test_evaluate_user_happiness_accepts_short_direct_answer() -> None:
     evaluation = sampler._evaluate_user_happiness(
         prompt_entry={
@@ -107,6 +108,77 @@ def test_evaluate_user_happiness_accepts_short_direct_answer() -> None:
                     }
                 },
                 "tool_history": [],
+            }
+        },
+    )
+
+    assert evaluation["should_user_be_happy"] is True
+    assert evaluation["verdict"] == "happy"
+    assert evaluation["reasons"] == []
+
+
+def test_evaluate_user_happiness_requires_tool_use_for_operational_prompt() -> None:
+    evaluation = sampler._evaluate_user_happiness(
+        prompt_entry={
+            "id": "create_von_task_for_replay_review",
+            "category": "von_task_creation",
+            "complexity_class": "tool_augmented",
+            "prompt": (
+                "Create a Von task for me titled 'Review replay results' with a "
+                "short description saying it came from the JVNAUTOSCI-1894 "
+                "replay programme."
+            ),
+            "knowledge_surfaces": ["turn_context", "von_tasks"],
+            "likely_tools": ["task_create"],
+            "requires_tool_use": True,
+        },
+        generate_payload={
+            "response": "I can help with that, but I would need to create the task first."
+        },
+        llm_debug_data={
+            "turn_execution_diagnostics": {
+                "workflow_routing_diagnostics": {
+                    "dispatch": {
+                        "selected_execution_mode": "direct_response",
+                    }
+                },
+                "tool_history": [],
+            }
+        },
+    )
+
+    assert evaluation["should_user_be_happy"] is False
+    assert any(
+        "required operational tool use" in reason for reason in evaluation["reasons"]
+    )
+
+
+def test_evaluate_user_happiness_accepts_grounded_empty_operational_result() -> None:
+    evaluation = sampler._evaluate_user_happiness(
+        prompt_entry={
+            "id": "list_my_pending_von_tasks",
+            "category": "von_task_listing",
+            "complexity_class": "tool_augmented",
+            "prompt": "List my pending Von tasks.",
+            "knowledge_surfaces": ["turn_context", "von_tasks"],
+            "likely_tools": ["task_list"],
+            "requires_tool_use": True,
+            "allows_grounded_empty_result": True,
+        },
+        generate_payload={
+            "response": "I don't currently have any pending Von tasks for you."
+        },
+        llm_debug_data={
+            "turn_execution_diagnostics": {
+                "workflow_routing_diagnostics": {
+                    "dispatch": {
+                        "selected_execution_mode": "tool_pipeline",
+                        "dispatch_workflow_id": "#V#tool_calling_workflow",
+                    }
+                },
+                "tool_history": [
+                    {"tool": "task_list", "success": True},
+                ],
             }
         },
     )
@@ -158,6 +230,29 @@ def test_choose_prompt_respects_complexity_class_filter() -> None:
     )
 
     assert prompt["complexity_class"] == "direct_context_or_background"
+
+
+def test_prompt_bank_includes_operational_task_and_message_cases() -> None:
+    prompts = sampler.PROMPT_BANK_PAYLOAD["prompts"]
+    by_id = {
+        prompt["id"]: prompt
+        for prompt in prompts
+        if isinstance(prompt, dict) and isinstance(prompt.get("id"), str)
+    }
+
+    assert by_id["create_von_task_for_replay_review"]["likely_tools"] == [
+        "task_create"
+    ]
+    assert by_id["mark_replay_related_von_task_in_progress"]["likely_tools"] == [
+        "task_search",
+        "task_update_status",
+    ]
+    assert by_id["send_myself_a_von_message_about_replay_results"][
+        "requires_tool_use"
+    ] is True
+    assert by_id["count_my_unread_von_messages"][
+        "allows_grounded_empty_result"
+    ] is True
 
 
 def test_run_generate_background_omits_model_when_not_requested(
@@ -271,7 +366,7 @@ def test_build_summary_includes_replay_guide_metadata() -> None:
             }
         },
         evaluation={"verdict": "happy", "should_user_be_happy": True},
-        prompt_bank_schema_version="live_kb_tool_prompt_bank.v2",
+        prompt_bank_schema_version="live_kb_tool_prompt_bank.v3",
         requested_complexity_classes=["vontology_grounded"],
         seed=17,
         requested_model="gemma4:26b",
@@ -296,7 +391,7 @@ def test_build_summary_includes_replay_guide_metadata() -> None:
         "replay_guide_note"
     ]
     assert summary["prompt"]["complexity_class"] == "vontology_grounded"
-    assert summary["selection"]["prompt_bank_schema_version"] == "live_kb_tool_prompt_bank.v2"
+    assert summary["selection"]["prompt_bank_schema_version"] == "live_kb_tool_prompt_bank.v3"
     assert summary["selection"]["requested_complexity_classes"] == [
         "vontology_grounded"
     ]

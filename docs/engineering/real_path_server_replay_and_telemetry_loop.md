@@ -171,7 +171,8 @@ sampler can constrain random choice with `--complexity-class`:
   Vontology/KB content.
 - `tool_augmented`
   Questions that combine those abilities with live tool use such as web, Jira,
-  or arXiv lookup.
+  or arXiv lookup. This class also includes local operational prompts such as
+  Von task creation/listing/status change and direct-message creation/counting.
 
 The sampler itself now points back to this document and prints a runtime note
 that it should be used in conjunction with this method. Treat that reminder as
@@ -190,7 +191,11 @@ Practical rules:
 5. Treat the harness verdict such as `should_user_be_happy` as supporting
    evidence, not as the whole judgement. Compare the real answer and telemetry
    against your recorded expectation.
-6. When the capability spans multiple classes, work up the complexity over
+6. For operational prompts that are really asking Von to mutate or inspect its
+   own task/message state, record whether actual task/message tool use happened.
+   A generic "I can help with that" answer is not a pass for a create/update
+   prompt.
+7. When the capability spans multiple classes, work up the complexity over
    time:
    - start with `direct_context_or_background`;
    - then move to `vontology_grounded`;
@@ -207,6 +212,9 @@ Useful cases:
   downstream of a simpler direct-answer or KB-grounding weakness;
 - when you want a fast regression sentinel that still exercises the real server
   path.
+- when you want lightweight operational coverage for built-in Von surfaces such
+  as task creation/list/search/status updates and message creation/counting,
+  without jumping immediately to harder multi-surface research prompts.
 
 ## 6. Setup
 
@@ -322,6 +330,8 @@ For each replayed prompt:
    - RAG/KB search results
    - indexed sessions or file copies where relevant
    - any other expected represented source for that prompt class
+   For operational task/message prompts, this can include the relevant Von task
+   or message state rather than only KB search.
 9. If the replay route already exposed a live Thinking card or equivalent
    progress panel, review that user-facing surface as well.
 10. If the replay was a scripted `/von/generate` pass and it succeeded against

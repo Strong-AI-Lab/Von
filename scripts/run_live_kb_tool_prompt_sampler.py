@@ -62,18 +62,37 @@ PROMPT_COMPLEXITY_CLASS_DESCRIPTIONS: dict[str, str] = {
         "use, especially web, Jira, arXiv, or other external/operational surfaces."
     ),
 }
-NEGATIVE_RESPONSE_MARKERS = (
-    "i don't currently have",
-    "i do not currently have",
-    "i don't have enough information",
-    "i do not have enough information",
+HARD_FAILURE_RESPONSE_MARKERS = (
     "i can't access",
     "i cannot access",
     "not authenticated",
     "workflow not runnable",
     "instance was not created",
+)
+SOFT_FAILURE_RESPONSE_MARKERS = (
+    "i don't currently have",
+    "i do not currently have",
+    "i don't have enough information",
+    "i do not have enough information",
     "i don't know",
     "i do not know",
+)
+GROUNDED_EMPTY_RESULT_MARKERS = (
+    "no pending von tasks",
+    "no pending tasks",
+    "no unread von messages",
+    "no unread messages",
+    "no von messages",
+    "no messages",
+    "don't currently have any pending von tasks",
+    "do not currently have any pending von tasks",
+    "don't currently have any unread von messages",
+    "do not currently have any unread von messages",
+    "no matching tasks",
+    "couldn't find any matching tasks",
+    "could not find any matching tasks",
+    "didn't find any matching tasks",
+    "did not find any matching tasks",
 )
 INVENTORY_ONLY_TOOLS = frozenset({"list_papers"})
 RELATIONSHIP_CLAIM_MARKERS = (
@@ -84,11 +103,12 @@ RELATIONSHIP_CLAIM_MARKERS = (
 )
 
 PROMPT_BANK_PAYLOAD: dict[str, Any] = {
-    "schema_version": "live_kb_tool_prompt_bank.v2",
+    "schema_version": "live_kb_tool_prompt_bank.v3",
     "description": (
         "Prompt bank for live /von/generate sampling of turns that range from "
         "easy direct-response questions through KB-grounded questions to "
-        "tool-augmented prompts."
+        "tool-augmented prompts, including local operational prompts for Von "
+        "task and message creation/manipulation."
     ),
     "complexity_classes": PROMPT_COMPLEXITY_CLASS_DESCRIPTIONS,
     "prompts": [
@@ -221,6 +241,77 @@ PROMPT_BANK_PAYLOAD: dict[str, Any] = {
             ),
             "knowledge_surfaces": ["kb"],
             "likely_tools": ["search_knowledge_base"],
+        },
+        {
+            "id": "create_von_task_for_replay_review",
+            "category": "von_task_creation",
+            "complexity_class": "tool_augmented",
+            "prompt": (
+                "Create a Von task for me titled 'Review replay results' with a "
+                "short description saying it came from the JVNAUTOSCI-1894 "
+                "replay programme."
+            ),
+            "knowledge_surfaces": ["turn_context", "von_tasks"],
+            "likely_tools": ["task_create"],
+            "requires_tool_use": True,
+        },
+        {
+            "id": "list_my_pending_von_tasks",
+            "category": "von_task_listing",
+            "complexity_class": "tool_augmented",
+            "prompt": "List my pending Von tasks.",
+            "knowledge_surfaces": ["turn_context", "von_tasks"],
+            "likely_tools": ["task_list"],
+            "requires_tool_use": True,
+            "allows_grounded_empty_result": True,
+        },
+        {
+            "id": "search_my_von_tasks_for_replay_or_thinking_card_work",
+            "category": "von_task_search",
+            "complexity_class": "tool_augmented",
+            "prompt": (
+                "Search my Von tasks for anything about replay testing or the "
+                "thinking card."
+            ),
+            "knowledge_surfaces": ["turn_context", "von_tasks"],
+            "likely_tools": ["task_search"],
+            "requires_tool_use": True,
+            "allows_grounded_empty_result": True,
+        },
+        {
+            "id": "mark_replay_related_von_task_in_progress",
+            "category": "von_task_status_update",
+            "complexity_class": "tool_augmented",
+            "prompt": (
+                "If I have a pending Von task about replay testing, mark it in "
+                "progress and tell me which task you changed."
+            ),
+            "knowledge_surfaces": ["turn_context", "von_tasks"],
+            "likely_tools": ["task_search", "task_update_status"],
+            "requires_tool_use": True,
+            "allows_grounded_empty_result": True,
+        },
+        {
+            "id": "send_myself_a_von_message_about_replay_results",
+            "category": "von_message_creation",
+            "complexity_class": "tool_augmented",
+            "prompt": (
+                "Send me a Von message reminding me to review the latest replay "
+                "results."
+            ),
+            "knowledge_surfaces": ["turn_context", "von_messages"],
+            "likely_tools": ["message_create"],
+            "requires_tool_use": True,
+        },
+        {
+            "id": "count_my_unread_von_messages",
+            "category": "von_message_listing",
+            "complexity_class": "tool_augmented",
+            "prompt": "How many unread Von messages do I have right now?",
+            "knowledge_surfaces": ["turn_context", "von_messages"],
+            "likely_tools": ["message_list"],
+            "requires_tool_use": True,
+            "allows_grounded_empty_result": True,
         },
         {
             "id": "closest_kb_papers_to_recent_arxiv_interests",
@@ -894,10 +985,24 @@ def _evaluate_user_happiness(
         reasons.append(f"Critic verdict reported {critic_status}.")
 
     lowered_response = response_text.lower()
-    if any(marker in lowered_response for marker in NEGATIVE_RESPONSE_MARKERS):
-        reasons.append("Response contains a generic limitation or failure marker.")
-
     tool_names = _collect_tool_names(diagnostics, llm_debug_data)
+    requires_tool_use = bool(prompt_entry.get("requires_tool_use"))
+    allows_grounded_empty_result = bool(
+        prompt_entry.get("allows_grounded_empty_result")
+    )
+    if any(marker in lowered_response for marker in HARD_FAILURE_RESPONSE_MARKERS):
+        reasons.append("Response contains a concrete failure or access marker.")
+    elif any(marker in lowered_response for marker in SOFT_FAILURE_RESPONSE_MARKERS):
+        grounded_empty_result = (
+            allows_grounded_empty_result
+            and bool(tool_names)
+            and any(
+                marker in lowered_response for marker in GROUNDED_EMPTY_RESULT_MARKERS
+            )
+        )
+        if not grounded_empty_result:
+            reasons.append("Response contains a generic limitation or failure marker.")
+
     expected_tools = [
         _safe_text(name)
         for name in _as_list(prompt_entry.get("likely_tools"))
@@ -912,9 +1017,17 @@ def _evaluate_user_happiness(
         reasons.append(
             "Prompt expected external knowledge surfaces but no tool usage was recorded."
         )
+    if requires_tool_use and not tool_names:
+        reasons.append(
+            "Prompt required operational tool use but no tool usage was recorded."
+        )
 
     minimum_response_length = (
-        4 if complexity_class == "direct_context_or_background" else 40
+        4
+        if complexity_class == "direct_context_or_background"
+        else 20
+        if requires_tool_use or allows_grounded_empty_result
+        else 40
     )
     if len(response_text) < minimum_response_length:
         reasons.append("Response was too short to plausibly satisfy the prompt.")
@@ -1001,6 +1114,10 @@ def _build_summary(
             "text": _safe_text(prompt_entry.get("prompt")),
             "knowledge_surfaces": _as_list(prompt_entry.get("knowledge_surfaces")),
             "likely_tools": _as_list(prompt_entry.get("likely_tools")),
+            "requires_tool_use": bool(prompt_entry.get("requires_tool_use")),
+            "allows_grounded_empty_result": bool(
+                prompt_entry.get("allows_grounded_empty_result")
+            ),
         },
         "conversation": {
             "session_id": session_id,
@@ -1118,6 +1235,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                             entry.get("complexity_class")
                         ),
                         "prompt": _safe_text(entry.get("prompt")),
+                        "requires_tool_use": bool(
+                            entry.get("requires_tool_use")
+                        ),
+                        "allows_grounded_empty_result": bool(
+                            entry.get("allows_grounded_empty_result")
+                        ),
                     }
                     for entry in prompt_bank
                     if isinstance(entry, Mapping)

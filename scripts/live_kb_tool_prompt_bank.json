@@ -1,6 +1,6 @@
 {
-  "schema_version": "live_kb_tool_prompt_bank.v2",
-  "description": "Prompt bank for live /von/generate sampling of turns that range from easy direct-response questions through KB-grounded questions to tool-augmented prompts.",
+  "schema_version": "live_kb_tool_prompt_bank.v3",
+  "description": "Prompt bank for live /von/generate sampling of turns that range from easy direct-response questions through KB-grounded questions to tool-augmented prompts, including local operational prompts for Von task and message creation/manipulation.",
   "complexity_classes": {
     "direct_context_or_background": "Questions that a capable direct-response LLM should usually answer from turn context, runtime context, or background knowledge without needing KB grounding or extra tools.",
     "tool_augmented": "Questions that combine direct/context and KB reasoning with live tool use, especially web, Jira, arXiv, or other external/operational surfaces.",
@@ -170,6 +170,95 @@
       "likely_tools": [
         "search_knowledge_base"
       ]
+    },
+    {
+      "id": "create_von_task_for_replay_review",
+      "category": "von_task_creation",
+      "complexity_class": "tool_augmented",
+      "prompt": "Create a Von task for me titled 'Review replay results' with a short description saying it came from the JVNAUTOSCI-1894 replay programme.",
+      "knowledge_surfaces": [
+        "turn_context",
+        "von_tasks"
+      ],
+      "likely_tools": [
+        "task_create"
+      ],
+      "requires_tool_use": true
+    },
+    {
+      "id": "list_my_pending_von_tasks",
+      "category": "von_task_listing",
+      "complexity_class": "tool_augmented",
+      "prompt": "List my pending Von tasks.",
+      "knowledge_surfaces": [
+        "turn_context",
+        "von_tasks"
+      ],
+      "likely_tools": [
+        "task_list"
+      ],
+      "requires_tool_use": true,
+      "allows_grounded_empty_result": true
+    },
+    {
+      "id": "search_my_von_tasks_for_replay_or_thinking_card_work",
+      "category": "von_task_search",
+      "complexity_class": "tool_augmented",
+      "prompt": "Search my Von tasks for anything about replay testing or the thinking card.",
+      "knowledge_surfaces": [
+        "turn_context",
+        "von_tasks"
+      ],
+      "likely_tools": [
+        "task_search"
+      ],
+      "requires_tool_use": true,
+      "allows_grounded_empty_result": true
+    },
+    {
+      "id": "mark_replay_related_von_task_in_progress",
+      "category": "von_task_status_update",
+      "complexity_class": "tool_augmented",
+      "prompt": "If I have a pending Von task about replay testing, mark it in progress and tell me which task you changed.",
+      "knowledge_surfaces": [
+        "turn_context",
+        "von_tasks"
+      ],
+      "likely_tools": [
+        "task_search",
+        "task_update_status"
+      ],
+      "requires_tool_use": true,
+      "allows_grounded_empty_result": true
+    },
+    {
+      "id": "send_myself_a_von_message_about_replay_results",
+      "category": "von_message_creation",
+      "complexity_class": "tool_augmented",
+      "prompt": "Send me a Von message reminding me to review the latest replay results.",
+      "knowledge_surfaces": [
+        "turn_context",
+        "von_messages"
+      ],
+      "likely_tools": [
+        "message_create"
+      ],
+      "requires_tool_use": true
+    },
+    {
+      "id": "count_my_unread_von_messages",
+      "category": "von_message_listing",
+      "complexity_class": "tool_augmented",
+      "prompt": "How many unread Von messages do I have right now?",
+      "knowledge_surfaces": [
+        "turn_context",
+        "von_messages"
+      ],
+      "likely_tools": [
+        "message_list"
+      ],
+      "requires_tool_use": true,
+      "allows_grounded_empty_result": true
     },
     {
       "id": "closest_kb_papers_to_recent_arxiv_interests",
