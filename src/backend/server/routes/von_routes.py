@@ -2857,13 +2857,34 @@ def _resolve_tool_progress_state_from_scope_candidates(
     best_state: dict[str, Any] | None = None
     best_scope_key: str | None = None
     best_ordering_key: tuple[int, float, float, float] | None = None
-
-    for candidate_scope_key in _build_tool_progress_scope_candidates(
+    candidate_scope_keys = _build_tool_progress_scope_candidates(
         explicit_scope_key=explicit_scope_key,
         user_concept_id=user_concept_id,
         window_session_id=window_session_id,
         anonymous_session_id=anonymous_session_id,
-    ):
+    )
+
+    # Prefer any in-memory live progress before touching the persisted store.
+    # This keeps alternate-scope fallback responsive during active browser turns
+    # instead of blocking on a slow persisted-store miss for an earlier scope.
+    for candidate_scope_key in candidate_scope_keys:
+        candidate_state = _get_live_memory_tool_progress(
+            candidate_scope_key, request_id
+        )
+        if not isinstance(candidate_state, dict):
+            continue
+        ordering_key = _tool_progress_state_ordering_key(candidate_state)
+        if best_state is None or ordering_key > cast(
+            tuple[int, float, float, float], best_ordering_key
+        ):
+            best_state = dict(candidate_state)
+            best_scope_key = candidate_scope_key
+            best_ordering_key = ordering_key
+
+    if best_state is not None:
+        return best_state, best_scope_key
+
+    for candidate_scope_key in candidate_scope_keys:
         candidate_state = _get_tool_progress(candidate_scope_key, request_id)
         if not isinstance(candidate_state, dict):
             continue
@@ -3937,6 +3958,17 @@ def _get_tool_progress(scope_key: str, request_id: str) -> dict[str, Any] | None
     return None
 
 
+def _get_live_memory_tool_progress(
+    scope_key: str, request_id: str
+) -> dict[str, Any] | None:
+    _prune_tool_progress()
+    with _TOOL_PROGRESS_LOCK:
+        value = _TOOL_PROGRESS.get((scope_key, request_id))
+        if isinstance(value, dict):
+            return dict(value)
+    return None
+
+
 def _snapshot_tool_progress_for_request(
     scope_key: str | None, request_id: str | None
 ) -> dict[str, Any] | None:
@@ -3971,17 +4003,30 @@ def get_generation_progress(request_id: str):
     ):
         return jsonify({"error": "Invalid request_id"}), 400
 
-    scope_key = _get_tool_progress_scope_key()
-    resolved_user_concept_id = None
-    if scope_key.startswith("user:"):
-        resolved_user_concept_id = _progress_str(scope_key[len("user:") :])
-    else:
-        resolved_user_concept_id = _progress_str(session.get("user_concept_id"))
-
     window_session_id = _normalise_tool_progress_window_session_id(
         request.headers.get(_WINDOW_SESSION_HEADER_NAME)
     )
-    anonymous_session_id = _progress_str(session.get("tool_progress_scope"))
+    header_user_concept_id = _normalise_concept_id(
+        request.headers.get("X-User-Concept-ID")
+    ) or _progress_str(request.headers.get("X-User-Concept-ID"))
+
+    scope_key = ""
+    resolved_user_concept_id = header_user_concept_id
+    anonymous_session_id = None
+
+    # Keep live progress polling as header-first as possible so browser turns do
+    # not depend on Flask-session reads while /von/generate is still active.
+    if resolved_user_concept_id:
+        scope_key = f"user:{resolved_user_concept_id}"
+    elif window_session_id:
+        scope_key = f"{_TOOL_PROGRESS_WINDOW_SCOPE_PREFIX}{window_session_id}"
+    else:
+        scope_key = _get_tool_progress_scope_key()
+        if scope_key.startswith("user:"):
+            resolved_user_concept_id = _progress_str(scope_key[len("user:") :])
+        else:
+            resolved_user_concept_id = _progress_str(session.get("user_concept_id"))
+        anonymous_session_id = _progress_str(session.get("tool_progress_scope"))
 
     state, resolved_scope_key = _resolve_tool_progress_state_from_scope_candidates(
         request_id=request_id.strip(),
@@ -6451,6 +6496,7 @@ def _add_chat_history_message(
     namespace: str | None = None,
     organisation_concept_id: str | None = None,
     role_in_org: str | None = None,
+    skip_rag_indexing: bool = False,
 ) -> None:
     context_kwargs = _build_chat_history_context_kwargs(
         namespace=namespace,
@@ -6462,6 +6508,7 @@ def _add_chat_history_message(
         session_id,
         message,
         llm_debug_data=llm_debug_data,
+        skip_rag_indexing=skip_rag_indexing,
         **context_kwargs,
     )
 
@@ -7925,6 +7972,9 @@ def _persist_generate_turn_messages(
     org_concept_id: str | None,
     role_in_org: str | None,
 ) -> None:
+    # Live /von/generate turns must not block the browser response on best-effort
+    # chat-history RAG indexing. Dedicated reindex pathways can backfill this
+    # material later without holding the user-visible turn open.
     truncated_tool_messages = _truncate_large_tool_results(
         tool_messages, max_tool_content_chars=5000
     )
@@ -7943,6 +7993,7 @@ def _persist_generate_turn_messages(
                 namespace=user_namespace,
                 organisation_concept_id=org_concept_id,
                 role_in_org=role_in_org,
+                skip_rag_indexing=True,
             )
         for tool_msg in truncated_tool_messages:
             _add_chat_history_message(
@@ -7952,6 +8003,7 @@ def _persist_generate_turn_messages(
                 namespace=user_namespace,
                 organisation_concept_id=org_concept_id,
                 role_in_org=role_in_org,
+                skip_rag_indexing=True,
             )
         _add_chat_history_message(
             user_id=history_user_id,
@@ -7961,6 +8013,7 @@ def _persist_generate_turn_messages(
             namespace=user_namespace,
             organisation_concept_id=org_concept_id,
             role_in_org=role_in_org,
+            skip_rag_indexing=True,
         )
     else:
         current_app.config["CONTEXT"].append({"role": "user", "content": prompt_text})
@@ -8387,7 +8440,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 org_concept_id if isinstance(org_concept_id, str) else None
             ),
             role_in_org=role_in_org if isinstance(role_in_org, str) else None,
-            window_session_id=window_session_id,
+            window_session_id=request_window_session_id,
         )
     )
 
@@ -8417,11 +8470,34 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 and user_concept_id
                 and history_owner_user_id != user_concept_id
             ):
+                shared_invite_org_concept_id = (
+                    _normalise_concept_id(shared_invite.get("organisation_concept_id"))
+                    if isinstance(shared_invite, Mapping)
+                    else None
+                )
+                owner_history_namespace = _derive_namespace_for_user_org(
+                    history_owner_user_id, shared_invite_org_concept_id
+                ) or chat_history_service.resolve_chat_history_namespace(
+                    history_owner_user_id
+                )
+                invitee_history_namespace = (
+                    user_namespace
+                    if isinstance(user_namespace, str) and user_namespace.strip()
+                    else _derive_namespace_for_user_org(
+                        user_concept_id, shared_invite_org_concept_id
+                    )
+                ) or chat_history_service.resolve_chat_history_namespace(
+                    user_concept_id
+                )
                 owner_history = chat_history_service.get_chat_history(
-                    history_owner_user_id, session_id
+                    history_owner_user_id,
+                    session_id,
+                    namespace=owner_history_namespace,
                 )
                 invitee_history = chat_history_service.get_chat_history(
-                    user_concept_id, session_id
+                    user_concept_id,
+                    session_id,
+                    namespace=invitee_history_namespace,
                 )
                 owner_history = _apply_default_author(
                     owner_history, history_owner_user_id
@@ -8432,7 +8508,13 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 context = _merge_shared_histories(owner_history, invitee_history)
             else:
                 context = chat_history_service.get_chat_history(
-                    history_user_id, session_id
+                    history_user_id,
+                    session_id,
+                    namespace=(
+                        user_namespace
+                        if isinstance(user_namespace, str) and user_namespace.strip()
+                        else None
+                    ),
                 )
         finally:
             _chat_history_elapsed_ms = (
@@ -8451,7 +8533,10 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
     # JVNAUTOSCI-1423: Persist user message to chat history immediately,
     # BEFORE orchestrator/LLM work begins.  This guarantees the user's
     # message is recorded even if the downstream turn crashes or stalls.
-    # Downstream paths must NOT re-persist the user message.
+    # Downstream paths must NOT re-persist the user message. This early
+    # durability write must also avoid synchronous best-effort RAG indexing,
+    # otherwise embeddings/quota delays can stall the browser turn before
+    # workflow selection even begins.
     # ------------------------------------------------------------------
     _user_message_persisted_early = False
     if history_user_id:
@@ -8467,6 +8552,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 namespace=user_namespace,
                 organisation_concept_id=org_concept_id,
                 role_in_org=role_in_org,
+                skip_rag_indexing=True,
             )
             _user_message_persisted_early = True
         except Exception as early_persist_exc:
@@ -9234,6 +9320,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     namespace=user_namespace,
                     organisation_concept_id=org_concept_id,
                     role_in_org=role_in_org,
+                    skip_rag_indexing=True,
                 )
             for tool_msg in _truncate_large_tool_results(
                 tool_messages, max_tool_content_chars=5000
@@ -9246,6 +9333,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         namespace=user_namespace,
                         organisation_concept_id=org_concept_id,
                         role_in_org=role_in_org,
+                        skip_rag_indexing=True,
                     )
             current_app.config["CONTEXT"] = _limit_context_size(
                 current_app.config["CONTEXT"], max_messages=20
@@ -9317,6 +9405,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     namespace=user_namespace,
                     organisation_concept_id=org_concept_id,
                     role_in_org=role_in_org,
+                    skip_rag_indexing=True,
                 )
 
             return jsonify(
@@ -9419,6 +9508,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                                 namespace=user_namespace,
                                 organisation_concept_id=org_concept_id,
                                 role_in_org=role_in_org,
+                                skip_rag_indexing=True,
                             )
                         for tool_msg in _truncate_large_tool_results(
                             tool_messages, max_tool_content_chars=5000
@@ -9430,6 +9520,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                                 namespace=user_namespace,
                                 organisation_concept_id=org_concept_id,
                                 role_in_org=role_in_org,
+                                skip_rag_indexing=True,
                             )
                     else:
                         current_app.config["CONTEXT"].append(
@@ -9520,6 +9611,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                             namespace=user_namespace,
                             organisation_concept_id=org_concept_id,
                             role_in_org=role_in_org,
+                            skip_rag_indexing=True,
                         )
 
                     rag_trace["tools_invoked"] = [
@@ -11345,7 +11437,13 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         if user_concept_id:
             try:
                 persisted_history = chat_history_service.get_chat_history(
-                    user_concept_id, session_id
+                    user_concept_id,
+                    session_id,
+                    namespace=(
+                        user_namespace
+                        if isinstance(user_namespace, str) and user_namespace.strip()
+                        else None
+                    ),
                 )
             except Exception:
                 persisted_history = []

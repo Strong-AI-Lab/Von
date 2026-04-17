@@ -24,11 +24,12 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, cast
 
 from ..vontology.utils_vontology import get_concept_description
 from .file_copy_reference_service import extract_file_copy_concept_ids_from_text
@@ -87,6 +88,51 @@ _EXECUTABILITY_REASON_PRIORITY = {
     EXECUTABILITY_WORKFLOW_STEP_PARTIALLY_VACUOUS: 1,
     EXECUTABILITY_WORKFLOW_STEP_COMPLETELY_VACUOUS: 1,
 }
+
+
+def _remaining_search_timeout_seconds(
+    *,
+    started_at: float,
+    timeout_seconds: float,
+) -> float:
+    return max(0.0, float(timeout_seconds) - (time.perf_counter() - started_at))
+
+
+def _run_with_search_timeout(
+    *,
+    label: str,
+    timeout_seconds: float,
+    operation: Callable[[], Any],
+) -> Any:
+    if timeout_seconds <= 0.0:
+        raise TimeoutError(f"{label} exceeded discovery timeout budget before it started")
+
+    state: dict[str, object] = {}
+    completed = threading.Event()
+
+    def _worker() -> None:
+        try:
+            state["result"] = operation()
+        except Exception as exc:  # pragma: no cover - re-raised on caller thread
+            state["error"] = exc
+        finally:
+            completed.set()
+
+    threading.Thread(
+        target=_worker,
+        daemon=True,
+        name=f"workflow-discovery-{label}",
+    ).start()
+
+    if not completed.wait(timeout=timeout_seconds):
+        raise TimeoutError(
+            f"{label} timed out after {timeout_seconds:.3f}s during workflow discovery"
+        )
+
+    error = state.get("error")
+    if isinstance(error, Exception):
+        raise error
+    return state.get("result")
 
 
 def _count_workflow_steps(graph: Optional[Dict[str, Any]]) -> int:
@@ -1196,11 +1242,21 @@ def discover_workflows(
     # tool_calling are discoverable on equal footing with Vontology workflows.
     try:
         search_sources.append("capability_index")
-        capability_matches = _search_workflow_capabilities(
-            search_query,
-            limit=max_results * 3,
-            max_wait_seconds=capability_index_wait_seconds,
-            workflow_registry=workflow_registry,
+        capability_matches = cast(
+            List[WorkflowMatch],
+            _run_with_search_timeout(
+                label="capability_index_search",
+                timeout_seconds=_remaining_search_timeout_seconds(
+                    started_at=start_time,
+                    timeout_seconds=timeout_seconds,
+                ),
+                operation=lambda: _search_workflow_capabilities(
+                    search_query,
+                    limit=max_results * 3,
+                    max_wait_seconds=capability_index_wait_seconds,
+                    workflow_registry=workflow_registry,
+                ),
+            ),
         )
         capability_index_state = get_workflow_capability_index_runtime_state()
         all_matches.extend(capability_matches)
@@ -1228,8 +1284,18 @@ def discover_workflows(
     ):
         try:
             search_sources.append("semantic")
-            semantic_matches = _search_workflows_semantic(
-                search_query, limit=max_results * 2
+            semantic_matches = cast(
+                List[WorkflowMatch],
+                _run_with_search_timeout(
+                    label="semantic_search",
+                    timeout_seconds=_remaining_search_timeout_seconds(
+                        started_at=start_time,
+                        timeout_seconds=timeout_seconds,
+                    ),
+                    operation=lambda: _search_workflows_semantic(
+                        search_query, limit=max_results * 2
+                    ),
+                ),
             )
             all_matches.extend(semantic_matches)
         except Exception as e:
@@ -1242,8 +1308,18 @@ def discover_workflows(
     ):
         try:
             search_sources.append("vontology")
-            vontology_matches = _search_workflows_vontology(
-                search_query, limit=max_results * 2
+            vontology_matches = cast(
+                List[WorkflowMatch],
+                _run_with_search_timeout(
+                    label="vontology_search",
+                    timeout_seconds=_remaining_search_timeout_seconds(
+                        started_at=start_time,
+                        timeout_seconds=timeout_seconds,
+                    ),
+                    operation=lambda: _search_workflows_vontology(
+                        search_query, limit=max_results * 2
+                    ),
+                ),
             )
             all_matches.extend(vontology_matches)
         except Exception as e:
@@ -1257,9 +1333,19 @@ def discover_workflows(
     ):
         try:
             search_sources.append("name_fallback")
-            fallback_matches = _search_workflows_name_fallback(
-                keyword_fallback_queries,
-                limit=max_results * 2,
+            fallback_matches = cast(
+                List[WorkflowMatch],
+                _run_with_search_timeout(
+                    label="workflow_name_fallback_search",
+                    timeout_seconds=_remaining_search_timeout_seconds(
+                        started_at=start_time,
+                        timeout_seconds=timeout_seconds,
+                    ),
+                    operation=lambda: _search_workflows_name_fallback(
+                        keyword_fallback_queries,
+                        limit=max_results * 2,
+                    ),
+                ),
             )
             all_matches.extend(fallback_matches)
         except Exception as e:
@@ -1360,15 +1446,34 @@ def discover_workflows_for_turn(
             if allow_non_executable is None
             else bool(allow_non_executable)
         )
-        result = discover_workflows(
-            user_input,
-            relevance_threshold=relevance_threshold,
-            max_results=max_results,
-            allow_non_executable=effective_allow_non_executable,
-            workflow_registry=workflow_registry,
+        result = cast(
+            WorkflowDiscoveryResult,
+            _run_with_search_timeout(
+                label="workflow_discovery_for_turn",
+                timeout_seconds=SEARCH_TIMEOUT_SECONDS,
+                operation=lambda: discover_workflows(
+                    user_input,
+                    relevance_threshold=relevance_threshold,
+                    max_results=max_results,
+                    timeout_seconds=SEARCH_TIMEOUT_SECONDS,
+                    allow_non_executable=effective_allow_non_executable,
+                    workflow_registry=workflow_registry,
+                ),
+            ),
         )
         return result.to_dict()
 
     except Exception as e:
         logger.warning(f"Workflow discovery for turn failed: {e}")
-        return None
+        return WorkflowDiscoveryResult(
+            query=user_input.strip(),
+            requested_query=user_input.strip(),
+            threshold=relevance_threshold,
+            errors=[f"workflow_discovery_for_turn_error: {e}"],
+            match_absence_reason="workflow_discovery_for_turn_error",
+            allow_non_executable=(
+                _env_allow_non_executable_default()
+                if allow_non_executable is None
+                else bool(allow_non_executable)
+            ),
+        ).to_dict()

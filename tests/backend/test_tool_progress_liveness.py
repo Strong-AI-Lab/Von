@@ -242,6 +242,98 @@ def test_progress_endpoint_uses_window_session_scope_for_anonymous_requests(
     assert body.get("goal_label") == "https://arxiv.org/abs/2602.20478"
 
 
+def test_progress_endpoint_uses_header_user_scope_without_session_resolution(
+    monkeypatch,
+) -> None:
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+    app.register_blueprint(von_routes.von_bp, url_prefix="/von")
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.get_show_tool_use_during_thinking",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("progress route should not require session auth lookup")
+        ),
+    )
+
+    request_id = "req-header-user-scope"
+    von_routes._set_tool_progress(
+        "user:#V#test_user",
+        request_id,
+        {
+            "status": "thinking",
+            "phase": "workflow_dispatch",
+            "phase_label": "Selecting workflow",
+            "request_id": request_id,
+        },
+    )
+
+    client = app.test_client()
+    response = client.get(
+        f"/von/progress/{request_id}",
+        headers={"X-User-Concept-ID": "#V#test_user"},
+    )
+    assert response.status_code == 200
+
+    body = response.get_json()
+    assert isinstance(body, dict)
+    assert body.get("request_id") == request_id
+    assert body.get("stage") == "workflow_dispatch"
+    assert body.get("phase_label") == "Selecting workflow"
+
+
+def test_progress_endpoint_uses_window_header_scope_without_session_resolution(
+    monkeypatch,
+) -> None:
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+    app.register_blueprint(von_routes.von_bp, url_prefix="/von")
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.get_show_tool_use_during_thinking",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("progress route should not require session auth lookup")
+        ),
+    )
+
+    request_id = "req-header-window-scope"
+    window_session_id = "ws_header_only_progress"
+    von_routes._set_tool_progress(
+        f"anon:window:{window_session_id}",
+        request_id,
+        {
+            "status": "thinking",
+            "phase": "context_build",
+            "phase_label": "Building context",
+            "request_id": request_id,
+        },
+    )
+
+    client = app.test_client()
+    response = client.get(
+        f"/von/progress/{request_id}",
+        headers={
+            "X-Von-Window-Session": window_session_id,
+            "X-User-Concept-ID": "#V#test_user",
+        },
+    )
+    assert response.status_code == 200
+
+    body = response.get_json()
+    assert isinstance(body, dict)
+    assert body.get("request_id") == request_id
+    assert body.get("stage") == "context_build"
+    assert body.get("phase_label") == "Building context"
+
+
 def test_progress_endpoint_retains_legacy_session_scope_without_window_header(
     monkeypatch,
 ) -> None:
@@ -374,13 +466,72 @@ def test_progress_endpoint_recovers_window_scoped_progress_after_auth_scope_shif
     client = app.test_client()
     response = client.get(
         "/von/progress/req-window-auth-shift",
-        headers={"X-Von-Window-Session": window_session_id},
+        headers={
+            "X-Von-Window-Session": window_session_id,
+            "X-User-Concept-ID": "#V#test_user",
+        },
     )
     assert response.status_code == 200
 
     body = response.get_json()
     assert isinstance(body, dict)
     assert body.get("request_id") == "req-window-auth-shift"
+    assert body.get("stage") == "workflow_dispatch_prepare"
+    assert body.get("phase_label") == "Preparing workflow dispatch"
+    assert body.get("resolved_scope_key") == f"anon:window:{window_session_id}"
+    assert body.get("progress_source") == "alternate_scope_fallback"
+
+
+def test_progress_endpoint_prefers_live_alternate_scope_before_persisted_miss(
+    monkeypatch,
+) -> None:
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+    app.register_blueprint(von_routes.von_bp, url_prefix="/von")
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.get_show_tool_use_during_thinking",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: "#V#test_user",
+    )
+
+    window_session_id = "ws_progress_memory_first"
+    request_id = "req-memory-first"
+    von_routes._set_tool_progress(
+        f"anon:window:{window_session_id}",
+        request_id,
+        {
+            "status": "thinking",
+            "phase": "workflow_dispatch_prepare",
+            "phase_label": "Preparing workflow dispatch",
+            "request_id": request_id,
+        },
+    )
+
+    def _unexpected_fetch(*, scope_key: str, request_id: str):
+        raise AssertionError(
+            f"persisted fetch should not run before checking live alternate scope "
+            f"(scope_key={scope_key}, request_id={request_id})"
+        )
+
+    monkeypatch.setattr(von_routes, "fetch_tool_progress_state", _unexpected_fetch)
+
+    client = app.test_client()
+    response = client.get(
+        f"/von/progress/{request_id}",
+        headers={
+            "X-Von-Window-Session": window_session_id,
+            "X-User-Concept-ID": "#V#test_user",
+        },
+    )
+    assert response.status_code == 200
+
+    body = response.get_json()
+    assert isinstance(body, dict)
+    assert body.get("request_id") == request_id
     assert body.get("stage") == "workflow_dispatch_prepare"
     assert body.get("phase_label") == "Preparing workflow dispatch"
     assert body.get("resolved_scope_key") == f"anon:window:{window_session_id}"

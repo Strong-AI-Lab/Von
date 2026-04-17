@@ -922,7 +922,11 @@ const THINKING_CARD_TOGGLE_ARIA_LABEL_EXPANDED = 'Collapse thinking details';
 const THINKING_CARD_TOGGLE_ARIA_LABEL_COLLAPSED = 'Expand thinking details';
 const THINKING_ACTIVITY_LOW_LEVEL_EVENT_KINDS = new Set(['llm_call_chunk', 'heartbeat']);
 const THINKING_DIAGNOSTIC_DETAILS_SELECTOR = 'details[data-thinking-diagnostic-key]';
-const THINKING_PROGRESS_POLL_FETCH_TIMEOUT_MS = 2_000;
+// Browser live-progress polls must tolerate local-server contention while the
+// real /von/generate POST is still running. A shorter timeout causes the page
+// to abort its own /von/progress reads and surface a false "Awaiting visible
+// progress" stall even when the backend has activity history available.
+const THINKING_PROGRESS_POLL_FETCH_TIMEOUT_MS = 30_000;
 const THINKING_PROGRESS_TIMEOUT_VISIBLE_AFTER_MS = 8_000;
 const THINKING_PROGRESS_TIMEOUTS_BEFORE_VISIBLE = 2;
 const THINKING_DIAGNOSTICS_EXPORT_EVENT_LIMIT = 40;
@@ -2239,9 +2243,17 @@ function createThinkingCardHistorySnapshot(request) {
         return null;
     }
 
-    const latestProgress = (request.latestProgress && typeof request.latestProgress === 'object')
-        ? { ...request.latestProgress }
-        : (buildSyntheticThinkingTerminalProgress(request) || null);
+    const currentLatestProgress = (request.latestProgress && typeof request.latestProgress === 'object')
+        ? request.latestProgress
+        : null;
+    const syntheticTerminalProgress = buildSyntheticThinkingTerminalProgress(request);
+    const latestProgress = currentLatestProgress
+        ? (
+            isTerminalThinkingProgress(currentLatestProgress) || !syntheticTerminalProgress
+                ? { ...currentLatestProgress }
+                : { ...syntheticTerminalProgress }
+        )
+        : (syntheticTerminalProgress ? { ...syntheticTerminalProgress } : null);
     const activityHistory = Array.isArray(request.activityHistory)
         ? request.activityHistory.map((entry) => ({ ...entry }))
         : [];
@@ -2549,6 +2561,10 @@ function hasAnyLiveChatRequest() {
     return liveChatRequestsBySession.size > 0;
 }
 
+function shouldDeferWorkflowStatusSnapshotRefresh({ silent = false } = {}) {
+    return Boolean(silent) && hasAnyLiveChatRequest();
+}
+
 function isLiveChatRequest(request) {
     if (!request || typeof request !== 'object') {
         return false;
@@ -2602,6 +2618,7 @@ function invalidateSessionHistoryCache(sessionId) {
 }
 
 function setLiveChatRequestForSession(sessionId, request = null) {
+    const hadAnyLiveChatRequest = hasAnyLiveChatRequest();
     const sessionKey = getChatRequestSessionKey(sessionId);
     if (request && typeof request === 'object') {
         request.sessionId = normaliseHistorySessionId(sessionId);
@@ -2612,6 +2629,13 @@ function setLiveChatRequestForSession(sessionId, request = null) {
     }
     syncActiveChatRequestPointers();
     refreshChatSessionTabActivityIndicators();
+    if (
+        hadAnyLiveChatRequest
+        && !request
+        && !hasAnyLiveChatRequest()
+    ) {
+        scheduleWorkflowStatusLiveRefresh();
+    }
 }
 
 function setFinishedThinkingCardForSession(sessionId, request = null) {
@@ -3076,6 +3100,10 @@ export function __testOnly_persistThinkingCardBodyHeightFromDom(request = getThi
 
 export function __testOnly_shouldAcceptThinkingProgressUpdate(currentProgress = null, nextProgress = null) {
     return shouldAcceptThinkingProgressUpdate(currentProgress, nextProgress);
+}
+
+export function __testOnly_getThinkingProgressPollFetchTimeoutMs() {
+    return THINKING_PROGRESS_POLL_FETCH_TIMEOUT_MS;
 }
 
 function updateThinkingCardStatusBadge(progress, cardRoot = null) {
@@ -6369,6 +6397,9 @@ function startToolUseProgressPolling(request) {
                     method: 'GET',
                     signal: poll.abortController?.signal,
                     headers: buildChatFetchHeaders(),
+                    // Avoid same-session request serialization against the live
+                    // /von/generate POST; header-based scope is sufficient here.
+                    credentials: 'omit',
                     timeoutMs: THINKING_PROGRESS_POLL_FETCH_TIMEOUT_MS
                 });
             if (!resp) {
@@ -21029,6 +21060,7 @@ async function refreshWorkflowStatusSnapshot({ silent = false, preserveRetryAtte
     const { panel } = getWorkflowStatusElements();
     if (!panel) return;
     if (workflowStatusStreamState.loading) return;
+    if (shouldDeferWorkflowStatusSnapshotRefresh({ silent })) return;
 
     const params = buildWorkflowStatusQuery({ includeStatusFilter: true });
     params.set('limit', '50');
@@ -25808,6 +25840,9 @@ export async function __testOnly_refreshChatSessionTabs() {
 export function __testOnly_setActiveChatSession(sessionId, sessionName = null) {
     setActiveChatSession(sessionId, sessionName);
     syncActiveChatRequestPointers();
+}
+export function __testOnly_setLiveChatRequestForSession(sessionId, request = null) {
+    setLiveChatRequestForSession(sessionId, request);
 }
 export function __testOnly_setDisplayedHistorySession(sessionId) {
     displayedHistorySessionId = normaliseHistorySessionId(sessionId);

@@ -7,6 +7,8 @@
  * access for organisation and namespace data to ensure proper window isolation.
  */
 
+import { parseStoredContextValue } from './runtimeIdentityBootstrap.js';
+
 // Storage keys
 const KEYS = {
     CURRENT_ORG: 'von_current_org',
@@ -19,7 +21,7 @@ const KEYS = {
 function readJsonFromStorage(storage, key) {
     try {
         const raw = storage?.getItem(key);
-        return raw ? JSON.parse(raw) : null;
+        return parseStoredContextValue(raw);
     } catch {
         return null;
     }
@@ -134,25 +136,25 @@ export function getSessionScopedOrgContext() {
     // Try von_current_org from sessionStorage first
     try {
         const sessionOrg = sessionStorage.getItem(KEYS.CURRENT_ORG);
-        if (sessionOrg) return JSON.parse(sessionOrg);
+        if (sessionOrg) return parseStoredContextValue(sessionOrg);
     } catch { /* ignore */ }
 
     // Fallback to localStorage von_current_org
     try {
         const localOrg = localStorage.getItem(KEYS.CURRENT_ORG);
-        if (localOrg) return JSON.parse(localOrg);
+        if (localOrg) return parseStoredContextValue(localOrg);
     } catch { /* ignore */ }
 
     // Try von_org_context from sessionStorage
     try {
         const sessionCtx = sessionStorage.getItem(KEYS.ORG_CONTEXT);
-        if (sessionCtx) return JSON.parse(sessionCtx);
+        if (sessionCtx) return parseStoredContextValue(sessionCtx);
     } catch { /* ignore */ }
 
     // Fallback to localStorage von_org_context
     try {
         const localCtx = localStorage.getItem(KEYS.ORG_CONTEXT);
-        if (localCtx) return JSON.parse(localCtx);
+        if (localCtx) return parseStoredContextValue(localCtx);
     } catch { /* ignore */ }
 
     return null;

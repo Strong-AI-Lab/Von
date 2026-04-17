@@ -27,6 +27,12 @@ import {
   syncOrgContextFromLocalStorage
 } from './utils/sessionScopedStorage.js';
 import { buildHealthTelemetryCopyPayload, buildHealthTelemetrySnapshot } from './utils/healthTelemetrySnapshot.js';
+import {
+  parseStoredContextValue,
+  resolveBrowserBootstrapNamespace,
+  resolveBrowserBootstrapOrganisationContext,
+  resolveBrowserBootstrapUserContext
+} from './utils/runtimeIdentityBootstrap.js';
 import { hydrateStoredSelectionsFromUserPreferences } from './utils/userPreferenceBootstrap.js';
 import { isVontologyBusy, loadKeyConceptsForUser, preloadVontologyData, selectVontologyNodeByIdentifier, setupVontologySearchUI } from './vontology.js';
 
@@ -309,8 +315,7 @@ async function syncFlaskSessionOrg() {
     if (context.organisation_id && isWindowSessionSource) {
       // Window session store already has org - trust it as source of truth
       console.log('[main] Window session has org:', context.organisation_id);
-      const existingOrg = sessionStorage.getItem('von_current_org');
-      const parsed = existingOrg ? JSON.parse(existingOrg) : {};
+      const parsed = parseStoredContextValue(sessionStorage.getItem('von_current_org')) || {};
       if (parsed?.concept_id !== context.organisation_id) {
         setSessionScopedOrgContext({
           id: null,
@@ -343,7 +348,7 @@ async function syncFlaskSessionOrg() {
       }
       return;
     }
-    const org = JSON.parse(storedOrg);
+    const org = parseStoredContextValue(storedOrg);
     const orgConceptId = org?.concept_id;
     if (!orgConceptId) {
       console.log('[main] No org concept_id in storage, proceeding without org');
@@ -371,6 +376,18 @@ async function syncFlaskSessionOrg() {
   }
 }
 
+async function fetchBootstrapAuthStatus(getJsonImpl) {
+  try {
+    return await getJsonImpl('/von/api/auth/status');
+  } catch (_) {
+    try {
+      return await getJsonImpl('/api/auth/status');
+    } catch {
+      return null;
+    }
+  }
+}
+
 /**
  * Ensure user context is available in storage before app initialization.
  * Fetches settings if localStorage is empty.
@@ -386,24 +403,18 @@ async function ensureUserContext() {
     initSessionStorageFromLocalStorage();
 
     // Import to ensure window session ID is generated
-    const { getJson, postJson, getWindowSessionId } = await import('./apiService.js');
+    const { getJson, getWindowSessionId } = await import('./apiService.js');
     // Ensure window session ID exists
     getWindowSessionId();
 
-    // If we already have user context, still sync session org but skip settings fetch
-    if (localStorage.getItem('von_current_user')) {
+    const storedUser = parseStoredContextValue(localStorage.getItem('von_current_user'));
+    if (storedUser?.concept_id) {
       try {
-        const storedUser = JSON.parse(localStorage.getItem('von_current_user') || 'null');
-        if (storedUser?.concept_id) {
-          await hydrateStoredSelectionsFromUserPreferences(storedUser.concept_id);
-          // CRITICAL: Even with localStorage data, we must sync session org
-          // to avoid race condition where /history/sessions is called before org context is set.
-          await syncFlaskSessionOrg();
-          return;
-        }
+        await hydrateStoredSelectionsFromUserPreferences(storedUser.concept_id);
       } catch (e) {
         console.warn('[main] Failed to hydrate stored selections from user preferences:', e);
       }
+    } else if (localStorage.getItem('von_current_user')) {
       try {
         localStorage.removeItem('von_current_user');
         sessionStorage.removeItem('von_current_user');
@@ -414,36 +425,53 @@ async function ensureUserContext() {
 
     console.log('[main] Fetching settings to populate user context...');
     const settings = await getJson('/api/settings/');
+    const needsIdentityFallback = !settings.current_user_person_concept_id || !settings.current_organisation_concept_id;
+    const [authStatus, sessionContext] = needsIdentityFallback
+      ? await Promise.all([
+        fetchBootstrapAuthStatus(getJson),
+        getJson('/von/api/session/context').catch(() => null)
+      ])
+      : [null, null];
 
-    if (settings.current_user_person_id) {
-      const user = {
-        id: settings.current_user_person_id,
-        concept_id: settings.current_user_person_concept_id,
-        name: settings.current_user_person_name
-      };
-      localStorage.setItem('von_current_user', JSON.stringify(user));
-      console.log('[main] Populated von_current_user from settings');
+    const resolvedUser = resolveBrowserBootstrapUserContext({
+      settings,
+      authStatus,
+      storedUser
+    });
+
+    if (resolvedUser) {
+      const encodedUser = JSON.stringify(resolvedUser);
+      localStorage.setItem('von_current_user', encodedUser);
+      sessionStorage.setItem('von_current_user', encodedUser);
+      console.log('[main] Populated von_current_user from browser bootstrap context');
     }
 
-    // When logged in, derive and persist the user/org namespace used by RAG status calls.
-    // JVNAUTOSCI-1011: Use sessionStorage for namespace (window-scoped)
-    if (!sessionStorage.getItem('current_user_namespace') && settings.current_user_person_concept_id) {
-      try {
-        const userSlug = String(settings.current_user_person_concept_id).replace(/^#V#/, '');
-        const orgSlug = settings.current_organisation_concept_id
-          ? String(settings.current_organisation_concept_id).replace(/^#V#/, '')
-          : null;
-        const ns = orgSlug ? `#V#${userSlug}@${orgSlug}` : `#V#${userSlug}`;
-        setSessionScopedNamespace(ns);
-        console.log('[main] Derived current_user_namespace from settings:', ns);
-      } catch (e) {
-        console.warn('[main] Failed to derive current_user_namespace from settings:', e);
-      }
+    const resolvedOrg = resolveBrowserBootstrapOrganisationContext({
+      settings,
+      sessionContext,
+      storedOrganisation: parseStoredContextValue(sessionStorage.getItem('von_current_org'))
+        || parseStoredContextValue(localStorage.getItem('von_current_org'))
+    });
+
+    if (resolvedOrg) {
+      setSessionScopedOrgContext(resolvedOrg);
+      console.log('[main] Populated von_current_org from browser bootstrap context');
+    }
+
+    const resolvedNamespace = resolveBrowserBootstrapNamespace({
+      settings,
+      sessionContext,
+      userContext: resolvedUser,
+      organisationContext: resolvedOrg
+    });
+    if (resolvedNamespace) {
+      setSessionScopedNamespace(resolvedNamespace);
+      console.log('[main] Populated current_user_namespace from browser bootstrap context:', resolvedNamespace);
     }
 
     // Namespace fallback: if server does not provide user info, but a namespace is already
     // set locally (e.g., via manual selection), propagate it so downstream calls use it.
-    if (!settings.current_user_person_id) {
+    if (!resolvedUser?.concept_id) {
       const ns = sessionStorage.getItem('von_namespace') || localStorage.getItem('von_namespace');
       if (ns && !sessionStorage.getItem('current_user_namespace')) {
         setSessionScopedNamespace(ns);
@@ -451,34 +479,9 @@ async function ensureUserContext() {
       }
     }
 
-    // JVNAUTOSCI-1011: Store org context in both sessionStorage (window-scoped) and localStorage (persistent)
-    if (settings.current_organisation_id) {
-      setSessionScopedOrgContext({
-        id: settings.current_organisation_id,
-        concept_id: settings.current_organisation_concept_id,
-        name: settings.current_organisation_name
-      });
-      console.log('[main] Populated von_current_org in sessionStorage and localStorage from settings');
-    }
-
-    // CRITICAL: Sync the session's organisation_concept_id to avoid race condition
+    // CRITICAL: Sync the session's organisation_concept_id to avoid race conditions
     // where /history/sessions is called before the org context is set in the server session.
-    // This ensures shared conversation filtering works correctly on initial page load.
-    if (settings.current_organisation_concept_id) {
-      try {
-        console.log('[main] Syncing organisation to session:', settings.current_organisation_concept_id);
-        const syncData = await postJson('/von/api/session/set_organisation', {
-          organisation_concept_id: settings.current_organisation_concept_id
-        });
-        console.log('[main] Session org synced:', syncData);
-        // Update namespace if returned
-        if (syncData.namespace) {
-          setSessionScopedNamespace(syncData.namespace);
-        }
-      } catch (syncErr) {
-        console.warn('[main] Error syncing org to session:', syncErr);
-      }
-    }
+    await syncFlaskSessionOrg();
   } catch (e) {
     console.warn('[main] Failed to ensure user context:', e);
   }

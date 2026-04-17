@@ -18,6 +18,12 @@ from src.backend.workflows.definitions import (
 SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID = (
     "#V#scholarly_paper_representation_workflow"
 )
+_TEST_BASE_PROMPT = (
+    "You have access to internal MCP tools.\n\n"
+    "{auth_status}\n"
+    "Available tools:\n"
+    "{listing}"
+)
 
 
 def _build_discovery_result(
@@ -409,13 +415,20 @@ def _make_app(
             "#V#test_org": {"name": "Test Org"},
         }.get(concept_id),
     )
-
     gateway = gateway_override if gateway_override is not None else _GatewayStub()
     orchestrator = build_db_independent_orchestrator(
         monkeypatch,
         gateway=cast(Any, gateway),
         selector_enabled=True,
         max_tool_invocations=1,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_load_base_system_prompt_from_vontology",
+        lambda preferred_language=None: (
+            _TEST_BASE_PROMPT,
+            "#V#test_base_prompt",
+        ),
     )
 
     app = Flask(__name__)
@@ -783,3 +796,178 @@ def test_generate_explicit_entity_relation_lookup_uses_grounded_tool_pipeline(
     execution = turn_record.get("execution") or {}
     selected_workflow_trace = execution.get("selected_workflow_trace") or {}
     assert selected_workflow_trace.get("selected_execution_mode") == "tool_pipeline"
+
+
+def test_generate_threads_window_session_header_into_conversation_session_resolution(
+    monkeypatch,
+) -> None:
+    llm = _IdentityLLM()
+    app = _make_app(monkeypatch, llm=llm)
+
+    captured: dict[str, Any] = {}
+
+    def _capture_generate_session(**kwargs: Any) -> tuple[str, str | None, bool]:
+        captured.update(kwargs)
+        return "window-session-generated", None, False
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes._ensure_generate_conversation_session",
+        _capture_generate_session,
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/von/generate",
+        headers={"X-Von-Window-Session": "ws-browser-1910"},
+        json={"prompt": "Who am I?"},
+    )
+
+    assert response.status_code == 200
+    assert captured["window_session_id"] == "ws-browser-1910"
+    assert captured["request_conversation_session_id"] is None
+
+
+def test_generate_threads_resolved_namespace_into_chat_history_reads(
+    monkeypatch,
+) -> None:
+    llm = _IdentityLLM()
+    app = _make_app(monkeypatch, llm=llm)
+
+    resolved_namespace = "#V#test_user@test_org"
+    captured_calls: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes._resolve_generate_namespace_context",
+        lambda **_kwargs: {
+            "namespace": resolved_namespace,
+            "namespace_source": "test_override",
+            "effective_context_source": "test",
+            "effective_context_namespace": resolved_namespace,
+            "session_namespace": None,
+            "candidates": [
+                {"namespace": resolved_namespace, "source": "test_override"}
+            ],
+            "mismatch_detected": False,
+            "org_scope_preferred": True,
+        },
+    )
+
+    def _capture_chat_history(
+        user_id: str,
+        session_id: str,
+        *,
+        namespace: str | None = None,
+        **_kwargs: Any,
+    ) -> list[dict[str, Any]]:
+        captured_calls.append(
+            {
+                "user_id": user_id,
+                "session_id": session_id,
+                "namespace": namespace,
+            }
+        )
+        return []
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.chat_history_service.get_chat_history",
+        _capture_chat_history,
+    )
+
+    client = app.test_client()
+    response = client.post("/von/generate", json={"prompt": "Who am I?"})
+
+    assert response.status_code == 200
+    assert len(captured_calls) >= 2
+    assert all(call["namespace"] == resolved_namespace for call in captured_calls)
+
+
+def test_generate_live_response_persistence_skips_best_effort_rag_indexing(
+    monkeypatch,
+) -> None:
+    llm = _IdentityLLM()
+    app = _make_app(monkeypatch, llm=llm)
+
+    captured_calls: list[dict[str, Any]] = []
+
+    def _capture_add_message_to_history(
+        user_id: str,
+        session_id: str,
+        message: dict[str, Any],
+        llm_debug_data: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        captured_calls.append(
+            {
+                "user_id": user_id,
+                "session_id": session_id,
+                "message": dict(message),
+                "llm_debug_data": llm_debug_data,
+                "skip_rag_indexing": kwargs.get("skip_rag_indexing"),
+            }
+        )
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.chat_history_service.add_message_to_history",
+        _capture_add_message_to_history,
+    )
+
+    client = app.test_client()
+    response = client.post("/von/generate", json={"prompt": "Who am I?"})
+
+    assert response.status_code == 200
+    assert captured_calls
+    early_user_call = next(
+        call for call in captured_calls if call["message"].get("role") == "user"
+    )
+    assert early_user_call["skip_rag_indexing"] is True
+    assistant_call = next(
+        call for call in captured_calls if call["message"].get("role") == "assistant"
+    )
+    assert assistant_call["skip_rag_indexing"] is True
+
+
+def test_generate_tool_pipeline_persistence_skips_best_effort_rag_indexing(
+    monkeypatch,
+) -> None:
+    llm = _EntityRelativeToolPipelineLLM()
+    gateway = _EntityLookupGatewayStub()
+    app = _make_app(
+        monkeypatch,
+        llm=llm,
+        gateway_override=gateway,
+        discovery_override=_tool_calling_discovery,
+    )
+
+    captured_calls: list[dict[str, Any]] = []
+
+    def _capture_add_message_to_history(
+        user_id: str,
+        session_id: str,
+        message: dict[str, Any],
+        llm_debug_data: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        captured_calls.append(
+            {
+                "user_id": user_id,
+                "session_id": session_id,
+                "message": dict(message),
+                "llm_debug_data": llm_debug_data,
+                "skip_rag_indexing": kwargs.get("skip_rag_indexing"),
+            }
+        )
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.chat_history_service.add_message_to_history",
+        _capture_add_message_to_history,
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/von/generate", json={"prompt": "What papers of mine do you know about?"}
+    )
+
+    assert response.status_code == 200
+    assert captured_calls
+    assert all(call["skip_rag_indexing"] is True for call in captured_calls)
+    assert any(call["message"].get("role") == "assistant" for call in captured_calls)

@@ -9,6 +9,7 @@ orchestrator machinery when a gateway is available.
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from typing import Any, Mapping, MutableMapping, Optional, Sequence, cast
@@ -18,6 +19,10 @@ from ..services.buttonify_service import (
     sanitise_buttonify_options,
 )
 from ..services.prompt_template_service import PromptTemplateService
+from .conversation_turn_llm_timeout import (
+    coerce_conversation_turn_llm_timeout_sec,
+    default_conversation_turn_llm_timeout_sec,
+)
 from .action_registry import WorkflowActionRequest, WorkflowActionResult
 
 _SPOKEN_BLOCK_RE = re.compile(
@@ -30,6 +35,9 @@ _CONVERSATION_TURN_LLM_TELEMETRY_STATES = frozenset(
         "selector_decision",
         "recovery_decision",
     }
+)
+_CONVERSATION_TURN_LLM_TIMEOUT_CONTEXT_KEY = (
+    "conversation_turn_llm_timeout_override_sec"
 )
 
 
@@ -96,6 +104,32 @@ def _conversation_turn_llm_phase_override(
     if workflow_state_id in _CONVERSATION_TURN_LLM_TELEMETRY_STATES:
         return workflow_state_id
     return None
+
+
+def _coerce_llm_timeout_override_sec(raw_timeout: Any) -> float | None:
+    return coerce_conversation_turn_llm_timeout_sec(raw_timeout)
+
+
+def _conversation_turn_llm_timeout_override_sec(
+    request: WorkflowActionRequest,
+) -> float | None:
+    explicit_override = (
+        _coerce_llm_timeout_override_sec(
+            request.data.get(_CONVERSATION_TURN_LLM_TIMEOUT_CONTEXT_KEY)
+        )
+        if isinstance(request.data, Mapping)
+        else None
+    )
+    if explicit_override is not None:
+        return explicit_override
+
+    workflow_state_id = _context_string(request.workflow_state_id)
+    if workflow_state_id not in _CONVERSATION_TURN_LLM_TELEMETRY_STATES:
+        return None
+
+    return default_conversation_turn_llm_timeout_sec(
+        os.getenv("VON_CONVERSATION_TURN_LLM_TIMEOUT_SEC")
+    )
 
 
 def _resolve_user_context_ids(
@@ -662,6 +696,53 @@ def _build_result(
     return WorkflowActionResult(outputs=outputs)
 
 
+def _build_timeout_failure_result(
+    *,
+    request: WorkflowActionRequest,
+    stage: str,
+    prompt_id: str | None,
+    prompt_source: str | None,
+    rendered_variables: Mapping[str, Any],
+    llm_policy_map: Mapping[str, Any],
+    timeout_detail: str,
+    selected_model: str | None,
+    llm_calls: Sequence[Mapping[str, Any]],
+    aux_llm_calls: Sequence[Mapping[str, Any]],
+) -> WorkflowActionResult:
+    llm_step_envelope = {
+        "execution_mode": "llm",
+        "action_id": request.action_id,
+        "selected_prompt_id": prompt_id,
+        "selected_prompt_source": prompt_source,
+        "selected_model": selected_model,
+        "selected_model_candidate": None,
+        "tool_invocations": [],
+        "tool_messages": [],
+        "rendered_prompt_variables": dict(rendered_variables),
+        "selection_policy": _context_string(llm_policy_map.get("selection_policy"))
+        or "adaptive",
+        "allowed_tools": list(llm_policy_map.get("allowed_tools") or []),
+        "llm_calls": list(llm_calls),
+        "aux_llm_calls": list(aux_llm_calls),
+        "validation": {
+            "status": "skipped",
+            "reason": "llm_step_timeout",
+        },
+        "completion_reason": "timeout",
+        "timeout_stage": stage,
+        "timeout_detail": timeout_detail,
+    }
+    return WorkflowActionResult(
+        status="failed",
+        outputs={
+            "llm_step_envelope": llm_step_envelope,
+            "llm_calls": list(llm_calls),
+            "aux_llm_calls": list(aux_llm_calls),
+        },
+        error=f"workflow_llm_step_timeout:{timeout_detail}",
+    )
+
+
 def _run_direct_llm_step(
     *,
     request: WorkflowActionRequest,
@@ -735,6 +816,7 @@ def _run_gateway_llm_step_no_tools(
         _build_gateway_runtime(request)
     )
     prefer_default_model = _prefer_default_model_for_request(request)
+    timeout_override_sec = _conversation_turn_llm_timeout_override_sec(request)
     llm_calls: list[dict[str, Any]] = []
     aux_llm_calls: list[dict[str, Any]] = []
     context_messages_key = _context_string(
@@ -778,25 +860,41 @@ def _run_gateway_llm_step_no_tools(
             entry["candidate"] = dict(candidate)
         llm_calls.append(entry)
 
-    response_text, selected_model, selected_candidate = (
-        orchestrator._run_llm_with_fallbacks(
-            stage=stage,
-            prompt=rendered_prompt,
-            context=context_messages,
-            default_client=request.environment.llm_client,
-            default_model=request.environment.model,
-            policy_state=policy_state,
-            registry_snapshot=registry_snapshot,
-            user_concept_id=user_concept_id,
-            org_concept_id=org_concept_id,
-            llm_calls_log=llm_calls,
-            aux_log=aux_llm_calls,
-            record_llm_call=_record_llm_call,
-            emit_progress=emit_progress,
-            context_telemetry=context_telemetry,
-            prefer_default_model=prefer_default_model,
+    try:
+        response_text, selected_model, selected_candidate = (
+            orchestrator._run_llm_with_fallbacks(
+                stage=stage,
+                prompt=rendered_prompt,
+                context=context_messages,
+                default_client=request.environment.llm_client,
+                default_model=request.environment.model,
+                policy_state=policy_state,
+                registry_snapshot=registry_snapshot,
+                user_concept_id=user_concept_id,
+                org_concept_id=org_concept_id,
+                llm_calls_log=llm_calls,
+                aux_log=aux_llm_calls,
+                record_llm_call=_record_llm_call,
+                emit_progress=emit_progress,
+                context_telemetry=context_telemetry,
+                prefer_default_model=prefer_default_model,
+                timeout_override_sec=timeout_override_sec,
+            )
         )
-    )
+    except TimeoutError as exc:
+        timeout_detail = _context_string(str(exc)) or "llm_call_timed_out"
+        return _build_timeout_failure_result(
+            request=request,
+            stage=stage,
+            prompt_id=prompt_id,
+            prompt_source=prompt_source,
+            rendered_variables=rendered_variables,
+            llm_policy_map=llm_policy_map,
+            timeout_detail=timeout_detail,
+            selected_model=request.environment.model,
+            llm_calls=llm_calls,
+            aux_llm_calls=aux_llm_calls,
+        )
 
     return _build_result(
         request=request,
@@ -1139,30 +1237,45 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
         action_target_id=request.action_target_id,
         contract_concept_id=request.contract_concept_id,
     )
-    plan_result = orchestrator._action_tool_calling_plan(plan_request)
-    shared_data.update(plan_result.outputs)
-    if plan_result.status == "failed":
-        return plan_result
+    try:
+        plan_result = orchestrator._action_tool_calling_plan(plan_request)
+        shared_data.update(plan_result.outputs)
+        if plan_result.status == "failed":
+            return plan_result
 
-    while bool(shared_data.get("tool_calls_present")):
-        validate_result = orchestrator._action_tool_calling_validate(plan_request)
-        shared_data.update(validate_result.outputs)
-        if validate_result.status == "failed":
-            return validate_result
-        if not shared_data.get("tool_calls_validated"):
-            break
+        while bool(shared_data.get("tool_calls_present")):
+            validate_result = orchestrator._action_tool_calling_validate(plan_request)
+            shared_data.update(validate_result.outputs)
+            if validate_result.status == "failed":
+                return validate_result
+            if not shared_data.get("tool_calls_validated"):
+                break
 
-        execute_result = orchestrator._action_tool_calling_execute(plan_request)
-        shared_data.update(execute_result.outputs)
-        if execute_result.status == "failed":
-            return execute_result
+            execute_result = orchestrator._action_tool_calling_execute(plan_request)
+            shared_data.update(execute_result.outputs)
+            if execute_result.status == "failed":
+                return execute_result
 
-        backfill_result = orchestrator._action_tool_calling_backfill(plan_request)
-        shared_data.update(backfill_result.outputs)
-        if backfill_result.status == "failed":
-            return backfill_result
-        if not shared_data.get("more_tool_calls"):
-            break
+            backfill_result = orchestrator._action_tool_calling_backfill(plan_request)
+            shared_data.update(backfill_result.outputs)
+            if backfill_result.status == "failed":
+                return backfill_result
+            if not shared_data.get("more_tool_calls"):
+                break
+    except TimeoutError as exc:
+        timeout_detail = _context_string(str(exc)) or "llm_call_timed_out"
+        return _build_timeout_failure_result(
+            request=request,
+            stage=stage,
+            prompt_id=prompt_id,
+            prompt_source=prompt_source,
+            rendered_variables=rendered_variables,
+            llm_policy_map=llm_policy_map,
+            timeout_detail=timeout_detail,
+            selected_model=request.environment.model,
+            llm_calls=llm_calls,
+            aux_llm_calls=aux_llm_calls,
+        )
 
     orchestrator_result = shared_data.get("orchestrator_result")
     if isinstance(orchestrator_result, Mapping):

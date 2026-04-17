@@ -47,6 +47,12 @@ import {
   hydrateStoredSelectionsFromUserPreferences,
 } from './utils/userPreferenceBootstrap.js';
 import {
+  parseStoredContextValue,
+  resolveBrowserBootstrapNamespace,
+  resolveBrowserBootstrapOrganisationContext,
+  resolveBrowserBootstrapUserContext,
+} from './utils/runtimeIdentityBootstrap.js';
+import {
   clearStoredOllamaSelection,
   getEffectiveLocalModelPreference,
   getStoredOpenAiSelectedModel,
@@ -999,6 +1005,19 @@ function resolveActiveLlmFromSelections(
 async function _fetchSessionContextForRole() {
   try {
     const resp = await fetch('/von/api/session/context', {
+      cache: 'no-cache',
+      headers: buildSettingsFetchHeaders()
+    });
+    if (!resp.ok) return null;
+    return await resp.json();
+  } catch {
+    return null;
+  }
+}
+
+async function fetchSettingsAuthStatus() {
+  try {
+    const resp = await fetch('/von/api/auth/status', {
       cache: 'no-cache',
       headers: buildSettingsFetchHeaders()
     });
@@ -2230,8 +2249,8 @@ function getStoredJson(key) {
   // JVNAUTOSCI-1011: sessionStorage (per-window) first, localStorage fallback
   try {
     const sessionVal = sessionStorage.getItem(key);
-    if (sessionVal) return JSON.parse(sessionVal);
-    return JSON.parse(localStorage.getItem(key) || 'null');
+    if (sessionVal) return parseStoredContextValue(sessionVal);
+    return parseStoredContextValue(localStorage.getItem(key));
   } catch { return null; }
 }
 function setStoredJson(key, value) {
@@ -2740,10 +2759,46 @@ async function loadAndDisplaySettings() {
     });
     if (!response.ok) throw new Error(`Failed to fetch settings: ${response.statusText}`);
     const settings = await response.json();
+    const [sessionContext, authStatus] = await Promise.all([
+      _fetchSessionContextForRole(),
+      fetchSettingsAuthStatus()
+    ]);
+
+    const bootstrapUser = resolveBrowserBootstrapUserContext({
+      settings,
+      authStatus,
+      storedUser
+    });
+    if (bootstrapUser) {
+      setStoredJson(LS_USER_KEY, bootstrapUser);
+    }
+
+    const bootstrapOrg = resolveBrowserBootstrapOrganisationContext({
+      settings,
+      sessionContext,
+      storedOrganisation: storedOrg
+    });
+    if (bootstrapOrg) {
+      setStoredJson(LS_ORG_KEY, bootstrapOrg);
+    }
+
+    const bootstrapNamespace = resolveBrowserBootstrapNamespace({
+      settings,
+      sessionContext,
+      userContext: bootstrapUser,
+      organisationContext: bootstrapOrg
+    });
+    try {
+      if (bootstrapNamespace) {
+        sessionStorage.setItem('current_user_namespace', bootstrapNamespace);
+        localStorage.setItem('current_user_namespace', bootstrapNamespace);
+      }
+    } catch {
+      // Ignore storage bootstrap failures.
+    }
 
     // Admin-only controls: decide visibility based on session role.
     try {
-      const sessionContext = await _fetchSessionContextForRole();
       const role = (sessionContext && sessionContext.role) ? String(sessionContext.role).toLowerCase() : '';
       __vonIsAdminOrOwner = role === 'admin' || role === 'owner';
       __canPersistWriteConservatism = __vonIsAdminOrOwner

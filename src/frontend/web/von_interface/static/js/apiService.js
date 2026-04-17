@@ -9,6 +9,7 @@ const WINDOW_SESSION_KEY = 'von_window_session_id';
 const WINDOW_SESSION_HEADER = 'X-Von-Window-Session';
 
 import { getSessionScopedOrgId } from './utils/sessionScopedStorage.js';
+import { parseStoredContextValue } from './utils/runtimeIdentityBootstrap.js';
 
 /**
  * Get or generate a unique window session ID.
@@ -70,7 +71,7 @@ export async function getJsonDetailed(url, options = {}) {
     ...fetchOptions
   });
 
-  let data = null;
+  let data;
   try {
     data = await res.json();
   } catch (_) {
@@ -118,7 +119,7 @@ export async function fetchWithTimeout(url, options = {}) {
   }
 
   const controller = new AbortController();
-  let timeoutId = null;
+  let timeoutId;
   let releaseParentAbort = null;
   let timedOut = false;
 
@@ -223,7 +224,7 @@ export function getUserContext() {
   const ctx = {};
 
   try {
-    const storedUser = JSON.parse(localStorage.getItem('von_current_user') || 'null');
+    const storedUser = parseStoredContextValue(localStorage.getItem('von_current_user'));
     // Prefer concept_id (e.g., #V#michael_witbrock) over id (MongoDB ObjectID)
     // Settings page may populate either field depending on data source
     if (storedUser) {
@@ -239,13 +240,13 @@ export function getUserContext() {
   // Get language preference from localStorage or fallback
   try {
     ctx.language = localStorage.getItem('von_preferred_language') || 'en-NZ';
-  } catch (e) {
+  } catch (_e) {
     ctx.language = 'en-NZ';
   }
 
   try {
     ctx.gmail_profile = localStorage.getItem('von_gmail_profile') || null;
-  } catch (e) {
+  } catch (_e) {
     ctx.gmail_profile = null;
   }
 
@@ -283,7 +284,7 @@ export async function annotateTurn(payload) {
       const json = JSON.parse(text);
       console.info('[annotations] annotateTurn response (parsed)', json);
       return json;
-    } catch (e) {
+    } catch (_e) {
       console.info('[annotations] annotateTurn response (raw text)', text);
       // Return raw text as fallback
       return text;

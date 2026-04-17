@@ -6,6 +6,9 @@ from typing import Any, cast
 from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
 )
+from src.backend.workflows.conversation_turn_llm_timeout import (
+    DEFAULT_CONVERSATION_TURN_LLM_TIMEOUT_SEC,
+)
 from src.backend.workflows import (
     WorkflowActionInvocation,
     WorkflowDefinition,
@@ -31,10 +34,19 @@ class _DummyGateway:
         return {}
 
 
+def _stub_base_system_prompt(monkeypatch, orchestrator: InternalMCPChatOrchestrator) -> None:
+    monkeypatch.setattr(
+        orchestrator,
+        "_load_base_system_prompt_from_vontology",
+        lambda preferred_language=None: ("Test base system prompt", "#V#test_base_prompt"),
+    )
+
+
 def test_supervised_turn_preserves_gate_reported_response_when_follow_up_is_required(
     monkeypatch,
 ) -> None:
     orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _DummyGateway()))
+    _stub_base_system_prompt(monkeypatch, orchestrator)
     expected_response = (
         "Execution status: mutation may have run but verification is inconclusive."
     )
@@ -74,6 +86,7 @@ def test_supervised_turn_still_fails_closed_without_gate_reported_response(
     monkeypatch,
 ) -> None:
     orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _DummyGateway()))
+    _stub_base_system_prompt(monkeypatch, orchestrator)
     monkeypatch.setattr(
         orchestrator,
         "execute_workflow",
@@ -103,6 +116,7 @@ def test_supervised_turn_leaves_missing_discovery_unset_for_workflow_owned_routi
     monkeypatch,
 ) -> None:
     orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _DummyGateway()))
+    _stub_base_system_prompt(monkeypatch, orchestrator)
     captured: dict[str, Any] = {}
 
     def _execute_workflow(*args, **kwargs):
@@ -693,6 +707,7 @@ def test_supervised_turn_propagates_completion_gate_retry_budget(
     monkeypatch,
 ) -> None:
     orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _DummyGateway()))
+    _stub_base_system_prompt(monkeypatch, orchestrator)
     orchestrator._completion_gate_loop_max_attempts = 3
     captured: dict[str, Any] = {}
 
@@ -717,6 +732,41 @@ def test_supervised_turn_propagates_completion_gate_retry_budget(
     workflow_data = captured.get("data")
     assert isinstance(workflow_data, dict)
     assert workflow_data.get("completion_gate_loop_max_attempts") == 3
+    assert result.response_text == "Done."
+
+
+def test_supervised_turn_seeds_conversation_turn_llm_timeout_override(
+    monkeypatch,
+) -> None:
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _DummyGateway()))
+    _stub_base_system_prompt(monkeypatch, orchestrator)
+    captured: dict[str, Any] = {}
+
+    def _execute_workflow(*args, **kwargs):
+        captured["data"] = kwargs.get("data")
+        return SimpleNamespace(
+            completed=True,
+            final_state="completed",
+            error=None,
+            data={"response_text": "Done.", "completion_report": {"completed": True}},
+        )
+
+    monkeypatch.delenv("VON_CONVERSATION_TURN_LLM_TIMEOUT_SEC", raising=False)
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
+
+    result = orchestrator.execute_conversation_turn_supervised(
+        prompt="Represent this paper.",
+        context=None,
+        llm_client=_DummyLLM(),
+        model="test-model",
+    )
+
+    workflow_data = captured.get("data")
+    assert isinstance(workflow_data, dict)
+    assert (
+        workflow_data.get("conversation_turn_llm_timeout_override_sec")
+        == DEFAULT_CONVERSATION_TURN_LLM_TIMEOUT_SEC
+    )
     assert result.response_text == "Done."
 
 
@@ -812,6 +862,81 @@ def test_turn_execution_route_uses_prepared_selector_response_without_extra_llm_
     assert result.outputs["selected_workflow_trace"]["selector_prompt_id"] == (
         "#V#chat_turn_classifier_prompt"
     )
+
+
+def test_turn_execution_route_passes_conversation_turn_timeout_override_to_selector_llm(
+    monkeypatch,
+) -> None:
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
+        gateway=cast(Any, _DummyGateway()),
+        selector_enabled=True,
+    )
+    captured: dict[str, Any] = {}
+
+    def _capture_timeout_override(**kwargs: Any):
+        captured["timeout_override_sec"] = kwargs.get("timeout_override_sec")
+        return CHAT_ASSISTANT_WORKFLOW_ID, "test-model", None
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_run_llm_with_fallbacks",
+        _capture_timeout_override,
+    )
+
+    result = orchestrator._action_turn_execution_route(
+        SimpleNamespace(
+            data={
+                "user_prompt": "Who am I?",
+                "workflow_discovery_result": {
+                    "matches": [
+                        {
+                            "concept_id": CHAT_ASSISTANT_WORKFLOW_ID,
+                            "name": "Chat Assistant Workflow",
+                            "description": "Default chat assistant route.",
+                            "is_executable": True,
+                            "executability_reason": "executable_now",
+                            "routing_eligible": True,
+                        }
+                    ],
+                    "candidates": [
+                        {
+                            "concept_id": CHAT_ASSISTANT_WORKFLOW_ID,
+                            "name": "Chat Assistant Workflow",
+                            "description": "Default chat assistant route.",
+                            "is_executable": True,
+                            "executability_reason": "executable_now",
+                            "routing_eligible": True,
+                        }
+                    ],
+                    "match_count": 1,
+                },
+                "workflow_discovery": None,
+                "conversation_turn_llm_timeout_override_sec": 29,
+                "policy_state": SimpleNamespace(
+                    enabled=False,
+                    policy=None,
+                    policy_id=None,
+                    predicate_id=None,
+                    errors=(),
+                ),
+                "registry_snapshot": None,
+                "llm_calls": [],
+                "aux_llm_calls": [],
+                "augmented_context": [
+                    {"role": "user", "content": "Who am I?"},
+                ],
+            },
+            environment=SimpleNamespace(
+                user_namespace="#V#user",
+                llm_client=_DummyLLM(),
+                model="test-model",
+            ),
+        )
+    )
+
+    assert result.status == "success"
+    assert captured["timeout_override_sec"] == 29.0
 
 
 def test_turn_execution_route_preserves_non_default_selector_intent_with_safe_general_fallback(

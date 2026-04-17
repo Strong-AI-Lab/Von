@@ -87,6 +87,10 @@ from ...workflows.conversation_turn_stage_model import (
     build_conversation_turn_stage_model_snapshot,
     build_conversation_turn_stage_path,
 )
+from ...workflows.conversation_turn_llm_timeout import (
+    coerce_conversation_turn_llm_timeout_sec,
+    default_conversation_turn_llm_timeout_sec,
+)
 from ...workflows.engine import (
     WORKFLOW_TERMINAL_EFFECT_EVENTS_KEY,
     WorkflowExecutor,
@@ -163,6 +167,9 @@ _TURN_EXECUTION_NARRATION_ACTION_IDS = frozenset(
         "narration.emit_audio",
     }
 )
+_CONVERSATION_TURN_LLM_TIMEOUT_CONTEXT_KEY = (
+    "conversation_turn_llm_timeout_override_sec"
+)
 
 
 @dataclass(frozen=True)
@@ -206,6 +213,28 @@ def _resolve_identity_context(
     if not resolved_org:
         resolved_org = namespace_org
     return resolved_user, resolved_org
+
+
+def _coerce_conversation_turn_llm_timeout_override_sec(
+    raw_timeout: Any,
+) -> float | None:
+    return coerce_conversation_turn_llm_timeout_sec(raw_timeout)
+
+
+def _default_conversation_turn_llm_timeout_override_sec() -> float | None:
+    return default_conversation_turn_llm_timeout_sec(
+        os.getenv("VON_CONVERSATION_TURN_LLM_TIMEOUT_SEC")
+    )
+
+
+def _conversation_turn_llm_timeout_override_sec_from_data(
+    data: Mapping[str, Any] | None,
+) -> float | None:
+    if not isinstance(data, Mapping):
+        return None
+    return _coerce_conversation_turn_llm_timeout_override_sec(
+        data.get(_CONVERSATION_TURN_LLM_TIMEOUT_CONTEXT_KEY)
+    )
 
 
 @dataclass(frozen=True)
@@ -4860,6 +4889,7 @@ class InternalMCPChatOrchestrator:
         buttonify_source = "none"
         buttonify_error_class: str | None = None
         buttonify_model_attempted = False
+        buttonify_policy_attempted = False
         buttonify_suppression_reason = request.data.get("buttonify_suppression_reason")
         if not isinstance(buttonify_suppression_reason, str):
             buttonify_suppression_reason = None
@@ -4876,11 +4906,16 @@ class InternalMCPChatOrchestrator:
             user_concept_id = request.data.get("user_concept_id")
             org_concept_id = request.data.get("org_concept_id")
             llm_calls_log = request.data.get("llm_calls_log")
+            if not isinstance(llm_calls_log, list):
+                llm_calls_log = request.data.get("llm_calls")
             emit_progress_raw = request.data.get("emit_progress")
             emit_progress_cb: Callable[[Mapping[str, Any]], None] | None = (
                 cast(Callable[[Mapping[str, Any]], None], emit_progress_raw)
                 if callable(emit_progress_raw)
                 else None
+            )
+            timeout_override_sec = _conversation_turn_llm_timeout_override_sec_from_data(
+                request.data
             )
 
             if (
@@ -4889,6 +4924,7 @@ class InternalMCPChatOrchestrator:
                 and isinstance(aux_llm_calls, list)
                 and isinstance(llm_calls_log, list)
             ):
+                buttonify_policy_attempted = True
                 try:
                     buttonify_response, buttonify_model_used, _ = (
                         self._run_llm_with_fallbacks(
@@ -4920,13 +4956,14 @@ class InternalMCPChatOrchestrator:
                             prefer_default_model=bool(
                                 request.data.get("prefer_default_model")
                             ),
+                            timeout_override_sec=timeout_override_sec,
                         )
                     )
                 except Exception as exc:
                     buttonify_error_class = type(exc).__name__
                     buttonify_response = None
 
-            if buttonify_response is None:
+            if buttonify_response is None and not buttonify_policy_attempted:
                 llm_start = time.perf_counter()
                 try:
                     if callable(emit_progress_cb):
@@ -12326,6 +12363,7 @@ class InternalMCPChatOrchestrator:
         model_name: str | None,
         emit_progress: Callable[[Mapping[str, Any]], None] | None,
         attempt_meta: Mapping[str, Any] | None = None,
+        timeout_override_sec: float | None = None,
     ) -> Any:
         if not callable(emit_progress):
             return call()
@@ -12354,6 +12392,8 @@ class InternalMCPChatOrchestrator:
             )
         else:
             timeout_sec = max(0.0, _coerce_float_env("VON_LLM_CALL_TIMEOUT_SEC", 0.0))
+        if isinstance(timeout_override_sec, (int, float)):
+            timeout_sec = max(0.0, float(timeout_override_sec))
 
         state: dict[str, Any] = {}
         done = threading.Event()
@@ -12415,6 +12455,7 @@ class InternalMCPChatOrchestrator:
         emit_progress: Callable[[Mapping[str, Any]], None] | None = None,
         context_telemetry: Mapping[str, Any] | None = None,
         prefer_default_model: bool = False,
+        timeout_override_sec: float | None = None,
     ) -> tuple[str, Optional[str], Mapping[str, Any]]:
         candidate_stage = policy_stage or stage
 
@@ -12571,6 +12612,7 @@ class InternalMCPChatOrchestrator:
                     model_name=model_name,
                     emit_progress=_progress_cb,
                     attempt_meta=attempt_meta,
+                    timeout_override_sec=timeout_override_sec,
                 )
                 duration_ms = (time.perf_counter() - llm_start) * 1000.0
                 if callable(emit_progress):
@@ -23050,6 +23092,8 @@ class InternalMCPChatOrchestrator:
     def _prepare_turn_selector_context_outputs(
         self,
         request: Any,
+        *,
+        progress_note: Callable[[str, str], None] | None = None,
     ) -> dict[str, Any]:
         from ...services.workflow_discovery_service import discover_workflows_for_turn
 
@@ -23080,12 +23124,22 @@ class InternalMCPChatOrchestrator:
             and raw_discovery
             and not refresh_discovery
         ):
+            if callable(progress_note):
+                progress_note(
+                    "Reuse cached workflow discovery",
+                    "Reusing and annotating the cached workflow-discovery result.",
+                )
             workflow_discovery_result = self._annotate_turn_workflow_discovery_result(
                 workflow_discovery_result=raw_discovery,
                 requested_query=prompt_text,
                 discovery_query_input=discovery_query_input,
             )
         elif prompt_text:
+            if callable(progress_note):
+                progress_note(
+                    "Refresh workflow discovery",
+                    "Refreshing workflow discovery from the turn text and expected-outcome contract.",
+                )
             discovered = discover_workflows_for_turn(
                 discovery_query_input,
                 namespace=env.user_namespace,
@@ -23114,28 +23168,44 @@ class InternalMCPChatOrchestrator:
             and not isinstance(augmented_context_raw, (str, bytes, bytearray))
             else ()
         )
+        if callable(progress_note):
+            progress_note(
+                "Assemble launchability inputs",
+                "Projecting current-turn inputs for workflow launchability checks.",
+            )
+        launchability_probe_inputs = self._build_turn_launchability_probe_inputs(
+            prompt_text=prompt_text,
+            augmented_context=augmented_context,
+            workflow_discovery_result=workflow_discovery_result,
+            continuation_context=raw_continuation_context,
+            user_namespace=env.user_namespace,
+            user_concept_id=(
+                str(data.get("user_concept_id") or "").strip() or None
+            ),
+            org_concept_id=(
+                str(data.get("org_concept_id") or "").strip() or None
+            ),
+            gmail_profile=(
+                str(data.get("gmail_profile") or "").strip() or None
+            ),
+            base_data=data if isinstance(data, Mapping) else None,
+        )
+        if callable(progress_note):
+            progress_note(
+                "Probe workflow launchability",
+                "Checking which discovered workflows can launch from the current turn inputs.",
+            )
         candidate_turn_launchability = (
             self._build_discovered_candidate_turn_launchability(
                 workflow_discovery_result=workflow_discovery_result,
-                available_inputs=self._build_turn_launchability_probe_inputs(
-                    prompt_text=prompt_text,
-                    augmented_context=augmented_context,
-                    workflow_discovery_result=workflow_discovery_result,
-                    continuation_context=raw_continuation_context,
-                    user_namespace=env.user_namespace,
-                    user_concept_id=(
-                        str(data.get("user_concept_id") or "").strip() or None
-                    ),
-                    org_concept_id=(
-                        str(data.get("org_concept_id") or "").strip() or None
-                    ),
-                    gmail_profile=(
-                        str(data.get("gmail_profile") or "").strip() or None
-                    ),
-                    base_data=data if isinstance(data, Mapping) else None,
-                ),
+                available_inputs=launchability_probe_inputs,
             )
         )
+        if callable(progress_note):
+            progress_note(
+                "Prepare selector candidates",
+                "Filtering discovered workflows into the candidate set shown to the selector.",
+            )
         (
             discovered_matches,
             excluded_discovered_matches,
@@ -23168,6 +23238,11 @@ class InternalMCPChatOrchestrator:
             ),
         )
         if env.user_namespace and self._workflow_selector.enabled():
+            if callable(progress_note):
+                progress_note(
+                    "Build selector prompt",
+                    "Rendering the authoritative selector prompt and candidate list.",
+                )
             selector_prompt = self._workflow_selector.prepare_selection_prompt(
                 turn_text=prompt_text,
                 discovered_workflows=selector_candidate_matches or None,
@@ -23191,6 +23266,11 @@ class InternalMCPChatOrchestrator:
         ):
             selector_stage_messages.append(
                 {"role": "system", "content": selector_prompt.prompt_text.strip()}
+            )
+        if callable(progress_note):
+            progress_note(
+                "Build selector context",
+                "Composing the selector-stage LLM context from turn context and selector guidance.",
             )
         selector_context, selector_context_lineage = self._build_stage_llm_context(
             base_context=augmented_context,
@@ -23288,7 +23368,33 @@ class InternalMCPChatOrchestrator:
                 },
             )
         prepare_start = time.perf_counter()
-        outputs = self._prepare_turn_selector_context_outputs(request)
+        emit_progress_raw = data.get("emit_progress")
+        emit_progress = (
+            cast(Callable[[Mapping[str, Any]], None], emit_progress_raw)
+            if callable(emit_progress_raw)
+            else None
+        )
+
+        def _emit_prepare_progress(subtask: str, result_summary: str) -> None:
+            if not callable(emit_progress):
+                return
+            emit_progress(
+                {
+                    "status": "thinking",
+                    "stage": "selector_preparation",
+                    "phase": "selector_preparation",
+                    "phase_label": self._PHASE_LABELS.get(
+                        "selector_preparation", "Preparing selector context"
+                    ),
+                    "subtask": subtask,
+                    "result_summary": result_summary,
+                }
+            )
+
+        outputs = self._prepare_turn_selector_context_outputs(
+            request,
+            progress_note=_emit_prepare_progress,
+        )
         duration_ms = int((time.perf_counter() - prepare_start) * 1000)
 
         if isinstance(aux_llm_calls, list):
@@ -23484,6 +23590,9 @@ class InternalMCPChatOrchestrator:
             augmented_context = []
         record_llm_call = data.get("record_llm_call")
         emit_progress = data.get("emit_progress")
+        timeout_override_sec = _conversation_turn_llm_timeout_override_sec_from_data(
+            data
+        )
 
         if not callable(record_llm_call):
 
@@ -23554,6 +23663,7 @@ class InternalMCPChatOrchestrator:
                             ),
                             context_telemetry=selector_context_telemetry,
                             prefer_default_model=bool(default_model),
+                            timeout_override_sec=timeout_override_sec,
                         )
                     )
                     prepared_outputs["selector_raw_response"] = selector_response_text
@@ -23981,6 +24091,9 @@ class InternalMCPChatOrchestrator:
                     and str(default_model_candidate).strip()
                     else None
                 )
+                timeout_override_sec = (
+                    _conversation_turn_llm_timeout_override_sec_from_data(data)
+                )
 
                 if not prompt_text:
                     failure_detail = "turn_execution_missing_user_prompt"
@@ -24016,6 +24129,7 @@ class InternalMCPChatOrchestrator:
                             emit_progress=emit_progress,
                             context_telemetry=context_telemetry,
                             prefer_default_model=bool(default_model),
+                            timeout_override_sec=timeout_override_sec,
                         )
                     )
                 else:
@@ -24508,6 +24622,9 @@ class InternalMCPChatOrchestrator:
             org_concept_id=org_concept_id,
             step_callback=_step_callback,
         )
+        conversation_turn_llm_timeout_override_sec = (
+            _default_conversation_turn_llm_timeout_override_sec()
+        )
 
         workflow_inputs = {
             "prompt": prompt,
@@ -24549,6 +24666,9 @@ class InternalMCPChatOrchestrator:
             "check_cancellation": _check_cancellation_local,
             "build_parse_error_result": _build_tool_call_parse_error_result,
             "build_validation_error_result": _build_tool_call_validation_error_result,
+            _CONVERSATION_TURN_LLM_TIMEOUT_CONTEXT_KEY: (
+                conversation_turn_llm_timeout_override_sec
+            ),
             "aux_llm_calls": aux_llm_calls,
             "llm_calls": llm_calls,
             "invocations": tool_invocations,

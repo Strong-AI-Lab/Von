@@ -3626,6 +3626,137 @@ describe('thinking card toggle accessibility', () => {
         expect(retained.detail.innerHTML).toContain('Response generated');
     });
 
+    test('retains a completed card inline when the last live progress remains non-terminal', async () => {
+        const { getUserContext } = require('../apiService.js');
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ',
+            gmail_profile: null
+        });
+
+        __testOnly_setActiveChatSession('session-stale-progress-complete', 'Stale Progress Complete');
+        document.getElementById('promptInput').value = 'stale pending progress';
+
+        global.fetch = jest.fn((url) => {
+            if (typeof url === 'string' && url.startsWith('/api/settings/')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ show_tool_use_during_thinking: true })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/progress/')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        status: 'thinking',
+                        phase: 'plain_response',
+                        stage: 'plain_response',
+                        phase_label: 'Answering directly',
+                        result_summary: 'Drafting a direct response',
+                        liveness_state: 'active'
+                    })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ history_length: 0, authenticated: true })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        response: 'Done',
+                        llm_debug: { model: 'gpt-5.2' }
+                    })
+                });
+            }
+
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        await expect(sendMessage()).resolves.toBeUndefined();
+
+        const retained = getRetainedThinkingCardElements();
+        const indicatorText = retained.wrapper.querySelector('.loading-indicator-text');
+
+        expect(retained).not.toBeNull();
+        expect(indicatorText.textContent).toBe('Complete');
+        expect(retained.detail.innerHTML).toContain('Turn completed');
+        expect(retained.detail.innerHTML).toContain('Response generated');
+        expect(retained.detail.innerHTML).not.toContain('Active');
+    });
+
+    test('retains a failed card inline when the last live progress remains non-terminal', async () => {
+        const { getUserContext } = require('../apiService.js');
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ',
+            gmail_profile: null
+        });
+
+        __testOnly_setActiveChatSession('session-stale-progress-failed', 'Stale Progress Failed');
+        document.getElementById('promptInput').value = 'stale pending failure progress';
+
+        global.fetch = jest.fn((url) => {
+            if (typeof url === 'string' && url.startsWith('/api/settings/')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ show_tool_use_during_thinking: true })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/progress/')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        status: 'thinking',
+                        phase: 'plain_response',
+                        stage: 'plain_response',
+                        phase_label: 'Answering directly',
+                        result_summary: 'Drafting a direct response',
+                        liveness_state: 'active'
+                    })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ history_length: 0, authenticated: true })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                return Promise.resolve({
+                    ok: false,
+                    json: async () => ({
+                        error: 'authoritative workflow failed'
+                    })
+                });
+            }
+
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        await expect(sendMessage()).resolves.toBeUndefined();
+
+        const retained = getRetainedThinkingCardElements();
+        const indicatorText = retained.wrapper.querySelector('.loading-indicator-text');
+
+        expect(retained).not.toBeNull();
+        expect(indicatorText.textContent).toBe('Failed');
+        expect(retained.detail.innerHTML).toContain('Turn failed');
+        expect(retained.detail.innerHTML).toContain('authoritative workflow failed');
+        expect(retained.detail.innerHTML).not.toContain('Active');
+    });
+
     test('keeps one retained thinking card per completed turn instead of replacing the previous turn', async () => {
         const { getUserContext } = require('../apiService.js');
         getUserContext.mockReturnValue({

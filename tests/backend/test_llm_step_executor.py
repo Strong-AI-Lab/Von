@@ -6,6 +6,9 @@ from src.backend.workflows.action_registry import (
     WorkflowActionRequest,
     WorkflowEnvironment,
 )
+from src.backend.workflows.conversation_turn_llm_timeout import (
+    DEFAULT_CONVERSATION_TURN_LLM_TIMEOUT_SEC,
+)
 from src.backend.workflows.llm_step_executor import execute_llm_step
 
 
@@ -235,3 +238,184 @@ def test_execute_llm_step_emits_phase_transition_for_conversation_turn_stage(
             },
         }
     ]
+
+
+def test_execute_llm_step_applies_conversation_turn_timeout_override_to_gateway_llm(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _StubOrchestrator:
+        def _run_llm_with_fallbacks(self, **kwargs):
+            captured["timeout_override_sec"] = kwargs.get("timeout_override_sec")
+            return ('{"ok": true}', "test-model", None)
+
+    monkeypatch.setattr(
+        "src.backend.workflows.llm_step_executor._build_gateway_runtime",
+        lambda request: (_StubOrchestrator(), object(), None, None, None),
+    )
+    monkeypatch.setenv("VON_CONVERSATION_TURN_LLM_TIMEOUT_SEC", "42")
+
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=MagicMock(),
+            gateway=object(),
+            model="test-model",
+        ),
+        data={
+            "selector_context_messages": [
+                {"role": "system", "content": "Selector prompt"},
+                {"role": "user", "content": "Who am I?"},
+            ]
+        },
+        workflow_state_id="selector_decision",
+        prompt_contract={"prompt_text": "Return JSON only."},
+        llm_policy={
+            "context_messages_context_key": "selector_context_messages",
+        },
+        validation_policy={"output_format": "json_value"},
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "success"
+    assert captured["timeout_override_sec"] == 42.0
+
+
+def test_execute_llm_step_uses_default_conversation_turn_timeout_when_env_missing(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _StubOrchestrator:
+        def _run_llm_with_fallbacks(self, **kwargs):
+            captured["timeout_override_sec"] = kwargs.get("timeout_override_sec")
+            return ('{"ok": true}', "test-model", None)
+
+    monkeypatch.setattr(
+        "src.backend.workflows.llm_step_executor._build_gateway_runtime",
+        lambda request: (_StubOrchestrator(), object(), None, None, None),
+    )
+    monkeypatch.delenv("VON_CONVERSATION_TURN_LLM_TIMEOUT_SEC", raising=False)
+
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=MagicMock(),
+            gateway=object(),
+            model="test-model",
+        ),
+        data={
+            "selector_context_messages": [
+                {"role": "system", "content": "Selector prompt"},
+                {"role": "user", "content": "Who am I?"},
+            ]
+        },
+        workflow_state_id="selector_decision",
+        prompt_contract={"prompt_text": "Return JSON only."},
+        llm_policy={
+            "context_messages_context_key": "selector_context_messages",
+        },
+        validation_policy={"output_format": "json_value"},
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "success"
+    assert (
+        captured["timeout_override_sec"]
+        == DEFAULT_CONVERSATION_TURN_LLM_TIMEOUT_SEC
+    )
+
+
+def test_execute_llm_step_returns_failed_result_on_gateway_llm_timeout(
+    monkeypatch,
+) -> None:
+    class _StubOrchestrator:
+        def _run_llm_with_fallbacks(self, **_kwargs):
+            raise TimeoutError(
+                "LLM call timed out after 12s (stage=classifier, model=gemma4:26b)"
+            )
+
+    monkeypatch.setattr(
+        "src.backend.workflows.llm_step_executor._build_gateway_runtime",
+        lambda request: (_StubOrchestrator(), object(), None, None, None),
+    )
+
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=MagicMock(),
+            gateway=object(),
+            model="gemma4:26b",
+        ),
+        data={
+            "selector_context_messages": [
+                {"role": "system", "content": "Selector prompt"},
+                {"role": "user", "content": "Who am I?"},
+            ]
+        },
+        workflow_state_id="selector_decision",
+        prompt_contract={"prompt_text": "Return JSON only."},
+        llm_policy={
+            "context_messages_context_key": "selector_context_messages",
+        },
+        validation_policy={"output_format": "json_value"},
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "failed"
+    assert "workflow_llm_step_timeout:" in str(result.error or "")
+    envelope = result.outputs["llm_step_envelope"]
+    assert envelope["completion_reason"] == "timeout"
+    assert envelope["timeout_stage"] == "llm.action"
+    assert "timed out after 12s" in envelope["timeout_detail"]
+
+
+def test_execute_llm_step_uses_explicit_timeout_override_from_request_data(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _StubOrchestrator:
+        def _run_llm_with_fallbacks(self, **kwargs):
+            captured["timeout_override_sec"] = kwargs.get("timeout_override_sec")
+            return ('{"ok": true}', "test-model", None)
+
+    monkeypatch.setattr(
+        "src.backend.workflows.llm_step_executor._build_gateway_runtime",
+        lambda request: (_StubOrchestrator(), object(), None, None, None),
+    )
+
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=MagicMock(),
+            gateway=object(),
+            model="test-model",
+        ),
+        data={
+            "tool_plan_context_messages": [
+                {"role": "system", "content": "Tool plan prompt"},
+                {"role": "user", "content": "Represent this paper."},
+            ],
+            "conversation_turn_llm_timeout_override_sec": 31,
+        },
+        workflow_state_id="tool_planning",
+        prompt_contract={"prompt_text": "Return JSON only."},
+        llm_policy={
+            "context_messages_context_key": "tool_plan_context_messages",
+        },
+        validation_policy={"output_format": "json_value"},
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "success"
+    assert captured["timeout_override_sec"] == 31.0

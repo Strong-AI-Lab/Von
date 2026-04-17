@@ -9,6 +9,7 @@ Validates workflow discovery during conversation turns including:
 
 from __future__ import annotations
 
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -861,6 +862,92 @@ class TestDiscoverWorkflowsForTurn:
         assert mock_vontology.called is False
         assert mock_name_fallback.called is False
 
+    @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
+    @patch("src.backend.services.workflow_discovery_service._search_workflows_name_fallback")
+    @patch("src.backend.services.workflow_discovery_service._search_workflows_vontology")
+    @patch("src.backend.services.workflow_discovery_service._search_workflows_semantic")
+    @patch("src.backend.services.workflow_discovery_service._search_workflow_capabilities")
+    @patch(
+        "src.backend.services.workflow_discovery_service.get_workflow_capability_index_runtime_state"
+    )
+    def test_hard_timeboxes_blocking_capability_index_search(
+        self,
+        mock_capability_state: MagicMock,
+        mock_capability: MagicMock,
+        mock_semantic: MagicMock,
+        mock_vontology: MagicMock,
+        mock_name_fallback: MagicMock,
+        mock_enrich: MagicMock,
+    ) -> None:
+        def _blocking_capability(*_args, **_kwargs):
+            time.sleep(0.2)
+            return []
+
+        mock_capability.side_effect = _blocking_capability
+        mock_capability_state.return_value = {
+            "ready": False,
+            "build_in_progress": True,
+            "last_error": None,
+        }
+        mock_semantic.return_value = []
+        mock_vontology.return_value = []
+        mock_name_fallback.return_value = []
+        mock_enrich.side_effect = lambda matches: matches
+
+        result = discover_workflows(
+            "Represent the uploaded paper now",
+            max_results=1,
+            timeout_seconds=0.05,
+        )
+
+        assert any(
+            "capability_index_search timed out" in error for error in result.errors
+        )
+        assert result.search_time_ms < 200.0
+        assert mock_semantic.called is False
+
+    @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
+    @patch("src.backend.services.workflow_discovery_service._search_workflows_name_fallback")
+    @patch("src.backend.services.workflow_discovery_service._search_workflows_vontology")
+    @patch("src.backend.services.workflow_discovery_service._search_workflows_semantic")
+    @patch("src.backend.services.workflow_discovery_service._search_workflow_capabilities")
+    @patch(
+        "src.backend.services.workflow_discovery_service.get_workflow_capability_index_runtime_state"
+    )
+    def test_hard_timeboxes_blocking_semantic_search(
+        self,
+        mock_capability_state: MagicMock,
+        mock_capability: MagicMock,
+        mock_semantic: MagicMock,
+        mock_vontology: MagicMock,
+        mock_name_fallback: MagicMock,
+        mock_enrich: MagicMock,
+    ) -> None:
+        def _blocking_semantic(*_args, **_kwargs):
+            time.sleep(0.2)
+            return []
+
+        mock_capability.return_value = []
+        mock_capability_state.return_value = {
+            "ready": True,
+            "build_in_progress": False,
+            "last_error": None,
+        }
+        mock_semantic.side_effect = _blocking_semantic
+        mock_vontology.return_value = []
+        mock_name_fallback.return_value = []
+        mock_enrich.side_effect = lambda matches: matches
+
+        result = discover_workflows(
+            "Represent the uploaded paper now",
+            max_results=1,
+            timeout_seconds=0.06,
+        )
+
+        assert any("semantic_search timed out" in error for error in result.errors)
+        assert result.search_time_ms < 200.0
+        assert mock_vontology.called is False
+
     @patch(
         "src.backend.services.workflow_discovery_service._classify_workflow_concept_executability"
     )
@@ -933,10 +1020,34 @@ class TestDiscoverWorkflowsForTurn:
 
     @patch("src.backend.services.workflow_discovery_service.discover_workflows")
     def test_catches_exceptions(self, mock_discover: MagicMock) -> None:
-        """Should catch exceptions and return None."""
+        """Should catch exceptions and return an explicit failed-closed payload."""
         mock_discover.side_effect = Exception("Unexpected error")
         result = discover_workflows_for_turn("test query input")
-        assert result is None
+        assert isinstance(result, dict)
+        assert result["matches"] == []
+        assert "workflow_discovery_for_turn_error: Unexpected error" in result["errors"]
+        assert result["match_absence_reason"] == "workflow_discovery_for_turn_error"
+
+    @patch("src.backend.services.workflow_discovery_service.discover_workflows")
+    def test_turn_wrapper_hard_timeboxes_blocking_discovery(
+        self,
+        mock_discover: MagicMock,
+    ) -> None:
+        def _blocking_discovery(*_args, **_kwargs):
+            time.sleep(0.7)
+            return WorkflowDiscoveryResult()
+
+        mock_discover.side_effect = _blocking_discovery
+
+        result = discover_workflows_for_turn("test query input")
+
+        assert isinstance(result, dict)
+        assert result["matches"] == []
+        assert any(
+            "workflow_discovery_for_turn timed out" in error
+            for error in (result.get("errors") or [])
+        )
+        assert result["match_absence_reason"] == "workflow_discovery_for_turn_error"
 
 
 class TestWorkflowTypeIds:

@@ -1,4 +1,5 @@
 import { openSettingsTabAndFocus } from './utils/settingsNavigation.js';
+import { parseStoredContextValue } from './utils/runtimeIdentityBootstrap.js';
 import { applyLocalModelPreferenceOverlay } from './utils/localModelPreferences.js';
 
 export const elements = {};
@@ -137,13 +138,13 @@ export function updateHeaderOrgName() {
   try {
     const sessionOrg = sessionStorage.getItem('von_current_org');
     if (sessionOrg) {
-      const parsed = JSON.parse(sessionOrg);
+      const parsed = parseStoredContextValue(sessionOrg);
       orgName = parsed?.name || null;
     }
     if (!orgName) {
       const localOrg = localStorage.getItem('von_current_org');
       if (localOrg) {
-        const parsed = JSON.parse(localOrg);
+        const parsed = parseStoredContextValue(localOrg);
         orgName = parsed?.name || null;
       }
     }
@@ -164,13 +165,13 @@ async function loadInfoPopupContent() {
   try {
     const sessionOrg = sessionStorage.getItem('von_current_org');
     if (sessionOrg) {
-      const parsed = JSON.parse(sessionOrg);
+      const parsed = parseStoredContextValue(sessionOrg);
       orgConceptId = parsed?.concept_id || null;
     }
     if (!orgConceptId) {
       const localOrg = localStorage.getItem('von_current_org');
       if (localOrg) {
-        const parsed = JSON.parse(localOrg);
+        const parsed = parseStoredContextValue(localOrg);
         orgConceptId = parsed?.concept_id || null;
       }
     }
@@ -311,13 +312,13 @@ async function getSettings() {
 }
 
 // Helpers to access current user / organisation with both name and concept id
-function readStoredJson(key) { try { return JSON.parse(localStorage.getItem(key) || 'null'); } catch { return null; } }
+function readStoredJson(key) { try { return parseStoredContextValue(localStorage.getItem(key)); } catch { return null; } }
 // JVNAUTOSCI-1011: For window-scoped values, check sessionStorage first (per-window), then localStorage (shared fallback)
 function readSessionScopedJson(key) {
   try {
     const sessionVal = sessionStorage.getItem(key);
-    if (sessionVal) return JSON.parse(sessionVal);
-    return JSON.parse(localStorage.getItem(key) || 'null');
+    if (sessionVal) return parseStoredContextValue(sessionVal);
+    return parseStoredContextValue(localStorage.getItem(key));
   } catch { return null; }
 }
 async function getCurrentUserInfo(settingsOverride = null) {
