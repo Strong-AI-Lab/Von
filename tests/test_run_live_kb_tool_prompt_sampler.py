@@ -88,7 +88,6 @@ def test_evaluate_user_happiness_accepts_grounded_tool_answer() -> None:
         "jira_search",
     ]
 
-
 def test_evaluate_user_happiness_accepts_short_direct_answer() -> None:
     evaluation = sampler._evaluate_user_happiness(
         prompt_entry={
@@ -115,6 +114,39 @@ def test_evaluate_user_happiness_accepts_short_direct_answer() -> None:
     assert evaluation["should_user_be_happy"] is True
     assert evaluation["verdict"] == "happy"
     assert evaluation["reasons"] == []
+
+
+def test_evaluate_user_happiness_rejects_inventory_only_claim_of_relationship() -> None:
+    evaluation = sampler._evaluate_user_happiness(
+        prompt_entry={
+            "id": "what_papers_of_mine_do_you_know_about",
+            "prompt": "What papers of mine do you know about?",
+            "knowledge_surfaces": ["kb"],
+            "likely_tools": ["search_knowledge_base"],
+        },
+        generate_payload={
+            "response": "I currently have 35 of your papers stored in my system."
+        },
+        llm_debug_data={
+            "turn_execution_diagnostics": {
+                "workflow_routing_diagnostics": {
+                    "dispatch": {
+                        "selected_execution_mode": "tool_pipeline",
+                        "dispatch_workflow_id": "#V#tool_calling_workflow",
+                    }
+                },
+                "tool_history": [
+                    {"tool": "list_papers", "success": True},
+                ],
+            }
+        },
+    )
+
+    assert evaluation["should_user_be_happy"] is False
+    assert evaluation["verdict"] == "unhappy"
+    assert any(
+        "inventory-only tool evidence" in reason for reason in evaluation["reasons"]
+    )
 
 
 def test_choose_prompt_respects_complexity_class_filter() -> None:

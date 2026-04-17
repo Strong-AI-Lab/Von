@@ -7922,7 +7922,9 @@ def _list_papers_output_schema() -> Schema:
         allow_unknown=True,
         description=(
             "list_papers output: total_papers (int), papers (list of cached paper objects; "
-            "typically includes file_path, filename, size_bytes, arxiv_id, version), "
+            "typically includes file_path, filename, size_bytes, arxiv_id, version). "
+            "Inventory only: this does not by itself prove authorship, ownership, provenance, "
+            "or any user/entity relationship, "
             "or error (str) if failed"
         ),
     )

@@ -268,7 +268,16 @@ def test_turn_execution_route_refreshes_prefilled_discovery_when_effective_query
         discovered_queries.append(user_input)
         assert namespace == "#V#user"
         assert workflow_registry is orchestrator._workflow_registry
-        assert user_input == "What papers of mine do you know about?"
+        assert user_input == (
+            "What papers of mine do you know about?\n\n"
+            "Turn-intent routing guidance:\n"
+            "- Routing guidance: Treat this as concept/relation retrieval for the "
+            "referenced entity rather than artefact creation or representation.\n"
+            "- Grounding requirement: Ground authorship or ownership claims in "
+            "represented concept relations.\n"
+            "- Success target: Answer only with represented facts grounded to the "
+            "referenced user concept."
+        )
         return {
             "query": user_input,
             "requested_query": "stale query",
@@ -432,10 +441,17 @@ def test_turn_execution_route_refreshes_prefilled_discovery_when_effective_query
         "What papers of mine do you know about?"
     )
     assert refreshed_discovery["discovery_query_input"] == (
-        "What papers of mine do you know about?"
+        "What papers of mine do you know about?\n\n"
+        "Turn-intent routing guidance:\n"
+        "- Routing guidance: Treat this as concept/relation retrieval for the "
+        "referenced entity rather than artefact creation or representation.\n"
+        "- Grounding requirement: Ground authorship or ownership claims in "
+        "represented concept relations.\n"
+        "- Success target: Answer only with represented facts grounded to the "
+        "referenced user concept."
     )
     assert refreshed_discovery["query"] == discovered_queries[0]
-    assert refreshed_discovery.get("query_enrichment_applied") is not True
+    assert refreshed_discovery.get("query_enrichment_applied") is True
     assert refreshed_discovery["discovery_refreshed"] is True
     assert refreshed_discovery["discovery_refresh_reason"] == (
         "effective_query_changed"

@@ -135,6 +135,7 @@ from src.backend.services.namespace_service import derive_actor_context_from_nam
 # Tool metadata service for Vontology-driven tool display (JVNAUTOSCI-1073)
 from src.backend.services.tool_metadata_service import (
     get_tool_metadata,
+    get_tool_planner_hint,
     get_tool_salience,
     is_tool_visible,
 )
@@ -1832,6 +1833,19 @@ class InternalMCPChatOrchestrator:
                 "url",
                 "website",
                 "news",
+            ),
+        ),
+        (
+            "arxiv",
+            (
+                "arxiv",
+                "arxiv id",
+                "arxiv.org",
+                "pdf",
+                "doi",
+                "preprint",
+                "cached paper",
+                "cached papers",
             ),
         ),
         ("task", ("task", "to-do", "todo", "assignment", "assignee", "due date")),
@@ -5934,6 +5948,15 @@ class InternalMCPChatOrchestrator:
             if isinstance(data.get("missing_tool_call_recovery_outcome"), str)
             else None
         )
+        method_catalogue_for_requirements = data.get("method_catalogue")
+        if not isinstance(method_catalogue_for_requirements, Mapping):
+            try:
+                method_catalogue_for_requirements = self._gateway.describe_methods()
+            except Exception:
+                method_catalogue_for_requirements = None
+        if isinstance(method_catalogue_for_requirements, Mapping):
+            data["method_catalogue"] = method_catalogue_for_requirements
+
         tool_plan_stage_messages = self._build_turn_expected_outcome_stage_messages(
             data=data,
             stage="tool_call",
@@ -5944,15 +5967,6 @@ class InternalMCPChatOrchestrator:
             base_context_source="augmented_context",
             stage_messages=tool_plan_stage_messages,
         )
-        data["tool_plan_context_lineage"] = dict(tool_plan_context_telemetry)
-        method_catalogue_for_requirements = data.get("method_catalogue")
-        if not isinstance(method_catalogue_for_requirements, Mapping):
-            try:
-                method_catalogue_for_requirements = self._gateway.describe_methods()
-            except Exception:
-                method_catalogue_for_requirements = None
-        if isinstance(method_catalogue_for_requirements, Mapping):
-            data["method_catalogue"] = method_catalogue_for_requirements
 
         allowed_tool_names = {
             str(tool_name).strip().lower()
@@ -5985,6 +5999,7 @@ class InternalMCPChatOrchestrator:
         )
         self._store_prompt_requirement_evaluation(data, prompt_requirements)
         required_prompt_tools = list(prompt_requirements.required_tools)
+        data["tool_plan_context_lineage"] = dict(tool_plan_context_telemetry)
 
         # Emit planning phase.
         if callable(emit_phase_transition):
@@ -8598,7 +8613,10 @@ class InternalMCPChatOrchestrator:
                 # Create ToolDefinition
                 tool_def = ToolDefinition(
                     name=tool_name,
-                    description=metadata.get("description", f"Execute {tool_name}"),
+                    description=self._build_tool_planner_description(
+                        tool_name,
+                        metadata if isinstance(metadata, Mapping) else None,
+                    ),
                     input_schema=input_schema,
                 )
                 tool_definitions.append(tool_def)
@@ -8615,6 +8633,24 @@ class InternalMCPChatOrchestrator:
             len(tool_definitions),
         )
         return tool_definitions
+
+    @staticmethod
+    def _build_tool_planner_description(
+        tool_name: str,
+        metadata: Mapping[str, Any] | None,
+    ) -> str:
+        base_description = (
+            str(metadata.get("description") or "").strip()
+            if isinstance(metadata, Mapping)
+            else ""
+        ) or f"Execute {tool_name}"
+        planner_hint = get_tool_planner_hint(tool_name)
+        if not isinstance(planner_hint, str) or not planner_hint.strip():
+            return base_description
+        clean_hint = planner_hint.strip()
+        if clean_hint.lower() in base_description.lower():
+            return base_description
+        return f"{base_description} Planner hint: {clean_hint}"
 
     @staticmethod
     def _structured_tool_step_profile(
@@ -8744,11 +8780,28 @@ class InternalMCPChatOrchestrator:
             _add_hint(cls._structured_tool_family_for_name(tool_name))
 
         prompt_text = str(prompt or "").strip().lower()
-        if prompt_text:
+        context_text = ""
+        if isinstance(context, Sequence):
+            context_fragments: list[str] = []
+            for message in list(context)[-16:]:
+                if not isinstance(message, Mapping):
+                    continue
+                raw_content = message.get("content")
+                if not isinstance(raw_content, str):
+                    continue
+                text = raw_content.strip().lower()
+                if text:
+                    context_fragments.append(text)
+            context_text = "\n".join(context_fragments)
+
+        combined_text = "\n".join(
+            fragment for fragment in (prompt_text, context_text) if fragment
+        )
+        if combined_text:
             for family, tokens in cls._STRUCTURED_TOOL_FAMILY_HINTS:
-                if any(token in prompt_text for token in tokens):
+                if any(token in combined_text for token in tokens):
                     _add_hint(family)
-            if re.search(r"https?://\S+", prompt_text):
+            if re.search(r"https?://\S+", combined_text):
                 _add_hint("search")
 
         return tuple(hints)
@@ -9644,6 +9697,7 @@ class InternalMCPChatOrchestrator:
         base_message = self._inject_prompt_variable(
             base_message, key="listing", value=listing
         )
+        base_message = self._inject_instruction_grounding_guardrails(base_message)
         if identity_lines:
             base_message = f"{base_message.rstrip()}\n\n" + "\n".join(identity_lines)
 
@@ -9666,6 +9720,53 @@ class InternalMCPChatOrchestrator:
             )
 
         return base_message
+
+    @staticmethod
+    def _inject_instruction_grounding_guardrails(base_message: str) -> str:
+        """Append deterministic grounding guardrails without reviving prompt fallback."""
+
+        if not isinstance(base_message, str) or not base_message.strip():
+            return base_message
+
+        lowered_message = base_message.lower()
+        guardrail_lines: list[str] = []
+        if "list_papers is inventory-only" not in lowered_message:
+            guardrail_lines.append(
+                "- list_papers is inventory-only: it enumerates cached/stored PDFs "
+                "and does NOT by itself establish authorship, ownership, "
+                "provenance, or any user/entity relationship."
+            )
+        if "do not treat cache presence" not in lowered_message:
+            guardrail_lines.append(
+                "- Do NOT treat cache presence, file presence, storage inventory, "
+                "or generic listing tools as sufficient evidence that an artefact "
+                "belongs to, was authored by, or is otherwise related to a person "
+                "or entity."
+            )
+        if (
+            "prefer kb/concept/relation retrieval tools over inventory/listing tools"
+            not in lowered_message
+        ):
+            guardrail_lines.append(
+                "- For questions about papers, projects, collaborators, "
+                "affiliations, or other facts 'of mine', 'of ours', or 'of X', "
+                "prefer KB/concept/relation retrieval tools over inventory/listing "
+                "tools unless the user explicitly asked for inventory only."
+            )
+        if not guardrail_lines:
+            return base_message
+
+        guardrail_block = "\n".join(
+            ["GROUNDING GUARDRAILS:", *guardrail_lines]
+        )
+        marker = "Available tools:\n"
+        if marker in base_message:
+            return base_message.replace(
+                marker,
+                f"{guardrail_block}\n\n{marker}",
+                1,
+            )
+        return f"{base_message.rstrip()}\n\n{guardrail_block}"
 
     def _load_base_system_prompt_from_vontology(
         self, *, preferred_language: str | None = None
@@ -22705,7 +22806,41 @@ class InternalMCPChatOrchestrator:
         expected_outcome_contract: Mapping[str, Any] | None,
     ) -> str:
         clean_turn_text = turn_text.strip() if isinstance(turn_text, str) else ""
-        return clean_turn_text
+        if not clean_turn_text:
+            return ""
+
+        contract = (
+            expected_outcome_contract
+            if isinstance(expected_outcome_contract, Mapping)
+            else {}
+        )
+        guidance_lines: list[str] = []
+
+        selector_guidance = contract.get("selector_guidance")
+        if isinstance(selector_guidance, str) and selector_guidance.strip():
+            guidance_lines.append(f"- Routing guidance: {selector_guidance.strip()}")
+
+        grounding_requirement = contract.get("grounding_requirement")
+        if isinstance(grounding_requirement, str) and grounding_requirement.strip():
+            guidance_lines.append(
+                f"- Grounding requirement: {grounding_requirement.strip()}"
+            )
+
+        summary = contract.get("summary")
+        if isinstance(summary, str) and summary.strip():
+            guidance_lines.append(f"- Success target: {summary.strip()}")
+
+        if not guidance_lines:
+            return clean_turn_text
+
+        return "\n".join(
+            [
+                clean_turn_text,
+                "",
+                "Turn-intent routing guidance:",
+                *guidance_lines,
+            ]
+        )
 
     @staticmethod
     def _turn_discovery_query_is_enriched(

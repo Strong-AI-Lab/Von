@@ -75,6 +75,13 @@ NEGATIVE_RESPONSE_MARKERS = (
     "i don't know",
     "i do not know",
 )
+INVENTORY_ONLY_TOOLS = frozenset({"list_papers"})
+RELATIONSHIP_CLAIM_MARKERS = (
+    "your papers",
+    "papers of yours",
+    "my papers",
+    "our papers",
+)
 
 PROMPT_BANK_PAYLOAD: dict[str, Any] = {
     "schema_version": "live_kb_tool_prompt_bank.v2",
@@ -915,6 +922,18 @@ def _evaluate_user_happiness(
     if not reasons and not tool_names and not selected_execution_mode:
         reasons.append(
             "No positive evidence of grounded execution was recorded for this turn."
+        )
+
+    inventory_only_tools = [
+        name for name in tool_names if name in INVENTORY_ONLY_TOOLS
+    ]
+    if (
+        inventory_only_tools
+        and len(inventory_only_tools) == len(tool_names)
+        and any(marker in lowered_response for marker in RELATIONSHIP_CLAIM_MARKERS)
+    ):
+        reasons.append(
+            "Response made a relationship or ownership claim using inventory-only tool evidence."
         )
 
     should_user_be_happy = not reasons

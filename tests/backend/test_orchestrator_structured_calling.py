@@ -631,6 +631,48 @@ def test_tool_definitions_conversion(orchestrator):
     assert "properties" in tool_defs[0].input_schema
 
 
+def test_tool_definitions_conversion_appends_planner_hints():
+    """Tool planner hints should be exposed through structured tool descriptions."""
+
+    from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
+
+    gateway = MagicMock(spec=InternalMCPGateway)
+    gateway.enabled = True
+    gateway.describe_methods.return_value = {
+        "list_papers": {
+            "name": "list_papers",
+            "description": "List cached papers",
+            "input_schema": {
+                "required": {},
+                "optional": {},
+                "allow_unknown": True,
+                "description": "No input",
+            },
+            "output_schema": None,
+            "category": "read",
+        },
+        "search_knowledge_base": {
+            "name": "search_knowledge_base",
+            "description": "Search the knowledge base",
+            "input_schema": {
+                "required": {"query": str},
+                "optional": {},
+                "allow_unknown": True,
+                "description": "Search query parameters",
+            },
+            "output_schema": None,
+            "category": "read",
+        },
+    }
+
+    orch = InternalMCPChatOrchestrator(gateway=gateway)
+    tool_defs = orch._convert_mcp_tools_to_structured_definitions()
+    by_name = {definition.name: definition.description for definition in tool_defs}
+
+    assert "Inventory only." in by_name["list_papers"]
+    assert "represented-knowledge lookup" in by_name["search_knowledge_base"]
+
+
 def test_structured_calling_with_no_tool_response(orchestrator, mock_gateway):
     """Test that structured calling handles responses without tool calls."""
 
@@ -982,6 +1024,82 @@ def test_structured_candidate_resolver_prefers_workflow_testing_family_for_plann
     assert "gmail_list_messages" not in lowered
     assert "jira_search" not in lowered
     assert len(resolution.candidate_tool_names) < 20
+
+
+def test_structured_candidate_resolver_uses_context_for_entity_relative_kb_hints():
+    """Contextual routing guidance should hint KB/relation tools without paper->arxiv bias."""
+
+    from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
+
+    gateway = MagicMock(spec=InternalMCPGateway)
+    gateway.enabled = True
+    catalogue = {
+        "search_knowledge_base": {
+            "name": "search_knowledge_base",
+            "description": "Search the knowledge base",
+            "input_schema": {"required": {"query": str}, "optional": {}, "allow_unknown": True},
+            "output_schema": None,
+            "category": "read",
+        },
+        "resolve_concept_by_name": {
+            "name": "resolve_concept_by_name",
+            "description": "Resolve a concept by name",
+            "input_schema": {"required": {"name": str}, "optional": {}, "allow_unknown": True},
+            "output_schema": None,
+            "category": "read",
+        },
+        "find_relations_with_argument": {
+            "name": "find_relations_with_argument",
+            "description": "Find relations for a concept argument",
+            "input_schema": {
+                "required": {"concept_id": str},
+                "optional": {},
+                "allow_unknown": True,
+            },
+            "output_schema": None,
+            "category": "read",
+        },
+        "list_papers": {
+            "name": "list_papers",
+            "description": "List cached papers",
+            "input_schema": {"required": {}, "optional": {}, "allow_unknown": True},
+            "output_schema": None,
+            "category": "read",
+        },
+    }
+    gateway.describe_methods.return_value = catalogue
+
+    orch = InternalMCPChatOrchestrator(gateway=gateway)
+    tool_defs = orch._convert_mcp_tools_to_structured_definitions(
+        method_catalogue=catalogue
+    )
+    resolution = orch._resolve_structured_tool_candidates(
+        prompt="What papers of mine do you know about?",
+        context=[
+            {
+                "role": "system",
+                "content": (
+                    "Expected answer contract for this turn:\n"
+                    "- Selector guidance: Treat this as concept/relation retrieval "
+                    "for the referenced entity.\n"
+                    "- Grounding requirement: Use represented relation evidence."
+                ),
+            }
+        ],
+        stage="tool_call",
+        workflow_action_id="tool_calling.plan",
+        provider="openai",
+        tool_definitions=tool_defs,
+        method_catalogue=catalogue,
+        required_prompt_tools=[],
+    )
+
+    lowered = {name.lower() for name in resolution.candidate_tool_names}
+    assert "search_knowledge_base" in lowered
+    assert "resolve_concept_by_name" in lowered
+    assert "find_relations_with_argument" in lowered
+    assert "vontology" in resolution.hinted_families
+    assert "arxiv" not in resolution.hinted_families
 
 
 if __name__ == "__main__":

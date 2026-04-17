@@ -80,6 +80,7 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     assert "ownership, authorship, identity, provenance, attribution" in (
         expected_outcome_text
     )
+    assert "Do not treat storage presence, cache presence" in expected_outcome_text
     assert "Prefer omission or explicit uncertainty over speculative recall" in (
         expected_outcome_text
     )

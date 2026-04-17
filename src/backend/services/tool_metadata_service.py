@@ -44,6 +44,7 @@ class ToolMetadata:
     display_template: str | None = None
     description: str | None = None
     category: str | None = None  # vontology, arxiv, gmail, jira, task, search, etc.
+    planner_hint: str | None = None
 
     @property
     def is_high_salience(self) -> bool:
@@ -348,6 +349,24 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "category": "vontology",
         "display_template": "{count} children",
     },
+    "fetch_concept": {
+        "salience": "medium",
+        "category": "vontology",
+        "display_template": "Concept: {concept_id}",
+        "planner_hint": (
+            "Use when you already know the concept ID and need grounded represented "
+            "facts, predicates, or relationships for that specific concept."
+        ),
+    },
+    "find_relations_with_argument": {
+        "salience": "medium",
+        "category": "vontology",
+        "display_template": "{count} relations",
+        "planner_hint": (
+            "Use for entity-relative relationship lookup after resolving the anchor "
+            "concept. This is relation-bearing evidence, not mere inventory."
+        ),
+    },
     "find_concepts_by_name": {
         "salience": "medium",
         "category": "vontology",
@@ -357,6 +376,10 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "salience": "medium",
         "category": "vontology",
         "display_template": "Resolved: {name}",
+        "planner_hint": (
+            "Use to resolve a named person, project, organisation, or other entity "
+            "to a represented concept before relation lookup."
+        ),
     },
     "vontology_concept_search": {
         "salience": "medium",
@@ -377,6 +400,11 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "salience": "medium",
         "category": "arxiv",
         "display_template": "{count} papers",
+        "planner_hint": (
+            "Inventory only. Use for cached/stored paper listings, not as evidence "
+            "of authorship, ownership, provenance, affiliation, or any entity "
+            "relationship."
+        ),
     },
     "read_paper": {
         "salience": "medium",
@@ -397,6 +425,11 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "salience": "medium",
         "category": "search",
         "display_template": "{count} KB matches",
+        "planner_hint": (
+            "Use for represented-knowledge lookup over indexed content in the user's "
+            "namespace, especially when answering questions about an entity and its "
+            "related facts, artefacts, or relationships."
+        ),
     },
     "task_get": {
         "salience": "medium",
@@ -606,6 +639,7 @@ def _load_from_vontology() -> dict[str, ToolMetadata]:
                 display_template=display_template,
                 description=description,
                 category=category,
+                planner_hint=attrs.get("planner_hint"),
             )
 
         logger.debug(f"Loaded {len(result)} tool metadata entries from Vontology")
@@ -642,10 +676,27 @@ def _refresh_cache_if_needed() -> None:
                 salience=defaults.get("salience", "medium"),
                 display_template=defaults.get("display_template"),
                 category=defaults.get("category"),
+                planner_hint=defaults.get("planner_hint"),
             )
 
-        # Override with Vontology data
-        new_cache.update(vontology_metadata)
+        # Override with Vontology data while preserving useful default hints when
+        # the Vontology representation has not been extended yet.
+        for tool_name, metadata in vontology_metadata.items():
+            default_metadata = new_cache.get(tool_name)
+            if isinstance(default_metadata, ToolMetadata):
+                new_cache[tool_name] = ToolMetadata(
+                    tool_name=tool_name,
+                    concept_id=metadata.concept_id or default_metadata.concept_id,
+                    salience=metadata.salience or default_metadata.salience,
+                    display_template=(
+                        metadata.display_template or default_metadata.display_template
+                    ),
+                    description=metadata.description or default_metadata.description,
+                    category=metadata.category or default_metadata.category,
+                    planner_hint=metadata.planner_hint or default_metadata.planner_hint,
+                )
+            else:
+                new_cache[tool_name] = metadata
 
         _tool_metadata_cache = new_cache
         _cache_timestamp = time.time()
@@ -690,6 +741,11 @@ def is_tool_visible(tool_name: str) -> bool:
 def get_display_template(tool_name: str) -> str | None:
     """Get the display template for a tool result summary."""
     return get_tool_metadata(tool_name).display_template
+
+
+def get_tool_planner_hint(tool_name: str) -> str | None:
+    """Get a short planner-facing hint for tool selection."""
+    return get_tool_metadata(tool_name).planner_hint
 
 
 def invalidate_cache() -> None:

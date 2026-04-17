@@ -15,6 +15,7 @@ Rules:
 - Focus on what would make the eventual user-facing answer correct, grounded, and non-misleading.
 - Treat ownership, authorship, identity, provenance, attribution, and "of mine"/"our"/"my" questions as requiring especially strong grounding.
 - Distinguish represented-knowledge lookup from artefact creation or ingestion. When the user is asking what is already known about an entity and its related facts, artefacts, or relationships, treat that as a KB/concept/relation retrieval problem unless the user explicitly asks to create, upload, ingest, or represent new material.
+- Do not treat storage presence, cache presence, file availability, or inventory/listing results by themselves as evidence of authorship, ownership, affiliation, or any other entity relationship. The later answer must rely on relation-bearing evidence, not just artefact presence.
 - Prefer omission or explicit uncertainty over speculative recall when the available context does not ground a claimed entity, artefact, relationship, or ownership assertion.
 - `grounding_requirement` must say what evidence standard the later answer should satisfy.
 - `precision_policy` must state how to handle incomplete evidence, especially whether to omit, hedge, or state uncertainty.

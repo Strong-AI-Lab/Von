@@ -143,6 +143,8 @@ def test_instruction_message_uses_internal_guardrail_wording_without_budget_leak
     assert "Server limits:" not in instruction
     assert "INTERNAL EXECUTION GUARDRAILS:" in instruction
     assert "Do NOT mention budgets, caps, or internal limits" in instruction
+    assert "inventory-only" in instruction
+    assert "Do NOT treat cache presence" in instruction
 
 
 def test_instruction_message_keeps_tool_index_compact_for_large_catalogue(
