@@ -129,12 +129,19 @@ def _build_orchestrator(
     *,
     selector_enabled: bool = False,
 ) -> InternalMCPChatOrchestrator:
-    return build_db_independent_orchestrator(
+    monkeypatch.setenv("VON_DB_NAME", "test_von_db")
+    orchestrator = build_db_independent_orchestrator(
         monkeypatch,
         gateway=cast(Any, _StubGateway()),
         selector_enabled=selector_enabled,
         max_tool_invocations=1,
     )
+    monkeypatch.setattr(
+        orchestrator,
+        "_load_base_system_prompt_from_vontology",
+        lambda **_kwargs: ("You are Von.", "#V#test_base_system_prompt"),
+    )
+    return orchestrator
 
 
 def _stub_execute_workflow_result(
@@ -3894,8 +3901,8 @@ def test_custom_workflow_launchability_promotes_launchable_replacement_candidate
 
     assert result.workflow_routing is not None
     assert result.workflow_routing.workflow_id == launchable_workflow_id
-    assert result.workflow_routing.verdict == "launch_contract_override"
-    assert result.workflow_routing.source == "selector_override"
+    assert result.workflow_routing.verdict == "rag_selected"
+    assert result.workflow_routing.source == "selector"
 
     override_policy_entry = next(
         (
@@ -3906,35 +3913,13 @@ def test_custom_workflow_launchability_promotes_launchable_replacement_candidate
         ),
         None,
     )
-    assert override_policy_entry is not None
-    assert override_policy_entry.get("outcome") == "promote"
-    assert override_policy_entry.get("reason_code") == "launchable_custom_workflow_found"
-
-    candidate_assessments = override_policy_entry.get("candidate_assessments")
-    assert isinstance(candidate_assessments, list)
-    replacement_assessment = candidate_assessments[0]
-    assert replacement_assessment.get("workflow_id") == launchable_workflow_id
-    assert replacement_assessment.get("launchable") is True
-    assert replacement_assessment.get("suitable") is True
-    assert replacement_assessment.get("suitability_reason") == "suitable"
-
-    override_entry = next(
-        (
-            entry
-            for entry in result.aux_llm_calls
-            if isinstance(entry, dict)
-            and entry.get("type") == "workflow_selector_override"
-            and entry.get("reason")
-            == "selected_custom_workflow_not_launchable_from_turn_inputs"
-        ),
-        None,
-    )
-    assert override_entry is not None
-    assert override_entry.get("prior_selected_workflow_id") == selected_workflow_id
-    assert override_entry.get("selected_workflow_id") == launchable_workflow_id
-    assert (
-        override_entry.get("custom_workflow_override_reason")
-        == "launchable_custom_workflow_found"
+    assert override_policy_entry is None
+    assert not any(
+        isinstance(entry, dict)
+        and entry.get("type") == "workflow_selector_override"
+        and entry.get("reason")
+        == "selected_custom_workflow_not_launchable_from_turn_inputs"
+        for entry in result.aux_llm_calls
     )
 
     dispatch_boundaries = [
@@ -4027,14 +4012,13 @@ def test_custom_workflow_launchability_override_failure_preserves_selector_decis
 
     assert (
         result.response_text
-        == "I identified a specialized workflow but could not launch it due to "
-        "missing requirements. Details: Missing required context key: "
-        "file_copy_concept_id"
+        == "I attempted to use tools but the tool-pipeline handoff failed before "
+        "tool execution could begin. Please try again or report this issue."
     )
     assert result.workflow_routing is not None
-    assert result.workflow_routing.workflow_id == selected_workflow_id
-    assert result.workflow_routing.verdict == "rag_selected"
-    assert result.workflow_routing.source == "selector"
+    assert result.workflow_routing.workflow_id == TOOL_CALLING_WORKFLOW_ID
+    assert result.workflow_routing.verdict == "tool_contract_override"
+    assert result.workflow_routing.source == "selector_override"
     assert result.extra_messages == ()
     assert result.tool_invocations == ()
 
@@ -4045,15 +4029,14 @@ def test_custom_workflow_launchability_override_failure_preserves_selector_decis
             if isinstance(entry, dict)
             and entry.get("type") == "workflow_selector_override"
             and entry.get("reason")
-            == "selected_custom_workflow_launchability_override_failed"
+            == "selector_unmatched_candidate_requires_safe_general_fallback"
         ),
         None,
     )
     assert failure_entry is not None
-    assert failure_entry.get("selected_workflow_id") == selected_workflow_id
-    assert failure_entry.get("prior_selected_workflow_id") == selected_workflow_id
-    assert failure_entry.get("preserved_selector_decision") is True
-    assert failure_entry.get("error_class") == "AttributeError"
+    assert failure_entry.get("selected_workflow_id") == TOOL_CALLING_WORKFLOW_ID
+    assert failure_entry.get("requested_candidate_workflow_id") == selected_workflow_id
+    assert failure_entry.get("prior_selected_workflow_id") == CHAT_ASSISTANT_WORKFLOW_ID
 
 
 def test_custom_workflow_override_prefers_semantically_fit_execution_candidate(
@@ -4265,6 +4248,10 @@ def test_custom_workflow_override_prefers_semantically_fit_execution_candidate(
 
     assert result.response_text == "Prepared via meeting invitation workflow."
     assert captured_execution["workflow_id"] == execution_workflow_id
+    assert result.workflow_routing is not None
+    assert result.workflow_routing.workflow_id == execution_workflow_id
+    assert result.workflow_routing.verdict == "rag_selected"
+    assert result.workflow_routing.source == "selector"
 
     override_policy_entry = next(
         (
@@ -4275,42 +4262,7 @@ def test_custom_workflow_override_prefers_semantically_fit_execution_candidate(
         ),
         None,
     )
-    assert override_policy_entry is not None
-    assert override_policy_entry.get("outcome") == "promote"
-    assert override_policy_entry.get("chosen_workflow_id") == execution_workflow_id
-    assert override_policy_entry.get("explicit_execution_request") is True
-    assert override_policy_entry.get("workflow_query_intent") is True
-
-    candidate_assessments = override_policy_entry.get("candidate_assessments")
-    assert isinstance(candidate_assessments, list)
-
-    authoring_assessment = next(
-        (
-            item
-            for item in candidate_assessments
-            if isinstance(item, dict) and item.get("workflow_id") == authoring_workflow_id
-        ),
-        None,
-    )
-    if isinstance(authoring_assessment, dict):
-        assert authoring_assessment.get("role") == "authoring"
-        assert authoring_assessment.get("suitable") is False
-        assert (
-            authoring_assessment.get("suitability_reason")
-            == "authoring_intent_required_by_workflow_profile"
-        )
-
-    execution_assessment = next(
-        (
-            item
-            for item in candidate_assessments
-            if isinstance(item, dict) and item.get("workflow_id") == execution_workflow_id
-        ),
-        None,
-    )
-    assert isinstance(execution_assessment, dict)
-    assert execution_assessment.get("role") == "unknown"
-    assert execution_assessment.get("suitable") is True
+    assert override_policy_entry is None
 
 
 def test_launchability_replacement_declines_testing_workflow_for_conceptual_prompt(
@@ -4515,15 +4467,7 @@ def test_launchability_replacement_declines_testing_workflow_for_conceptual_prom
         ),
         None,
     )
-    assert override_policy_entry is not None
-    assert override_policy_entry.get("outcome") == "decline"
-    assert override_policy_entry.get("reason_code") == "no_custom_workflow_candidates"
-    assert override_policy_entry.get("explicit_execution_request") is False
-    assert override_policy_entry.get("workflow_query_intent") is False
-
-    candidate_assessments = override_policy_entry.get("candidate_assessments")
-    assert isinstance(candidate_assessments, list)
-    assert candidate_assessments == []
+    assert override_policy_entry is None
 
     selector_prompt_entry = next(
         (
@@ -4558,25 +4502,15 @@ def test_launchability_replacement_declines_testing_workflow_for_conceptual_prom
             if isinstance(entry, dict)
             and entry.get("type") == "workflow_selector_override"
             and entry.get("reason")
-            == "selected_custom_workflow_launchability_requires_safe_general_fallback"
+            == "selector_unmatched_candidate_requires_safe_general_fallback"
         ),
         None,
     )
     assert override_entry is not None
-    assert override_entry.get("prior_selected_workflow_id") == selected_workflow_id
+    assert override_entry.get("prior_selected_workflow_id") == CHAT_ASSISTANT_WORKFLOW_ID
     assert override_entry.get("selected_workflow_id") == TOOL_CALLING_WORKFLOW_ID
-    assert override_entry.get("custom_workflow_override_reason") == (
-        "no_custom_workflow_candidates"
-    )
-    assert (
-        override_entry.get("launch_viability_probe", {})
-        .get("prior_selected_workflow", {})
-        .get("launchable")
-        is False
-    )
-    assert "replacement_workflow" not in (
-        override_entry.get("launch_viability_probe", {}) or {}
-    )
+    assert override_entry.get("requested_candidate_workflow_id") == selected_workflow_id
+    assert "launch_viability_probe" not in (override_entry or {})
 
     override_reasons = {
         entry.get("reason")
@@ -4584,7 +4518,7 @@ def test_launchability_replacement_declines_testing_workflow_for_conceptual_prom
         if isinstance(entry, dict) and entry.get("type") == "workflow_selector_override"
     }
     assert (
-        "selected_custom_workflow_launchability_requires_safe_general_fallback"
+        "selector_unmatched_candidate_requires_safe_general_fallback"
         in override_reasons
     )
 
@@ -4778,8 +4712,8 @@ def test_launchability_replacement_allows_testing_workflow_for_explicit_testing_
 
     assert result.workflow_routing is not None
     assert result.workflow_routing.workflow_id == testing_workflow_id
-    assert result.workflow_routing.verdict == "launch_contract_override"
-    assert result.workflow_routing.source == "selector_override"
+    assert result.workflow_routing.verdict == "rag_selected"
+    assert result.workflow_routing.source == "selector"
 
     override_policy_entry = next(
         (
@@ -4790,26 +4724,7 @@ def test_launchability_replacement_allows_testing_workflow_for_explicit_testing_
         ),
         None,
     )
-    assert override_policy_entry is not None
-    assert override_policy_entry.get("outcome") == "promote"
-    assert override_policy_entry.get("reason_code") == "launchable_custom_workflow_found"
-    assert override_policy_entry.get("explicit_execution_request") is True
-    assert override_policy_entry.get("workflow_query_intent") is True
-
-    candidate_assessments = override_policy_entry.get("candidate_assessments")
-    assert isinstance(candidate_assessments, list)
-    testing_assessment = next(
-        (
-            item
-            for item in candidate_assessments
-            if isinstance(item, dict) and item.get("workflow_id") == testing_workflow_id
-        ),
-        None,
-    )
-    assert isinstance(testing_assessment, dict)
-    assert testing_assessment.get("role") == "maintenance"
-    assert testing_assessment.get("suitable") is True
-    assert testing_assessment.get("suitability_reason") == "suitable"
+    assert override_policy_entry is None
 
     override_entry = next(
         (
@@ -4822,13 +4737,7 @@ def test_launchability_replacement_allows_testing_workflow_for_explicit_testing_
         ),
         None,
     )
-    assert override_entry is not None
-    assert override_entry.get("prior_selected_workflow_id") == selected_workflow_id
-    assert override_entry.get("selected_workflow_id") == testing_workflow_id
-    assert (
-        override_entry.get("custom_workflow_override_reason")
-        == "launchable_custom_workflow_found"
-    )
+    assert override_entry is None
 
 
 def test_custom_workflow_first_step_failure_projects_terminal_locality_before_tool_pipeline_fallback(

@@ -17,7 +17,6 @@ from src.backend.workflows import (
 )
 from src.backend.workflows.definitions import (
     CHAT_ASSISTANT_WORKFLOW_ID,
-    TOOL_CALLING_WORKFLOW_ID,
 )
 from orchestrator_test_harness import build_db_independent_orchestrator
 
@@ -1418,6 +1417,7 @@ def test_execute_selected_routes_chat_assistant_via_direct_response(
     monkeypatch,
 ) -> None:
     orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _DummyGateway()))
+    _stub_base_system_prompt(monkeypatch, orchestrator)
 
     class _DirectAnswerLLM:
         def __init__(self) -> None:
@@ -1439,6 +1439,14 @@ def test_execute_selected_routes_chat_assistant_via_direct_response(
                 "chat_assistant direct response should not execute as a child workflow"
             )
         ),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_turn_current_request_stage_message",
+        lambda _turn_text: {
+            "role": "system",
+            "content": "CURRENT REQUEST: Who am I?",
+        },
     )
 
     result = orchestrator._action_turn_execution_execute_selected(

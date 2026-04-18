@@ -9,7 +9,7 @@ import re
 import threading
 import time
 import requests
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from typing import (
     Any,
@@ -262,6 +262,701 @@ class OrchestratorResult:
     critic_verdict: Mapping[str, Any] | None = None
     completion_gate_verdict: Mapping[str, Any] | None = None
     completion_report: Mapping[str, Any] | None = None
+
+
+@dataclass
+class _WorkflowDispatchSelectionState:
+    """Mutable workflow-selection state during dispatch preparation."""
+
+    selected_workflow_id: str | None
+    selected_workflow_id_text: str | None
+    selector_verdict: str
+    selector_requests_narration: bool
+    selector_requests_custom_workflow: bool
+    selected_uses_narration_contract: bool
+    selected_prefers_direct_response: bool
+    selected_uses_tool_pipeline_contract: bool
+    routing_info: WorkflowRoutingInfo | None
+
+
+@dataclass
+class _CustomWorkflowDispatchSupport:
+    """Support surface for launchability and override handling inside dispatch."""
+
+    orchestrator: "InternalMCPChatOrchestrator"
+    prompt: str
+    discovered_matches: Sequence[Mapping[str, Any]]
+    aux_llm_calls: list[Mapping[str, Any]]
+    trace_enabled: bool
+    trace: Any
+    build_live_workflow_routing_payload: Callable[[], Mapping[str, Any]]
+    build_custom_workflow_dispatch_data: Callable[[str | None], Mapping[str, Any]]
+    resolve_selected_workflow_name: Callable[[str | None], str | None]
+    record_dispatch_prepare_note: Callable[..., None]
+    emit_progress_local: Callable[[Mapping[str, Any]], None]
+    custom_workflow_launchability_probe_cache: dict[str, dict[str, Any]] = field(
+        default_factory=dict
+    )
+
+    def force_tool_pipeline_routing(
+        self,
+        state: _WorkflowDispatchSelectionState,
+        *,
+        reason: str,
+        excluded_selector_verdicts: Sequence[str],
+        extra_payload: Mapping[str, Any] | None = None,
+        reasoning_text: str | None = None,
+    ) -> None:
+        prior_selected_workflow_id = state.selected_workflow_id_text
+        prior_selector_verdict = state.selector_verdict or None
+        excluded_workflow_ids = sorted(
+            {
+                CHAT_ASSISTANT_WORKFLOW_ID,
+                state.selected_workflow_id_text or CHAT_ASSISTANT_WORKFLOW_ID,
+            }
+        )
+        state.selected_workflow_id = TOOL_CALLING_WORKFLOW_ID
+        state.selected_workflow_id_text = TOOL_CALLING_WORKFLOW_ID
+        state.selector_verdict = "tool_contract_override"
+        state.selector_requests_narration = False
+        state.selector_requests_custom_workflow = False
+        state.selected_uses_narration_contract = False
+        state.selected_prefers_direct_response = False
+        state.selected_uses_tool_pipeline_contract = True
+
+        prompt_id = None
+        discovered_workflow_ids: tuple[str, ...] = ()
+        routing_duration_ms = None
+        if isinstance(state.routing_info, WorkflowRoutingInfo):
+            prompt_id = state.routing_info.prompt_id
+            discovered_workflow_ids = state.routing_info.discovered_workflow_ids
+            routing_duration_ms = state.routing_info.routing_duration_ms
+        resolved_reasoning = (
+            reasoning_text.strip()
+            if isinstance(reasoning_text, str) and reasoning_text.strip()
+            else _describe_tool_pipeline_override_reason(reason)
+        )
+        state.routing_info = WorkflowRoutingInfo(
+            workflow_id=TOOL_CALLING_WORKFLOW_ID,
+            verdict="tool_contract_override",
+            prompt_id=prompt_id,
+            discovered_workflow_ids=discovered_workflow_ids,
+            routing_duration_ms=routing_duration_ms,
+            source="selector_override",
+            reasoning=resolved_reasoning,
+            selection_rationale=resolved_reasoning,
+        )
+
+        override_payload: dict[str, Any] = {
+            "type": "workflow_selector_override",
+            "reason": reason,
+            "selected_workflow_id": TOOL_CALLING_WORKFLOW_ID,
+            "excluded_workflow_ids": excluded_workflow_ids,
+            "excluded_selector_verdicts": list(excluded_selector_verdicts),
+            "prior_selected_workflow_id": prior_selected_workflow_id,
+            "prior_selector_verdict": prior_selector_verdict,
+        }
+        if extra_payload:
+            override_payload.update(dict(extra_payload))
+        self.aux_llm_calls.append(
+            annotate_python_decision_event(
+                override_payload,
+                stage="workflow_dispatch",
+                component="internal_mcp_orchestrator",
+                function="_force_tool_pipeline_routing",
+                decision_class="workflow_selector_override",
+                decision_source="workflow_launchability_check",
+                changed_outcome=True,
+                reason_code=reason,
+                possible_inappropriate_python_code_use=False,
+            )
+        )
+        if self.trace_enabled and self.trace is not None:
+            self.trace.metadata["workflow_selector_override"] = dict(override_payload)
+        if reason == (
+            "selected_custom_workflow_launchability_requires_safe_general_fallback"
+        ):
+            prior_workflow_label = (
+                self.resolve_selected_workflow_name(prior_selected_workflow_id)
+                or prior_selected_workflow_id
+                or "selected workflow"
+            )
+            self.record_dispatch_prepare_note(
+                step_id="safe_general_fallback",
+                step_label="Use safe general fallback",
+                result_summary=(
+                    f"{prior_workflow_label} could not launch from the current "
+                    "turn inputs; using the general tool workflow instead."
+                ),
+                workflow_id=TOOL_CALLING_WORKFLOW_ID,
+                workflow_name=self.resolve_selected_workflow_name(
+                    TOOL_CALLING_WORKFLOW_ID
+                ),
+            )
+
+    def get_cached_custom_workflow_launchability_probe(
+        self,
+        workflow_id: str | None,
+    ) -> dict[str, Any]:
+        clean_workflow_id = (
+            workflow_id.strip()
+            if isinstance(workflow_id, str) and workflow_id.strip()
+            else None
+        )
+        if not clean_workflow_id:
+            return self.orchestrator._probe_custom_workflow_launchability(
+                workflow_id,
+                build_custom_workflow_dispatch_data=self.build_custom_workflow_dispatch_data,
+            )
+
+        cached_probe = self.custom_workflow_launchability_probe_cache.get(
+            clean_workflow_id
+        )
+        if isinstance(cached_probe, Mapping):
+            return dict(cached_probe)
+
+        target_workflow_name = self.resolve_selected_workflow_name(clean_workflow_id)
+        target_workflow_label = target_workflow_name or clean_workflow_id
+        step_label = (
+            f"Evaluate launch requirements for {target_workflow_label}"
+            if target_workflow_label
+            else "Evaluate launch requirements"
+        )
+        step_start = time.perf_counter()
+        try:
+            probe = self.orchestrator._probe_custom_workflow_launchability(
+                clean_workflow_id,
+                build_custom_workflow_dispatch_data=self.build_custom_workflow_dispatch_data,
+            )
+        except Exception as exc:
+            duration_ms = int((time.perf_counter() - step_start) * 1000)
+            self.record_dispatch_prepare_note(
+                step_id="launchability_probe",
+                step_label=step_label,
+                status="failed",
+                duration_ms=duration_ms,
+                result_summary="Launchability check failed.",
+                workflow_id=clean_workflow_id,
+                workflow_name=target_workflow_name,
+                error_class=exc.__class__.__name__,
+                error=str(exc),
+            )
+            raise
+        duration_ms = int((time.perf_counter() - step_start) * 1000)
+        probe_payload = dict(probe) if isinstance(probe, Mapping) else {}
+        pre_action_validation_raw = probe_payload.get("pre_action_validation")
+        pre_action_validation = (
+            {str(key): value for key, value in pre_action_validation_raw.items()}
+            if isinstance(pre_action_validation_raw, Mapping)
+            else {}
+        )
+        launch_input_resolution_raw = probe_payload.get("launch_input_resolution")
+        launch_input_resolution = (
+            {str(key): value for key, value in launch_input_resolution_raw.items()}
+            if isinstance(launch_input_resolution_raw, Mapping)
+            else {}
+        )
+        unresolved_required_inputs = [
+            item.strip()
+            for item in (launch_input_resolution.get("unresolved_required_inputs") or [])
+            if isinstance(item, str) and item.strip()
+        ]
+        pre_action_message = str(pre_action_validation.get("message") or "").strip()
+        pre_action_reason_code = (
+            str(pre_action_validation.get("reason_code") or "").strip() or None
+        )
+        pre_action_symbol = (
+            str(pre_action_validation.get("symbol") or "").strip() or None
+        )
+        launch_input_resolution_status = (
+            str(launch_input_resolution.get("status") or "").strip() or None
+        )
+        if bool(probe_payload.get("launchable")):
+            result_summary = "All launch requirements satisfied."
+            step_status = "completed"
+            error_text = None
+        else:
+            result_summary = (
+                pre_action_message
+                or (
+                    "Unresolved required launch inputs: "
+                    + ", ".join(unresolved_required_inputs)
+                    + "."
+                    if unresolved_required_inputs
+                    else ""
+                )
+                or (
+                    f"Workflow definition unavailable for {target_workflow_label}."
+                    if pre_action_reason_code == "workflow_missing"
+                    and target_workflow_label
+                    else ""
+                )
+                or "Launch requirements were not satisfied."
+            )
+            step_status = "failed"
+            error_text = pre_action_message or result_summary
+        self.record_dispatch_prepare_note(
+            step_id="launchability_probe",
+            step_label=step_label,
+            status=step_status,
+            duration_ms=duration_ms,
+            result_summary=result_summary,
+            workflow_id=clean_workflow_id,
+            workflow_name=target_workflow_name,
+            reason_code=pre_action_reason_code,
+            symbol=pre_action_symbol,
+            unresolved_required_inputs=unresolved_required_inputs,
+            error=error_text,
+            launch_input_resolution_status=launch_input_resolution_status,
+        )
+        self.custom_workflow_launchability_probe_cache[clean_workflow_id] = dict(
+            probe
+        )
+        return dict(probe)
+
+    @staticmethod
+    def _collect_workflow_action_ids(workflow_definition: Any) -> tuple[str, ...]:
+        states = getattr(workflow_definition, "states", None)
+        if not isinstance(states, Mapping):
+            return ()
+
+        action_ids: list[str] = []
+        seen_action_ids: set[str] = set()
+        for state_spec in states.values():
+            for action in getattr(state_spec, "actions", ()) or ():
+                action_id = str(getattr(action, "action_id", "") or "").strip()
+                if not action_id:
+                    continue
+                lowered_action_id = action_id.lower()
+                if lowered_action_id in seen_action_ids:
+                    continue
+                seen_action_ids.add(lowered_action_id)
+                action_ids.append(action_id)
+        return tuple(action_ids)
+
+    def build_custom_workflow_override_candidates(
+        self,
+        *,
+        exclude_workflow_ids: Sequence[str] = (),
+    ) -> list[dict[str, Any]]:
+        excluded = {
+            str(workflow_id).strip().lower()
+            for workflow_id in exclude_workflow_ids
+            if isinstance(workflow_id, str) and str(workflow_id).strip()
+        }
+        builtin_workflow_ids = {
+            CHAT_ASSISTANT_WORKFLOW_ID.lower(),
+            CHAT_NARRATION_WORKFLOW_ID.lower(),
+            TOOL_CALLING_WORKFLOW_ID.lower(),
+        }
+        candidates: list[dict[str, Any]] = []
+        for match in self.discovered_matches:
+            if not isinstance(match, Mapping):
+                continue
+            candidate_workflow_id = str(match.get("concept_id") or "").strip()
+            if not candidate_workflow_id:
+                continue
+            lowered_candidate_workflow_id = candidate_workflow_id.lower()
+            if (
+                lowered_candidate_workflow_id in builtin_workflow_ids
+                or lowered_candidate_workflow_id in excluded
+            ):
+                continue
+
+            registration, workflow_definition = (
+                self.orchestrator._resolve_workflow_registration_and_definition(
+                    candidate_workflow_id
+                )
+            )
+            definition_metadata = getattr(workflow_definition, "metadata", None)
+            workflow_purpose = str(
+                getattr(registration, "purpose", None)
+                or getattr(workflow_definition, "purpose", None)
+                or match.get("description")
+                or ""
+            ).strip()
+
+            candidates.append(
+                {
+                    "concept_id": candidate_workflow_id,
+                    "name": str(match.get("name") or candidate_workflow_id).strip(),
+                    "description": str(match.get("description") or "").strip(),
+                    "relevance_score": match.get("relevance_score"),
+                    "confidence_score": match.get("confidence_score"),
+                    "workflow_purpose": workflow_purpose,
+                    "routing_profile": (
+                        definition_metadata.get("routing_profile")
+                        if isinstance(definition_metadata, Mapping)
+                        else None
+                    ),
+                    "workflow_action_ids": self._collect_workflow_action_ids(
+                        workflow_definition
+                    ),
+                }
+            )
+        return candidates
+
+    def evaluate_custom_workflow_override_policy(
+        self,
+        *,
+        override_context: str,
+        exclude_workflow_ids: Sequence[str] = (),
+    ) -> WorkflowOverrideDecision:
+        override_candidates = self.build_custom_workflow_override_candidates(
+            exclude_workflow_ids=exclude_workflow_ids
+        )
+        launchability_probes = {
+            str(candidate.get("concept_id")): self.get_cached_custom_workflow_launchability_probe(
+                str(candidate.get("concept_id"))
+            )
+            for candidate in override_candidates
+            if isinstance(candidate.get("concept_id"), str)
+            and str(candidate.get("concept_id")).strip()
+        }
+        return choose_custom_workflow_override_candidate(
+            turn_text=self.prompt,
+            context=override_context,
+            candidates=override_candidates,
+            launchability_probes=launchability_probes,
+        )
+
+    def record_custom_workflow_override_policy(
+        self,
+        *,
+        decision: WorkflowOverrideDecision,
+        prior_selected_workflow_id: str | None = None,
+        preserved_execution_mode: str | None = None,
+    ) -> None:
+        payload = decision.to_dict()
+        payload.update(
+            {
+                "type": "custom_workflow_override_policy",
+                "prior_selected_workflow_id": prior_selected_workflow_id,
+                "preserved_execution_mode": preserved_execution_mode,
+                "candidate_count": len(decision.candidate_assessments),
+            }
+        )
+        self.aux_llm_calls.append(
+            annotate_python_decision_event(
+                payload,
+                stage="workflow_dispatch",
+                component="workflow_override_policy_service",
+                function="choose_custom_workflow_override_candidate",
+                decision_class="workflow_override_policy",
+                decision_source="workflow_launchability_check",
+                changed_outcome=decision.outcome == "promote",
+                reason_code=decision.reason_code,
+                possible_inappropriate_python_code_use=False,
+            )
+        )
+        if self.trace_enabled and self.trace is not None:
+            raw_events = self.trace.metadata.get("custom_workflow_override_policy")
+            if isinstance(raw_events, list):
+                events = raw_events
+            else:
+                events = []
+                self.trace.metadata["custom_workflow_override_policy"] = events
+            events.append(dict(payload))
+
+    def record_custom_workflow_launchability_override_failure(
+        self,
+        *,
+        reason: str,
+        error: Exception,
+        selected_workflow_id: str | None,
+        selected_probe: Mapping[str, Any] | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "type": "workflow_selector_override",
+            "reason": reason,
+            "selected_workflow_id": selected_workflow_id,
+            "prior_selected_workflow_id": selected_workflow_id,
+            "preserved_selector_decision": True,
+            "error": str(error),
+            "error_class": type(error).__name__,
+        }
+        if isinstance(selected_probe, Mapping):
+            payload["launch_viability_probe"] = {
+                "prior_selected_workflow": dict(selected_probe)
+            }
+        self.aux_llm_calls.append(
+            annotate_python_decision_event(
+                payload,
+                stage="workflow_dispatch",
+                component="internal_mcp_orchestrator",
+                function="_maybe_override_selected_custom_workflow_for_launchability",
+                decision_class="workflow_selector_override",
+                decision_source="workflow_launchability_check",
+                changed_outcome=False,
+                reason_code=reason,
+                possible_inappropriate_python_code_use=False,
+            )
+        )
+        if self.trace_enabled and self.trace is not None:
+            raw_events = self.trace.metadata.get("workflow_selector_override_failures")
+            if isinstance(raw_events, list):
+                events = raw_events
+            else:
+                events = []
+                self.trace.metadata["workflow_selector_override_failures"] = events
+            events.append(dict(payload))
+        self.emit_progress_local(
+            {
+                "status": "thinking",
+                "stage": "workflow_dispatch_prepare",
+                "phase": "workflow_dispatch_prepare",
+                "phase_label": (
+                    "Launchability override failed; preserving selected workflow"
+                ),
+                "selected_workflow_id": selected_workflow_id,
+                "selected_workflow_name": self.resolve_selected_workflow_name(
+                    selected_workflow_id
+                ),
+                "workflow_selection_rationale": reason,
+                "error_class": type(error).__name__,
+                **self.build_live_workflow_routing_payload(),
+            }
+        )
+
+    def promote_selected_workflow_to_custom_dispatch(
+        self,
+        state: _WorkflowDispatchSelectionState,
+        *,
+        replacement_probe: Mapping[str, Any] | None,
+        reason: str,
+        verdict: str,
+        reasoning: str,
+        prior_selected_workflow_id: str | None = None,
+        prior_selector_verdict: str | None = None,
+        extra_payload: Mapping[str, Any] | None = None,
+        decision_source: str = "workflow_launchability_check",
+        dispatch_prepare_step_id: str = "launchability_override",
+        dispatch_prepare_step_label: str = "Promote launchable workflow",
+        dispatch_prepare_result_summary: str | None = None,
+    ) -> bool:
+        replacement_workflow_id = (
+            str(replacement_probe.get("workflow_id") or "").strip()
+            if isinstance(replacement_probe, Mapping)
+            else ""
+        )
+        if not replacement_workflow_id:
+            return False
+
+        if prior_selected_workflow_id is None:
+            prior_selected_workflow_id = state.selected_workflow_id_text
+        if prior_selector_verdict is None:
+            prior_selector_verdict = state.selector_verdict or None
+
+        state.selected_workflow_id = replacement_workflow_id
+        state.selected_workflow_id_text = replacement_workflow_id
+        state.selector_verdict = verdict
+        state.selector_requests_narration = False
+        state.selector_requests_custom_workflow = True
+        state.selected_uses_narration_contract = False
+        state.selected_prefers_direct_response = False
+        state.selected_uses_tool_pipeline_contract = False
+
+        discovered_workflow_ids: tuple[str, ...] = ()
+        prompt_id = None
+        routing_duration_ms = None
+        confidence_score = 0.0
+        if isinstance(state.routing_info, WorkflowRoutingInfo):
+            discovered_workflow_ids = state.routing_info.discovered_workflow_ids
+            prompt_id = state.routing_info.prompt_id
+            routing_duration_ms = state.routing_info.routing_duration_ms
+            confidence_score = state.routing_info.confidence_score
+        elif self.discovered_matches:
+            discovered_workflow_ids = tuple(
+                str(item.get("concept_id"))
+                for item in self.discovered_matches
+                if isinstance(item, Mapping)
+                and isinstance(item.get("concept_id"), str)
+                and str(item.get("concept_id")).strip()
+            )
+
+        state.routing_info = WorkflowRoutingInfo(
+            workflow_id=replacement_workflow_id,
+            verdict=verdict,
+            prompt_id=prompt_id,
+            discovered_workflow_ids=discovered_workflow_ids,
+            routing_duration_ms=routing_duration_ms,
+            source="selector_override",
+            confidence_score=confidence_score,
+            reasoning=reasoning,
+            selection_rationale=reason,
+        )
+
+        override_payload = {
+            "type": "workflow_selector_override",
+            "reason": reason,
+            "selected_workflow_id": replacement_workflow_id,
+            "prior_selected_workflow_id": prior_selected_workflow_id,
+            "prior_selector_verdict": prior_selector_verdict,
+            "candidate_workflow_ids_considered": [
+                str(item.get("concept_id"))
+                for item in self.discovered_matches
+                if isinstance(item, Mapping)
+                and isinstance(item.get("concept_id"), str)
+                and str(item.get("concept_id")).strip()
+            ],
+        }
+        if extra_payload:
+            override_payload.update(dict(extra_payload))
+        self.aux_llm_calls.append(
+            annotate_python_decision_event(
+                override_payload,
+                stage="workflow_dispatch",
+                component="internal_mcp_orchestrator",
+                function="_promote_selected_workflow_to_custom_dispatch",
+                decision_class="workflow_selector_override",
+                decision_source=decision_source,
+                changed_outcome=True,
+                reason_code=reason,
+                possible_inappropriate_python_code_use=False,
+            )
+        )
+        if self.trace_enabled and self.trace is not None:
+            self.trace.metadata["workflow_selector_override"] = dict(override_payload)
+        prior_workflow_label = (
+            self.resolve_selected_workflow_name(prior_selected_workflow_id)
+            or prior_selected_workflow_id
+            or "selected workflow"
+        )
+        replacement_workflow_name = self.resolve_selected_workflow_name(
+            replacement_workflow_id
+        )
+        replacement_workflow_label = (
+            replacement_workflow_name or replacement_workflow_id or "launchable workflow"
+        )
+        note_result_summary = (
+            dispatch_prepare_result_summary.strip()
+            if isinstance(dispatch_prepare_result_summary, str)
+            and dispatch_prepare_result_summary.strip()
+            else (
+                f"Using {replacement_workflow_label} because {prior_workflow_label} "
+                "could not launch from the current turn inputs."
+            )
+        )
+        self.record_dispatch_prepare_note(
+            step_id=dispatch_prepare_step_id,
+            step_label=dispatch_prepare_step_label,
+            result_summary=note_result_summary,
+            workflow_id=replacement_workflow_id,
+            workflow_name=replacement_workflow_name,
+        )
+        self.emit_progress_local(
+            {
+                "status": "thinking",
+                "stage": "workflow_dispatch",
+                "phase": "workflow_dispatch",
+                "phase_label": "Workflow routing overridden",
+                "workflow_selector_verdict": verdict,
+                "selected_workflow_id": replacement_workflow_id,
+                "selected_workflow_name": self.resolve_selected_workflow_name(
+                    replacement_workflow_id
+                ),
+                "workflow_selection_rationale": reason,
+                **self.build_live_workflow_routing_payload(),
+            }
+        )
+        return True
+
+    def maybe_override_selected_custom_workflow_for_launchability(
+        self,
+        state: _WorkflowDispatchSelectionState,
+    ) -> bool:
+        if not state.selected_workflow_id_text:
+            return True
+        if state.selected_workflow_id_text in _SELECTOR_GENERIC_WORKFLOW_IDS:
+            return True
+
+        try:
+            selected_probe = self.get_cached_custom_workflow_launchability_probe(
+                state.selected_workflow_id_text
+            )
+        except Exception as exc:
+            self.record_custom_workflow_launchability_override_failure(
+                reason="selected_custom_workflow_launchability_probe_failed",
+                error=exc,
+                selected_workflow_id=state.selected_workflow_id_text,
+            )
+            return False
+        if bool(selected_probe.get("launchable")):
+            return True
+
+        try:
+            override_policy = self.evaluate_custom_workflow_override_policy(
+                override_context="selected_custom_workflow_launchability_replacement",
+                exclude_workflow_ids=(state.selected_workflow_id_text,),
+            )
+            self.record_custom_workflow_override_policy(
+                decision=override_policy,
+                prior_selected_workflow_id=state.selected_workflow_id_text,
+                preserved_execution_mode="custom_workflow",
+            )
+            prior_selected_workflow_id = state.selected_workflow_id_text
+            prior_selector_verdict = state.selector_verdict or None
+            replacement_probe = (
+                self.get_cached_custom_workflow_launchability_probe(
+                    override_policy.chosen_workflow_id
+                )
+                if isinstance(override_policy.chosen_workflow_id, str)
+                and override_policy.chosen_workflow_id.strip()
+                else None
+            )
+        except Exception as exc:
+            self.record_custom_workflow_launchability_override_failure(
+                reason="selected_custom_workflow_launchability_override_failed",
+                error=exc,
+                selected_workflow_id=state.selected_workflow_id_text,
+                selected_probe=selected_probe,
+            )
+            return False
+
+        if replacement_probe is None:
+            self.force_tool_pipeline_routing(
+                state,
+                reason=(
+                    "selected_custom_workflow_launchability_requires_safe_general_fallback"
+                ),
+                excluded_selector_verdicts=[
+                    prior_selector_verdict or "rag_selected"
+                ],
+                extra_payload={
+                    "prior_selected_workflow_id": prior_selected_workflow_id,
+                    "prior_selector_verdict": prior_selector_verdict,
+                    "launch_viability_probe": {
+                        "prior_selected_workflow": dict(selected_probe),
+                    },
+                    "custom_workflow_override_reason": override_policy.reason_code,
+                },
+            )
+            return False
+
+        reason = "selected_custom_workflow_not_launchable_from_turn_inputs"
+        reasoning = (
+            "Selected custom workflow could not launch from the current turn "
+            "inputs after launch-contract resolution and initial-state metadata "
+            "validation, so a semantically better launchable discovered custom "
+            "workflow was used instead."
+        )
+        self.promote_selected_workflow_to_custom_dispatch(
+            state,
+            replacement_probe=replacement_probe,
+            reason=reason,
+            verdict="launch_contract_override",
+            reasoning=reasoning,
+            prior_selected_workflow_id=prior_selected_workflow_id,
+            prior_selector_verdict=prior_selector_verdict,
+            extra_payload={
+                "launch_viability_probe": {
+                    "prior_selected_workflow": dict(selected_probe),
+                    "replacement_workflow": dict(replacement_probe),
+                },
+                "custom_workflow_override_reason": override_policy.reason_code,
+            },
+        )
+        return True
 
 
 class _ToolCallRequest(TypedDict):
@@ -27899,6 +28594,9 @@ class InternalMCPChatOrchestrator:
                 )
             return copied
 
+        routing_info: WorkflowRoutingInfo | None = None
+        selection_state: _WorkflowDispatchSelectionState | None = None
+
         def _build_live_workflow_routing_payload() -> dict[str, Any]:
             payload: dict[str, Any] = {
                 "workflow_discovery": (
@@ -27908,19 +28606,24 @@ class InternalMCPChatOrchestrator:
                 ),
                 "workflow_routing_aux": _copy_workflow_routing_aux_entries(),
             }
-            if isinstance(routing_info, WorkflowRoutingInfo):
+            effective_routing_info = (
+                selection_state.routing_info
+                if isinstance(selection_state, _WorkflowDispatchSelectionState)
+                else routing_info
+            )
+            if isinstance(effective_routing_info, WorkflowRoutingInfo):
                 payload["workflow_routing"] = {
-                    "workflow_id": routing_info.workflow_id,
-                    "verdict": routing_info.verdict,
-                    "prompt_id": routing_info.prompt_id,
+                    "workflow_id": effective_routing_info.workflow_id,
+                    "verdict": effective_routing_info.verdict,
+                    "prompt_id": effective_routing_info.prompt_id,
                     "discovered_workflow_ids": list(
-                        routing_info.discovered_workflow_ids
+                        effective_routing_info.discovered_workflow_ids
                     ),
-                    "routing_duration_ms": routing_info.routing_duration_ms,
-                    "source": routing_info.source,
-                    "confidence_score": routing_info.confidence_score,
-                    "reasoning": routing_info.reasoning,
-                    "selection_rationale": routing_info.selection_rationale,
+                    "routing_duration_ms": effective_routing_info.routing_duration_ms,
+                    "source": effective_routing_info.source,
+                    "confidence_score": effective_routing_info.confidence_score,
+                    "reasoning": effective_routing_info.reasoning,
+                    "selection_rationale": effective_routing_info.selection_rationale,
                 }
             else:
                 payload["workflow_routing"] = None
@@ -27967,7 +28670,6 @@ class InternalMCPChatOrchestrator:
             _prepare_selector_candidates_local,
         )
 
-        routing_info: WorkflowRoutingInfo | None = None
         selection_experience_id: str | None = None
         selector_selection_metadata: dict[str, Any] = {}
 
@@ -28643,6 +29345,17 @@ class InternalMCPChatOrchestrator:
             and not selected_prefers_direct_response
             and not selected_uses_tool_pipeline_contract
         )
+        selection_state = _WorkflowDispatchSelectionState(
+            selected_workflow_id=selected_workflow_id,
+            selected_workflow_id_text=selected_workflow_id_text,
+            selector_verdict=selector_verdict,
+            selector_requests_narration=selector_requests_narration,
+            selector_requests_custom_workflow=selector_requests_custom_workflow,
+            selected_uses_narration_contract=selected_uses_narration_contract,
+            selected_prefers_direct_response=selected_prefers_direct_response,
+            selected_uses_tool_pipeline_contract=selected_uses_tool_pipeline_contract,
+            routing_info=routing_info,
+        )
         write_tool_candidates_for_routing = sorted(
             {
                 str(tool_name).strip()
@@ -28736,8 +29449,8 @@ class InternalMCPChatOrchestrator:
             for invocation in tool_invocations:
                 if not isinstance(invocation, Mapping):
                     continue
-                for field in ("effective_payload", "payload"):
-                    payload = invocation.get(field)
+                for payload_field in ("effective_payload", "payload"):
+                    payload = invocation.get(payload_field)
                     if isinstance(payload, Mapping):
                         payloads.append(payload)
             return payloads
@@ -30691,8 +31404,8 @@ class InternalMCPChatOrchestrator:
                     row.get("venue"),
                     row.get("place"),
                 )
-                for field in direct_fields:
-                    address = _extract_address_text(field)
+                for direct_field in direct_fields:
+                    address = _extract_address_text(direct_field)
                     if address:
                         return address
 
@@ -33112,13 +33825,27 @@ class InternalMCPChatOrchestrator:
         # Python may still apply narrow routing overrides for launchability, but
         # semantic authority should stay with the workflow/LLM path.
 
-        def _force_tool_pipeline_routing(
-            *,
-            reason: str,
-            excluded_selector_verdicts: Sequence[str],
-            extra_payload: Mapping[str, Any] | None = None,
-            reasoning_text: str | None = None,
-        ) -> None:
+        assert selection_state is not None
+        dispatch_selection_state = selection_state
+        custom_workflow_dispatch_support = _CustomWorkflowDispatchSupport(
+            orchestrator=self,
+            prompt=prompt,
+            discovered_matches=discovered_matches,
+            aux_llm_calls=aux_llm_calls,
+            trace_enabled=trace_enabled,
+            trace=trace,
+            build_live_workflow_routing_payload=_build_live_workflow_routing_payload,
+            build_custom_workflow_dispatch_data=(
+                lambda workflow_id_override=None: _build_custom_workflow_dispatch_data(
+                    workflow_id_override
+                )
+            ),
+            resolve_selected_workflow_name=_resolve_selected_workflow_name,
+            record_dispatch_prepare_note=_record_dispatch_prepare_note,
+            emit_progress_local=_emit_progress_local,
+        )
+
+        def _sync_selected_workflow_locals_from_state() -> None:
             nonlocal selected_workflow_id
             nonlocal selected_workflow_id_text
             nonlocal selector_verdict
@@ -33129,92 +33856,41 @@ class InternalMCPChatOrchestrator:
             nonlocal routing_info
             nonlocal selected_uses_tool_pipeline_contract
 
-            prior_selected_workflow_id = selected_workflow_id_text
-            prior_selector_verdict = selector_verdict or None
-            excluded_workflow_ids = sorted(
-                {
-                    CHAT_ASSISTANT_WORKFLOW_ID,
-                    selected_workflow_id_text or CHAT_ASSISTANT_WORKFLOW_ID,
-                }
+            selected_workflow_id = dispatch_selection_state.selected_workflow_id
+            selected_workflow_id_text = dispatch_selection_state.selected_workflow_id_text
+            selector_verdict = dispatch_selection_state.selector_verdict
+            selector_requests_narration = (
+                dispatch_selection_state.selector_requests_narration
             )
-            selected_workflow_id = TOOL_CALLING_WORKFLOW_ID
-            selected_workflow_id_text = TOOL_CALLING_WORKFLOW_ID
-            selector_verdict = "tool_contract_override"
-            selector_requests_narration = False
-            selector_requests_custom_workflow = False
-            selected_uses_narration_contract = False
-            selected_prefers_direct_response = False
-            selected_uses_tool_pipeline_contract = True
+            selector_requests_custom_workflow = (
+                dispatch_selection_state.selector_requests_custom_workflow
+            )
+            selected_uses_narration_contract = (
+                dispatch_selection_state.selected_uses_narration_contract
+            )
+            selected_prefers_direct_response = (
+                dispatch_selection_state.selected_prefers_direct_response
+            )
+            selected_uses_tool_pipeline_contract = (
+                dispatch_selection_state.selected_uses_tool_pipeline_contract
+            )
+            routing_info = dispatch_selection_state.routing_info
 
-            prompt_id = None
-            discovered_workflow_ids: tuple[str, ...] = ()
-            routing_duration_ms = None
-            if isinstance(routing_info, WorkflowRoutingInfo):
-                prompt_id = routing_info.prompt_id
-                discovered_workflow_ids = routing_info.discovered_workflow_ids
-                routing_duration_ms = routing_info.routing_duration_ms
-            resolved_reasoning = (
-                reasoning_text.strip()
-                if isinstance(reasoning_text, str) and reasoning_text.strip()
-                else _describe_tool_pipeline_override_reason(reason)
+        def _force_tool_pipeline_routing(
+            *,
+            reason: str,
+            excluded_selector_verdicts: Sequence[str],
+            extra_payload: Mapping[str, Any] | None = None,
+            reasoning_text: str | None = None,
+        ) -> None:
+            custom_workflow_dispatch_support.force_tool_pipeline_routing(
+                dispatch_selection_state,
+                reason=reason,
+                excluded_selector_verdicts=excluded_selector_verdicts,
+                extra_payload=extra_payload,
+                reasoning_text=reasoning_text,
             )
-            routing_info = WorkflowRoutingInfo(
-                workflow_id=TOOL_CALLING_WORKFLOW_ID,
-                verdict="tool_contract_override",
-                prompt_id=prompt_id,
-                discovered_workflow_ids=discovered_workflow_ids,
-                routing_duration_ms=routing_duration_ms,
-                source="selector_override",
-                reasoning=resolved_reasoning,
-                selection_rationale=resolved_reasoning,
-            )
-
-            override_payload: dict[str, Any] = {
-                "type": "workflow_selector_override",
-                "reason": reason,
-                "selected_workflow_id": TOOL_CALLING_WORKFLOW_ID,
-                "excluded_workflow_ids": excluded_workflow_ids,
-                "excluded_selector_verdicts": list(excluded_selector_verdicts),
-                "prior_selected_workflow_id": prior_selected_workflow_id,
-                "prior_selector_verdict": prior_selector_verdict,
-            }
-            if extra_payload:
-                override_payload.update(dict(extra_payload))
-            aux_llm_calls.append(
-                annotate_python_decision_event(
-                    override_payload,
-                    stage="workflow_dispatch",
-                    component="internal_mcp_orchestrator",
-                    function="_force_tool_pipeline_routing",
-                    decision_class="workflow_selector_override",
-                    decision_source="workflow_launchability_check",
-                    changed_outcome=True,
-                    reason_code=reason,
-                    possible_inappropriate_python_code_use=False,
-                )
-            )
-            if trace_enabled and trace is not None:
-                trace.metadata["workflow_selector_override"] = dict(override_payload)
-            if reason == (
-                "selected_custom_workflow_launchability_requires_safe_general_fallback"
-            ):
-                prior_workflow_label = (
-                    _resolve_selected_workflow_name(prior_selected_workflow_id)
-                    or prior_selected_workflow_id
-                    or "selected workflow"
-                )
-                _record_dispatch_prepare_note(
-                    step_id="safe_general_fallback",
-                    step_label="Use safe general fallback",
-                    result_summary=(
-                        f"{prior_workflow_label} could not launch from the current "
-                        "turn inputs; using the general tool workflow instead."
-                    ),
-                    workflow_id=TOOL_CALLING_WORKFLOW_ID,
-                    workflow_name=_resolve_selected_workflow_name(
-                        TOOL_CALLING_WORKFLOW_ID
-                    ),
-                )
+            _sync_selected_workflow_locals_from_state()
 
         def _maybe_force_tool_pipeline_for_multi_surface_turn_contract() -> None:
             if not selector_requests_custom_workflow:
@@ -33283,11 +33959,12 @@ class InternalMCPChatOrchestrator:
         def _build_custom_workflow_dispatch_data(
             workflow_id_override: str | None = None,
         ) -> dict[str, Any]:
+            effective_routing_info = dispatch_selection_state.routing_info
             effective_workflow_id = (
                 workflow_id_override.strip()
                 if isinstance(workflow_id_override, str)
                 and workflow_id_override.strip()
-                else selected_workflow_id_text
+                else dispatch_selection_state.selected_workflow_id_text
             )
             workflow_dispatch_data = {
                 "prompt": prompt,
@@ -33298,8 +33975,8 @@ class InternalMCPChatOrchestrator:
                     else None
                 ),
                 "workflow_routing": (
-                    asdict(routing_info)
-                    if isinstance(routing_info, WorkflowRoutingInfo)
+                    asdict(effective_routing_info)
+                    if isinstance(effective_routing_info, WorkflowRoutingInfo)
                     else None
                 ),
                 "workflow_discovery_result": (
@@ -33311,10 +33988,12 @@ class InternalMCPChatOrchestrator:
                 "selected_workflow_name": _resolve_selected_workflow_name(
                     effective_workflow_id
                 ),
-                "workflow_selector_verdict": selector_verdict or None,
+                "workflow_selector_verdict": (
+                    dispatch_selection_state.selector_verdict or None
+                ),
                 "workflow_selector_source": (
-                    routing_info.source
-                    if isinstance(routing_info, WorkflowRoutingInfo)
+                    effective_routing_info.source
+                    if isinstance(effective_routing_info, WorkflowRoutingInfo)
                     else None
                 ),
                 "user_concept_id": user_concept_id,
@@ -33353,230 +34032,34 @@ class InternalMCPChatOrchestrator:
 
             return workflow_dispatch_data
 
-        custom_workflow_launchability_probe_cache: dict[str, dict[str, Any]] = {}
-
         def _get_cached_custom_workflow_launchability_probe(
             workflow_id: str | None,
         ) -> dict[str, Any]:
-            clean_workflow_id = (
-                workflow_id.strip()
-                if isinstance(workflow_id, str) and workflow_id.strip()
-                else None
+            return custom_workflow_dispatch_support.get_cached_custom_workflow_launchability_probe(
+                workflow_id
             )
-            if not clean_workflow_id:
-                return self._probe_custom_workflow_launchability(
-                    workflow_id,
-                    build_custom_workflow_dispatch_data=_build_custom_workflow_dispatch_data,
-                )
-
-            cached_probe = custom_workflow_launchability_probe_cache.get(
-                clean_workflow_id
-            )
-            if isinstance(cached_probe, Mapping):
-                return dict(cached_probe)
-
-            target_workflow_name = _resolve_selected_workflow_name(clean_workflow_id)
-            target_workflow_label = target_workflow_name or clean_workflow_id
-            step_label = (
-                f"Evaluate launch requirements for {target_workflow_label}"
-                if target_workflow_label
-                else "Evaluate launch requirements"
-            )
-            step_start = time.perf_counter()
-            try:
-                probe = self._probe_custom_workflow_launchability(
-                    clean_workflow_id,
-                    build_custom_workflow_dispatch_data=_build_custom_workflow_dispatch_data,
-                )
-            except Exception as exc:
-                duration_ms = int((time.perf_counter() - step_start) * 1000)
-                _record_dispatch_prepare_note(
-                    step_id="launchability_probe",
-                    step_label=step_label,
-                    status="failed",
-                    duration_ms=duration_ms,
-                    result_summary="Launchability check failed.",
-                    workflow_id=clean_workflow_id,
-                    workflow_name=target_workflow_name,
-                    error_class=exc.__class__.__name__,
-                    error=str(exc),
-                )
-                raise
-            duration_ms = int((time.perf_counter() - step_start) * 1000)
-            probe_payload = dict(probe) if isinstance(probe, Mapping) else {}
-            pre_action_validation_raw = probe_payload.get("pre_action_validation")
-            pre_action_validation = (
-                {str(key): value for key, value in pre_action_validation_raw.items()}
-                if isinstance(pre_action_validation_raw, Mapping)
-                else {}
-            )
-            launch_input_resolution_raw = probe_payload.get("launch_input_resolution")
-            launch_input_resolution = (
-                {str(key): value for key, value in launch_input_resolution_raw.items()}
-                if isinstance(launch_input_resolution_raw, Mapping)
-                else {}
-            )
-            unresolved_required_inputs = [
-                item.strip()
-                for item in (
-                    launch_input_resolution.get("unresolved_required_inputs") or []
-                )
-                if isinstance(item, str) and item.strip()
-            ]
-            pre_action_message = str(pre_action_validation.get("message") or "").strip()
-            pre_action_reason_code = (
-                str(pre_action_validation.get("reason_code") or "").strip() or None
-            )
-            pre_action_symbol = (
-                str(pre_action_validation.get("symbol") or "").strip() or None
-            )
-            launch_input_resolution_status = (
-                str(launch_input_resolution.get("status") or "").strip() or None
-            )
-            if bool(probe_payload.get("launchable")):
-                result_summary = "All launch requirements satisfied."
-                step_status = "completed"
-                error_text = None
-            else:
-                result_summary = (
-                    pre_action_message
-                    or (
-                        "Unresolved required launch inputs: "
-                        + ", ".join(unresolved_required_inputs)
-                        + "."
-                        if unresolved_required_inputs
-                        else ""
-                    )
-                    or (
-                        f"Workflow definition unavailable for {target_workflow_label}."
-                        if pre_action_reason_code == "workflow_missing"
-                        and target_workflow_label
-                        else ""
-                    )
-                    or "Launch requirements were not satisfied."
-                )
-                step_status = "failed"
-                error_text = pre_action_message or result_summary
-            _record_dispatch_prepare_note(
-                step_id="launchability_probe",
-                step_label=step_label,
-                status=step_status,
-                duration_ms=duration_ms,
-                result_summary=result_summary,
-                workflow_id=clean_workflow_id,
-                workflow_name=target_workflow_name,
-                reason_code=pre_action_reason_code,
-                symbol=pre_action_symbol,
-                unresolved_required_inputs=unresolved_required_inputs,
-                error=error_text,
-                launch_input_resolution_status=launch_input_resolution_status,
-            )
-            custom_workflow_launchability_probe_cache[clean_workflow_id] = dict(probe)
-            return dict(probe)
 
         def _collect_workflow_action_ids(workflow_definition: Any) -> tuple[str, ...]:
-            states = getattr(workflow_definition, "states", None)
-            if not isinstance(states, Mapping):
-                return ()
-
-            action_ids: list[str] = []
-            seen_action_ids: set[str] = set()
-            for state_spec in states.values():
-                for action in getattr(state_spec, "actions", ()) or ():
-                    action_id = str(getattr(action, "action_id", "") or "").strip()
-                    if not action_id:
-                        continue
-                    lowered_action_id = action_id.lower()
-                    if lowered_action_id in seen_action_ids:
-                        continue
-                    seen_action_ids.add(lowered_action_id)
-                    action_ids.append(action_id)
-            return tuple(action_ids)
+            return _CustomWorkflowDispatchSupport._collect_workflow_action_ids(
+                workflow_definition
+            )
 
         def _build_custom_workflow_override_candidates(
             *,
             exclude_workflow_ids: Sequence[str] = (),
         ) -> list[dict[str, Any]]:
-            excluded = {
-                str(workflow_id).strip().lower()
-                for workflow_id in exclude_workflow_ids
-                if isinstance(workflow_id, str) and str(workflow_id).strip()
-            }
-            builtin_workflow_ids = {
-                CHAT_ASSISTANT_WORKFLOW_ID.lower(),
-                CHAT_NARRATION_WORKFLOW_ID.lower(),
-                TOOL_CALLING_WORKFLOW_ID.lower(),
-            }
-            candidates: list[dict[str, Any]] = []
-            for match in discovered_matches:
-                if not isinstance(match, Mapping):
-                    continue
-                candidate_workflow_id = str(match.get("concept_id") or "").strip()
-                if not candidate_workflow_id:
-                    continue
-                lowered_candidate_workflow_id = candidate_workflow_id.lower()
-                if (
-                    lowered_candidate_workflow_id in builtin_workflow_ids
-                    or lowered_candidate_workflow_id in excluded
-                ):
-                    continue
-
-                registration, workflow_definition = (
-                    self._resolve_workflow_registration_and_definition(
-                        candidate_workflow_id
-                    )
-                )
-                definition_metadata = getattr(workflow_definition, "metadata", None)
-                workflow_purpose = str(
-                    getattr(registration, "purpose", None)
-                    or getattr(workflow_definition, "purpose", None)
-                    or match.get("description")
-                    or ""
-                ).strip()
-
-                candidates.append(
-                    {
-                        "concept_id": candidate_workflow_id,
-                        "name": str(match.get("name") or candidate_workflow_id).strip(),
-                        "description": str(match.get("description") or "").strip(),
-                        "relevance_score": match.get("relevance_score"),
-                        "confidence_score": match.get("confidence_score"),
-                        "workflow_purpose": workflow_purpose,
-                        "routing_profile": (
-                            definition_metadata.get("routing_profile")
-                            if isinstance(definition_metadata, Mapping)
-                            else None
-                        ),
-                        "workflow_action_ids": _collect_workflow_action_ids(
-                            workflow_definition
-                        ),
-                    }
-                )
-            return candidates
+            return custom_workflow_dispatch_support.build_custom_workflow_override_candidates(
+                exclude_workflow_ids=exclude_workflow_ids
+            )
 
         def _evaluate_custom_workflow_override_policy(
             *,
             override_context: str,
             exclude_workflow_ids: Sequence[str] = (),
         ) -> WorkflowOverrideDecision:
-            override_candidates = _build_custom_workflow_override_candidates(
-                exclude_workflow_ids=exclude_workflow_ids
-            )
-            launchability_probes = {
-                str(
-                    candidate.get("concept_id")
-                ): _get_cached_custom_workflow_launchability_probe(
-                    str(candidate.get("concept_id"))
-                )
-                for candidate in override_candidates
-                if isinstance(candidate.get("concept_id"), str)
-                and str(candidate.get("concept_id")).strip()
-            }
-            return choose_custom_workflow_override_candidate(
-                turn_text=prompt,
-                context=override_context,
-                candidates=override_candidates,
-                launchability_probes=launchability_probes,
+            return custom_workflow_dispatch_support.evaluate_custom_workflow_override_policy(
+                override_context=override_context,
+                exclude_workflow_ids=exclude_workflow_ids,
             )
 
         def _record_custom_workflow_override_policy(
@@ -33585,36 +34068,11 @@ class InternalMCPChatOrchestrator:
             prior_selected_workflow_id: str | None = None,
             preserved_execution_mode: str | None = None,
         ) -> None:
-            payload = decision.to_dict()
-            payload.update(
-                {
-                    "type": "custom_workflow_override_policy",
-                    "prior_selected_workflow_id": prior_selected_workflow_id,
-                    "preserved_execution_mode": preserved_execution_mode,
-                    "candidate_count": len(decision.candidate_assessments),
-                }
+            custom_workflow_dispatch_support.record_custom_workflow_override_policy(
+                decision=decision,
+                prior_selected_workflow_id=prior_selected_workflow_id,
+                preserved_execution_mode=preserved_execution_mode,
             )
-            aux_llm_calls.append(
-                annotate_python_decision_event(
-                    payload,
-                    stage="workflow_dispatch",
-                    component="workflow_override_policy_service",
-                    function="choose_custom_workflow_override_candidate",
-                    decision_class="workflow_override_policy",
-                    decision_source="workflow_launchability_check",
-                    changed_outcome=decision.outcome == "promote",
-                    reason_code=decision.reason_code,
-                    possible_inappropriate_python_code_use=False,
-                )
-            )
-            if trace_enabled and trace is not None:
-                raw_events = trace.metadata.get("custom_workflow_override_policy")
-                if isinstance(raw_events, list):
-                    events = raw_events
-                else:
-                    events = []
-                    trace.metadata["custom_workflow_override_policy"] = events
-                events.append(dict(payload))
 
         def _record_custom_workflow_launchability_override_failure(
             *,
@@ -33623,56 +34081,11 @@ class InternalMCPChatOrchestrator:
             selected_workflow_id: str | None,
             selected_probe: Mapping[str, Any] | None = None,
         ) -> None:
-            payload: dict[str, Any] = {
-                "type": "workflow_selector_override",
-                "reason": reason,
-                "selected_workflow_id": selected_workflow_id,
-                "prior_selected_workflow_id": selected_workflow_id,
-                "preserved_selector_decision": True,
-                "error": str(error),
-                "error_class": type(error).__name__,
-            }
-            if isinstance(selected_probe, Mapping):
-                payload["launch_viability_probe"] = {
-                    "prior_selected_workflow": dict(selected_probe)
-                }
-            aux_llm_calls.append(
-                annotate_python_decision_event(
-                    payload,
-                    stage="workflow_dispatch",
-                    component="internal_mcp_orchestrator",
-                    function="_maybe_override_selected_custom_workflow_for_launchability",
-                    decision_class="workflow_selector_override",
-                    decision_source="workflow_launchability_check",
-                    changed_outcome=False,
-                    reason_code=reason,
-                    possible_inappropriate_python_code_use=False,
-                )
-            )
-            if trace_enabled and trace is not None:
-                raw_events = trace.metadata.get("workflow_selector_override_failures")
-                if isinstance(raw_events, list):
-                    events = raw_events
-                else:
-                    events = []
-                    trace.metadata["workflow_selector_override_failures"] = events
-                events.append(dict(payload))
-            _emit_progress_local(
-                {
-                    "status": "thinking",
-                    "stage": "workflow_dispatch_prepare",
-                    "phase": "workflow_dispatch_prepare",
-                    "phase_label": (
-                        "Launchability override failed; preserving selected workflow"
-                    ),
-                    "selected_workflow_id": selected_workflow_id,
-                    "selected_workflow_name": _resolve_selected_workflow_name(
-                        selected_workflow_id
-                    ),
-                    "workflow_selection_rationale": reason,
-                    "error_class": type(error).__name__,
-                    **_build_live_workflow_routing_payload(),
-                }
+            custom_workflow_dispatch_support.record_custom_workflow_launchability_override_failure(
+                reason=reason,
+                error=error,
+                selected_workflow_id=selected_workflow_id,
+                selected_probe=selected_probe,
             )
 
         def _promote_selected_workflow_to_custom_dispatch(
@@ -33689,144 +34102,22 @@ class InternalMCPChatOrchestrator:
             dispatch_prepare_step_label: str = "Promote launchable workflow",
             dispatch_prepare_result_summary: str | None = None,
         ) -> bool:
-            nonlocal selected_workflow_id
-            nonlocal selected_workflow_id_text
-            nonlocal selector_verdict
-            nonlocal selector_requests_narration
-            nonlocal selector_requests_custom_workflow
-            nonlocal selected_uses_narration_contract
-            nonlocal selected_prefers_direct_response
-            nonlocal routing_info
-            nonlocal selected_uses_tool_pipeline_contract
-
-            replacement_workflow_id = (
-                str(replacement_probe.get("workflow_id") or "").strip()
-                if isinstance(replacement_probe, Mapping)
-                else ""
-            )
-            if not replacement_workflow_id:
-                return False
-
-            if prior_selected_workflow_id is None:
-                prior_selected_workflow_id = selected_workflow_id_text
-            if prior_selector_verdict is None:
-                prior_selector_verdict = selector_verdict or None
-
-            selected_workflow_id = replacement_workflow_id
-            selected_workflow_id_text = replacement_workflow_id
-            selector_verdict = verdict
-            selector_requests_narration = False
-            selector_requests_custom_workflow = True
-            selected_uses_narration_contract = False
-            selected_prefers_direct_response = False
-            selected_uses_tool_pipeline_contract = False
-
-            discovered_workflow_ids: tuple[str, ...] = ()
-            prompt_id = None
-            routing_duration_ms = None
-            confidence_score = 0.0
-            if isinstance(routing_info, WorkflowRoutingInfo):
-                discovered_workflow_ids = routing_info.discovered_workflow_ids
-                prompt_id = routing_info.prompt_id
-                routing_duration_ms = routing_info.routing_duration_ms
-                confidence_score = routing_info.confidence_score
-            elif discovered_matches:
-                discovered_workflow_ids = tuple(
-                    str(item.get("concept_id"))
-                    for item in discovered_matches
-                    if isinstance(item, Mapping)
-                    and isinstance(item.get("concept_id"), str)
-                    and str(item.get("concept_id")).strip()
-                )
-
-            routing_info = WorkflowRoutingInfo(
-                workflow_id=replacement_workflow_id,
+            promoted = custom_workflow_dispatch_support.promote_selected_workflow_to_custom_dispatch(
+                dispatch_selection_state,
+                replacement_probe=replacement_probe,
+                reason=reason,
                 verdict=verdict,
-                prompt_id=prompt_id,
-                discovered_workflow_ids=discovered_workflow_ids,
-                routing_duration_ms=routing_duration_ms,
-                source="selector_override",
-                confidence_score=confidence_score,
                 reasoning=reasoning,
-                selection_rationale=reason,
+                prior_selected_workflow_id=prior_selected_workflow_id,
+                prior_selector_verdict=prior_selector_verdict,
+                extra_payload=extra_payload,
+                decision_source=decision_source,
+                dispatch_prepare_step_id=dispatch_prepare_step_id,
+                dispatch_prepare_step_label=dispatch_prepare_step_label,
+                dispatch_prepare_result_summary=dispatch_prepare_result_summary,
             )
-
-            override_payload = {
-                "type": "workflow_selector_override",
-                "reason": reason,
-                "selected_workflow_id": replacement_workflow_id,
-                "prior_selected_workflow_id": prior_selected_workflow_id,
-                "prior_selector_verdict": prior_selector_verdict,
-                "candidate_workflow_ids_considered": [
-                    str(item.get("concept_id"))
-                    for item in discovered_matches
-                    if isinstance(item, Mapping)
-                    and isinstance(item.get("concept_id"), str)
-                    and str(item.get("concept_id")).strip()
-                ],
-            }
-            if extra_payload:
-                override_payload.update(dict(extra_payload))
-            aux_llm_calls.append(
-                annotate_python_decision_event(
-                    override_payload,
-                    stage="workflow_dispatch",
-                    component="internal_mcp_orchestrator",
-                    function="_promote_selected_workflow_to_custom_dispatch",
-                    decision_class="workflow_selector_override",
-                    decision_source=decision_source,
-                    changed_outcome=True,
-                    reason_code=reason,
-                    possible_inappropriate_python_code_use=False,
-                )
-            )
-            if trace_enabled and trace is not None:
-                trace.metadata["workflow_selector_override"] = dict(override_payload)
-            prior_workflow_label = (
-                _resolve_selected_workflow_name(prior_selected_workflow_id)
-                or prior_selected_workflow_id
-                or "selected workflow"
-            )
-            replacement_workflow_name = _resolve_selected_workflow_name(
-                replacement_workflow_id
-            )
-            replacement_workflow_label = (
-                replacement_workflow_name
-                or replacement_workflow_id
-                or "launchable workflow"
-            )
-            note_result_summary = (
-                dispatch_prepare_result_summary.strip()
-                if isinstance(dispatch_prepare_result_summary, str)
-                and dispatch_prepare_result_summary.strip()
-                else (
-                    f"Using {replacement_workflow_label} because {prior_workflow_label} "
-                    "could not launch from the current turn inputs."
-                )
-            )
-            _record_dispatch_prepare_note(
-                step_id=dispatch_prepare_step_id,
-                step_label=dispatch_prepare_step_label,
-                result_summary=note_result_summary,
-                workflow_id=replacement_workflow_id,
-                workflow_name=replacement_workflow_name,
-            )
-            _emit_progress_local(
-                {
-                    "status": "thinking",
-                    "stage": "workflow_dispatch",
-                    "phase": "workflow_dispatch",
-                    "phase_label": "Workflow routing overridden",
-                    "workflow_selector_verdict": verdict,
-                    "selected_workflow_id": replacement_workflow_id,
-                    "selected_workflow_name": _resolve_selected_workflow_name(
-                        replacement_workflow_id
-                    ),
-                    "workflow_selection_rationale": reason,
-                    **_build_live_workflow_routing_payload(),
-                }
-            )
-            return True
+            _sync_selected_workflow_locals_from_state()
+            return promoted
 
         if selector_single_discovered_recovery_payload is not None:
             recovery_workflow_id = str(
@@ -33878,125 +34169,11 @@ class InternalMCPChatOrchestrator:
                     )
 
         def _maybe_override_selected_custom_workflow_for_launchability() -> bool:
-            if not selected_workflow_id_text:
-                return True
-            if selected_workflow_id_text in {
-                CHAT_ASSISTANT_WORKFLOW_ID,
-                CHAT_NARRATION_WORKFLOW_ID,
-                TOOL_CALLING_WORKFLOW_ID,
-            }:
-                return True
-
-            try:
-                selected_probe = _get_cached_custom_workflow_launchability_probe(
-                    selected_workflow_id_text
-                )
-            except Exception as exc:
-                _record_custom_workflow_launchability_override_failure(
-                    reason="selected_custom_workflow_launchability_probe_failed",
-                    error=exc,
-                    selected_workflow_id=selected_workflow_id_text,
-                )
-                return False
-            if bool(selected_probe.get("launchable")):
-                return True
-
-            try:
-                override_policy = _evaluate_custom_workflow_override_policy(
-                    override_context="selected_custom_workflow_launchability_replacement",
-                    exclude_workflow_ids=(selected_workflow_id_text,),
-                )
-                _record_custom_workflow_override_policy(
-                    decision=override_policy,
-                    prior_selected_workflow_id=selected_workflow_id_text,
-                    preserved_execution_mode="custom_workflow",
-                )
-                prior_selected_workflow_id = selected_workflow_id_text
-                prior_selector_verdict = selector_verdict or None
-                replacement_probe = (
-                    _get_cached_custom_workflow_launchability_probe(
-                        override_policy.chosen_workflow_id
-                    )
-                    if isinstance(override_policy.chosen_workflow_id, str)
-                    and override_policy.chosen_workflow_id.strip()
-                    else None
-                )
-            except Exception as exc:
-                _record_custom_workflow_launchability_override_failure(
-                    reason="selected_custom_workflow_launchability_override_failed",
-                    error=exc,
-                    selected_workflow_id=selected_workflow_id_text,
-                    selected_probe=selected_probe,
-                )
-                return False
-            if replacement_probe is None:
-                # When a specialised workflow is semantically right but cannot
-                # launch from free-text turn inputs, prefer the safe generic
-                # tool path over promoting a weakly related custom workflow.
-                _force_tool_pipeline_routing(
-                    reason=(
-                        "selected_custom_workflow_launchability_requires_safe_general_fallback"
-                    ),
-                    excluded_selector_verdicts=[
-                        prior_selector_verdict or "rag_selected"
-                    ],
-                    extra_payload={
-                        "prior_selected_workflow_id": prior_selected_workflow_id,
-                        "prior_selector_verdict": prior_selector_verdict,
-                        "launch_viability_probe": {
-                            "prior_selected_workflow": dict(selected_probe),
-                        },
-                        "custom_workflow_override_reason": override_policy.reason_code,
-                    },
-                )
-                return False
-
-            reason = "selected_custom_workflow_not_launchable_from_turn_inputs"
-            reasoning = (
-                "Selected custom workflow could not launch from the current turn "
-                "inputs after launch-contract resolution and initial-state metadata "
-                "validation, so a semantically better launchable discovered custom "
-                "workflow was used instead."
+            override_applied = custom_workflow_dispatch_support.maybe_override_selected_custom_workflow_for_launchability(
+                dispatch_selection_state
             )
-            _promote_selected_workflow_to_custom_dispatch(
-                replacement_probe=replacement_probe,
-                reason=reason,
-                verdict="launch_contract_override",
-                reasoning=reasoning,
-                prior_selected_workflow_id=prior_selected_workflow_id,
-                prior_selector_verdict=prior_selector_verdict,
-                extra_payload={
-                    "launch_viability_probe": {
-                        "prior_selected_workflow": dict(selected_probe),
-                        "replacement_workflow": dict(replacement_probe),
-                    },
-                    "custom_workflow_override_reason": override_policy.reason_code,
-                },
-            )
-            return True
-
-            reason = "selected_custom_workflow_not_launchable_from_turn_inputs"
-            reasoning = (
-                "Selected custom workflow could not launch from the current turn "
-                "inputs after launch-contract resolution and initial-state metadata "
-                "validation, so a semantically better launchable discovered custom "
-                "workflow was used instead."
-            )
-            _promote_selected_workflow_to_custom_dispatch(
-                replacement_probe=replacement_probe,
-                reason=reason,
-                verdict="launch_contract_override",
-                reasoning=reasoning,
-                prior_selected_workflow_id=prior_selected_workflow_id,
-                prior_selector_verdict=prior_selector_verdict,
-                extra_payload={
-                    "launch_viability_probe": {
-                        "prior_selected_workflow": dict(selected_probe),
-                        "replacement_workflow": dict(replacement_probe),
-                    },
-                    "custom_workflow_override_reason": override_policy.reason_code,
-                },
-            )
+            _sync_selected_workflow_locals_from_state()
+            return override_applied
 
         if not _maybe_override_selected_custom_workflow_for_launchability():
             if selector_requests_custom_workflow:
