@@ -285,6 +285,13 @@ resolves history location, fetches persisted debug telemetry, and emits a
 conservative verdict. Keep in mind that its verdict complements rather than
 replaces the expectation-first human judgement.
 
+The sampler also supports controlled multi-arm model comparison. Use repeated
+`--compare-model` flags, and optionally `--include-active-model-arm`, when you
+need the same selected prompt, seed, authenticated user/org context, and replay
+method across multiple model arms. Each arm should run in its own fresh
+authenticated conversation so one arm's answer history does not contaminate the
+next arm's replay.
+
 When the active Thinking card or related live progress surface is part of the
 user experience, include that in acceptance review too. Use
 `docs/engineering/thinking_card_live_llm_visibility_design.md` as the contract

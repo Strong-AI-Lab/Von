@@ -334,6 +334,39 @@ def test_run_generate_background_omits_model_when_not_requested(
     assert "model" not in seen_payloads[0]
 
 
+def test_build_model_arm_plan_includes_active_arm_and_deduplicates() -> None:
+    arms = sampler._build_model_arm_plan(
+        requested_model="gemma4:26b",
+        compare_models=["gpt-5.4-mini", "gemma4:26b", "gpt-5.4-mini"],
+        include_active_model_arm=True,
+    )
+
+    assert arms == [
+        {
+            "arm_id": "arm_1",
+            "label": sampler.ACTIVE_AUTHENTICATED_MODEL_LABEL,
+            "requested_model": None,
+        },
+        {
+            "arm_id": "arm_2",
+            "label": "gemma4:26b",
+            "requested_model": "gemma4:26b",
+        },
+        {
+            "arm_id": "arm_3",
+            "label": "gpt-5.4-mini",
+            "requested_model": "gpt-5.4-mini",
+        },
+    ]
+    assert (
+        sampler._build_arm_session_name(
+            base_session_name="Replay run",
+            arm_metadata=arms[1],
+        )
+        == "Replay run [arm_2:gemma4:26b]"
+    )
+
+
 def test_summarise_server_diag_extracts_relevant_server_fields() -> None:
     summary = sampler._summarise_server_diag(
         {
@@ -448,3 +481,262 @@ def test_build_summary_includes_replay_guide_metadata() -> None:
     assert summary["environment"]["local_repo_git_branch"] == "jvnautosci-1894-replay-programme"
     assert summary["environment"]["server_reported_git_branch"] == "jvnautosci-1894-replay-programme"
     assert summary["environment"]["server_resolved_active_llm_model"] == "gemma4:26b"
+
+
+def test_build_multi_arm_summary_reports_requested_arms_and_comparison() -> None:
+    prompt_entry = {
+        "id": "what_papers_of_mine_do_you_know_about",
+        "category": "entity_relative_kb_lookup",
+        "complexity_class": "vontology_grounded",
+        "prompt": "What papers of mine do you know about?",
+        "knowledge_surfaces": ["kb"],
+        "likely_tools": ["search_knowledge_base"],
+    }
+    run_environment = {
+        "base_url": "http://127.0.0.1:5000",
+        "authenticated_user_concept_id": "#V#michael_witbrock",
+        "session_name": "comparison run",
+        "server_resolved_active_llm_model": "gpt-5.4-mini",
+    }
+    arm_a = sampler._build_summary(
+        prompt_entry=prompt_entry,
+        task_id="task-a",
+        session_id="session-a",
+        request_id="request-a",
+        history_location={"history_index": 2, "session_id": "session-a"},
+        generate_payload={"response": "Answer from gemma."},
+        llm_debug_data={
+            "model": "gemma4:26b",
+            "turn_execution_diagnostics": {
+                "workflow_routing_diagnostics": {
+                    "dispatch": {
+                        "dispatch_workflow_id": "#V#tool_calling_workflow",
+                        "selected_execution_mode": "tool_pipeline",
+                    }
+                },
+                "tool_history": [],
+            },
+        },
+        evaluation={"verdict": "happy", "should_user_be_happy": True},
+        prompt_bank_schema_version="live_kb_tool_prompt_bank.v3",
+        requested_complexity_classes=["vontology_grounded"],
+        seed=17,
+        requested_model="gemma4:26b",
+        run_environment={
+            **run_environment,
+            "requested_model": "gemma4:26b",
+            "session_name": "comparison run [arm_1:gemma4:26b]",
+        },
+        arm_metadata={
+            "arm_id": "arm_1",
+            "label": "gemma4:26b",
+            "requested_model": "gemma4:26b",
+        },
+    )
+    arm_b = sampler._build_summary(
+        prompt_entry=prompt_entry,
+        task_id="task-b",
+        session_id="session-b",
+        request_id="request-b",
+        history_location={"history_index": 2, "session_id": "session-b"},
+        generate_payload={"response": "Answer from the active model."},
+        llm_debug_data={
+            "model": "gpt-5.4-mini",
+            "turn_execution_diagnostics": {
+                "workflow_routing_diagnostics": {
+                    "dispatch": {
+                        "dispatch_workflow_id": "#V#direct_response",
+                        "selected_execution_mode": "direct_response",
+                    }
+                },
+                "tool_history": [],
+            },
+        },
+        evaluation={"verdict": "happy", "should_user_be_happy": True},
+        prompt_bank_schema_version="live_kb_tool_prompt_bank.v3",
+        requested_complexity_classes=["vontology_grounded"],
+        seed=17,
+        requested_model=None,
+        run_environment={
+            **run_environment,
+            "requested_model": None,
+            "session_name": "comparison run [arm_2:active_authenticated_model]",
+        },
+        arm_metadata={
+            "arm_id": "arm_2",
+            "label": sampler.ACTIVE_AUTHENTICATED_MODEL_LABEL,
+            "requested_model": None,
+        },
+    )
+
+    summary = sampler._build_multi_arm_summary(
+        prompt_entry=prompt_entry,
+        prompt_bank_schema_version="live_kb_tool_prompt_bank.v3",
+        requested_complexity_classes=["vontology_grounded"],
+        seed=17,
+        requested_model="gemma4:26b",
+        requested_model_arms=[
+            {
+                "arm_id": "arm_1",
+                "label": "gemma4:26b",
+                "requested_model": "gemma4:26b",
+            },
+            {
+                "arm_id": "arm_2",
+                "label": sampler.ACTIVE_AUTHENTICATED_MODEL_LABEL,
+                "requested_model": None,
+            },
+        ],
+        run_environment=run_environment,
+        arm_summaries=[arm_a, arm_b],
+    )
+
+    assert summary["mode"] == "multi_arm_comparison"
+    assert summary["selection"]["requested_model"] == "gemma4:26b"
+    assert summary["selection"]["requested_model_arms"] == [
+        {
+            "arm_id": "arm_1",
+            "label": "gemma4:26b",
+            "requested_model": "gemma4:26b",
+        },
+        {
+            "arm_id": "arm_2",
+            "label": sampler.ACTIVE_AUTHENTICATED_MODEL_LABEL,
+            "requested_model": None,
+        },
+    ]
+    assert summary["comparison"]["arm_count"] == 2
+    assert summary["comparison"]["happy_arm_count"] == 2
+    assert summary["comparison"]["all_should_user_be_happy"] is True
+    assert summary["comparison"]["telemetry_models"] == [
+        "gemma4:26b",
+        "gpt-5.4-mini",
+    ]
+
+
+def test_main_builds_multi_arm_comparison_from_one_prompt_selection(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    choose_calls: list[dict[str, object]] = []
+    replay_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(sampler, "_emit_replay_guide_note", lambda: None)
+    monkeypatch.setattr(
+        sampler,
+        "_load_prompt_bank",
+        lambda: {
+            "schema_version": "live_kb_tool_prompt_bank.v3",
+            "prompts": [
+                {
+                    "id": "who_am_i_in_this_conversation",
+                    "category": "identity_context",
+                    "complexity_class": "direct_context_or_background",
+                    "prompt": "Who am I in this conversation?",
+                    "knowledge_surfaces": ["turn_context"],
+                    "likely_tools": [],
+                }
+            ],
+        },
+    )
+
+    def fake_choose_prompt(*args: object, **kwargs: object) -> dict[str, object]:
+        choose_calls.append({"args": args, "kwargs": kwargs})
+        return {
+            "id": "who_am_i_in_this_conversation",
+            "category": "identity_context",
+            "complexity_class": "direct_context_or_background",
+            "prompt": "Who am I in this conversation?",
+            "knowledge_surfaces": ["turn_context"],
+            "likely_tools": [],
+        }
+
+    monkeypatch.setattr(sampler, "_choose_prompt", fake_choose_prompt)
+    monkeypatch.setattr(
+        sampler,
+        "_collect_run_environment",
+        lambda **kwargs: {
+            "base_url": kwargs["base_url"],
+            "requested_model": kwargs["requested_model"],
+            "session_name": kwargs["session_name"],
+        },
+    )
+    monkeypatch.setattr(
+        sampler,
+        "_augment_run_environment_with_server_diag",
+        lambda **kwargs: {
+            **kwargs["run_environment"],
+            "server_reported_git_commit": "abc123",
+        },
+    )
+    monkeypatch.setattr(
+        sampler,
+        "_augment_run_environment_with_active_llm_info",
+        lambda **kwargs: {
+            **kwargs["run_environment"],
+            "server_resolved_active_llm_model": "gpt-5.4-mini",
+        },
+    )
+
+    def fake_run_prompt_replay_arm(**kwargs: object) -> dict[str, object]:
+        replay_calls.append(kwargs)
+        arm = dict(kwargs["arm_metadata"])  # type: ignore[arg-type]
+        requested_model = kwargs["requested_model"]
+        telemetry_model = requested_model or "gpt-5.4-mini"
+        return {
+            "status": "ok",
+            "arm": arm,
+            "evaluation": {"should_user_be_happy": True},
+            "telemetry": {
+                "model": telemetry_model,
+                "selected_workflow_id": "#V#direct_response",
+                "selected_execution_mode": "direct_response",
+            },
+            "response": {"text": f"Response from {telemetry_model}"},
+        }
+
+    monkeypatch.setattr(sampler, "_run_prompt_replay_arm", fake_run_prompt_replay_arm)
+
+    exit_code = sampler.main(
+        [
+            "--prompt-id",
+            "who_am_i_in_this_conversation",
+            "--model",
+            "gemma4:26b",
+            "--compare-model",
+            "gpt-5.4-mini",
+            "--include-active-model-arm",
+        ]
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert len(choose_calls) == 1
+    assert [call["requested_model"] for call in replay_calls] == [
+        None,
+        "gemma4:26b",
+        "gpt-5.4-mini",
+    ]
+    assert all(
+        isinstance(prompt_entry := call.get("prompt_entry"), dict)
+        and prompt_entry.get("prompt") == "Who am I in this conversation?"
+        for call in replay_calls
+    )
+    assert output["mode"] == "multi_arm_comparison"
+    assert output["comparison"]["arm_count"] == 3
+    assert output["selection"]["requested_model_arms"] == [
+        {
+            "arm_id": "arm_1",
+            "label": sampler.ACTIVE_AUTHENTICATED_MODEL_LABEL,
+            "requested_model": None,
+        },
+        {
+            "arm_id": "arm_2",
+            "label": "gemma4:26b",
+            "requested_model": "gemma4:26b",
+        },
+        {
+            "arm_id": "arm_3",
+            "label": "gpt-5.4-mini",
+            "requested_model": "gpt-5.4-mini",
+        },
+    ]

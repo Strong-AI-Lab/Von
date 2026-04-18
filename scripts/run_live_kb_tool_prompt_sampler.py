@@ -38,6 +38,7 @@ DEFAULT_MODEL = "gemma4:26b"
 DEFAULT_USER_CONCEPT_ID = "#V#michael_witbrock"
 DEFAULT_ORGANISATION_CONCEPT_ID = "university_of_auckland_strong_ai_lab"
 DEFAULT_SESSION_NAME = "JVNAUTOSCI-1894 live prompt sample"
+ACTIVE_AUTHENTICATED_MODEL_LABEL = "active_authenticated_model"
 PROMPT_BANK_PATH = Path(__file__).with_name("live_kb_tool_prompt_bank.json")
 REAL_PATH_REPLAY_GUIDE = "docs/engineering/real_path_server_replay_and_telemetry_loop.md"
 REAL_PATH_REPLAY_GUIDE_NOTE = (
@@ -1077,6 +1078,48 @@ def _evaluate_user_happiness(
     }
 
 
+def _build_prompt_summary(prompt_entry: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "id": _safe_text(prompt_entry.get("id")),
+        "category": _safe_text(prompt_entry.get("category")),
+        "complexity_class": _safe_text(prompt_entry.get("complexity_class")),
+        "text": _safe_text(prompt_entry.get("prompt")),
+        "knowledge_surfaces": _as_list(prompt_entry.get("knowledge_surfaces")),
+        "likely_tools": _as_list(prompt_entry.get("likely_tools")),
+        "requires_tool_use": bool(prompt_entry.get("requires_tool_use")),
+        "allows_grounded_empty_result": bool(
+            prompt_entry.get("allows_grounded_empty_result")
+        ),
+    }
+
+
+def _build_selection_summary(
+    *,
+    prompt_bank_schema_version: str,
+    requested_complexity_classes: Sequence[str],
+    seed: int | None,
+    requested_model: str | None,
+    requested_model_arms: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    selection = {
+        "prompt_bank_schema_version": prompt_bank_schema_version,
+        "requested_complexity_classes": list(requested_complexity_classes),
+        "seed": seed,
+        "requested_model": _safe_text(requested_model) or None,
+    }
+    if requested_model_arms:
+        selection["requested_model_arms"] = [
+            {
+                "arm_id": _safe_text(entry.get("arm_id")) or None,
+                "label": _safe_text(entry.get("label")) or None,
+                "requested_model": _safe_text(entry.get("requested_model")) or None,
+            }
+            for entry in requested_model_arms
+            if isinstance(entry, Mapping)
+        ]
+    return selection
+
+
 def _build_summary(
     *,
     prompt_entry: Mapping[str, Any],
@@ -1092,36 +1135,26 @@ def _build_summary(
     seed: int | None,
     requested_model: str | None,
     run_environment: Mapping[str, Any],
+    arm_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     diagnostics = _as_mapping(llm_debug_data.get("turn_execution_diagnostics"))
     routing = _as_mapping(diagnostics.get("workflow_routing_diagnostics"))
     dispatch = _as_mapping(routing.get("dispatch"))
     tool_history = _as_list(diagnostics.get("tool_history"))
-    return {
+    summary = {
         "status": "ok",
         "guidance": {
             "replay_guide_path": REAL_PATH_REPLAY_GUIDE,
             "replay_guide_note": REAL_PATH_REPLAY_GUIDE_NOTE,
         },
         "environment": dict(run_environment),
-        "selection": {
-            "prompt_bank_schema_version": prompt_bank_schema_version,
-            "requested_complexity_classes": list(requested_complexity_classes),
-            "seed": seed,
-            "requested_model": _safe_text(requested_model) or None,
-        },
-        "prompt": {
-            "id": _safe_text(prompt_entry.get("id")),
-            "category": _safe_text(prompt_entry.get("category")),
-            "complexity_class": _safe_text(prompt_entry.get("complexity_class")),
-            "text": _safe_text(prompt_entry.get("prompt")),
-            "knowledge_surfaces": _as_list(prompt_entry.get("knowledge_surfaces")),
-            "likely_tools": _as_list(prompt_entry.get("likely_tools")),
-            "requires_tool_use": bool(prompt_entry.get("requires_tool_use")),
-            "allows_grounded_empty_result": bool(
-                prompt_entry.get("allows_grounded_empty_result")
-            ),
-        },
+        "selection": _build_selection_summary(
+            prompt_bank_schema_version=prompt_bank_schema_version,
+            requested_complexity_classes=requested_complexity_classes,
+            seed=seed,
+            requested_model=requested_model,
+        ),
+        "prompt": _build_prompt_summary(prompt_entry),
         "conversation": {
             "session_id": session_id,
             "request_id": request_id,
@@ -1161,6 +1194,243 @@ def _build_summary(
         },
         "evaluation": dict(evaluation),
     }
+    if arm_metadata:
+        summary["arm"] = {
+            "arm_id": _safe_text(arm_metadata.get("arm_id")) or None,
+            "label": _safe_text(arm_metadata.get("label")) or None,
+            "requested_model": _safe_text(arm_metadata.get("requested_model")) or None,
+        }
+    return summary
+
+
+def _build_model_arm_plan(
+    *,
+    requested_model: str | None,
+    compare_models: Sequence[str],
+    include_active_model_arm: bool,
+) -> list[dict[str, Any]]:
+    planned_arms: list[dict[str, Any]] = []
+    seen_models: set[str] = set()
+
+    def _append_arm(model_name: str | None) -> None:
+        cleaned_model = _safe_text(model_name) or None
+        dedupe_key = cleaned_model or "__active_authenticated_model__"
+        if dedupe_key in seen_models:
+            return
+        seen_models.add(dedupe_key)
+        planned_arms.append(
+            {
+                "arm_id": f"arm_{len(planned_arms) + 1}",
+                "label": cleaned_model or ACTIVE_AUTHENTICATED_MODEL_LABEL,
+                "requested_model": cleaned_model,
+            }
+        )
+
+    if include_active_model_arm:
+        _append_arm(None)
+    _append_arm(requested_model)
+    for entry in compare_models:
+        cleaned_entry = _safe_text(entry)
+        if cleaned_entry:
+            _append_arm(cleaned_entry)
+    if not planned_arms:
+        _append_arm(None)
+    return planned_arms
+
+
+def _build_arm_session_name(
+    *, base_session_name: str, arm_metadata: Mapping[str, Any] | None
+) -> str:
+    if not arm_metadata:
+        return _safe_text(base_session_name) or DEFAULT_SESSION_NAME
+    cleaned_base = _safe_text(base_session_name) or DEFAULT_SESSION_NAME
+    arm_id = _safe_text(arm_metadata.get("arm_id")) or "arm"
+    label = _safe_text(arm_metadata.get("label")) or arm_id
+    return f"{cleaned_base} [{arm_id}:{label}]"
+
+
+def _build_arm_run_environment(
+    *,
+    shared_run_environment: Mapping[str, Any],
+    requested_model: str | None,
+    session_name: str,
+    arm_metadata: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    run_environment = dict(shared_run_environment)
+    run_environment["requested_model"] = _safe_text(requested_model) or None
+    run_environment["session_name"] = _safe_text(session_name) or None
+    if arm_metadata:
+        run_environment["comparison_arm_id"] = (
+            _safe_text(arm_metadata.get("arm_id")) or None
+        )
+        run_environment["comparison_arm_label"] = (
+            _safe_text(arm_metadata.get("label")) or None
+        )
+    return run_environment
+
+
+def _run_prompt_replay_arm(
+    *,
+    prompt_entry: Mapping[str, Any],
+    base_url: str,
+    requested_model: str | None,
+    timeout_seconds: float,
+    poll_interval_seconds: float,
+    user_concept_id: str,
+    organisation_concept_id: str,
+    base_session_name: str,
+    shared_run_environment: Mapping[str, Any],
+    prompt_bank_schema_version: str,
+    requested_complexity_classes: Sequence[str],
+    seed: int | None,
+    arm_metadata: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    session = requests.Session()
+    session_name = _build_arm_session_name(
+        base_session_name=base_session_name,
+        arm_metadata=arm_metadata,
+    )
+    default_session_id, _window_session_id = _establish_authenticated_session(
+        session=session,
+        base_url=base_url,
+        user_concept_id=user_concept_id,
+        organisation_concept_id=organisation_concept_id,
+        session_name=session_name,
+    )
+    run_environment = _build_arm_run_environment(
+        shared_run_environment=shared_run_environment,
+        requested_model=requested_model,
+        session_name=session_name,
+        arm_metadata=arm_metadata,
+    )
+    task_id, generate_payload = _run_generate_background(
+        session=session,
+        base_url=base_url,
+        prompt=_safe_text(prompt_entry.get("prompt")),
+        model=requested_model,
+        timeout_seconds=timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+    )
+    request_id, session_id = _extract_request_and_session_ids(
+        task_id=task_id,
+        generate_payload=generate_payload,
+        default_session_id=default_session_id,
+    )
+    response_text = (
+        _safe_text(generate_payload.get("response"))
+        or _safe_text(generate_payload.get("response_text"))
+        or _safe_text(_as_mapping(generate_payload.get("llm_debug")).get("response"))
+    )
+    history_location = _find_assistant_turn_history_location(
+        session=session,
+        base_url=base_url,
+        session_id=session_id,
+        request_id=request_id,
+        response_text=response_text,
+    )
+    history_index_raw = history_location.get("history_index")
+    if not isinstance(history_index_raw, int):
+        raise RuntimeError(
+            "History location did not include an integer history_index: "
+            f"{history_location!r}"
+        )
+    llm_debug_data = _fetch_turn_debug(
+        session=session,
+        base_url=base_url,
+        session_id=session_id,
+        history_index=history_index_raw,
+    )
+    evaluation = _evaluate_user_happiness(
+        prompt_entry=prompt_entry,
+        generate_payload=generate_payload,
+        llm_debug_data=llm_debug_data,
+    )
+    return _build_summary(
+        prompt_entry=prompt_entry,
+        task_id=task_id,
+        session_id=session_id,
+        request_id=request_id,
+        history_location=history_location,
+        generate_payload=generate_payload,
+        llm_debug_data=llm_debug_data,
+        evaluation=evaluation,
+        prompt_bank_schema_version=prompt_bank_schema_version,
+        requested_complexity_classes=requested_complexity_classes,
+        seed=seed,
+        requested_model=requested_model,
+        run_environment=run_environment,
+        arm_metadata=arm_metadata,
+    )
+
+
+def _build_multi_arm_summary(
+    *,
+    prompt_entry: Mapping[str, Any],
+    prompt_bank_schema_version: str,
+    requested_complexity_classes: Sequence[str],
+    seed: int | None,
+    requested_model: str | None,
+    requested_model_arms: Sequence[Mapping[str, Any]],
+    run_environment: Mapping[str, Any],
+    arm_summaries: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    happy_arm_labels: list[str] = []
+    unhappy_arm_labels: list[str] = []
+    telemetry_models: list[str] = []
+    selected_workflow_ids: list[str] = []
+    selected_execution_modes: list[str] = []
+    for arm_summary in arm_summaries:
+        if not isinstance(arm_summary, Mapping):
+            continue
+        arm = _as_mapping(arm_summary.get("arm"))
+        label = _safe_text(arm.get("label")) or _safe_text(arm.get("arm_id"))
+        if bool(_as_mapping(arm_summary.get("evaluation")).get("should_user_be_happy")):
+            if label:
+                happy_arm_labels.append(label)
+        elif label:
+            unhappy_arm_labels.append(label)
+        telemetry_model = _safe_text(_as_mapping(arm_summary.get("telemetry")).get("model"))
+        if telemetry_model and telemetry_model not in telemetry_models:
+            telemetry_models.append(telemetry_model)
+        workflow_id = _safe_text(
+            _as_mapping(arm_summary.get("telemetry")).get("selected_workflow_id")
+        )
+        if workflow_id and workflow_id not in selected_workflow_ids:
+            selected_workflow_ids.append(workflow_id)
+        execution_mode = _safe_text(
+            _as_mapping(arm_summary.get("telemetry")).get("selected_execution_mode")
+        )
+        if execution_mode and execution_mode not in selected_execution_modes:
+            selected_execution_modes.append(execution_mode)
+    return {
+        "status": "ok",
+        "mode": "multi_arm_comparison",
+        "guidance": {
+            "replay_guide_path": REAL_PATH_REPLAY_GUIDE,
+            "replay_guide_note": REAL_PATH_REPLAY_GUIDE_NOTE,
+        },
+        "environment": dict(run_environment),
+        "selection": _build_selection_summary(
+            prompt_bank_schema_version=prompt_bank_schema_version,
+            requested_complexity_classes=requested_complexity_classes,
+            seed=seed,
+            requested_model=requested_model,
+            requested_model_arms=requested_model_arms,
+        ),
+        "prompt": _build_prompt_summary(prompt_entry),
+        "comparison": {
+            "arm_count": len(arm_summaries),
+            "happy_arm_count": len(happy_arm_labels),
+            "unhappy_arm_count": len(unhappy_arm_labels),
+            "all_should_user_be_happy": len(unhappy_arm_labels) == 0,
+            "happy_arm_labels": happy_arm_labels,
+            "unhappy_arm_labels": unhappy_arm_labels,
+            "telemetry_models": telemetry_models,
+            "selected_workflow_ids": selected_workflow_ids,
+            "selected_execution_modes": selected_execution_modes,
+        },
+        "arms": [dict(entry) for entry in arm_summaries if isinstance(entry, Mapping)],
+    }
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1182,6 +1452,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             "`gemma4:26b` for the JVNAUTOSCI-1894 replay programme. Pass an "
             "empty string to omit the override and let /von/generate use the "
             "active user-facing model for the authenticated session."
+        ),
+    )
+    parser.add_argument(
+        "--compare-model",
+        dest="compare_models",
+        action="append",
+        default=[],
+        help=(
+            "Additional model override to run as a comparison arm. Repeat the "
+            "flag to compare the same prompt and authenticated context across "
+            "multiple requested models."
+        ),
+    )
+    parser.add_argument(
+        "--include-active-model-arm",
+        action="store_true",
+        help=(
+            "When running comparison arms, also replay one arm without any model "
+            "override so the authenticated session's active user-facing model is "
+            "measured alongside explicit requested-model arms."
         ),
     )
     parser.add_argument("--timeout-seconds", type=float, default=900.0)
@@ -1270,8 +1560,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
 
     base_url = _safe_text(args.base_url).rstrip("/") or DEFAULT_BASE_URL
-    session = requests.Session()
     requested_model = _safe_text(args.model) or None
+    compare_models = [
+        cleaned
+        for entry in _as_list(args.compare_models)
+        if isinstance(entry, str)
+        and (cleaned := _safe_text(entry))
+    ]
+    model_arms = _build_model_arm_plan(
+        requested_model=requested_model,
+        compare_models=compare_models,
+        include_active_model_arm=bool(args.include_active_model_arm),
+    )
     authenticated_user_concept_id = (
         _safe_text(args.user_concept_id) or DEFAULT_USER_CONCEPT_ID
     )
@@ -1281,88 +1581,75 @@ def main(argv: Sequence[str] | None = None) -> int:
     session_name = _safe_text(args.session_name) or DEFAULT_SESSION_NAME
     run_environment = _collect_run_environment(
         base_url=base_url,
-        requested_model=requested_model,
+        requested_model=requested_model if len(model_arms) == 1 else None,
         user_concept_id=authenticated_user_concept_id,
         organisation_concept_id=authenticated_organisation_concept_id,
         session_name=session_name,
     )
-    session_id, _window_session_id = _establish_authenticated_session(
-        session=session,
-        base_url=base_url,
-        user_concept_id=authenticated_user_concept_id,
-        organisation_concept_id=authenticated_organisation_concept_id,
-        session_name=session_name,
-    )
+    metadata_session = requests.Session()
     run_environment = _augment_run_environment_with_server_diag(
-        session=session,
+        session=metadata_session,
         base_url=base_url,
         run_environment=run_environment,
     )
     run_environment = _augment_run_environment_with_active_llm_info(
-        session=session,
+        session=metadata_session,
         base_url=base_url,
         user_concept_id=authenticated_user_concept_id,
         organisation_concept_id=authenticated_organisation_concept_id,
         run_environment=run_environment,
     )
-    task_id, generate_payload = _run_generate_background(
-        session=session,
-        base_url=base_url,
-        prompt=_safe_text(prompt_entry.get("prompt")),
-        model=requested_model,
-        timeout_seconds=float(args.timeout_seconds),
-        poll_interval_seconds=float(args.poll_interval_seconds),
-    )
-    request_id, session_id = _extract_request_and_session_ids(
-        task_id=task_id,
-        generate_payload=generate_payload,
-        default_session_id=session_id,
-    )
-    response_text = (
-        _safe_text(generate_payload.get("response"))
-        or _safe_text(generate_payload.get("response_text"))
-        or _safe_text(_as_mapping(generate_payload.get("llm_debug")).get("response"))
-    )
-    history_location = _find_assistant_turn_history_location(
-        session=session,
-        base_url=base_url,
-        session_id=session_id,
-        request_id=request_id,
-        response_text=response_text,
-    )
-    history_index_raw = history_location.get("history_index")
-    if not isinstance(history_index_raw, int):
-        raise RuntimeError(
-            "History location did not include an integer history_index: "
-            f"{history_location!r}"
+    if len(model_arms) == 1:
+        summary = _run_prompt_replay_arm(
+            prompt_entry=prompt_entry,
+            base_url=base_url,
+            requested_model=requested_model,
+            timeout_seconds=float(args.timeout_seconds),
+            poll_interval_seconds=float(args.poll_interval_seconds),
+            user_concept_id=authenticated_user_concept_id,
+            organisation_concept_id=authenticated_organisation_concept_id,
+            base_session_name=session_name,
+            shared_run_environment=run_environment,
+            prompt_bank_schema_version=prompt_bank_schema_version,
+            requested_complexity_classes=requested_complexity_classes,
+            seed=args.seed,
+            arm_metadata=None,
         )
-    history_index = history_index_raw
-    llm_debug_data = _fetch_turn_debug(
-        session=session,
-        base_url=base_url,
-        session_id=session_id,
-        history_index=history_index,
-    )
-    evaluation = _evaluate_user_happiness(
-        prompt_entry=prompt_entry,
-        generate_payload=generate_payload,
-        llm_debug_data=llm_debug_data,
-    )
-    summary = _build_summary(
-        prompt_entry=prompt_entry,
-        task_id=task_id,
-        session_id=session_id,
-        request_id=request_id,
-        history_location=history_location,
-        generate_payload=generate_payload,
-        llm_debug_data=llm_debug_data,
-        evaluation=evaluation,
-        prompt_bank_schema_version=prompt_bank_schema_version,
-        requested_complexity_classes=requested_complexity_classes,
-        seed=args.seed,
-        requested_model=requested_model,
-        run_environment=run_environment,
-    )
+        should_user_be_happy = bool(
+            _as_mapping(summary.get("evaluation")).get("should_user_be_happy")
+        )
+    else:
+        arm_summaries = [
+            _run_prompt_replay_arm(
+                prompt_entry=prompt_entry,
+                base_url=base_url,
+                requested_model=_safe_text(arm.get("requested_model")) or None,
+                timeout_seconds=float(args.timeout_seconds),
+                poll_interval_seconds=float(args.poll_interval_seconds),
+                user_concept_id=authenticated_user_concept_id,
+                organisation_concept_id=authenticated_organisation_concept_id,
+                base_session_name=session_name,
+                shared_run_environment=run_environment,
+                prompt_bank_schema_version=prompt_bank_schema_version,
+                requested_complexity_classes=requested_complexity_classes,
+                seed=args.seed,
+                arm_metadata=arm,
+            )
+            for arm in model_arms
+        ]
+        summary = _build_multi_arm_summary(
+            prompt_entry=prompt_entry,
+            prompt_bank_schema_version=prompt_bank_schema_version,
+            requested_complexity_classes=requested_complexity_classes,
+            seed=args.seed,
+            requested_model=requested_model,
+            requested_model_arms=model_arms,
+            run_environment=run_environment,
+            arm_summaries=arm_summaries,
+        )
+        should_user_be_happy = bool(
+            _as_mapping(summary.get("comparison")).get("all_should_user_be_happy")
+        )
     output_json = _safe_text(args.output_json)
     if output_json:
         Path(output_json).write_text(
@@ -1370,7 +1657,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             encoding="utf-8",
         )
     print(json.dumps(summary, ensure_ascii=True, indent=2, sort_keys=True))
-    return 0 if bool(evaluation.get("should_user_be_happy")) else 1
+    return 0 if should_user_be_happy else 1
 
 
 if __name__ == "__main__":
