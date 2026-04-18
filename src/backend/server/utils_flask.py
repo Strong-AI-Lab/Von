@@ -2872,6 +2872,14 @@ def create_flask_app(
         except Exception:
             salient_cache = {"error": "unavailable"}
 
+        mcp_helper_inventory = {}
+        try:
+            from ..mcp_server.process_guard import get_mcp_helper_inventory
+
+            mcp_helper_inventory = get_mcp_helper_inventory()
+        except Exception:
+            mcp_helper_inventory = {"success": False, "error": "unavailable"}
+
         # Entity counts stats (lightweight)
         entity_counts_stats = {}
         try:
@@ -3036,6 +3044,7 @@ def create_flask_app(
             "tree_cache": tree_cache,
             "instance_counts_cache": counts_cache,
             "salient_cache": salient_cache,
+            "mcp_helper_inventory": mcp_helper_inventory,
             "entity_counts": entity_counts_stats,
             "guid_stats": guid_stats,
             "search_proxy": search_proxy_stats,

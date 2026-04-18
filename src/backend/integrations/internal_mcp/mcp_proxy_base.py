@@ -11,8 +11,10 @@ import json
 import logging
 import time
 import asyncio
+import os
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence
+from uuid import uuid4
 
 from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
@@ -87,11 +89,30 @@ class MCPStdIOClient:
 
     def __init__(self, config: MCPServerConfig) -> None:
         self._config = config
+        self._helper_owner_token = (
+            (config.env or {}).get("VON_MCP_HELPER_OWNER_TOKEN")
+            or f"proxy-owner:{uuid4()}"
+        )
         self._call_count = 0
         self._error_count = 0
         self._total_duration_ms = 0.0
         self._last_call_telemetry: Optional[MCPCallTelemetry] = None
         self._telemetry_history: List[MCPCallTelemetry] = []
+
+    @property
+    def helper_owner_token(self) -> str:
+        return self._helper_owner_token
+
+    def _build_server_params(self) -> StdioServerParameters:
+        env = dict(self._config.env or {})
+        env.setdefault("VON_MCP_HELPER_OWNER_TOKEN", self._helper_owner_token)
+        env.setdefault("VON_MCP_HELPER_OWNER_LABEL", self._config.log_tag)
+        env.setdefault("VON_MCP_HELPER_PARENT_PID", str(os.getpid()))
+        return StdioServerParameters(
+            command=self._config.command,
+            args=self._config.args,
+            env=env,
+        )
 
     @property
     def call_count(self) -> int:
@@ -256,11 +277,7 @@ class MCPStdIOClient:
         """
         from datetime import datetime, timezone
 
-        params = StdioServerParameters(
-            command=self._config.command,
-            args=self._config.args,
-            env=self._config.env,
-        )
+        params = self._build_server_params()
 
         logger.info(
             "%s Calling tool %s with arguments %s",
@@ -377,11 +394,7 @@ class MCPStdIOClient:
     async def list_tools(self) -> list[Dict[str, Any]]:
         """List tools exposed by the MCP server."""
 
-        params = StdioServerParameters(
-            command=self._config.command,
-            args=self._config.args,
-            env=self._config.env,
-        )
+        params = self._build_server_params()
 
         logger.info("%s Listing tools", self._config.log_tag)
 

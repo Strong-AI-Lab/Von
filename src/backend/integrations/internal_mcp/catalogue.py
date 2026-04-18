@@ -14178,6 +14178,7 @@ def _workflow_mcp_health_check(**kwargs):
     from time import perf_counter
     from .gateway import InternalMCPGateway
     from .transport import InternalMCPTransport
+    from ...mcp_server.process_guard import get_mcp_helper_inventory
 
     include_introspection = kwargs.get("include_introspection", True)
     if not isinstance(include_introspection, bool):
@@ -14246,13 +14247,16 @@ def _workflow_mcp_health_check(**kwargs):
             }
         )
 
-    return {
+    payload = {
         "success": len(failed_tools) == 0,
         "checked_tools": [tool_name for tool_name, _ in checks_to_run],
         "checks": checks,
         "failed_tools": failed_tools,
         "capability_matrix": capability_matrix,
     }
+    if include_introspection:
+        payload["mcp_helper_inventory"] = get_mcp_helper_inventory()
+    return payload
 
 
 def _workflow_materialisation_diagnostics(**kwargs):

@@ -1911,6 +1911,44 @@ def test_workflow_mcp_health_check_gateway_invoke_success_path():
     assert "capability_matrix" in payload
 
 
+def test_workflow_mcp_health_check_includes_helper_inventory_when_requested(
+    monkeypatch,
+):
+    import src.backend.mcp_server.process_guard as process_guard
+
+    monkeypatch.setattr(
+        process_guard,
+        "get_mcp_helper_inventory",
+        lambda: {
+            "success": True,
+            "helper_count": 2,
+            "live_helper_count": 1,
+            "duplicate_group_count": 1,
+            "duplicate_groups": [
+                {
+                    "helper_kind": "mcp_stdio_server",
+                    "owner_token": "owner-a",
+                    "pids": [101, 102],
+                    "count": 2,
+                }
+            ],
+            "helpers": [],
+        },
+    )
+
+    gateway = _build_gateway()
+    payload = gateway.invoke(
+        "workflow_mcp_health_check",
+        {"include_introspection": True},
+    ).payload
+
+    assert payload.get("success") is True
+    helper_inventory = payload.get("mcp_helper_inventory")
+    assert isinstance(helper_inventory, dict)
+    assert helper_inventory.get("helper_count") == 2
+    assert helper_inventory.get("duplicate_group_count") == 1
+
+
 def test_workflow_materialisation_diagnostics_exists_and_runs(monkeypatch):
     import src.backend.services.workflow_materialisation_diagnostics_service as service
 

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
+import importlib
 import sys
 import types
+from pathlib import Path
 
 from src.backend.mcp_server import process_guard
 
@@ -94,6 +97,30 @@ class _DummyParentProcess:
             if int(info.get("ppid") or 0) == self.pid:
                 children.append(proc)
         return children
+
+
+def _write_lease(
+    path: Path,
+    *,
+    helper_kind: str,
+    pid: int,
+    parent_pid: int,
+    owner_token: str,
+    started_at_epoch_sec: float = 1.0,
+) -> None:
+    payload = {
+        "schema_version": "mcp_helper_lease.v1",
+        "helper_kind": helper_kind,
+        "script_path": f"C:/repo/{helper_kind}.py",
+        "pid": pid,
+        "parent_pid": parent_pid,
+        "owner_token": owner_token,
+        "started_at_utc": "2026-04-18T00:00:00+00:00",
+        "started_at_epoch_sec": started_at_epoch_sec,
+        "last_heartbeat_utc": "2026-04-18T00:00:00+00:00",
+        "last_heartbeat_epoch_sec": started_at_epoch_sec,
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
 
 
 def _install_fake_psutil(
@@ -246,4 +273,171 @@ def test_terminate_duplicate_sibling_servers_defaults_to_disabled(monkeypatch) -
 
     assert result == {"matched": 0, "terminated": 0, "killed": 0, "failed": 0}
     assert proc.terminated is False
+
+
+def test_activate_mcp_helper_lifecycle_reclaims_older_same_owner_duplicate(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    older_same_owner = _DummyProcess(
+        pid=101,
+        ppid=50,
+        cmdline=["python", "src/backend/mcp_server/mcp_stdio_server.py"],
+    )
+    other_owner = _DummyProcess(
+        pid=102,
+        ppid=51,
+        cmdline=["python", "src/backend/mcp_server/mcp_stdio_server.py"],
+    )
+    current_proc = _DummyProcess(
+        pid=200,
+        ppid=50,
+        cmdline=["python", "src/backend/mcp_server/mcp_stdio_server.py"],
+    )
+    _install_fake_psutil(monkeypatch, [older_same_owner, other_owner, current_proc])
+
+    registry_dir = tmp_path / "leases"
+    registry_dir.mkdir()
+    _write_lease(
+        registry_dir / "101.json",
+        helper_kind="mcp_stdio_server",
+        pid=101,
+        parent_pid=50,
+        owner_token="owner-a",
+        started_at_epoch_sec=10.0,
+    )
+    _write_lease(
+        registry_dir / "102.json",
+        helper_kind="mcp_stdio_server",
+        pid=102,
+        parent_pid=51,
+        owner_token="owner-b",
+        started_at_epoch_sec=11.0,
+    )
+
+    monkeypatch.setattr(process_guard.os, "getpid", lambda: 200)
+    monkeypatch.setattr(process_guard.os, "getppid", lambda: 50)
+    monkeypatch.setenv("VON_MCP_HELPER_REGISTRY_DIR", str(registry_dir))
+    monkeypatch.setenv("VON_MCP_HELPER_OWNER_TOKEN", "owner-a")
+    monkeypatch.setenv("VON_MCP_HELPER_HEARTBEAT_SEC", "0")
+    monkeypatch.setenv("VON_MCP_TERMINATE_DUPLICATE_SIBLINGS", "0")
+
+    result = process_guard.activate_mcp_helper_lifecycle(
+        "src/backend/mcp_server/mcp_stdio_server.py"
+    )
+
+    harvest = result["harvest_report"]
+    assert harvest["matched"] == 1
+    assert harvest["terminated"] == 1
+    assert harvest["killed"] == 0
+    assert harvest["harvested_pids"] == [101]
+    assert older_same_owner.terminated is True
+    assert other_owner.terminated is False
+
+    inventory = process_guard.get_mcp_helper_inventory()
+    live_pids = sorted(helper["pid"] for helper in inventory["helpers"])
+    assert 101 not in live_pids
+    assert 102 in live_pids
+    assert 200 in live_pids
+
+
+def test_activate_mcp_helper_lifecycle_prunes_dead_lease_files(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    current_proc = _DummyProcess(
+        pid=200,
+        ppid=50,
+        cmdline=["python", "src/backend/mcp_server/mcp_stdio_server.py"],
+    )
+    _install_fake_psutil(monkeypatch, [current_proc])
+
+    registry_dir = tmp_path / "leases"
+    registry_dir.mkdir()
+    _write_lease(
+        registry_dir / "999.json",
+        helper_kind="mcp_stdio_server",
+        pid=999,
+        parent_pid=77,
+        owner_token="owner-old",
+        started_at_epoch_sec=1.0,
+    )
+
+    monkeypatch.setattr(process_guard.os, "getpid", lambda: 200)
+    monkeypatch.setattr(process_guard.os, "getppid", lambda: 50)
+    monkeypatch.setenv("VON_MCP_HELPER_REGISTRY_DIR", str(registry_dir))
+    monkeypatch.setenv("VON_MCP_HELPER_OWNER_TOKEN", "owner-a")
+    monkeypatch.setenv("VON_MCP_HELPER_HEARTBEAT_SEC", "0")
+    monkeypatch.setenv("VON_MCP_TERMINATE_DUPLICATE_SIBLINGS", "0")
+
+    result = process_guard.activate_mcp_helper_lifecycle(
+        "src/backend/mcp_server/mcp_stdio_server.py"
+    )
+
+    assert result["prune_report"]["removed_dead_files"] == 1
+    assert result["prune_report"]["removed_dead_pids"] == [999]
+    assert not (registry_dir / "999.json").exists()
+
+
+def test_get_mcp_helper_inventory_reports_duplicate_groups(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    proc_a = _DummyProcess(
+        pid=101,
+        ppid=50,
+        cmdline=["python", "src/backend/mcp_server/mcp_stdio_server.py"],
+    )
+    proc_b = _DummyProcess(
+        pid=102,
+        ppid=50,
+        cmdline=["python", "src/backend/mcp_server/mcp_stdio_server.py"],
+    )
+    _install_fake_psutil(monkeypatch, [proc_a, proc_b])
+
+    registry_dir = tmp_path / "leases"
+    registry_dir.mkdir()
+    _write_lease(
+        registry_dir / "101.json",
+        helper_kind="mcp_stdio_server",
+        pid=101,
+        parent_pid=50,
+        owner_token="owner-a",
+        started_at_epoch_sec=1.0,
+    )
+    _write_lease(
+        registry_dir / "102.json",
+        helper_kind="mcp_stdio_server",
+        pid=102,
+        parent_pid=50,
+        owner_token="owner-a",
+        started_at_epoch_sec=2.0,
+    )
+
+    monkeypatch.setenv("VON_MCP_HELPER_REGISTRY_DIR", str(registry_dir))
+
+    inventory = process_guard.get_mcp_helper_inventory()
+
+    assert inventory["helper_count"] == 2
+    assert inventory["duplicate_group_count"] == 1
+    duplicate_group = inventory["duplicate_groups"][0]
+    assert duplicate_group["helper_kind"] == "mcp_stdio_server"
+    assert duplicate_group["owner_token"] == "owner-a"
+    assert duplicate_group["pids"] == [101, 102]
+
+
+def test_rag_mcp_stdio_server_activates_helper_lifecycle_on_import(monkeypatch) -> None:
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        process_guard,
+        "activate_mcp_helper_lifecycle",
+        lambda script_path, log_fn=None: calls.append(str(script_path)) or {"ok": True},
+    )
+
+    import src.backend.mcp_server.rag_mcp_stdio_server as rag_mcp_stdio_server
+
+    importlib.reload(rag_mcp_stdio_server)
+
+    assert any(path.endswith("rag_mcp_stdio_server.py") for path in calls)
 

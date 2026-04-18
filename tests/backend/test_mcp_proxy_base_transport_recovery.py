@@ -22,6 +22,59 @@ class _DummyStdioContext:
         return False
 
 
+def test_call_tool_injects_stable_helper_owner_token_into_server_env(monkeypatch):
+    captured_envs: list[dict[str, str]] = []
+
+    class _Session:
+        def __init__(self, _read, _write):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def initialize(self):
+            return None
+
+        async def call_tool(self, _tool_name, _arguments):
+            return types.SimpleNamespace(
+                content=[
+                    mcp_types.TextContent(type="text", text='{"success": true}')
+                ]
+            )
+
+    def _fake_stdio_client(params):
+        captured_envs.append(dict(params.env or {}))
+        return _DummyStdioContext()
+
+    monkeypatch.setattr(mcp_proxy_base, "stdio_client", _fake_stdio_client)
+    monkeypatch.setattr(mcp_proxy_base, "ClientSession", _Session)
+
+    client = MCPStdIOClient(
+        MCPServerConfig(
+            command="python",
+            args=["server.py"],
+            env={"EXISTING_VAR": "1"},
+            transport_retry_attempts=0,
+            transport_retry_backoff_sec=0.0,
+            log_tag="[unit-proxy]",
+        )
+    )
+
+    asyncio.run(client.call_tool("fetch_concept", {"concept_id": "#V#x"}))
+    asyncio.run(client.call_tool("fetch_concept", {"concept_id": "#V#y"}))
+
+    assert len(captured_envs) == 2
+    assert captured_envs[0]["EXISTING_VAR"] == "1"
+    assert captured_envs[1]["EXISTING_VAR"] == "1"
+    assert captured_envs[0]["VON_MCP_HELPER_OWNER_TOKEN"] == client.helper_owner_token
+    assert captured_envs[1]["VON_MCP_HELPER_OWNER_TOKEN"] == client.helper_owner_token
+    assert captured_envs[0]["VON_MCP_HELPER_OWNER_LABEL"] == "[unit-proxy]"
+    assert captured_envs[0]["VON_MCP_HELPER_PARENT_PID"].isdigit()
+
+
 def test_call_tool_retries_transport_closed_once_then_succeeds(monkeypatch):
     state = {"calls": 0}
 

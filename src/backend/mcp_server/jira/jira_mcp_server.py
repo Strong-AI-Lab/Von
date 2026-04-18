@@ -19,7 +19,7 @@ from src.backend.integrations.internal_mcp.tool_contract_registry import (
     SURFACE_JIRA_FAMILY_SERVER,
     get_surface_tool_payloads,
 )
-from src.backend.mcp_server.process_guard import terminate_duplicate_sibling_servers
+from src.backend.mcp_server.process_guard import activate_mcp_helper_lifecycle
 
 try:
     from mcp.server import Server
@@ -40,9 +40,8 @@ project_root = (
 dotenv_path = project_root / ".env"
 load_dotenv(dotenv_path=dotenv_path)
 
-# Optional recovery hygiene: enable only when explicitly debugging stale
-# sibling MCP processes from previous IDE restarts.
-terminate_duplicate_sibling_servers(
+# Register a helper lease and reclaim only safe same-owner stale helpers.
+_MCP_HELPER_LIFECYCLE = activate_mcp_helper_lifecycle(
     __file__, log_fn=lambda message: print(message, file=sys.stderr)
 )
 

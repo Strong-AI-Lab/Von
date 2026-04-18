@@ -32,13 +32,12 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-terminate_duplicate_sibling_servers = importlib.import_module(
+activate_mcp_helper_lifecycle = importlib.import_module(
     "src.backend.mcp_server.process_guard"
-).terminate_duplicate_sibling_servers
+).activate_mcp_helper_lifecycle
 
-# Optional recovery hygiene: enable only when explicitly debugging stale
-# sibling MCP processes from previous IDE restarts.
-terminate_duplicate_sibling_servers(
+# Register a helper lease and reclaim only safe same-owner stale helpers.
+_MCP_HELPER_LIFECYCLE = activate_mcp_helper_lifecycle(
     __file__, log_fn=lambda message: print(message, file=sys.stderr)
 )
 
