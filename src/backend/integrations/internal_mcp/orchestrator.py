@@ -7609,10 +7609,13 @@ class InternalMCPChatOrchestrator:
             augmented_context,
             max_chars=self._follow_up_context_chars,
         )
-        follow_up_stage_messages = self._build_turn_expected_outcome_stage_messages(
-            data=data,
-            stage="summariser",
-        )
+        follow_up_stage_messages = [
+            *self._build_turn_expected_outcome_stage_messages(
+                data=data,
+                stage="summariser",
+            ),
+            *self._build_tool_follow_up_stage_messages(data=data),
+        ]
         follow_up_context, follow_up_context_telemetry = self._build_stage_llm_context(
             base_context=follow_up_context,
             stage="summariser",
@@ -8512,7 +8515,12 @@ class InternalMCPChatOrchestrator:
                 and isinstance(unresolved.get("effect_type"), str)
                 and str(unresolved.get("effect_type") or "").strip()
             }
-            if unresolved_effect_types == {"tool_execution"}:
+            if unresolved_effect_types == {"required_evidence_answer_consistency"}:
+                status_line = (
+                    "Execution status: retrieved evidence and the drafted answer "
+                    "were inconsistent."
+                )
+            elif unresolved_effect_types == {"tool_execution"}:
                 if decision == "failed":
                     status_line = "Execution status: planned tool execution did not complete successfully."
                 else:
@@ -21699,6 +21707,89 @@ class InternalMCPChatOrchestrator:
                 user_anchor_concept_id = candidate_concept_ids[0]
         return user_anchor_name, user_anchor_concept_id
 
+    @staticmethod
+    def _guided_retrieval_focus_terms(
+        *,
+        lower_prompt: str,
+        combined_context: str,
+    ) -> tuple[str, ...]:
+        focus_terms: list[str] = []
+
+        def _add_term(term: str, *tokens: str) -> None:
+            if term in focus_terms:
+                return
+            if any(token in lower_prompt or token in combined_context for token in tokens):
+                focus_terms.append(term)
+
+        _add_term(
+            "papers",
+            "paper",
+            "papers",
+            "publication",
+            "publications",
+            "represented papers",
+            "authorship",
+        )
+        _add_term("projects", "project", "projects")
+        _add_term(
+            "research",
+            "research",
+            "research theme",
+            "research themes",
+            "collaborator",
+            "collaborators",
+        )
+        return tuple(focus_terms)
+
+    @staticmethod
+    def _combined_context_mentions_open_jira_items(combined_context: str) -> bool:
+        if not isinstance(combined_context, str) or not combined_context.strip():
+            return False
+        lowered = combined_context.lower()
+        if "jira" not in lowered:
+            return False
+        return any(
+            token in lowered
+            for token in (
+                "open jira task",
+                "open jira tasks",
+                "open jira issue",
+                "open jira issues",
+                "open task",
+                "open tasks",
+                "open issue",
+                "open issues",
+                "unresolved jira",
+                "still-open jira",
+                "statuscategory != done",
+            )
+        )
+
+    @classmethod
+    def _build_guided_jira_search_jql(
+        cls,
+        *,
+        combined_context: str,
+        user_anchor_name: str | None,
+        user_anchor_concept_id: str | None,
+    ) -> str | None:
+        anchor_clauses: list[str] = []
+        if user_anchor_concept_id:
+            anchor_clauses.append(f'text ~ "\\"{user_anchor_concept_id}\\""')
+        if user_anchor_name:
+            anchor_clauses.append(f'text ~ "\\"{user_anchor_name}\\""')
+        if not anchor_clauses:
+            return None
+
+        anchor_expression = (
+            f"({' OR '.join(anchor_clauses)})"
+            if len(anchor_clauses) > 1
+            else anchor_clauses[0]
+        )
+        if cls._combined_context_mentions_open_jira_items(combined_context):
+            return f"statusCategory != Done AND {anchor_expression} ORDER BY updated DESC"
+        return f"{anchor_expression} ORDER BY updated DESC"
+
     @classmethod
     def _build_guided_retrieval_query(
         cls,
@@ -21715,14 +21806,15 @@ class InternalMCPChatOrchestrator:
             if isinstance(user_anchor_name, str) and str(user_anchor_name).strip()
             else ""
         )
+        focus_terms = cls._guided_retrieval_focus_terms(
+            lower_prompt=lower_prompt,
+            combined_context=combined_context,
+        )
 
-        first_person_research_prompt = (
+        first_person_profile_prompt = (
             anchor_name
             and any(token in lower_prompt for token in (" my ", " me ", "mine", "my "))
-            and any(
-                token in lower_prompt
-                for token in ("paper", "papers", "research", "arxiv", "briefing")
-            )
+            and bool(focus_terms or "arxiv" in lower_prompt or "briefing" in lower_prompt)
         )
         grounding_prompt = any(
             token in combined_context
@@ -21737,14 +21829,21 @@ class InternalMCPChatOrchestrator:
         )
 
         if tool_name == "search_arxiv" and anchor_name and (
-            first_person_research_prompt or grounding_prompt
+            first_person_profile_prompt or grounding_prompt
         ):
             return f'"{anchor_name}"'
 
         if tool_name == "search_web" and anchor_name and (
-            first_person_research_prompt or grounding_prompt
+            first_person_profile_prompt or grounding_prompt
         ):
             return f'"{anchor_name}" research papers'
+
+        if tool_name in {"search_knowledge_base", "search_concepts"} and anchor_name and (
+            first_person_profile_prompt or grounding_prompt
+        ):
+            query_tokens = [anchor_name, *focus_terms]
+            if len(query_tokens) > 1:
+                return " ".join(query_tokens)
 
         return prompt_text
 
@@ -21863,11 +21962,17 @@ class InternalMCPChatOrchestrator:
             and "search_knowledge_base" in available_tools
             and "search_knowledge_base" not in invoked_lookup
         ):
+            kb_query = self._build_guided_retrieval_query(
+                tool_name="search_knowledge_base",
+                user_text=prompt_text,
+                combined_context=combined_context,
+                user_anchor_name=user_anchor_name,
+            )
             forced_calls.append(
                 {
                     "action": "call_tool",
                     "tool": "search_knowledge_base",
-                    "payload": {"query": prompt_text, "top_k": 5},
+                    "payload": {"query": kb_query, "top_k": 5},
                 }
             )
         if (
@@ -21875,13 +21980,21 @@ class InternalMCPChatOrchestrator:
             and "search_concepts" in available_tools
             and "search_concepts" not in invoked_lookup
         ):
+            concept_query = self._build_guided_retrieval_query(
+                tool_name="search_concepts",
+                user_text=prompt_text,
+                combined_context=combined_context,
+                user_anchor_name=user_anchor_name,
+            )
             forced_calls.append(
                 {
                     "action": "call_tool",
                     "tool": "search_concepts",
                     "payload": {
-                        "query": prompt_text,
-                        "match_type": "all",
+                        "query": concept_query,
+                        "match_type": (
+                            "any" if concept_query != prompt_text else "all"
+                        ),
                         "include_description": True,
                         "limit": 8,
                     },
@@ -21892,19 +22005,18 @@ class InternalMCPChatOrchestrator:
             and "jira_search" in available_tools
             and "jira_search" not in invoked_lookup
         ):
-            jql_clauses: list[str] = []
-            if user_anchor_concept_id:
-                jql_clauses.append(f'text ~ "\\"{user_anchor_concept_id}\\""')
-            if user_anchor_name:
-                jql_clauses.append(f'text ~ "\\"{user_anchor_name}\\""')
-            if jql_clauses:
+            guided_jql = self._build_guided_jira_search_jql(
+                combined_context=combined_context,
+                user_anchor_name=user_anchor_name,
+                user_anchor_concept_id=user_anchor_concept_id,
+            )
+            if guided_jql:
                 forced_calls.append(
                     {
                         "action": "call_tool",
                         "tool": "jira_search",
                         "payload": {
-                            "jql": " OR ".join(jql_clauses)
-                            + " ORDER BY updated DESC",
+                            "jql": guided_jql,
                             "max_results": 10,
                         },
                     }
@@ -24454,6 +24566,138 @@ class InternalMCPChatOrchestrator:
             lines.append(f"- Why this matters: {reasoning}")
 
         return [{"role": "system", "content": "\n".join(lines)}]
+
+    @staticmethod
+    def _tool_invocation_completed_successfully(
+        invocation: Mapping[str, Any],
+    ) -> bool:
+        if bool(invocation.get("blocked")):
+            return False
+        if isinstance(invocation.get("error"), str) and str(invocation.get("error")).strip():
+            return False
+
+        payload = invocation.get("effective_payload")
+        if not isinstance(payload, Mapping):
+            payload = invocation.get("payload")
+        if isinstance(payload, Mapping):
+            status_value = str(payload.get("status") or "").strip().lower()
+            if status_value in {"error", "failed", "failure"}:
+                return False
+            raw_success = payload.get("success")
+            if raw_success is False:
+                return False
+        return True
+
+    @staticmethod
+    def _extract_tool_result_count_for_follow_up(
+        tool_name: str,
+        payload: Mapping[str, Any] | None,
+    ) -> int | None:
+        if not isinstance(payload, Mapping):
+            return None
+
+        list_fields_by_tool = {
+            "jira_search": "issues",
+            "search_arxiv": "papers",
+        }
+        list_field = list_fields_by_tool.get(tool_name, "results")
+        raw_items = payload.get(list_field)
+        if isinstance(raw_items, list):
+            return len([item for item in raw_items if isinstance(item, Mapping)])
+
+        for field_name in ("total", "total_count", "total_results", "count"):
+            raw_value = payload.get(field_name)
+            try:
+                if raw_value is None:
+                    continue
+                return max(0, int(raw_value))
+            except Exception:
+                continue
+        return None
+
+    @classmethod
+    def _build_tool_follow_up_stage_messages(
+        cls,
+        *,
+        data: Mapping[str, Any],
+    ) -> list[dict[str, str]]:
+        invocations_raw = data.get("invocations")
+        invocations = (
+            invocations_raw if isinstance(invocations_raw, list) else []
+        )
+
+        summary_lines: list[str] = []
+        for invocation in invocations:
+            if not isinstance(invocation, Mapping):
+                continue
+            tool_name = str(invocation.get("tool") or invocation.get("method") or "").strip()
+            if tool_name not in {
+                "jira_search",
+                "search_knowledge_base",
+                "search_concepts",
+                "search_arxiv",
+                "search_web",
+            }:
+                continue
+            if not cls._tool_invocation_completed_successfully(invocation):
+                continue
+
+            payload = invocation.get("effective_payload")
+            if not isinstance(payload, Mapping):
+                payload = invocation.get("payload")
+            count = cls._extract_tool_result_count_for_follow_up(tool_name, payload)
+            if count is None:
+                continue
+
+            arguments = invocation.get("effective_arguments")
+            if not isinstance(arguments, Mapping):
+                arguments = invocation.get("arguments")
+            query_label = "query"
+            query_value = None
+            if isinstance(arguments, Mapping):
+                if tool_name == "jira_search":
+                    query_label = "jql"
+                    query_value = arguments.get("jql")
+                else:
+                    query_value = arguments.get("query")
+            query_text = (
+                str(query_value).strip()
+                if isinstance(query_value, str) and str(query_value).strip()
+                else None
+            )
+
+            noun = {
+                "jira_search": "issue",
+                "search_knowledge_base": "result",
+                "search_concepts": "concept",
+                "search_arxiv": "paper",
+                "search_web": "result",
+            }.get(tool_name, "result")
+            count_label = noun if count == 1 else f"{noun}s"
+            line = f"- {tool_name} returned {count} {count_label}"
+            if query_text:
+                line = f'{line} for {query_label} "{query_text}"'
+            summary_lines.append(line + ".")
+
+        if not summary_lines:
+            return []
+
+        return [
+            {
+                "role": "system",
+                "content": "\n".join(
+                    [
+                        "Retrieved evidence summary for this turn:",
+                        *summary_lines,
+                        (
+                            "Ground the answer in these observed retrieval counts. "
+                            "Do not claim that a retrieval surface returned no results "
+                            "when the retrieved payload for that surface is non-empty."
+                        ),
+                    ]
+                ),
+            }
+        ]
 
     @staticmethod
     def _build_turn_discovery_query_text(

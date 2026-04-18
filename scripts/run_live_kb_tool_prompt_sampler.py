@@ -47,6 +47,8 @@ REAL_PATH_REPLAY_GUIDE_NOTE = (
     "expectation-first preflight, real-path replay, false-empty verification, "
     "telemetry review, and thinking-panel review steps."
 )
+SERVER_METADATA_TIMEOUT_SECONDS = 15.0
+ACTIVE_LLM_INFO_TIMEOUT_SECONDS = 15.0
 PROMPT_COMPLEXITY_CLASS_DESCRIPTIONS: dict[str, str] = {
     "direct_context_or_background": (
         "Questions that a capable direct-response LLM should usually answer from "
@@ -637,9 +639,25 @@ def _augment_run_environment_with_server_diag(
     base_url: str,
     run_environment: dict[str, Any],
 ) -> dict[str, Any]:
-    diag_payload = _request_json(session, "GET", f"{base_url}/diag")
     augmented_environment = dict(run_environment)
-    augmented_environment.update(_summarise_server_diag(diag_payload))
+    last_error: str | None = None
+    for source, path in (("health", "/health"), ("diag", "/diag")):
+        try:
+            payload = _request_json(
+                session,
+                "GET",
+                f"{base_url}{path}",
+                timeout_seconds=SERVER_METADATA_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            last_error = f"{source}: {exc}"
+            continue
+        augmented_environment.update(_summarise_server_diag(payload))
+        augmented_environment["server_metadata_source"] = source
+        augmented_environment["server_metadata_error"] = None
+        return augmented_environment
+    augmented_environment["server_metadata_source"] = None
+    augmented_environment["server_metadata_error"] = last_error
     return augmented_environment
 
 
@@ -663,17 +681,23 @@ def _augment_run_environment_with_active_llm_info(
     organisation_concept_id: str,
     run_environment: dict[str, Any],
 ) -> dict[str, Any]:
-    llm_info_payload = _request_json(
-        session,
-        "GET",
-        f"{base_url}/api/settings/llm/info",
-        params={
-            "user_concept_id": user_concept_id,
-            "organisation_concept_id": organisation_concept_id,
-        },
-    )
     augmented_environment = dict(run_environment)
+    try:
+        llm_info_payload = _request_json(
+            session,
+            "GET",
+            f"{base_url}/api/settings/llm/info",
+            timeout_seconds=ACTIVE_LLM_INFO_TIMEOUT_SECONDS,
+            params={
+                "user_concept_id": user_concept_id,
+                "organisation_concept_id": organisation_concept_id,
+            },
+        )
+    except Exception as exc:
+        augmented_environment["server_resolved_active_llm_lookup_error"] = str(exc)
+        return augmented_environment
     augmented_environment.update(_summarise_active_llm_info(llm_info_payload))
+    augmented_environment["server_resolved_active_llm_lookup_error"] = None
     return augmented_environment
 
 

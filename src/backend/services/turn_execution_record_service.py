@@ -194,6 +194,7 @@ _VERIFICATION_READ_TOOL_PREFIXES = (
 _SEARCH_EVIDENCE_TOOL_NAMES = {
     "context_search",
     "find_concepts_by_name",
+    "jira_search",
     "qna_search",
     "search_arxiv",
     "search_concept_descriptions",
@@ -206,6 +207,24 @@ _SEARCH_EVIDENCE_TOOL_PREFIXES = ("search_",)
 _SEARCH_EVIDENCE_MAX_ARGUMENT_CHARS = 50_000
 _SEARCH_EVIDENCE_MAX_RESULT_CHARS = 500_000
 _SEARCH_EVIDENCE_PREVIEW_CHARS = 8_000
+_JIRA_EMPTY_RESULT_CLAIM_MARKERS = (
+    "no jira tasks found",
+    "no jira task found",
+    "no open jira tasks",
+    "no open jira task",
+    "no jira issues found",
+    "no jira issue found",
+    "unable to find any open jira tasks",
+    "unable to find any jira tasks",
+    "unable to find any open jira issues",
+    "unable to find any jira issues",
+    "couldn't find any open jira tasks",
+    "could not find any open jira tasks",
+    "didn't find any open jira tasks",
+    "did not find any open jira tasks",
+    "search returned no issues",
+    "returned no issues",
+)
 
 _MUTATION_INTENT_TERMS = (
     "add",
@@ -1361,6 +1380,187 @@ def build_search_tool_evidence(
         evidence.append(entry)
 
     return evidence
+
+
+def _normalise_text_for_matching(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    return re.sub(r"\s+", " ", value.strip().lower())
+
+
+def _extract_search_evidence_result_count(entry: Mapping[str, Any]) -> int | None:
+    result_value = entry.get("result")
+    if isinstance(result_value, Mapping):
+        for field_name in ("issues", "results", "papers"):
+            raw_items = result_value.get(field_name)
+            if isinstance(raw_items, list):
+                return len(raw_items)
+        for field_name in ("total", "total_count", "total_results", "count"):
+            raw_count = result_value.get(field_name)
+            try:
+                if raw_count is None:
+                    continue
+                return max(0, int(raw_count))
+            except Exception:
+                continue
+
+    result_summary = _safe_str(entry.get("result_summary"))
+    if result_summary:
+        match = re.search(
+            r"\bfound\s+(\d+)\s+(?:jira\s+)?(?:issue|issues|result|results|paper|papers|concept|concepts)\b",
+            result_summary,
+            flags=re.IGNORECASE,
+        )
+        if match is not None:
+            try:
+                return max(0, int(match.group(1)))
+            except Exception:
+                return None
+    return None
+
+
+def _response_claims_empty_jira_results(response_text: Any) -> bool:
+    normalised = _normalise_text_for_matching(response_text)
+    if not normalised:
+        return False
+    return any(marker in normalised for marker in _JIRA_EMPTY_RESULT_CLAIM_MARKERS)
+
+
+def _derive_prompt_required_evidence_answer_consistency_blocker(
+    *,
+    response_text: Any,
+    prompt_required_evidence_contract: Mapping[str, Any] | None,
+    search_evidence: Sequence[Mapping[str, Any]] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(prompt_required_evidence_contract, Mapping):
+        return None
+    if not _response_claims_empty_jira_results(response_text):
+        return None
+
+    artefact_context_raw = prompt_required_evidence_contract.get("artefact_context")
+    artefact_context = (
+        artefact_context_raw if isinstance(artefact_context_raw, Mapping) else {}
+    )
+    required_tools = _dedupe_string_sequence(
+        artefact_context.get("required_tools") or []
+    )
+    if not required_tools:
+        for effect in prompt_required_evidence_contract.get("required_effects") or []:
+            if not isinstance(effect, Mapping):
+                continue
+            required_tools.extend(effect.get("required_tools") or [])
+        required_tools = _dedupe_string_sequence(required_tools)
+    if "jira_search" not in {tool_name.lower() for tool_name in required_tools}:
+        return None
+
+    best_jira_entry: Mapping[str, Any] | None = None
+    best_result_count = 0
+    for entry in search_evidence or ():
+        if not isinstance(entry, Mapping):
+            continue
+        tool_name = (_safe_str(entry.get("tool")) or "").lower()
+        if tool_name != "jira_search":
+            continue
+        if (_safe_str(entry.get("status")) or "").lower() != "ok":
+            continue
+        result_count = _extract_search_evidence_result_count(entry)
+        if result_count is None or result_count <= 0:
+            continue
+        if result_count > best_result_count:
+            best_result_count = result_count
+            best_jira_entry = entry
+    if best_jira_entry is None:
+        return None
+
+    arguments = best_jira_entry.get("arguments")
+    jql_text = None
+    if isinstance(arguments, Mapping):
+        jql_text = _safe_str(arguments.get("jql"))
+
+    status_reason = (
+        f"Jira retrieval returned {best_result_count} issue(s), but the answer claimed that no Jira issues or tasks were found."
+    )
+    if jql_text:
+        status_reason = f'{status_reason} Observed JQL: "{jql_text}".'
+
+    failure_code = (
+        "prompt_required_evidence_jira_search_nonempty_results_contradict_empty_answer"
+    )
+    return {
+        "effect_id": "effect_prompt_required_evidence_jira_answer_consistency",
+        "effect_type": "required_evidence_answer_consistency",
+        "status": "not_satisfied",
+        "status_reason": status_reason,
+        "failure_code": failure_code,
+        "failure_codes": [failure_code],
+        "decision": "partial",
+        "decision_reason": status_reason,
+        "repeat_eligible": True,
+        "observed_result_count": best_result_count,
+        "tool": "jira_search",
+        "jql": jql_text,
+    }
+
+
+def _apply_completion_gate_blocker(
+    *,
+    completion_gate: Mapping[str, Any] | None,
+    blocker: Mapping[str, Any],
+) -> dict[str, Any]:
+    gate_payload = dict(completion_gate) if isinstance(completion_gate, Mapping) else {}
+    evidence_payload_raw = gate_payload.get("evidence_payload")
+    evidence_payload = (
+        dict(evidence_payload_raw) if isinstance(evidence_payload_raw, Mapping) else {}
+    )
+
+    unresolved_preconditions: list[dict[str, Any]] = []
+    unresolved_raw = evidence_payload.get("unresolved_preconditions")
+    if isinstance(unresolved_raw, list):
+        unresolved_preconditions.extend(
+            dict(item) for item in unresolved_raw if isinstance(item, Mapping)
+        )
+    unresolved_preconditions.append(
+        {
+            "effect_id": _safe_str(blocker.get("effect_id"))
+            or "effect_required_evidence_answer_consistency_1",
+            "effect_type": _safe_str(blocker.get("effect_type"))
+            or "required_evidence_answer_consistency",
+            "status": _safe_str(blocker.get("status")) or "not_satisfied",
+            "status_reason": _safe_str(blocker.get("status_reason")) or "",
+            "failure_codes": _dedupe_string_sequence(blocker.get("failure_codes") or []),
+        }
+    )
+    evidence_payload["unresolved_preconditions"] = unresolved_preconditions
+    evidence_payload["required_evidence_answer_consistency_blocker"] = dict(blocker)
+    evidence_payload["completion_outcome"] = "inconclusive"
+
+    blocking_effect_ids = _dedupe_string_sequence(
+        [
+            *(gate_payload.get("blocking_effect_ids") or []),
+            _safe_str(blocker.get("effect_id")),
+        ]
+    )
+    blocking_failure_codes = _dedupe_string_sequence(
+        [
+            *(gate_payload.get("blocking_failure_codes") or []),
+            *(_dedupe_string_sequence(blocker.get("failure_codes") or [])),
+            _safe_str(blocker.get("failure_code")),
+        ]
+    )
+    gate_payload.update(
+        {
+            "decision": _safe_str(blocker.get("decision")) or "partial",
+            "decision_reason": _safe_str(blocker.get("decision_reason"))
+            or "Answer contradicted retrieved evidence.",
+            "blocking_effect_ids": blocking_effect_ids,
+            "blocking_failure_codes": blocking_failure_codes,
+            "safe_to_claim_completion": False,
+            "requires_follow_up": True,
+            "repeat_eligible": bool(blocker.get("repeat_eligible", True)),
+            "evidence_payload": evidence_payload,
+        }
+    )
+    return gate_payload
 
 
 def _is_write_tool(tool_name: str | None) -> bool:
@@ -5912,6 +6112,31 @@ def build_turn_execution_record(
         completion_claim_validated=bool(completion_claim["validated"]),
         execution_summary=execution_summary,
     )
+    prompt_required_evidence_answer_consistency_blocker = (
+        _derive_prompt_required_evidence_answer_consistency_blocker(
+            response_text=response_text,
+            prompt_required_evidence_contract=prompt_required_evidence_contract,
+            search_evidence=search_evidence_payload,
+        )
+    )
+    existing_gate_failure_codes = {
+        code.lower()
+        for code in _dedupe_string_sequence(
+            completion_gate.get("blocking_failure_codes") or []
+        )
+        if isinstance(code, str) and code.strip()
+    }
+    if (
+        isinstance(prompt_required_evidence_answer_consistency_blocker, Mapping)
+        and (
+            bool(completion_gate.get("safe_to_claim_completion", False))
+            or existing_gate_failure_codes.issubset({"postcondition_inconclusive"})
+        )
+    ):
+        completion_gate = _apply_completion_gate_blocker(
+            completion_gate=completion_gate,
+            blocker=prompt_required_evidence_answer_consistency_blocker,
+        )
 
     latest_progress = (
         turn_execution_diagnostics.get("latest_progress")
@@ -6032,6 +6257,9 @@ def build_turn_execution_record(
     execution_summary_with_contract["search_evidence_count"] = len(
         search_evidence_payload
     )
+    execution_summary_with_contract[
+        "required_evidence_answer_consistency_blocked"
+    ] = bool(prompt_required_evidence_answer_consistency_blocker)
     if isinstance(workflow_required_effects_contract, Mapping):
         execution_summary_with_contract["workflow_required_effects_contract_id"] = (
             _safe_str(workflow_required_effects_contract.get("contract_id"))

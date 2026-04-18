@@ -566,6 +566,67 @@ def test_prompt_required_evidence_contract_blocks_missing_surface() -> None:
     )
 
 
+def test_prompt_required_evidence_contract_blocks_false_empty_jira_answer() -> None:
+    record = _build_record(
+        prompt_text=(
+            "Which of my open Jira tasks seem most closely connected to the papers "
+            "and projects you know about me?"
+        ),
+        response_text=(
+            "I couldn't identify any connections because no open Jira tasks were found."
+        ),
+        required_prompt_tools=["jira_search"],
+        tool_invocations=[
+            {
+                "tool": "jira_search",
+                "arguments": {
+                    "jql": (
+                        'statusCategory != Done AND (text ~ "\\"#V#michael_witbrock\\"" '
+                        'OR text ~ "\\"Michael Witbrock\\"") ORDER BY updated DESC'
+                    )
+                },
+                "effective_payload": {
+                    "success": True,
+                    "total": 1,
+                    "issues": [
+                        {
+                            "key": "JVNAUTOSCI-1902",
+                            "fields": {"summary": "Replay open-Jira task grounding"},
+                        }
+                    ],
+                },
+                "result_summary": "Found 1 issue",
+            }
+        ],
+    )
+
+    execution = record.get("execution")
+    assert isinstance(execution, dict)
+    assert execution.get("summary", {}).get(
+        "required_evidence_answer_consistency_blocked"
+    ) is True
+
+    completion_gate = record.get("completion_gate") or {}
+    assert completion_gate.get("decision") == "partial"
+    assert completion_gate.get("safe_to_claim_completion") is False
+    assert completion_gate.get("requires_follow_up") is True
+    assert (
+        "prompt_required_evidence_jira_search_nonempty_results_contradict_empty_answer"
+        in (completion_gate.get("blocking_failure_codes") or [])
+    )
+
+    evidence_payload = completion_gate.get("evidence_payload") or {}
+    blocker = evidence_payload.get("required_evidence_answer_consistency_blocker") or {}
+    assert blocker.get("effect_type") == "required_evidence_answer_consistency"
+    assert blocker.get("observed_result_count") == 1
+    unresolved = evidence_payload.get("unresolved_preconditions") or []
+    assert any(
+        isinstance(item, dict)
+        and item.get("effect_type") == "required_evidence_answer_consistency"
+        for item in unresolved
+    )
+
+
 def test_prompt_required_mutation_contract_blocks_missing_task_create() -> None:
     record = _build_record(
         prompt_text=(

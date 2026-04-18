@@ -399,6 +399,67 @@ def test_summarise_server_diag_extracts_relevant_server_fields() -> None:
     assert summary["server_worker_running"] is False
 
 
+def test_augment_run_environment_with_server_diag_prefers_health_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_request_json(*args: object, **kwargs: object) -> dict[str, object]:
+        url = str(args[2])
+        calls.append(url)
+        if url.endswith("/health"):
+            return {
+                "version": "v20250421_1015_backend+gabc123",
+                "version_details": {
+                    "git_branch": "main",
+                    "git_commit": "abc123",
+                    "git_short_commit": "abc123",
+                    "git_dirty": None,
+                },
+            }
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    monkeypatch.setattr(sampler, "_request_json", fake_request_json)
+
+    summary = sampler._augment_run_environment_with_server_diag(
+        session=requests.Session(),
+        base_url="http://127.0.0.1:5000",
+        run_environment={"base_url": "http://127.0.0.1:5000"},
+    )
+
+    assert calls == ["http://127.0.0.1:5000/health"]
+    assert summary["server_metadata_source"] == "health"
+    assert summary["server_metadata_error"] is None
+    assert summary["server_reported_git_branch"] == "main"
+    assert summary["server_reported_git_commit"] == "abc123"
+
+
+def test_augment_run_environment_with_server_diag_records_lookup_error_when_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_request_json(*args: object, **kwargs: object) -> dict[str, object]:
+        url = str(args[2])
+        calls.append(url)
+        raise RuntimeError(f"timeout for {url}")
+
+    monkeypatch.setattr(sampler, "_request_json", fake_request_json)
+
+    summary = sampler._augment_run_environment_with_server_diag(
+        session=requests.Session(),
+        base_url="http://127.0.0.1:5000",
+        run_environment={"base_url": "http://127.0.0.1:5000"},
+    )
+
+    assert calls == [
+        "http://127.0.0.1:5000/health",
+        "http://127.0.0.1:5000/diag",
+    ]
+    assert summary["server_metadata_source"] is None
+    assert "diag:" in str(summary["server_metadata_error"])
+
+
 def test_summarise_active_llm_info_extracts_relevant_fields() -> None:
     summary = sampler._summarise_active_llm_info(
         {
@@ -415,6 +476,25 @@ def test_summarise_active_llm_info_extracts_relevant_fields() -> None:
     assert summary["server_resolved_active_llm_status"] == "ready"
     assert summary["server_resolved_active_llm_ping_ok"] is True
     assert summary["server_resolved_active_llm_error"] is None
+
+
+def test_augment_run_environment_with_active_llm_info_records_lookup_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_request_json(*args: object, **kwargs: object) -> dict[str, object]:
+        raise RuntimeError("llm info timeout")
+
+    monkeypatch.setattr(sampler, "_request_json", fake_request_json)
+
+    summary = sampler._augment_run_environment_with_active_llm_info(
+        session=requests.Session(),
+        base_url="http://127.0.0.1:5000",
+        user_concept_id="#V#michael_witbrock",
+        organisation_concept_id="university_of_auckland_strong_ai_lab",
+        run_environment={"base_url": "http://127.0.0.1:5000"},
+    )
+
+    assert summary["server_resolved_active_llm_lookup_error"] == "llm info timeout"
 
 
 def test_build_summary_includes_replay_guide_metadata() -> None:
@@ -457,8 +537,11 @@ def test_build_summary_includes_replay_guide_metadata() -> None:
             "local_repo_git_head": "abc123",
             "server_reported_git_branch": "jvnautosci-1894-replay-programme",
             "server_reported_git_commit": "abc123",
+            "server_metadata_source": "health",
+            "server_metadata_error": None,
             "server_resolved_active_llm_provider": "ollama",
             "server_resolved_active_llm_model": "gemma4:26b",
+            "server_resolved_active_llm_lookup_error": None,
             "requested_model": "gemma4:26b",
             "run_started_at_utc": "2026-04-16T19:00:00+00:00",
             "session_name": "test session",

@@ -136,6 +136,12 @@ def mock_gateway():
 def orchestrator(mock_gateway):
     """Create an orchestrator instance with mocked gateway."""
     orch = InternalMCPChatOrchestrator(gateway=mock_gateway)
+    cast(Any, orch)._load_base_system_prompt_from_vontology = (
+        lambda preferred_language=None: (
+            "Test base system prompt",
+            "#V#test_base_prompt",
+        )
+    )
     original_run_llm_with_fallbacks = orch._run_llm_with_fallbacks
     selector = cast(Any, orch._workflow_selector)
 
@@ -1406,7 +1412,64 @@ def test_guided_retrieval_retry_uses_user_anchor_for_research_briefing() -> None
     )
     assert (
         by_tool["jira_search"]["payload"]["jql"]
-        == 'text ~ "\\"#V#michael_witbrock\\"" OR text ~ "\\"Michael Witbrock\\"" ORDER BY updated DESC'
+        == '(text ~ "\\"#V#michael_witbrock\\"" OR text ~ "\\"Michael Witbrock\\"") ORDER BY updated DESC'
+    )
+
+
+def test_guided_retrieval_retry_filters_open_jira_tasks_and_focuses_kb_query() -> None:
+    gateway = MagicMock()
+    gateway.describe_methods.return_value = {
+        "search_knowledge_base": {},
+        "search_concepts": {},
+        "jira_search": {},
+    }
+    orchestrator = InternalMCPChatOrchestrator(gateway=gateway)
+
+    calls = orchestrator._infer_guided_retrieval_retry_tool_calls(
+        user_text=(
+            "Which of my open Jira tasks seem most closely connected to the "
+            "papers and projects you know about me?"
+        ),
+        context_messages=[
+            {
+                "role": "system",
+                "content": (
+                    "CURRENT USER CONTEXT: Michael Witbrock (#V#michael_witbrock)\n"
+                    "Selector guidance: Use search_knowledge_base and search_concepts "
+                    "for my represented papers and projects, then jira_search for "
+                    "open Jira tasks."
+                ),
+            }
+        ],
+        expected_outcome_contract={
+            "summary": (
+                "A grounded answer relating the user's open Jira tasks to their "
+                "represented papers and projects."
+            ),
+            "selector_guidance": (
+                "Use search_knowledge_base and search_concepts for the represented "
+                "papers/projects, then jira_search for open Jira tasks."
+            ),
+            "grounding_requirement": (
+                "Connections to papers and projects must be grounded in represented "
+                "KB evidence, and open Jira tasks must be verified via jira_search."
+            ),
+        },
+        invoked_tool_names=[],
+    )
+
+    assert calls is not None
+    by_tool = {str(call["tool"]): call for call in calls}
+    assert by_tool["search_knowledge_base"]["payload"]["query"] == (
+        "Michael Witbrock papers projects"
+    )
+    assert by_tool["search_concepts"]["payload"]["query"] == (
+        "Michael Witbrock papers projects"
+    )
+    assert by_tool["search_concepts"]["payload"]["match_type"] == "any"
+    assert by_tool["jira_search"]["payload"]["jql"] == (
+        'statusCategory != Done AND (text ~ "\\"#V#michael_witbrock\\"" OR '
+        'text ~ "\\"Michael Witbrock\\"") ORDER BY updated DESC'
     )
 
 
