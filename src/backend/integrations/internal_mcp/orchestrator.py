@@ -25656,7 +25656,13 @@ class InternalMCPChatOrchestrator:
                 else ()
             )
             direct_response_text: str | None = None
-            plain_response_stage_messages = (
+            plain_response_stage_messages: list[dict[str, str]] = []
+            current_turn_message = self._build_turn_current_request_stage_message(
+                prompt_text
+            )
+            if isinstance(current_turn_message, dict):
+                plain_response_stage_messages.append(current_turn_message)
+            plain_response_stage_messages.extend(
                 self._build_turn_expected_outcome_stage_messages(
                     data=data,
                     stage="plain_response",

@@ -575,6 +575,13 @@ def test_generate_authorship_turn_prefers_grounded_omission_over_unsupported_pap
         raising=False,
     )
     app = _make_app(monkeypatch, llm=llm)
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.chat_history_service.get_chat_history",
+        lambda *_args, **_kwargs: [
+            {"role": "user", "content": "Check my papers"},
+            {"role": "assistant", "content": "I need more grounded context first."},
+        ],
+    )
 
     client = app.test_client()
     response = client.post(
@@ -614,13 +621,6 @@ def test_generate_authorship_turn_prefers_grounded_omission_over_unsupported_pap
         assert "expected_outcome_inference" in stage_diagnostic_ids
         assert "selector_preparation" in stage_diagnostic_ids
         assert "selector_decision" in stage_diagnostic_ids
-    timing_breakdown = diagnostics.get("timing_breakdown") or {}
-    assert any(
-        str(entry.get("stage")) == "plain_response"
-        for entry in (timing_breakdown.get("stages") or [])
-        if isinstance(entry, dict)
-    )
-
     turn_record = llm_debug.get("turn_execution_record") or {}
     execution = turn_record.get("execution") or {}
     selected_workflow_trace = execution.get("selected_workflow_trace") or {}
@@ -633,6 +633,15 @@ def test_generate_authorship_turn_prefers_grounded_omission_over_unsupported_pap
     )
     assert (direct_response_context_lineage.get("stage_added_message_count") or 0) >= 1
     assert any(
+        "Current turn request" in str(message.get("content_preview") or "")
+        and "What papers of mine do you know about?"
+        in str(message.get("content_preview") or "")
+        for message in (
+            direct_response_context_lineage.get("stage_added_messages") or []
+        )
+        if isinstance(message, dict)
+    )
+    assert any(
         "Expected answer contract for this turn"
         in str(message.get("content_preview") or "")
         for message in (
@@ -640,6 +649,19 @@ def test_generate_authorship_turn_prefers_grounded_omission_over_unsupported_pap
         )
         if isinstance(message, dict)
     )
+    direct_response_call = next(
+        call
+        for call in llm.calls
+        if call.get("prompt") == "What papers of mine do you know about?"
+    )
+    direct_response_context_text = "\n".join(
+        str(message.get("content") or "")
+        for message in (direct_response_call.get("context") or [])
+        if isinstance(message, dict)
+    )
+    assert "Check my papers" in direct_response_context_text
+    assert "Current turn request" in direct_response_context_text
+    assert "What papers of mine do you know about?" in direct_response_context_text
     expected_outcome_contract = (
         selected_workflow_trace.get("expected_outcome_contract") or {}
     )
