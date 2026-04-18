@@ -312,13 +312,9 @@ def test_swift_blob_store_cloud_not_found_falls_back_to_envvars(
         def __init__(self, **kwargs):
             self.kwargs = kwargs
 
-    class _DummyCloud:
-        def __init__(self, name: str):
-            self.name = name
-
     class _DummyOpenStackConfig:
-        def get_all_clouds(self):
-            return [_DummyCloud("envvars")]
+        def get_cloud_names(self):
+            return ["envvars"]
 
     def _fake_connect(*, cloud):
         raise ConfigException(f"Cloud {cloud} was not found.")
@@ -351,6 +347,90 @@ def test_swift_blob_store_cloud_not_found_falls_back_to_envvars(
     assert store._conn.kwargs["auth_url"] == "https://identity.example/v3"
     assert store._conn.kwargs["username"] == "demo-user"
     assert store._conn.kwargs["project_name"] == "demo-project"
+
+
+def test_swift_blob_store_cloud_not_found_falls_back_to_application_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import importlib as _importlib
+
+    class ConfigException(Exception):
+        pass
+
+    class _DummyConnection:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class _DummyOpenStackConfig:
+        def get_cloud_names(self):
+            return ["envvars"]
+
+    def _fake_connect(*, cloud):
+        raise ConfigException(f"Cloud {cloud} was not found.")
+
+    openstack_mod = SimpleNamespace(connect=_fake_connect)
+    connection_mod = SimpleNamespace(Connection=_DummyConnection)
+    config_mod = SimpleNamespace(OpenStackConfig=_DummyOpenStackConfig)
+    real_import_module = _importlib.import_module
+
+    def _fake_import_module(name: str, package: str | None = None):
+        if name == "openstack":
+            return openstack_mod
+        if name == "openstack.connection":
+            return connection_mod
+        if name == "openstack.config":
+            return config_mod
+        return real_import_module(name, package)
+
+    monkeypatch.setattr(_importlib, "import_module", _fake_import_module)
+    monkeypatch.setenv("OS_AUTH_URL", "https://api.nz-por-1.catalystcloud.io:5000/v3")
+    monkeypatch.setenv("OS_APPLICATION_CREDENTIAL_ID", "dummy-app-cred-id")
+    monkeypatch.setenv("OS_APPLICATION_CREDENTIAL_SECRET", "dummy-app-cred-secret")
+    monkeypatch.setenv("OS_REGION_NAME", "nz-por-1")
+
+    store = SwiftBlobStore(container="demo-container", cloud="catalystcloud")
+    assert isinstance(store._conn, _DummyConnection)
+    assert (
+        store._conn.kwargs["auth_url"]
+        == "https://api.nz-por-1.catalystcloud.io:5000/v3"
+    )
+    assert store._conn.kwargs["auth_type"] == "v3applicationcredential"
+    assert store._conn.kwargs["application_credential_id"] == "dummy-app-cred-id"
+    assert (
+        store._conn.kwargs["application_credential_secret"]
+        == "dummy-app-cred-secret"
+    )
+    assert store._conn.kwargs["region_name"] == "nz-por-1"
+
+
+def test_swift_blob_store_put_bytes_classifies_network_failures(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class _DummyObjectStore:
+        def create_object(self, **kwargs):
+            raise RuntimeError("Max retries exceeded with url: /v1/AUTH_demo")
+
+    class _DummyConn:
+        def __init__(self):
+            self.object_store = _DummyObjectStore()
+
+    monkeypatch.setenv("OS_AUTH_URL", "https://api.nz-por-1.catalystcloud.io:5000/v3")
+    monkeypatch.setenv("OS_REGION_NAME", "nz-por-1")
+
+    store = SwiftBlobStore.__new__(SwiftBlobStore)
+    store._container = "demo-container"
+    store._prefix = ""
+    store._public_base_url = None
+    store._cloud = "catalystcloud"
+    store._conn = _DummyConn()
+
+    with pytest.raises(RuntimeError) as exc_info:
+        store.put_bytes("demo/thing.txt", b"hello")
+
+    message = str(exc_info.value)
+    assert "network/connectivity failure" in message
+    assert "not a local clouds.yaml/profile lookup failure" in message
+    assert "nz-por-1" in message
 
 
 def test_s3_blob_store_methods_use_s3_client_signatures():

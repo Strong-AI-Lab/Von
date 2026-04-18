@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 
 @dataclass(frozen=True)
@@ -50,7 +51,13 @@ def _first_non_empty_env(*names: str) -> str | None:
 def _swift_config_present() -> bool:
     if not _first_non_empty_env("VON_SWIFT_CONTAINER"):
         return False
-    if _first_non_empty_env("OS_CLOUD"):
+    if _first_non_empty_env("OS_CLOUD", "OS_CLOUD_NAME"):
+        return True
+    if (
+        _first_non_empty_env("OS_AUTH_URL")
+        and _first_non_empty_env("OS_APPLICATION_CREDENTIAL_ID")
+        and _first_non_empty_env("OS_APPLICATION_CREDENTIAL_SECRET")
+    ):
         return True
     return bool(
         _first_non_empty_env("OS_AUTH_URL")
@@ -117,6 +124,137 @@ def _is_openstack_not_found_exception(exc: Exception) -> bool:
         return True
 
     return _exception_http_status(exc) == 404
+
+
+def _get_openstack_config_candidate_paths() -> list[Path]:
+    candidates: list[Path] = []
+
+    explicit = _first_non_empty_env("OS_CLIENT_CONFIG_FILE")
+    if explicit:
+        candidates.append(Path(explicit).expanduser())
+
+    home = Path.home().expanduser()
+    userprofile = Path(os.environ.get("USERPROFILE", str(home))).expanduser()
+
+    for root in (home, userprofile):
+        for relative in (
+            Path(".config") / "openstack" / "clouds.yaml",
+            Path(".config") / "openstack" / "clouds-public.yaml",
+        ):
+            candidate = root / relative
+            if candidate not in candidates:
+                candidates.append(candidate)
+
+    return candidates
+
+
+def _summarise_openstack_endpoint() -> str:
+    details: list[str] = []
+
+    auth_url = _first_non_empty_env("OS_AUTH_URL")
+    if auth_url:
+        parsed = urlsplit(auth_url)
+        endpoint_hint = f"{parsed.scheme or 'https'}://{parsed.netloc or parsed.path}"
+        if parsed.path and parsed.netloc:
+            endpoint_hint += parsed.path
+        details.append(f"auth_url={endpoint_hint!r}")
+
+    region_name = _first_non_empty_env("OS_REGION_NAME")
+    if region_name:
+        details.append(f"region={region_name!r}")
+
+    return ", ".join(details)
+
+
+def _summarise_openstack_env_auth_mode() -> str:
+    endpoint_hint = _summarise_openstack_endpoint()
+    suffix = f" ({endpoint_hint})" if endpoint_hint else ""
+
+    app_cred_id = _first_non_empty_env("OS_APPLICATION_CREDENTIAL_ID")
+    app_cred_secret = _first_non_empty_env("OS_APPLICATION_CREDENTIAL_SECRET")
+    if app_cred_id or app_cred_secret:
+        missing = [
+            name
+            for name in (
+                "OS_AUTH_URL",
+                "OS_APPLICATION_CREDENTIAL_ID",
+                "OS_APPLICATION_CREDENTIAL_SECRET",
+            )
+            if not _first_non_empty_env(name)
+        ]
+        if missing:
+            return (
+                "Environment-variable fallback is configured for application-credential "
+                f"auth but is missing: {missing!r}{suffix}."
+            )
+        return (
+            "Environment-variable fallback is configured for application-credential "
+            f"auth{suffix}."
+        )
+
+    if any(
+        _first_non_empty_env(name)
+        for name in ("OS_AUTH_URL", "OS_USERNAME", "OS_PASSWORD", "OS_PROJECT_NAME")
+    ):
+        missing = [
+            name
+            for name in ("OS_AUTH_URL", "OS_USERNAME", "OS_PASSWORD", "OS_PROJECT_NAME")
+            if not _first_non_empty_env(name)
+        ]
+        if missing:
+            return (
+                "Environment-variable fallback is configured for password auth but is "
+                f"missing: {missing!r}{suffix}."
+            )
+        return f"Environment-variable fallback is configured for password auth{suffix}."
+
+    return "No complete environment-variable fallback credentials are visible."
+
+
+def _is_networkish_openstack_failure(exc: Exception) -> bool:
+    text = f"{type(exc).__name__}: {exc}".lower()
+    markers = (
+        "connecttimeout",
+        "connectionerror",
+        "connectfailure",
+        "max retries exceeded",
+        "failed to establish a new connection",
+        "name or service not known",
+        "temporary failure in name resolution",
+        "proxyerror",
+        "ssl",
+        "timed out",
+        "connection refused",
+        "network is unreachable",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _is_auth_openstack_failure(exc: Exception) -> bool:
+    text = f"{type(exc).__name__}: {exc}".lower()
+    markers = (
+        "unauthorized",
+        "forbidden",
+        "401",
+        "403",
+        "authentication",
+        "invalid application credential",
+        "applicationcredential",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _is_endpoint_openstack_failure(exc: Exception) -> bool:
+    text = f"{type(exc).__name__}: {exc}".lower()
+    markers = (
+        "endpointnotfound",
+        "catalog",
+        "no suitable endpoint",
+        "object-store endpoint",
+        "object store endpoint",
+        "container not found",
+    )
+    return any(marker in text for marker in markers)
 
 
 class LocalBlobStore:
@@ -204,13 +342,18 @@ class SwiftBlobStore:
 
     Authentication uses standard OpenStack environment variables (OS_*) or OS_CLOUD.
 
-    Required env vars (unless using OS_CLOUD):
-    - OS_AUTH_URL
-    - OS_USERNAME
-    - OS_PASSWORD
-    - OS_PROJECT_NAME
-    - OS_USER_DOMAIN_NAME (often 'Default')
-    - OS_PROJECT_DOMAIN_NAME (often 'Default')
+    Supported env-var auth modes (unless using OS_CLOUD):
+    - Application credentials:
+      - OS_AUTH_URL
+      - OS_APPLICATION_CREDENTIAL_ID
+      - OS_APPLICATION_CREDENTIAL_SECRET
+    - Password auth:
+      - OS_AUTH_URL
+      - OS_USERNAME
+      - OS_PASSWORD
+      - OS_PROJECT_NAME
+      - OS_USER_DOMAIN_NAME (often 'Default')
+      - OS_PROJECT_DOMAIN_NAME (often 'Default')
 
     Required for this store:
     - VON_SWIFT_CONTAINER
@@ -236,31 +379,173 @@ class SwiftBlobStore:
 
         self._conn = self._create_connection()
 
-    def _create_connection_from_envvars(self, connection_mod):
-        def _require(name: str) -> str:
-            value = os.environ.get(name)
-            if not value:
-                raise ValueError(
-                    f"Missing required environment variable for Swift auth: {name}"
+    def _build_connection_kwargs_from_envvars(self) -> tuple[dict[str, Any], str]:
+        auth_url = _first_non_empty_env("OS_AUTH_URL")
+        region_name = _first_non_empty_env("OS_REGION_NAME")
+        interface = _first_non_empty_env("OS_INTERFACE")
+
+        app_cred_id = _first_non_empty_env("OS_APPLICATION_CREDENTIAL_ID")
+        app_cred_secret = _first_non_empty_env("OS_APPLICATION_CREDENTIAL_SECRET")
+        if app_cred_id or app_cred_secret:
+            missing = [
+                name
+                for name in (
+                    "OS_AUTH_URL",
+                    "OS_APPLICATION_CREDENTIAL_ID",
+                    "OS_APPLICATION_CREDENTIAL_SECRET",
                 )
-            return value
+                if not _first_non_empty_env(name)
+            ]
+            if missing:
+                raise ValueError(
+                    "Missing required environment variables for Swift "
+                    f"application-credential auth: {', '.join(missing)}"
+                )
 
-        auth_url = _require("OS_AUTH_URL")
-        username = _require("OS_USERNAME")
-        password = _require("OS_PASSWORD")
-        project_name = _require("OS_PROJECT_NAME")
-        user_domain_name = os.environ.get("OS_USER_DOMAIN_NAME", "Default")
-        project_domain_name = os.environ.get("OS_PROJECT_DOMAIN_NAME", "Default")
-        region_name = os.environ.get("OS_REGION_NAME")
+            kwargs: dict[str, Any] = {
+                "auth_url": auth_url,
+                "auth_type": "v3applicationcredential",
+                "application_credential_id": app_cred_id,
+                "application_credential_secret": app_cred_secret,
+                "region_name": region_name,
+            }
+            if interface:
+                kwargs["interface"] = interface
+            return kwargs, "application-credential"
 
-        return connection_mod.Connection(
-            auth_url=auth_url,
-            username=username,
-            password=password,
-            project_name=project_name,
-            user_domain_name=user_domain_name,
-            project_domain_name=project_domain_name,
-            region_name=region_name,
+        missing = [
+            name
+            for name in ("OS_AUTH_URL", "OS_USERNAME", "OS_PASSWORD", "OS_PROJECT_NAME")
+            if not _first_non_empty_env(name)
+        ]
+        if missing:
+            raise ValueError(
+                "Missing required environment variables for Swift password auth: "
+                + ", ".join(missing)
+            )
+
+        kwargs = {
+            "auth_url": auth_url,
+            "username": os.environ["OS_USERNAME"],
+            "password": os.environ["OS_PASSWORD"],
+            "project_name": os.environ["OS_PROJECT_NAME"],
+            "user_domain_name": os.environ.get("OS_USER_DOMAIN_NAME", "Default"),
+            "project_domain_name": os.environ.get("OS_PROJECT_DOMAIN_NAME", "Default"),
+            "region_name": region_name,
+        }
+        if interface:
+            kwargs["interface"] = interface
+        return kwargs, "password"
+
+    def _create_connection_from_envvars(self, connection_mod):
+        kwargs, _mode = self._build_connection_kwargs_from_envvars()
+        return connection_mod.Connection(**kwargs)
+
+    def _list_available_cloud_names(self, config_mod) -> list[str]:
+        OpenStackConfig = getattr(config_mod, "OpenStackConfig")
+        cfg = OpenStackConfig()
+        names = cfg.get_cloud_names()
+        return sorted({name for name in names if isinstance(name, str)})
+
+    def _build_cloud_resolution_error(
+        self,
+        *,
+        available_clouds: list[str],
+        env_exc: Exception | None = None,
+    ) -> ValueError:
+        parts = [
+            "OpenStack cloud profile resolution failed for "
+            f"OS_CLOUD={self._cloud!r}. This happened before Von could make a "
+            "Swift network request."
+        ]
+
+        if available_clouds:
+            parts.append(
+                f"Configured cloud names visible to openstacksdk: {available_clouds!r}."
+            )
+        else:
+            parts.append("No configured cloud names were visible to openstacksdk.")
+
+        explicit_config = _first_non_empty_env("OS_CLIENT_CONFIG_FILE")
+        if explicit_config:
+            config_path = Path(explicit_config).expanduser()
+            if config_path.exists():
+                parts.append(
+                    "OS_CLIENT_CONFIG_FILE points to "
+                    f"{config_path}, but that file does not define the requested "
+                    f"cloud name {self._cloud!r}."
+                )
+            else:
+                parts.append(
+                    "OS_CLIENT_CONFIG_FILE points to "
+                    f"{config_path}, but that file does not exist on this machine."
+                )
+        else:
+            existing_paths = [
+                path for path in _get_openstack_config_candidate_paths() if path.exists()
+            ]
+            if existing_paths:
+                parts.append(
+                    "No OS_CLIENT_CONFIG_FILE is set. OpenStack config files found at: "
+                    + ", ".join(str(path) for path in existing_paths)
+                    + "."
+                )
+            else:
+                parts.append(
+                    "No OS_CLIENT_CONFIG_FILE is set, and no clouds.yaml was found at "
+                    "the default Windows/OpenStack locations: "
+                    + ", ".join(str(path) for path in _get_openstack_config_candidate_paths())
+                    + "."
+                )
+
+        parts.append(_summarise_openstack_env_auth_mode())
+
+        if env_exc is not None:
+            parts.append(f"Environment-variable fallback also failed: {env_exc}.")
+
+        parts.append(
+            "On Windows/PowerShell, either set OS_CLIENT_CONFIG_FILE to the full "
+            "clouds.yaml path, or place clouds.yaml under "
+            "%USERPROFILE%\\.config\\openstack\\clouds.yaml, then restart Von."
+        )
+        return ValueError(" ".join(parts))
+
+    def _wrap_operation_exception(self, action: str, exc: Exception) -> RuntimeError:
+        endpoint_hint = _summarise_openstack_endpoint()
+        endpoint_suffix = f" ({endpoint_hint})" if endpoint_hint else ""
+
+        if _is_networkish_openstack_failure(exc):
+            return RuntimeError(
+                "Swift network/connectivity failure during "
+                f"{action}{endpoint_suffix}. Von had already resolved enough "
+                "configuration to attempt a remote OpenStack request, so this is "
+                "not a local clouds.yaml/profile lookup failure. Check outbound "
+                "network access, firewall/VPN/proxy rules, and the configured "
+                "region/endpoint. Underlying error: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+        if _is_auth_openstack_failure(exc):
+            return RuntimeError(
+                "Swift authentication/authorisation failure during "
+                f"{action}{endpoint_suffix}. Check the configured application "
+                "credential or password-based OpenStack credentials and confirm "
+                "that the project has Object Storage access. Underlying error: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+        if _is_endpoint_openstack_failure(exc):
+            return RuntimeError(
+                "Swift endpoint/container resolution failure during "
+                f"{action}{endpoint_suffix}. Check OS_REGION_NAME, the Object "
+                "Storage endpoint for this project, and that "
+                f"container={self._container!r} exists. Underlying error: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+        return RuntimeError(
+            f"Swift operation failed during {action}{endpoint_suffix}: "
+            f"{type(exc).__name__}: {exc}"
         )
 
     def _create_connection(self):
@@ -289,15 +574,7 @@ class SwiftBlobStore:
                     available: list[str] = []
                     try:
                         config_mod = importlib.import_module("openstack.config")
-                        OpenStackConfig = getattr(config_mod, "OpenStackConfig")
-                        cfg = OpenStackConfig()
-                        clouds = cfg.get_all_clouds()
-                        names = [
-                            getattr(c, "name", None)
-                            for c in clouds
-                            if getattr(c, "name", None)
-                        ]
-                        available = sorted({n for n in names if isinstance(n, str)})
+                        available = self._list_available_cloud_names(config_mod)
                     except Exception:
                         available = []
 
@@ -308,28 +585,14 @@ class SwiftBlobStore:
                         try:
                             return self._create_connection_from_envvars(connection_mod)
                         except Exception as env_exc:
-                            msg = (
-                                "OpenStack cloud was not found for OS_CLOUD="
-                                f"{self._cloud!r}, and fallback to env-var auth failed: "
-                                f"{env_exc}. "
-                                "Set OS_CLOUD to a configured cloud name in clouds.yaml "
-                                "(or set OS_CLIENT_CONFIG_FILE to point at clouds.yaml), "
-                                "or configure OS_AUTH_URL/OS_USERNAME/etc instead."
-                            )
-                            if available:
-                                msg += f" Available clouds: {available!r}."
-                            raise ValueError(msg) from env_exc
+                            raise self._build_cloud_resolution_error(
+                                available_clouds=available,
+                                env_exc=env_exc,
+                            ) from env_exc
 
-                    msg = (
-                        "OpenStack cloud was not found for OS_CLOUD="
-                        f"{self._cloud!r}. "
-                        "Set OS_CLOUD to a configured cloud name in clouds.yaml "
-                        "(or set OS_CLIENT_CONFIG_FILE to point at clouds.yaml), "
-                        "or configure OS_AUTH_URL/OS_USERNAME/etc instead."
-                    )
-                    if available:
-                        msg += f" Available clouds: {available!r}."
-                    raise ValueError(msg) from exc
+                    raise self._build_cloud_resolution_error(
+                        available_clouds=available,
+                    ) from exc
                 raise
 
         return self._create_connection_from_envvars(connection_mod)
@@ -357,13 +620,16 @@ class SwiftBlobStore:
         full_key = self._full_key(key)
 
         # openstacksdk supports both bytes and file-like objects.
-        self._conn.object_store.create_object(
-            container=self._container,
-            name=full_key,
-            data=data,
-            content_type=content_type,
-            metadata=dict(metadata) if metadata else None,
-        )
+        try:
+            self._conn.object_store.create_object(
+                container=self._container,
+                name=full_key,
+                data=data,
+                content_type=content_type,
+                metadata=dict(metadata) if metadata else None,
+            )
+        except Exception as exc:
+            raise self._wrap_operation_exception("put_bytes", exc) from exc
 
         return BlobRef(
             backend="swift",
@@ -385,10 +651,15 @@ class SwiftBlobStore:
                 container=self._container,
             )
         except TypeError:
-            return self._conn.object_store.download_object(
-                name=full_key,
-                container=self._container,
-            )
+            try:
+                return self._conn.object_store.download_object(
+                    name=full_key,
+                    container=self._container,
+                )
+            except Exception as exc:
+                raise self._wrap_operation_exception("get_bytes", exc) from exc
+        except Exception as exc:
+            raise self._wrap_operation_exception("get_bytes", exc) from exc
 
     def exists(self, key: str) -> bool:
         full_key = self._full_key(key)
@@ -422,11 +693,16 @@ class SwiftBlobStore:
                 ignore_missing=True,
             )
         except TypeError:
-            self._conn.object_store.delete_object(
-                name=full_key,
-                container=self._container,
-                ignore_missing=True,
-            )
+            try:
+                self._conn.object_store.delete_object(
+                    name=full_key,
+                    container=self._container,
+                    ignore_missing=True,
+                )
+            except Exception as exc:
+                raise self._wrap_operation_exception("delete", exc) from exc
+        except Exception as exc:
+            raise self._wrap_operation_exception("delete", exc) from exc
 
     def list(self, prefix: str = "") -> list[str]:
         safe_prefix = _normalise_key(prefix) if prefix else ""
@@ -435,21 +711,24 @@ class SwiftBlobStore:
             full_prefix = full_prefix + "/"
 
         keys: list[str] = []
-        for obj in self._conn.object_store.objects(
-            container=self._container,
-            prefix=full_prefix or None,
-        ):
-            name = getattr(obj, "name", None)
-            if not name or not isinstance(name, str):
-                continue
+        try:
+            for obj in self._conn.object_store.objects(
+                container=self._container,
+                prefix=full_prefix or None,
+            ):
+                name = getattr(obj, "name", None)
+                if not name or not isinstance(name, str):
+                    continue
 
-            # Strip store-level prefix to return stable keys.
-            if self._prefix:
-                store_prefix = self._prefix + "/"
-                if name.startswith(store_prefix):
-                    name = name[len(store_prefix) :]
+                # Strip store-level prefix to return stable keys.
+                if self._prefix:
+                    store_prefix = self._prefix + "/"
+                    if name.startswith(store_prefix):
+                        name = name[len(store_prefix) :]
 
-            keys.append(_normalise_key(name))
+                keys.append(_normalise_key(name))
+        except Exception as exc:
+            raise self._wrap_operation_exception("list", exc) from exc
 
         keys.sort()
         return keys
@@ -824,7 +1103,7 @@ def get_blob_store_from_env() -> BlobStore:
 
         prefix = os.environ.get("VON_SWIFT_PREFIX", "")
         public_base_url = os.environ.get("VON_SWIFT_PUBLIC_BASE_URL")
-        cloud = os.environ.get("OS_CLOUD")
+        cloud = _first_non_empty_env("OS_CLOUD", "OS_CLOUD_NAME")
 
         swift_kwargs = {
             "container": container,

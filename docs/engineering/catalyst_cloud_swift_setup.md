@@ -36,7 +36,9 @@ pdm install
 
 Von’s Swift implementation supports standard OpenStack authentication via:
 - `OS_CLOUD` pointing at a `clouds.yaml` entry (recommended), or
-- environment variables (`OS_AUTH_URL`, `OS_USERNAME`, etc.).
+- environment variables for either:
+  - application credentials (`OS_AUTH_URL`, `OS_APPLICATION_CREDENTIAL_ID`, `OS_APPLICATION_CREDENTIAL_SECRET`), or
+  - password auth (`OS_AUTH_URL`, `OS_USERNAME`, etc.).
 
 ### Option A (recommended): `clouds.yaml` + `OS_CLOUD`
 
@@ -48,7 +50,7 @@ Example (fill in values from Catalyst Cloud):
 
 ```yaml
 clouds:
-  catalyst:
+  catalystcloud:
     region_name: "<your-region>"
     interface: "public"
     identity_api_version: 3
@@ -73,11 +75,28 @@ Important:
 $env:OS_CLIENT_CONFIG_FILE = "$HOME\.config\openstack\clouds.yaml"
 ```
 
+- If you keep these values in repo-root `.env` instead of the shell, restart Von after editing `.env`. Von now applies the Swift/OpenStack keys from `.env` at startup, but an already-running process will still have stale values.
+
 Notes:
 - `region_name` and `auth_url` must match the values Catalyst provides for your project.
 - If you maintain multiple OpenStack environments, add multiple entries under `clouds:`.
 
-### Option B: Environment variables (RC file values)
+### Option B1: Environment variables (application credentials, no `clouds.yaml`)
+
+This is often the simplest local fallback if `clouds.yaml` resolution is flaky on Windows:
+
+```powershell
+$env:OS_AUTH_URL = '<from Catalyst API Access>'
+$env:OS_APPLICATION_CREDENTIAL_ID = '<app credential id>'
+$env:OS_APPLICATION_CREDENTIAL_SECRET = '<app credential secret>'
+$env:OS_REGION_NAME = '<from Catalyst API Access>'
+```
+
+Notes:
+- `OS_PROJECT_NAME` is not required for application-credential auth.
+- This avoids `clouds.yaml` entirely, so it is a good way to separate profile-resolution failures from real network/auth failures.
+
+### Option B2: Environment variables (RC file values / password auth)
 
 If Catalyst provides a Bash-style RC file (`export OS_...`), copy the values into PowerShell instead:
 
@@ -165,14 +184,35 @@ With the Swift backend configured:
 
 ## Troubleshooting
 
+### Cloud/profile resolution failures
+
+If Von reports that `OS_CLOUD` could not be resolved before any Swift network request:
+
+- Confirm `OS_CLOUD` matches an entry in `clouds.yaml`.
+- If you are on Windows, set:
+
+```powershell
+$env:OS_CLIENT_CONFIG_FILE = "$HOME\.config\openstack\clouds.yaml"
+```
+
+- Or bypass `clouds.yaml` completely and use the application-credential environment variables from Option B1.
+- If you changed `.env`, restart Von so the new values are actually applied.
+- If you see a warning like `Couldn't find the vendor profile catalystcloud for the cloud envvars`, that usually means `openstacksdk` only saw the synthetic `envvars` cloud, not your intended `clouds.yaml` profile.
+
 ### Authentication errors
 
-- Confirm `OS_CLOUD` matches an entry in `clouds.yaml`, or that your `OS_...` environment variables are set correctly.
 - Confirm the credential/project has access to **Object Storage**.
+- For application credentials, confirm `OS_APPLICATION_CREDENTIAL_ID` and `OS_APPLICATION_CREDENTIAL_SECRET` are from the same Catalyst project as the selected region.
 
 ### Wrong region or endpoint
 
 - Catalyst Cloud values can vary by project and region. Use the `auth_url` and `region_name` provided for your account.
+- Do not infer `OS_REGION_NAME` from the Object Store container's storage-policy detail alone. That UI can reflect backing storage placement rather than the identity/endpoint region Von should authenticate against.
+- Use the values shown under **API Access** (or a known-good working OpenStack configuration from another machine) as the authoritative source for `OS_AUTH_URL` and `OS_REGION_NAME`.
+
+### Network or firewall failures
+
+- If Von reports a network/connectivity failure after configuration was resolved, check outbound access to the configured `auth_url`, VPN/proxy/firewall rules, and whether the current network allows access to the Catalyst/OpenStack endpoints.
 
 ### Container not found
 

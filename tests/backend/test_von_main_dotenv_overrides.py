@@ -37,3 +37,21 @@ def test_von_main_overrides_durable_workflow_enable_from_dotenv() -> None:
     keys = _get_von_main_dotenv_override_keys()
 
     assert "VON_DURABLE_WORKFLOWS_ENABLE" in keys
+
+
+def test_von_main_overrides_swift_openstack_env_keys_from_dotenv() -> None:
+    keys = _get_von_main_dotenv_override_keys()
+
+    expected = {
+        "VON_BLOB_STORE_BACKEND",
+        "VON_SWIFT_CONTAINER",
+        "VON_SWIFT_PREFIX",
+        "OS_CLOUD",
+        "OS_CLIENT_CONFIG_FILE",
+        "OS_AUTH_URL",
+        "OS_REGION_NAME",
+        "OS_APPLICATION_CREDENTIAL_ID",
+        "OS_APPLICATION_CREDENTIAL_SECRET",
+    }
+
+    assert expected.issubset(keys)
