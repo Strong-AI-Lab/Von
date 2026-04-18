@@ -214,6 +214,65 @@ def test_turn_execution_critic_prefers_explicit_actor_concept_id() -> None:
     assert record.get("actor_concept_id") == "#V#github_copilot_instance"
 
 
+def test_turn_execution_critic_blocks_missing_prompt_required_evidence_surface() -> None:
+    orchestrator = _build_orchestrator()
+    request = _build_request(
+        action_id="turn_execution.critic",
+        data={
+            "prompt": (
+                "Prepare a short research briefing for me: my represented papers, "
+                "relevant recent arXiv work, and any linked Jira tasks."
+            ),
+            "final_response": (
+                "### User Papers\nNo user papers found.\n\n"
+                "### Recent arXiv\nNo recent arXiv papers found.\n\n"
+                "### Jira Tasks\nNo Jira tasks found."
+            ),
+            "required_prompt_tools": [
+                "search_knowledge_base",
+                "search_concepts",
+                "search_arxiv",
+                "jira_search",
+            ],
+            "invocations": [
+                {"tool": "search_knowledge_base", "payload": {"success": True}},
+                {"tool": "search_concepts", "payload": {"success": True}},
+                {"tool": "search_arxiv", "payload": {"success": True}},
+            ],
+            "aux_llm_calls": [],
+            "turn_id": "req-turn-critic-briefing-1",
+            "conversation_session_id": "session-critic-briefing-1",
+            "workflow_discovery_result": None,
+            "workflow_routing": {
+                "workflow_id": "#V#tool_calling_workflow",
+                "verdict": "tool_seeking",
+            },
+        },
+    )
+
+    result = orchestrator._action_turn_execution_critic(request)
+
+    assert result.ok
+    record = result.outputs.get("turn_execution_record")
+    assert isinstance(record, dict)
+    required_effects = record.get("required_effects")
+    assert isinstance(required_effects, list)
+    jira_effect = next(
+        effect
+        for effect in required_effects
+        if effect.get("required_tools") == ["jira_search"]
+    )
+    assert jira_effect.get("status") == "not_executed"
+
+    completion_gate = record.get("completion_gate")
+    assert isinstance(completion_gate, dict)
+    assert completion_gate.get("decision") == "escalation_required"
+    assert completion_gate.get("safe_to_claim_completion") is False
+    assert "prompt_required_evidence_jira_search_missing" in (
+        completion_gate.get("blocking_failure_codes") or []
+    )
+
+
 def test_turn_execution_critic_prefers_concrete_verification_reads() -> None:
     orchestrator = _build_orchestrator()
     request = _build_request(

@@ -575,6 +575,19 @@ After each fix:
 8. Confirm that the live answer cleared the recorded bar, or exceeded it on its
    own grounded merits, rather than merely improving relative to a bad
    baseline.
+9. Before closing a `JVNAUTOSCI-1894` subtask, prepare the closure record that
+   will be written into Jira:
+   - the exact replayed prompt text;
+   - the exact user-visible answer, or a faithful quoted excerpt if the full
+     answer is too long to quote comfortably in the task;
+   - the key telemetry identifiers for the accepted run;
+   - a short synopsis of what the live Thinking card showed, or would have
+     shown if the browser pass exposed it;
+   - a short note on why that Thinking-card content would or would not have
+     helped a user understand the answering process.
+   If no browser Thinking card or equivalent user-facing progress surface was
+   available, say so explicitly rather than silently omitting that part of the
+   record.
 
 Good signs:
 
@@ -626,6 +639,20 @@ For user-visible issues, record both:
 
 - the user-visible acceptance evidence
 - the corresponding telemetry evidence
+
+For `JVNAUTOSCI-1894` programme subtasks, the closure comment should normally
+also record:
+
+- the exact prompt text used for the accepted replay;
+- the user-visible answer text, or a faithful excerpt when the answer is long;
+- the accepted run identifiers such as `request_id`, `session_id`, and any
+  history locator you relied on;
+- a short synopsis of the Thinking card or equivalent live progress surface;
+- a short judgement of whether that card would have helped a user understand
+  how Von answered, and why.
+
+If the browser pass was not run, or if no user-facing Thinking card was
+available on that path, record that absence explicitly in the closure note.
 
 Those two together are the closure story.
 

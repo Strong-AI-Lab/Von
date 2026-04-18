@@ -6312,6 +6312,175 @@ def test_incidental_url_prompt_stays_on_plain_response_path(monkeypatch):
     )
 
 
+def test_multi_surface_turn_contract_overrides_selected_custom_workflow_to_tool_pipeline(
+    monkeypatch,
+):
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    selected_workflow_id = "#V#concept_search_instance_retrieval_workflow"
+
+    _register_terminal_custom_workflow(
+        orchestrator,
+        workflow_id=selected_workflow_id,
+        purpose="Inspect represented concepts and relations for retrieval questions.",
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_load_base_system_prompt_from_vontology",
+        lambda **_kwargs: ("You are Von.", "#V#test_base_system_prompt"),
+    )
+
+    monkeypatch.setattr(
+        orchestrator._gateway,
+        "describe_methods",
+        lambda: {
+            "search_knowledge_base": {"category": "read"},
+            "search_concepts": {"category": "read"},
+            "search_arxiv": {"category": "read"},
+            "jira_search": {"category": "read"},
+        },
+    )
+
+    execute_calls: list[str] = []
+
+    def _execute_workflow(workflow_id: str, **_kwargs: Any):
+        execute_calls.append(workflow_id)
+        if workflow_id != TOOL_CALLING_WORKFLOW_ID:
+            raise AssertionError(f"Unexpected workflow execution: {workflow_id}")
+        return SimpleNamespace(
+            data={
+                "final_response": "Research briefing via tool pipeline.",
+                "tool_messages": [],
+                "invocations": [],
+                "iteration_count": 1,
+            },
+            final_state="complete",
+            completed=True,
+        )
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
+
+    result = orchestrator.run(
+        prompt=(
+            "Prepare a short research briefing for me: my represented papers, "
+            "relevant recent arXiv work, and any linked Jira tasks."
+        ),
+        context=[
+            {
+                "role": "system",
+                "content": (
+                    "Expected answer contract for this turn:\n"
+                    "- Success target: A concise research briefing comprising "
+                    "represented papers, recent relevant arXiv work, and linked Jira tasks.\n"
+                    "- Grounding requirement: Papers must be grounded via authorship "
+                    "or ownership relationships.\n"
+                    "- Selector guidance: Use KB/concept retrieval, arXiv search, "
+                    "and Jira retrieval."
+                ),
+            }
+        ],
+        llm_client=_CapturingLLM(
+            [
+                json.dumps(
+                    {
+                        "workflow_id": selected_workflow_id,
+                        "confidence": 0.96,
+                        "reasoning": (
+                            "The specialised concept-search workflow is best for "
+                            "grounded represented retrieval."
+                        ),
+                    }
+                )
+            ]
+        ),
+        model=None,
+        user_namespace="#V#user",
+        workflow_discovery_result={
+            "matches": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Concept Search Instance Retrieval Workflow",
+                    "description": "Retrieve represented concepts and relations.",
+                    "routing_eligible": True,
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "candidate_source": "workflow_discovery",
+                    "relevance_score": 0.99,
+                    "confidence_score": 0.99,
+                }
+            ],
+            "candidates": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Concept Search Instance Retrieval Workflow",
+                    "description": "Retrieve represented concepts and relations.",
+                    "routing_eligible": True,
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "candidate_source": "workflow_discovery",
+                    "relevance_score": 0.99,
+                    "confidence_score": 0.99,
+                }
+            ],
+            "match_count": 1,
+        },
+    )
+
+    assert execute_calls == [TOOL_CALLING_WORKFLOW_ID]
+    assert result.response_text == "Research briefing via tool pipeline."
+    assert result.workflow_routing is not None
+    assert result.workflow_routing.workflow_id == TOOL_CALLING_WORKFLOW_ID
+    assert result.workflow_routing.verdict == "tool_contract_override"
+    assert result.workflow_routing.source == "selector_override"
+
+    preflight_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "prompt_tool_requirements_preflight"
+            and entry.get("stage") == "workflow_dispatch"
+        ),
+        None,
+    )
+    assert preflight_entry is not None
+    assert preflight_entry.get("contract_required_tools") == [
+        "search_knowledge_base",
+        "search_concepts",
+        "search_arxiv",
+        "jira_search",
+    ]
+    assert preflight_entry.get("required_tool_surface_families") == [
+        "knowledge_base",
+        "arxiv",
+        "jira",
+    ]
+
+    override_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "workflow_selector_override"
+            and entry.get("reason")
+            == "selected_custom_workflow_cannot_satisfy_multi_surface_turn_contract"
+        ),
+        None,
+    )
+    assert override_entry is not None
+    assert override_entry.get("prior_selected_workflow_id") == selected_workflow_id
+    assert override_entry.get("selected_workflow_id") == TOOL_CALLING_WORKFLOW_ID
+    assert override_entry.get("turn_contract_required_tools") == [
+        "search_knowledge_base",
+        "search_concepts",
+        "search_arxiv",
+        "jira_search",
+    ]
+    assert override_entry.get("turn_contract_external_surface_families") == [
+        "arxiv",
+        "jira",
+    ]
+
+
 def test_url_read_prompt_stays_selector_owned_without_python_url_preselection(
     monkeypatch,
 ):

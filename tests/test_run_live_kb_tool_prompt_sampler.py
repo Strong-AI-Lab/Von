@@ -49,6 +49,48 @@ def test_evaluate_user_happiness_flags_dispatch_failure() -> None:
     assert any("Dispatch failed" in reason for reason in evaluation["reasons"])
 
 
+def test_evaluate_user_happiness_flags_explicit_timeout_failure_response() -> None:
+    evaluation = sampler._evaluate_user_happiness(
+        prompt_entry={
+            "id": "research_briefing_my_papers_recent_arxiv_and_jira",
+            "prompt": (
+                "Prepare a short research briefing for me: my represented papers, "
+                "relevant recent arXiv work, and any linked Jira tasks."
+            ),
+            "knowledge_surfaces": ["kb", "arxiv", "jira"],
+            "likely_tools": ["search_knowledge_base", "search_arxiv", "jira_search"],
+        },
+        generate_payload={
+            "response": (
+                "I couldn't complete that request because the authoritative "
+                "conversation-turn workflow failed. "
+                "workflow_llm_step_timeout:LLM call timed out after 45s "
+                "(stage=llm.action, model=gemma4:26b)"
+            )
+        },
+        llm_debug_data={
+            "turn_execution_diagnostics": {
+                "workflow_routing_diagnostics": {
+                    "dispatch": {
+                        "selected_execution_mode": "tool_pipeline",
+                        "dispatch_workflow_id": "#V#tool_calling_workflow",
+                    }
+                },
+                "tool_history": [
+                    {"tool": "search_knowledge_base", "success": True},
+                    {"tool": "search_arxiv", "success": True},
+                ],
+            }
+        },
+    )
+
+    assert evaluation["should_user_be_happy"] is False
+    assert any(
+        "concrete failure or access marker" in reason.lower()
+        for reason in evaluation["reasons"]
+    )
+
+
 def test_evaluate_user_happiness_accepts_grounded_tool_answer() -> None:
     evaluation = sampler._evaluate_user_happiness(
         prompt_entry={

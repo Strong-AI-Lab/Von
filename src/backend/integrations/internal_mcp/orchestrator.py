@@ -1349,6 +1349,16 @@ def _describe_tool_pipeline_override_reason(reason: str) -> str:
             "The selected specialised workflow could not launch from the current "
             "turn inputs, so the safe general tool workflow was selected instead."
         )
+    if (
+        clean_reason
+        == "selected_custom_workflow_cannot_satisfy_multi_surface_turn_contract"
+    ):
+        return (
+            "The selected specialised workflow did not advertise tool-pipeline "
+            "execution, but the turn contract required evidence from multiple "
+            "surfaces including external ones, so the safe general tool workflow "
+            "was selected instead."
+        )
     return clean_reason or "Safe general tool workflow selected by override."
 
 
@@ -9267,16 +9277,11 @@ class InternalMCPChatOrchestrator:
         return any(
             token in combined_text
             for token in (
+                "find_relations_with_argument",
                 "concept/relation retrieval",
                 "relation retrieval",
                 "represented relation evidence",
                 "entity-relative relationship",
-                "authorship or ownership",
-                "author or owner",
-                "ownership relationship",
-                "belongs to the user",
-                "belonging to the user",
-                "grounded to the user",
                 "prefer kb/concept/relation retrieval tools over inventory/listing tools",
             )
         )
@@ -9490,6 +9495,14 @@ class InternalMCPChatOrchestrator:
             if key in included_lookup:
                 return
             if key not in definitions_by_name:
+                return
+            if (
+                profile == "planner"
+                and key == "find_relations_with_argument"
+                and key not in required_lookup
+                and not relation_grounding_requested
+            ):
+                _mark_excluded(tool_name, "relation_grounding_not_requested")
                 return
             if (
                 relation_grounding_requested
@@ -11293,6 +11306,44 @@ class InternalMCPChatOrchestrator:
         )
 
     @classmethod
+    def _extract_turn_expected_outcome_contract_from_context_messages(
+        cls,
+        context_messages: Sequence[Mapping[str, Any]] | None,
+    ) -> dict[str, str]:
+        contract: dict[str, str] = {}
+        field_by_label = {
+            "success target": "summary",
+            "grounding requirement": "grounding_requirement",
+            "precision policy": "precision_policy",
+            "selector guidance": "selector_guidance",
+            "answering guidance": "answering_guidance",
+            "why this matters": "reasoning",
+        }
+
+        for message in context_messages or ():
+            if not isinstance(message, Mapping):
+                continue
+            content = message.get("content")
+            if not isinstance(content, str) or not content.strip():
+                continue
+            if "Expected answer contract for this turn:" not in content:
+                continue
+            for raw_line in content.splitlines():
+                line = raw_line.strip()
+                if not line.startswith("-"):
+                    continue
+                body = line[1:].strip()
+                if ":" not in body:
+                    continue
+                label_text, value_text = body.split(":", 1)
+                field_name = field_by_label.get(label_text.strip().lower())
+                value = value_text.strip()
+                if field_name and value:
+                    contract[field_name] = value
+
+        return contract
+
+    @classmethod
     def _turn_contract_text_fragments(
         cls,
         turn_expected_outcome_contract: Mapping[str, Any] | None,
@@ -11349,6 +11400,34 @@ class InternalMCPChatOrchestrator:
             seen.add(lowered)
             required_tools.append(tool_name)
 
+        prefers_jira_issue_retrieval = (
+            "jira" in contract_text
+            and any(
+                token in contract_text
+                for token in (
+                    "linked jira task",
+                    "linked jira tasks",
+                    "jira retrieval",
+                    "jira search",
+                    "jira issue",
+                    "jira issues",
+                    "jira toolset",
+                    "jira/task tools",
+                )
+            )
+            and not any(
+                token in contract_text
+                for token in (
+                    "von task",
+                    "internal task",
+                    "my tasks",
+                    "task inbox",
+                    "to-do",
+                    "todo",
+                )
+            )
+        )
+
         relation_grounding_requested = any(
             token in contract_text
             for token in (
@@ -11385,7 +11464,13 @@ class InternalMCPChatOrchestrator:
             )
         ):
             _add_tool("search_concepts")
-        if relation_grounding_requested:
+        if any(
+            token in contract_text
+            for token in (
+                "find_relations_with_argument",
+                "relation-bearing evidence",
+            )
+        ):
             _add_tool("find_relations_with_argument")
         if "arxiv" in contract_text:
             _add_tool("search_arxiv")
@@ -11408,9 +11493,69 @@ class InternalMCPChatOrchestrator:
             "message_list",
         ):
             if tool_name in contract_text:
+                if prefers_jira_issue_retrieval and tool_name in {
+                    "task_search",
+                    "task_list",
+                    "list_my_tasks",
+                }:
+                    continue
                 _add_tool(tool_name)
 
         return tuple(required_tools)
+
+    @classmethod
+    def _infer_required_tool_surface_families(
+        cls,
+        *,
+        required_tools: Sequence[str],
+    ) -> tuple[str, ...]:
+        family_membership = {
+            "knowledge_base": {
+                "search_knowledge_base",
+                "search_concepts",
+                "find_relations_with_argument",
+                "fetch_concept",
+                "list_papers",
+                "resolve_concept_by_name",
+            },
+            "web": {
+                "search_web",
+                "extract_url",
+                "resilient_extract_url",
+            },
+            "arxiv": {
+                "search_arxiv",
+                "download_paper",
+            },
+            "jira": {
+                "jira_search",
+                "jira_get_issue",
+            },
+            "task": {
+                "task_create",
+                "task_create_subtask",
+                "task_search",
+                "task_list",
+                "list_my_tasks",
+                "task_update_status",
+                "task_assign",
+            },
+            "message": {
+                "message_create",
+                "message_list",
+            },
+        }
+        ordered_families: list[str] = []
+        seen: set[str] = set()
+        for tool_name in required_tools:
+            lowered = str(tool_name or "").strip().lower()
+            if not lowered:
+                continue
+            for family_name, members in family_membership.items():
+                if lowered in members and family_name not in seen:
+                    seen.add(family_name)
+                    ordered_families.append(family_name)
+        return tuple(ordered_families)
 
     @classmethod
     def _augment_prompt_requirements_with_turn_contract(
@@ -21529,6 +21674,80 @@ class InternalMCPChatOrchestrator:
             payload["assignee_concept_id"] = assignee_concept_id.strip()
         return payload
 
+    @staticmethod
+    def _extract_retry_user_anchor(
+        combined_text: str,
+        concept_ids: Sequence[str] = (),
+    ) -> tuple[str | None, str | None]:
+        user_anchor_name: str | None = None
+        user_anchor_concept_id: str | None = None
+        user_anchor_match = re.search(
+            r"(?:current user context|current user)\s*:\s*([^\n(]+?)\s*\((#V#[^)]+)\)",
+            combined_text,
+            flags=re.IGNORECASE,
+        )
+        if user_anchor_match is not None:
+            user_anchor_name = user_anchor_match.group(1).strip() or None
+            user_anchor_concept_id = user_anchor_match.group(2).strip() or None
+        if user_anchor_concept_id is None:
+            candidate_concept_ids = [
+                concept_id
+                for concept_id in concept_ids
+                if "workflow" not in concept_id.lower()
+            ]
+            if candidate_concept_ids:
+                user_anchor_concept_id = candidate_concept_ids[0]
+        return user_anchor_name, user_anchor_concept_id
+
+    @classmethod
+    def _build_guided_retrieval_query(
+        cls,
+        *,
+        tool_name: str,
+        user_text: str,
+        combined_context: str,
+        user_anchor_name: str | None,
+    ) -> str:
+        prompt_text = str(user_text or "").strip()
+        lower_prompt = prompt_text.lower()
+        anchor_name = (
+            str(user_anchor_name).strip()
+            if isinstance(user_anchor_name, str) and str(user_anchor_name).strip()
+            else ""
+        )
+
+        first_person_research_prompt = (
+            anchor_name
+            and any(token in lower_prompt for token in (" my ", " me ", "mine", "my "))
+            and any(
+                token in lower_prompt
+                for token in ("paper", "papers", "research", "arxiv", "briefing")
+            )
+        )
+        grounding_prompt = any(
+            token in combined_context
+            for token in (
+                "authorship/ownership",
+                "authorship",
+                "ownership relationships",
+                "represented papers",
+                "papers authored",
+                "papers owned",
+            )
+        )
+
+        if tool_name == "search_arxiv" and anchor_name and (
+            first_person_research_prompt or grounding_prompt
+        ):
+            return f'"{anchor_name}"'
+
+        if tool_name == "search_web" and anchor_name and (
+            first_person_research_prompt or grounding_prompt
+        ):
+            return f'"{anchor_name}" research papers'
+
+        return prompt_text
+
     def _infer_guided_retrieval_retry_tool_calls(
         self,
         *,
@@ -21591,6 +21810,11 @@ class InternalMCPChatOrchestrator:
             for tool_name in (invoked_tool_names or ())
             if isinstance(tool_name, str) and str(tool_name).strip()
         }
+        concept_ids = self._extract_concept_ids_from_text("\n".join(context_bits))
+        user_anchor_name, user_anchor_concept_id = self._extract_retry_user_anchor(
+            "\n".join(context_bits),
+            concept_ids,
+        )
 
         wants_kb_search = (
             "search_knowledge_base" in combined_context
@@ -21618,11 +21842,18 @@ class InternalMCPChatOrchestrator:
         wants_arxiv_search = (
             "search_arxiv" in combined_context or "arxiv search" in combined_context
         )
+        wants_jira_search = (
+            "jira_search" in combined_context
+            or "jira retrieval" in combined_context
+            or "linked jira task" in combined_context
+            or "linked jira tasks" in combined_context
+        )
         if not (
             wants_kb_search
             or wants_concept_search
             or wants_web_search
             or wants_arxiv_search
+            or wants_jira_search
         ):
             return None
 
@@ -21657,6 +21888,28 @@ class InternalMCPChatOrchestrator:
                 }
             )
         if (
+            wants_jira_search
+            and "jira_search" in available_tools
+            and "jira_search" not in invoked_lookup
+        ):
+            jql_clauses: list[str] = []
+            if user_anchor_concept_id:
+                jql_clauses.append(f'text ~ "\\"{user_anchor_concept_id}\\""')
+            if user_anchor_name:
+                jql_clauses.append(f'text ~ "\\"{user_anchor_name}\\""')
+            if jql_clauses:
+                forced_calls.append(
+                    {
+                        "action": "call_tool",
+                        "tool": "jira_search",
+                        "payload": {
+                            "jql": " OR ".join(jql_clauses)
+                            + " ORDER BY updated DESC",
+                            "max_results": 10,
+                        },
+                    }
+                )
+        if (
             wants_web_search
             and "search_web" in available_tools
             and "search_web" not in invoked_lookup
@@ -21665,7 +21918,15 @@ class InternalMCPChatOrchestrator:
                 {
                     "action": "call_tool",
                     "tool": "search_web",
-                    "payload": {"query": prompt_text, "max_results": 5},
+                    "payload": {
+                        "query": self._build_guided_retrieval_query(
+                            tool_name="search_web",
+                            user_text=prompt_text,
+                            combined_context=combined_context,
+                            user_anchor_name=user_anchor_name,
+                        ),
+                        "max_results": 5,
+                    },
                 }
             )
         if (
@@ -21677,7 +21938,15 @@ class InternalMCPChatOrchestrator:
                 {
                     "action": "call_tool",
                     "tool": "search_arxiv",
-                    "payload": {"query": prompt_text, "max_results": 5},
+                    "payload": {
+                        "query": self._build_guided_retrieval_query(
+                            tool_name="search_arxiv",
+                            user_text=prompt_text,
+                            combined_context=combined_context,
+                            user_anchor_name=user_anchor_name,
+                        ),
+                        "max_results": 5,
+                    },
                 }
             )
         return forced_calls or None
@@ -27393,6 +27662,33 @@ class InternalMCPChatOrchestrator:
                 url_requirement=routing_url_requirement,
             ),
         )
+        routing_turn_expected_outcome_contract = (
+            self._extract_turn_expected_outcome_contract_from_context_messages(
+                augmented_context
+            )
+        )
+        routing_explicit_required_tools = tuple(routing_prompt_requirements.required_tools)
+        routing_prompt_requirements = self._augment_prompt_requirements_with_turn_contract(
+            evaluation=routing_prompt_requirements,
+            turn_expected_outcome_contract=routing_turn_expected_outcome_contract,
+            method_catalogue=method_catalogue_for_routing,
+            tool_invocations=(),
+        )
+        routing_contract_required_tools = tuple(
+            tool_name
+            for tool_name in routing_prompt_requirements.required_tools
+            if tool_name not in routing_explicit_required_tools
+        )
+        routing_contract_required_tool_surface_families = (
+            self._infer_required_tool_surface_families(
+                required_tools=routing_contract_required_tools
+            )
+        )
+        routing_contract_external_surface_families = tuple(
+            family_name
+            for family_name in routing_contract_required_tool_surface_families
+            if family_name in {"web", "arxiv", "jira"}
+        )
         if isinstance(aux_llm_calls, list):
             try:
                 aux_llm_calls.append(
@@ -27400,6 +27696,12 @@ class InternalMCPChatOrchestrator:
                         {
                             "type": "prompt_tool_requirements_preflight",
                             "stage": "workflow_dispatch",
+                            "explicit_required_tools": list(
+                                routing_explicit_required_tools
+                            ),
+                            "contract_required_tools": list(
+                                routing_contract_required_tools
+                            ),
                             "required_tools": list(
                                 routing_prompt_requirements.required_tools
                             ),
@@ -27411,6 +27713,9 @@ class InternalMCPChatOrchestrator:
                             ),
                             "missing_tools": list(
                                 routing_prompt_requirements.missing_tools
+                            ),
+                            "required_tool_surface_families": list(
+                                routing_contract_required_tool_surface_families
                             ),
                             "url_requirement": dict(routing_url_requirement),
                         },
@@ -32828,6 +33133,44 @@ class InternalMCPChatOrchestrator:
                     ),
                 )
 
+        def _maybe_force_tool_pipeline_for_multi_surface_turn_contract() -> None:
+            if not selector_requests_custom_workflow:
+                return
+            if selected_uses_tool_pipeline_contract:
+                return
+            if not routing_contract_required_tools:
+                return
+            if len(routing_contract_required_tool_surface_families) < 2:
+                return
+            if not routing_contract_external_surface_families:
+                return
+            _force_tool_pipeline_routing(
+                reason=(
+                    "selected_custom_workflow_cannot_satisfy_multi_surface_turn_contract"
+                ),
+                excluded_selector_verdicts=[selector_verdict or "rag_selected"],
+                reasoning_text=(
+                    "The selected custom workflow did not advertise tool-pipeline "
+                    "execution, but the turn contract required retrieval across "
+                    "multiple evidence surfaces including external ones, so the "
+                    "general tool workflow was selected instead."
+                ),
+                extra_payload={
+                    "turn_contract_required_tools": list(
+                        routing_contract_required_tools
+                    ),
+                    "turn_contract_required_surface_families": list(
+                        routing_contract_required_tool_surface_families
+                    ),
+                    "turn_contract_external_surface_families": list(
+                        routing_contract_external_surface_families
+                    ),
+                    "turn_expected_outcome_contract": dict(
+                        routing_turn_expected_outcome_contract
+                    ),
+                },
+            )
+
         selector_safe_general_fallback_payload = (
             _build_selector_safe_general_fallback_payload(
                 selected_workflow_id=selected_workflow_id_text,
@@ -32851,6 +33194,8 @@ class InternalMCPChatOrchestrator:
                     discovered_matches=discovered_matches,
                 )
             )
+
+        _maybe_force_tool_pipeline_for_multi_surface_turn_contract()
 
         def _build_custom_workflow_dispatch_data(
             workflow_id_override: str | None = None,
