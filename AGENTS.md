@@ -196,6 +196,7 @@ Verify all of the following:
   materialised; repo-side support code alone is not sufficient closure evidence
 - review linked issues and update or transition them as justified
 - merge to `main`, verify `origin/main` contains the intended commit(s), then close the Jira issue
+- finish branch/worktree hygiene for the completed task: fast-forward any retained local `main` worktree that is meant to track `origin/main`, move the current worktree off the completed task branch, and delete merged local/remote task branches unless there is a clearly recorded reason to keep them
 - complete the reflection pass
 
 ### 7.4 Jira task design quality

@@ -165,6 +165,60 @@ treat that as a broader host issue rather than endlessly restarting repo
 processes. Record that fact in diagnostics and avoid pretending the repository
 itself is the only source of the problem.
 
+### 4.7 Post-merge branch and worktree hygiene
+
+After a Jira implementation task is merged to `main`, do not leave the Git
+state half-finished.
+
+Common failure shape:
+
+- `origin/main` contains the fix;
+- Jira is already closed;
+- but the current worktree is still sitting on the completed task branch;
+- the retained local `main` worktree is several commits behind;
+- and the merged local/remote task branch is left behind indefinitely.
+
+That is not merely cosmetic. It causes later confusion about what is really
+done, makes branch lists noisy, and increases the chance that a later agent
+reopens work on the wrong base.
+
+Expected close-out after merge:
+
+- verify the intended commit is on `origin/main`;
+- if you keep a separate local `main` worktree, fast-forward it when it is
+  clean and intended to track `origin/main`;
+- move the current worktree off the completed task branch before trying to
+  delete that branch;
+- delete the merged local task branch;
+- delete the merged remote task branch unless there is a clear reason to keep
+  it;
+- if you intentionally keep a merged branch, record why.
+
+Useful probes:
+
+- current branch and worktree state:
+  `git branch --all --verbose --no-abbrev`
+- merged local branches:
+  `git branch --merged origin/main`
+- worktree layout:
+  `git worktree list`
+- fast-forward a retained main worktree:
+  `git -C C:\\path\\to\\main-worktree merge --ff-only origin/main`
+- move the current worktree off a completed task branch:
+  `git checkout --detach origin/main`
+- delete a merged local branch:
+  `git branch -d <task-branch>`
+- delete a merged remote branch:
+  `git push origin --delete <task-branch>`
+
+If branch deletion fails, diagnose the real blocker rather than silently
+abandoning cleanup. The common reasons are:
+
+- the branch is still checked out in the current worktree;
+- the branch is checked out in another worktree;
+- the supposed `main` worktree is not actually clean enough to fast-forward;
+- or the branch is not really merged yet.
+
 ## 5. Environment and Credential Handling
 
 - `.env` is the authoritative local source for credentials and service-critical
