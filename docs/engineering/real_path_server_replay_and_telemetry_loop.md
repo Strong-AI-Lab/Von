@@ -55,6 +55,45 @@ That means every replay should answer two questions:
 
 If those disagree, the task is not done.
 
+### 3.1 Architectural Sentinel Cases
+
+Treat lower-complexity replay prompts and control prompts as architectural
+sentinels, not as permission to ship a prompt-local rescue.
+
+A simple prompt such as a direct represented lookup, a straightforward
+Vontology-grounded question, or a lightweight background-knowledge control is
+worth fixing only if it succeeds for the same structural reasons that a richer
+compositional turn would succeed:
+
+- the right workflow candidates were discoverable from the same authority
+  surfaces;
+- selector and tool planning stayed narrow to the prompt's real evidence needs;
+- KB, Vontology, tools, and background knowledge interacted through the normal
+  turn architecture rather than through case-specific shortcuts; and
+- the answer stayed grounded to the evidence that path actually surfaced.
+
+This also means the success path must not depend on English-specific semantic
+code. If the underlying represented knowledge and tool surfaces are language
+agnostic, the same capability should remain viable in any language rather than
+only through English lexical overlap.
+
+Do not count a replay as architecturally satisfying if the "fix" depends on:
+
+- workflow-family-specific query seeds or literal prompt-bank memorisation;
+- broad external tool fan-out that would be inappropriate for the harder cases
+  in the same family;
+- narrow Python heuristics that happen to rescue the simple wording but would
+  misroute richer multi-surface turns; or
+- English-only stopword lists, lexical anchors, regex intent cues, or similar
+  code-side semantics that would collapse under other languages;
+- special handling that would not remain appropriate once workflows, tools, KB
+  state, and background knowledge are combined in more complex ways.
+
+The question to ask after a simple replay passes is: would this still be the
+right reason for success if the user asked a more compositional variant of the
+same task class? If the answer is no, keep treating the replay as diagnostic
+rather than as closure evidence.
+
 ## 4. Expectation-First Preflight
 
 Before replaying any prompt, first form and report to the user your full
@@ -147,6 +186,12 @@ capability class:
 
 If the exact prompt passes but the neighbouring prompts fail, you probably
 implemented a narrow local fix.
+
+For lower-complexity prompts in the family, keep the same bar. They are useful
+because they expose whether the general discovery, retrieval, workflow, and
+answer-grounding architecture is healthy. They are not a separate invitation to
+introduce an easier, narrower success path that the harder compositional turns
+would never use.
 
 ### 5.1 Random Prompt Sampling
 

@@ -337,6 +337,9 @@ Current discovery rule:
 - authoritative workflow-capability text MAY be augmented with discovery keywords and example requests when this metadata is present;
 - discovery exemplars are a retrieval aid, not an execution permission grant;
 - discovery SHOULD prefer explicit exemplar metadata over workflow-family-specific capability-seeding code.
+- discovery metadata SHOULD represent general workflow applicability rather than overfitting the current replay bank or a small set of English phrasings;
+- English lexical anchors MUST NOT become the effective semantic authority for workflow discovery. If applicability collapses outside English or depends on English stopwords, regexes, or token overlap in support code, the design is wrong;
+- low-complexity replay prompts are useful architectural sentinels only when they succeed for the same multilingual applicability surface that would also support richer compositional turns combining workflows, tools, KB retrieval, and background knowledge.
 
 ### 4.4 Workflow Template Profiles
 

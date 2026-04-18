@@ -4,7 +4,8 @@
   "complexity_classes": {
     "direct_context_or_background": "Questions that a capable direct-response LLM should usually answer from turn context, runtime context, or background knowledge without needing KB grounding or extra tools.",
     "tool_augmented": "Questions that combine direct/context and KB reasoning with live tool use, especially web, Jira, arXiv, or other external/operational surfaces.",
-    "vontology_grounded": "Questions that should build on direct/context knowledge plus represented Vontology or KB content, but do not inherently need live external tool surfaces such as web, Jira, or arXiv."
+    "vontology_grounded": "Questions that should build on direct/context knowledge plus represented Vontology or KB content, but do not inherently need live external tool surfaces such as web, Jira, or arXiv.",
+    "vontology_plus_single_tool": "Questions that build on represented Vontology or KB context and invite one additional live retrieval or operational tool surface such as arXiv, Jira, or RAG, without broader multi-tool orchestration."
   },
   "prompts": [
     {
@@ -170,6 +171,142 @@
       "likely_tools": [
         "search_knowledge_base"
       ]
+    },
+    {
+      "id": "one_recent_arxiv_paper_for_my_agent_memory_work",
+      "category": "single_tool_arxiv_recommendation",
+      "complexity_class": "vontology_plus_single_tool",
+      "prompt": "Given what is represented about my work, find one recent arXiv paper on agent memory that I should read next.",
+      "knowledge_surfaces": [
+        "kb",
+        "arxiv"
+      ],
+      "likely_tools": [
+        "search_arxiv"
+      ],
+      "requires_tool_use": true
+    },
+    {
+      "id": "one_recent_arxiv_paper_for_my_neurosymbolic_work",
+      "category": "single_tool_arxiv_recommendation",
+      "complexity_class": "vontology_plus_single_tool",
+      "prompt": "Given what is represented about my work, find one recent arXiv paper on neuro-symbolic agents that looks relevant.",
+      "knowledge_surfaces": [
+        "kb",
+        "arxiv"
+      ],
+      "likely_tools": [
+        "search_arxiv"
+      ],
+      "requires_tool_use": true
+    },
+    {
+      "id": "one_recent_arxiv_paper_for_sail_workflow_work",
+      "category": "single_tool_arxiv_recommendation",
+      "complexity_class": "vontology_plus_single_tool",
+      "prompt": "Using the represented SAIL context, find one recent arXiv paper on workflow orchestration that looks relevant to our work.",
+      "knowledge_surfaces": [
+        "kb",
+        "arxiv"
+      ],
+      "likely_tools": [
+        "search_arxiv"
+      ],
+      "requires_tool_use": true
+    },
+    {
+      "id": "summarise_jvnautosci_1894_parent_replay_programme",
+      "category": "single_tool_jira_summary",
+      "complexity_class": "vontology_plus_single_tool",
+      "prompt": "Summarise JVNAUTOSCI-1894 as the parent replay programme for these tests.",
+      "knowledge_surfaces": [
+        "turn_context",
+        "jira"
+      ],
+      "likely_tools": [
+        "jira_get_issue"
+      ],
+      "requires_tool_use": true
+    },
+    {
+      "id": "what_does_jvnautosci_1925_ask_to_record",
+      "category": "single_tool_jira_summary",
+      "complexity_class": "vontology_plus_single_tool",
+      "prompt": "What does JVNAUTOSCI-1925 ask the replayer to record?",
+      "knowledge_surfaces": [
+        "turn_context",
+        "jira"
+      ],
+      "likely_tools": [
+        "jira_get_issue"
+      ],
+      "requires_tool_use": true
+    },
+    {
+      "id": "which_open_jira_issue_is_the_parent_replay_programme",
+      "category": "single_tool_jira_search",
+      "complexity_class": "vontology_plus_single_tool",
+      "prompt": "Which open Jira issue is the parent replay programme for these KB and tool stability subtasks?",
+      "knowledge_surfaces": [
+        "turn_context",
+        "jira"
+      ],
+      "likely_tools": [
+        "jira_search"
+      ],
+      "requires_tool_use": true
+    },
+    {
+      "id": "what_research_interests_of_mine_are_explicitly_represented_here",
+      "category": "single_tool_rag_lookup",
+      "complexity_class": "vontology_plus_single_tool",
+      "prompt": "What research interests of mine are explicitly represented here?",
+      "knowledge_surfaces": [
+        "kb"
+      ],
+      "likely_tools": [
+        "search_knowledge_base"
+      ],
+      "requires_tool_use": true
+    },
+    {
+      "id": "what_collaborators_of_mine_are_explicitly_represented_here",
+      "category": "single_tool_rag_lookup",
+      "complexity_class": "vontology_plus_single_tool",
+      "prompt": "What collaborators of mine are explicitly represented here?",
+      "knowledge_surfaces": [
+        "kb"
+      ],
+      "likely_tools": [
+        "search_knowledge_base"
+      ],
+      "requires_tool_use": true
+    },
+    {
+      "id": "what_projects_of_mine_are_explicitly_represented_here",
+      "category": "single_tool_rag_lookup",
+      "complexity_class": "vontology_plus_single_tool",
+      "prompt": "What projects of mine are explicitly represented here?",
+      "knowledge_surfaces": [
+        "kb"
+      ],
+      "likely_tools": [
+        "search_knowledge_base"
+      ],
+      "requires_tool_use": true
+    },
+    {
+      "id": "what_sail_people_or_roles_are_explicitly_represented_here",
+      "category": "single_tool_rag_lookup",
+      "complexity_class": "vontology_plus_single_tool",
+      "prompt": "What SAIL people or roles are explicitly represented here?",
+      "knowledge_surfaces": [
+        "kb"
+      ],
+      "likely_tools": [
+        "search_knowledge_base"
+      ],
+      "requires_tool_use": true
     },
     {
       "id": "create_von_task_for_replay_review",

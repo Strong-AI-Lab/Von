@@ -139,6 +139,11 @@ the following policy constraints intact:
    general tool workflow or an authorised direct tool batch, before
    workflow-gap escalation or user-facing surrender. Telemetry should preserve
    both the failed specialised attempt and the recovery handoff.
+8. Do not repair simple routing regressions with English-specific lexical
+   rescue logic. Lower-complexity replay cases should succeed for the same
+   discovery, selector, workflow, and tool-planning reasons that richer
+   compositional turns would succeed, and that success path should remain valid
+   in any language rather than only for English phrasings.
 
 ## 9. Fine-tuning guidance
 
@@ -170,4 +175,7 @@ Before closing prompt- or routing-related work, verify:
   and justified in task notes when non-obvious
 - user-facing evaluation cases verify that execution summaries do not displace
   answers
+- routing and retrieval improvements do not depend on English-only semantic
+  code, and language-agnostic capability claims were checked against at least
+  some non-English or otherwise non-canonical phrasings where relevant
 - rollback is straightforward
