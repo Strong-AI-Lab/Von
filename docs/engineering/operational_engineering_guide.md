@@ -222,6 +222,46 @@ For minimum local and hosted environment sets, see
 - Prefer workflow MCP tools as the default control surface for workflow
   behaviour when the behaviour can be represented there.
 
+### 6.1a Reusable workflow authoring during replay-driven fixes
+
+When a real-path replay or `JVNAUTOSCI-1894`-style test uncovers a missing
+capability that is really a broader research/lab task class, prefer authoring a
+new reusable workflow or subworkflow in Vontology rather than patching Python to
+make the sampled prompt pass.
+
+This is allowed even when the workflow design relies partly on background
+knowledge of the task class, so long as the result is a reusable authored
+workflow rather than a one-off hack for a particular prompt combination.
+
+Typical examples:
+
+- paper-author disambiguation;
+- daily diary drafting from represented context;
+- weekly lab activity/progress report composition;
+- stale-or-unnecessary task review.
+
+Operational rule:
+
+- if the behaviour can be represented cleanly in VWL/Vontology, do that;
+- if a reusable runtime or authoring primitive is missing, add only that
+  primitive in Python and then author the workflow through the canonical
+  workflow-authoring path;
+- do not encode the durable decision policy as a selector tweak, special route
+  override, or test-specific orchestration patch just because that is faster
+  for the current replay.
+
+Use the current workflow-authoring guidance in
+`docs/engineering/von_workflow_language_manual.md`, especially:
+
+- `### 4.1a Generic Workflow Authoring Primitives`
+- `#V#workflow_repair_or_create_workflow`
+- `#V#workflow_authoring_repair_workflow`
+- `#V#von_workflow_creation_workflow`
+
+If a proposed workflow would only make sense for the exact wording or exact
+tool mix of the current failing test, treat that as evidence you have not yet
+found the right reusable workflow boundary.
+
 ### 6.2 Jira
 
 - Prefer Von's internal Jira path when Atlassian MCP OAuth is unreliable.

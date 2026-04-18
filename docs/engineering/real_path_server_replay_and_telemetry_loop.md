@@ -547,6 +547,43 @@ Apply fixes in this order:
 2. Missing reusable support surface in Python.
 3. Telemetry or validation support.
 
+When a replay exposes a missing but genuinely reusable workflow or subworkflow
+for a broader research-team or lab-support task class, prefer authoring that
+workflow in Vontology rather than patching Python or adding a test-shaped
+selector/routing hack.
+
+This includes cases where a competent engineer can design the reusable
+behaviour from background knowledge of the task class itself, provided the
+result is authored as a durable VWL/Vontology artefact and not as a narrow fix
+for the exact prompt combination in the test.
+
+Examples of acceptable reusable workflow/subworkflow targets include:
+
+- author disambiguation for represented or retrieved papers;
+- drafting a daily diary entry from represented activity context;
+- composing a weekly lab activity and progress report;
+- checking whether a task appears stale, superseded, or unnecessary.
+
+In those cases:
+
+1. Prefer a reusable workflow or subworkflow that could serve future adjacent
+   prompts, not just the triggering replay.
+2. Keep the authored policy in Vontology/VWL if the runtime can represent it
+   there.
+3. If the runtime lacks a reusable authoring primitive, add only that support
+   surface in Python and then author the workflow through the canonical
+   workflow-authoring path.
+4. Use the current workflow-authoring guidance in
+   `docs/engineering/von_workflow_language_manual.md`, especially the
+   `Generic Workflow Authoring Primitives` section and the canonical
+   authoring/meta-workflow composition:
+   - `#V#workflow_repair_or_create_workflow`
+   - `#V#workflow_authoring_repair_workflow`
+   - `#V#von_workflow_creation_workflow`
+5. Treat a workflow that is special-cased to the prompt wording, the exact test
+   bank entry, or one accidental combination of tools as a design smell rather
+   than a successful fix.
+
 Avoid:
 
 - code-side prompt bodies for durable policy
