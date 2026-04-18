@@ -10978,6 +10978,37 @@ class InternalMCPChatOrchestrator:
             urls.append(url)
         return urls
 
+    @staticmethod
+    def _extract_arxiv_id_from_text(text: Any) -> str | None:
+        """Extract the first canonical arXiv identifier from arbitrary text."""
+        import re as _re
+
+        try:
+            from src.backend.services.arxiv_paper_link_service import (
+                extract_arxiv_id_candidates,
+            )
+        except Exception:
+            return None
+
+        candidates = extract_arxiv_id_candidates(text)
+        if not candidates and isinstance(text, str):
+            fallback_match = _re.search(
+                r"(?i)\b(?:arxiv:\s*|arxiv\.org/(?:abs|pdf)/)?"
+                r"((?:[a-z\-]+/\d{7})|(?:[a-z\-]+/\d{7}v\d+)|(?:\d{4}\.\d{4,5})(?:v\d+)?)\b",
+                text,
+            )
+            if fallback_match:
+                candidates = [str(fallback_match.group(1) or "").strip().lower()]
+        if not candidates:
+            return None
+        first = candidates[0]
+        if not isinstance(first, str) or not first.strip():
+            return None
+        normalised = first.strip()
+        normalised = _re.sub(r"(?i)^arxiv:\s*", "", normalised)
+        normalised = _re.sub(r"(?i)^((?:[a-z\-]+/\d{7})|(?:\d{4}\.\d{4,5}))v\d+$", r"\1", normalised)
+        return normalised or None
+
     @classmethod
     def _derive_prompt_tool_requirements(
         cls,
@@ -11803,14 +11834,12 @@ class InternalMCPChatOrchestrator:
 
     @staticmethod
     def _looks_like_missing_tool_call(response: str) -> bool:
-        """Heuristic: model appears to promise a tool-backed action but emitted no tool-call JSON.
+        """Legacy hook retained only for response-shape compatibility."""
 
-        This protects against a common failure mode where the model says e.g.
-        "Here is the actual ontology operation" and then stops, resulting in a
-        silent no-op.
-
-        Keep this conservative to avoid forcing tool calls for normal prose.
-        """
+        # Missing-tool-call recovery now relies on structural parse signals and
+        # the Vontology-configured detector prompt. Do not reintroduce Python
+        # semantic heuristics here.
+        return False
 
         if not isinstance(response, str):
             return False
@@ -17753,17 +17782,20 @@ class InternalMCPChatOrchestrator:
 
         return predicates
 
-    def _extract_topic_keywords_from_context(
+    def _build_topic_vocabulary_query_text(
         self,
         prompt: str,
         context: Optional[Sequence[Mapping[str, Any]]],
         *,
         max_recent_messages: int = 5,
-    ) -> list[str]:
-        """Extract significant topic keywords from recent conversation context.
+        max_chars: int = 320,
+    ) -> str | None:
+        """Build a bounded discovery query from the current turn context.
 
         Used for context-based ontology vocabulary discovery (JVNAUTOSCI-1052).
-        Combines keywords from the current prompt and recent user messages.
+        This helper is intentionally structural: it preserves prompt and recent
+        user text, removes explicit concept identifiers, and delegates semantic
+        matching to Vontology-backed retrieval services.
         """
         import re as _re
 
@@ -17789,114 +17821,16 @@ class InternalMCPChatOrchestrator:
                 texts.append(text)
 
         if not texts:
-            return []
+            return None
 
         combined = " ".join(texts)
 
         # Remove explicit concept IDs to avoid circular discovery
-        combined = _re.sub(r"#V#[A-Za-z0-9][A-Za-z0-9._-]*", "", combined)
-
-        # Extract words (3+ chars, alphanumeric with underscores/hyphens)
-        words = _re.findall(r"\b[A-Za-z][A-Za-z0-9_-]{2,}\b", combined)
-
-        # Common stop words to filter out
-        stop_words = {
-            "the",
-            "and",
-            "for",
-            "are",
-            "but",
-            "not",
-            "you",
-            "all",
-            "can",
-            "had",
-            "her",
-            "was",
-            "one",
-            "our",
-            "out",
-            "has",
-            "have",
-            "been",
-            "would",
-            "could",
-            "should",
-            "will",
-            "with",
-            "this",
-            "that",
-            "from",
-            "they",
-            "what",
-            "which",
-            "when",
-            "where",
-            "there",
-            "their",
-            "about",
-            "into",
-            "than",
-            "then",
-            "some",
-            "such",
-            "only",
-            "other",
-            "also",
-            "just",
-            "like",
-            "more",
-            "most",
-            "very",
-            "much",
-            "many",
-            "how",
-            "why",
-            "who",
-            "whom",
-            "does",
-            "did",
-            "these",
-            "those",
-            "them",
-            "being",
-            "each",
-            "few",
-            "any",
-            "both",
-            "after",
-            "before",
-            "please",
-            "help",
-            "tell",
-            "show",
-            "give",
-            "find",
-            "make",
-            "want",
-            "need",
-            "know",
-            "think",
-            "look",
-            "use",
-            "using",
-            "used",
-        }
-
-        # Filter and deduplicate keywords
-        seen: set[str] = set()
-        keywords: list[str] = []
-        for word in words:
-            lower = word.lower()
-            if lower in stop_words:
-                continue
-            if lower in seen:
-                continue
-            seen.add(lower)
-            keywords.append(word)
-
-        # Limit to most frequent/significant keywords (first 10)
-        return keywords[:10]
+        combined = _re.sub(r"#V#[A-Za-z0-9][A-Za-z0-9._-]*", " ", combined)
+        combined = _re.sub(r"\s+", " ", combined).strip()
+        if not combined:
+            return None
+        return combined[:max_chars].strip() or None
 
     @staticmethod
     def _normalise_preflight_session_key(
@@ -17980,24 +17914,25 @@ class InternalMCPChatOrchestrator:
             normalised.append(cleaned)
         return normalised
 
-    def _get_topic_vocabulary_cache_key(self, keywords: list[str]) -> str:
-        """Generate a cache key from topic keywords."""
-        if not keywords:
+    def _get_topic_vocabulary_cache_key(self, query_text: str | None) -> str:
+        """Generate a cache key from the bounded topic discovery query."""
+        if not isinstance(query_text, str) or not query_text.strip():
             return "__empty__"
-        # Use sorted lowercase keywords for consistent hashing
-        normalised = sorted(set(k.lower() for k in keywords if k))
-        return ":".join(normalised[:6])
+        import re as _re
 
-    def _discover_types_for_topic(
+        normalised = _re.sub(r"\s+", " ", query_text).strip().lower()
+        return normalised[:320] or "__empty__"
+
+    def _discover_types_for_topic_context(
         self,
-        keywords: list[str],
+        query_text: str | None,
         preferred_language: str | None,
     ) -> list[dict[str, Any]]:
-        """Discover types relevant to the given topic keywords.
+        """Discover types relevant to the current turn context query.
 
         JVNAUTOSCI-1052: Query Vontology for types matching the conversation topic.
         """
-        if not keywords:
+        if not isinstance(query_text, str) or not query_text.strip():
             return []
 
         try:
@@ -18005,10 +17940,9 @@ class InternalMCPChatOrchestrator:
         except Exception:
             return []
 
-        query = " ".join(keywords[:6])
         try:
             result = search_concepts(
-                query=query,
+                query=query_text,
                 filter_kind=["type"],
                 match_type="similarity",
                 min_similarity=0.50,
@@ -18046,16 +17980,16 @@ class InternalMCPChatOrchestrator:
 
         return types
 
-    def _discover_predicates_for_topic(
+    def _discover_predicates_for_topic_context(
         self,
-        keywords: list[str],
+        query_text: str | None,
         preferred_language: str | None,
     ) -> list[dict[str, Any]]:
-        """Discover predicates relevant to the given topic keywords.
+        """Discover predicates relevant to the current turn context query.
 
         JVNAUTOSCI-1052: Query Vontology for predicates matching the conversation topic.
         """
-        if not keywords:
+        if not isinstance(query_text, str) or not query_text.strip():
             return []
 
         try:
@@ -18063,10 +17997,9 @@ class InternalMCPChatOrchestrator:
         except Exception:
             return []
 
-        query = " ".join(keywords[:6])
         try:
             result = search_concepts(
-                query=query,
+                query=query_text,
                 filter_kind=["predicate"],
                 match_type="similarity",
                 min_similarity=0.50,
@@ -18108,15 +18041,15 @@ class InternalMCPChatOrchestrator:
         self,
         types: list[dict[str, Any]],
         predicates: list[dict[str, Any]],
-        keywords: list[str],
+        query_text: str | None,
     ) -> str | None:
         """Build the topic vocabulary section for the preflight message."""
         if not types and not predicates:
             return None
 
-        lines: list[str] = [
-            f"Topic-relevant vocabulary (keywords: {', '.join(keywords[:5])}):",
-        ]
+        lines: list[str] = ["Topic-relevant vocabulary (from turn context):"]
+        if isinstance(query_text, str) and query_text.strip():
+            lines.append(f'  Context query: "{query_text.strip()[:120]}"')
 
         if types:
             lines.append("  Types:")
@@ -18518,7 +18451,7 @@ class InternalMCPChatOrchestrator:
         self,
         *,
         prompt: str,
-        topic_keywords: Sequence[str],
+        topic_query_text: str | None,
         preferred_language: str | None,
         user_namespace: str | None,
     ) -> dict[str, Any]:
@@ -18545,12 +18478,11 @@ class InternalMCPChatOrchestrator:
         if not isinstance(prompt, str) or not prompt.strip():
             return payload
 
-        query_terms = [
-            str(item).strip()
-            for item in topic_keywords
-            if isinstance(item, str) and item.strip()
-        ]
-        query = " ".join(query_terms[:8]) if query_terms else prompt.strip()
+        query = (
+            topic_query_text.strip()
+            if isinstance(topic_query_text, str) and topic_query_text.strip()
+            else prompt.strip()
+        )
         query = query[:320].strip()
         if not query:
             return payload
@@ -19579,16 +19511,16 @@ class InternalMCPChatOrchestrator:
         predicate_query: str | None = None
 
         # --- Topic vocabulary discovery (JVNAUTOSCI-1052) ---
-        topic_keywords: list[str] = []
+        topic_query_text: str | None = None
         topic_types: list[dict[str, Any]] = []
         topic_predicates: list[dict[str, Any]] = []
         topic_vocabulary_section: str | None = None
         topic_vocabulary_cached: bool = False
 
-        # Extract keywords from conversation context
-        topic_keywords = self._extract_topic_keywords_from_context(raw, context)
-        if topic_keywords:
-            topic_cache_key = self._get_topic_vocabulary_cache_key(topic_keywords)
+        # Build a bounded discovery query from the current turn context.
+        topic_query_text = self._build_topic_vocabulary_query_text(raw, context)
+        if topic_query_text:
+            topic_cache_key = self._get_topic_vocabulary_cache_key(topic_query_text)
             cached_topic = self._topic_vocabulary_cache.get(topic_cache_key)
 
             if (
@@ -19602,11 +19534,11 @@ class InternalMCPChatOrchestrator:
                 topic_vocabulary_cached = True
             else:
                 # Discover new topic vocabulary
-                topic_types = self._discover_types_for_topic(
-                    topic_keywords, preferred_language
+                topic_types = self._discover_types_for_topic_context(
+                    topic_query_text, preferred_language
                 )
-                topic_predicates = self._discover_predicates_for_topic(
-                    topic_keywords, preferred_language
+                topic_predicates = self._discover_predicates_for_topic_context(
+                    topic_query_text, preferred_language
                 )
                 # Cache the results
                 self._topic_vocabulary_cache[topic_cache_key] = {
@@ -19616,7 +19548,7 @@ class InternalMCPChatOrchestrator:
                 }
 
             topic_vocabulary_section = self._build_topic_vocabulary_section(
-                topic_types, topic_predicates, topic_keywords
+                topic_types, topic_predicates, topic_query_text
             )
 
         # --- Annotation-derived concept candidates (JVNAUTOSCI-991) ---
@@ -19709,7 +19641,7 @@ class InternalMCPChatOrchestrator:
         # --- RAG-assisted concept discovery (JVNAUTOSCI-989) ---
         rag_context = self._collect_rag_preflight_context(
             prompt=raw,
-            topic_keywords=topic_keywords,
+            topic_query_text=topic_query_text,
             preferred_language=preferred_language,
             user_namespace=user_namespace,
         )
@@ -19893,7 +19825,7 @@ class InternalMCPChatOrchestrator:
                     "concept_id": concept_id,
                     "name": item.get("name"),
                     "score": item.get("score"),
-                    "source_path": "topic_keyword_similarity_search",
+                    "source_path": "topic_context_similarity_search",
                 }
             )
         for item in rag_type_candidates:
@@ -19956,7 +19888,7 @@ class InternalMCPChatOrchestrator:
                     "concept_id": concept_id,
                     "name": item.get("name"),
                     "score": item.get("score"),
-                    "source_path": "topic_keyword_similarity_search",
+                    "source_path": "topic_context_similarity_search",
                 }
             )
         for item in rag_predicate_candidates:
@@ -20169,7 +20101,7 @@ class InternalMCPChatOrchestrator:
                 concept_id=item.get("concept_id"),
                 name=item.get("name"),
                 score=item.get("score"),
-                source_path="topic_keyword_similarity_search",
+                source_path="topic_context_similarity_search",
             )
 
         for concept_id in annotation_suggested_type_ids:
@@ -20234,7 +20166,7 @@ class InternalMCPChatOrchestrator:
                 concept_id=item.get("concept_id"),
                 name=item.get("name"),
                 score=item.get("score"),
-                source_path="topic_keyword_similarity_search",
+                source_path="topic_context_similarity_search",
             )
 
         for concept_id in annotation_region_predicate_ids:
@@ -20787,7 +20719,7 @@ class InternalMCPChatOrchestrator:
                 "predicate_query": predicate_query,
                 "targeted_predicates": targeted_predicates,
                 # JVNAUTOSCI-1052: Topic vocabulary discovery telemetry
-                "topic_keywords": topic_keywords,
+                "topic_query_text": topic_query_text,
                 "topic_types": topic_types,
                 "topic_predicates": topic_predicates,
                 "topic_vocabulary_cached": topic_vocabulary_cached,
@@ -20862,9 +20794,9 @@ class InternalMCPChatOrchestrator:
                         "changed_outcome": bool(predicates),
                     },
                     {
-                        "stage": "topic_keyword_extraction",
-                        "decision_source": "prompt_semantic_inference",
-                        "changed_outcome": bool(topic_keywords),
+                        "stage": "topic_context_query_construction",
+                        "decision_source": "turn_context_query_construction",
+                        "changed_outcome": bool(topic_query_text),
                     },
                     {
                         "stage": "topic_type_discovery",
@@ -20917,14 +20849,13 @@ class InternalMCPChatOrchestrator:
             # preflight_stage_authorities above.
             decision_source="composite_preflight",
             changed_outcome=bool(
-                topic_keywords
-                or annotation_seed_candidate_ids
+                annotation_seed_candidate_ids
                 or rag_selected_concept_ids
                 or salient_predicate_ids
                 or final_type_suggestions
                 or final_predicate_suggestions
             ),
-            possible_inappropriate_python_code_use=bool(topic_keywords),
+            possible_inappropriate_python_code_use=False,
             reason_code="deterministic_ontology_preflight",
         )
 
@@ -21218,12 +21149,6 @@ class InternalMCPChatOrchestrator:
             else self._contains_fenced_tool_call_json(response_text)
         )
 
-        heuristic_missing = (
-            interpretation.heuristic_missing_tool_call
-            if (not use_structured and interpretation is not None)
-            else self._looks_like_missing_tool_call(response_text)
-        )
-
         classifier_invoked = False
         classifier_has_verdict = False
         classifier_verdict: bool | None = None
@@ -21242,52 +21167,13 @@ class InternalMCPChatOrchestrator:
             retry_reason = "JSON tool-call output detected"
 
         if retry_reason is None and allow_semantic_retry:
-            lowered = response_text.lower() if isinstance(response_text, str) else ""
-            mentions_tools = any(
-                token in lowered
-                for token in (
-                    "tool",
-                    "mcp",
-                    "ontology",
-                    "rag",
-                    "search",
-                    "fetch",
-                    "create",
-                    "update",
-                    "delete",
-                    "jira",
-                    "confluence",
-                    "gmail",
-                )
+            classifier_invoked, llm_flag = self._llm_detects_missing_tool_call(
+                response_text,
+                llm_client,
+                fallback_model=classifier_model or model,
+                aux_log=aux_log,
+                path=path,
             )
-
-            detector = self._get_missing_tool_call_detector()
-            fallback_detector = bool(
-                detector
-                and isinstance(getattr(detector, "action_id", None), str)
-                and detector.action_id == "fallback_missing_tool_call_detector"
-            )
-
-            # If the conservative heuristic already fires and we're using the
-            # fallback classifier spec, skip the classifier call to avoid
-            # unnecessary extra LLM traffic (and to keep recovery deterministic
-            # in unit tests that stub the LLM client).
-            if heuristic_missing and fallback_detector:
-                retry_reason = "heuristic missing tool call"
-                llm_flag = None
-                classifier_invoked = False
-            elif not heuristic_missing and not mentions_tools:
-                # Normal prose: don't bother running the classifier.
-                llm_flag = None
-                classifier_invoked = False
-            else:
-                classifier_invoked, llm_flag = self._llm_detects_missing_tool_call(
-                    response_text,
-                    llm_client,
-                    fallback_model=classifier_model or model,
-                    aux_log=aux_log,
-                    path=path,
-                )
 
             if llm_flag is not None:
                 classifier_has_verdict = True
@@ -21296,59 +21182,6 @@ class InternalMCPChatOrchestrator:
             if retry_reason is None:
                 if llm_flag is True:
                     retry_reason = "LLM classifier flagged missing tool call"
-                elif llm_flag is None:
-                    # Fallback to legacy heuristic only when classifier unavailable.
-                    if heuristic_missing:
-                        retry_reason = "heuristic missing tool call"
-                elif llm_flag is False:
-                    # Backstop: the LLM classifier can miss obvious cases.
-                    if heuristic_missing:
-                        retry_reason = (
-                            "heuristic missing tool call (classifier said no)"
-                        )
-
-            if heuristic_missing and isinstance(retry_reason, str):
-                heuristic_reason_code = None
-                if retry_reason == "heuristic missing tool call":
-                    heuristic_reason_code = (
-                        "heuristic_missing_tool_call_requested_retry"
-                    )
-                elif retry_reason == "heuristic missing tool call (classifier said no)":
-                    heuristic_reason_code = (
-                        "heuristic_missing_tool_call_backstopped_classifier_no"
-                    )
-                if heuristic_reason_code:
-                    try:
-                        aux_log.append(
-                            annotate_python_decision_event(
-                                {
-                                    "type": "missing_tool_call_heuristic",
-                                    "path": path,
-                                    "heuristic_missing_tool_call": True,
-                                    "mentions_tools": mentions_tools,
-                                    "fallback_detector": fallback_detector,
-                                    "classifier_invoked": classifier_invoked,
-                                    "classifier_verdict": (
-                                        "yes"
-                                        if llm_flag is True
-                                        else (
-                                            "no" if llm_flag is False else "unavailable"
-                                        )
-                                    ),
-                                    "retry_reason": retry_reason,
-                                },
-                                stage="tool_recovery",
-                                component="internal_mcp_orchestrator",
-                                function="_assess_missing_tool_call",
-                                decision_class="missing_tool_call_heuristic",
-                                decision_source="response_semantic_inference",
-                                changed_outcome=True,
-                                reason_code=heuristic_reason_code,
-                                possible_inappropriate_python_code_use=True,
-                            )
-                        )
-                    except Exception:
-                        pass
 
         return _MissingToolCallAssessment(
             path=path,

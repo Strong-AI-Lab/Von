@@ -101,11 +101,7 @@ def test_no_python_lexical_selector_guidance_in_policy_service() -> None:
 
 
 def test_prompt_semantic_source_budget_in_orchestrator() -> None:
-    """Only one orchestrator call site should use prompt_semantic_inference.
-
-    Currently: ontology_preflight.  If more call sites appear, they need
-    explicit justification and this budget must be updated.
-    """
+    """The orchestrator should have no prompt-semantic decision-source budget."""
     from src.backend.integrations.internal_mcp import orchestrator as mod
     from src.backend.services.python_decision_authority_service import (
         _PROMPT_SEMANTIC_DECISION_SOURCES,
@@ -122,12 +118,31 @@ def test_prompt_semantic_source_budget_in_orchestrator() -> None:
         matches = re.findall(pattern, source)
         hits.extend(matches)
 
-    # Budget: exactly 1 (ontology_preflight → prompt_semantic_inference)
-    assert len(hits) <= 1, (
-        f"Expected ≤1 prompt-semantic decision_source in orchestrator, "
-        f"found {len(hits)}: {hits}.  New prompt-semantic call sites need "
+    # Budget: zero prompt-semantic decision-source call sites in orchestrator.
+    assert hits == [], (
+        f"Expected 0 prompt-semantic decision_source call sites in orchestrator, "
+        f"found {len(hits)}: {hits}. New prompt-semantic call sites need "
         "explicit justification or migration to workflow-owned logic."
     )
+
+
+def test_no_topic_stopword_keyworder_left_in_orchestrator() -> None:
+    """Guard against reintroducing the old English stopword topic keyworder."""
+    from src.backend.integrations.internal_mcp import orchestrator as mod
+
+    source = inspect.getsource(mod)
+    banned_fragments = [
+        "_extract_topic_keywords_from_context",
+        "stop_words = {",
+        "topic_keyword_extraction",
+        "topic_keyword_similarity_search",
+    ]
+    for fragment in banned_fragments:
+        assert fragment not in source, (
+            f"Found banned topic-keyword fragment '{fragment}' in orchestrator. "
+            "Turn-context discovery must delegate semantics to workflow/Vontology "
+            "surfaces, not English stopword keywording."
+        )
 
 
 def test_derive_prompt_tool_requirements_no_url_extraction_for_scholarly_text() -> None:

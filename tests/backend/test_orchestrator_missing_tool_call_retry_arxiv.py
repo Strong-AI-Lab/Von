@@ -113,14 +113,10 @@ def _uses_missing_tool_call_classifier_prompt(
     return False
 
 
-def test_missing_tool_call_assessment_skips_classifier_when_fallback_detector_matches():
+def test_missing_tool_call_assessment_uses_classifier_when_detector_is_available():
     orchestrator = _build_orchestrator_stub()
 
-    llm = _CapturingLLM(
-        [
-            "Here is the actual tool call.",
-        ]
-    )
+    llm = _CapturingLLM(["YES"])
 
     response_text = "Here is the actual tool call."
     assessment = orchestrator._assess_missing_tool_call(
@@ -135,12 +131,9 @@ def test_missing_tool_call_assessment_skips_classifier_when_fallback_detector_ma
         allow_semantic_retry=True,
     )
 
-    assert assessment.retry_reason == "heuristic missing tool call"
-    assert assessment.classifier_invoked is False
-    assert not _uses_missing_tool_call_classifier_prompt(
-        llm.calls, _TEST_CLASSIFIER_PROMPT
-    )
-    assert llm.calls == []
+    assert assessment.retry_reason == "LLM classifier flagged missing tool call"
+    assert assessment.classifier_invoked is True
+    assert _uses_missing_tool_call_classifier_prompt(llm.calls, _TEST_CLASSIFIER_PROMPT)
 
 
 def test_missing_tool_call_retry_does_not_force_domain_specific_download_tool():

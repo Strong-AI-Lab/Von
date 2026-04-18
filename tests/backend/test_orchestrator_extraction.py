@@ -384,7 +384,7 @@ def test_assess_missing_tool_call_retries_on_json_action_without_classifier_call
     assert not llm.calls
 
 
-def test_assess_missing_tool_call_backstops_classifier_no_with_heuristic_yes():
+def test_assess_missing_tool_call_does_not_backstop_classifier_no_with_python_heuristic():
     orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
     orchestrator._missing_tool_call_detector_loaded = True
     orchestrator._missing_tool_call_detector = _MissingToolCallDetectorSpec(
@@ -399,7 +399,7 @@ def test_assess_missing_tool_call_backstops_classifier_no_with_heuristic_yes():
 
     response_text = "I'll do that now and execute the tools."
     interpretation = orchestrator._interpret_model_turn(response_text)
-    assert interpretation.heuristic_missing_tool_call
+    assert interpretation.heuristic_missing_tool_call is False
 
     assessment = orchestrator._assess_missing_tool_call(
         response_text=interpretation.response_text,
@@ -412,7 +412,7 @@ def test_assess_missing_tool_call_backstops_classifier_no_with_heuristic_yes():
         tool_call_parse_error=None,
     )
 
-    assert assessment.retry_reason == "heuristic missing tool call (classifier said no)"
+    assert assessment.retry_reason is None
 
 
 def test_assess_missing_tool_call_skips_semantic_retry_when_not_required():
@@ -422,7 +422,7 @@ def test_assess_missing_tool_call_skips_semantic_retry_when_not_required():
 
     response_text = "I'll now execute the tools."
     interpretation = orchestrator._interpret_model_turn(response_text)
-    assert interpretation.heuristic_missing_tool_call
+    assert interpretation.heuristic_missing_tool_call is False
 
     assessment = orchestrator._assess_missing_tool_call(
         response_text=interpretation.response_text,
@@ -617,25 +617,11 @@ def test_extract_json_blob_ignores_missing_action_when_tool_is_unknown():
     assert orchestrator._extract_json_blob(text) is None
 
 
-def test_looks_like_missing_tool_call_detects_promise_to_search():
-    """Test that 'I'm going to search...' without actual tool call is detected."""
+def test_looks_like_missing_tool_call_is_disabled_for_tool_promise_prose():
+    """Tool-promise prose should not trigger Python heuristic recovery anymore."""
     text = "I'm going to search the web for authoritative information about you."
     orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
-    assert orchestrator._looks_like_missing_tool_call(text)
-
-
-def test_looks_like_missing_tool_call_detects_promise_to_execute_tools():
-    """Test that 'I'll execute the tools' without actual tool call is detected."""
-    text = "I'll fix that now and actually execute the tools."
-    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
-    assert orchestrator._looks_like_missing_tool_call(text)
-
-
-def test_looks_like_missing_tool_call_detects_promise_to_fetch():
-    """Test that 'Let me fetch...' without actual tool call is detected."""
-    text = "Let me fetch the concept details now."
-    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
-    assert orchestrator._looks_like_missing_tool_call(text)
+    assert not orchestrator._looks_like_missing_tool_call(text)
 
 
 def test_looks_like_missing_tool_call_ignores_short_explanatory_text():
@@ -800,7 +786,7 @@ def test_missing_tool_call_assess_requests_retry_when_classifier_flags_missing_t
     assert "missing_tool_call_classifier" in aux_types
 
 
-def test_missing_tool_call_assess_uses_heuristic_when_classifier_misses():
+def test_missing_tool_call_assess_does_not_use_python_heuristic_when_classifier_misses():
     orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
     llm = _RecorderLLM(["NO"])
     orchestrator._missing_tool_call_detector_loaded = True
@@ -833,25 +819,18 @@ def test_missing_tool_call_assess_uses_heuristic_when_classifier_misses():
     )
     result = orchestrator._action_missing_tool_call_assess(request)
 
-    assert result.outputs["result"] is True
-    assert result.outputs["missing_tool_call_retry_reason"]
+    assert result.outputs["result"] is False
+    assert result.outputs["missing_tool_call_retry_reason"] is None
     detection_entry = next(
         entry
         for entry in result.outputs["aux_llm_calls"]
         if entry.get("type") == "missing_tool_call_detection"
     )
     assert detection_entry["classifier_verdict"] == "no"
-    heuristic_entry = next(
-        entry
+    assert not any(
+        entry.get("type") == "missing_tool_call_heuristic"
         for entry in result.outputs["aux_llm_calls"]
-        if entry.get("type") == "missing_tool_call_heuristic"
     )
-    assert heuristic_entry["decision_class"] == "missing_tool_call_heuristic"
-    assert heuristic_entry["decision_source"] == "response_semantic_inference"
-    assert heuristic_entry["reason_code"] == (
-        "heuristic_missing_tool_call_backstopped_classifier_no"
-    )
-    assert heuristic_entry["possible_inappropriate_python_code_use"] is True
 
 
 def test_missing_tool_retry_forces_explicitly_requested_workflow_tools():

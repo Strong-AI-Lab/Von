@@ -324,18 +324,19 @@ def test_orchestrator_injects_deterministic_preflight_context(monkeypatch):
 # --- JVNAUTOSCI-1052: Topic vocabulary discovery tests ---
 
 
-def test_extract_topic_keywords_from_context():
-    """Test keyword extraction from conversation context."""
+def test_build_topic_vocabulary_query_text():
+    """Test structural topic-query construction from conversation context."""
     gateway = cast(Any, _CapturingGateway())
     orchestrator = InternalMCPChatOrchestrator(
         gateway=gateway, max_tool_invocations=1, max_context_chars=80_000
     )
 
     # Test with prompt only
-    keywords = orchestrator._extract_topic_keywords_from_context(
+    query_text = orchestrator._build_topic_vocabulary_query_text(
         "Tell me about machine learning algorithms", None
     )
-    assert "machine" in keywords or "learning" in keywords or "algorithms" in keywords
+    assert isinstance(query_text, str)
+    assert "machine learning algorithms" in query_text.lower()
 
     # Test with context
     context = [
@@ -343,33 +344,33 @@ def test_extract_topic_keywords_from_context():
         {"role": "assistant", "content": "Sure, I can help with that."},
         {"role": "user", "content": "What about deep learning?"},
     ]
-    keywords = orchestrator._extract_topic_keywords_from_context(
+    query_text = orchestrator._build_topic_vocabulary_query_text(
         "How do transformers work?", context
     )
-    # Should include keywords from both prompt and recent user messages
-    assert len(keywords) > 0
-    # Should filter stop words
-    assert "about" not in keywords
-    assert "want" not in keywords
+    assert isinstance(query_text, str)
+    lowered_query = query_text.lower()
+    assert "transformers" in lowered_query
+    assert "neural networks" in lowered_query
+    assert "deep learning" in lowered_query
 
 
-def test_extract_topic_keywords_filters_concept_ids():
-    """Test that explicit concept IDs are filtered from keywords."""
+def test_build_topic_vocabulary_query_text_filters_concept_ids():
+    """Test that explicit concept IDs are filtered from the query text."""
     gateway = cast(Any, _CapturingGateway())
     orchestrator = InternalMCPChatOrchestrator(
         gateway=gateway, max_tool_invocations=1, max_context_chars=80_000
     )
 
-    keywords = orchestrator._extract_topic_keywords_from_context(
+    query_text = orchestrator._build_topic_vocabulary_query_text(
         "Create a concept #V#machine_learning_algorithm as type", None
     )
-    # The concept ID should be removed, but 'machine', 'learning', 'algorithm' should
-    # not appear from the ID (they might appear from other words in the prompt)
-    assert "#V#machine_learning_algorithm" not in " ".join(keywords)
+    assert isinstance(query_text, str)
+    assert "#V#machine_learning_algorithm" not in query_text
+    assert "Create a concept" in query_text
 
 
-def test_discover_types_for_topic(monkeypatch):
-    """Test type discovery based on topic keywords."""
+def test_discover_types_for_topic_context(monkeypatch):
+    """Test type discovery based on structural topic query text."""
     search_calls = []
 
     def _fake_search_concepts(*, query="", filter_kind=None, **_kwargs):
@@ -401,18 +402,19 @@ def test_discover_types_for_topic(monkeypatch):
         gateway=gateway, max_tool_invocations=1, max_context_chars=80_000
     )
 
-    types = orchestrator._discover_types_for_topic(
-        ["neural", "network", "learning"], "en"
+    types = orchestrator._discover_types_for_topic_context(
+        "neural network learning", "en"
     )
 
     assert len(types) == 2
     assert types[0]["concept_id"] == "#V#neural_network"
     assert types[0]["name"] == "Neural Network"
     assert any(c["filter_kind"] == ["type"] for c in search_calls)
+    assert search_calls[0]["query"] == "neural network learning"
 
 
-def test_discover_predicates_for_topic(monkeypatch):
-    """Test predicate discovery based on topic keywords."""
+def test_discover_predicates_for_topic_context(monkeypatch):
+    """Test predicate discovery based on structural topic query text."""
     search_calls = []
 
     def _fake_search_concepts(*, query="", filter_kind=None, **_kwargs):
@@ -439,12 +441,13 @@ def test_discover_predicates_for_topic(monkeypatch):
         gateway=gateway, max_tool_invocations=1, max_context_chars=80_000
     )
 
-    predicates = orchestrator._discover_predicates_for_topic(
-        ["neural", "network", "training"], "en"
+    predicates = orchestrator._discover_predicates_for_topic_context(
+        "neural network training", "en"
     )
 
     assert len(predicates) == 1
     assert predicates[0]["concept_id"] == "#V#has_training_data"
+    assert search_calls[0]["query"] == "neural network training"
 
 
 def test_topic_vocabulary_caching(monkeypatch):
@@ -478,14 +481,14 @@ def test_topic_vocabulary_caching(monkeypatch):
         gateway=gateway, max_tool_invocations=1, max_context_chars=80_000
     )
 
-    keywords = ["machine", "learning"]
+    query_text = "machine learning"
 
     # First discovery should hit the search
-    types1 = orchestrator._discover_types_for_topic(keywords, "en")
-    predicates1 = orchestrator._discover_predicates_for_topic(keywords, "en")
+    types1 = orchestrator._discover_types_for_topic_context(query_text, "en")
+    predicates1 = orchestrator._discover_predicates_for_topic_context(query_text, "en")
 
-    # Second discovery with same keywords should use cache
-    cache_key = orchestrator._get_topic_vocabulary_cache_key(keywords)
+    # Second discovery with same query should use cache
+    cache_key = orchestrator._get_topic_vocabulary_cache_key(query_text)
 
     # Manually populate cache to simulate what _build_ontology_preflight does
     import time
@@ -497,11 +500,11 @@ def test_topic_vocabulary_caching(monkeypatch):
     }
 
     # Verify cache key generation is consistent
-    cache_key2 = orchestrator._get_topic_vocabulary_cache_key(keywords)
+    cache_key2 = orchestrator._get_topic_vocabulary_cache_key(query_text)
     assert cache_key == cache_key2
 
-    # Verify keywords order doesn't affect cache key
-    cache_key3 = orchestrator._get_topic_vocabulary_cache_key(["learning", "machine"])
+    # Verify cache-key normalisation ignores case and repeated whitespace.
+    cache_key3 = orchestrator._get_topic_vocabulary_cache_key("  MACHINE   learning  ")
     assert cache_key == cache_key3
 
 
@@ -573,7 +576,7 @@ def test_topic_vocabulary_in_preflight_telemetry(monkeypatch):
     telemetry = preflight_entries[0]
 
     # Check topic vocabulary is in telemetry
-    assert "topic_keywords" in telemetry
+    assert "topic_query_text" in telemetry
     assert "topic_types" in telemetry
     assert "topic_predicates" in telemetry
     assert "topic_vocabulary_cached" in telemetry
@@ -742,7 +745,7 @@ def test_preflight_telemetry_exposes_discovery_path_provenance(monkeypatch):
     assert telemetry.get("final_type_suggestions"), "expected final type suggestions"
     assert telemetry.get("final_predicate_suggestions"), "expected final predicates"
     assert telemetry.get("final_suggestion_paths"), "expected source path summary"
-    assert "topic_keyword_similarity_search" in telemetry.get(
+    assert "topic_context_similarity_search" in telemetry.get(
         "final_suggestion_paths", []
     )
     assert "preflight_predicate_registry" in telemetry.get("final_suggestion_paths", [])
@@ -1635,8 +1638,8 @@ def test_specialised_preflight_shadow_mode_reports_evaluation_without_applying(
     monkeypatch.setenv("VON_MCP_SPECIALISED_PREFLIGHT_MODE", "shadow")
     monkeypatch.setattr(
         InternalMCPChatOrchestrator,
-        "_extract_topic_keywords_from_context",
-        lambda self, prompt, context, max_recent_messages=5: [],
+        "_build_topic_vocabulary_query_text",
+        lambda self, prompt, context, max_recent_messages=5, max_chars=320: None,
     )
     monkeypatch.setattr(
         "src.backend.services.annotation_extraction_service.extract_annotations",
@@ -1739,8 +1742,8 @@ def test_specialised_preflight_active_mode_applies_fallback_suggestions(monkeypa
     monkeypatch.setenv("VON_MCP_SPECIALISED_PREFLIGHT_MODE", "active")
     monkeypatch.setattr(
         InternalMCPChatOrchestrator,
-        "_extract_topic_keywords_from_context",
-        lambda self, prompt, context, max_recent_messages=5: [],
+        "_build_topic_vocabulary_query_text",
+        lambda self, prompt, context, max_recent_messages=5, max_chars=320: None,
     )
     monkeypatch.setattr(
         "src.backend.services.annotation_extraction_service.extract_annotations",
@@ -1852,10 +1855,11 @@ def test_specialised_preflight_active_mode_applies_fallback_suggestions(monkeypa
 def test_preflight_stage_authorities_classify_mechanical_stages_correctly(
     monkeypatch,
 ):
-    """JVNAUTOSCI-1629: per-stage sub-annotations should NOT label mechanical
-    stages as prompt_semantic_inference; only topic keyword extraction is
-    prompt-semantic.  The top-level decision_source should be
-    composite_preflight, not prompt_semantic_inference.
+    """JVNAUTOSCI-1629: ontology preflight should have no prompt-semantic stage.
+
+    The top-level decision_source should remain composite_preflight, and the
+    turn-context query construction stage should be classified as structural
+    context construction rather than prompt-semantic inference.
     """
 
     def _fake_search_concepts(
@@ -1922,10 +1926,8 @@ def test_preflight_stage_authorities_classify_mechanical_stages_correctly(
     # Top-level decision_source must be composite, not prompt_semantic_inference.
     assert telemetry["decision_source"] == "composite_preflight"
 
-    # possible_inappropriate_python_code_use should reflect whether topic
-    # keywords (the only prompt-semantic stage) actually produced output.
-    has_topic_keywords = bool(telemetry.get("topic_keywords"))
-    assert telemetry["possible_inappropriate_python_code_use"] == has_topic_keywords
+    # This preflight path no longer relies on prompt-semantic inference.
+    assert telemetry["possible_inappropriate_python_code_use"] is False
 
     # Per-stage sub-annotations must be present.
     stage_authorities = telemetry.get("preflight_stage_authorities")
@@ -1938,6 +1940,7 @@ def test_preflight_stage_authorities_classify_mechanical_stages_correctly(
     mechanical_stages = {
         "explicit_id_extraction",
         "predicate_registry_load",
+        "topic_context_query_construction",
         "topic_type_discovery",
         "topic_predicate_discovery",
         "annotation_extraction",
@@ -1953,11 +1956,16 @@ def test_preflight_stage_authorities_classify_mechanical_stages_correctly(
                 != "prompt_semantic_inference"
             ), f"Stage {stage_name} should not be classified as prompt_semantic_inference"
 
-    # Only topic_keyword_extraction should be prompt_semantic_inference.
-    assert "topic_keyword_extraction" in stages_by_name
+    assert "topic_context_query_construction" in stages_by_name
     assert (
-        stages_by_name["topic_keyword_extraction"]["decision_source"]
-        == "prompt_semantic_inference"
+        stages_by_name["topic_context_query_construction"]["decision_source"]
+        == "turn_context_query_construction"
+    )
+
+    assert not any(
+        item.get("decision_source") == "prompt_semantic_inference"
+        for item in stage_authorities
+        if isinstance(item, dict)
     )
 
     # Each sub-stage entry must have required fields.
