@@ -370,6 +370,122 @@ def test_format_tool_result_marks_search_concepts_payload_weak_when_matches_are_
     assert payload["results"][0]["lexical_grounding"] == "none"
 
 
+def test_format_tool_result_shapes_search_arxiv_payload_for_live_follow_up():
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=cast(Any, _StubGateway()),
+        max_tool_invocations=1,
+        max_tool_result_chars=5_000,
+        max_tool_result_field_chars=1_500,
+        max_context_chars=80_000,
+    )
+
+    encoded = orchestrator._format_tool_result(
+        "search_arxiv",
+        {
+            "query": "agent memory symbolic reasoning",
+            "total_results": 2,
+            "papers": [
+                {
+                    "id": "2604.12345",
+                    "title": "Agent Memory With Symbolic Grounding",
+                    "authors": [f"Author {index}" for index in range(12)],
+                    "abstract": "A" * 1200,
+                    "categories": ["cs.AI", "cs.LG"],
+                    "published": "2026-04-01T00:00:00+00:00",
+                    "url": "https://arxiv.org/abs/2604.12345",
+                    "resource_uri": "arxiv://2604.12345",
+                }
+            ],
+        },
+        1.0,
+        "ok",
+    )
+
+    parsed = json.loads(encoded)
+    payload = parsed["payload"]
+    assert payload["_llm_view"] == "search_arxiv_results.v1"
+    assert payload["query"] == "agent memory symbolic reasoning"
+    assert payload["papers"][0]["title"] == "Agent Memory With Symbolic Grounding"
+    assert payload["papers"][0]["author_count"] == 12
+    assert len(payload["papers"][0]["authors_preview"]) == 6
+    assert len(payload["papers"][0]["abstract_preview"]) == 480
+
+
+def test_format_tool_result_shapes_search_web_payload_for_live_follow_up():
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=cast(Any, _StubGateway()),
+        max_tool_invocations=1,
+        max_tool_result_chars=5_000,
+        max_tool_result_field_chars=1_500,
+        max_context_chars=80_000,
+    )
+
+    encoded = orchestrator._format_tool_result(
+        "search_web",
+        {
+            "query": "agent memory workflow orchestration open source",
+            "results": [
+                {
+                    "title": "Project Alpha",
+                    "url": "https://example.com/alpha",
+                    "content": "B" * 800,
+                }
+            ],
+        },
+        1.0,
+        "ok",
+    )
+
+    parsed = json.loads(encoded)
+    payload = parsed["payload"]
+    assert payload["_llm_view"] == "search_web_results.v1"
+    assert payload["query"] == "agent memory workflow orchestration open source"
+    assert payload["results"][0]["title"] == "Project Alpha"
+    assert payload["results"][0]["url"] == "https://example.com/alpha"
+    assert len(payload["results"][0]["snippet"]) == 320
+
+
+def test_format_tool_result_shapes_jira_search_payload_for_live_follow_up():
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=cast(Any, _StubGateway()),
+        max_tool_invocations=1,
+        max_tool_result_chars=5_000,
+        max_tool_result_field_chars=1_500,
+        max_context_chars=80_000,
+    )
+
+    encoded = orchestrator._format_tool_result(
+        "jira_search",
+        {
+            "jql": "project = JVNAUTOSCI ORDER BY updated DESC",
+            "total": 1,
+            "issues": [
+                {
+                    "key": "JVNAUTOSCI-1903",
+                    "fields": {
+                        "summary": "Replay and record research briefing result",
+                        "status": {"name": "In Progress"},
+                        "issuetype": {"name": "Subtask"},
+                        "assignee": {"displayName": "Michael Witbrock"},
+                        "updated": "2026-04-18T08:00:00.000+0000",
+                        "labels": ["real-path-testing", "multi-surface"],
+                    },
+                }
+            ],
+        },
+        1.0,
+        "ok",
+    )
+
+    parsed = json.loads(encoded)
+    payload = parsed["payload"]
+    assert payload["_llm_view"] == "jira_search_results.v1"
+    assert payload["issues"][0]["key"] == "JVNAUTOSCI-1903"
+    assert payload["issues"][0]["summary"] == "Replay and record research briefing result"
+    assert payload["issues"][0]["status"] == "In Progress"
+    assert payload["issues"][0]["issue_type"] == "Subtask"
+
+
 def test_extract_result_summary_uses_total_count_and_query_for_search_concepts():
     summary = InternalMCPChatOrchestrator._extract_result_summary(
         "search_concepts",

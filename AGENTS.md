@@ -91,6 +91,7 @@ For frontend/browser user-view validation practice, also see
 28. Agents are authorised to create new refactoring or architecture-alignment Jira tasks when they encounter code of this kind. Such tasks should explain the observed structural problem, why it matters now, and how the proposed refactor would improve code coherence, represented-authority alignment, and future change safety.
 29. Do not use size alone as the criterion for opening refactor tasks. A strong candidate usually combines size or repeated patch pressure with mixed responsibilities, weak test seams, user-visible interpretation risk, integration-boundary sprawl, or drift of workflow/control/verification logic away from represented authority.
 30. After a substantial workflow/orchestration refactor, perform a bounded structural scan of adjacent code for monoliths or authority-drift risks. Create linked follow-on Jira tasks when the architectural case is clear; do not create noise tickets based only on line count.
+31. In long coding sessions, perform periodic host-hygiene checks and clean up stale local helper processes spawned by the work. Before starting another local server, browser replay, or MCP-heavy batch after repeated retries/restarts, check for duplicate Von servers, stale Playwright/browser daemons, old MCP stdio helpers, and similar leftovers. Do not normalise piling up extra local services on new ports as a workaround for not cleaning up the old ones.
 
 ## 4. Workflow, prompt, and KB authority
 
@@ -181,6 +182,7 @@ Verify all of the following:
 - use existing canonical helpers and pathways before adding new ones
 - run targeted tests as you go
 - keep changes minimal but systemic where a shared fix is clearly better than a point fix
+- during long sessions or after repeated local restarts/browser replays, run a bounded operational cleanup check for stale local servers, browser/tool daemons, and temp probe processes before starting yet another copy
 - do not treat unrelated local changes as automatic exclusions from a commit; if they appear consistent with the branch direction, do not weaken task correctness, and do not conflict with explicit user intent, it is acceptable to bundle them rather than spend disproportionate effort separating them mechanically
 
 ### 7.3 Before saying the task is done

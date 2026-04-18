@@ -200,6 +200,10 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "salience": "high",
         "category": "arxiv",
         "display_template": "Found {count} papers",
+        "planner_hint": (
+            "Use for recent or current arXiv literature retrieval. Query with the "
+            "topic, person, or research thread rather than a generic placeholder."
+        ),
     },
     "download_paper": {
         "salience": "high",
@@ -252,6 +256,10 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "salience": "high",
         "category": "search",
         "display_template": "{count} web results",
+        "planner_hint": (
+            "Use for current public-web information or recent external developments. "
+            "Query with the concrete topic or entity, not a vague placeholder."
+        ),
     },
     "extract_url": {
         "salience": "high",
@@ -268,6 +276,10 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "salience": "medium",
         "category": "jira",
         "display_template": "Found {count} issues",
+        "planner_hint": (
+            "Use for Jira issue retrieval. Prefer this over general task tools when "
+            "the user asks about Jira issues or linked Jira tasks."
+        ),
     },
     "jira_get_issue": {
         "salience": "medium",
@@ -440,6 +452,10 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "salience": "medium",
         "category": "task",
         "display_template": "{count} tasks",
+        "planner_hint": (
+            "Use for Von internal tasks and to-dos. This is not Jira issue search "
+            "and should not be used for Jira issues or linked Jira tasks."
+        ),
     },
     "extract_annotations": {
         "salience": "medium",

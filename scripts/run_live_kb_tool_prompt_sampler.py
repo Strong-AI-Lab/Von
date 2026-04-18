@@ -68,6 +68,9 @@ HARD_FAILURE_RESPONSE_MARKERS = (
     "not authenticated",
     "workflow not runnable",
     "instance was not created",
+    "authoritative conversation-turn workflow failed",
+    "workflow_llm_step_timeout",
+    "llm call timed out",
 )
 SOFT_FAILURE_RESPONSE_MARKERS = (
     "i don't currently have",

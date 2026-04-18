@@ -19,6 +19,7 @@ import pytest
 from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
     _MissingToolCallDetectorSpec,
+    _PromptRequirementEvaluation,
     _WorkflowModelPolicyState,
 )
 from src.backend.languagemodels.structured_tool_calling.types import (
@@ -1166,8 +1167,247 @@ def test_structured_candidate_resolver_uses_context_for_entity_relative_kb_hints
     assert "search_knowledge_base" in lowered
     assert "resolve_concept_by_name" in lowered
     assert "find_relations_with_argument" in lowered
-    assert "vontology" not in resolution.hinted_families
+    assert "list_papers" not in lowered
     assert "arxiv" not in resolution.hinted_families
+
+
+def test_turn_contract_requirement_augmentation_adds_multi_surface_briefing_tools():
+    evaluation = _PromptRequirementEvaluation()
+
+    augmented = (
+        InternalMCPChatOrchestrator._augment_prompt_requirements_with_turn_contract(
+            evaluation=evaluation,
+            turn_expected_outcome_contract={
+                "summary": (
+                    "Return a short research briefing grounded in represented papers, "
+                    "recent arXiv work, and linked Jira tasks."
+                ),
+                "selector_guidance": (
+                    "Use KB/concept retrieval, arXiv search, and Jira retrieval."
+                ),
+                "grounding_requirement": (
+                    "Papers must be grounded via authorship or ownership relationships."
+                ),
+            },
+            method_catalogue={
+                "search_knowledge_base": {},
+                "search_concepts": {},
+                "find_relations_with_argument": {},
+                "search_arxiv": {},
+                "jira_search": {},
+            },
+            tool_invocations=(),
+        )
+    )
+
+    assert augmented.required_tools == (
+        "search_knowledge_base",
+        "search_concepts",
+        "search_arxiv",
+        "jira_search",
+    )
+    assert augmented.missing_tools == augmented.required_tools
+
+
+def test_turn_contract_requirement_augmentation_prefers_jira_search_over_task_list():
+    evaluation = _PromptRequirementEvaluation()
+
+    augmented = (
+        InternalMCPChatOrchestrator._augment_prompt_requirements_with_turn_contract(
+            evaluation=evaluation,
+            turn_expected_outcome_contract={
+                "summary": (
+                    "A research briefing comprising represented papers, recent "
+                    "arXiv work, and linked Jira tasks."
+                ),
+                "selector_guidance": (
+                    "Use retrieval workflows first: (1) `list_papers` and "
+                    "`search_knowledge_base` for the user's represented papers, "
+                    "(2) `search_arxiv` for recent related work, and (3) "
+                    "`jira_search` or `task_list` for related tasks."
+                ),
+                "grounding_requirement": (
+                    "Papers must be explicitly grounded to the user via authorship "
+                    "or ownership in the Vontology or arXiv inventory; Jira tasks "
+                    "must be verifiable via the Jira/Task tools within the user's "
+                    "scope."
+                ),
+            },
+            method_catalogue={
+                "search_knowledge_base": {},
+                "search_concepts": {},
+                "search_arxiv": {},
+                "jira_search": {},
+                "task_list": {},
+                "task_search": {},
+                "list_my_tasks": {},
+            },
+            tool_invocations=(),
+        )
+    )
+
+    assert augmented.required_tools == (
+        "search_knowledge_base",
+        "search_concepts",
+        "search_arxiv",
+        "jira_search",
+    )
+    assert "task_list" not in augmented.required_tools
+    assert "task_search" not in augmented.required_tools
+    assert "list_my_tasks" not in augmented.required_tools
+
+
+def test_structured_candidate_resolver_suppresses_general_task_family_for_jira_task_prompt():
+    from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
+
+    gateway = MagicMock(spec=InternalMCPGateway)
+    gateway.enabled = True
+    catalogue = {
+        "search_knowledge_base": {
+            "name": "search_knowledge_base",
+            "description": "Search the knowledge base",
+            "input_schema": {"required": {"query": str}, "optional": {}, "allow_unknown": True},
+            "output_schema": None,
+            "category": "read",
+        },
+        "search_concepts": {
+            "name": "search_concepts",
+            "description": "Search concepts",
+            "input_schema": {"required": {"query": str}, "optional": {}, "allow_unknown": True},
+            "output_schema": None,
+            "category": "read",
+        },
+        "find_relations_with_argument": {
+            "name": "find_relations_with_argument",
+            "description": "Find relations for a concept argument",
+            "input_schema": {"required": {"concept_id": str}, "optional": {}, "allow_unknown": True},
+            "output_schema": None,
+            "category": "read",
+        },
+        "search_arxiv": {
+            "name": "search_arxiv",
+            "description": "Search arXiv",
+            "input_schema": {"required": {"query": str}, "optional": {}, "allow_unknown": True},
+            "output_schema": None,
+            "category": "read",
+        },
+        "jira_search": {
+            "name": "jira_search",
+            "description": "Search Jira issues",
+            "input_schema": {"required": {"jql": str}, "optional": {}, "allow_unknown": True},
+            "output_schema": None,
+            "category": "read",
+        },
+        "task_list": {
+            "name": "task_list",
+            "description": "List Von tasks",
+            "input_schema": {"required": {}, "optional": {}, "allow_unknown": True},
+            "output_schema": None,
+            "category": "read",
+        },
+    }
+    gateway.describe_methods.return_value = catalogue
+
+    orch = InternalMCPChatOrchestrator(gateway=gateway)
+    tool_defs = orch._convert_mcp_tools_to_structured_definitions(
+        method_catalogue=catalogue
+    )
+    resolution = orch._resolve_structured_tool_candidates(
+        prompt=(
+            "Prepare a short research briefing for me: my represented papers, "
+            "relevant recent arXiv work, and any linked Jira tasks."
+        ),
+        context=[
+            {
+                "role": "system",
+                "content": (
+                    "Expected answer contract for this turn:\n"
+                    "- Selector guidance: Use KB/concept retrieval, arXiv search, "
+                    "and Jira retrieval.\n"
+                    "- Grounding requirement: Papers must be grounded via "
+                    "authorship or ownership relationships."
+                ),
+            }
+        ],
+        stage="tool_call",
+        workflow_action_id="tool_calling.plan",
+        provider="openai",
+        tool_definitions=tool_defs,
+        method_catalogue=catalogue,
+        required_prompt_tools=[
+            "search_knowledge_base",
+            "search_concepts",
+            "search_arxiv",
+            "jira_search",
+        ],
+    )
+
+    lowered = {name.lower() for name in resolution.candidate_tool_names}
+    assert "jira_search" in lowered
+    assert "search_arxiv" in lowered
+    assert "find_relations_with_argument" not in lowered
+    assert "task_list" not in lowered
+
+
+def test_guided_retrieval_retry_uses_user_anchor_for_research_briefing() -> None:
+    gateway = MagicMock()
+    gateway.describe_methods.return_value = {
+        "search_knowledge_base": {},
+        "search_concepts": {},
+        "find_relations_with_argument": {},
+        "search_web": {},
+        "search_arxiv": {},
+        "jira_search": {},
+    }
+    orchestrator = InternalMCPChatOrchestrator(gateway=gateway)
+
+    calls = orchestrator._infer_guided_retrieval_retry_tool_calls(
+        user_text=(
+            "Prepare a short research briefing for me: my represented papers, "
+            "relevant recent arXiv work, and any linked Jira tasks."
+        ),
+        context_messages=[
+            {
+                "role": "system",
+                "content": (
+                    "CURRENT USER CONTEXT: Michael Witbrock (#V#michael_witbrock)\n"
+                    "Selector guidance: Use KB/concept retrieval, web search, "
+                    "arXiv search, and Jira retrieval.\n"
+                    "Grounding requirement: Authorship/ownership of papers must "
+                    "be verified via retrieved metadata or RAG collections."
+                ),
+            }
+        ],
+        expected_outcome_contract={
+            "summary": (
+                "A concise research briefing comprising verified user papers, "
+                "recent relevant arXiv work, and related Jira tasks."
+            ),
+            "selector_guidance": (
+                "Use KB/concept retrieval, web search, arXiv search, and Jira retrieval."
+            ),
+            "grounding_requirement": (
+                "Authorship/ownership of papers must be verified via retrieved "
+                "metadata or RAG collections."
+            ),
+        },
+        invoked_tool_names=[],
+    )
+
+    assert calls is not None
+    by_tool = {str(call["tool"]): call for call in calls}
+    assert "find_relations_with_argument" not in by_tool
+    assert (
+        by_tool["search_arxiv"]["payload"]["query"] == '"Michael Witbrock"'
+    )
+    assert (
+        by_tool["search_web"]["payload"]["query"]
+        == '"Michael Witbrock" research papers'
+    )
+    assert (
+        by_tool["jira_search"]["payload"]["jql"]
+        == 'text ~ "\\"#V#michael_witbrock\\"" OR text ~ "\\"Michael Witbrock\\"" ORDER BY updated DESC'
+    )
 
 
 def test_structured_candidate_resolver_caps_hinted_kb_web_planner_sets():

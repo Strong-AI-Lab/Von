@@ -880,6 +880,11 @@ def run_turn_execution_critic(
         critic_verdict=data.get("critic_verdict"),
         completion_gate_verdict=data.get("completion_gate_verdict"),
         completion_report=data.get("completion_report"),
+        required_prompt_tools=(
+            data.get("required_prompt_tools")
+            if isinstance(data.get("required_prompt_tools"), list)
+            else None
+        ),
     )
 
     completion_gate = turn_execution_record.get("completion_gate")

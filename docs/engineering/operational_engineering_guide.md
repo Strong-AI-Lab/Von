@@ -112,6 +112,59 @@ finding in diagnostics or task notes.
   to terminate matching `probe.ps1` processes and remove their temp
   directories.
 
+### 4.6 Long-session process hygiene
+
+Long coding sessions that repeatedly start local Von servers, browser replays,
+Playwright tooling, or MCP helper processes can quietly accumulate stale
+processes and host-level memory pressure.
+
+Do not treat this as harmless background noise. It changes test results,
+consumes ports, and can destabilise the host badly enough to distort later
+debugging.
+
+Run a bounded hygiene check:
+
+- before starting yet another local Von server because "the previous one might
+  be stuck";
+- after multiple browser replay attempts or Playwright-driven acceptance runs;
+- after repeated MCP/tool-host restarts;
+- whenever RAM pressure or unexplained port conflicts start to appear;
+- at least once in any long session that has already spawned several local
+  services.
+
+Good first probes:
+
+- current RAM pressure:
+  `Get-CimInstance Win32_OperatingSystem | Select-Object @{Name='TotalGB';Expression={[math]::Round($_.TotalVisibleMemorySize/1MB,2)}}, @{Name='FreeGB';Expression={[math]::Round($_.FreePhysicalMemory/1MB,2)}}`
+- duplicate Von listeners:
+  `Get-NetTCPConnection -State Listen | Where-Object { $_.LocalPort -ge 5000 -and $_.LocalPort -le 5008 }`
+- likely stale Von / MCP / Playwright processes:
+  `Get-CimInstance Win32_Process | Where-Object { $_.Name -in 'python.exe','node.exe','chrome.exe' -and $_.CommandLine -match 'src\\.workflows\\.von\\.main|mcp_server|playwright|@playwright/mcp|mcp-chrome' }`
+- top memory consumers:
+  `Get-Process | Sort-Object WorkingSet64 -Descending | Select-Object -First 15 ProcessName, Id, @{Name='WS_GB';Expression={[math]::Round($_.WorkingSet64/1GB,2)}}`
+
+Common stale-process families in Von work:
+
+- extra `src.workflows.von.main` servers on adjacent ports from prior retries
+- Playwright daemon `node` processes and their temporary Chrome profiles
+- MCP stdio Python helpers no longer attached to a real client
+- temporary probe scripts or one-off debug helpers left behind after diagnosis
+
+Cleanup expectations:
+
+- prefer stopping clearly stale duplicate helpers before launching new ones;
+- keep the currently used local server or browser session alive when practical;
+- do not work around stale listeners by blindly hopping to a new port unless
+  the retained old process is genuinely needed;
+- after cleanup, re-check RAM and listeners so the session notes say whether
+  the pressure actually improved.
+
+If cleanup removes the obvious duplicates but memory pressure remains extreme,
+or kernel/pool counters stay abnormally high relative to process working sets,
+treat that as a broader host issue rather than endlessly restarting repo
+processes. Record that fact in diagnostics and avoid pretending the repository
+itself is the only source of the problem.
+
 ## 5. Environment and Credential Handling
 
 - `.env` is the authoritative local source for credentials and service-critical
@@ -168,6 +221,46 @@ For minimum local and hosted environment sets, see
 - Do not introduce direct DB access for Vontology-governed state.
 - Prefer workflow MCP tools as the default control surface for workflow
   behaviour when the behaviour can be represented there.
+
+### 6.1a Reusable workflow authoring during replay-driven fixes
+
+When a real-path replay or `JVNAUTOSCI-1894`-style test uncovers a missing
+capability that is really a broader research/lab task class, prefer authoring a
+new reusable workflow or subworkflow in Vontology rather than patching Python to
+make the sampled prompt pass.
+
+This is allowed even when the workflow design relies partly on background
+knowledge of the task class, so long as the result is a reusable authored
+workflow rather than a one-off hack for a particular prompt combination.
+
+Typical examples:
+
+- paper-author disambiguation;
+- daily diary drafting from represented context;
+- weekly lab activity/progress report composition;
+- stale-or-unnecessary task review.
+
+Operational rule:
+
+- if the behaviour can be represented cleanly in VWL/Vontology, do that;
+- if a reusable runtime or authoring primitive is missing, add only that
+  primitive in Python and then author the workflow through the canonical
+  workflow-authoring path;
+- do not encode the durable decision policy as a selector tweak, special route
+  override, or test-specific orchestration patch just because that is faster
+  for the current replay.
+
+Use the current workflow-authoring guidance in
+`docs/engineering/von_workflow_language_manual.md`, especially:
+
+- `### 4.1a Generic Workflow Authoring Primitives`
+- `#V#workflow_repair_or_create_workflow`
+- `#V#workflow_authoring_repair_workflow`
+- `#V#von_workflow_creation_workflow`
+
+If a proposed workflow would only make sense for the exact wording or exact
+tool mix of the current failing test, treat that as evidence you have not yet
+found the right reusable workflow boundary.
 
 ### 6.2 Jira
 
