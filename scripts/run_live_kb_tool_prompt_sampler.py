@@ -175,6 +175,14 @@ PROMPT_BANK_PAYLOAD: dict[str, Any] = {
             "likely_tools": ["search_concepts"],
         },
         {
+            "id": "salient_predicates_for_sail_students",
+            "category": "ontology_predicate_lookup",
+            "complexity_class": "vontology_grounded",
+            "prompt": "What predicates are salient to SAIL students?",
+            "knowledge_surfaces": ["background_knowledge", "kb"],
+            "likely_tools": ["search_concepts"],
+        },
+        {
             "id": "list_my_papers",
             "category": "entity_relative_kb_lookup",
             "complexity_class": "vontology_grounded",
