@@ -8359,6 +8359,13 @@ class InternalMCPChatOrchestrator:
                 prompt_requirements.missing_scholarly_representation_file_copy_ids
             )
             self._store_prompt_requirement_evaluation(data, prompt_requirements)
+            has_unmet_prompt_requirements = bool(
+                missing_prompt_tools
+                or missing_prompt_fetch_concept_ids
+                or missing_prompt_read_file_copy_ids
+                or missing_prompt_scholarly_representation_file_copy_ids
+                or required_prompt_create_type_name
+            )
 
             if isinstance(aux_llm_calls, list) and required_prompt_tools:
                 try:
@@ -8423,6 +8430,8 @@ class InternalMCPChatOrchestrator:
             if exc is not None:
                 recovery_reason = "parse_error"
             elif has_override_retry_reason:
+                recovery_reason = "required_prompt_tools_missing"
+            elif has_unmet_prompt_requirements:
                 recovery_reason = "required_prompt_tools_missing"
             elif isinstance(current_response, str) and current_response.strip():
                 semantic_assessment = self._assess_missing_tool_call(
@@ -17307,12 +17316,205 @@ class InternalMCPChatOrchestrator:
 
         return compact_payload
 
+    @classmethod
+    def _shape_get_text_relations_summary_payload_for_llm(
+        cls,
+        payload: Mapping[str, Any],
+        *,
+        max_groups: int = 8,
+        max_relation_ids_per_group: int = 3,
+    ) -> dict[str, Any]:
+        raw_groups = payload.get("groups")
+        groups = (
+            [group for group in raw_groups if isinstance(group, Mapping)]
+            if isinstance(raw_groups, list)
+            else []
+        )
+
+        def _group_sort_key(group: Mapping[str, Any]) -> tuple[int, str, str]:
+            raw_count = group.get("count")
+            count = int(raw_count) if isinstance(raw_count, (int, float)) else 0
+            predicate = (
+                str(group.get("predicate")).strip()
+                if isinstance(group.get("predicate"), str)
+                else ""
+            )
+            language = (
+                str(group.get("language")).strip()
+                if isinstance(group.get("language"), str)
+                else ""
+            )
+            return (-count, predicate, language)
+
+        sorted_groups = sorted(groups, key=_group_sort_key)
+        shown_groups = sorted_groups[:max_groups]
+        compact_groups: list[dict[str, Any]] = []
+        predicate_values: list[str] = []
+
+        for group in shown_groups:
+            predicate = (
+                str(group.get("predicate")).strip()
+                if isinstance(group.get("predicate"), str)
+                else ""
+            )
+            if predicate and predicate not in predicate_values:
+                predicate_values.append(predicate)
+            compact_group: dict[str, Any] = {}
+            if predicate:
+                compact_group["predicate"] = predicate
+            language = group.get("language")
+            if isinstance(language, str) and language.strip():
+                compact_group["language"] = language.strip()
+            raw_count = group.get("count")
+            if isinstance(raw_count, (int, float)):
+                compact_group["count"] = int(raw_count)
+            latest_relation_id = group.get("latest_relation_id")
+            if isinstance(latest_relation_id, str) and latest_relation_id.strip():
+                compact_group["latest_relation_id"] = latest_relation_id.strip()
+            relation_ids = group.get("relation_ids")
+            if isinstance(relation_ids, list):
+                compact_group["sample_relation_ids"] = [
+                    str(relation_id).strip()
+                    for relation_id in relation_ids[:max_relation_ids_per_group]
+                    if isinstance(relation_id, str) and str(relation_id).strip()
+                ]
+            if compact_group:
+                compact_groups.append(compact_group)
+
+        concept_id = payload.get("concept_id")
+        if not isinstance(concept_id, str):
+            concept_id = None
+
+        total_relations_scanned = payload.get("total_relations_scanned")
+        if not isinstance(total_relations_scanned, (int, float)):
+            total_relations_scanned = len(groups)
+
+        groups_found = payload.get("groups_found")
+        if not isinstance(groups_found, (int, float)):
+            groups_found = len(groups)
+
+        diagnostics_note = (
+            "No text relation groups were available."
+            if not groups
+            else (
+                f"{len(predicate_values)} distinct predicate(s) were observed across "
+                f"{int(groups_found)} predicate/language group(s)."
+            )
+        )
+
+        compact_payload: dict[str, Any] = {
+            "_llm_view": "text_relations_summary.v1",
+            "concept_id": concept_id,
+            "groups_found": int(groups_found),
+            "shown_group_count": len(compact_groups),
+            "omitted_group_count": max(0, int(groups_found) - len(compact_groups)),
+            "total_relations_scanned": int(total_relations_scanned),
+            "predicates": predicate_values[:12],
+            "groups": compact_groups,
+            "retrieval_diagnostics": {"note": diagnostics_note},
+        }
+        return {
+            key: value
+            for key, value in compact_payload.items()
+            if value not in (None, [], {})
+        }
+
+    @classmethod
+    def _shape_get_related_concepts_payload_for_llm(
+        cls,
+        payload: Mapping[str, Any],
+        *,
+        max_results: int = 5,
+        max_text_chars: int = 220,
+    ) -> dict[str, Any]:
+        raw_results = payload.get("results")
+        results = (
+            [result for result in raw_results if isinstance(result, Mapping)]
+            if isinstance(raw_results, list)
+            else []
+        )
+        compact_results: list[dict[str, Any]] = []
+        related_concept_ids: list[str] = []
+        predicates: list[str] = []
+
+        for row in results[:max_results]:
+            compact_row: dict[str, Any] = {}
+            row_id = row.get("id")
+            if isinstance(row_id, str) and row_id.strip():
+                compact_row["id"] = row_id.strip()
+            score = row.get("score")
+            if isinstance(score, (int, float)):
+                compact_row["score"] = round(float(score), 3)
+            text = row.get("text")
+            if isinstance(text, str) and text.strip():
+                compact_row["text_preview"] = text.strip()[:max_text_chars]
+            metadata = row.get("metadata")
+            if isinstance(metadata, Mapping):
+                for field_name in (
+                    "item_kind",
+                    "source_system",
+                    "direction",
+                    "predicate",
+                    "concept_id",
+                    "subject_concept_id",
+                ):
+                    field_value = metadata.get(field_name)
+                    if isinstance(field_value, str) and field_value.strip():
+                        compact_row[field_name] = field_value.strip()
+                concept_id = compact_row.get("concept_id")
+                if isinstance(concept_id, str) and concept_id not in related_concept_ids:
+                    related_concept_ids.append(concept_id)
+                predicate = compact_row.get("predicate")
+                if isinstance(predicate, str) and predicate not in predicates:
+                    predicates.append(predicate)
+            if compact_row:
+                compact_results.append(compact_row)
+
+        result_count = payload.get("count")
+        if not isinstance(result_count, (int, float)):
+            result_count = len(results)
+
+        compact_payload: dict[str, Any] = {
+            "_llm_view": "related_concepts_results.v1",
+            "concept_id": (
+                str(payload.get("concept_id")).strip()
+                if isinstance(payload.get("concept_id"), str)
+                else None
+            ),
+            "seed_text": (
+                str(payload.get("seed_text")).strip()[:max_text_chars]
+                if isinstance(payload.get("seed_text"), str)
+                and str(payload.get("seed_text")).strip()
+                else None
+            ),
+            "count": int(result_count),
+            "fallback_used": bool(payload.get("fallback_used")),
+            "fallback_mode": (
+                str(payload.get("fallback_mode")).strip()
+                if isinstance(payload.get("fallback_mode"), str)
+                and str(payload.get("fallback_mode")).strip()
+                else None
+            ),
+            "related_concept_ids": related_concept_ids[:10],
+            "predicates": predicates[:10],
+            "results": compact_results,
+        }
+        return {
+            key: value
+            for key, value in compact_payload.items()
+            if value not in (None, [], {})
+        }
+
     def _prepare_tool_payload_for_llm(self, tool_name: str, payload: Any) -> Any:
         if not isinstance(tool_name, str) or not isinstance(payload, Mapping):
             return payload
         tool_lower = tool_name.strip().lower()
         if tool_lower in {"search_concepts", "vontology_concept_search"}:
             return self._shape_search_concepts_payload_for_llm(payload)
+        if tool_lower == "get_text_relations_summary":
+            return self._shape_get_text_relations_summary_payload_for_llm(payload)
+        if tool_lower == "get_related_concepts":
+            return self._shape_get_related_concepts_payload_for_llm(payload)
         if tool_lower == "search_web":
             return self._shape_search_web_payload_for_llm(payload)
         if tool_lower == "search_arxiv":
@@ -22108,7 +22310,8 @@ class InternalMCPChatOrchestrator:
         if not tool_invocations or max_concept_ids <= 0:
             return []
 
-        concept_ids: list[str] = []
+        preferred_concept_ids: list[str] = []
+        fallback_concept_ids: list[str] = []
         seen: set[str] = set()
         for invocation in tool_invocations:
             if not isinstance(invocation, Mapping):
@@ -22139,11 +22342,62 @@ class InternalMCPChatOrchestrator:
                 if lowered in seen:
                     continue
                 seen.add(lowered)
-                concept_ids.append(concept_id)
-                if len(concept_ids) >= max_concept_ids:
-                    return concept_ids
+                if cls._is_preferred_ontology_follow_up_search_result(row):
+                    preferred_concept_ids.append(concept_id)
+                    if len(preferred_concept_ids) >= max_concept_ids:
+                        return preferred_concept_ids
+                else:
+                    fallback_concept_ids.append(concept_id)
 
-        return concept_ids
+        if preferred_concept_ids:
+            return preferred_concept_ids[:max_concept_ids]
+        return fallback_concept_ids[:max_concept_ids]
+
+    @classmethod
+    def _is_preferred_ontology_follow_up_search_result(
+        cls,
+        row: Mapping[str, Any],
+    ) -> bool:
+        concept_id = cls._normalise_concept_id_candidate(row.get("concept_id"))
+        if not concept_id:
+            return False
+        if cls._is_file_copy_concept_id(concept_id):
+            return False
+
+        predicate_meta_ids = {
+            "#v#predicate",
+            "#v#binary_predicate",
+            "#v#ternary_predicate",
+            "#v#nary_predicate",
+        }
+
+        kind = row.get("kind")
+        if isinstance(kind, str) and kind.strip().lower() == "predicate":
+            return False
+
+        instance_of = row.get("instance_of")
+        if (
+            isinstance(instance_of, str)
+            and instance_of.strip().lower() in predicate_meta_ids
+        ):
+            return False
+
+        hierarchy = row.get("hierarchy")
+        if isinstance(hierarchy, Mapping):
+            primary_path = hierarchy.get("primary_path")
+            if isinstance(primary_path, list):
+                lowered_path = {
+                    str(item).strip().lower()
+                    for item in primary_path
+                    if isinstance(item, str) and str(item).strip()
+                }
+                if lowered_path & predicate_meta_ids:
+                    return False
+
+        if concept_id.lower() in predicate_meta_ids:
+            return False
+
+        return True
 
     @classmethod
     def _extract_structural_retry_search_query(
@@ -24890,6 +25144,7 @@ class InternalMCPChatOrchestrator:
         list_fields_by_tool = {
             "jira_search": "issues",
             "search_arxiv": "papers",
+            "get_text_relations_summary": "groups",
         }
         list_field = list_fields_by_tool.get(tool_name, "results")
         raw_items = payload.get(list_field)
@@ -24905,6 +25160,127 @@ class InternalMCPChatOrchestrator:
             except Exception:
                 continue
         return None
+
+    @classmethod
+    def _build_search_concepts_follow_up_lines(
+        cls,
+        payload: Mapping[str, Any],
+    ) -> list[str]:
+        shaped_payload = cls._shape_search_concepts_payload_for_llm(payload, max_results=3)
+        results = shaped_payload.get("results")
+        if not isinstance(results, list):
+            return []
+        fragments: list[str] = []
+        for row in results[:3]:
+            if not isinstance(row, Mapping):
+                continue
+            name = row.get("name")
+            concept_id = row.get("concept_id")
+            if isinstance(name, str) and name.strip():
+                fragment = name.strip()
+                if isinstance(concept_id, str) and concept_id.strip():
+                    fragment = f"{fragment} ({concept_id.strip()})"
+                fragments.append(fragment)
+            elif isinstance(concept_id, str) and concept_id.strip():
+                fragments.append(concept_id.strip())
+        if not fragments:
+            return []
+        return [f"- search_concepts top matches: {'; '.join(fragments)}."]
+
+    @classmethod
+    def _build_text_relations_summary_follow_up_lines(
+        cls,
+        payload: Mapping[str, Any],
+    ) -> list[str]:
+        shaped_payload = cls._shape_get_text_relations_summary_payload_for_llm(
+            payload,
+            max_groups=4,
+        )
+        lines: list[str] = []
+        concept_id = shaped_payload.get("concept_id")
+        groups_found = shaped_payload.get("groups_found")
+        total_relations_scanned = shaped_payload.get("total_relations_scanned")
+        if isinstance(groups_found, int):
+            line = f"- get_text_relations_summary found {groups_found} predicate group"
+            if groups_found != 1:
+                line += "s"
+            if isinstance(concept_id, str) and concept_id.strip():
+                line += f" for concept_id \"{concept_id.strip()}\""
+            if isinstance(total_relations_scanned, int):
+                line += f" after scanning {total_relations_scanned} relation"
+                if total_relations_scanned != 1:
+                    line += "s"
+            lines.append(line + ".")
+
+        groups = shaped_payload.get("groups")
+        if not isinstance(groups, list):
+            return lines
+
+        fragments: list[str] = []
+        for group in groups[:4]:
+            if not isinstance(group, Mapping):
+                continue
+            predicate = group.get("predicate")
+            if not isinstance(predicate, str) or not predicate.strip():
+                continue
+            fragment = predicate.strip()
+            count = group.get("count")
+            if isinstance(count, int):
+                fragment += f" (count={count})"
+            language = group.get("language")
+            if isinstance(language, str) and language.strip():
+                fragment += f" [lang={language.strip()}]"
+            fragments.append(fragment)
+        if fragments:
+            lines.append(f"- Predicate evidence observed: {'; '.join(fragments)}.")
+        return lines
+
+    @classmethod
+    def _build_related_concepts_follow_up_lines(
+        cls,
+        payload: Mapping[str, Any],
+    ) -> list[str]:
+        shaped_payload = cls._shape_get_related_concepts_payload_for_llm(
+            payload,
+            max_results=3,
+            max_text_chars=140,
+        )
+        lines: list[str] = []
+        count = shaped_payload.get("count")
+        concept_id = shaped_payload.get("concept_id")
+        if isinstance(count, int):
+            line = f"- get_related_concepts returned {count} related evidence result"
+            if count != 1:
+                line += "s"
+            if isinstance(concept_id, str) and concept_id.strip():
+                line += f" for concept_id \"{concept_id.strip()}\""
+            fallback_mode = shaped_payload.get("fallback_mode")
+            if isinstance(fallback_mode, str) and fallback_mode.strip():
+                line += f" using {fallback_mode.strip()} mode"
+            lines.append(line + ".")
+
+        results = shaped_payload.get("results")
+        if not isinstance(results, list):
+            return lines
+
+        fragments: list[str] = []
+        for row in results[:3]:
+            if not isinstance(row, Mapping):
+                continue
+            text_preview = row.get("text_preview")
+            if isinstance(text_preview, str) and text_preview.strip():
+                fragments.append(text_preview.strip())
+                continue
+            predicate = row.get("predicate")
+            concept_value = row.get("concept_id")
+            if isinstance(predicate, str) and predicate.strip():
+                fragment = predicate.strip()
+                if isinstance(concept_value, str) and concept_value.strip():
+                    fragment += f" -> {concept_value.strip()}"
+                fragments.append(fragment)
+        if fragments:
+            lines.append(f"- Related evidence excerpts: {'; '.join(fragments)}.")
+        return lines
 
     @classmethod
     def _build_tool_follow_up_stage_messages(
@@ -24928,6 +25304,8 @@ class InternalMCPChatOrchestrator:
                 "search_concepts",
                 "search_arxiv",
                 "search_web",
+                "get_text_relations_summary",
+                "get_related_concepts",
             }:
                 continue
             if not cls._tool_invocation_completed_successfully(invocation):
@@ -24936,6 +25314,8 @@ class InternalMCPChatOrchestrator:
             payload = invocation.get("effective_payload")
             if not isinstance(payload, Mapping):
                 payload = invocation.get("payload")
+            if not isinstance(payload, Mapping):
+                continue
             count = cls._extract_tool_result_count_for_follow_up(tool_name, payload)
             if count is None:
                 continue
@@ -24951,6 +25331,12 @@ class InternalMCPChatOrchestrator:
                     query_value = arguments.get("jql")
                 else:
                     query_value = arguments.get("query")
+                if query_value is None and tool_name in {
+                    "get_text_relations_summary",
+                    "get_related_concepts",
+                }:
+                    query_label = "concept_id"
+                    query_value = arguments.get("concept_id")
             query_text = (
                 str(query_value).strip()
                 if isinstance(query_value, str) and str(query_value).strip()
@@ -24963,12 +25349,25 @@ class InternalMCPChatOrchestrator:
                 "search_concepts": "concept",
                 "search_arxiv": "paper",
                 "search_web": "result",
+                "get_text_relations_summary": "predicate group",
+                "get_related_concepts": "related evidence result",
             }.get(tool_name, "result")
             count_label = noun if count == 1 else f"{noun}s"
             line = f"- {tool_name} returned {count} {count_label}"
             if query_text:
                 line = f'{line} for {query_label} "{query_text}"'
             summary_lines.append(line + ".")
+
+            if tool_name == "search_concepts":
+                summary_lines.extend(cls._build_search_concepts_follow_up_lines(payload))
+            elif tool_name == "get_text_relations_summary":
+                summary_lines.extend(
+                    cls._build_text_relations_summary_follow_up_lines(payload)
+                )
+            elif tool_name == "get_related_concepts":
+                summary_lines.extend(
+                    cls._build_related_concepts_follow_up_lines(payload)
+                )
 
         if not summary_lines:
             return []
@@ -24981,9 +25380,11 @@ class InternalMCPChatOrchestrator:
                         "Retrieved evidence summary for this turn:",
                         *summary_lines,
                         (
-                            "Ground the answer in these observed retrieval counts. "
+                            "Ground the answer in these observed retrieval results and "
+                            "the concrete predicate or relation evidence they surfaced. "
                             "Do not claim that a retrieval surface returned no results "
-                            "when the retrieved payload for that surface is non-empty."
+                            "when the retrieved payload for that surface is non-empty, "
+                            "and do not collapse concrete predicate evidence into count-only summaries."
                         ),
                     ]
                 ),

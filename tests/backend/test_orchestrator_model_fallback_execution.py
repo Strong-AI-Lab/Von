@@ -64,6 +64,8 @@ def _bare_orchestrator() -> InternalMCPChatOrchestrator:
     orchestrator._workflow_model_policy_cache_ttl_seconds = 60
     orchestrator._max_context_chars = 120_000
     orchestrator._follow_up_context_chars = 40_000
+    orchestrator._max_tool_result_chars = 5_000
+    orchestrator._max_tool_result_field_chars = 1_500
     orchestrator._max_missing_tool_call_retries_per_turn = 3
     return orchestrator
 
@@ -843,3 +845,193 @@ def test_tool_calling_backfill_uses_compacted_follow_up_context(monkeypatch) -> 
         "recent-tool-5",
         "recent-tool-6",
     ]
+
+
+def test_tool_calling_backfill_surfaces_ontology_predicate_evidence(monkeypatch) -> None:
+    orchestrator = _bare_orchestrator()
+
+    captured: dict[str, Any] = {}
+
+    def _run_llm_with_fallbacks(**kwargs: Any) -> tuple[str, str, Mapping[str, Any]]:
+        context_messages = cast(list[Mapping[str, Any]], kwargs.get("context") or [])
+        captured["context"] = context_messages
+        context_text = "\n".join(
+            str(message.get("content") or "")
+            for message in context_messages
+            if isinstance(message, Mapping)
+        )
+        if (
+            "Expected answer contract for this turn" in context_text
+            and "#V#has_phd_supervisor" in context_text
+            and "#V#member_of_organisation" in context_text
+            and "Timothy Pistotti has relation #V#has_phd_supervisor" in context_text
+        ):
+            return (
+                "Grounded predicate evidence for SAIL students includes "
+                "#V#has_phd_supervisor and #V#member_of_organisation.",
+                "gpt-test",
+                {},
+            )
+        return "I cannot identify any grounded predicates yet.", "gpt-test", {}
+
+    monkeypatch.setattr(orchestrator, "_run_llm_with_fallbacks", _run_llm_with_fallbacks)
+    monkeypatch.setattr(
+        orchestrator,
+        "_interpret_model_turn",
+        lambda _text: SimpleNamespace(tool_calls=[], tool_call_parse_error=None),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_evaluate_prompt_requirements",
+        lambda **_kwargs: SimpleNamespace(
+            required_tools=[],
+            required_fetch_concept_ids=[],
+            required_read_file_copy_ids=[],
+            required_scholarly_representation_file_copy_ids=[],
+            required_create_type_name=None,
+            missing_tools=[],
+            missing_fetch_concept_ids=[],
+            missing_read_file_copy_ids=[],
+            missing_scholarly_representation_file_copy_ids=[],
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator, "_store_prompt_requirement_evaluation", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        orchestrator, "_sanitise_user_visible_action_output", lambda text, **_kwargs: text
+    )
+    monkeypatch.setattr(
+        orchestrator, "_resolve_environment_max_tool_invocations", lambda _env: 4
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_assess_missing_tool_call",
+        lambda **_kwargs: SimpleNamespace(retry_reason=None),
+    )
+
+    text_relations_payload = {
+        "concept_id": "#V#sail_student_group",
+        "groups_found": 2,
+        "total_relations_scanned": 6,
+        "groups": [
+            {
+                "predicate": "#V#has_phd_supervisor",
+                "language": "en-NZ",
+                "count": 3,
+                "relation_ids": ["r1", "r2", "r3"],
+                "latest_relation_id": "r3",
+            },
+            {
+                "predicate": "#V#member_of_organisation",
+                "language": "en-NZ",
+                "count": 3,
+                "relation_ids": ["r4", "r5", "r6"],
+                "latest_relation_id": "r6",
+            },
+        ],
+    }
+    related_concepts_payload = {
+        "concept_id": "#V#sail_student_group",
+        "seed_text": "SAIL students and their represented relationships.",
+        "count": 1,
+        "fallback_used": True,
+        "fallback_mode": "graph_text",
+        "results": [
+            {
+                "id": "graph_text::timothy",
+                "score": 0.94,
+                "text": (
+                    "Timothy Pistotti has relation #V#has_phd_supervisor with "
+                    "SAIL Student Group. Timothy Pistotti: PhD student in SAIL."
+                ),
+                "metadata": {
+                    "item_kind": "concept_relation_fallback",
+                    "source_system": "vontology.graph",
+                    "predicate": "#V#has_phd_supervisor",
+                    "direction": "incoming",
+                    "concept_id": "#V#timothy_pistotti",
+                    "subject_concept_id": "#V#sail_student_group",
+                },
+            }
+        ],
+    }
+
+    augmented_context = [
+        {"role": "system", "content": "system-one"},
+        {"role": "user", "content": "What predicates are salient to SAIL students?"},
+        {
+            "role": "tool",
+            "content": orchestrator._format_tool_result(
+                "get_text_relations_summary",
+                text_relations_payload,
+                1.0,
+                "ok",
+            ),
+        },
+        {
+            "role": "tool",
+            "content": orchestrator._format_tool_result(
+                "get_related_concepts",
+                related_concepts_payload,
+                1.0,
+                "ok",
+            ),
+        },
+    ]
+
+    request = SimpleNamespace(
+        data={
+            "augmented_context": augmented_context,
+            "policy_state": None,
+            "registry_snapshot": None,
+            "user_concept_id": None,
+            "org_concept_id": None,
+            "model_for_stage": lambda _stage: "gpt-test",
+            "record_llm_call": lambda **_kwargs: None,
+            "aux_llm_calls": [],
+            "llm_calls": [],
+            "iteration_count": 0,
+            "remaining_tool_calls": [],
+            "invocations": [
+                {
+                    "tool": "get_text_relations_summary",
+                    "arguments": {"concept_id": "#V#sail_student_group"},
+                    "payload": text_relations_payload,
+                },
+                {
+                    "tool": "get_related_concepts",
+                    "arguments": {"concept_id": "#V#sail_student_group"},
+                    "payload": related_concepts_payload,
+                },
+            ],
+            "method_catalogue": {},
+            "prompt": "What predicates are salient to SAIL students?",
+            "prompt_for_requirements": "What predicates are salient to SAIL students?",
+            "turn_expected_outcome_summary": (
+                "Identify predicates salient to SAIL students."
+            ),
+            "turn_expected_grounding_requirement": (
+                "Predicates must be grounded in represented relationships or text relations."
+            ),
+            "turn_answering_guidance": (
+                "Surface the grounded predicate evidence directly rather than returning only counts."
+            ),
+            "emit_progress": None,
+        },
+        environment=SimpleNamespace(llm_client=object(), model="gpt-test"),
+    )
+
+    result = orchestrator._action_tool_calling_backfill(request)
+
+    assert result.outputs["final_response"] == (
+        "Grounded predicate evidence for SAIL students includes "
+        "#V#has_phd_supervisor and #V#member_of_organisation."
+    )
+    context_text = "\n".join(
+        str(message.get("content") or "")
+        for message in cast(list[Mapping[str, Any]], captured["context"])
+        if isinstance(message, Mapping)
+    )
+    assert "Predicate evidence observed" in context_text
+    assert "Related evidence excerpts" in context_text

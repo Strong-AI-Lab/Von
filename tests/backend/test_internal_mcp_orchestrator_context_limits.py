@@ -486,6 +486,141 @@ def test_format_tool_result_shapes_jira_search_payload_for_live_follow_up():
     assert payload["issues"][0]["issue_type"] == "Subtask"
 
 
+def test_format_tool_result_shapes_text_relations_summary_payload_for_live_follow_up():
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=cast(Any, _StubGateway()),
+        max_tool_invocations=1,
+        max_tool_result_chars=5_000,
+        max_tool_result_field_chars=1_500,
+        max_context_chars=80_000,
+    )
+
+    encoded = orchestrator._format_tool_result(
+        "get_text_relations_summary",
+        {
+            "concept_id": "#V#sail_student_group",
+            "groups_found": 3,
+            "total_relations_scanned": 9,
+            "groups": [
+                {
+                    "predicate": "#V#has_phd_supervisor",
+                    "language": "en-NZ",
+                    "count": 5,
+                    "relation_ids": ["r1", "r2", "r3", "r4"],
+                    "latest_relation_id": "r4",
+                },
+                {
+                    "predicate": "#V#member_of_organisation",
+                    "language": "en-NZ",
+                    "count": 3,
+                    "relation_ids": ["r5", "r6", "r7"],
+                    "latest_relation_id": "r7",
+                },
+                {
+                    "predicate": "#V#has_research_topic",
+                    "language": "en",
+                    "count": 1,
+                    "relation_ids": ["r8"],
+                    "latest_relation_id": "r8",
+                },
+            ],
+        },
+        1.0,
+        "ok",
+    )
+
+    parsed = json.loads(encoded)
+    payload = parsed["payload"]
+    assert payload["_llm_view"] == "text_relations_summary.v1"
+    assert payload["concept_id"] == "#V#sail_student_group"
+    assert payload["groups_found"] == 3
+    assert payload["total_relations_scanned"] == 9
+    assert payload["predicates"] == [
+        "#V#has_phd_supervisor",
+        "#V#member_of_organisation",
+        "#V#has_research_topic",
+    ]
+    assert payload["groups"][0]["predicate"] == "#V#has_phd_supervisor"
+    assert payload["groups"][0]["sample_relation_ids"] == ["r1", "r2", "r3"]
+    assert "distinct predicate" in payload["retrieval_diagnostics"]["note"]
+
+
+def test_format_tool_result_shapes_related_concepts_payload_for_live_follow_up():
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=cast(Any, _StubGateway()),
+        max_tool_invocations=1,
+        max_tool_result_chars=5_000,
+        max_tool_result_field_chars=1_500,
+        max_context_chars=80_000,
+    )
+
+    encoded = orchestrator._format_tool_result(
+        "get_related_concepts",
+        {
+            "concept_id": "#V#sail_student_group",
+            "seed_text": "Strong AI Lab students and their relationships.",
+            "count": 2,
+            "fallback_used": True,
+            "fallback_mode": "graph_text",
+            "results": [
+                {
+                    "id": "graph_text::1",
+                    "score": 0.93,
+                    "text": (
+                        "Timothy Pistotti has relation #V#has_phd_supervisor with "
+                        "SAIL Student Group. Timothy Pistotti: PhD student in SAIL."
+                    ),
+                    "metadata": {
+                        "item_kind": "concept_relation_fallback",
+                        "source_system": "vontology.graph",
+                        "predicate": "#V#has_phd_supervisor",
+                        "direction": "incoming",
+                        "concept_id": "#V#timothy_pistotti",
+                        "subject_concept_id": "#V#sail_student_group",
+                    },
+                },
+                {
+                    "id": "graph_text::2",
+                    "score": 0.89,
+                    "text": (
+                        "SAIL Student Group has relation #V#member_of_organisation "
+                        "with University of Auckland Strong AI Lab."
+                    ),
+                    "metadata": {
+                        "item_kind": "concept_relation_fallback",
+                        "source_system": "vontology.graph",
+                        "predicate": "#V#member_of_organisation",
+                        "direction": "outgoing",
+                        "concept_id": (
+                            "#V#university_of_auckland_strong_ai_lab"
+                        ),
+                        "subject_concept_id": "#V#sail_student_group",
+                    },
+                },
+            ],
+        },
+        1.0,
+        "ok",
+    )
+
+    parsed = json.loads(encoded)
+    payload = parsed["payload"]
+    assert payload["_llm_view"] == "related_concepts_results.v1"
+    assert payload["concept_id"] == "#V#sail_student_group"
+    assert payload["count"] == 2
+    assert payload["fallback_used"] is True
+    assert payload["fallback_mode"] == "graph_text"
+    assert payload["related_concept_ids"] == [
+        "#V#timothy_pistotti",
+        "#V#university_of_auckland_strong_ai_lab",
+    ]
+    assert payload["predicates"] == [
+        "#V#has_phd_supervisor",
+        "#V#member_of_organisation",
+    ]
+    assert "Timothy Pistotti has relation" in payload["results"][0]["text_preview"]
+
+
 def test_extract_result_summary_uses_total_count_and_query_for_search_concepts():
     summary = InternalMCPChatOrchestrator._extract_result_summary(
         "search_concepts",
