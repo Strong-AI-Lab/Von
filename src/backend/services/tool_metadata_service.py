@@ -492,12 +492,6 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "category": "vontology",
         "display_template": "Synced {count} to RAG",
     },
-    # LOW salience - aggregate count only
-    "fetch_concept": {
-        "salience": "low",
-        "category": "vontology",
-        "display_template": "Fetched: {name}",
-    },
     "fetch_concept_content": {
         "salience": "low",
         "category": "vontology",
