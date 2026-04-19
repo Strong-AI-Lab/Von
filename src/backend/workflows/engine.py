@@ -1251,12 +1251,905 @@ def _build_idempotency_key(
     return "::".join(parts)
 
 
+@dataclass(frozen=True)
+class _WorkflowRunSupport:
+    termination_states: frozenset[str]
+    validation_mode: str
+    enforce_metadata_failures: bool
+
+
+@dataclass(frozen=True)
+class _WorkflowStateRuntimeSupport:
+    has_failure_route: bool
+    has_unknown_route: bool
+    has_approval_route: bool
+    has_break_route: bool
+    has_continue_route: bool
+    retry_policy: Mapping[str, Any] | None
+    approval_gate: Mapping[str, Any] | None
+    idempotency_policy: Mapping[str, Any] | None
+
+
+@dataclass(frozen=True)
+class _WorkflowTransitionDecision:
+    next_state: str | None = None
+    reason: str | None = None
+
+
 class WorkflowExecutor:
     """Execute a workflow definition using a registry of declarative actions."""
 
     def __init__(self, *, registry: ActionRegistry, max_transitions: int = 12) -> None:
         self._registry = registry
         self._max_transitions = max(3, int(max_transitions))
+
+    def _initialise_declared_workflow_variables(
+        self,
+        *,
+        definition: WorkflowDefinition,
+        context: Dict[str, Any],
+    ) -> None:
+        # Initialise declared workflow variables (defaults only, not overriding
+        # values already present from caller-supplied data).
+        variable_declarations = (definition.metadata or {}).get("variable_declarations")
+        if not isinstance(variable_declarations, (list, tuple)):
+            return
+        for var_decl in variable_declarations:
+            if not isinstance(var_decl, Mapping):
+                continue
+            var_name = str(var_decl.get("name") or "").strip()
+            if var_name and var_name not in context:
+                context[var_name] = var_decl.get("default_value")
+
+    def _resolve_run_support(
+        self,
+        *,
+        definition: WorkflowDefinition,
+    ) -> _WorkflowRunSupport:
+        termination_states = frozenset(definition.termination_states).union(
+            state_id
+            for state_id, state_spec in definition.states.items()
+            if state_spec.terminal
+        )
+        validation_mode = get_metadata_validation_mode()
+        return _WorkflowRunSupport(
+            termination_states=termination_states,
+            validation_mode=validation_mode,
+            enforce_metadata_failures=metadata_validation_failures_are_enforced(
+                validation_mode
+            ),
+        )
+
+    def _build_result(
+        self,
+        *,
+        definition: WorkflowDefinition,
+        context: Dict[str, Any],
+        transitions: int,
+        completed: bool,
+        final_state: str,
+        error: str | None = None,
+    ) -> WorkflowResult:
+        result_envelope = build_workflow_result_envelope(
+            workflow_id=definition.workflow_id,
+            completed=completed,
+            final_state=final_state,
+            error=error,
+            control_signal=get_last_control_signal(context),
+            return_payload=context.get(WORKFLOW_RETURN_PAYLOAD_KEY),
+            context=context,
+            transition_count=transitions,
+        )
+        set_workflow_result_envelope(context=context, envelope=result_envelope)
+        return WorkflowResult(
+            data=context,
+            completed=completed,
+            final_state=final_state,
+            error=error,
+            result_envelope=result_envelope,
+        )
+
+    def _finish_failed(
+        self,
+        *,
+        definition: WorkflowDefinition,
+        context: Dict[str, Any],
+        transitions: int,
+        trace: WorkflowExecutionTrace | None,
+        final_state: str,
+        error: str,
+    ) -> WorkflowResult:
+        if trace is not None:
+            trace.finish_failed(error)
+        return self._build_result(
+            definition=definition,
+            context=context,
+            transitions=transitions,
+            completed=False,
+            final_state=final_state,
+            error=error,
+        )
+
+    def _complete_with_gate(
+        self,
+        *,
+        definition: WorkflowDefinition,
+        context: Dict[str, Any],
+        transitions: int,
+        trace: WorkflowExecutionTrace | None,
+        final_state: str,
+    ) -> WorkflowResult:
+        gate_ok, gate_result = evaluate_workflow_completion_gate(
+            context=context,
+            workflow_id=definition.workflow_id,
+            definition_metadata=definition.metadata,
+            final_state=final_state,
+        )
+        if not gate_ok:
+            blocking_reasons = []
+            if isinstance(gate_result, Mapping):
+                blocking_reasons = [
+                    str(item).strip()
+                    for item in gate_result.get("blocking_reason_codes") or []
+                    if str(item).strip()
+                ]
+            error = "workflow_completion_gate_unmet"
+            if blocking_reasons:
+                error = f"{error}:{'|'.join(blocking_reasons)}"
+            return self._finish_failed(
+                definition=definition,
+                context=context,
+                transitions=transitions,
+                trace=trace,
+                final_state=final_state,
+                error=error,
+            )
+        if trace is not None:
+            trace.finish_completed()
+        return self._build_result(
+            definition=definition,
+            context=context,
+            transitions=transitions,
+            completed=True,
+            final_state=final_state,
+        )
+
+    def _record_state_entry(
+        self,
+        *,
+        definition: WorkflowDefinition,
+        state_spec: WorkflowStateSpec,
+        state_id: str,
+        context: Dict[str, Any],
+        trace: WorkflowExecutionTrace | None,
+    ) -> None:
+        mark_workflow_plan_state_entry(
+            context=context,
+            workflow_id=definition.workflow_id,
+            state_id=state_id,
+            definition_metadata=definition.metadata,
+            state_metadata=state_spec.metadata,
+        )
+        if trace is not None:
+            trace.record_state_transition(
+                state_id,
+                state_id,
+                verdict={"status": "enter"},
+            )
+
+    def _apply_pre_action_metadata_validation(
+        self,
+        *,
+        state_id: str,
+        state_metadata: Mapping[str, Any],
+        context: Dict[str, Any],
+        trace: WorkflowExecutionTrace | None,
+        validation_mode: str,
+    ) -> Any:
+        if validation_mode == METADATA_VALIDATION_MODE_OFF:
+            off_probe = validate_state_metadata_pre_action(
+                state_id=state_id,
+                metadata=state_metadata,
+                context=context,
+            )
+            if off_probe.applied:
+                validation = skipped_metadata_validation(
+                    state_id=state_id,
+                    phase="pre_action",
+                    reason="disabled_by_rollout_mode",
+                    mode=validation_mode,
+                )
+            else:
+                validation = apply_metadata_validation_mode(
+                    result=off_probe,
+                    mode=validation_mode,
+                )
+        else:
+            validation = apply_metadata_validation_mode(
+                result=validate_state_metadata_pre_action(
+                    state_id=state_id,
+                    metadata=state_metadata,
+                    context=context,
+                ),
+                mode=validation_mode,
+            )
+
+        append_metadata_validation_event(context=context, result=validation)
+        if trace is not None and validation.applied:
+            trace.record_state_transition(
+                state_id,
+                state_id,
+                verdict=validation.to_trace_verdict(),
+            )
+        return validation
+
+    def _apply_post_action_metadata_validation(
+        self,
+        *,
+        state_id: str,
+        state_metadata: Mapping[str, Any],
+        state_support: _WorkflowStateRuntimeSupport,
+        context_before: Mapping[str, Any],
+        context: Dict[str, Any],
+        trace: WorkflowExecutionTrace | None,
+        validation_mode: str,
+        approval_blocked: bool,
+    ) -> Any:
+        if approval_blocked and state_support.has_approval_route:
+            validation = skipped_metadata_validation(
+                state_id=state_id,
+                phase="post_action",
+                reason="approval_required_with_on_approval_required_route",
+                mode=validation_mode,
+            )
+        elif state_support.has_unknown_route and bool(context.get("last_action_unknown")):
+            validation = skipped_metadata_validation(
+                state_id=state_id,
+                phase="post_action",
+                reason="action_unknown_with_on_unknown_route",
+                mode=validation_mode,
+            )
+        elif state_support.has_failure_route and bool(context.get("last_action_failed")):
+            validation = skipped_metadata_validation(
+                state_id=state_id,
+                phase="post_action",
+                reason="action_failed_with_on_failure_route",
+                mode=validation_mode,
+            )
+        elif validation_mode == METADATA_VALIDATION_MODE_OFF:
+            off_probe = validate_state_metadata_post_action(
+                state_id=state_id,
+                metadata=state_metadata,
+                context_before=context_before,
+                context_after=context,
+            )
+            if off_probe.applied:
+                validation = skipped_metadata_validation(
+                    state_id=state_id,
+                    phase="post_action",
+                    reason="disabled_by_rollout_mode",
+                    mode=validation_mode,
+                )
+            else:
+                validation = apply_metadata_validation_mode(
+                    result=off_probe,
+                    mode=validation_mode,
+                )
+        else:
+            validation = apply_metadata_validation_mode(
+                result=validate_state_metadata_post_action(
+                    state_id=state_id,
+                    metadata=state_metadata,
+                    context_before=context_before,
+                    context_after=context,
+                ),
+                mode=validation_mode,
+            )
+
+        append_metadata_validation_event(context=context, result=validation)
+        if trace is not None and validation.applied:
+            trace.record_state_transition(
+                state_id,
+                state_id,
+                verdict=validation.to_trace_verdict(),
+            )
+        return validation
+
+    def _resolve_state_runtime_support(
+        self,
+        *,
+        state_spec: WorkflowStateSpec,
+    ) -> _WorkflowStateRuntimeSupport:
+        retry_policy = _normalise_retry_policy_spec(state_spec.metadata.get("retry_policy"))
+        approval_gate = _normalise_approval_gate_spec(
+            state_spec.metadata.get("approval_gate")
+        )
+        idempotency_policy = _normalise_idempotency_policy_spec(
+            state_spec.metadata.get("idempotency_policy")
+        )
+
+        if retry_policy is not None and len(state_spec.actions) > 1:
+            raise ValueError("workflow_retry_policy_invalid:multi_action_state_unsupported")
+        if idempotency_policy is not None and len(state_spec.actions) > 1:
+            raise ValueError(
+                "workflow_idempotency_policy_invalid:multi_action_state_unsupported"
+            )
+
+        return _WorkflowStateRuntimeSupport(
+            has_failure_route=state_has_on_failure_transition(state_spec),
+            has_unknown_route=state_has_on_unknown_transition(state_spec),
+            has_approval_route=state_has_on_approval_required_transition(state_spec),
+            has_break_route=state_has_on_break_transition(state_spec),
+            has_continue_route=state_has_on_continue_transition(state_spec),
+            retry_policy=retry_policy,
+            approval_gate=approval_gate,
+            idempotency_policy=idempotency_policy,
+        )
+
+    def _lookup_idempotency_record(
+        self,
+        *,
+        definition: WorkflowDefinition,
+        state_id: str,
+        action_id: str,
+        context: Dict[str, Any],
+        idempotency_policy: Mapping[str, Any] | None,
+    ) -> tuple[str | None, dict[str, Any] | None, Mapping[str, Any] | None]:
+        if idempotency_policy is None:
+            return None, None, None
+
+        idempotency_key = _build_idempotency_key(
+            workflow_id=definition.workflow_id,
+            state_id=state_id,
+            action_id=action_id,
+            context=context,
+            idempotency_policy=idempotency_policy,
+        )
+        raw_records = context.get(WORKFLOW_IDEMPOTENCY_RECORDS_KEY)
+        if not isinstance(raw_records, dict):
+            raw_records = {}
+            context[WORKFLOW_IDEMPOTENCY_RECORDS_KEY] = raw_records
+        existing_record_raw = raw_records.get(idempotency_key)
+        existing_record = (
+            existing_record_raw if isinstance(existing_record_raw, Mapping) else None
+        )
+        return idempotency_key, raw_records, existing_record
+
+    def _reuse_idempotent_action_result(
+        self,
+        *,
+        definition: WorkflowDefinition,
+        state_id: str,
+        action_id: str,
+        idempotency_key: str,
+        existing_record: Mapping[str, Any],
+        resolved_inputs: Dict[str, Any],
+        state_metadata: Mapping[str, Any],
+        context: Dict[str, Any],
+        trace: WorkflowExecutionTrace | None,
+    ) -> tuple[WorkflowActionResult, str, dict[str, Any]]:
+        cached_outputs_raw = existing_record.get("outputs")
+        cached_outputs = (
+            {
+                str(key): value
+                for key, value in cached_outputs_raw.items()
+                if isinstance(key, str) and key
+            }
+            if isinstance(cached_outputs_raw, Mapping)
+            else {}
+        )
+        result = WorkflowActionResult(
+            status="success",
+            outputs=cached_outputs,
+            call_id=str(existing_record.get("call_id") or "") or None,
+            duration_ms=0.0,
+        )
+        action_outcome = _apply_action_result_context(
+            context=context,
+            action_id=action_id,
+            result=result,
+        )
+        if trace is not None:
+            trace.record_action(
+                action_id=action_id,
+                inputs=resolved_inputs,
+                outputs=result.outputs,
+                status=result.status,
+                error=result.error,
+                call_id=result.call_id,
+                duration_ms=result.duration_ms,
+            )
+
+        action_output_snapshot: dict[str, Any] = {}
+        if cached_outputs:
+            cached_output_snapshot = snapshot_workflow_mapping(cached_outputs)
+            action_output_snapshot = snapshot_workflow_mapping(cached_output_snapshot)
+            context.update(cached_output_snapshot)
+            apply_tool_output_context_mappings(
+                context=context,
+                metadata=state_metadata,
+                action_outputs=cached_output_snapshot,
+                state_id=state_id,
+                action_id=action_id,
+            )
+
+        idempotency_event = {
+            "status": "idempotent_reuse",
+            "workflow_id": definition.workflow_id,
+            "state_id": state_id,
+            "action_id": action_id,
+            "idempotency_key": idempotency_key,
+        }
+        _append_context_event(
+            context=context,
+            key=WORKFLOW_IDEMPOTENCY_EVENTS_KEY,
+            last_key=LAST_WORKFLOW_IDEMPOTENCY_EVENT_KEY,
+            event=idempotency_event,
+        )
+        append_runtime_event(context=context, event=idempotency_event)
+        if trace is not None:
+            trace.record_state_transition(
+                state_id,
+                state_id,
+                verdict=idempotency_event,
+            )
+
+        return result, action_outcome, action_output_snapshot
+
+    def _check_approval_gate(
+        self,
+        *,
+        definition: WorkflowDefinition,
+        state_id: str,
+        action_id: str,
+        approval_gate: Mapping[str, Any],
+        context: Dict[str, Any],
+        trace: WorkflowExecutionTrace | None,
+    ) -> bool:
+        prior_approval_state = str(context.get("approval_state") or "").strip()
+        found, approval_value = resolve_context_path(
+            context=context,
+            path=str(approval_gate.get("approval_context_key") or ""),
+        )
+        approved = found and (
+            bool(approval_value) is bool(approval_gate.get("expected", True))
+        )
+        approval_event = {
+            "type": "mutation_guardrail",
+            "status": "approval_gate_checked",
+            "guardrail_surface": "workflow_approval_gate",
+            "decision": "allowed" if approved else "approval_required",
+            "stage": state_id,
+            "workflow_id": definition.workflow_id,
+            "workflow_step_id": state_id,
+            "state_id": state_id,
+            "action_id": action_id,
+            "approval_context_key": approval_gate.get("approval_context_key"),
+            "approval_label": approval_gate.get("approval_label"),
+            "approval_state": "approved" if approved else "blocked",
+            "approval_required": not approved,
+            "approval_transition": (
+                "entered_approval_required"
+                if (not approved and prior_approval_state != "blocked")
+                else (
+                    "exited_approval_required"
+                    if (approved and prior_approval_state == "blocked")
+                    else "approval_state_unchanged"
+                )
+            ),
+        }
+        _append_context_event(
+            context=context,
+            key=WORKFLOW_APPROVAL_GATE_EVENTS_KEY,
+            last_key=LAST_WORKFLOW_APPROVAL_GATE_KEY,
+            event=approval_event,
+        )
+        append_runtime_event(context=context, event=approval_event)
+        try:
+            from .workflow_baseline_telemetry import record_mutation_guardrail_event
+
+            record_mutation_guardrail_event(approval_event)
+        except Exception:
+            pass
+        if trace is not None:
+            trace.record_state_transition(
+                state_id,
+                state_id,
+                verdict=approval_event,
+            )
+
+        if not approved:
+            context["approval_required"] = True
+            context["approval_state"] = "blocked"
+            return False
+
+        context["approval_required"] = False
+        context["approval_state"] = "approved"
+        return True
+
+    def _record_idempotent_success(
+        self,
+        *,
+        definition: WorkflowDefinition,
+        state_id: str,
+        action_id: str,
+        raw_records: dict[str, Any],
+        idempotency_key: str,
+        action_output_snapshot: Mapping[str, Any],
+        result: WorkflowActionResult,
+        context: Dict[str, Any],
+    ) -> None:
+        raw_records[idempotency_key] = {
+            "outputs": snapshot_workflow_mapping(action_output_snapshot),
+            "call_id": result.call_id,
+        }
+        idempotency_event = {
+            "status": "idempotent_recorded",
+            "workflow_id": definition.workflow_id,
+            "state_id": state_id,
+            "action_id": action_id,
+            "idempotency_key": idempotency_key,
+        }
+        _append_context_event(
+            context=context,
+            key=WORKFLOW_IDEMPOTENCY_EVENTS_KEY,
+            last_key=LAST_WORKFLOW_IDEMPOTENCY_EVENT_KEY,
+            event=idempotency_event,
+        )
+        append_runtime_event(context=context, event=idempotency_event)
+
+    def _execute_action_with_runtime_policies(
+        self,
+        *,
+        definition: WorkflowDefinition,
+        state_id: str,
+        state_metadata: Mapping[str, Any],
+        action: WorkflowActionInvocation,
+        resolved_inputs: Dict[str, Any],
+        context: Dict[str, Any],
+        environment: WorkflowEnvironment,
+        trace: WorkflowExecutionTrace | None,
+        approval_gate: Mapping[str, Any] | None,
+        idempotency_policy: Mapping[str, Any] | None,
+    ) -> tuple[WorkflowActionResult | None, str | None, dict[str, Any], bool]:
+        action_id = action.target_id
+        idempotency_key = None
+        raw_records = None
+        existing_record = None
+        if idempotency_policy is not None:
+            idempotency_key, raw_records, existing_record = self._lookup_idempotency_record(
+                definition=definition,
+                state_id=state_id,
+                action_id=action_id,
+                context=context,
+                idempotency_policy=idempotency_policy,
+            )
+
+        if existing_record is not None and idempotency_key is not None:
+            result, action_outcome, action_output_snapshot = (
+                self._reuse_idempotent_action_result(
+                    definition=definition,
+                    state_id=state_id,
+                    action_id=action_id,
+                    idempotency_key=idempotency_key,
+                    existing_record=existing_record,
+                    resolved_inputs=resolved_inputs,
+                    state_metadata=state_metadata,
+                    context=context,
+                    trace=trace,
+                )
+            )
+            return result, action_outcome, action_output_snapshot, False
+
+        if approval_gate is not None and not self._check_approval_gate(
+            definition=definition,
+            state_id=state_id,
+            action_id=action_id,
+            approval_gate=approval_gate,
+            context=context,
+            trace=trace,
+        ):
+            return None, None, {}, True
+
+        result = execute_workflow_step_invocation(
+            registry=self._registry,
+            workflow_id=definition.workflow_id,
+            workflow_state_id=state_id,
+            workflow_state_metadata=state_metadata,
+            action=action,
+            resolved_inputs=resolved_inputs,
+            context=context,
+            env=environment,
+            trace=trace,
+        )
+        if trace is not None:
+            trace.record_action(
+                action_id=action_id,
+                inputs=resolved_inputs,
+                outputs=result.outputs,
+                status=result.status,
+                error=result.error,
+                call_id=result.call_id,
+                duration_ms=result.duration_ms,
+            )
+
+        action_outcome = normalise_action_outcome(result.status)
+        action_output_snapshot: dict[str, Any] = {}
+        if isinstance(result.outputs, Mapping):
+            action_output_snapshot = snapshot_workflow_mapping(result.outputs)
+        if action_outcome != WORKFLOW_ACTION_OUTCOME_FAILURE:
+            context.update(action_output_snapshot)
+            apply_tool_output_context_mappings(
+                context=context,
+                metadata=state_metadata,
+                action_outputs=action_output_snapshot,
+                state_id=state_id,
+                action_id=action_id,
+            )
+            if (
+                idempotency_policy is not None
+                and raw_records is not None
+                and idempotency_key is not None
+                and action_outcome == WORKFLOW_ACTION_OUTCOME_SUCCESS
+            ):
+                self._record_idempotent_success(
+                    definition=definition,
+                    state_id=state_id,
+                    action_id=action_id,
+                    raw_records=raw_records,
+                    idempotency_key=idempotency_key,
+                    action_output_snapshot=action_output_snapshot,
+                    result=result,
+                    context=context,
+                )
+
+        return result, action_outcome, action_output_snapshot, False
+
+    def _append_step_execution_envelope(
+        self,
+        *,
+        definition: WorkflowDefinition,
+        state_id: str,
+        action_id: str,
+        state_attempt: int,
+        result: WorkflowActionResult,
+        action_outcome: str,
+        action_output_snapshot: Mapping[str, Any],
+        context_before: Mapping[str, Any],
+        context: Dict[str, Any],
+        environment: WorkflowEnvironment,
+        trace: WorkflowExecutionTrace | None,
+    ) -> None:
+        step_envelope = build_step_result_envelope(
+            workflow_id=definition.workflow_id,
+            state_id=state_id,
+            action_id=action_id,
+            action_status=result.status,
+            action_outcome=action_outcome,
+            action_error=result.error,
+            action_outputs=action_output_snapshot,
+            control_signal=get_last_control_signal(context),
+            control_signal_scope=get_last_control_signal_scope(context),
+            duration_ms=result.duration_ms,
+            context_before=context_before,
+            context_after=context,
+        )
+        step_envelope["state_attempt"] = state_attempt
+        append_step_result_envelope(context=context, envelope=step_envelope)
+
+        if environment.step_callback:
+            try:
+                environment.step_callback(step_envelope)
+            except Exception:
+                logger.warning(
+                    "[workflow_engine] Step callback failed for %s",
+                    definition.workflow_id,
+                    exc_info=True,
+                )
+
+        if trace is not None and step_envelope["control_signal"] != "none":
+            event = {
+                "status": "control_signal",
+                "workflow_id": definition.workflow_id,
+                "state_id": state_id,
+                "action_id": action_id,
+                "control_signal": step_envelope["control_signal"],
+                "control_signal_scope": step_envelope.get("control_signal_scope"),
+            }
+            append_runtime_event(context=context, event=event)
+            trace.record_state_transition(
+                state_id,
+                state_id,
+                verdict=event,
+            )
+
+    def _maybe_schedule_retry(
+        self,
+        *,
+        definition: WorkflowDefinition,
+        state_id: str,
+        action_id: str,
+        state_attempt: int,
+        action_outcome: str,
+        retry_policy: Mapping[str, Any] | None,
+        context: Dict[str, Any],
+        trace: WorkflowExecutionTrace | None,
+    ) -> bool:
+        if retry_policy is None:
+            return False
+        if action_outcome not in set(retry_policy.get("retry_on_outcomes") or []):
+            return False
+        if state_attempt >= int(retry_policy.get("max_attempts") or 1):
+            return False
+
+        delay_ms = _compute_retry_delay_ms(
+            retry_policy=retry_policy,
+            attempt_number=state_attempt,
+        )
+        retry_event = {
+            "status": "retry_scheduled",
+            "workflow_id": definition.workflow_id,
+            "state_id": state_id,
+            "action_id": action_id,
+            "attempt_number": state_attempt,
+            "next_attempt_number": state_attempt + 1,
+            "delay_ms": delay_ms,
+            "action_outcome": action_outcome,
+        }
+        _append_context_event(
+            context=context,
+            key=WORKFLOW_RETRY_EVENTS_KEY,
+            last_key=LAST_WORKFLOW_RETRY_EVENT_KEY,
+            event=retry_event,
+        )
+        append_runtime_event(context=context, event=retry_event)
+        if trace is not None:
+            trace.record_state_transition(
+                state_id,
+                state_id,
+                verdict=retry_event,
+            )
+        if delay_ms > 0:
+            time.sleep(delay_ms / 1000.0)
+        return True
+
+    def _execute_state_actions(
+        self,
+        *,
+        definition: WorkflowDefinition,
+        state_id: str,
+        state_spec: WorkflowStateSpec,
+        state_support: _WorkflowStateRuntimeSupport,
+        context: Dict[str, Any],
+        environment: WorkflowEnvironment,
+        trace: WorkflowExecutionTrace | None,
+    ) -> bool:
+        approval_blocked = False
+        if state_support.approval_gate is not None:
+            context["approval_required"] = False
+            context["approval_state"] = None
+
+        state_attempt = 0
+        while True:
+            state_attempt += 1
+            retry_requested = False
+            for action in state_spec.actions:
+                context_before_action = dict(context)
+                action_id = action.target_id
+                resolved_inputs = resolve_action_inputs_from_context(
+                    action_inputs=action.inputs,
+                    context=context,
+                )
+                result, action_outcome, action_output_snapshot, approval_blocked = (
+                    self._execute_action_with_runtime_policies(
+                        definition=definition,
+                        state_id=state_id,
+                        state_metadata=state_spec.metadata,
+                        action=action,
+                        resolved_inputs=resolved_inputs,
+                        context=context,
+                        environment=environment,
+                        trace=trace,
+                        approval_gate=state_support.approval_gate,
+                        idempotency_policy=state_support.idempotency_policy,
+                    )
+                )
+                if approval_blocked or result is None or action_outcome is None:
+                    break
+
+                self._append_step_execution_envelope(
+                    definition=definition,
+                    state_id=state_id,
+                    action_id=action_id,
+                    state_attempt=state_attempt,
+                    result=result,
+                    action_outcome=action_outcome,
+                    action_output_snapshot=action_output_snapshot,
+                    context_before=context_before_action,
+                    context=context,
+                    environment=environment,
+                    trace=trace,
+                )
+
+                if self._maybe_schedule_retry(
+                    definition=definition,
+                    state_id=state_id,
+                    action_id=action_id,
+                    state_attempt=state_attempt,
+                    action_outcome=action_outcome,
+                    retry_policy=state_support.retry_policy,
+                    context=context,
+                    trace=trace,
+                ):
+                    retry_requested = True
+                    break
+
+                if action_outcome == WORKFLOW_ACTION_OUTCOME_FAILURE:
+                    if state_support.has_failure_route:
+                        break
+                    raise RuntimeError(result.error or "action_failed")
+                if action_outcome == WORKFLOW_ACTION_OUTCOME_UNKNOWN:
+                    if state_support.has_unknown_route:
+                        break
+                    raise RuntimeError(result.error or "action_unknown")
+
+                control_signal = get_last_control_signal(context)
+                if control_signal in {
+                    WORKFLOW_CONTROL_SIGNAL_BREAK,
+                    WORKFLOW_CONTROL_SIGNAL_CONTINUE,
+                    WORKFLOW_CONTROL_SIGNAL_RETURN,
+                }:
+                    break
+
+            if approval_blocked or not retry_requested:
+                break
+
+        return approval_blocked
+
+    def _validate_control_signal_routing(
+        self,
+        *,
+        state_support: _WorkflowStateRuntimeSupport,
+        context: Mapping[str, Any],
+        approval_blocked: bool,
+    ) -> str | None:
+        control_signal = get_last_control_signal(context)
+        if control_signal == WORKFLOW_CONTROL_SIGNAL_BREAK and not state_support.has_break_route:
+            return "workflow_break_outside_loop_scope"
+        if (
+            control_signal == WORKFLOW_CONTROL_SIGNAL_CONTINUE
+            and not state_support.has_continue_route
+        ):
+            return "workflow_continue_outside_loop_scope"
+        if approval_blocked and not state_support.has_approval_route:
+            return "approval_required"
+        return None
+
+    def _select_next_transition(
+        self,
+        *,
+        state_spec: WorkflowStateSpec,
+        context: Dict[str, Any],
+    ) -> _WorkflowTransitionDecision:
+        for transition in state_spec.transitions:
+            try:
+                condition_result = bool(transition.condition(context))
+                if (
+                    not condition_result
+                    and isinstance(transition.condition_spec, Mapping)
+                ):
+                    condition_result = evaluate_transition_condition_spec(
+                        context=context,
+                        condition_spec=transition.condition_spec,
+                    )
+                if condition_result:
+                    return _WorkflowTransitionDecision(
+                        next_state=transition.to_state,
+                        reason=transition.reason,
+                    )
+            except Exception:
+                continue
+        return _WorkflowTransitionDecision()
 
     def run(
         self,
@@ -1268,690 +2161,136 @@ class WorkflowExecutor:
     ) -> WorkflowResult:
         context: Dict[str, Any] = data or {}
         clear_control_signal_context(context)
-
-        # Initialise declared workflow variables (defaults only, not overriding
-        # values already present from caller-supplied data).
-        variable_declarations = (definition.metadata or {}).get(
-            "variable_declarations"
+        self._initialise_declared_workflow_variables(
+            definition=definition,
+            context=context,
         )
-        if isinstance(variable_declarations, (list, tuple)):
-            for var_decl in variable_declarations:
-                if not isinstance(var_decl, Mapping):
-                    continue
-                var_name = str(var_decl.get("name") or "").strip()
-                if var_name and var_name not in context:
-                    context[var_name] = var_decl.get("default_value")
-
         current_state = definition.initial_state
         transitions = 0
-        termination_states = set(definition.termination_states) | {
-            state for state, spec in definition.states.items() if spec.terminal
-        }
-        validation_mode = get_metadata_validation_mode()
-        enforce_metadata_failures = metadata_validation_failures_are_enforced(
-            validation_mode
-        )
-
-        def _build_result(
-            *,
-            completed: bool,
-            final_state: str,
-            error: str | None = None,
-        ) -> WorkflowResult:
-            result_envelope = build_workflow_result_envelope(
-                workflow_id=definition.workflow_id,
-                completed=completed,
-                final_state=final_state,
-                error=error,
-                control_signal=get_last_control_signal(context),
-                return_payload=context.get(WORKFLOW_RETURN_PAYLOAD_KEY),
-                context=context,
-                transition_count=transitions,
-            )
-            set_workflow_result_envelope(context=context, envelope=result_envelope)
-            return WorkflowResult(
-                data=context,
-                completed=completed,
-                final_state=final_state,
-                error=error,
-                result_envelope=result_envelope,
-            )
-
-        def _complete_with_gate(final_state: str) -> WorkflowResult:
-            gate_ok, gate_result = evaluate_workflow_completion_gate(
-                context=context,
-                workflow_id=definition.workflow_id,
-                definition_metadata=definition.metadata,
-                final_state=final_state,
-            )
-            if not gate_ok:
-                blocking_reasons = []
-                if isinstance(gate_result, Mapping):
-                    blocking_reasons = [
-                        str(item).strip()
-                        for item in gate_result.get("blocking_reason_codes") or []
-                        if str(item).strip()
-                    ]
-                error = "workflow_completion_gate_unmet"
-                if blocking_reasons:
-                    error = f"{error}:{'|'.join(blocking_reasons)}"
-                if trace is not None:
-                    trace.finish_failed(error)
-                return _build_result(
-                    completed=False,
-                    final_state=final_state,
-                    error=error,
-                )
-            if trace is not None:
-                trace.finish_completed()
-            return _build_result(
-                completed=True,
-                final_state=final_state,
-            )
+        run_support = self._resolve_run_support(definition=definition)
 
         while transitions < self._max_transitions:
             transitions += 1
             state_spec = definition.states.get(current_state)
             if state_spec is None:
-                error = f"unknown_state:{current_state}"
-                return _build_result(
-                    completed=False,
-                    final_state=current_state,
-                    error=error,
-                )
-
-            mark_workflow_plan_state_entry(
-                context=context,
-                workflow_id=definition.workflow_id,
-                state_id=current_state,
-                definition_metadata=definition.metadata,
-                state_metadata=state_spec.metadata,
-            )
-
-            if trace is not None:
-                trace.record_state_transition(
-                    current_state,
-                    current_state,
-                    verdict={"status": "enter"},
-                )
-
-            if validation_mode == METADATA_VALIDATION_MODE_OFF:
-                off_probe = validate_state_metadata_pre_action(
-                    state_id=current_state,
-                    metadata=state_spec.metadata,
+                return self._finish_failed(
+                    definition=definition,
                     context=context,
-                )
-                if off_probe.applied:
-                    pre_validation = skipped_metadata_validation(
-                        state_id=current_state,
-                        phase="pre_action",
-                        reason="disabled_by_rollout_mode",
-                        mode=validation_mode,
-                    )
-                else:
-                    pre_validation = apply_metadata_validation_mode(
-                        result=off_probe,
-                        mode=validation_mode,
-                    )
-            else:
-                pre_validation = apply_metadata_validation_mode(
-                    result=validate_state_metadata_pre_action(
-                        state_id=current_state,
-                        metadata=state_spec.metadata,
-                        context=context,
-                    ),
-                    mode=validation_mode,
-                )
-            append_metadata_validation_event(context=context, result=pre_validation)
-            if trace is not None and pre_validation.applied:
-                trace.record_state_transition(
-                    current_state,
-                    current_state,
-                    verdict=pre_validation.to_trace_verdict(),
-                )
-            if not pre_validation.ok and enforce_metadata_failures:
-                error = format_metadata_validation_error(pre_validation)
-                if trace is not None:
-                    trace.finish_failed(error)
-                return _build_result(
-                    completed=False,
+                    transitions=transitions,
+                    trace=trace,
                     final_state=current_state,
-                    error=error,
+                    error=f"unknown_state:{current_state}",
                 )
 
-            state_has_failure_route = state_has_on_failure_transition(state_spec)
-            state_has_unknown_route = state_has_on_unknown_transition(state_spec)
-            state_has_approval_route = state_has_on_approval_required_transition(
-                state_spec
+            self._record_state_entry(
+                definition=definition,
+                state_spec=state_spec,
+                state_id=current_state,
+                context=context,
+                trace=trace,
             )
-            state_has_break_route = state_has_on_break_transition(state_spec)
-            state_has_continue_route = state_has_on_continue_transition(state_spec)
+
+            pre_validation = self._apply_pre_action_metadata_validation(
+                state_id=current_state,
+                state_metadata=state_spec.metadata,
+                context=context,
+                trace=trace,
+                validation_mode=run_support.validation_mode,
+            )
+            if not pre_validation.ok and run_support.enforce_metadata_failures:
+                return self._finish_failed(
+                    definition=definition,
+                    context=context,
+                    transitions=transitions,
+                    trace=trace,
+                    final_state=current_state,
+                    error=format_metadata_validation_error(pre_validation),
+                )
+
             try:
-                retry_policy = _normalise_retry_policy_spec(
-                    state_spec.metadata.get("retry_policy")
-                )
-                approval_gate = _normalise_approval_gate_spec(
-                    state_spec.metadata.get("approval_gate")
-                )
-                idempotency_policy = _normalise_idempotency_policy_spec(
-                    state_spec.metadata.get("idempotency_policy")
+                state_support = self._resolve_state_runtime_support(
+                    state_spec=state_spec
                 )
             except ValueError as exc:
-                if trace is not None:
-                    trace.finish_failed(str(exc))
-                return _build_result(
-                    completed=False,
+                return self._finish_failed(
+                    definition=definition,
+                    context=context,
+                    transitions=transitions,
+                    trace=trace,
                     final_state=current_state,
                     error=str(exc),
                 )
 
-            if retry_policy is not None and len(state_spec.actions) > 1:
-                error = "workflow_retry_policy_invalid:multi_action_state_unsupported"
-                if trace is not None:
-                    trace.finish_failed(error)
-                return _build_result(
-                    completed=False,
-                    final_state=current_state,
-                    error=error,
-                )
-            if idempotency_policy is not None and len(state_spec.actions) > 1:
-                error = (
-                    "workflow_idempotency_policy_invalid:"
-                    "multi_action_state_unsupported"
-                )
-                if trace is not None:
-                    trace.finish_failed(error)
-                return _build_result(
-                    completed=False,
-                    final_state=current_state,
-                    error=error,
-                )
-
             context_before_actions = dict(context)
-            approval_blocked = False
-            if approval_gate is not None:
-                context["approval_required"] = False
-                context["approval_state"] = None
+            try:
+                approval_blocked = self._execute_state_actions(
+                    definition=definition,
+                    state_id=current_state,
+                    state_spec=state_spec,
+                    state_support=state_support,
+                    context=context,
+                    environment=environment,
+                    trace=trace,
+                )
+            except ValueError as exc:
+                return self._finish_failed(
+                    definition=definition,
+                    context=context,
+                    transitions=transitions,
+                    trace=trace,
+                    final_state=current_state,
+                    error=str(exc),
+                )
+            except RuntimeError as exc:
+                return self._finish_failed(
+                    definition=definition,
+                    context=context,
+                    transitions=transitions,
+                    trace=trace,
+                    final_state=current_state,
+                    error=str(exc),
+                )
 
-            state_attempt = 0
-            while True:
-                state_attempt += 1
-                retry_requested = False
-                for action in state_spec.actions:
-                    context_before_action = dict(context)
-                    action_target_id = action.target_id
-                    resolved_inputs = resolve_action_inputs_from_context(
-                        action_inputs=action.inputs,
-                        context=context,
-                    )
-                    result: WorkflowActionResult
-                    action_outcome: str
-
-                    idempotency_key: str | None = None
-                    raw_records: dict[str, Any] | None = None
-                    existing_record: Mapping[str, Any] | None = None
-                    if idempotency_policy is not None:
-                        try:
-                            idempotency_key = _build_idempotency_key(
-                                workflow_id=definition.workflow_id,
-                                state_id=current_state,
-                                action_id=action_target_id,
-                                context=context,
-                                idempotency_policy=idempotency_policy,
-                            )
-                        except ValueError as exc:
-                            if trace is not None:
-                                trace.finish_failed(str(exc))
-                            return _build_result(
-                                completed=False,
-                                final_state=current_state,
-                                error=str(exc),
-                            )
-                        raw_records = context.get(WORKFLOW_IDEMPOTENCY_RECORDS_KEY)
-                        if not isinstance(raw_records, dict):
-                            raw_records = {}
-                            context[WORKFLOW_IDEMPOTENCY_RECORDS_KEY] = raw_records
-                        existing_record_raw = raw_records.get(idempotency_key)
-                        if isinstance(existing_record_raw, Mapping):
-                            existing_record = existing_record_raw
-                    if existing_record is not None:
-                        action_output_snapshot: dict[str, Any] = {}
-                        cached_outputs_raw = existing_record.get("outputs")
-                        cached_outputs = (
-                            {
-                                str(key): value
-                                for key, value in cached_outputs_raw.items()
-                                if isinstance(key, str) and key
-                            }
-                            if isinstance(cached_outputs_raw, Mapping)
-                            else {}
-                        )
-                        result = WorkflowActionResult(
-                            status="success",
-                            outputs=cached_outputs,
-                            call_id=str(existing_record.get("call_id") or "") or None,
-                            duration_ms=0.0,
-                        )
-                        action_outcome = _apply_action_result_context(
-                            context=context,
-                            action_id=action_target_id,
-                            result=result,
-                        )
-                        if trace is not None:
-                            trace.record_action(
-                                action_id=action_target_id,
-                                inputs=resolved_inputs,
-                                outputs=result.outputs,
-                                status=result.status,
-                                error=result.error,
-                                call_id=result.call_id,
-                                duration_ms=result.duration_ms,
-                            )
-                        if cached_outputs:
-                            cached_output_snapshot = snapshot_workflow_mapping(
-                                cached_outputs
-                            )
-                            action_output_snapshot = snapshot_workflow_mapping(
-                                cached_output_snapshot
-                            )
-                            context.update(cached_output_snapshot)
-                            apply_tool_output_context_mappings(
-                                context=context,
-                                metadata=state_spec.metadata,
-                                action_outputs=cached_output_snapshot,
-                                state_id=current_state,
-                                action_id=action_target_id,
-                            )
-                        idempotency_event = {
-                            "status": "idempotent_reuse",
-                            "workflow_id": definition.workflow_id,
-                            "state_id": current_state,
-                            "action_id": action_target_id,
-                            "idempotency_key": idempotency_key,
-                        }
-                        _append_context_event(
-                            context=context,
-                            key=WORKFLOW_IDEMPOTENCY_EVENTS_KEY,
-                            last_key=LAST_WORKFLOW_IDEMPOTENCY_EVENT_KEY,
-                            event=idempotency_event,
-                        )
-                        append_runtime_event(
-                            context=context,
-                            event=idempotency_event,
-                        )
-                        if trace is not None:
-                            trace.record_state_transition(
-                                current_state,
-                                current_state,
-                                verdict=idempotency_event,
-                            )
-                    else:
-                        if approval_gate is not None:
-                            prior_approval_state = str(
-                                context.get("approval_state") or ""
-                            ).strip()
-                            found, approval_value = resolve_context_path(
-                                context=context,
-                                path=str(
-                                    approval_gate.get("approval_context_key") or ""
-                                ),
-                            )
-                            approved = found and (
-                                bool(approval_value)
-                                is bool(approval_gate.get("expected", True))
-                            )
-                            approval_event = {
-                                "type": "mutation_guardrail",
-                                "status": "approval_gate_checked",
-                                "guardrail_surface": "workflow_approval_gate",
-                                "decision": (
-                                    "allowed" if approved else "approval_required"
-                                ),
-                                "stage": current_state,
-                                "workflow_id": definition.workflow_id,
-                                "workflow_step_id": current_state,
-                                "state_id": current_state,
-                                "action_id": action_target_id,
-                                "approval_context_key": approval_gate.get(
-                                    "approval_context_key"
-                                ),
-                                "approval_label": approval_gate.get("approval_label"),
-                                "approval_state": "approved"
-                                if approved
-                                else "blocked",
-                                "approval_required": not approved,
-                                "approval_transition": (
-                                    "entered_approval_required"
-                                    if (not approved and prior_approval_state != "blocked")
-                                    else (
-                                        "exited_approval_required"
-                                        if (approved and prior_approval_state == "blocked")
-                                        else "approval_state_unchanged"
-                                    )
-                                ),
-                            }
-                            _append_context_event(
-                                context=context,
-                                key=WORKFLOW_APPROVAL_GATE_EVENTS_KEY,
-                                last_key=LAST_WORKFLOW_APPROVAL_GATE_KEY,
-                                event=approval_event,
-                            )
-                            append_runtime_event(
-                                context=context,
-                                event=approval_event,
-                            )
-                            try:
-                                from .workflow_baseline_telemetry import (
-                                    record_mutation_guardrail_event,
-                                )
-
-                                record_mutation_guardrail_event(approval_event)
-                            except Exception:
-                                pass
-                            if trace is not None:
-                                trace.record_state_transition(
-                                    current_state,
-                                    current_state,
-                                    verdict=approval_event,
-                                )
-                            if not approved:
-                                context["approval_required"] = True
-                                context["approval_state"] = "blocked"
-                                approval_blocked = True
-                                break
-                            context["approval_required"] = False
-                            context["approval_state"] = "approved"
-
-                        result = execute_workflow_step_invocation(
-                            registry=self._registry,
-                            workflow_id=definition.workflow_id,
-                            workflow_state_id=current_state,
-                            workflow_state_metadata=state_spec.metadata,
-                            action=action,
-                            resolved_inputs=resolved_inputs,
-                            context=context,
-                            env=environment,
-                            trace=trace,
-                        )
-                        if trace is not None:
-                            trace.record_action(
-                                action_id=action_target_id,
-                                inputs=resolved_inputs,
-                                outputs=result.outputs,
-                                status=result.status,
-                                error=result.error,
-                                call_id=result.call_id,
-                                duration_ms=result.duration_ms,
-                            )
-                        action_outcome = normalise_action_outcome(result.status)
-                        action_output_snapshot: dict[str, Any] = {}
-                        if isinstance(result.outputs, Mapping):
-                            action_output_snapshot = snapshot_workflow_mapping(
-                                result.outputs
-                            )
-                        if action_outcome != WORKFLOW_ACTION_OUTCOME_FAILURE:
-                            context.update(action_output_snapshot)
-                            apply_tool_output_context_mappings(
-                                context=context,
-                                metadata=state_spec.metadata,
-                                action_outputs=action_output_snapshot,
-                                state_id=current_state,
-                                action_id=action_target_id,
-                            )
-                            if (
-                                idempotency_policy is not None
-                                and raw_records is not None
-                                and idempotency_key is not None
-                                and action_outcome
-                                == WORKFLOW_ACTION_OUTCOME_SUCCESS
-                            ):
-                                raw_records[idempotency_key] = {
-                                    "outputs": snapshot_workflow_mapping(
-                                        action_output_snapshot
-                                    ),
-                                    "call_id": result.call_id,
-                                }
-                                idempotency_event = {
-                                    "status": "idempotent_recorded",
-                                    "workflow_id": definition.workflow_id,
-                                    "state_id": current_state,
-                                    "action_id": action_target_id,
-                                    "idempotency_key": idempotency_key,
-                                }
-                                _append_context_event(
-                                    context=context,
-                                    key=WORKFLOW_IDEMPOTENCY_EVENTS_KEY,
-                                    last_key=LAST_WORKFLOW_IDEMPOTENCY_EVENT_KEY,
-                                    event=idempotency_event,
-                                )
-                                append_runtime_event(
-                                    context=context,
-                                    event=idempotency_event,
-                                )
-
-                    step_envelope = build_step_result_envelope(
-                        workflow_id=definition.workflow_id,
-                        state_id=current_state,
-                        action_id=action_target_id,
-                        action_status=result.status,
-                        action_outcome=action_outcome,
-                        action_error=result.error,
-                        action_outputs=action_output_snapshot,
-                        control_signal=get_last_control_signal(context),
-                        control_signal_scope=get_last_control_signal_scope(context),
-                        duration_ms=result.duration_ms,
-                        context_before=context_before_action,
-                        context_after=context,
-                    )
-                    step_envelope["state_attempt"] = state_attempt
-                    append_step_result_envelope(context=context, envelope=step_envelope)
-
-                    if environment.step_callback:
-                        try:
-                            environment.step_callback(step_envelope)
-                        except Exception:
-                            logger.warning(
-                                "[workflow_engine] Step callback failed for %s",
-                                definition.workflow_id,
-                                exc_info=True,
-                            )
-
-                    if trace is not None and step_envelope["control_signal"] != "none":
-                        event = {
-                            "status": "control_signal",
-                            "workflow_id": definition.workflow_id,
-                            "state_id": current_state,
-                            "action_id": action_target_id,
-                            "control_signal": step_envelope["control_signal"],
-                            "control_signal_scope": step_envelope.get(
-                                "control_signal_scope"
-                            ),
-                        }
-                        append_runtime_event(context=context, event=event)
-                        trace.record_state_transition(
-                            current_state,
-                            current_state,
-                            verdict=event,
-                        )
-
-                    if (
-                        retry_policy is not None
-                        and action_outcome
-                        in set(retry_policy.get("retry_on_outcomes") or [])
-                        and state_attempt < int(retry_policy.get("max_attempts") or 1)
-                    ):
-                        delay_ms = _compute_retry_delay_ms(
-                            retry_policy=retry_policy,
-                            attempt_number=state_attempt,
-                        )
-                        retry_event = {
-                            "status": "retry_scheduled",
-                            "workflow_id": definition.workflow_id,
-                            "state_id": current_state,
-                            "action_id": action_target_id,
-                            "attempt_number": state_attempt,
-                            "next_attempt_number": state_attempt + 1,
-                            "delay_ms": delay_ms,
-                            "action_outcome": action_outcome,
-                        }
-                        _append_context_event(
-                            context=context,
-                            key=WORKFLOW_RETRY_EVENTS_KEY,
-                            last_key=LAST_WORKFLOW_RETRY_EVENT_KEY,
-                            event=retry_event,
-                        )
-                        append_runtime_event(context=context, event=retry_event)
-                        if trace is not None:
-                            trace.record_state_transition(
-                                current_state,
-                                current_state,
-                                verdict=retry_event,
-                            )
-                        if delay_ms > 0:
-                            time.sleep(delay_ms / 1000.0)
-                        retry_requested = True
-                        break
-
-                    if action_outcome == WORKFLOW_ACTION_OUTCOME_FAILURE:
-                        if state_has_failure_route:
-                            # Safety envelope (JVNAUTOSCI-1087): preserve the failure
-                            # in context and let transition rules decide recovery.
-                            break
-                        if trace is not None:
-                            trace.finish_failed(result.error or "action_failed")
-                        return _build_result(
-                            completed=False,
-                            final_state=current_state,
-                            error=result.error or "action_failed",
-                        )
-                    if action_outcome == WORKFLOW_ACTION_OUTCOME_UNKNOWN:
-                        if state_has_unknown_route:
-                            # Explicit unknown-routing is required to avoid silent
-                            # progression on ambiguous action outcomes.
-                            break
-                        unknown_error = result.error or "action_unknown"
-                        if trace is not None:
-                            trace.finish_failed(unknown_error)
-                        return _build_result(
-                            completed=False,
-                            final_state=current_state,
-                            error=unknown_error,
-                        )
-
-                    control_signal = get_last_control_signal(context)
-                    if control_signal in {
-                        WORKFLOW_CONTROL_SIGNAL_BREAK,
-                        WORKFLOW_CONTROL_SIGNAL_CONTINUE,
-                        WORKFLOW_CONTROL_SIGNAL_RETURN,
-                    }:
-                        break
-
-                if approval_blocked or not retry_requested:
-                    break
-
-            if current_state in termination_states:
+            if current_state in run_support.termination_states:
                 materialise_terminal_effect_context(
                     context=context,
                     state_spec=state_spec,
                     state_id=current_state,
                 )
 
-            control_signal = get_last_control_signal(context)
-            if control_signal == WORKFLOW_CONTROL_SIGNAL_BREAK and not state_has_break_route:
-                if trace is not None:
-                    trace.finish_failed("workflow_break_outside_loop_scope")
-                return _build_result(
-                    completed=False,
+            control_signal_error = self._validate_control_signal_routing(
+                state_support=state_support,
+                context=context,
+                approval_blocked=approval_blocked,
+            )
+            if control_signal_error is not None:
+                return self._finish_failed(
+                    definition=definition,
+                    context=context,
+                    transitions=transitions,
+                    trace=trace,
                     final_state=current_state,
-                    error="workflow_break_outside_loop_scope",
-                )
-            if (
-                control_signal == WORKFLOW_CONTROL_SIGNAL_CONTINUE
-                and not state_has_continue_route
-            ):
-                if trace is not None:
-                    trace.finish_failed("workflow_continue_outside_loop_scope")
-                return _build_result(
-                    completed=False,
-                    final_state=current_state,
-                    error="workflow_continue_outside_loop_scope",
+                    error=control_signal_error,
                 )
 
-            if approval_blocked and not state_has_approval_route:
-                if trace is not None:
-                    trace.finish_failed("approval_required")
-                return _build_result(
-                    completed=False,
+            post_validation = self._apply_post_action_metadata_validation(
+                state_id=current_state,
+                state_metadata=state_spec.metadata,
+                state_support=state_support,
+                context_before=context_before_actions,
+                context=context,
+                trace=trace,
+                validation_mode=run_support.validation_mode,
+                approval_blocked=approval_blocked,
+            )
+            if not post_validation.ok and run_support.enforce_metadata_failures:
+                return self._finish_failed(
+                    definition=definition,
+                    context=context,
+                    transitions=transitions,
+                    trace=trace,
                     final_state=current_state,
-                    error="approval_required",
-                )
-
-            if approval_blocked and state_has_approval_route:
-                post_validation = skipped_metadata_validation(
-                    state_id=current_state,
-                    phase="post_action",
-                    reason="approval_required_with_on_approval_required_route",
-                    mode=validation_mode,
-                )
-            elif state_has_unknown_route and bool(context.get("last_action_unknown")):
-                post_validation = skipped_metadata_validation(
-                    state_id=current_state,
-                    phase="post_action",
-                    reason="action_unknown_with_on_unknown_route",
-                    mode=validation_mode,
-                )
-            elif state_has_failure_route and bool(context.get("last_action_failed")):
-                post_validation = skipped_metadata_validation(
-                    state_id=current_state,
-                    phase="post_action",
-                    reason="action_failed_with_on_failure_route",
-                    mode=validation_mode,
-                )
-            elif validation_mode == METADATA_VALIDATION_MODE_OFF:
-                off_probe = validate_state_metadata_post_action(
-                    state_id=current_state,
-                    metadata=state_spec.metadata,
-                    context_before=context_before_actions,
-                    context_after=context,
-                )
-                if off_probe.applied:
-                    post_validation = skipped_metadata_validation(
-                        state_id=current_state,
-                        phase="post_action",
-                        reason="disabled_by_rollout_mode",
-                        mode=validation_mode,
-                    )
-                else:
-                    post_validation = apply_metadata_validation_mode(
-                        result=off_probe,
-                        mode=validation_mode,
-                    )
-            else:
-                post_validation = apply_metadata_validation_mode(
-                    result=validate_state_metadata_post_action(
-                        state_id=current_state,
-                        metadata=state_spec.metadata,
-                        context_before=context_before_actions,
-                        context_after=context,
-                    ),
-                    mode=validation_mode,
-                )
-
-            append_metadata_validation_event(context=context, result=post_validation)
-            if trace is not None and post_validation.applied:
-                trace.record_state_transition(
-                    current_state,
-                    current_state,
-                    verdict=post_validation.to_trace_verdict(),
-                )
-            if not post_validation.ok and enforce_metadata_failures:
-                error = format_metadata_validation_error(post_validation)
-                if trace is not None:
-                    trace.finish_failed(error)
-                return _build_result(
-                    completed=False,
-                    final_state=current_state,
-                    error=error,
+                    error=format_metadata_validation_error(post_validation),
                 )
 
             apply_workflow_step_checkpoint(
@@ -1964,55 +2303,52 @@ class WorkflowExecutor:
                 blocked=approval_blocked,
             )
 
+            control_signal = get_last_control_signal(context)
             if control_signal == WORKFLOW_CONTROL_SIGNAL_RETURN:
-                return _complete_with_gate(current_state)
-
-            if current_state in termination_states:
-                return _complete_with_gate(current_state)
-
-            next_state = None
-            transition_reason = None
-            for transition in state_spec.transitions:
-                try:
-                    condition_result = bool(transition.condition(context))
-                    if (
-                        not condition_result
-                        and isinstance(transition.condition_spec, Mapping)
-                    ):
-                        condition_result = evaluate_transition_condition_spec(
-                            context=context,
-                            condition_spec=transition.condition_spec,
-                        )
-                    if condition_result:
-                        next_state = transition.to_state
-                        transition_reason = transition.reason
-                        break
-                except Exception:
-                    continue
-
-            if next_state is None:
-                error = "approval_required" if approval_blocked else "no_transition"
-                if trace is not None:
-                    trace.finish_failed(error)
-                return _build_result(
-                    completed=False,
+                return self._complete_with_gate(
+                    definition=definition,
+                    context=context,
+                    transitions=transitions,
+                    trace=trace,
                     final_state=current_state,
-                    error=error,
                 )
 
+            if current_state in run_support.termination_states:
+                return self._complete_with_gate(
+                    definition=definition,
+                    context=context,
+                    transitions=transitions,
+                    trace=trace,
+                    final_state=current_state,
+                )
+
+            transition_decision = self._select_next_transition(
+                state_spec=state_spec,
+                context=context,
+            )
+            if transition_decision.next_state is None:
+                return self._finish_failed(
+                    definition=definition,
+                    context=context,
+                    transitions=transitions,
+                    trace=trace,
+                    final_state=current_state,
+                    error="approval_required" if approval_blocked else "no_transition",
+                )
             if trace is not None:
                 trace.record_state_transition(
                     current_state,
-                    next_state,
-                    reason=transition_reason,
+                    transition_decision.next_state,
+                    reason=transition_decision.reason,
                 )
-            current_state = next_state
+            current_state = transition_decision.next_state
             clear_control_signal_context(context)
 
-        if trace is not None:
-            trace.finish_failed("transition_limit")
-        return _build_result(
-            completed=False,
+        return self._finish_failed(
+            definition=definition,
+            context=context,
+            transitions=transitions,
+            trace=trace,
             final_state=current_state,
             error="transition_limit",
         )
