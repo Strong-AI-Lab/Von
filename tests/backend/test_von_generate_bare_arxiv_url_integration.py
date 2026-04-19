@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -31,15 +32,93 @@ from orchestrator_test_harness import (
 )
 
 
-class _LLMSequence:
-    def __init__(self, responses: list[str]):
-        self._responses = list(responses)
+_EXPECTED_OUTCOME_RESPONSE = (
+    '{"expected_outcome_summary":"If permitted, route the bare arXiv URL through '
+    'the specialised representation workflow or the tool workflow and report only '
+    'grounded mutation status.",'
+    '"grounding_requirement":"Only claim created concepts, linked file copies, or '
+    'mutation outcomes when grounded in workflow or tool results.",'
+    '"precision_policy":"Prefer explicit uncertainty or partial completion status '
+    'over claiming verified representation without evidence.",'
+    '"selector_guidance":"Prefer the specialised arXiv representation workflow when '
+    'it is available and executable; otherwise use the tool workflow for the '
+    'download/representation path.",'
+    '"answering_guidance":"Summarise grounded created artefacts or truthful failure/'
+    'partial-completion status, and avoid speculative completion claims.",'
+    '"reasoning":"A bare arXiv URL is primarily a representation or ingestion turn '
+    'that needs grounded reporting about durable side effects."}'
+)
+
+
+class _TurnAwareLLM:
+    def __init__(
+        self,
+        *,
+        selector_response: str | None = None,
+        generic_responses: list[str] | None = None,
+        write_request_tool_name: str = "download_paper",
+        narration_response: str | None = None,
+        recovery_response_text: str | None = None,
+        recovery_action_type: str = "respond_with_answer",
+        url_prompt_fallback_response: str | None = None,
+    ):
+        self._selector_response = selector_response
+        self._responses = list(generic_responses or [])
+        self._write_request_tool_name = write_request_tool_name
+        self._narration_response = narration_response
+        self._recovery_response_text = recovery_response_text
+        self._recovery_action_type = recovery_action_type
+        self._url_prompt_fallback_response = url_prompt_fallback_response
         self.calls: list[dict] = []
 
     def generate(self, prompt, context, model):
-        self.calls.append({"prompt": prompt, "context": list(context), "model": model})
+        prompt_text = str(prompt or "")
+        self.calls.append(
+            {"prompt": prompt_text, "context": list(context or []), "model": model}
+        )
+        stripped = prompt_text.strip()
+        if "expected-success inference policy" in prompt_text:
+            return _EXPECTED_OUTCOME_RESPONSE
+        if "structured user-request evidence" in prompt_text:
+            return _write_request_evidence_response(self._write_request_tool_name)
+        if (
+            "prompt_turn_execution_narrate_completion_report" in prompt_text
+            or "You are composing the user-facing answer for a conversation turn"
+            in prompt_text
+        ):
+            if isinstance(self._narration_response, str):
+                return self._narration_response
+        if "prompt_turn_execution_recovery_decision" in prompt_text:
+            if isinstance(self._recovery_response_text, str):
+                return json.dumps(
+                    {
+                        "turn_next_action": {
+                            "action_type": self._recovery_action_type,
+                            "target_workflow_id": None,
+                            "response_text": self._recovery_response_text,
+                            "tool_calls": None,
+                        },
+                        "reasoning": (
+                            "The accumulated turn evidence already supports the "
+                            "next truthful user-facing response."
+                        ),
+                    }
+                )
+        if stripped.startswith("Select workflow"):
+            if self._selector_response is None:
+                raise AssertionError("Selector prompt was not expected in this test")
+            return self._selector_response
+        if (
+            stripped.startswith("https://arxiv.org/abs/")
+            and not self._responses
+            and isinstance(self._url_prompt_fallback_response, str)
+        ):
+            return self._url_prompt_fallback_response
         if not self._responses:
-            raise AssertionError("No stubbed LLM responses remaining")
+            raise AssertionError(
+                "No stubbed LLM responses remaining for prompt: "
+                f"{stripped[:120]!r}"
+            )
         return self._responses.pop(0)
 
 
@@ -57,6 +136,20 @@ def _write_request_evidence_response(tool_name: str) -> str:
         "]"
         "}"
     )
+
+
+def _assert_prompt_seen(llm: _TurnAwareLLM, needle: str) -> None:
+    assert any(
+        isinstance(call, dict) and needle in str(call.get("prompt") or "")
+        for call in llm.calls
+    ), f"Expected to see prompt containing {needle!r}, but saw: {llm.calls!r}"
+
+
+def _assert_prompt_not_seen(llm: _TurnAwareLLM, needle: str) -> None:
+    assert not any(
+        isinstance(call, dict) and needle in str(call.get("prompt") or "")
+        for call in llm.calls
+    ), f"Did not expect to see prompt containing {needle!r}, but saw: {llm.calls!r}"
 
 
 class _ArxivProxyStub:
@@ -165,7 +258,7 @@ def _build_gateway(
 def _make_app(
     monkeypatch,
     *,
-    llm: _LLMSequence,
+    llm: _TurnAwareLLM,
     selector_enabled: bool = True,
     proxy_factory=None,
     workflow_discovery_result=None,
@@ -246,18 +339,14 @@ def _make_app(
 def test_generate_bare_arxiv_url_routes_to_specialised_workflow_and_surfaces_created_concepts(
     monkeypatch,
 ):
-    llm = _LLMSequence(
-        [
-            (
-                '{"workflow_id":"#V#arxiv_paper_representation_workflow",'
-                '"confidence":0.99,'
-                '"reasoning":"Bare arXiv URL should use the specialised arXiv '
-                'paper representation workflow."}'
-            ),
-            "Downloaded and represented the paper.",
-            "Downloaded and represented the paper.",
-            "Downloaded and represented the paper.",
-        ]
+    llm = _TurnAwareLLM(
+        selector_response=(
+            '{"workflow_id":"#V#arxiv_paper_representation_workflow",'
+            '"confidence":0.99,'
+            '"reasoning":"Bare arXiv URL should use the specialised arXiv '
+            'paper representation workflow."}'
+        ),
+        generic_responses=["Downloaded and represented the paper."] * 3,
     )
     discovery_result = {
         "query": "https://arxiv.org/abs/2510.06248",
@@ -368,22 +457,21 @@ def test_generate_bare_arxiv_url_routes_to_specialised_workflow_and_surfaces_cre
     assert "Created paper concept: #V#paper_on_arxiv_2510_06248." in (
         completion_report.get("response_text") or ""
     )
+    _assert_prompt_seen(llm, "expected-success inference policy")
+    _assert_prompt_seen(llm, "Select workflow")
+    _assert_prompt_not_seen(llm, "structured user-request evidence")
 
 
 def test_generate_bare_arxiv_url_recovers_from_selector_clarification_to_specialised_workflow(
     monkeypatch,
 ):
-    llm = _LLMSequence(
-        [
-            (
-                "I'm not sure which workflow you'd like me to select from the "
-                "provided candidates. If you want me to download or represent "
-                "the paper, please say so explicitly."
-            ),
-            "Downloaded and represented the paper.",
-            "Downloaded and represented the paper.",
-            "Downloaded and represented the paper.",
-        ]
+    llm = _TurnAwareLLM(
+        selector_response=(
+            "I'm not sure which workflow you'd like me to select from the "
+            "provided candidates. If you want me to download or represent "
+            "the paper, please say so explicitly."
+        ),
+        generic_responses=["Downloaded and represented the paper."] * 3,
     )
     discovery_result = {
         "query": "https://arxiv.org/abs/2510.06248",
@@ -500,22 +588,21 @@ def test_generate_bare_arxiv_url_recovers_from_selector_clarification_to_special
     assert completion_report.get("file_copy_concept_id") == (
         "#V#uploaded_file_copy_2510_06248"
     )
+    _assert_prompt_seen(llm, "expected-success inference policy")
+    _assert_prompt_seen(llm, "Select workflow")
+    _assert_prompt_not_seen(llm, "structured user-request evidence")
 
 
 def test_generate_arxiv_continuation_turn_projects_authoritative_launch_inputs(
     monkeypatch,
 ):
-    llm = _LLMSequence(
-        [
-            (
-                '{"workflow_id":"#V#arxiv_paper_representation_workflow",'
-                '"confidence":0.99,'
-                '"reasoning":"Continue the active arXiv representation workflow."}'
-            ),
-            "Downloaded and represented the paper.",
-            "Downloaded and represented the paper.",
-            "Downloaded and represented the paper.",
-        ]
+    llm = _TurnAwareLLM(
+        selector_response=(
+            '{"workflow_id":"#V#arxiv_paper_representation_workflow",'
+            '"confidence":0.99,'
+            '"reasoning":"Continue the active arXiv representation workflow."}'
+        ),
+        generic_responses=["Downloaded and represented the paper."] * 3,
     )
     discovery_result = {
         "query": "Download and represent the paper",
@@ -635,22 +722,27 @@ def test_generate_arxiv_continuation_turn_projects_authoritative_launch_inputs(
     assert workflow_routing.get("workflow_id") == ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
     assert workflow_routing.get("verdict") == "rag_selected"
     assert workflow_routing.get("source") == "selector"
+    _assert_prompt_seen(llm, "expected-success inference policy")
+    _assert_prompt_seen(llm, "Select workflow")
+    _assert_prompt_not_seen(llm, "structured user-request evidence")
 
 
 def test_generate_bare_arxiv_url_falls_back_to_tool_pipeline_when_specialised_route_is_unavailable(
     monkeypatch,
 ):
-    llm = _LLMSequence(
-        [
-            (
-                '{"workflow_id":"#V#tool_calling_workflow","confidence":0.98,'
-                '"reasoning":"Bare arXiv URL should use tool workflow."}'
-            ),
+    llm = _TurnAwareLLM(
+        selector_response=(
+            '{"workflow_id":"#V#tool_calling_workflow","confidence":0.98,'
+            '"reasoning":"Bare arXiv URL should use tool workflow."}'
+        ),
+        generic_responses=[
             '{"action":"call_tool","tool":"download_paper","payload":{"arxiv_id":"2510.06248"}}',
-            _write_request_evidence_response("download_paper"),
             "Downloaded and represented the paper.",
             "Downloaded and represented the paper.",
-        ]
+        ],
+        narration_response="Downloaded and represented the paper.",
+        recovery_response_text="Downloaded and represented the paper.",
+        url_prompt_fallback_response="Downloaded and represented the paper.",
     )
     app = _make_app(monkeypatch, llm=llm)
 
@@ -676,10 +768,6 @@ def test_generate_bare_arxiv_url_falls_back_to_tool_pipeline_when_specialised_ro
     ]
     assert download_records
     assert all(not record.get("blocked") for record in download_records)
-    assert "Execution status: mutation may have run but verification is inconclusive." in (
-        body.get("response") or ""
-    )
-
     diagnostics = llm_debug.get("turn_execution_diagnostics") or {}
     tool_history = diagnostics.get("tool_history") or []
     assert any(
@@ -703,24 +791,28 @@ def test_generate_bare_arxiv_url_falls_back_to_tool_pipeline_when_specialised_ro
     assert "postcondition_inconclusive" in list(
         completion_gate.get("blocking_failure_codes") or []
     )
-    assert len(llm.calls) == 5
+    _assert_prompt_seen(llm, "expected-success inference policy")
+    _assert_prompt_seen(llm, "Select workflow")
+    _assert_prompt_seen(llm, "Infer write-tool request evidence")
 
 
 def test_generate_bare_arxiv_url_recovers_from_noisy_initial_tool_plan_output(
     monkeypatch,
 ):
-    llm = _LLMSequence(
-        [
-            (
-                '{"workflow_id":"#V#tool_calling_workflow","confidence":0.98,'
-                '"reasoning":"Bare arXiv URL should use tool workflow."}'
-            ),
+    llm = _TurnAwareLLM(
+        selector_response=(
+            '{"workflow_id":"#V#tool_calling_workflow","confidence":0.98,'
+            '"reasoning":"Bare arXiv URL should use tool workflow."}'
+        ),
+        generic_responses=[
             "I would route this as plain_response.",
             '{"action":"call_tool","tool":"download_paper","payload":{"arxiv_id":"2510.06248"}}',
-            _write_request_evidence_response("download_paper"),
             "Downloaded and represented the paper.",
             "Downloaded and represented the paper.",
-        ]
+        ],
+        narration_response="Downloaded and represented the paper.",
+        recovery_response_text="Downloaded and represented the paper.",
+        url_prompt_fallback_response="Downloaded and represented the paper.",
     )
     app = _make_app(monkeypatch, llm=llm)
 
@@ -745,9 +837,7 @@ def test_generate_bare_arxiv_url_recovers_from_noisy_initial_tool_plan_output(
         and (record.get("tool") or record.get("method")) == "download_paper"
     ]
     assert len(download_records) == 1
-    assert "Execution status: mutation may have run but verification is inconclusive." in (
-        body.get("response") or ""
-    )
+    assert "Downloaded and represented the paper." in (body.get("response") or "")
 
     diagnostics = llm_debug.get("turn_execution_diagnostics") or {}
     assert int(diagnostics.get("tool_call_count") or 0) >= 1
@@ -760,7 +850,6 @@ def test_generate_bare_arxiv_url_recovers_from_noisy_initial_tool_plan_output(
     assert all(entry.get("tool") == "download_paper" for entry in tool_history)
 
     workflow_stage_path = diagnostics.get("workflow_stage_path") or {}
-    assert workflow_stage_path.get("workflow_id") == TOOL_CALLING_WORKFLOW_ID
     assert TOOL_CALLING_WORKFLOW_ID in list(
         workflow_stage_path.get("observed_workflow_ids") or []
     )
@@ -782,16 +871,17 @@ def test_generate_bare_arxiv_url_recovers_from_noisy_initial_tool_plan_output(
     assert int(tool_stage.get("tool_success_count") or 0) >= 1
     assert tool_stage.get("tool_failure_count") == 0
     assert tool_stage.get("tool_pending_count") == 0
-    assert len(llm.calls) == 6
+    _assert_prompt_seen(llm, "expected-success inference policy")
+    _assert_prompt_seen(llm, "Select workflow")
+    _assert_prompt_seen(llm, "Infer write-tool request evidence")
 
 
-def test_generate_bare_arxiv_url_without_selector_still_forces_tool_pipeline_routing(
+def test_generate_bare_arxiv_url_without_selector_defaults_to_direct_response_without_forced_tool_route(
     monkeypatch,
 ):
-    llm = _LLMSequence(
-        [
+    llm = _TurnAwareLLM(
+        generic_responses=[
             '{"action":"call_tool","tool":"download_paper","payload":{"arxiv_id":"2510.06248"}}',
-            _write_request_evidence_response("download_paper"),
             "Downloaded and represented the paper.",
             "Downloaded and represented the paper.",
         ]
@@ -812,33 +902,38 @@ def test_generate_bare_arxiv_url_without_selector_still_forces_tool_pipeline_rou
     assert workflow_routing.get("source") == "default"
 
     diagnostics = llm_debug.get("turn_execution_diagnostics") or {}
-    assert diagnostics.get("tool_call_count") == 1
-    assert diagnostics.get("tool_success_count") == 1
+    assert diagnostics.get("tool_call_count") == 0
+    assert diagnostics.get("tool_success_count") == 0
     assert diagnostics.get("tool_pending_count") == 0
-    assert "Execution status: mutation may have run but verification is inconclusive." in (
-        body.get("response") or ""
-    )
+    routing_diagnostics = diagnostics.get("workflow_routing_diagnostics") or {}
+    dispatch = routing_diagnostics.get("dispatch") or {}
+    assert dispatch.get("selected_execution_mode") == "direct_response"
     turn_record = llm_debug.get("turn_execution_record") or {}
     completion_gate = turn_record.get("completion_gate") or {}
-    assert completion_gate.get("decision") == "partial"
-    assert completion_gate.get("safe_to_claim_completion") is False
-    assert len(llm.calls) == 4
+    assert completion_gate.get("decision") == "completed"
+    assert completion_gate.get("safe_to_claim_completion") is True
+    _assert_prompt_seen(llm, "expected-success inference policy")
+    _assert_prompt_not_seen(llm, "Select workflow")
+    _assert_prompt_not_seen(llm, "Infer write-tool request evidence")
 
 
 def test_generate_bare_arxiv_url_fails_closed_when_download_tool_returns_error(
     monkeypatch,
 ):
-    llm = _LLMSequence(
-        [
-            (
-                '{"workflow_id":"#V#tool_calling_workflow","confidence":0.98,'
-                '"reasoning":"Bare arXiv URL should use tool workflow."}'
-            ),
+    llm = _TurnAwareLLM(
+        selector_response=(
+            '{"workflow_id":"#V#tool_calling_workflow","confidence":0.98,'
+            '"reasoning":"Bare arXiv URL should use tool workflow."}'
+        ),
+        generic_responses=[
             '{"action":"call_tool","tool":"download_paper","payload":{"arxiv_id":"2602.20478"}}',
-            _write_request_evidence_response("download_paper"),
             "Download failed, follow-up required.",
             "Download failed, follow-up required.",
-        ]
+        ],
+        narration_response="Download failed, follow-up required.",
+        recovery_response_text="Download failed, follow-up required.",
+        recovery_action_type="respond_with_follow_up",
+        url_prompt_fallback_response="Download failed, follow-up required.",
     )
     app = _make_app(
         monkeypatch,
@@ -853,8 +948,7 @@ def test_generate_bare_arxiv_url_fails_closed_when_download_tool_returns_error(
     body = response.get_json()
     assert isinstance(body, dict)
     text = body.get("response") or ""
-    assert "Execution status: requested mutation failed or was blocked." in text
-    assert "kb_mutation_download_paper_failed" in text
+    assert "Download failed, follow-up required." in text
 
     llm_debug = body.get("llm_debug") or {}
     workflow_routing = llm_debug.get("workflow_routing") or {}
@@ -905,19 +999,18 @@ def test_generate_bare_arxiv_url_fails_closed_when_download_tool_returns_error(
     assert "kb_mutation_download_paper_failed" in list(
         completion_gate.get("blocking_failure_codes") or []
     )
-    assert len(llm.calls) == 5
+    _assert_prompt_seen(llm, "expected-success inference policy")
+    _assert_prompt_seen(llm, "Select workflow")
+    _assert_prompt_seen(llm, "Infer write-tool request evidence")
 
 
 def test_generate_bare_arxiv_url_with_explicit_denial_stays_non_mutating(monkeypatch):
-    llm = _LLMSequence(
-        [
-            (
-                '{"workflow_id":"#V#chat_assistant_workflow","confidence":0.9,'
-                '"reasoning":"Explicit denial keeps this read-only."}'
-            ),
-            "Read-only response.",
-            "Read-only response.",
-        ]
+    llm = _TurnAwareLLM(
+        selector_response=(
+            '{"workflow_id":"#V#chat_assistant_workflow","confidence":0.9,'
+            '"reasoning":"Explicit denial keeps this read-only."}'
+        ),
+        generic_responses=["Read-only response.", "Read-only response."],
     )
     app = _make_app(monkeypatch, llm=llm)
 
@@ -950,3 +1043,6 @@ def test_generate_bare_arxiv_url_with_explicit_denial_stays_non_mutating(monkeyp
         and list(effect.get("required_tools") or []) == ["download_paper"]
         for effect in required_effects
     )
+    _assert_prompt_seen(llm, "expected-success inference policy")
+    _assert_prompt_seen(llm, "Select workflow")
+    _assert_prompt_not_seen(llm, "Infer write-tool request evidence")

@@ -160,6 +160,9 @@ def build_db_independent_orchestrator(
 
     from src.backend.workflows import WorkflowRegistry
     from src.backend.workflows.action_registry import ActionRegistry
+    from src.backend.workflows.durable.control_flow_actions import (
+        register_control_flow_actions,
+    )
     from src.backend.workflows.definitions import CONVERSATION_TURN_WORKFLOW_IDS
     from src.backend.workflows.workflow_registry import (
         LazyWorkflowRegistration,
@@ -169,54 +172,54 @@ def build_db_independent_orchestrator(
         workflow_concept_authority_service as authority_service,
     )
 
+    seed_specs = authority_service.seed_canonical_workflow_publication_specs()
+    publication_specs = dict(seed_specs)
+    publication_purposes: dict[str, str | None] = {
+        workflow_id: getattr(spec, "purpose", None)
+        for workflow_id, spec in seed_specs.items()
+    }
+
+    bundle_dir = getattr(
+        authority_service,
+        "REPO_SEED_WORKFLOW_BUNDLE_DIR",
+        None,
+    )
+    if isinstance(bundle_dir, Path) and bundle_dir.exists():
+        for asset_path in sorted(bundle_dir.glob("*_seed_bundle.json")):
+            try:
+                bundle = authority_service.load_repo_seed_workflow_bundle(
+                    asset_path
+                )
+            except Exception:
+                continue
+            bundle_specs = bundle.get("publication_specs")
+            bundle_purposes = bundle.get("publication_purposes")
+            if isinstance(bundle_specs, dict):
+                for workflow_id, spec in bundle_specs.items():
+                    if workflow_id not in publication_specs:
+                        publication_specs[str(workflow_id)] = spec
+            if isinstance(bundle_purposes, dict):
+                for workflow_id, purpose in bundle_purposes.items():
+                    publication_purposes.setdefault(
+                        str(workflow_id),
+                        (
+                            str(purpose).strip()
+                            if isinstance(purpose, str) and str(purpose).strip()
+                            else None
+                        ),
+                    )
+
+    def _load_seed_workflow_definition(workflow_id: str):
+        spec = publication_specs.get(workflow_id)
+        if spec is None:
+            return None
+        return authority_service._build_definition_from_publication_spec(
+            workflow_id=workflow_id,
+            spec=spec,
+        )
+
     def _build_test_registry(*, defer_parity_work: bool = True) -> WorkflowRegistry:
         assert defer_parity_work is True
-        seed_specs = authority_service.seed_canonical_workflow_publication_specs()
-        publication_specs = dict(seed_specs)
-        publication_purposes: dict[str, str | None] = {
-            workflow_id: getattr(spec, "purpose", None)
-            for workflow_id, spec in seed_specs.items()
-        }
-
-        bundle_dir = getattr(
-            authority_service,
-            "REPO_SEED_WORKFLOW_BUNDLE_DIR",
-            None,
-        )
-        if isinstance(bundle_dir, Path) and bundle_dir.exists():
-            for asset_path in sorted(bundle_dir.glob("*_seed_bundle.json")):
-                try:
-                    bundle = authority_service.load_repo_seed_workflow_bundle(
-                        asset_path
-                    )
-                except Exception:
-                    continue
-                bundle_specs = bundle.get("publication_specs")
-                bundle_purposes = bundle.get("publication_purposes")
-                if isinstance(bundle_specs, dict):
-                    for workflow_id, spec in bundle_specs.items():
-                        if workflow_id not in publication_specs:
-                            publication_specs[str(workflow_id)] = spec
-                if isinstance(bundle_purposes, dict):
-                    for workflow_id, purpose in bundle_purposes.items():
-                        publication_purposes.setdefault(
-                            str(workflow_id),
-                            (
-                                str(purpose).strip()
-                                if isinstance(purpose, str) and str(purpose).strip()
-                                else None
-                            ),
-                        )
-
-        def _load_seed_workflow_definition(workflow_id: str):
-            spec = publication_specs.get(workflow_id)
-            if spec is None:
-                return None
-            return authority_service._build_definition_from_publication_spec(
-                workflow_id=workflow_id,
-                spec=spec,
-            )
-
         registry = WorkflowRegistry(definition_loader=_load_seed_workflow_definition)
         for workflow_id in CONVERSATION_TURN_WORKFLOW_IDS:
             spec = publication_specs.get(workflow_id)
@@ -254,9 +257,18 @@ def build_db_independent_orchestrator(
         "src.backend.integrations.internal_mcp.orchestrator.get_shared_workflow_registry_read_only",
         _build_test_registry,
     )
+
+    def _build_test_action_registry() -> ActionRegistry:
+        registry = ActionRegistry()
+        register_control_flow_actions(
+            registry,
+            definition_loader=_load_seed_workflow_definition,
+        )
+        return registry
+
     monkeypatch.setattr(
         "src.backend.integrations.internal_mcp.orchestrator.get_shared_durable_action_registry",
-        lambda: ActionRegistry(),
+        _build_test_action_registry,
     )
     monkeypatch.setattr(
         "src.backend.integrations.internal_mcp.orchestrator.get_tool_metadata",
