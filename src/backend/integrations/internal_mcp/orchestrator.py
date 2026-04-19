@@ -8578,6 +8578,7 @@ class InternalMCPChatOrchestrator:
                     required_url_extraction_url=(
                         prompt_requirements.required_url_extraction_url
                     ),
+                    tool_invocations=invocations_for_requirements,
                     invoked_tool_names=(
                         self._extract_successful_tool_names(invocations_for_requirements)
                     ),
@@ -22090,6 +22091,169 @@ class InternalMCPChatOrchestrator:
 
         return forced_calls or None
 
+    @classmethod
+    def _extract_search_concepts_follow_up_concept_ids(
+        cls,
+        tool_invocations: Sequence[Mapping[str, Any]] | None,
+        *,
+        max_concept_ids: int = 1,
+    ) -> list[str]:
+        """Extract stable concept IDs from successful search_concepts results.
+
+        This keeps continuation structural: the authoritative concept search
+        ordering selects the follow-up concept target, rather than Python
+        inventing a second semantic ranking layer.
+        """
+
+        if not tool_invocations or max_concept_ids <= 0:
+            return []
+
+        concept_ids: list[str] = []
+        seen: set[str] = set()
+        for invocation in tool_invocations:
+            if not isinstance(invocation, Mapping):
+                continue
+            raw_tool = invocation.get("tool")
+            if not isinstance(raw_tool, str) or raw_tool.strip().lower() != "search_concepts":
+                continue
+            if not cls._tool_invocation_completed_successfully(invocation):
+                continue
+
+            payload = invocation.get("effective_payload")
+            if not isinstance(payload, Mapping):
+                payload = invocation.get("payload")
+            if not isinstance(payload, Mapping):
+                continue
+
+            raw_results = payload.get("results")
+            if not isinstance(raw_results, list):
+                continue
+
+            for row in raw_results:
+                if not isinstance(row, Mapping):
+                    continue
+                concept_id = cls._normalise_concept_id_candidate(row.get("concept_id"))
+                if not concept_id:
+                    continue
+                lowered = concept_id.lower()
+                if lowered in seen:
+                    continue
+                seen.add(lowered)
+                concept_ids.append(concept_id)
+                if len(concept_ids) >= max_concept_ids:
+                    return concept_ids
+
+        return concept_ids
+
+    @classmethod
+    def _extract_structural_retry_search_query(
+        cls,
+        tool_invocations: Sequence[Mapping[str, Any]] | None,
+        *,
+        user_text: str | None = None,
+    ) -> str | None:
+        """Reuse an earlier tool query before falling back to the raw turn text."""
+
+        for invocation in tool_invocations or ():
+            if not isinstance(invocation, Mapping):
+                continue
+            raw_tool = invocation.get("tool")
+            if not isinstance(raw_tool, str) or raw_tool.strip().lower() not in {
+                "search_knowledge_base",
+                "search_concepts",
+            }:
+                continue
+            payload = invocation.get("effective_payload")
+            if not isinstance(payload, Mapping):
+                payload = invocation.get("payload")
+            if not isinstance(payload, Mapping):
+                continue
+            query = payload.get("query")
+            if isinstance(query, str) and query.strip():
+                return query.strip()
+
+        if isinstance(user_text, str) and user_text.strip():
+            return user_text.strip()
+        return None
+
+    @classmethod
+    def _infer_ontology_follow_up_retry_tool_calls(
+        cls,
+        *,
+        user_text: str | None,
+        missing_required_tools: Sequence[str],
+        tool_invocations: Sequence[Mapping[str, Any]] | None,
+    ) -> list[_ToolCallRequest] | None:
+        """Derive ontology-native follow-up calls after a successful concept search.
+
+        Predicate/schema turns often need one more ontology step after
+        search_concepts. When the turn contract still requires
+        get_text_relations_summary or get_related_concepts, continue from the
+        strongest authoritative search result instead of stopping after concept
+        retrieval.
+        """
+
+        missing_tools = [
+            str(item).strip()
+            for item in (missing_required_tools or [])
+            if isinstance(item, str) and str(item).strip()
+        ]
+        if not missing_tools:
+            return None
+        if not any(
+            tool_name
+            in {
+                "search_concepts",
+                "get_text_relations_summary",
+                "get_related_concepts",
+            }
+            for tool_name in missing_tools
+        ):
+            return None
+
+        if "search_concepts" in missing_tools:
+            search_query = cls._extract_structural_retry_search_query(
+                tool_invocations,
+                user_text=user_text,
+            )
+            if search_query:
+                return [
+                    {
+                        "action": "call_tool",
+                        "tool": "search_concepts",
+                        "payload": {"query": search_query},
+                    }
+                ]
+
+        concept_ids = cls._extract_search_concepts_follow_up_concept_ids(
+            tool_invocations,
+            max_concept_ids=1,
+        )
+        if not concept_ids:
+            return None
+
+        primary_concept_id = concept_ids[0]
+        forced_calls: list[_ToolCallRequest] = []
+        for tool_name in missing_tools:
+            if tool_name == "get_text_relations_summary":
+                forced_calls.append(
+                    {
+                        "action": "call_tool",
+                        "tool": tool_name,
+                        "payload": {"concept_id": primary_concept_id},
+                    }
+                )
+            elif tool_name == "get_related_concepts":
+                forced_calls.append(
+                    {
+                        "action": "call_tool",
+                        "tool": tool_name,
+                        "payload": {"concept_id": primary_concept_id},
+                    }
+                )
+
+        return forced_calls or None
+
     @staticmethod
     def _build_task_create_retry_payload(
         *,
@@ -22147,6 +22311,7 @@ class InternalMCPChatOrchestrator:
         ) = None,
         required_create_type_name: str | None = None,
         required_url_extraction_url: str | None = None,
+        tool_invocations: Sequence[Mapping[str, Any]] | None = None,
         invoked_tool_names: Sequence[str] | None = None,
     ) -> list[_ToolCallRequest] | None:
         """Best-effort deterministic recovery for common missing-tool-call cases.
@@ -22213,6 +22378,15 @@ class InternalMCPChatOrchestrator:
         )
         if required_forced:
             return required_forced
+        ontology_follow_up = self._infer_ontology_follow_up_retry_tool_calls(
+            user_text=last_user_text,
+            missing_required_tools=(
+                list(missing_required_tools) if missing_required_tools else []
+            ),
+            tool_invocations=tool_invocations,
+        )
+        if ontology_follow_up:
+            return ontology_follow_up
         return None
 
     def _resolve_allowed_write_tools(
@@ -24539,6 +24713,18 @@ class InternalMCPChatOrchestrator:
             else None
         )
         trace_contract = trace_contract or {}
+        discovery_contract = (
+            cls._extract_turn_expected_outcome_contract_from_discovery_query(
+                data.get("workflow_discovery_result")
+                if isinstance(data.get("workflow_discovery_result"), Mapping)
+                else (
+                    data.get("workflow_discovery")
+                    if isinstance(data.get("workflow_discovery"), Mapping)
+                    else None
+                )
+            )
+            or {}
+        )
 
         def _resolve_text(*keys: str) -> str | None:
             for key in keys:
@@ -24549,6 +24735,8 @@ class InternalMCPChatOrchestrator:
                     value = direct_contract.get(key)
                 if not isinstance(value, str) or not value.strip():
                     value = trace_contract.get(key)
+                if not isinstance(value, str) or not value.strip():
+                    value = discovery_contract.get(key)
                 if isinstance(value, str) and value.strip():
                     return value.strip()
             return None

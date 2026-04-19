@@ -198,6 +198,7 @@ Verify all of the following:
 - merge to `main`, verify `origin/main` contains the intended commit(s), then close the Jira issue
 - finish branch/worktree hygiene for the completed task: fast-forward any retained local `main` worktree that is meant to track `origin/main`, move the current worktree off the completed task branch, and delete merged local/remote task branches unless there is a clearly recorded reason to keep them
 - complete the reflection pass
+- if the task removed or replaced heuristic code, code-side semantic steering, or other anti-patterns, verify that no tests remain that pin the old behaviour (see Testing rule 11). Tests that assert on removed heuristic outputs, autostub authority-backed replacements to avoid exercising them, or encode stale design assumptions are themselves anti-patterns and must be removed or rewritten as part of the same task.
 
 ### 7.4 Jira task design quality
 
@@ -239,6 +240,7 @@ Tasks that consist only of a summary sentence and acceptance criteria without th
 8. Use targeted impacted pytest execution by default; widen only when risk or failures warrant it.
 9. Never run backend tests against `VON_DB_NAME=von_db`. Use the test DB.
 10. Before every commit, run the lint/type-check gate and fix outstanding diagnostics.
+11. After any significant architectural change — replacing a heuristic with an authority surface, decomposing a monolith, or removing code-side semantic steering — perform a bounded anti-pattern test audit in the affected area. Scan for tests that (a) directly assert on outputs of the removed or replaced heuristic, (b) autostub the new authority-backed path to return empty/fixed values so the real architecture is never exercised, or (c) pin downstream effects of heuristic code through end-to-end assertions. Remove or rewrite such tests, then remove any code that existed only to satisfy them. Tests that validate anti-patterns are load-bearing obstacles to architectural progress; leaving them in place causes the old code to persist indefinitely because developers fear breaking the test suite.
 
 ## 9. Tooling defaults
 

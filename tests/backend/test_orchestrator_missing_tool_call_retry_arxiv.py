@@ -37,6 +37,14 @@ class _Gateway:
                 "category": "read",
                 "description": "Search Jira issues using JQL",
             },
+            "get_text_relations_summary": {
+                "category": "read",
+                "description": "Summarise text relations for a concept",
+            },
+            "get_related_concepts": {
+                "category": "read",
+                "description": "Retrieve related concepts for a concept",
+            },
             "task_create": {
                 "category": "write",
                 "description": "Create a Von task",
@@ -174,6 +182,108 @@ def test_missing_tool_call_retry_does_not_force_domain_specific_finalise_tool():
     assert forced is None
 
 
+def test_missing_tool_call_retry_chains_text_relation_summary_after_search_concepts():
+    orchestrator = _build_orchestrator_stub()
+
+    forced = orchestrator._infer_missing_tool_call_retry_tool_calls(
+        [],
+        user_prompt="What predicates are salient to SAIL students?",
+        missing_required_tools=["get_text_relations_summary"],
+        tool_invocations=[
+            {
+                "tool": "search_concepts",
+                "status": "ok",
+                "effective_payload": {
+                    "success": True,
+                    "results": [
+                        {
+                            "concept_id": "#V#sail_student_group",
+                            "name": "SAIL Student Group",
+                            "relevance_score": 98.0,
+                        },
+                        {
+                            "concept_id": "#V#unrelated_concept",
+                            "name": "Unrelated Concept",
+                            "relevance_score": 55.0,
+                        },
+                    ],
+                },
+            }
+        ],
+    )
+
+    assert forced == [
+        {
+            "action": "call_tool",
+            "tool": "get_text_relations_summary",
+            "payload": {"concept_id": "#V#sail_student_group"},
+        }
+    ]
+
+
+def test_missing_tool_call_retry_chains_related_concepts_after_search_concepts():
+    orchestrator = _build_orchestrator_stub()
+
+    forced = orchestrator._infer_missing_tool_call_retry_tool_calls(
+        [],
+        user_prompt="What related concepts should I inspect for SAIL students?",
+        missing_required_tools=["get_related_concepts"],
+        tool_invocations=[
+            {
+                "tool": "search_concepts",
+                "status": "ok",
+                "effective_payload": {
+                    "success": True,
+                    "results": [
+                        {
+                            "concept_id": "#V#sail_student_group",
+                            "name": "SAIL Student Group",
+                            "relevance_score": 97.0,
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+
+    assert forced == [
+        {
+            "action": "call_tool",
+            "tool": "get_related_concepts",
+            "payload": {"concept_id": "#V#sail_student_group"},
+        }
+    ]
+
+
+def test_missing_tool_call_retry_recovers_search_concepts_from_prior_kb_query():
+    orchestrator = _build_orchestrator_stub()
+
+    forced = orchestrator._infer_missing_tool_call_retry_tool_calls(
+        [],
+        user_prompt="What are key predicates or represented relationships for SAIL students?",
+        missing_required_tools=["search_concepts", "get_text_relations_summary"],
+        tool_invocations=[
+            {
+                "tool": "search_knowledge_base",
+                "status": "ok",
+                "effective_payload": {
+                    "success": True,
+                    "query": "SAIL students",
+                    "results": [],
+                },
+            }
+        ],
+    )
+
+    assert forced == [
+        {
+            "action": "call_tool",
+            "tool": "search_concepts",
+            "payload": {"query": "SAIL students"},
+        }
+    ]
+
+
 def test_missing_tool_call_retry_forces_explicit_scholarly_materialisation_tool():
     orchestrator = _build_orchestrator_stub()
 
@@ -196,7 +306,7 @@ def test_missing_tool_call_retry_forces_explicit_scholarly_materialisation_tool(
     ]
 
 
-def test_missing_tool_call_retry_forces_guided_kb_and_web_search() -> None:
+def test_missing_tool_call_retry_does_not_force_guided_kb_and_web_search() -> None:
     orchestrator = _build_orchestrator_stub()
     prompt = (
         "What open-source projects released recently look most aligned with the "
@@ -217,21 +327,10 @@ def test_missing_tool_call_retry_forces_guided_kb_and_web_search() -> None:
         user_prompt=prompt,
     )
 
-    assert forced == [
-        {
-            "action": "call_tool",
-            "tool": "search_knowledge_base",
-            "payload": {"query": prompt, "top_k": 5},
-        },
-        {
-            "action": "call_tool",
-            "tool": "search_web",
-            "payload": {"query": prompt, "max_results": 5},
-        },
-    ]
+    assert forced is None
 
 
-def test_missing_tool_call_retry_forces_guided_kb_and_web_search_from_turn_contract():
+def test_missing_tool_call_retry_does_not_force_guided_kb_and_web_search_from_turn_contract():
     orchestrator = _build_orchestrator_stub()
     prompt = (
         "What open-source projects released recently look most aligned with the "
@@ -254,21 +353,10 @@ def test_missing_tool_call_retry_forces_guided_kb_and_web_search_from_turn_contr
         },
     )
 
-    assert forced == [
-        {
-            "action": "call_tool",
-            "tool": "search_knowledge_base",
-            "payload": {"query": prompt, "top_k": 5},
-        },
-        {
-            "action": "call_tool",
-            "tool": "search_web",
-            "payload": {"query": prompt, "max_results": 5},
-        },
-    ]
+    assert forced is None
 
 
-def test_missing_tool_call_retry_forces_guided_concept_search_when_contract_names_it():
+def test_missing_tool_call_retry_does_not_force_guided_concept_search_when_contract_names_it():
     orchestrator = _build_orchestrator_stub()
     prompt = (
         "What open-source projects released recently look most aligned with the "
@@ -287,28 +375,7 @@ def test_missing_tool_call_retry_forces_guided_concept_search_when_contract_name
         },
     )
 
-    assert forced == [
-        {
-            "action": "call_tool",
-            "tool": "search_knowledge_base",
-            "payload": {"query": prompt, "top_k": 5},
-        },
-        {
-            "action": "call_tool",
-            "tool": "search_concepts",
-            "payload": {
-                "query": prompt,
-                "match_type": "all",
-                "include_description": True,
-                "limit": 8,
-            },
-        },
-        {
-            "action": "call_tool",
-            "tool": "search_web",
-            "payload": {"query": prompt, "max_results": 5},
-        },
-    ]
+    assert forced is None
 
 
 def test_turn_contract_required_tools_include_explicit_task_create():
@@ -567,7 +634,7 @@ def test_missing_tool_call_retry_injects_retry_context_for_missing_jira_surface(
     assert "already invoked successfully this turn" in retry_context[0]["content"].lower()
 
 
-def test_tool_calling_plan_applies_parent_guided_retry_fallback_when_nested_recovery_returns_no_calls():
+def test_tool_calling_plan_does_not_force_parent_guided_retry_without_explicit_missing_requirements():
     orchestrator = _build_orchestrator_stub()
 
     orchestrator._build_stage_llm_context = cast(
@@ -651,29 +718,10 @@ def test_tool_calling_plan_applies_parent_guided_retry_fallback_when_nested_reco
 
     result = orchestrator._action_tool_calling_plan(cast(Any, request))
 
-    assert result.outputs["tool_calls_present"] is True
-    assert result.outputs["direct_response"] is False
-    assert result.outputs["missing_tool_call_recovery_outcome"] == (
-        "retry_succeeded_parent_fallback"
-    )
-    assert result.outputs["tool_calls"] == [
-        {
-            "action": "call_tool",
-            "tool": "search_knowledge_base",
-            "payload": {
-                "query": request.data["prompt"],
-                "top_k": 5,
-            },
-        },
-        {
-            "action": "call_tool",
-            "tool": "search_web",
-            "payload": {
-                "query": request.data["prompt"],
-                "max_results": 5,
-            },
-        },
-    ]
+    assert result.outputs["tool_calls_present"] is False
+    assert result.outputs["direct_response"] is True
+    assert result.outputs["final_response"] == "I will search the KB and web now."
+    assert result.outputs["missing_tool_call_recovery_outcome"] is None
 
 
 def test_tool_calling_backfill_applies_parent_guided_retry_fallback_when_required_surfaces_remain():
@@ -818,6 +866,292 @@ def test_tool_calling_backfill_applies_parent_guided_retry_fallback_when_require
     ]
     assert '#V#michael_witbrock' in tool_calls[1]["payload"]["jql"]
     assert "Michael Witbrock" in tool_calls[1]["payload"]["jql"]
+
+
+def test_tool_calling_backfill_chains_ontology_follow_up_after_search_concepts():
+    orchestrator = _build_orchestrator_stub()
+
+    orchestrator._build_follow_up_llm_context = cast(
+        Any, lambda augmented_context, max_chars=4000: list(augmented_context or [])
+    )
+    orchestrator._build_stage_llm_context = cast(
+        Any, lambda **kwargs: (list(kwargs.get("base_context") or []), {})
+    )
+    orchestrator._run_llm_with_fallbacks = cast(
+        Any,
+        lambda **kwargs: (
+            "I cannot identify grounded predicates yet because only a broad concept search was completed.",
+            "gemma4:26b",
+            None,
+        ),
+    )
+    orchestrator._run_missing_tool_call_recovery_workflow = cast(
+        Any, lambda **kwargs: {}
+    )
+    orchestrator._store_prompt_requirement_evaluation = cast(
+        Any, lambda data, prompt_requirements: None
+    )
+    orchestrator._augment_prompt_requirements_with_turn_contract = cast(
+        Any, lambda **kwargs: kwargs["evaluation"]
+    )
+
+    class _PromptRequirements:
+        required_tools = [
+            "search_concepts",
+            "get_text_relations_summary",
+        ]
+        required_fetch_concept_ids: list[str] = []
+        required_read_file_copy_ids: list[str] = []
+        required_scholarly_representation_file_copy_ids: list[str] = []
+        required_create_type_name: str | None = None
+        required_url_extraction_tool: str | None = None
+        required_url_extraction_url: str | None = None
+        missing_tools = ["get_text_relations_summary"]
+        missing_fetch_concept_ids: list[str] = []
+        missing_read_file_copy_ids: list[str] = []
+        missing_scholarly_representation_file_copy_ids: list[str] = []
+        missing_retry_reason: str | None = (
+            "Required ontology follow-up tool was not called after concept search."
+        )
+
+    orchestrator._evaluate_prompt_requirements = cast(
+        Any, lambda **kwargs: _PromptRequirements()
+    )
+
+    request = SimpleNamespace(
+        data={
+            "prompt": "What predicates are salient to SAIL students?",
+            "augmented_context": [],
+            "policy_state": SimpleNamespace(enabled=False, policy=None),
+            "registry_snapshot": {},
+            "user_concept_id": "#V#michael_witbrock",
+            "org_concept_id": "#V#sail",
+            "model_for_stage": lambda stage: "gemma4:26b",
+            "record_llm_call": lambda **kwargs: None,
+            "aux_llm_calls": [],
+            "llm_calls": [],
+            "emit_progress": None,
+            "iteration_count": 1,
+            "remaining_tool_calls": [],
+            "invocations": [
+                {
+                    "tool": "search_concepts",
+                    "status": "ok",
+                    "effective_payload": {
+                        "success": True,
+                        "results": [
+                            {
+                                "concept_id": "#V#sail_student_group",
+                                "name": "SAIL Student Group",
+                                "relevance_score": 98.0,
+                            }
+                        ],
+                    },
+                }
+            ],
+            "prompt_requirement_url_policy": {},
+            "missing_tool_call_retry_reason_override": (
+                "Required ontology follow-up tool was not called after concept search."
+            ),
+            "turn_selector_guidance": (
+                "Use search_concepts and get_text_relations_summary before answering."
+            ),
+            "turn_expected_grounding_requirement": (
+                "Predicates must be grounded in represented relationships or text relations."
+            ),
+            "turn_expected_outcome_summary": (
+                "Identify grounded predicates for SAIL students."
+            ),
+            "missing_tool_call_retry_attempts": 0,
+            "missing_tool_call_retry_budget": 2,
+            "prefer_default_model": False,
+        },
+        environment=SimpleNamespace(
+            llm_client=object(),
+            model="gemma4:26b",
+            max_tool_invocations=6,
+        ),
+        trace=None,
+        workflow_id="#V#tool_calling_workflow",
+        workflow_state_id="backfill",
+        workflow_state_metadata={},
+        action_id="tool_calling.backfill",
+    )
+
+    result = orchestrator._action_tool_calling_backfill(cast(Any, request))
+
+    assert result.outputs["more_tool_calls"] is True
+    assert result.outputs["tool_calls_present"] is True
+    assert result.outputs["missing_tool_call_recovery_outcome"] == (
+        "retry_succeeded_parent_fallback"
+    )
+    assert result.outputs["tool_calls"] == [
+        {
+            "action": "call_tool",
+            "tool": "get_text_relations_summary",
+            "payload": {"concept_id": "#V#sail_student_group"},
+        }
+    ]
+
+
+def test_build_turn_expected_outcome_contract_falls_back_to_discovery_query_guidance():
+    orchestrator = _build_orchestrator_stub()
+
+    discovery_query = (
+        "What are key predicates or represented relationships for SAIL students?\n\n"
+        "Turn-intent routing guidance:\n"
+        "- Routing guidance: Prioritize Vontology tools such as `search_concepts`, "
+        "`get_related_concepts`, and `get_text_relations_summary` to identify the "
+        "structural role of 'SAIL students' and their associated predicates.\n"
+        "- Grounding requirement: All identified predicates or relationships must be "
+        "verifiable through Vontology schema inspection (predicates) or retrieved "
+        "relation instances (text relations) in the KG.\n"
+        "- Success target: A precise list of predicates and relationship types that "
+        "explicitly connect 'SAIL students' to other entities or concepts within the "
+        "ontology or knowledge base."
+    )
+
+    contract = orchestrator._build_turn_expected_outcome_contract(
+        {"workflow_discovery_result": {"query": discovery_query}}
+    )
+
+    assert contract == {
+        "summary": (
+            "A precise list of predicates and relationship types that explicitly "
+            "connect 'SAIL students' to other entities or concepts within the "
+            "ontology or knowledge base."
+        ),
+        "grounding_requirement": (
+            "All identified predicates or relationships must be verifiable through "
+            "Vontology schema inspection (predicates) or retrieved relation "
+            "instances (text relations) in the KG."
+        ),
+        "selector_guidance": (
+            "Prioritize Vontology tools such as `search_concepts`, "
+            "`get_related_concepts`, and `get_text_relations_summary` to identify "
+            "the structural role of 'SAIL students' and their associated predicates."
+        ),
+    }
+
+
+def test_tool_calling_backfill_recovers_search_concepts_from_discovery_query_contract():
+    orchestrator = _build_orchestrator_stub()
+
+    orchestrator._build_follow_up_llm_context = cast(
+        Any, lambda augmented_context, max_chars=4000: list(augmented_context or [])
+    )
+    orchestrator._build_stage_llm_context = cast(
+        Any, lambda **kwargs: (list(kwargs.get("base_context") or []), {})
+    )
+    orchestrator._run_llm_with_fallbacks = cast(
+        Any,
+        lambda **kwargs: (
+            "No represented relationships or predicates for 'SAIL students' were found.",
+            "gemma4:26b",
+            None,
+        ),
+    )
+    orchestrator._run_missing_tool_call_recovery_workflow = cast(
+        Any, lambda **kwargs: {}
+    )
+
+    class _PromptRequirements:
+        required_tools: list[str] = []
+        required_fetch_concept_ids: list[str] = []
+        required_read_file_copy_ids: list[str] = []
+        required_scholarly_representation_file_copy_ids: list[str] = []
+        required_create_type_name: str | None = None
+        required_url_extraction_tool: str | None = None
+        required_url_extraction_url: str | None = None
+        unavailable_required_tools: list[str] = []
+        scholarly_representation_intent = False
+        missing_tools: list[str] = []
+        missing_fetch_concept_ids: list[str] = []
+        missing_read_file_copy_ids: list[str] = []
+        missing_scholarly_representation_file_copy_ids: list[str] = []
+        missing_retry_reason: str | None = None
+
+    orchestrator._evaluate_prompt_requirements = cast(
+        Any, lambda **kwargs: _PromptRequirements()
+    )
+
+    discovery_query = (
+        "What are key predicates or represented relationships for SAIL students?\n\n"
+        "Turn-intent routing guidance:\n"
+        "- Routing guidance: Prioritize Vontology tools such as `search_concepts`, "
+        "`get_related_concepts`, and `get_text_relations_summary` to identify the "
+        "structural role of 'SAIL students' and their associated predicates.\n"
+        "- Grounding requirement: All identified predicates or relationships must be "
+        "verifiable through Vontology schema inspection (predicates) or retrieved "
+        "relation instances (text relations) in the KG.\n"
+        "- Success target: A precise list of predicates and relationship types that "
+        "explicitly connect 'SAIL students' to other entities or concepts within the "
+        "ontology or knowledge base."
+    )
+
+    request = SimpleNamespace(
+        data={
+            "prompt": (
+                "What are key predicates or represented relationships for "
+                "SAIL students?"
+            ),
+            "augmented_context": [],
+            "policy_state": SimpleNamespace(enabled=False, policy=None),
+            "registry_snapshot": {},
+            "user_concept_id": "#V#michael_witbrock",
+            "org_concept_id": "#V#sail",
+            "model_for_stage": lambda stage: "gemma4:26b",
+            "record_llm_call": lambda **kwargs: None,
+            "aux_llm_calls": [],
+            "llm_calls": [],
+            "emit_progress": None,
+            "iteration_count": 1,
+            "remaining_tool_calls": [],
+            "invocations": [
+                {
+                    "tool": "search_knowledge_base",
+                    "status": "ok",
+                    "effective_payload": {
+                        "success": True,
+                        "query": "SAIL students",
+                        "results": [],
+                    },
+                }
+            ],
+            "prompt_requirement_url_policy": {},
+            "workflow_discovery_result": {"query": discovery_query},
+            "missing_tool_call_retry_attempts": 0,
+            "missing_tool_call_retry_budget": 2,
+            "prefer_default_model": False,
+        },
+        environment=SimpleNamespace(
+            llm_client=object(),
+            model="gemma4:26b",
+            max_tool_invocations=6,
+        ),
+        trace=None,
+        workflow_id="#V#tool_calling_workflow",
+        workflow_state_id="backfill",
+        workflow_state_metadata={},
+        action_id="tool_calling.backfill",
+    )
+
+    result = orchestrator._action_tool_calling_backfill(cast(Any, request))
+
+    assert "search_concepts" in request.data["missing_prompt_tools"]
+    assert "get_text_relations_summary" in request.data["missing_prompt_tools"]
+    assert result.outputs["more_tool_calls"] is True
+    assert result.outputs["tool_calls_present"] is True
+    assert result.outputs["missing_tool_call_recovery_outcome"] == (
+        "retry_succeeded_parent_fallback"
+    )
+    assert result.outputs["tool_calls"] == [
+        {
+            "action": "call_tool",
+            "tool": "search_concepts",
+            "payload": {"query": "SAIL students"},
+        }
+    ]
 
 
 def test_missing_tool_call_retry_does_not_force_guided_retrieval_without_guidance():
