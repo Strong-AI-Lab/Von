@@ -1276,6 +1276,15 @@ class _WorkflowTransitionDecision:
     reason: str | None = None
 
 
+class _WorkflowActionExecutionError(RuntimeError):
+    """Runtime failure for a workflow action with step identity preserved."""
+
+    def __init__(self, *, action_id: str, error: str) -> None:
+        super().__init__(error)
+        self.action_id = action_id
+        self.error = error
+
+
 class WorkflowExecutor:
     """Execute a workflow definition using a registry of declarative actions."""
 
@@ -2087,11 +2096,17 @@ class WorkflowExecutor:
                 if action_outcome == WORKFLOW_ACTION_OUTCOME_FAILURE:
                     if state_support.has_failure_route:
                         break
-                    raise RuntimeError(result.error or "action_failed")
+                    raise _WorkflowActionExecutionError(
+                        action_id=action_id,
+                        error=result.error or "action_failed",
+                    )
                 if action_outcome == WORKFLOW_ACTION_OUTCOME_UNKNOWN:
                     if state_support.has_unknown_route:
                         break
-                    raise RuntimeError(result.error or "action_unknown")
+                    raise _WorkflowActionExecutionError(
+                        action_id=action_id,
+                        error=result.error or "action_unknown",
+                    )
 
                 control_signal = get_last_control_signal(context)
                 if control_signal in {

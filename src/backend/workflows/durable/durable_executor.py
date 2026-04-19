@@ -14,55 +14,29 @@ from typing import Any, Mapping
 from ...db.transient_errors import run_with_transient_mongo_retry
 from ..engine import (
     WorkflowDefinition,
-    apply_tool_output_context_mappings,
-    execute_workflow_step_invocation,
-    evaluate_transition_condition_spec,
     materialise_terminal_effect_context,
-    resolve_action_inputs_from_context,
-    state_has_on_break_transition,
-    state_has_on_continue_transition,
-    state_has_on_failure_transition,
-    state_has_on_unknown_transition,
+    WorkflowExecutor,
 )
 from ..metadata_validation import (
-    METADATA_VALIDATION_MODE_OFF,
-    apply_metadata_validation_mode,
-    append_metadata_validation_event,
     format_metadata_validation_error,
-    get_metadata_validation_mode,
-    metadata_validation_failures_are_enforced,
-    skipped_metadata_validation,
-    validate_state_metadata_post_action,
-    validate_state_metadata_pre_action,
 )
 from ..action_registry import (
     ActionRegistry,
-    WORKFLOW_ACTION_OUTCOME_FAILURE,
-    WORKFLOW_ACTION_OUTCOME_UNKNOWN,
     WorkflowEnvironment,
-    normalise_action_outcome,
 )
 from ..trace_model import WorkflowExecutionTrace
 from ..execution_contracts import (
-    WORKFLOW_CONTROL_SIGNAL_BREAK,
-    WORKFLOW_CONTROL_SIGNAL_CONTINUE,
     WORKFLOW_CONTROL_SIGNAL_RETURN,
     WORKFLOW_RETURN_PAYLOAD_KEY,
-    append_runtime_event,
-    append_step_result_envelope,
-    build_step_result_envelope,
     build_workflow_result_envelope,
     clear_control_signal_context,
     get_last_control_signal,
-    get_last_control_signal_scope,
     set_workflow_result_envelope,
-    snapshot_workflow_mapping,
 )
 from ..plan_state_runtime import (
     apply_workflow_step_checkpoint,
     compute_plan_state_progress,
     evaluate_workflow_completion_gate,
-    mark_workflow_plan_state_entry,
     mark_workflow_plan_state_resume,
 )
 from ..trace_store import insert_workflow_execution_trace
@@ -169,7 +143,7 @@ class DurableWorkflowResult:
         }
 
 
-class DurableWorkflowExecutor:
+class DurableWorkflowExecutor(WorkflowExecutor):
     """Execute workflows with checkpoint-based durability.
 
     Extends the standard WorkflowExecutor pattern with:
@@ -193,7 +167,7 @@ class DurableWorkflowExecutor:
             instance_manager: Manager for instance persistence.
             max_transitions: Maximum state transitions before error.
         """
-        self._registry = registry
+        super().__init__(registry=registry, max_transitions=max_transitions)
         self._instance_manager = instance_manager
         self._max_transitions = max(5, int(max_transitions))
 
@@ -327,15 +301,8 @@ class DurableWorkflowExecutor:
                 trace.metadata["default_provider"] = resolved_provider
         persisted_execution_trace_id: str | None = None
 
-        # Compute terminal states
-        termination_states = set(definition.termination_states) | {
-            state_id for state_id, spec in definition.states.items() if spec.terminal
-        }
         total_steps = max(1, len(definition.states))
-        validation_mode = get_metadata_validation_mode()
-        enforce_metadata_failures = metadata_validation_failures_are_enforced(
-            validation_mode
-        )
+        run_support = self._resolve_run_support(definition=definition)
 
         transitions = 0
 
@@ -437,7 +404,6 @@ class DurableWorkflowExecutor:
             transitions += 1
             step_index += 1
 
-            # Check for cancellation
             if _retry_store_call(
                 "is_cancelled",
                 lambda: self._instance_manager.is_cancelled(instance_id),
@@ -449,7 +415,6 @@ class DurableWorkflowExecutor:
                     checkpoint=True,
                 )
 
-            # Extend lock if worker_id provided
             if worker_id:
                 try:
                     _retry_store_call(
@@ -466,10 +431,10 @@ class DurableWorkflowExecutor:
                         exc_info=True,
                     )
 
-            # Get current state spec
             state_spec = definition.states.get(current_state)
             if state_spec is None:
                 error = f"unknown_state:{current_state}"
+                trace.finish_failed(error)
                 return _build_result(
                     completed=False,
                     final_state=current_state,
@@ -477,56 +442,22 @@ class DurableWorkflowExecutor:
                     checkpoint=True,
                 )
 
-            mark_workflow_plan_state_entry(
-                context=context,
-                workflow_id=definition.workflow_id,
+            self._record_state_entry(
+                definition=definition,
+                state_spec=state_spec,
                 state_id=current_state,
-                definition_metadata=definition.metadata,
+                context=context,
+                trace=trace,
+            )
+
+            pre_validation = self._apply_pre_action_metadata_validation(
+                state_id=current_state,
                 state_metadata=state_spec.metadata,
+                context=context,
+                trace=trace,
+                validation_mode=run_support.validation_mode,
             )
-
-            # Record state entry in trace
-            trace.record_state_transition(
-                current_state,
-                current_state,
-                verdict={"status": "enter"},
-            )
-
-            if validation_mode == METADATA_VALIDATION_MODE_OFF:
-                off_probe = validate_state_metadata_pre_action(
-                    state_id=current_state,
-                    metadata=state_spec.metadata,
-                    context=context,
-                )
-                if off_probe.applied:
-                    pre_validation = skipped_metadata_validation(
-                        state_id=current_state,
-                        phase="pre_action",
-                        reason="disabled_by_rollout_mode",
-                        mode=validation_mode,
-                    )
-                else:
-                    pre_validation = apply_metadata_validation_mode(
-                        result=off_probe,
-                        mode=validation_mode,
-                    )
-            else:
-                pre_validation = apply_metadata_validation_mode(
-                    result=validate_state_metadata_pre_action(
-                        state_id=current_state,
-                        metadata=state_spec.metadata,
-                        context=context,
-                    ),
-                    mode=validation_mode,
-                )
-            append_metadata_validation_event(context=context, result=pre_validation)
-            if pre_validation.applied:
-                trace.record_state_transition(
-                    current_state,
-                    current_state,
-                    verdict=pre_validation.to_trace_verdict(),
-                )
-            if not pre_validation.ok and enforce_metadata_failures:
+            if not pre_validation.ok and run_support.enforce_metadata_failures:
                 error = format_metadata_validation_error(pre_validation)
                 trace.finish_failed(error)
                 return _build_result(
@@ -536,220 +467,83 @@ class DurableWorkflowExecutor:
                     checkpoint=True,
                 )
 
-            # Execute actions
-            state_has_failure_route = state_has_on_failure_transition(state_spec)
-            state_has_unknown_route = state_has_on_unknown_transition(state_spec)
-            state_has_break_route = state_has_on_break_transition(state_spec)
-            state_has_continue_route = state_has_on_continue_transition(state_spec)
-            context_before_actions = dict(context)
-            for action in state_spec.actions:
-                context_before_action = dict(context)
-                action_target_id = action.target_id
-                resolved_inputs = resolve_action_inputs_from_context(
-                    action_inputs=action.inputs,
-                    context=context,
+            try:
+                state_support = self._resolve_state_runtime_support(
+                    state_spec=state_spec
                 )
-                result = execute_workflow_step_invocation(
-                    registry=self._registry,
-                    workflow_id=definition.workflow_id,
-                    workflow_state_id=current_state,
-                    workflow_state_metadata=state_spec.metadata,
-                    action=action,
-                    resolved_inputs=resolved_inputs,
+            except ValueError as exc:
+                error = str(exc)
+                trace.finish_failed(error)
+                return _build_result(
+                    completed=False,
+                    final_state=current_state,
+                    error=error,
+                    checkpoint=True,
+                )
+
+            context_before_actions = dict(context)
+            try:
+                approval_blocked = self._execute_state_actions(
+                    definition=definition,
+                    state_id=current_state,
+                    state_spec=state_spec,
+                    state_support=state_support,
                     context=context,
-                    env=environment,
+                    environment=environment,
                     trace=trace,
                 )
-
-                trace.record_action(
-                    action_id=action_target_id,
-                    inputs=resolved_inputs,
-                    outputs=result.outputs,
-                    status=result.status,
-                    error=result.error,
-                    call_id=result.call_id,
-                    duration_ms=result.duration_ms,
-                )
-
-                action_outcome = normalise_action_outcome(result.status)
-                action_output_snapshot: dict[str, Any] = {}
-                if isinstance(result.outputs, Mapping):
-                    action_output_snapshot = snapshot_workflow_mapping(
-                        result.outputs
-                    )
-                if action_outcome != WORKFLOW_ACTION_OUTCOME_FAILURE:
-                    context.update(action_output_snapshot)
-                    apply_tool_output_context_mappings(
-                        context=context,
-                        metadata=state_spec.metadata,
-                        action_outputs=action_output_snapshot,
-                        state_id=current_state,
-                        action_id=action_target_id,
-                    )
-
-                step_envelope = build_step_result_envelope(
-                    workflow_id=definition.workflow_id,
-                    state_id=current_state,
-                    action_id=action_target_id,
-                    action_status=result.status,
-                    action_outcome=action_outcome,
-                    action_error=result.error,
-                    action_outputs=action_output_snapshot,
-                    control_signal=get_last_control_signal(context),
-                    control_signal_scope=get_last_control_signal_scope(context),
-                    duration_ms=result.duration_ms,
-                    context_before=context_before_action,
-                    context_after=context,
-                )
-                append_step_result_envelope(context=context, envelope=step_envelope)
-
-                if environment.step_callback:
-                    try:
-                        environment.step_callback(step_envelope)
-                    except Exception:
-                        logger.warning(
-                            "[durable_workflow] Step callback failed for %s",
-                            instance_id,
-                            exc_info=True,
-                        )
-
-                if step_envelope["control_signal"] != "none":
-                    event = {
-                        "status": "control_signal",
-                        "workflow_id": definition.workflow_id,
-                        "state_id": current_state,
-                        "action_id": action_target_id,
-                        "control_signal": step_envelope["control_signal"],
-                        "control_signal_scope": step_envelope.get(
-                            "control_signal_scope"
-                        ),
-                    }
-                    append_runtime_event(context=context, event=event)
-                    trace.record_state_transition(
-                        current_state,
-                        current_state,
-                        verdict=event,
-                    )
-
-                if action_outcome == WORKFLOW_ACTION_OUTCOME_FAILURE:
-                    if state_has_failure_route:
-                        # Safety envelope (JVNAUTOSCI-1087): if the state defines
-                        # an explicit on_failure branch, do not fail-fast here.
-                        # Keep failure markers in context and evaluate transitions.
-                        break
-                    error = result.error or "action_failed"
-                    # Checkpoint the failure state
-                    trace.finish_failed(error)
-                    return _build_result(
-                        completed=False,
-                        final_state=current_state,
-                        error=error,
-                        checkpoint=True,
-                        error_step=action_target_id,
-                    )
-                if action_outcome == WORKFLOW_ACTION_OUTCOME_UNKNOWN:
-                    if state_has_unknown_route:
-                        # Unknown outcomes require explicit routing; do not
-                        # silently continue via default transitions.
-                        break
-                    error = result.error or "action_unknown"
-                    trace.finish_failed(error)
-                    return _build_result(
-                        completed=False,
-                        final_state=current_state,
-                        error=error,
-                        checkpoint=True,
-                        error_step=action_target_id,
-                    )
-
-                control_signal = get_last_control_signal(context)
-                if control_signal in {
-                    WORKFLOW_CONTROL_SIGNAL_BREAK,
-                    WORKFLOW_CONTROL_SIGNAL_CONTINUE,
-                    WORKFLOW_CONTROL_SIGNAL_RETURN,
-                }:
-                    break
-
-            control_signal = get_last_control_signal(context)
-            if control_signal == WORKFLOW_CONTROL_SIGNAL_BREAK and not state_has_break_route:
-                trace.finish_failed("workflow_break_outside_loop_scope")
+            except ValueError as exc:
+                error = str(exc)
+                trace.finish_failed(error)
                 return _build_result(
                     completed=False,
                     final_state=current_state,
-                    error="workflow_break_outside_loop_scope",
+                    error=error,
                     checkpoint=True,
                 )
-            if (
-                control_signal == WORKFLOW_CONTROL_SIGNAL_CONTINUE
-                and not state_has_continue_route
-            ):
-                trace.finish_failed("workflow_continue_outside_loop_scope")
+            except RuntimeError as exc:
+                error = str(exc)
+                trace.finish_failed(error)
                 return _build_result(
                     completed=False,
                     final_state=current_state,
-                    error="workflow_continue_outside_loop_scope",
+                    error=error,
                     checkpoint=True,
+                    error_step=getattr(exc, "action_id", None),
                 )
 
-            if current_state in termination_states:
+            if current_state in run_support.termination_states:
                 materialise_terminal_effect_context(
                     context=context,
                     state_spec=state_spec,
                     state_id=current_state,
                 )
 
-            if state_has_unknown_route and bool(context.get("last_action_unknown")):
-                post_validation = skipped_metadata_validation(
-                    state_id=current_state,
-                    phase="post_action",
-                    reason="action_unknown_with_on_unknown_route",
-                    mode=validation_mode,
-                )
-            elif state_has_failure_route and bool(context.get("last_action_failed")):
-                post_validation = skipped_metadata_validation(
-                    state_id=current_state,
-                    phase="post_action",
-                    reason="action_failed_with_on_failure_route",
-                    mode=validation_mode,
-                )
-            elif validation_mode == METADATA_VALIDATION_MODE_OFF:
-                off_probe = validate_state_metadata_post_action(
-                    state_id=current_state,
-                    metadata=state_spec.metadata,
-                    context_before=context_before_actions,
-                    context_after=context,
-                )
-                if off_probe.applied:
-                    post_validation = skipped_metadata_validation(
-                        state_id=current_state,
-                        phase="post_action",
-                        reason="disabled_by_rollout_mode",
-                        mode=validation_mode,
-                    )
-                else:
-                    post_validation = apply_metadata_validation_mode(
-                        result=off_probe,
-                        mode=validation_mode,
-                    )
-            else:
-                post_validation = apply_metadata_validation_mode(
-                    result=validate_state_metadata_post_action(
-                        state_id=current_state,
-                        metadata=state_spec.metadata,
-                        context_before=context_before_actions,
-                        context_after=context,
-                    ),
-                    mode=validation_mode,
+            control_signal_error = self._validate_control_signal_routing(
+                state_support=state_support,
+                context=context,
+                approval_blocked=approval_blocked,
+            )
+            if control_signal_error is not None:
+                trace.finish_failed(control_signal_error)
+                return _build_result(
+                    completed=False,
+                    final_state=current_state,
+                    error=control_signal_error,
+                    checkpoint=True,
                 )
 
-            append_metadata_validation_event(context=context, result=post_validation)
-            if post_validation.applied:
-                trace.record_state_transition(
-                    current_state,
-                    current_state,
-                    verdict=post_validation.to_trace_verdict(),
-                )
-            if not post_validation.ok and enforce_metadata_failures:
+            post_validation = self._apply_post_action_metadata_validation(
+                state_id=current_state,
+                state_metadata=state_spec.metadata,
+                state_support=state_support,
+                context_before=context_before_actions,
+                context=context,
+                trace=trace,
+                validation_mode=run_support.validation_mode,
+                approval_blocked=approval_blocked,
+            )
+            if not post_validation.ok and run_support.enforce_metadata_failures:
                 error = format_metadata_validation_error(post_validation)
                 trace.finish_failed(error)
                 return _build_result(
@@ -766,44 +560,22 @@ class DurableWorkflowExecutor:
                 step_index=step_index,
                 definition_metadata=definition.metadata,
                 state_metadata=state_spec.metadata,
-                blocked=False,
+                blocked=approval_blocked,
             )
 
+            control_signal = get_last_control_signal(context)
             if control_signal == WORKFLOW_CONTROL_SIGNAL_RETURN:
                 return _complete_with_gate(current_state)
 
-            # Check for terminal state
-            if current_state in termination_states:
+            if current_state in run_support.termination_states:
                 return _complete_with_gate(current_state)
 
-            # Evaluate transitions
-            next_state = None
-            transition_reason = None
-            for transition in state_spec.transitions:
-                try:
-                    condition_result = bool(transition.condition(context))
-                    if (
-                        not condition_result
-                        and isinstance(transition.condition_spec, Mapping)
-                    ):
-                        condition_result = evaluate_transition_condition_spec(
-                            context=context,
-                            condition_spec=transition.condition_spec,
-                        )
-                    if condition_result:
-                        next_state = transition.to_state
-                        transition_reason = transition.reason
-                        break
-                except Exception as e:
-                    logger.warning(
-                        "[durable_workflow] Transition condition error in %s: %s",
-                        current_state,
-                        e,
-                    )
-                    continue
-
-            if next_state is None:
-                error = "no_transition"
+            transition_decision = self._select_next_transition(
+                state_spec=state_spec,
+                context=context,
+            )
+            if transition_decision.next_state is None:
+                error = "approval_required" if approval_blocked else "no_transition"
                 trace.finish_failed(error)
                 return _build_result(
                     completed=False,
@@ -812,8 +584,7 @@ class DurableWorkflowExecutor:
                     checkpoint=True,
                 )
 
-            # CHECKPOINT after successful step (before transitioning)
-            resolved_next_state = str(next_state)
+            resolved_next_state = str(transition_decision.next_state)
             progress_current_value, progress_total_value, progress_message_value = (
                 compute_plan_state_progress(
                     context=context,
@@ -838,7 +609,7 @@ class DurableWorkflowExecutor:
             trace.record_state_transition(
                 current_state,
                 resolved_next_state,
-                reason=transition_reason,
+                reason=transition_decision.reason,
             )
             current_state = resolved_next_state
             clear_control_signal_context(context)
