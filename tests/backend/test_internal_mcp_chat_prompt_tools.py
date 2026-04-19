@@ -108,6 +108,22 @@ def test_chat_get_prompt_context_includes_content_when_requested(monkeypatch):
 
 
 def test_chat_introspect_returns_model_and_prompt_fingerprint(monkeypatch):
+    class _StubOrchestrator:
+        def __init__(self, *, gateway):
+            self.gateway = gateway
+
+        def _instruction_message(
+            self,
+            *,
+            user_namespace,
+            auxiliary_system_prompt,
+            preferred_language,
+        ):
+            return (
+                f"guidance::{user_namespace}::{auxiliary_system_prompt}::"
+                f"{preferred_language}"
+            )
+
     _patch_prompt_services(
         monkeypatch,
         behaviour_fragments=[{"concept_id": "#V#prompt_a", "content": "Alpha"}],
@@ -115,7 +131,7 @@ def test_chat_introspect_returns_model_and_prompt_fingerprint(monkeypatch):
     )
     monkeypatch.setattr(
         "src.backend.languagemodels.llm_interface.get_active_model_name",
-        lambda: "test-model",
+        lambda *args, **kwargs: "test-model",
     )
     monkeypatch.setattr(
         "src.backend.services.settings_service.get_active_llm_setting",
@@ -124,6 +140,10 @@ def test_chat_introspect_returns_model_and_prompt_fingerprint(monkeypatch):
     monkeypatch.setattr(
         "src.backend.services.settings_service.resolve_llm_setting",
         lambda **_kwargs: {"provider": "resolved", "model": "resolved-model"},
+    )
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.catalogue._get_internal_mcp_chat_orchestrator_cls",
+        lambda: _StubOrchestrator,
     )
 
     result = _chat_introspect(
@@ -148,7 +168,7 @@ def test_chat_introspect_redacts_sensitive_values_and_reports_presence(monkeypat
     )
     monkeypatch.setattr(
         "src.backend.languagemodels.llm_interface.get_active_model_name",
-        lambda: "test-model",
+        lambda *args, **kwargs: "test-model",
     )
     monkeypatch.setattr(
         "src.backend.services.settings_service.resolve_llm_setting",
@@ -230,7 +250,7 @@ def test_chat_introspect_gateway_invoke_success_path(monkeypatch):
     )
     monkeypatch.setattr(
         "src.backend.languagemodels.llm_interface.get_active_model_name",
-        lambda: "test-model",
+        lambda *args, **kwargs: "test-model",
     )
     monkeypatch.setattr(
         "src.backend.services.settings_service.resolve_llm_setting",

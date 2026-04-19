@@ -25554,161 +25554,9 @@ def _shared_conversation_respond_invite(**kwargs):
     }
 
 
-def build_default_catalogue() -> MethodCatalogue:
-    """Return a catalogue pre-populated with the baseline method set."""
-
-    catalogue = MethodCatalogue()
+def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
     concept_search_input_schema = _concept_search_input_schema()
     concept_search_output_schema = _concept_search_output_schema()
-    jira_search_output_schema = _jira_generic_output_schema("search")
-    jira_get_issue_output_schema = _jira_generic_output_schema("get_issue")
-    jira_get_project_issue_types_output_schema = (
-        _jira_get_project_issue_types_output_schema()
-    )
-    jira_get_bulk_operation_progress_output_schema = _jira_generic_output_schema(
-        "get_bulk_operation_progress"
-    )
-    jira_get_transitions_output_schema = _jira_generic_output_schema("get_transitions")
-    jira_add_comment_output_schema = _jira_generic_output_schema("add_comment")
-    jira_add_attachment_output_schema = _jira_add_attachment_output_schema()
-    jira_transition_output_schema = _jira_generic_output_schema("transition")
-    jira_create_issue_output_schema = _jira_generic_output_schema("create_issue")
-    jira_update_issue_output_schema = _jira_generic_output_schema("update_issue")
-    jira_move_issue_output_schema = _jira_generic_output_schema("move_issue")
-    jira_link_issue_output_schema = _jira_generic_output_schema("link_issue")
-    jira_delete_issue_link_output_schema = _jira_generic_output_schema(
-        "delete_issue_link"
-    )
-    jira_get_myself_output_schema = _jira_generic_output_schema("get_myself")
-    jira_get_auth_config_output_schema = _jira_get_auth_config_output_schema()
-    jira_hygiene_discover_output_schema = _jira_generic_output_schema(
-        "hygiene_discover"
-    )
-    jira_hygiene_propose_output_schema = _jira_generic_output_schema("hygiene_propose")
-    jira_hygiene_check_approval_output_schema = _jira_generic_output_schema(
-        "hygiene_check_approval"
-    )
-    jira_hygiene_execute_batches_output_schema = _jira_generic_output_schema(
-        "hygiene_execute_batches"
-    )
-    jira_hygiene_emit_audit_output_schema = _jira_generic_output_schema(
-        "hygiene_emit_audit"
-    )
-    github_get_auth_config_output_schema = _github_get_auth_config_output_schema()
-    github_list_tools_output_schema = _github_list_tools_output_schema()
-    github_get_me_output_schema = _github_generic_output_schema("get_me")
-    github_get_file_contents_output_schema = _github_generic_output_schema(
-        "get_file_contents"
-    )
-    github_list_commits_output_schema = _github_generic_output_schema("list_commits")
-    github_search_code_output_schema = _github_generic_output_schema("search_code")
-    github_list_pull_requests_output_schema = _github_generic_output_schema(
-        "list_pull_requests"
-    )
-    github_pull_request_read_output_schema = _github_generic_output_schema(
-        "pull_request_read"
-    )
-    github_issue_read_output_schema = _github_generic_output_schema("issue_read")
-    github_list_releases_output_schema = _github_generic_output_schema("list_releases")
-    github_get_latest_release_output_schema = _github_generic_output_schema(
-        "get_latest_release"
-    )
-    github_list_tags_output_schema = _github_generic_output_schema("list_tags")
-    github_list_branches_output_schema = _github_generic_output_schema("list_branches")
-    github_create_branch_output_schema = _github_generic_output_schema("create_branch")
-    github_create_or_update_file_output_schema = _github_generic_output_schema(
-        "create_or_update_file"
-    )
-    github_create_pull_request_output_schema = _github_generic_output_schema(
-        "create_pull_request"
-    )
-    github_update_pull_request_output_schema = _github_generic_output_schema(
-        "update_pull_request"
-    )
-    github_create_pull_request_with_copilot_output_schema = (
-        _github_generic_output_schema("create_pull_request_with_copilot")
-    )
-    task_create_output_schema = _task_generic_output_schema("create")
-    task_get_output_schema = _task_generic_output_schema("get")
-    task_list_output_schema = _task_generic_output_schema("list")
-    task_search_output_schema = _task_generic_output_schema("search")
-    task_import_jira_issues_output_schema = _task_generic_output_schema(
-        "import_jira_issues"
-    )
-    task_update_status_output_schema = _task_generic_output_schema("update_status")
-    task_update_fields_output_schema = _task_generic_output_schema("update_fields")
-    task_get_transitions_output_schema = _task_generic_output_schema("get_transitions")
-    task_transition_output_schema = _task_generic_output_schema("transition")
-    task_assign_output_schema = _task_generic_output_schema("assign")
-    task_unassign_output_schema = _task_generic_output_schema("unassign")
-    task_set_parent_output_schema = _task_generic_output_schema("set_parent")
-    task_create_subtask_output_schema = _task_generic_output_schema("create_subtask")
-    task_link_output_schema = _task_generic_output_schema("link")
-    task_unlink_output_schema = _task_generic_output_schema("unlink")
-    task_add_comment_output_schema = _task_generic_output_schema("add_comment")
-    task_list_comments_output_schema = _task_generic_output_schema("list_comments")
-    task_add_attachment_output_schema = _task_generic_output_schema("add_attachment")
-    task_list_attachments_output_schema = _task_generic_output_schema(
-        "list_attachments"
-    )
-    task_add_worklog_output_schema = _task_generic_output_schema("add_worklog")
-    task_list_worklog_output_schema = _task_generic_output_schema("list_worklog")
-    task_get_history_output_schema = _task_generic_output_schema("get_history")
-    task_bulk_update_output_schema = _task_generic_output_schema("bulk_update")
-    task_delete_output_schema = _task_generic_output_schema("delete")
-    shared_conversation_create_session_output_schema = (
-        _shared_conversation_generic_output_schema("create_session")
-    )
-    shared_conversation_join_session_output_schema = (
-        _shared_conversation_generic_output_schema("join_session")
-    )
-    shared_conversation_invite_create_output_schema = (
-        _shared_conversation_generic_output_schema("invite_create")
-    )
-    shared_conversation_list_invites_output_schema = (
-        _shared_conversation_generic_output_schema("list_invites")
-    )
-    shared_conversation_respond_invite_output_schema = (
-        _shared_conversation_generic_output_schema("respond_invite")
-    )
-    gmail_list_messages_input_schema = Schema(
-        required={"profile": str},
-        optional={
-            "query": str,
-            "label_ids": list,
-            "max_results": (int, type(None)),
-            "maxResults": (int, type(None)),
-        },
-        allow_unknown=False,
-        description="List Gmail messages for a profile with optional query/labels (read-only).",
-    )
-    gmail_get_message_input_schema = Schema(
-        required={"profile": str, "message_id": str},
-        optional={"format": str},
-        allow_unknown=False,
-        description="Fetch a Gmail message for a profile (formats: metadata|full|raw|minimal).",
-    )
-    gmail_get_attachment_input_schema = Schema(
-        required={"profile": str, "message_id": str, "attachment_id": str},
-        optional={},
-        allow_unknown=False,
-        description="Fetch a Gmail attachment for a profile (base64 payload).",
-    )
-    gmail_list_labels_input_schema = Schema(
-        required={"profile": str},
-        optional={},
-        allow_unknown=False,
-        description="List Gmail labels for a profile (read-only).",
-    )
-    gmail_modify_labels_input_schema = Schema(
-        required={"profile": str, "message_id": str, "allow_mutation": bool},
-        optional={
-            "add_labels": list,
-            "remove_labels": list,
-        },
-        allow_unknown=False,
-        description="Add/remove labels on a Gmail message. Requires allow_mutation=true and gmail.modify scope.",
-    )
     definitions: List[MethodDefinition] = [
         MethodDefinition(
             name="get_context",
@@ -26211,6 +26059,50 @@ def build_default_catalogue() -> MethodCatalogue:
             description="Update specific fields of a concept. Use when you need to modify properties or relationships directly (e.g. fixing ontology errors, changing 'kind' by updating relationships). Supports dot notation in update_data keys for partial updates of nested objects.",
         ),
         # arXiv MCP tools
+    ]
+    return definitions
+
+
+def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition]:
+    gmail_list_messages_input_schema = Schema(
+        required={"profile": str},
+        optional={
+            "query": str,
+            "label_ids": list,
+            "max_results": (int, type(None)),
+            "maxResults": (int, type(None)),
+        },
+        allow_unknown=False,
+        description="List Gmail messages for a profile with optional query/labels (read-only).",
+    )
+    gmail_get_message_input_schema = Schema(
+        required={"profile": str, "message_id": str},
+        optional={"format": str},
+        allow_unknown=False,
+        description="Fetch a Gmail message for a profile (formats: metadata|full|raw|minimal).",
+    )
+    gmail_get_attachment_input_schema = Schema(
+        required={"profile": str, "message_id": str, "attachment_id": str},
+        optional={},
+        allow_unknown=False,
+        description="Fetch a Gmail attachment for a profile (base64 payload).",
+    )
+    gmail_list_labels_input_schema = Schema(
+        required={"profile": str},
+        optional={},
+        allow_unknown=False,
+        description="List Gmail labels for a profile (read-only).",
+    )
+    gmail_modify_labels_input_schema = Schema(
+        required={"profile": str, "message_id": str, "allow_mutation": bool},
+        optional={
+            "add_labels": list,
+            "remove_labels": list,
+        },
+        allow_unknown=False,
+        description="Add/remove labels on a Gmail message. Requires allow_mutation=true and gmail.modify scope.",
+    )
+    definitions: List[MethodDefinition] = [
         MethodDefinition(
             name="search_arxiv",
             handler=_search_arxiv,
@@ -26682,6 +26574,80 @@ def build_default_catalogue() -> MethodCatalogue:
             ),
         ),
         # GitHub MCP tools
+    ]
+    return definitions
+
+
+def _build_default_catalogue_external_integration_definitions() -> List[MethodDefinition]:
+    jira_search_output_schema = _jira_generic_output_schema("search")
+    jira_get_issue_output_schema = _jira_generic_output_schema("get_issue")
+    jira_get_project_issue_types_output_schema = (
+        _jira_get_project_issue_types_output_schema()
+    )
+    jira_get_bulk_operation_progress_output_schema = _jira_generic_output_schema(
+        "get_bulk_operation_progress"
+    )
+    jira_get_transitions_output_schema = _jira_generic_output_schema("get_transitions")
+    jira_add_comment_output_schema = _jira_generic_output_schema("add_comment")
+    jira_add_attachment_output_schema = _jira_add_attachment_output_schema()
+    jira_transition_output_schema = _jira_generic_output_schema("transition")
+    jira_create_issue_output_schema = _jira_generic_output_schema("create_issue")
+    jira_update_issue_output_schema = _jira_generic_output_schema("update_issue")
+    jira_move_issue_output_schema = _jira_generic_output_schema("move_issue")
+    jira_link_issue_output_schema = _jira_generic_output_schema("link_issue")
+    jira_delete_issue_link_output_schema = _jira_generic_output_schema(
+        "delete_issue_link"
+    )
+    jira_get_myself_output_schema = _jira_generic_output_schema("get_myself")
+    jira_get_auth_config_output_schema = _jira_get_auth_config_output_schema()
+    jira_hygiene_discover_output_schema = _jira_generic_output_schema(
+        "hygiene_discover"
+    )
+    jira_hygiene_propose_output_schema = _jira_generic_output_schema("hygiene_propose")
+    jira_hygiene_check_approval_output_schema = _jira_generic_output_schema(
+        "hygiene_check_approval"
+    )
+    jira_hygiene_execute_batches_output_schema = _jira_generic_output_schema(
+        "hygiene_execute_batches"
+    )
+    jira_hygiene_emit_audit_output_schema = _jira_generic_output_schema(
+        "hygiene_emit_audit"
+    )
+    github_get_auth_config_output_schema = _github_get_auth_config_output_schema()
+    github_list_tools_output_schema = _github_list_tools_output_schema()
+    github_get_me_output_schema = _github_generic_output_schema("get_me")
+    github_get_file_contents_output_schema = _github_generic_output_schema(
+        "get_file_contents"
+    )
+    github_list_commits_output_schema = _github_generic_output_schema("list_commits")
+    github_search_code_output_schema = _github_generic_output_schema("search_code")
+    github_list_pull_requests_output_schema = _github_generic_output_schema(
+        "list_pull_requests"
+    )
+    github_pull_request_read_output_schema = _github_generic_output_schema(
+        "pull_request_read"
+    )
+    github_issue_read_output_schema = _github_generic_output_schema("issue_read")
+    github_list_releases_output_schema = _github_generic_output_schema("list_releases")
+    github_get_latest_release_output_schema = _github_generic_output_schema(
+        "get_latest_release"
+    )
+    github_list_tags_output_schema = _github_generic_output_schema("list_tags")
+    github_list_branches_output_schema = _github_generic_output_schema("list_branches")
+    github_create_branch_output_schema = _github_generic_output_schema("create_branch")
+    github_create_or_update_file_output_schema = _github_generic_output_schema(
+        "create_or_update_file"
+    )
+    github_create_pull_request_output_schema = _github_generic_output_schema(
+        "create_pull_request"
+    )
+    github_update_pull_request_output_schema = _github_generic_output_schema(
+        "update_pull_request"
+    )
+    github_create_pull_request_with_copilot_output_schema = (
+        _github_generic_output_schema("create_pull_request_with_copilot")
+    )
+    definitions: List[MethodDefinition] = [
         MethodDefinition(
             name="github_get_auth_config",
             handler=_github_get_auth_config,
@@ -27101,6 +27067,12 @@ def build_default_catalogue() -> MethodCatalogue:
                 "workflow_execution_explicit_request": True,
             },
         ),
+    ]
+    return definitions
+
+
+def _build_default_catalogue_diagnostics_and_research_definitions() -> List[MethodDefinition]:
+    definitions: List[MethodDefinition] = [
         MethodDefinition(
             name="rag_get_status",
             handler=_rag_get_status,
@@ -28343,6 +28315,55 @@ def build_default_catalogue() -> MethodCatalogue:
             ),
         ),
         # Task management MCP tools (JVNAUTOSCI-1040)
+    ]
+    return definitions
+
+
+def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefinition]:
+    task_create_output_schema = _task_generic_output_schema("create")
+    task_get_output_schema = _task_generic_output_schema("get")
+    task_list_output_schema = _task_generic_output_schema("list")
+    task_search_output_schema = _task_generic_output_schema("search")
+    task_import_jira_issues_output_schema = _task_generic_output_schema(
+        "import_jira_issues"
+    )
+    task_update_status_output_schema = _task_generic_output_schema("update_status")
+    task_update_fields_output_schema = _task_generic_output_schema("update_fields")
+    task_get_transitions_output_schema = _task_generic_output_schema("get_transitions")
+    task_transition_output_schema = _task_generic_output_schema("transition")
+    task_assign_output_schema = _task_generic_output_schema("assign")
+    task_unassign_output_schema = _task_generic_output_schema("unassign")
+    task_set_parent_output_schema = _task_generic_output_schema("set_parent")
+    task_create_subtask_output_schema = _task_generic_output_schema("create_subtask")
+    task_link_output_schema = _task_generic_output_schema("link")
+    task_unlink_output_schema = _task_generic_output_schema("unlink")
+    task_add_comment_output_schema = _task_generic_output_schema("add_comment")
+    task_list_comments_output_schema = _task_generic_output_schema("list_comments")
+    task_add_attachment_output_schema = _task_generic_output_schema("add_attachment")
+    task_list_attachments_output_schema = _task_generic_output_schema(
+        "list_attachments"
+    )
+    task_add_worklog_output_schema = _task_generic_output_schema("add_worklog")
+    task_list_worklog_output_schema = _task_generic_output_schema("list_worklog")
+    task_get_history_output_schema = _task_generic_output_schema("get_history")
+    task_bulk_update_output_schema = _task_generic_output_schema("bulk_update")
+    task_delete_output_schema = _task_generic_output_schema("delete")
+    shared_conversation_create_session_output_schema = (
+        _shared_conversation_generic_output_schema("create_session")
+    )
+    shared_conversation_join_session_output_schema = (
+        _shared_conversation_generic_output_schema("join_session")
+    )
+    shared_conversation_invite_create_output_schema = (
+        _shared_conversation_generic_output_schema("invite_create")
+    )
+    shared_conversation_list_invites_output_schema = (
+        _shared_conversation_generic_output_schema("list_invites")
+    )
+    shared_conversation_respond_invite_output_schema = (
+        _shared_conversation_generic_output_schema("respond_invite")
+    )
+    definitions: List[MethodDefinition] = [
         MethodDefinition(
             name="task_create",
             handler=_task_create,
@@ -29864,10 +29885,14 @@ def build_default_catalogue() -> MethodCatalogue:
             ),
         ),
     ]
+    return definitions
 
-    for definition in definitions:
-        catalogue.register(definition)
 
+def _register_dynamic_catalogue_methods(
+    *,
+    catalogue: MethodCatalogue,
+    definitions: List[MethodDefinition],
+) -> None:
     try:
         built_in_definitions = {
             definition.name: definition for definition in definitions
@@ -29884,4 +29909,25 @@ def build_default_catalogue() -> MethodCatalogue:
             "[internal_mcp_catalogue] Dynamic MCP tool registration failed: %s", exc
         )
 
+
+def build_default_catalogue() -> MethodCatalogue:
+    """Return a catalogue pre-populated with the baseline method set."""
+
+    catalogue = MethodCatalogue()
+    definitions: List[MethodDefinition] = []
+    definitions.extend(_build_default_catalogue_core_definitions())
+    definitions.extend(_build_default_catalogue_knowledge_io_definitions())
+    definitions.extend(_build_default_catalogue_external_integration_definitions())
+    definitions.extend(_build_default_catalogue_diagnostics_and_research_definitions())
+    definitions.extend(_build_default_catalogue_task_and_workflow_definitions())
+
+    for definition in definitions:
+        catalogue.register(definition)
+
+    _register_dynamic_catalogue_methods(
+        catalogue=catalogue,
+        definitions=definitions,
+    )
+
     return catalogue
+
