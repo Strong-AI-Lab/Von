@@ -8002,6 +8002,11 @@ class InternalMCPChatOrchestrator:
                     conversation_session_id=conversation_session_id,
                     turn_id=data.get("turn_id"),
                 )
+                self._apply_turn_scoped_tool_payload_support(
+                    tool_name=tool_name,
+                    payload=payload,
+                    data=data,
+                )
 
                 result = self._gateway.invoke(tool_name, payload)
                 auto_retry_details: dict[str, Any] | None = None
@@ -10971,6 +10976,20 @@ class InternalMCPChatOrchestrator:
                 lines.append(f"{prefix}{chunk}")
         return "\n".join(lines)
 
+    def _resolve_concept_label(self, concept_id: str | None) -> str | None:
+        clean_concept_id = self._coerce_non_empty_text(concept_id)
+        if not clean_concept_id:
+            return None
+        try:
+            from ...services.concept_service import get_concept_by_concept_id
+
+            concept = get_concept_by_concept_id(clean_concept_id)
+        except Exception:
+            concept = None
+        if not isinstance(concept, Mapping):
+            return None
+        return self._coerce_non_empty_text(concept.get("name"))
+
     def _instruction_message(
         self,
         user_namespace: str | None = None,
@@ -11004,23 +11023,9 @@ class InternalMCPChatOrchestrator:
 
         identity_lines: list[str] = []
 
-        def _resolve_concept_label(concept_id: str) -> str | None:
-            try:
-                from ...services.concept_service import get_concept_by_concept_id
-
-                concept = get_concept_by_concept_id(concept_id)
-            except Exception:
-                concept = None
-            if not isinstance(concept, Mapping):
-                return None
-            name = concept.get("name")
-            if isinstance(name, str) and name.strip():
-                return name.strip()
-            return None
-
         if isinstance(user_concept_id, str) and user_concept_id.strip():
             resolved_user_id = user_concept_id.strip()
-            resolved_user_label = _resolve_concept_label(resolved_user_id)
+            resolved_user_label = self._resolve_concept_label(resolved_user_id)
             if resolved_user_label:
                 identity_lines.append(
                     f"CURRENT USER CONTEXT: {resolved_user_label} ({resolved_user_id})"
@@ -11030,7 +11035,7 @@ class InternalMCPChatOrchestrator:
 
         if isinstance(org_concept_id, str) and org_concept_id.strip():
             resolved_org_id = org_concept_id.strip()
-            resolved_org_label = _resolve_concept_label(resolved_org_id)
+            resolved_org_label = self._resolve_concept_label(resolved_org_id)
             if resolved_org_label:
                 identity_lines.append(
                     f"CURRENT ORGANISATION CONTEXT: {resolved_org_label} ({resolved_org_id})"
@@ -16514,6 +16519,129 @@ class InternalMCPChatOrchestrator:
             if "originating_session_id" not in payload and "session_id" not in payload:
                 payload["originating_session_id"] = conversation_session_id
 
+    def _build_turn_scoped_search_query_text(
+        self,
+        *,
+        query_text: str,
+        data: Mapping[str, Any],
+        include_actor_context: bool = False,
+    ) -> str:
+        clean_query = self._coerce_non_empty_text(query_text)
+        if not clean_query:
+            return ""
+
+        actor_lines: list[str] = []
+        if include_actor_context:
+            for label, concept_id in (
+                ("Current user context", data.get("user_concept_id")),
+                ("Current organisation context", data.get("org_concept_id")),
+            ):
+                clean_concept_id = self._coerce_non_empty_text(concept_id)
+                if not clean_concept_id:
+                    continue
+                display_label = self._resolve_concept_label(clean_concept_id)
+                if display_label:
+                    actor_lines.append(
+                        f"- {label}: {display_label} ({clean_concept_id})"
+                    )
+                else:
+                    actor_lines.append(f"- {label}: {clean_concept_id}")
+
+        return self._build_contextualised_search_query_text(
+            query_text=clean_query,
+            expected_outcome_contract=self._build_turn_expected_outcome_contract(data),
+            actor_context_lines=actor_lines,
+        )
+
+    @classmethod
+    def _build_contextualised_search_query_text(
+        cls,
+        *,
+        query_text: str,
+        expected_outcome_contract: Mapping[str, Any] | None,
+        actor_context_lines: Sequence[str] | None = None,
+    ) -> str:
+        clean_query = str(query_text or "").strip()
+        if not clean_query:
+            return ""
+
+        query_lines: list[str] = [
+            cls._build_turn_discovery_query_text(
+                turn_text=clean_query,
+                expected_outcome_contract=expected_outcome_contract,
+            )
+        ]
+
+        clean_actor_lines = [
+            str(line).strip()
+            for line in (actor_context_lines or [])
+            if isinstance(line, str) and str(line).strip()
+        ]
+        if clean_actor_lines:
+            query_lines.extend(["", "Authenticated actor context:", *clean_actor_lines])
+
+        return "\n".join(
+            line for line in query_lines if isinstance(line, str) and line.strip()
+        )
+
+    def _apply_turn_scoped_tool_payload_support(
+        self,
+        *,
+        tool_name: str,
+        payload: MutableMapping[str, Any],
+        data: Mapping[str, Any],
+    ) -> None:
+        if str(tool_name or "").strip().lower() != "search_knowledge_base":
+            return
+
+        query_text = self._coerce_non_empty_text(payload.get("query"))
+        if not query_text:
+            return
+
+        required_prompt_tools = {
+            str(item).strip().lower()
+            for item in (data.get("required_prompt_tools") or [])
+            if isinstance(item, str) and str(item).strip()
+        }
+        if not required_prompt_tools:
+            required_prompt_tools = {
+                str(item).strip().lower()
+                for item in self._infer_turn_contract_required_tools(
+                    turn_expected_outcome_contract=(
+                        self._build_turn_expected_outcome_contract(data)
+                    ),
+                    method_catalogue=(
+                        data.get("method_catalogue")
+                        if isinstance(data.get("method_catalogue"), Mapping)
+                        else None
+                    ),
+                )
+                if isinstance(item, str) and str(item).strip()
+            }
+
+        concept_surface_required = bool(
+            required_prompt_tools
+            & {
+                "search_concepts",
+                "get_related_concepts",
+                "get_text_relations_summary",
+                "find_relations_with_argument",
+            }
+        )
+        if not concept_surface_required:
+            return
+
+        if self._coerce_non_empty_text(payload.get("mode")) is None:
+            payload["mode"] = "concepts"
+
+        refined_query = self._build_turn_scoped_search_query_text(
+            query_text=query_text,
+            data=data,
+            include_actor_context=True,
+        )
+        if refined_query and refined_query != query_text:
+            payload["query"] = refined_query
+
     @staticmethod
     def _derive_actor_concept_id_from_namespace(namespace: str | None) -> str | None:
         actor_concept_id, _actor_org_id = derive_actor_context_from_namespace(namespace)
@@ -17806,10 +17934,199 @@ class InternalMCPChatOrchestrator:
             if value not in (None, [], {})
         }
 
+    @staticmethod
+    def _extract_search_knowledge_base_result_title(
+        row: Mapping[str, Any],
+        metadata: Mapping[str, Any] | None = None,
+    ) -> str | None:
+        for container in (row, metadata):
+            if not isinstance(container, Mapping):
+                continue
+            for key in (
+                "title",
+                "paper_title",
+                "document_title",
+                "source_title",
+                "name",
+            ):
+                value = container.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return None
+
+    @classmethod
+    def _shape_search_knowledge_base_payload_for_llm(
+        cls,
+        payload: Mapping[str, Any],
+        *,
+        max_results: int = 5,
+        max_text_chars: int = 220,
+    ) -> dict[str, Any]:
+        raw_results = payload.get("results") or payload.get("items")
+        results = (
+            [result for result in raw_results if isinstance(result, Mapping)]
+            if isinstance(raw_results, list)
+            else []
+        )
+        compact_results: list[dict[str, Any]] = []
+        source_system_counts: dict[str, int] = {}
+        item_kind_counts: dict[str, int] = {}
+        type_counts: dict[str, int] = {}
+        predicates: list[str] = []
+        concept_ids: list[str] = []
+
+        def _bump(counter: dict[str, int], value: Any) -> None:
+            if not isinstance(value, str) or not value.strip():
+                return
+            clean_value = value.strip()
+            counter[clean_value] = counter.get(clean_value, 0) + 1
+
+        def _ordered_counts(
+            counter: Mapping[str, int],
+            *,
+            field_name: str,
+        ) -> list[dict[str, Any]]:
+            return [
+                {field_name: name, "count": count}
+                for name, count in sorted(
+                    counter.items(),
+                    key=lambda item: (-item[1], item[0]),
+                )[:6]
+            ]
+
+        for row in results[:max_results]:
+            compact_row: dict[str, Any] = {}
+            row_id = row.get("id")
+            if isinstance(row_id, str) and row_id.strip():
+                compact_row["id"] = row_id.strip()
+            score = row.get("score")
+            if isinstance(score, (int, float)):
+                compact_row["score"] = round(float(score), 3)
+            text = row.get("text")
+            if isinstance(text, str) and text.strip():
+                compact_row["text_preview"] = text.strip()[:max_text_chars]
+
+            metadata = row.get("metadata")
+            metadata_map = metadata if isinstance(metadata, Mapping) else None
+            title = cls._extract_search_knowledge_base_result_title(row, metadata_map)
+            if title:
+                compact_row["title"] = title[:120]
+
+            if isinstance(metadata_map, Mapping):
+                for field_name in (
+                    "item_kind",
+                    "source_system",
+                    "type",
+                    "predicate",
+                    "concept_id",
+                    "subject_concept_id",
+                    "target_concept_id",
+                ):
+                    field_value = metadata_map.get(field_name)
+                    if isinstance(field_value, str) and field_value.strip():
+                        compact_row[field_name] = field_value.strip()
+                _bump(source_system_counts, metadata_map.get("source_system"))
+                _bump(item_kind_counts, metadata_map.get("item_kind"))
+                _bump(type_counts, metadata_map.get("type"))
+
+                predicate_value = metadata_map.get("predicate")
+                if (
+                    isinstance(predicate_value, str)
+                    and predicate_value.strip()
+                    and predicate_value.strip() not in predicates
+                ):
+                    predicates.append(predicate_value.strip())
+
+                concept_id = metadata_map.get("concept_id")
+                if (
+                    isinstance(concept_id, str)
+                    and concept_id.strip()
+                    and concept_id.strip() not in concept_ids
+                ):
+                    concept_ids.append(concept_id.strip())
+
+            if compact_row:
+                compact_results.append(compact_row)
+
+        total_count = payload.get("count")
+        if not isinstance(total_count, (int, float)):
+            total_count = len(results)
+
+        diagnostics_parts: list[str] = []
+        source_counts_payload = _ordered_counts(
+            source_system_counts,
+            field_name="source_system",
+        )
+        if source_counts_payload:
+            diagnostics_parts.append(
+                "source systems: "
+                + "; ".join(
+                    f"{item['source_system']} ({item['count']})"
+                    for item in source_counts_payload
+                )
+            )
+        type_counts_payload = _ordered_counts(type_counts, field_name="type")
+        if type_counts_payload:
+            diagnostics_parts.append(
+                "document types: "
+                + "; ".join(
+                    f"{item['type']} ({item['count']})" for item in type_counts_payload
+                )
+            )
+        item_kind_counts_payload = _ordered_counts(
+            item_kind_counts,
+            field_name="item_kind",
+        )
+        if item_kind_counts_payload:
+            diagnostics_parts.append(
+                "item kinds: "
+                + "; ".join(
+                    f"{item['item_kind']} ({item['count']})"
+                    for item in item_kind_counts_payload
+                )
+            )
+
+        diagnostics_note = (
+            "No retrieval results were available."
+            if not results
+            else (
+                "Retrieved evidence includes "
+                + ", ".join(diagnostics_parts)
+                + "."
+                if diagnostics_parts
+                else f"Retrieved {len(compact_results)} result preview(s)."
+            )
+        )
+
+        compact_payload: dict[str, Any] = {
+            "_llm_view": "search_knowledge_base_results.v1",
+            "query": (
+                str(payload.get("query")).strip()
+                if isinstance(payload.get("query"), str)
+                else None
+            ),
+            "count": int(total_count),
+            "omitted_result_count": max(0, int(total_count) - len(compact_results)),
+            "source_system_counts": source_counts_payload,
+            "item_kind_counts": item_kind_counts_payload,
+            "type_counts": type_counts_payload,
+            "predicates": predicates[:12],
+            "concept_ids": concept_ids[:12],
+            "results": compact_results,
+            "retrieval_diagnostics": {"note": diagnostics_note},
+        }
+        return {
+            key: value
+            for key, value in compact_payload.items()
+            if value not in (None, [], {})
+        }
+
     def _prepare_tool_payload_for_llm(self, tool_name: str, payload: Any) -> Any:
         if not isinstance(tool_name, str) or not isinstance(payload, Mapping):
             return payload
         tool_lower = tool_name.strip().lower()
+        if tool_lower == "search_knowledge_base":
+            return self._shape_search_knowledge_base_payload_for_llm(payload)
         if tool_lower in {"search_concepts", "vontology_concept_search"}:
             return self._shape_search_concepts_payload_for_llm(payload)
         if tool_lower == "get_text_relations_summary":
@@ -22424,7 +22741,6 @@ class InternalMCPChatOrchestrator:
             ]
             if candidate_concept_ids:
                 user_anchor_concept_id = candidate_concept_ids[0]
-
         pure_ontology_follow_up = self._missing_tools_are_pure_ontology_follow_up(
             missing_required_tools
         )
@@ -22484,6 +22800,25 @@ class InternalMCPChatOrchestrator:
                         "payload": {
                             "workflow_id": primary_workflow_id,
                             "limit": 5,
+                        },
+                    }
+                )
+                continue
+
+            if name == "search_knowledge_base":
+                search_query = self._extract_structural_retry_search_query(
+                    tool_invocations,
+                    user_text=user_text,
+                )
+                if not search_query:
+                    continue
+                forced_calls.append(
+                    {
+                        "action": "call_tool",
+                        "tool": name,
+                        "payload": {
+                            "query": search_query,
+                            "mode": "concepts",
                         },
                     }
                 )
@@ -25618,6 +25953,90 @@ class InternalMCPChatOrchestrator:
         return [f"- search_concepts top matches: {'; '.join(fragments)}."]
 
     @classmethod
+    def _build_search_knowledge_base_follow_up_lines(
+        cls,
+        payload: Mapping[str, Any],
+    ) -> list[str]:
+        shaped_payload = cls._shape_search_knowledge_base_payload_for_llm(
+            payload,
+            max_results=4,
+            max_text_chars=140,
+        )
+        lines: list[str] = []
+        count = shaped_payload.get("count")
+        query = shaped_payload.get("query")
+        if isinstance(count, int):
+            line = f"- search_knowledge_base returned {count} result"
+            if count != 1:
+                line += "s"
+            if isinstance(query, str) and query.strip():
+                line += f' for query "{query.strip()}"'
+            lines.append(line + ".")
+
+        for field_name, label in (
+            ("source_system_counts", "Source systems"),
+            ("type_counts", "Document types"),
+            ("item_kind_counts", "Item kinds"),
+        ):
+            raw_rows = shaped_payload.get(field_name)
+            if not isinstance(raw_rows, list):
+                continue
+            fragments = []
+            for row in raw_rows[:4]:
+                if not isinstance(row, Mapping):
+                    continue
+                if field_name == "source_system_counts":
+                    name = row.get("source_system")
+                elif field_name == "type_counts":
+                    name = row.get("type")
+                else:
+                    name = row.get("item_kind")
+                count_value = row.get("count")
+                if not isinstance(name, str) or not name.strip():
+                    continue
+                fragment = name.strip()
+                if isinstance(count_value, int):
+                    fragment += f" ({count_value})"
+                fragments.append(fragment)
+            if fragments:
+                lines.append(f"- {label}: {'; '.join(fragments)}.")
+
+        predicates = shaped_payload.get("predicates")
+        if isinstance(predicates, list):
+            predicate_fragments = [
+                str(predicate).strip()
+                for predicate in predicates[:4]
+                if isinstance(predicate, str) and str(predicate).strip()
+            ]
+            if predicate_fragments:
+                lines.append(
+                    f"- KB predicates observed: {'; '.join(predicate_fragments)}."
+                )
+
+        results = shaped_payload.get("results")
+        if not isinstance(results, list):
+            return lines
+
+        evidence_fragments: list[str] = []
+        for row in results[:4]:
+            if not isinstance(row, Mapping):
+                continue
+            title = row.get("title")
+            text_preview = row.get("text_preview")
+            concept_id = row.get("concept_id")
+            if isinstance(title, str) and title.strip():
+                fragment = title.strip()
+                if isinstance(concept_id, str) and concept_id.strip():
+                    fragment += f" ({concept_id.strip()})"
+                evidence_fragments.append(fragment)
+                continue
+            if isinstance(text_preview, str) and text_preview.strip():
+                evidence_fragments.append(text_preview.strip())
+        if evidence_fragments:
+            lines.append(f"- KB evidence excerpts: {'; '.join(evidence_fragments)}.")
+        return lines
+
+    @classmethod
     def _build_text_relations_summary_follow_up_lines(
         cls,
         payload: Mapping[str, Any],
@@ -25868,7 +26287,11 @@ class InternalMCPChatOrchestrator:
                 line = f'{line} for {query_label} "{query_text}"'
             summary_lines.append(line + ".")
 
-            if tool_name == "search_concepts":
+            if tool_name == "search_knowledge_base":
+                summary_lines.extend(
+                    cls._build_search_knowledge_base_follow_up_lines(payload)
+                )
+            elif tool_name == "search_concepts":
                 summary_lines.extend(cls._build_search_concepts_follow_up_lines(payload))
             elif tool_name == "get_text_relations_summary":
                 summary_lines.extend(

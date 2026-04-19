@@ -270,6 +270,74 @@ class _EntityLookupGatewayStub:
         )
 
 
+class _GroundedKbLookupGatewayStub:
+    enabled = True
+
+    def __init__(self) -> None:
+        self.invocations: list[dict[str, Any]] = []
+
+    def describe_methods(self) -> dict[str, Any]:
+        return {
+            "search_knowledge_base": {
+                "description": "Return represented knowledge matches for the current turn.",
+                "category": "read",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                    },
+                },
+            },
+            "search_concepts": {
+                "description": "Search represented concept surfaces for the current turn.",
+                "category": "read",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                    },
+                },
+            }
+        }
+
+    def invoke(self, tool_name: str, payload: dict[str, Any]):
+        self.invocations.append({"tool": tool_name, "payload": dict(payload)})
+        if tool_name != "search_knowledge_base":
+            raise AssertionError(f"Unexpected tool call: {tool_name}")
+        return SimpleNamespace(
+            payload={
+                "success": True,
+                "query": payload.get("query"),
+                "count": 2,
+                "results": [
+                    {
+                        "id": "text_relation:1",
+                        "text": "Grounded represented record: Example Record.",
+                        "score": 0.93,
+                        "metadata": {
+                            "type": "text_relation",
+                            "predicate": "hasName",
+                            "concept_id": "#V#example_record",
+                            "item_kind": "rag_chunk",
+                            "source_system": "mongo.text_relations",
+                        },
+                    },
+                    {
+                        "id": "chat_history:1",
+                        "text": "Previous conversational mention of an indexed record.",
+                        "score": 0.71,
+                        "metadata": {
+                            "type": "chat_message",
+                            "item_kind": "rag_chunk",
+                            "source_system": "mongo.chat_history",
+                        },
+                    },
+                ],
+            },
+            duration_ms=5,
+        )
+
+
 class _AffiliationLookupGatewayStub:
     enabled = True
 
@@ -353,6 +421,60 @@ class _EntityRelativeToolPipelineLLM:
         return "I know about one grounded paper for you: Test Paper."
 
 
+class _GroundedKbLookupLLM:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def generate(self, prompt, context=None, model=None):
+        context_messages = list(context or [])
+        self.calls.append(
+            {"prompt": prompt, "context": context_messages, "model": model}
+        )
+        context_text = "\n".join(
+            str(message.get("content") or "")
+            for message in context_messages
+            if isinstance(message, dict)
+        )
+        if isinstance(prompt, str) and "expected-success inference policy" in prompt:
+            return (
+                '{"expected_outcome_summary":"List grounded represented records linked to the current user.",'
+                '"grounding_requirement":"Only surface represented records that are supported by retrieved evidence.",'
+                '"precision_policy":"Prefer explicit uncertainty over unsupported linkage.",'
+                '"selector_guidance":"Use search_concepts and represented-knowledge retrieval, and keep the authenticated actor context in scope.",'
+                '"answering_guidance":"Answer from the retrieved evidence rather than returning only counts.",'
+                '"reasoning":"Entity-relative represented lookup turns should preserve turn context into retrieval and response stages."}'
+            )
+        if isinstance(prompt, str) and prompt.strip().startswith("Select workflow"):
+            return (
+                '{"workflow_id":"#V#tool_calling_workflow",'
+                '"confidence":0.94,'
+                '"reasoning":"This is a grounded represented-knowledge lookup that should retrieve evidence before answering."}'
+            )
+        if prompt == "List grounded represented records linked to the current user.":
+            if (
+                "Expected answer contract for this turn" in context_text
+                and "CURRENT USER CONTEXT: Test User (#V#test_user)" in context_text
+            ):
+                return (
+                    '{"action":"call_tool","tool":"search_knowledge_base",'
+                    '"payload":{"query":"current user records"}}'
+                )
+            return "I need grounded represented retrieval first."
+        if isinstance(prompt, str) and prompt.startswith(
+            "Provide a final answer to the user now that the tool result is available."
+        ):
+            if (
+                "Expected answer contract for this turn" in context_text
+                and "Source systems: mongo.chat_history (1); mongo.text_relations (1)."
+                in context_text
+                and "KB evidence excerpts" in context_text
+                and "Example Record" in context_text
+            ):
+                return "I found one grounded represented record: Example Record."
+            return "2 results"
+        return "I found one grounded represented record: Example Record."
+
+
 class _ExplicitEntityRelationLookupLLM:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
@@ -408,6 +530,7 @@ def _make_app(
         _IdentityLLM
         | _AuthorshipLLM
         | _EntityRelativeToolPipelineLLM
+        | _GroundedKbLookupLLM
         | _ExplicitEntityRelationLookupLLM
     ),
     gateway_override: Any | None = None,
@@ -817,6 +940,69 @@ def test_generate_entity_relative_tool_pipeline_threads_expected_contract_into_t
     )
     assert "Expected answer contract for this turn" in tool_plan_context_text
     assert "CURRENT USER CONTEXT: Test User (#V#test_user)" in tool_plan_context_text
+
+
+def test_generate_grounded_kb_lookup_preserves_turn_context_into_payload_and_summary(
+    monkeypatch,
+) -> None:
+    llm = _GroundedKbLookupLLM()
+    gateway = _GroundedKbLookupGatewayStub()
+    app = _make_app(
+        monkeypatch,
+        llm=llm,
+        gateway_override=gateway,
+        discovery_override=_tool_calling_discovery,
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/von/generate",
+        json={"prompt": "List grounded represented records linked to the current user."},
+    )
+    assert response.status_code == 200
+
+    body = response.get_json()
+    assert isinstance(body, dict)
+    response_text = str(body.get("response") or "")
+    assert "Example Record" in response_text
+    assert response_text != "2 results"
+
+    assert gateway.invocations
+    invocation = gateway.invocations[0]
+    assert invocation["tool"] == "search_knowledge_base"
+    payload = invocation["payload"]
+    assert payload.get("mode") == "concepts"
+    assert payload.get("query") != "current user records"
+    assert "Turn-intent routing guidance:" in str(payload.get("query") or "")
+    assert "Authenticated actor context:" in str(payload.get("query") or "")
+
+    summariser_call = next(
+        call
+        for call in llm.calls
+        if isinstance(call.get("prompt"), str)
+        and call["prompt"].startswith(
+            "Provide a final answer to the user now that the tool result is available."
+        )
+    )
+    summariser_context_text = "\n".join(
+        str(message.get("content") or "")
+        for message in (summariser_call.get("context") or [])
+        if isinstance(message, dict)
+    )
+    assert "Source systems: mongo.chat_history (1); mongo.text_relations (1)." in (
+        summariser_context_text
+    )
+    assert "Document types: chat_message (1); text_relation (1)." in (
+        summariser_context_text
+    )
+    assert "KB evidence excerpts" in summariser_context_text
+    assert "Example Record" in summariser_context_text
+
+    llm_debug = body.get("llm_debug") or {}
+    turn_record = llm_debug.get("turn_execution_record") or {}
+    execution = turn_record.get("execution") or {}
+    selected_workflow_trace = execution.get("selected_workflow_trace") or {}
+    assert selected_workflow_trace.get("selected_execution_mode") == "tool_pipeline"
 
 
 def test_generate_entity_relative_tool_pipeline_uses_live_workflow_retrieval_surface(

@@ -445,6 +445,69 @@ def test_format_tool_result_shapes_search_web_payload_for_live_follow_up():
     assert len(payload["results"][0]["snippet"]) == 320
 
 
+def test_format_tool_result_shapes_search_knowledge_base_payload_for_live_follow_up():
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=cast(Any, _StubGateway()),
+        max_tool_invocations=1,
+        max_tool_result_chars=5_000,
+        max_tool_result_field_chars=1_500,
+        max_context_chars=80_000,
+    )
+
+    encoded = orchestrator._format_tool_result(
+        "search_knowledge_base",
+        {
+            "query": "grounded represented records linked to the current user",
+            "count": 2,
+            "results": [
+                {
+                    "id": "text_relation:1",
+                    "text": "Grounded represented record: Example Record.",
+                    "score": 0.93,
+                    "metadata": {
+                        "type": "text_relation",
+                        "predicate": "hasName",
+                        "concept_id": "#V#example_record",
+                        "item_kind": "rag_chunk",
+                        "source_system": "mongo.text_relations",
+                    },
+                },
+                {
+                    "id": "chat_history:1",
+                    "text": "Previous conversational mention of an indexed record.",
+                    "score": 0.72,
+                    "metadata": {
+                        "type": "chat_message",
+                        "item_kind": "rag_chunk",
+                        "source_system": "mongo.chat_history",
+                    },
+                },
+            ],
+        },
+        1.0,
+        "ok",
+    )
+
+    parsed = json.loads(encoded)
+    payload = parsed["payload"]
+    assert payload["_llm_view"] == "search_knowledge_base_results.v1"
+    assert payload["query"] == "grounded represented records linked to the current user"
+    assert payload["count"] == 2
+    assert payload["predicates"] == ["hasName"]
+    assert payload["concept_ids"] == ["#V#example_record"]
+    assert {row["source_system"] for row in payload["source_system_counts"]} == {
+        "mongo.chat_history",
+        "mongo.text_relations",
+    }
+    assert {row["type"] for row in payload["type_counts"]} == {
+        "chat_message",
+        "text_relation",
+    }
+    assert payload["results"][0]["concept_id"] == "#V#example_record"
+    assert "Example Record" in payload["results"][0]["text_preview"]
+    assert "source systems" in payload["retrieval_diagnostics"]["note"].lower()
+
+
 def test_format_tool_result_shapes_jira_search_payload_for_live_follow_up():
     orchestrator = InternalMCPChatOrchestrator(
         gateway=cast(Any, _StubGateway()),

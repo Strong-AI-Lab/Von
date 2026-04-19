@@ -1594,3 +1594,53 @@ def test_missing_tool_call_retry_does_not_force_guided_retrieval_without_guidanc
     )
 
     assert forced is None
+
+
+def test_missing_tool_call_retry_recovers_search_knowledge_base_from_turn_contract():
+    orchestrator = _build_orchestrator_stub()
+
+    forced = orchestrator._infer_missing_tool_call_retry_tool_calls(
+        [
+            {
+                "role": "system",
+                "content": (
+                    "Expected answer contract for this turn:\n"
+                    "- Success target: List grounded represented records linked "
+                    "to the current user.\n"
+                    "- Grounding requirement: Only surface represented records "
+                    "supported by retrieved evidence.\n"
+                    "- Selector guidance: Use represented-knowledge retrieval and "
+                    "keep the authenticated actor context in scope.\n"
+                    "- Answering guidance: Answer from the retrieved evidence "
+                    "rather than returning only counts."
+                ),
+            },
+            {
+                "role": "system",
+                "content": (
+                    "CURRENT USER CONTEXT: Test User (#V#test_user)\n"
+                    "CURRENT ORGANISATION CONTEXT: Test Org (#V#test_org)"
+                ),
+            },
+        ],
+        user_prompt="List grounded represented records linked to the current user.",
+        missing_required_tools=["search_knowledge_base"],
+        tool_invocations=[
+            {
+                "tool": "search_concepts",
+                "payload": {"query": "current user records"},
+                "effective_payload": {"query": "current user records"},
+            }
+        ],
+    )
+
+    assert forced == [
+        {
+            "action": "call_tool",
+            "tool": "search_knowledge_base",
+            "payload": {
+                "query": "current user records",
+                "mode": "concepts",
+            },
+        }
+    ]
