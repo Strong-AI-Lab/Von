@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -14,6 +15,11 @@ from src.backend.workflows.definitions import (
     CHAT_ASSISTANT_WORKFLOW_ID,
     TOOL_CALLING_WORKFLOW_ID,
 )
+from src.backend.services.workflow_capability_service import (
+    ensure_workflow_capability_index_populated,
+    get_workflow_capability_index_runtime_state,
+    reset_workflow_capability_index,
+)
 
 SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID = (
     "#V#scholarly_paper_representation_workflow"
@@ -24,6 +30,85 @@ _TEST_BASE_PROMPT = (
     "Available tools:\n"
     "{listing}"
 )
+
+
+class _LiveWorkflowDiscoveryRetrievalBackend:
+    _TOKEN_RE = re.compile(r"[a-z0-9]+(?:'[a-z]+)?")
+
+    def __init__(self) -> None:
+        self.docs_by_namespace: dict[str, dict[str, dict[str, Any]]] = {}
+        self.queries: list[dict[str, Any]] = []
+        self.reset_calls: list[str] = []
+
+    def reset_namespace(self, namespace: str | None = None) -> None:
+        namespace_key = str(namespace or "")
+        self.reset_calls.append(namespace_key)
+        self.docs_by_namespace[namespace_key] = {}
+
+    def upsert_documents(
+        self,
+        docs: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+        *,
+        namespace: str | None = None,
+        allow_partial_failures: bool = True,
+    ) -> tuple[int, int]:
+        namespace_key = str(namespace or "")
+        store = self.docs_by_namespace.setdefault(namespace_key, {})
+        for doc in docs:
+            store[str(doc["id"])] = {
+                "id": str(doc["id"]),
+                "text": str(doc.get("text") or ""),
+                "metadata": dict(doc.get("metadata") or {}),
+            }
+        return (len(docs), 0)
+
+    def query(
+        self,
+        query_text: str,
+        *,
+        top_k: int = 5,
+        namespace: str | None = None,
+        hybrid: bool = True,
+        permissions_context: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        namespace_key = str(namespace or "")
+        self.queries.append(
+            {
+                "query_text": query_text,
+                "top_k": top_k,
+                "namespace": namespace_key,
+                "hybrid": hybrid,
+                "permissions_context": dict(permissions_context or {}),
+            }
+        )
+        query_tokens = set(self._TOKEN_RE.findall(str(query_text or "").lower()))
+        rows: list[dict[str, Any]] = []
+        for doc in self.docs_by_namespace.get(namespace_key, {}).values():
+            metadata = dict(doc.get("metadata") or {})
+            requested_type = str(
+                (permissions_context or {}).get("type") or ""
+            ).strip()
+            if requested_type and str(metadata.get("type") or "").strip() != requested_type:
+                continue
+            text_tokens = set(self._TOKEN_RE.findall(str(doc.get("text") or "").lower()))
+            overlap = len(query_tokens & text_tokens)
+            if overlap <= 0:
+                continue
+            rows.append(
+                {
+                    "id": doc["id"],
+                    "text": doc["text"],
+                    "metadata": metadata,
+                    "score": overlap / max(len(query_tokens), 1),
+                }
+            )
+        rows.sort(
+            key=lambda row: (
+                -float(row.get("score") or 0.0),
+                str((row.get("metadata") or {}).get("workflow_id") or ""),
+            )
+        )
+        return rows[:top_k]
 
 
 def _build_discovery_result(
@@ -327,6 +412,7 @@ def _make_app(
     ),
     gateway_override: Any | None = None,
     discovery_override: Any | None = None,
+    use_live_discovery: bool = False,
 ) -> Flask:
     import src.backend.workflows.durable.registry_factory as registry_factory
 
@@ -393,16 +479,24 @@ def _make_app(
         "src.backend.services.chat_auxiliary_prompt_service.get_user_specific_prompt_fragments",
         lambda _user_id, **_kwargs: [],
     )
-    monkeypatch.setattr(
-        "src.backend.services.workflow_discovery_service.discover_workflows_for_turn",
-        discovery_override or (lambda prompt_text, *_args, **_kwargs: _build_discovery_result(
-            prompt_text=prompt_text,
-            workflow_id=CHAT_ASSISTANT_WORKFLOW_ID,
-            name="Chat Assistant Workflow",
-            description="General conversational workflow.",
-        )),
-        raising=False,
-    )
+    if use_live_discovery and discovery_override is not None:
+        raise AssertionError(
+            "use_live_discovery and discovery_override are mutually exclusive"
+        )
+    if not use_live_discovery:
+        monkeypatch.setattr(
+            "src.backend.services.workflow_discovery_service.discover_workflows_for_turn",
+            discovery_override
+            or (
+                lambda prompt_text, *_args, **_kwargs: _build_discovery_result(
+                    prompt_text=prompt_text,
+                    workflow_id=CHAT_ASSISTANT_WORKFLOW_ID,
+                    name="Chat Assistant Workflow",
+                    description="General conversational workflow.",
+                )
+            ),
+            raising=False,
+        )
     monkeypatch.setattr(
         "src.backend.services.workflow_continuation_service.get_session_workflow_continuation_context",
         lambda *_args, **_kwargs: None,
@@ -723,6 +817,135 @@ def test_generate_entity_relative_tool_pipeline_threads_expected_contract_into_t
     )
     assert "Expected answer contract for this turn" in tool_plan_context_text
     assert "CURRENT USER CONTEXT: Test User (#V#test_user)" in tool_plan_context_text
+
+
+def test_generate_entity_relative_tool_pipeline_uses_live_workflow_retrieval_surface(
+    monkeypatch,
+) -> None:
+    llm = _EntityRelativeToolPipelineLLM()
+    gateway = _EntityLookupGatewayStub()
+    retrieval_backend = _LiveWorkflowDiscoveryRetrievalBackend()
+
+    reset_workflow_capability_index()
+    try:
+        monkeypatch.setattr(
+            "src.backend.services.workflow_capability_service._get_workflow_capability_rag_service",
+            lambda: retrieval_backend,
+        )
+        monkeypatch.setattr(
+            "src.backend.workflows.vontology_loader.batch_fetch_workflow_routing_metadata",
+            lambda workflow_ids: {
+                TOOL_CALLING_WORKFLOW_ID: {
+                    "description_text": (
+                        "Grounded represented-knowledge retrieval workflow for "
+                        "entity-relative paper and relation lookups."
+                    ),
+                    "description_source": "text_relation:#V#hasDescription",
+                    "discovery_exemplars": {
+                        "schema_version": "workflow_discovery_exemplars.v1",
+                        "keywords": [
+                            "papers of mine",
+                            "grounded retrieval",
+                            "represented knowledge",
+                        ],
+                        "examples": [
+                            "What papers of mine do you know about?",
+                            "Find grounded represented facts about my papers.",
+                        ],
+                    },
+                    "discovery_exemplars_source": (
+                        "text_relation:#V#hasWorkflowDiscoveryExemplarsJson"
+                    ),
+                },
+                CHAT_ASSISTANT_WORKFLOW_ID: {
+                    "description_text": "Direct conversational response workflow.",
+                    "description_source": "text_relation:#V#hasDescription",
+                },
+            },
+        )
+        monkeypatch.setattr(
+            "src.backend.workflows.vontology_loader.resolve_workflow_description",
+            lambda _workflow_id, **kwargs: (
+                str(
+                    kwargs.get("registration_purpose")
+                    or kwargs.get("definition_purpose")
+                    or ""
+                ).strip(),
+                "text_relation:#V#hasDescription",
+            ),
+        )
+        monkeypatch.setattr(
+            "src.backend.workflows.vontology_loader.resolve_workflow_discovery_exemplars",
+            lambda _workflow_id: (None, ""),
+        )
+        monkeypatch.setattr(
+            "src.backend.services.workflow_discovery_service._search_workflows_semantic",
+            lambda *_args, **_kwargs: [],
+        )
+        monkeypatch.setattr(
+            "src.backend.services.workflow_discovery_service._search_workflows_vontology",
+            lambda *_args, **_kwargs: [],
+        )
+        monkeypatch.setattr(
+            "src.backend.services.workflow_discovery_service._search_workflows_name_fallback",
+            lambda *_args, **_kwargs: [],
+        )
+        monkeypatch.setattr(
+            "src.backend.services.workflow_discovery_service.SEARCH_TIMEOUT_SECONDS",
+            2.0,
+        )
+
+        app = _make_app(
+            monkeypatch,
+            llm=llm,
+            gateway_override=gateway,
+            use_live_discovery=True,
+        )
+        orchestrator = app.config["INTERNAL_MCP_ORCHESTRATOR"]
+        ensure_workflow_capability_index_populated(
+            workflow_registry=orchestrator._workflow_registry
+        )
+
+        client = app.test_client()
+        response = client.post(
+            "/von/generate", json={"prompt": "What papers of mine do you know about?"}
+        )
+        assert response.status_code == 200
+
+        body = response.get_json()
+        assert isinstance(body, dict)
+        assert "Test Paper" in str(body.get("response") or "")
+        assert gateway.invocations
+        assert retrieval_backend.reset_calls == ["workflow_capabilities"]
+        assert retrieval_backend.queries
+        assert retrieval_backend.queries[-1]["namespace"] == "workflow_capabilities"
+        assert retrieval_backend.queries[-1]["permissions_context"] == {
+            "type": "workflow_capability"
+        }
+
+        llm_debug = body.get("llm_debug") or {}
+        workflow_routing = llm_debug.get("workflow_routing") or {}
+        assert workflow_routing.get("workflow_id") == TOOL_CALLING_WORKFLOW_ID
+        assert workflow_routing.get("source") == "selector"
+
+        diagnostics = llm_debug.get("turn_execution_diagnostics") or {}
+        routing_diagnostics = diagnostics.get("workflow_routing_diagnostics") or {}
+        discovery = routing_diagnostics.get("discovery") or {}
+        assert "capability_index" in list(discovery.get("search_sources") or [])
+        assert TOOL_CALLING_WORKFLOW_ID in list(discovery.get("candidate_ids") or [])
+
+        turn_record = llm_debug.get("turn_execution_record") or {}
+        execution = turn_record.get("execution") or {}
+        selected_workflow_trace = execution.get("selected_workflow_trace") or {}
+        assert selected_workflow_trace.get("selected_execution_mode") == "tool_pipeline"
+
+        runtime_state = get_workflow_capability_index_runtime_state()
+        assert runtime_state.get("surface") == "workflow_retrieval"
+        assert runtime_state.get("namespace") == "workflow_capabilities"
+        assert runtime_state.get("ready") is True
+        assert int(runtime_state.get("size") or 0) > 0
+    finally:
+        reset_workflow_capability_index()
 
 
 def test_generate_entity_relative_lookup_excludes_non_launchable_representation_workflow(

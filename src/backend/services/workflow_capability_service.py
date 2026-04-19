@@ -1,33 +1,27 @@
-"""Dedicated workflow capability index for RAG-first workflow routing.
+"""Authority-aligned workflow retrieval surface for conversation-turn routing.
 
-JVNAUTOSCI-1424 Phase 2: Provides a purpose-built search index for workflow
-capabilities, separate from the general concept embedding namespace.  All
-registered workflows (built-in + Vontology) are indexed here with rich
-capability descriptions so that routing can find the best workflow for any
-user request via semantic-like retrieval.
+This module keeps the existing workflow capability API boundary while replacing
+the previous Python-authored BM25 / English stopword core with a dedicated
+retrieval surface backed by the shared RAG infrastructure.
 
-Architecture:
-    - ``WorkflowCapabilityIndex``: In-memory BM25-scored index of workflow
-      capability documents.  Fast to build, zero external dependencies,
-      supports hybrid keyword + relevance matching.
-    - ``index_from_registry()``: Indexes all workflows from a registry
-      (both eager and lazy) using authoritative Vontology narrative text and
-      skipping non-authoritative or textless workflows.
-
-The dedicated namespace isolates workflow routing from general concept search,
-enabling independent tuning and scaling as the workflow catalogue grows.
-Phase 3 can upgrade to dense vector embeddings while preserving the same API.
+All registered workflows (built-in + Vontology) are materialised into a
+dedicated workflow retrieval namespace using authoritative workflow description
+text and discovery exemplars. Python remains support-only here: it prepares the
+documents, manages rebuild/readiness state, and queries the retrieval backend.
+It does not impose lexical routing semantics through token tables or stopword
+lists.
 """
 
 from __future__ import annotations
 
 import logging
 import math
-import re
+import os
+import shutil
 import threading
 import time
-from collections import Counter
 from dataclasses import dataclass, field
+from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -49,17 +43,6 @@ WORKFLOW_CAPABILITY_NAMESPACE = "workflow_capabilities"
 
 BUILTIN_WORKFLOW_CAPABILITIES: Dict[str, str] = {}
 
-
-# -------------------------------------------------------------------------
-# BM25 index implementation
-# -------------------------------------------------------------------------
-
-_TOKENISE_RE = re.compile(r"[a-z0-9]+(?:'[a-z]+)?")
-_STOP_WORDS = frozenset({
-    "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
-    "of", "with", "by", "is", "was", "are", "were", "be", "been", "being",
-    "it", "its", "this", "that", "from", "as", "not", "no", "do", "does",
-})
 _CAPABILITY_INDEX_REBUILD_MIN_INTERVAL_SECONDS = 30.0
 
 _INDEX_REBUILD_LOCK = Lock()
@@ -76,58 +59,109 @@ _INDEX_REBUILD_COMPLETED = threading.Event()
 _INDEX_REBUILD_COMPLETED.set()
 
 
-def _normalise_token_variants(token: str) -> List[str]:
-    """Return stable lexical variants for simple singular/plural matching."""
-    cleaned = str(token or "").strip().lower()
-    if not cleaned:
-        return []
-
-    variants = [cleaned]
-    singular = cleaned
-    if cleaned.endswith("ies") and len(cleaned) > 4:
-        singular = cleaned[:-3] + "y"
-    elif (
-        (cleaned.endswith("es") and len(cleaned) > 4 and cleaned[-3:-2] in {"s", "x", "z"})
-        or cleaned.endswith(("ches", "shes"))
-    ):
-        singular = cleaned[:-2]
-    elif (
-        cleaned.endswith("s")
-        and len(cleaned) > 4
-        and not cleaned.endswith(("ss", "us", "is"))
-    ):
-        singular = cleaned[:-1]
-
-    singular = singular.strip()
-    if singular and singular not in variants:
-        variants.append(singular)
-
-    return variants
+def _build_workflow_capability_document_id(workflow_id: str) -> str:
+    clean_workflow_id = str(workflow_id or "").strip()
+    return f"workflow_capability:{clean_workflow_id}"
 
 
-def _tokenise(text: str) -> List[str]:
-    """Tokenise text into lowercase terms, filtering stop words."""
-    tokens: list[str] = []
-    for raw_token in _TOKENISE_RE.findall(text.lower()):
-        for token in _normalise_token_variants(raw_token):
-            if token in _STOP_WORDS or len(token) <= 1:
-                continue
-            tokens.append(token)
-    return tokens
+def _coerce_retrieval_score(value: Any) -> float:
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(score):
+        return 0.0
+    return score
+
+
+def _normalise_retrieval_score(*, raw_score: float, max_score: float) -> float:
+    if max_score <= 0.0:
+        return 0.0
+    normalised = raw_score / max_score
+    if not math.isfinite(normalised):
+        return 0.0
+    return max(0.0, min(1.0, normalised))
+
+
+def _build_workflow_capability_result_description(entry: "_CapabilityEntry") -> str:
+    summary_text = str(entry.metadata.get("summary_text") or "").strip()
+    if summary_text:
+        return summary_text
+    text = str(entry.text or "").strip()
+    if not text:
+        return _workflow_id_to_description(entry.workflow_id)
+    first_block = text.split("\n\n", 1)[0].strip()
+    if first_block:
+        return first_block[:300]
+    return text[:300]
+
+
+def _get_workflow_capability_rag_service() -> Any:
+    from .rag_service import get_rag_service
+
+    service = get_rag_service("llamaindex")
+    if type(service).__name__ != "LlamaIndexRAGService":
+        raise RuntimeError(
+            "workflow capability retrieval requires the llamaindex backend"
+        )
+    return service
+
+
+def _reset_workflow_capability_backend_namespace(rag_service: Any) -> None:
+    reset_namespace = getattr(rag_service, "reset_namespace", None)
+    if callable(reset_namespace):
+        reset_namespace(WORKFLOW_CAPABILITY_NAMESPACE)
+        return
+
+    indices = getattr(rag_service, "_indices", None)
+    if isinstance(indices, dict):
+        indices.pop(WORKFLOW_CAPABILITY_NAMESPACE, None)
+
+    namespace_dir_builder = getattr(rag_service, "_namespace_persist_dir", None)
+    persistence_dir = getattr(rag_service, "persistence_dir", None)
+    if not callable(namespace_dir_builder):
+        return
+    if not isinstance(persistence_dir, str) or not persistence_dir.strip():
+        return
+
+    namespace_dir = Path(
+        str(namespace_dir_builder(WORKFLOW_CAPABILITY_NAMESPACE))
+    ).resolve()
+    namespaces_root = (Path(persistence_dir).resolve() / "namespaces").resolve()
+
+    try:
+        common_root = os.path.commonpath(
+            [str(namespace_dir), str(namespaces_root)]
+        )
+    except ValueError as exc:
+        raise RuntimeError(
+            f"workflow capability namespace reset path mismatch: {exc}"
+        ) from exc
+
+    if common_root != str(namespaces_root):
+        raise RuntimeError(
+            "workflow capability namespace reset refused outside persistence root"
+        )
+
+    if namespace_dir.is_dir():
+        shutil.rmtree(namespace_dir)
+    elif namespace_dir.exists():
+        raise RuntimeError(
+            f"workflow capability namespace path is not a directory: {namespace_dir}"
+        )
 
 
 @dataclass
 class _CapabilityEntry:
     workflow_id: str
+    doc_id: str
     text: str
-    tokens: List[str]
-    token_freqs: Dict[str, int]
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class WorkflowCapabilityMatch:
-    """A workflow matched from the capability index."""
+    """A workflow matched from the dedicated workflow retrieval surface."""
 
     workflow_id: str
     name: str
@@ -148,21 +182,49 @@ class WorkflowCapabilityMatch:
 
 
 class WorkflowCapabilityIndex:
-    """In-memory BM25-scored index of workflow capability documents.
-
-    Thread-safe.  Supports ``index_workflow()`` to add entries and
-    ``search()`` to retrieve ranked matches for a query string.
-    """
-
-    # BM25 tuning parameters.
-    _K1 = 1.5
-    _B = 0.75
+    """Dedicated workflow retrieval surface backed by the RAG service."""
 
     def __init__(self) -> None:
         self._entries: Dict[str, _CapabilityEntry] = {}
-        self._idf: Dict[str, float] = {}
-        self._avg_dl: float = 0.0
         self._lock = Lock()
+
+    @staticmethod
+    def _entry_to_document(entry: _CapabilityEntry) -> Dict[str, Any]:
+        metadata = dict(entry.metadata)
+        metadata["workflow_id"] = entry.workflow_id
+        metadata["name"] = str(
+            metadata.get("name") or _workflow_id_to_name(entry.workflow_id)
+        ).strip()
+        metadata["type"] = "workflow_capability"
+        return {
+            "id": entry.doc_id,
+            "text": entry.text,
+            "metadata": metadata,
+        }
+
+    def _replace_entries(
+        self,
+        pending_entries: Mapping[str, _CapabilityEntry],
+    ) -> None:
+        rag_service = _get_workflow_capability_rag_service()
+        _reset_workflow_capability_backend_namespace(rag_service)
+        payload = [
+            self._entry_to_document(entry) for entry in pending_entries.values()
+        ]
+        if payload:
+            success_count, failure_count = rag_service.upsert_documents(
+                payload,
+                namespace=WORKFLOW_CAPABILITY_NAMESPACE,
+                allow_partial_failures=False,
+            )
+            if failure_count or success_count != len(payload):
+                raise RuntimeError(
+                    "workflow capability retrieval sync failed "
+                    f"(success={success_count}, failed={failure_count}, "
+                    f"expected={len(payload)})"
+                )
+        with self._lock:
+            self._entries = dict(pending_entries)
 
     # ------------------------------------------------------------------
     # Indexing
@@ -175,18 +237,23 @@ class WorkflowCapabilityIndex:
         *,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Add or replace a workflow capability document."""
-        tokens = _tokenise(capability_text)
+        """Add or replace a workflow capability document and sync retrieval."""
+        clean_text = str(capability_text or "").strip()
+        if not clean_text:
+            raise ValueError("workflow capability text must not be empty")
+        merged_metadata = dict(metadata or {})
+        merged_metadata.setdefault("name", _workflow_id_to_name(workflow_id))
+        merged_metadata.setdefault("summary_text", clean_text.split("\n\n", 1)[0].strip())
         entry = _CapabilityEntry(
             workflow_id=workflow_id,
-            text=capability_text,
-            tokens=tokens,
-            token_freqs=dict(Counter(tokens)),
-            metadata=metadata or {},
+            doc_id=_build_workflow_capability_document_id(workflow_id),
+            text=clean_text,
+            metadata=merged_metadata,
         )
         with self._lock:
-            self._entries[workflow_id] = entry
-            self._rebuild_idf_unlocked()
+            pending_entries = dict(self._entries)
+        pending_entries[workflow_id] = entry
+        self._replace_entries(pending_entries)
 
     def index_from_registry(self, registry: Any) -> int:
         """Index all workflows from a ``WorkflowRegistry``.
@@ -234,17 +301,16 @@ class WorkflowCapabilityIndex:
                     skipped_missing_purpose += 1
                 return
 
-            tokens = _tokenise(text)
             pending_entries[workflow_id] = _CapabilityEntry(
                 workflow_id=workflow_id,
+                doc_id=_build_workflow_capability_document_id(workflow_id),
                 text=text,
-                tokens=tokens,
-                token_freqs=dict(Counter(tokens)),
                 metadata={
                     "name": _workflow_id_to_name(workflow_id),
                     "source": str(source or "unknown"),
                     "description_source": reason,
                     "purpose": _normalise_capability_text(purpose),
+                    "summary_text": text.split("\n\n", 1)[0].strip(),
                 },
             )
 
@@ -291,13 +357,11 @@ class WorkflowCapabilityIndex:
                 routing_metadata=authoritative_routing_metadata.get(workflow_id),
             )
 
-        with self._lock:
-            self._entries = dict(pending_entries)
-            self._rebuild_idf_unlocked()
+        self._replace_entries(pending_entries)
 
         count = len(pending_entries)
         logger.info(
-            "[workflow_capability_index] Indexed %d workflows "
+            "[workflow_capability_index] Indexed and synced %d workflows "
             "(%d eager, %d lazy), skipped_non_authoritative=%d "
             "skipped_missing_authoritative_text=%d "
             "skipped_invalid_workflow_id=%d",
@@ -328,96 +392,79 @@ class WorkflowCapabilityIndex:
     ) -> List[WorkflowCapabilityMatch]:
         """Search for workflows matching *query*.
 
-        Returns up to *max_results* matches sorted by BM25 relevance
-        score descending.
+        Returns up to *max_results* matches sorted by retrieval score
+        descending.
         """
-        query_tokens = _tokenise(query)
-        if not query_tokens:
+        clean_query = str(query or "").strip()
+        if not clean_query:
             return []
 
         with self._lock:
             entries = list(self._entries.values())
-            idf = dict(self._idf)
-            avg_dl = self._avg_dl
 
-        scored: List[Tuple[float, _CapabilityEntry]] = []
-        for entry in entries:
+        if not entries:
+            return []
+
+        entry_lookup = {entry.workflow_id: entry for entry in entries}
+        rag_service = _get_workflow_capability_rag_service()
+        rag_results = rag_service.query(
+            query_text=clean_query,
+            top_k=max(max_results * 4, max_results),
+            namespace=WORKFLOW_CAPABILITY_NAMESPACE,
+            hybrid=True,
+            permissions_context={"type": "workflow_capability"},
+        )
+
+        scored_rows: List[Tuple[float, _CapabilityEntry]] = []
+        seen_ids: set[str] = set()
+        for result in rag_results:
+            metadata = result.get("metadata")
+            if not isinstance(metadata, Mapping):
+                continue
+            workflow_id = str(metadata.get("workflow_id") or "").strip()
+            if not workflow_id or workflow_id in seen_ids:
+                continue
+            entry = entry_lookup.get(workflow_id)
+            if entry is None:
+                continue
             if exclude_ids and entry.workflow_id in exclude_ids:
                 continue
-            score = self._bm25_score(query_tokens, entry, idf, avg_dl)
-            if score > min_score:
-                scored.append((score, entry))
+            seen_ids.add(workflow_id)
+            scored_rows.append((_coerce_retrieval_score(result.get("score")), entry))
 
-        scored.sort(key=lambda x: -x[0])
+        if not scored_rows:
+            return []
 
-        # Normalise scores to 0-1 range for compatibility with discovery.
-        max_score = scored[0][0] if scored else 1.0
-        if max_score <= 0:
-            max_score = 1.0
+        scored_rows.sort(key=lambda item: (-item[0], item[1].workflow_id))
+        max_score = max(
+            (score for score, _entry in scored_rows if score > 0.0),
+            default=1.0,
+        )
 
         results: List[WorkflowCapabilityMatch] = []
-        for score, entry in scored[:max_results]:
-            normalised = min(1.0, score / max_score)
-            name = entry.metadata.get("name") or _workflow_id_to_name(entry.workflow_id)
-            results.append(WorkflowCapabilityMatch(
-                workflow_id=entry.workflow_id,
-                name=name,
-                description=entry.text[:300],
-                relevance_score=round(normalised, 4),
-                source="capability_index",
-                metadata=entry.metadata,
-            ))
-        return results
-
-    # ------------------------------------------------------------------
-    # BM25 scoring
-    # ------------------------------------------------------------------
-
-    def _rebuild_idf_unlocked(self) -> None:
-        """Rebuild IDF table and average document length.  Caller holds lock."""
-        n = len(self._entries)
-        if n == 0:
-            self._idf = {}
-            self._avg_dl = 0.0
-            return
-
-        doc_freq: Counter[str] = Counter()
-        total_tokens = 0
-        for entry in self._entries.values():
-            total_tokens += len(entry.tokens)
-            for tok in set(entry.tokens):
-                doc_freq[tok] += 1
-
-        self._avg_dl = total_tokens / n
-        self._idf = {
-            tok: math.log((n - df + 0.5) / (df + 0.5) + 1.0)
-            for tok, df in doc_freq.items()
-        }
-
-    @classmethod
-    def _bm25_score(
-        cls,
-        query_tokens: List[str],
-        entry: _CapabilityEntry,
-        idf: Dict[str, float],
-        avg_dl: float,
-    ) -> float:
-        k1 = cls._K1
-        b = cls._B
-        dl = len(entry.tokens)
-        if avg_dl <= 0:
-            avg_dl = 1.0
-
-        score = 0.0
-        for tok in set(query_tokens):
-            tf = entry.token_freqs.get(tok, 0)
-            if tf == 0:
+        for score, entry in scored_rows:
+            normalised = _normalise_retrieval_score(
+                raw_score=score,
+                max_score=max_score,
+            )
+            if normalised < min_score:
                 continue
-            tok_idf = idf.get(tok, 0.0)
-            numerator = tf * (k1 + 1)
-            denominator = tf + k1 * (1 - b + b * dl / avg_dl)
-            score += tok_idf * numerator / denominator
-        return score
+            name = entry.metadata.get("name") or _workflow_id_to_name(entry.workflow_id)
+            result_metadata = dict(entry.metadata)
+            result_metadata["raw_retrieval_score"] = score
+            results.append(
+                WorkflowCapabilityMatch(
+                    workflow_id=entry.workflow_id,
+                    name=name,
+                    description=_build_workflow_capability_result_description(entry),
+                    relevance_score=round(normalised, 4),
+                    source="capability_index",
+                    metadata=result_metadata,
+                )
+            )
+            if len(results) >= max_results:
+                break
+        return results
 
 
 # -------------------------------------------------------------------------
@@ -632,6 +679,9 @@ def get_workflow_capability_index_runtime_state() -> Dict[str, Any]:
     index = get_workflow_capability_index()
     with _INDEX_STATE_LOCK:
         return {
+            "surface": "workflow_retrieval",
+            "backend": "llamaindex",
+            "namespace": WORKFLOW_CAPABILITY_NAMESPACE,
             "size": int(index.size),
             "ready": bool(index.size > 0),
             "build_in_progress": bool(_INDEX_REBUILD_STATE.get("build_in_progress", False)),
@@ -818,14 +868,22 @@ def search_workflow_capabilities(
     max_wait_seconds: float | None = None,
     workflow_registry: Any | None = None,
 ) -> List[WorkflowCapabilityMatch]:
-    """Search workflow capabilities, rebuilding the index on bounded misses."""
+    """Search workflow capabilities, rebuilding the retrieval surface on misses."""
 
     index = ensure_workflow_capability_index_populated(
         block=not non_blocking,
         max_wait_seconds=max_wait_seconds,
         workflow_registry=workflow_registry,
     )
-    results = index.search(query, max_results=max_results, min_score=min_score)
+    try:
+        results = index.search(query, max_results=max_results, min_score=min_score)
+    except Exception as exc:
+        _set_workflow_capability_rebuild_state(
+            build_in_progress=False,
+            mode="query",
+            error=f"query_failed:{exc}",
+        )
+        raise
     if results:
         return results
     if non_blocking:

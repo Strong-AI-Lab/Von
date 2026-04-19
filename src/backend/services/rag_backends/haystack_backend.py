@@ -41,6 +41,13 @@ class HaystackRAGService(RAGService):
         # TODO: Implement deletion
         return 0
 
+    def reset_namespace(
+        self,
+        namespace: Optional[str] = None,
+    ) -> None:
+        # TODO: Implement namespace reset
+        return None
+
     def query(
         self,
         query_text: str,

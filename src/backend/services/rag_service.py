@@ -54,6 +54,13 @@ class RAGService(Protocol):
         """Delete documents by id. Returns count removed."""
         ...
 
+    def reset_namespace(
+        self,
+        namespace: Optional[str] = None,
+    ) -> None:
+        """Remove all indexed data for a namespace."""
+        ...
+
     def query(
         self,
         query_text: str,
@@ -160,6 +167,9 @@ class _NotImplementedRAG(RAGService):
         raise RAGBackendUnavailable("RAG backend not implemented")
 
     def delete_documents(self, ids: Iterable[str], *, namespace: Optional[str] = None) -> int:  # type: ignore
+        raise RAGBackendUnavailable("RAG backend not implemented")
+
+    def reset_namespace(self, namespace: Optional[str] = None) -> None:  # type: ignore
         raise RAGBackendUnavailable("RAG backend not implemented")
 
     def query(self, query_text: str, *, top_k: int = 5, namespace: Optional[str] = None, hybrid: bool = True, permissions_context: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:  # type: ignore

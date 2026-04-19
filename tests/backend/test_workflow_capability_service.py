@@ -1,20 +1,22 @@
-"""Tests for the workflow capability index (JVNAUTOSCI-1424 Phase 2).
+"""Tests for the dedicated workflow retrieval surface.
 
 Tests cover:
-- BM25 indexing and search behaviour.
-- Built-in workflow capability descriptions.
-- Registry integration (eager + lazy workflows).
-- Score normalisation and ranking order.
+- authority-aligned workflow document materialisation;
+- retrieval-backed indexing and search behaviour;
+- registry integration (eager + lazy workflows);
+- rebuild / invalidation behaviour and score normalisation.
 """
 
 from __future__ import annotations
+
+import re
+from typing import Any
 
 import pytest
 
 from src.backend.services.workflow_capability_service import (
     BUILTIN_WORKFLOW_CAPABILITIES,
     WorkflowCapabilityIndex,
-    _tokenise,
     _workflow_id_to_name,
     build_workflow_capability_text,
     get_workflow_capability_index,
@@ -24,6 +26,97 @@ from src.backend.services.workflow_capability_service import (
     search_workflow_capabilities,
 )
 from workflow_test_support import build_test_conversation_turn_registry
+
+
+class _FakeWorkflowRetrievalBackend:
+    _TOKEN_RE = re.compile(r"[a-z0-9]+(?:'[a-z]+)?")
+
+    def __init__(self) -> None:
+        self.docs_by_namespace: dict[str, dict[str, dict[str, Any]]] = {}
+        self.queries: list[dict[str, Any]] = []
+        self.reset_calls: list[str] = []
+
+    def reset_namespace(self, namespace: str) -> None:
+        namespace_key = str(namespace)
+        self.reset_calls.append(namespace_key)
+        self.docs_by_namespace[namespace_key] = {}
+
+    def upsert_documents(
+        self,
+        docs: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+        *,
+        namespace: str | None = None,
+        allow_partial_failures: bool = True,
+    ) -> tuple[int, int]:
+        store = self.docs_by_namespace.setdefault(str(namespace or ""), {})
+        for doc in docs:
+            store[str(doc["id"])] = {
+                "id": str(doc["id"]),
+                "text": str(doc.get("text") or ""),
+                "metadata": dict(doc.get("metadata") or {}),
+            }
+        return (len(docs), 0)
+
+    def query(
+        self,
+        query_text: str,
+        *,
+        top_k: int = 5,
+        namespace: str | None = None,
+        hybrid: bool = True,
+        permissions_context: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        namespace_key = str(namespace or "")
+        self.queries.append(
+            {
+                "query_text": query_text,
+                "top_k": top_k,
+                "namespace": namespace_key,
+                "hybrid": hybrid,
+                "permissions_context": dict(permissions_context or {}),
+            }
+        )
+        query_tokens = set(self._TOKEN_RE.findall(str(query_text or "").lower()))
+        scored_rows: list[dict[str, Any]] = []
+        for doc in self.docs_by_namespace.get(namespace_key, {}).values():
+            metadata = dict(doc.get("metadata") or {})
+            requested_type = str(
+                (permissions_context or {}).get("type") or ""
+            ).strip()
+            if requested_type and str(metadata.get("type") or "").strip() != requested_type:
+                continue
+            text_tokens = set(self._TOKEN_RE.findall(str(doc.get("text") or "").lower()))
+            overlap = len(query_tokens & text_tokens)
+            if overlap <= 0:
+                continue
+            scored_rows.append(
+                {
+                    "id": doc["id"],
+                    "text": doc["text"],
+                    "metadata": metadata,
+                    "score": overlap / max(len(query_tokens), 1),
+                }
+            )
+        scored_rows.sort(
+            key=lambda row: (
+                -float(row.get("score") or 0.0),
+                str((row.get("metadata") or {}).get("workflow_id") or ""),
+            )
+        )
+        return scored_rows[:top_k]
+
+
+@pytest.fixture(autouse=True)
+def _fake_retrieval_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> _FakeWorkflowRetrievalBackend:
+    backend = _FakeWorkflowRetrievalBackend()
+    monkeypatch.setattr(
+        "src.backend.services.workflow_capability_service._get_workflow_capability_rag_service",
+        lambda: backend,
+    )
+    reset_workflow_capability_index()
+    return backend
 
 
 @pytest.fixture(autouse=True)
@@ -48,39 +141,6 @@ def _stub_authoritative_workflow_description_resolution(
             "text_relation:#V#hasDescription",
         ),
     )
-
-
-# ---------------------------------------------------------------------------
-# Tokeniser
-# ---------------------------------------------------------------------------
-
-
-class TestTokenise:
-    def test_basic_words(self):
-        tokens = _tokenise("hello world tool calling")
-        assert "hello" in tokens
-        assert "world" in tokens
-
-    def test_stop_words_removed(self):
-        tokens = _tokenise("this is a test of the system")
-        assert "test" in tokens
-        assert "system" in tokens
-        assert "this" not in tokens
-        assert "is" not in tokens
-        assert "the" not in tokens
-
-    def test_single_char_removed(self):
-        tokens = _tokenise("a b c long")
-        assert "long" in tokens
-        # Single-char tokens should be excluded.
-        assert "b" not in tokens
-        assert "c" not in tokens
-
-    def test_simple_plural_forms_normalise_to_singular_variants(self):
-        tokens = _tokenise("testing workflows tools queries")
-        assert "workflow" in tokens
-        assert "tool" in tokens
-        assert "query" in tokens
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +216,38 @@ class TestWorkflowCapabilityIndex:
         results = index.search("alpha bravo")
         for r in results:
             assert 0.0 <= r.relevance_score <= 1.0
+
+    def test_search_passes_full_query_text_to_retrieval_backend(
+        self,
+        _fake_retrieval_backend: _FakeWorkflowRetrievalBackend,
+    ) -> None:
+        index = WorkflowCapabilityIndex()
+        index.index_workflow(
+            "#V#meeting_invitation_testing_workflow",
+            "Testing workflow for meeting invitation experiments.",
+        )
+
+        query_text = "Use Testing Workflows tools for experiments"
+        index.search(query_text)
+
+        assert _fake_retrieval_backend.queries
+        assert _fake_retrieval_backend.queries[-1]["query_text"] == query_text
+        assert _fake_retrieval_backend.queries[-1]["namespace"] == "workflow_capabilities"
+        assert _fake_retrieval_backend.queries[-1]["permissions_context"] == {
+            "type": "workflow_capability"
+        }
+
+    def test_index_sync_resets_backend_namespace(
+        self,
+        _fake_retrieval_backend: _FakeWorkflowRetrievalBackend,
+    ) -> None:
+        index = WorkflowCapabilityIndex()
+        index.index_workflow(
+            "#V#tool_calling_workflow",
+            "Tool workflow for grounded retrieval and relation lookups.",
+        )
+
+        assert _fake_retrieval_backend.reset_calls == ["workflow_capabilities"]
 
     def test_size_reflects_entries(self):
         index = WorkflowCapabilityIndex()
@@ -351,6 +443,29 @@ class TestIndexFromRegistry:
         assert results
         assert results[0].workflow_id == "#V#workflow_repair_or_create_workflow"
 
+    def test_rebuild_replaces_stale_retrieval_docs(
+        self,
+    ) -> None:
+        from src.backend.workflows import WorkflowRegistry
+        from src.backend.workflows.workflow_registry import LazyWorkflowRegistration
+
+        registry = WorkflowRegistry()
+        registry.register_lazy(
+            LazyWorkflowRegistration(
+                workflow_id="#V#workflow_repair_or_create_workflow",
+                purpose="Repair workflows from requests.",
+                source="vontology",
+            )
+        )
+
+        index = WorkflowCapabilityIndex()
+        assert index.index_from_registry(registry) == 1
+        assert index.search("repair workflows")
+
+        empty_registry = WorkflowRegistry()
+        assert index.index_from_registry(empty_registry) == 0
+        assert index.search("repair workflows") == []
+
     def test_index_from_registry_uses_batched_routing_metadata(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -433,22 +548,6 @@ class TestPurposeDrivenCapabilities:
         assert len(results) >= 1
         top = results[0]
         assert top.workflow_id == "#V#tool_calling_workflow"
-
-    def test_plural_query_matches_singular_workflow_capability_text(self):
-        index = WorkflowCapabilityIndex()
-        index.index_workflow(
-            "#V#meeting_invitation_testing_workflow",
-            (
-                "Testing workflow for meeting invitation experiments that prepares "
-                "an experiment spec and executes the candidate workflow."
-            ),
-            metadata={"name": "Meeting invitation testing workflow"},
-        )
-
-        results = index.search("use Testing Workflows tools for experiments")
-
-        assert results
-        assert results[0].workflow_id == "#V#meeting_invitation_testing_workflow"
 
 
 # ---------------------------------------------------------------------------

@@ -17,6 +17,7 @@ import hashlib
 import importlib
 import os
 import re
+import shutil
 import time
 from datetime import datetime, timezone
 from typing import Iterable, Dict, Any, Optional, List, Tuple
@@ -389,6 +390,37 @@ class LlamaIndexRAGService(RAGService):
             )
 
         return count
+
+    def reset_namespace(
+        self,
+        namespace: Optional[str] = None,
+    ) -> None:
+        effective_namespace = self._resolve_effective_namespace(namespace)
+        self._indices.pop(effective_namespace, None)
+
+        persist_dir = os.path.abspath(self._namespace_persist_dir(effective_namespace))
+        namespaces_root = os.path.abspath(
+            os.path.join(self.persistence_dir, "namespaces")
+        )
+
+        try:
+            common_root = os.path.commonpath([persist_dir, namespaces_root])
+        except ValueError as exc:
+            raise RuntimeError(
+                f"RAG namespace reset path mismatch for '{effective_namespace}': {exc}"
+            ) from exc
+
+        if common_root != namespaces_root:
+            raise RuntimeError(
+                f"Refusing to reset namespace outside persistence root: {effective_namespace}"
+            )
+
+        if os.path.isdir(persist_dir):
+            shutil.rmtree(persist_dir)
+        elif os.path.exists(persist_dir):
+            raise RuntimeError(
+                f"Namespace persistence path is not a directory: {persist_dir}"
+            )
 
     def query(
         self,
