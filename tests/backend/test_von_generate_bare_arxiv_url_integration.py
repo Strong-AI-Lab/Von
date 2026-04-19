@@ -43,6 +43,22 @@ class _LLMSequence:
         return self._responses.pop(0)
 
 
+def _write_request_evidence_response(tool_name: str) -> str:
+    return (
+        '{'
+        '"schema_version":"write_tool_request_evidence.v1",'
+        '"tool_evidence":['
+        "{"
+        f'"tool_name":"{tool_name}",'
+        '"request_state":"low_confidence",'
+        '"confirmation_state":"low_confidence",'
+        '"rationale":"test stub"'
+        "}"
+        "]"
+        "}"
+    )
+
+
 class _ArxivProxyStub:
     async def download_paper(self, *, arxiv_id: str, filename=None):
         return {
@@ -631,6 +647,7 @@ def test_generate_bare_arxiv_url_falls_back_to_tool_pipeline_when_specialised_ro
                 '"reasoning":"Bare arXiv URL should use tool workflow."}'
             ),
             '{"action":"call_tool","tool":"download_paper","payload":{"arxiv_id":"2510.06248"}}',
+            _write_request_evidence_response("download_paper"),
             "Downloaded and represented the paper.",
             "Downloaded and represented the paper.",
         ]
@@ -686,7 +703,7 @@ def test_generate_bare_arxiv_url_falls_back_to_tool_pipeline_when_specialised_ro
     assert "postcondition_inconclusive" in list(
         completion_gate.get("blocking_failure_codes") or []
     )
-    assert len(llm.calls) == 4
+    assert len(llm.calls) == 5
 
 
 def test_generate_bare_arxiv_url_recovers_from_noisy_initial_tool_plan_output(
@@ -700,6 +717,7 @@ def test_generate_bare_arxiv_url_recovers_from_noisy_initial_tool_plan_output(
             ),
             "I would route this as plain_response.",
             '{"action":"call_tool","tool":"download_paper","payload":{"arxiv_id":"2510.06248"}}',
+            _write_request_evidence_response("download_paper"),
             "Downloaded and represented the paper.",
             "Downloaded and represented the paper.",
         ]
@@ -764,7 +782,7 @@ def test_generate_bare_arxiv_url_recovers_from_noisy_initial_tool_plan_output(
     assert int(tool_stage.get("tool_success_count") or 0) >= 1
     assert tool_stage.get("tool_failure_count") == 0
     assert tool_stage.get("tool_pending_count") == 0
-    assert len(llm.calls) == 5
+    assert len(llm.calls) == 6
 
 
 def test_generate_bare_arxiv_url_without_selector_still_forces_tool_pipeline_routing(
@@ -773,6 +791,7 @@ def test_generate_bare_arxiv_url_without_selector_still_forces_tool_pipeline_rou
     llm = _LLMSequence(
         [
             '{"action":"call_tool","tool":"download_paper","payload":{"arxiv_id":"2510.06248"}}',
+            _write_request_evidence_response("download_paper"),
             "Downloaded and represented the paper.",
             "Downloaded and represented the paper.",
         ]
@@ -803,7 +822,7 @@ def test_generate_bare_arxiv_url_without_selector_still_forces_tool_pipeline_rou
     completion_gate = turn_record.get("completion_gate") or {}
     assert completion_gate.get("decision") == "partial"
     assert completion_gate.get("safe_to_claim_completion") is False
-    assert len(llm.calls) == 3
+    assert len(llm.calls) == 4
 
 
 def test_generate_bare_arxiv_url_fails_closed_when_download_tool_returns_error(
@@ -816,6 +835,7 @@ def test_generate_bare_arxiv_url_fails_closed_when_download_tool_returns_error(
                 '"reasoning":"Bare arXiv URL should use tool workflow."}'
             ),
             '{"action":"call_tool","tool":"download_paper","payload":{"arxiv_id":"2602.20478"}}',
+            _write_request_evidence_response("download_paper"),
             "Download failed, follow-up required.",
             "Download failed, follow-up required.",
         ]
@@ -885,7 +905,7 @@ def test_generate_bare_arxiv_url_fails_closed_when_download_tool_returns_error(
     assert "kb_mutation_download_paper_failed" in list(
         completion_gate.get("blocking_failure_codes") or []
     )
-    assert len(llm.calls) == 4
+    assert len(llm.calls) == 5
 
 
 def test_generate_bare_arxiv_url_with_explicit_denial_stays_non_mutating(monkeypatch):

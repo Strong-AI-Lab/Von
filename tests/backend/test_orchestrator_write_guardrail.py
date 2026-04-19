@@ -65,6 +65,22 @@ class _CapturingLLM:
         return self._responses.pop(0)
 
 
+def _write_request_evidence_response(tool_name: str) -> str:
+    return (
+        '{'
+        '"schema_version":"write_tool_request_evidence.v1",'
+        '"tool_evidence":['
+        "{"
+        f'"tool_name":"{tool_name}",'
+        '"request_state":"low_confidence",'
+        '"confirmation_state":"low_confidence",'
+        '"rationale":"test stub"'
+        "}"
+        "]"
+        "}"
+    )
+
+
 def test_write_guard_allows_download_paper_for_bare_arxiv_url(monkeypatch):
     gateway = _WriteToolGateway()
     orchestrator = build_db_independent_orchestrator(
@@ -76,6 +92,7 @@ def test_write_guard_allows_download_paper_for_bare_arxiv_url(monkeypatch):
     llm = _CapturingLLM(
         [
             '{"action":"call_tool","tool":"download_paper","payload":{"arxiv_id":"2510.06248"}}',
+            _write_request_evidence_response("download_paper"),
             "Done.",
         ]
     )

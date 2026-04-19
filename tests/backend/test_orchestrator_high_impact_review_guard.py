@@ -60,6 +60,25 @@ def _tool_call() -> str:
     )
 
 
+def _write_request_evidence_response(
+    *,
+    confirmation_state: str = "low_confidence",
+) -> str:
+    return (
+        '{'
+        '"schema_version":"write_tool_request_evidence.v1",'
+        '"tool_evidence":['
+        "{"
+        '"tool_name":"delete_concept",'
+        '"request_state":"low_confidence",'
+        f'"confirmation_state":"{confirmation_state}",'
+        '"rationale":"test stub"'
+        "}"
+        "]"
+        "}"
+    )
+
+
 def test_destructive_write_blocks_pending_confirmation(monkeypatch):
     monkeypatch.setattr(
         settings_service, "get_disable_write_tool_conservatism", lambda: False
@@ -71,7 +90,9 @@ def test_destructive_write_blocks_pending_confirmation(monkeypatch):
         gateway=cast(Any, gateway),
         max_tool_invocations=1,
     )
-    llm = _CapturingLLM([_tool_call(), "Done.", "Done."])
+    llm = _CapturingLLM(
+        [_tool_call(), _write_request_evidence_response(), "Done.", "Done."]
+    )
 
     result = orchestrator.run(
         prompt="Delete concept #V#guarded_concept.",
@@ -109,7 +130,9 @@ def test_destructive_write_allows_recent_confirmation(monkeypatch):
         gateway=cast(Any, gateway),
         max_tool_invocations=1,
     )
-    llm = _CapturingLLM([_tool_call(), "Done.", "Done."])
+    llm = _CapturingLLM(
+        [_tool_call(), _write_request_evidence_response(), "Done.", "Done."]
+    )
 
     result = orchestrator.run(
         prompt="Yes, do it.",

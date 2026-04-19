@@ -375,6 +375,8 @@ class TestMCPToolInvoke:
                 unresolved_risk_factors={},
                 intervention_kinds={},
                 confidence_states={},
+                request_evidence={},
+                request_evidence_diagnostics={},
                 profile_concept_id=None,
                 profile_diagnostics={},
             )

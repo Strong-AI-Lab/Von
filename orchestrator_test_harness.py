@@ -14,6 +14,9 @@ from src.backend.services.conversation_turn_workflow_vontology_service import (
     _load_expected_outcome_prompt_seed_text,
     _load_narration_prompt_seed_text,
 )
+from src.backend.services.write_tool_request_evidence_vontology_service import (
+    _load_write_tool_request_evidence_prompt_seed_text,
+)
 from src.backend.services.prompt_template_service import (
     PromptTemplateService as _RealPromptTemplateService,
 )
@@ -303,7 +306,10 @@ def build_db_independent_orchestrator(
     monkeypatch.setattr(
         orchestrator,
         "_load_base_system_prompt_from_vontology",
-        lambda *_a, **_kw: (None, None),
+        lambda *_a, **_kw: (
+            "You are Von. Prefer direct answers and tool execution when needed.",
+            "#V#test_base_system_prompt",
+        ),
     )
     monkeypatch.setattr(
         "src.backend.services.model_registry_service.get_model_registry_snapshot",
@@ -348,6 +354,9 @@ def build_db_independent_orchestrator(
     }
     expected_outcome_prompt_id = "#V#prompt_turn_execution_expected_outcome_inference"
     narration_prompt_id = "#V#prompt_turn_execution_narrate_completion_report"
+    write_tool_request_evidence_prompt_id = (
+        "#V#prompt_write_tool_request_evidence_inference"
+    )
     turn_current_request_prompt_id = "#V#turn_current_request_stage_prompt"
 
     class _HarnessPromptTemplateService:
@@ -380,6 +389,13 @@ def build_db_independent_orchestrator(
                 return SimpleNamespace(
                     text=_load_narration_prompt_seed_text(),
                     prompt_id=narration_prompt_id,
+                    variables=dict(variables or {}),
+                    truncated=False,
+                )
+            if write_tool_request_evidence_prompt_id in requested_prompt_ids:
+                return SimpleNamespace(
+                    text=_load_write_tool_request_evidence_prompt_seed_text(),
+                    prompt_id=write_tool_request_evidence_prompt_id,
                     variables=dict(variables or {}),
                     truncated=False,
                 )
@@ -449,6 +465,13 @@ def build_db_independent_orchestrator(
                     dict(variables or {}),
                 ),
                 prompt_id=turn_current_request_prompt_id,
+                variables=dict(variables or {}),
+                truncated=False,
+            )
+        if write_tool_request_evidence_prompt_id in requested_prompt_ids:
+            return SimpleNamespace(
+                text=_load_write_tool_request_evidence_prompt_seed_text(),
+                prompt_id=write_tool_request_evidence_prompt_id,
                 variables=dict(variables or {}),
                 truncated=False,
             )

@@ -3,6 +3,22 @@
 from __future__ import annotations
 
 
+def _request_evidence(
+    tool_name: str,
+    *,
+    request_state: str = "low_confidence",
+    confirmation_state: str = "low_confidence",
+    rationale: str | None = None,
+) -> dict[str, dict[str, str | None]]:
+    return {
+        tool_name: {
+            "request_state": request_state,
+            "confirmation_state": confirmation_state,
+            "rationale": rationale,
+        }
+    }
+
+
 def test_classify_write_tool_risk_covers_policy_classes():
     from src.backend.workflows.write_tool_policy import (
         WRITE_RISK_ADDITIVE_LOW_RISK,
@@ -123,8 +139,13 @@ def test_explicit_prompt_allows_mutative_non_destructive_write():
     )
 
     decision = compute_allowed_write_tools(
-        prompt="Update the Vontology concept description now.",
+        prompt="Tell me about this concept.",
         requested_tools=["update_concept"],
+        request_evidence=_request_evidence(
+            "update_concept",
+            request_state="explicit_request",
+            rationale="current prompt explicitly requests a recoverable update",
+        ),
         recent_user_prompts=[],
     )
 
@@ -132,7 +153,23 @@ def test_explicit_prompt_allows_mutative_non_destructive_write():
     assert decision.reason == REASON_EXPLICIT_NON_DESTRUCTIVE_MUTATION_REQUEST
 
 
-def test_recent_prompt_allows_mutative_non_destructive_write():
+def test_recent_prompt_alone_no_longer_allows_mutative_non_destructive_write():
+    from src.backend.workflows.write_tool_policy import (
+        REASON_MUTATIVE_NON_DESTRUCTIVE_REQUEST_REQUIRED,
+        compute_allowed_write_tools,
+    )
+
+    decision = compute_allowed_write_tools(
+        prompt="Yes, do it.",
+        requested_tools=["update_concept"],
+        recent_user_prompts=["Update the Vontology concept description now."],
+    )
+
+    assert "update_concept" not in decision.allowed_tools
+    assert decision.reason == REASON_MUTATIVE_NON_DESTRUCTIVE_REQUEST_REQUIRED
+
+
+def test_recent_request_evidence_allows_mutative_non_destructive_write():
     from src.backend.workflows.write_tool_policy import (
         REASON_RECENT_NON_DESTRUCTIVE_MUTATION_REQUEST,
         compute_allowed_write_tools,
@@ -141,6 +178,11 @@ def test_recent_prompt_allows_mutative_non_destructive_write():
     decision = compute_allowed_write_tools(
         prompt="Yes, do it.",
         requested_tools=["update_concept"],
+        request_evidence=_request_evidence(
+            "update_concept",
+            request_state="recent_request_context",
+            rationale="current prompt is a continuation of the preserved update request",
+        ),
         recent_user_prompts=["Update the Vontology concept description now."],
     )
 
@@ -176,6 +218,11 @@ def test_recent_confirmation_allows_destructive_write():
     decision = compute_allowed_write_tools(
         prompt="Yes, do it.",
         requested_tools=["delete_concept"],
+        request_evidence=_request_evidence(
+            "delete_concept",
+            confirmation_state="recent_confirmation_context",
+            rationale="current prompt confirms the recent destructive request",
+        ),
         recent_user_prompts=["Delete concept #V#paper_on_arxiv_2510_06248."],
     )
 

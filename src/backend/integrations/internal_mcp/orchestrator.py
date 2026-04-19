@@ -53,6 +53,9 @@ from src.backend.services.workflow_override_policy_service import (
 from src.backend.services.minimal_imposition_runtime_profile_vontology_service import (
     load_minimal_imposition_runtime_profile,
 )
+from src.backend.services.write_tool_request_evidence_vontology_service import (
+    infer_write_tool_request_evidence,
+)
 from src.backend.services.python_decision_authority_service import (
     annotate_python_decision_event,
 )
@@ -2115,6 +2118,8 @@ class _ResolvedWritePolicyDecision:
     unresolved_risk_factors: Mapping[str, Sequence[str]]
     intervention_kinds: Mapping[str, str]
     confidence_states: Mapping[str, str]
+    request_evidence: Mapping[str, Mapping[str, Any]]
+    request_evidence_diagnostics: Mapping[str, Any]
     profile_concept_id: str | None
     profile_diagnostics: Mapping[str, Any]
 
@@ -3821,6 +3826,12 @@ class InternalMCPChatOrchestrator:
         prompt = request.data.get("prompt")
         requested_tools = request.data.get("requested_write_tools")
         recent_user_prompts = request.data.get("recent_user_prompts")
+        data = request.data if isinstance(request.data, MutableMapping) else {}
+        aux_log = (
+            data.setdefault("aux_llm_calls", [])
+            if isinstance(data, MutableMapping)
+            else None
+        )
         if not isinstance(prompt, str):
             prompt = ""
         if not isinstance(requested_tools, list):
@@ -3864,14 +3875,81 @@ class InternalMCPChatOrchestrator:
                 "workflow_id": WRITE_TOOL_POLICY_WORKFLOW_ID,
             }
 
+        requested_tool_list = [str(tool) for tool in requested_tools if tool]
+        request_evidence: dict[str, dict[str, Any]] = {}
+        request_evidence_diagnostics: dict[str, Any] = {
+            "schema_version": "write_tool_request_evidence.v1",
+            "status": (
+                "skipped_explicit_write_denial"
+                if prompt_explicitly_denies_write(prompt)
+                else "skipped_no_requested_tools"
+            ),
+            "requested_tool_count": len(requested_tool_list),
+        }
+        if requested_tool_list and not prompt_explicitly_denies_write(prompt):
+            request_evidence, request_evidence_diagnostics = (
+                infer_write_tool_request_evidence(
+                    llm_client=request.environment.llm_client,
+                    model=request.environment.model,
+                    prompt=prompt,
+                    recent_user_prompts=[
+                        str(item)
+                        for item in recent_user_prompts
+                        if isinstance(item, str)
+                    ],
+                    requested_tools=requested_tool_list,
+                    requested_tool_payloads={
+                        str(tool_name): dict(payload)
+                        for tool_name, payload in requested_tool_payloads.items()
+                        if isinstance(tool_name, str) and isinstance(payload, Mapping)
+                    },
+                )
+            )
+            if isinstance(aux_log, list):
+                aux_log.append(
+                    {
+                        "type": "write_tool_request_evidence",
+                        "status": (
+                            str(request_evidence_diagnostics.get("status") or "").strip()
+                            or "unknown"
+                        ),
+                        "requested_tool_count": len(requested_tool_list),
+                        "parse_mode": (
+                            str(request_evidence_diagnostics.get("parse_mode") or "").strip()
+                            or None
+                        ),
+                        "resolved_prompt_concept_id": (
+                            str(
+                                request_evidence_diagnostics.get(
+                                    "resolved_prompt_concept_id"
+                                )
+                                or ""
+                            ).strip()
+                            or None
+                        ),
+                        "loaded_prompt_concept_id": (
+                            str(
+                                request_evidence_diagnostics.get(
+                                    "loaded_prompt_concept_id"
+                                )
+                                or ""
+                            ).strip()
+                            or None
+                        ),
+                        "tool_names": list(request_evidence.keys()),
+                    }
+                )
+
         decision = compute_allowed_write_tools(
             prompt=prompt,
-            requested_tools=[str(tool) for tool in requested_tools if tool],
+            requested_tools=requested_tool_list,
             requested_tool_payloads={
                 str(tool_name): dict(payload)
                 for tool_name, payload in requested_tool_payloads.items()
                 if isinstance(tool_name, str) and isinstance(payload, Mapping)
             },
+            request_evidence=request_evidence,
+            request_evidence_diagnostics=request_evidence_diagnostics,
             recent_user_prompts=[
                 str(item) for item in recent_user_prompts if isinstance(item, str)
             ],
@@ -3932,76 +4010,85 @@ class InternalMCPChatOrchestrator:
             ),
         )
 
-        return WorkflowActionResult(
-            outputs={
-                "allowed_write_tools": sorted(decision.allowed_tools),
-                "write_policy_reason": decision.reason,
-                "write_policy_decision_basis": decision.decision_basis,
-                "write_policy_outcome": decision.outcome,
-                "write_policy_user_denial_detected": decision.user_denial_detected,
-                "write_policy_effective_mutation_authority": (
-                    decision.effective_mutation_authority
-                ),
-                "write_policy_authority_sources": dict(decision.authority_sources),
-                "write_policy_risk_classes": {
-                    item.tool_name: item.risk_class for item in decision.tool_decisions
-                },
-                "write_policy_tool_outcomes": {
-                    item.tool_name: item.outcome for item in decision.tool_decisions
-                },
-                "write_policy_blocked_reasons": {
-                    item.tool_name: item.blocked_reason
-                    for item in decision.tool_decisions
-                    if isinstance(item.blocked_reason, str) and item.blocked_reason
-                },
-                "write_policy_authority_block_sources": {
-                    item.tool_name: item.authority_block_source
-                    for item in decision.tool_decisions
-                    if isinstance(item.authority_block_source, str)
-                    and item.authority_block_source
-                },
-                "write_policy_scenario_ids": {
-                    item.tool_name: item.scenario_id
-                    for item in decision.tool_decisions
-                    if isinstance(item.scenario_id, str) and item.scenario_id
-                },
-                "write_policy_risk_features": {
-                    item.tool_name: dict(item.risk_features or {})
-                    for item in decision.tool_decisions
-                    if isinstance(item.risk_features, Mapping)
-                },
-                "write_policy_unresolved_risk_factors": {
-                    item.tool_name: list(item.unresolved_risk_factors)
-                    for item in decision.tool_decisions
-                    if item.unresolved_risk_factors
-                },
-                "write_policy_intervention_kinds": {
-                    item.tool_name: item.intervention_kind
-                    for item in decision.tool_decisions
-                    if isinstance(item.intervention_kind, str)
-                    and item.intervention_kind
-                },
-                "write_policy_confidence_states": {
-                    item.tool_name: item.confidence_state
-                    for item in decision.tool_decisions
-                    if isinstance(item.confidence_state, str) and item.confidence_state
-                },
-                "write_policy_profile_concept_id": decision.profile_concept_id,
-                "write_policy_profile_diagnostics": dict(
-                    decision.profile_diagnostics or {}
-                ),
-                "write_policy_requires_confirmation": [
-                    item.tool_name
-                    for item in decision.tool_decisions
-                    if item.requires_confirmation
-                ],
-                "mutation_guardrail_events": list(mutation_guardrail_events),
-                "approval_required": any(
-                    item.requires_confirmation and not item.allowed
-                    for item in decision.tool_decisions
-                ),
-            }
-        )
+        outputs = {
+            "allowed_write_tools": sorted(decision.allowed_tools),
+            "write_policy_reason": decision.reason,
+            "write_policy_decision_basis": decision.decision_basis,
+            "write_policy_outcome": decision.outcome,
+            "write_policy_user_denial_detected": decision.user_denial_detected,
+            "write_policy_effective_mutation_authority": (
+                decision.effective_mutation_authority
+            ),
+            "write_policy_authority_sources": dict(decision.authority_sources),
+            "write_policy_risk_classes": {
+                item.tool_name: item.risk_class for item in decision.tool_decisions
+            },
+            "write_policy_tool_outcomes": {
+                item.tool_name: item.outcome for item in decision.tool_decisions
+            },
+            "write_policy_blocked_reasons": {
+                item.tool_name: item.blocked_reason
+                for item in decision.tool_decisions
+                if isinstance(item.blocked_reason, str) and item.blocked_reason
+            },
+            "write_policy_authority_block_sources": {
+                item.tool_name: item.authority_block_source
+                for item in decision.tool_decisions
+                if isinstance(item.authority_block_source, str)
+                and item.authority_block_source
+            },
+            "write_policy_scenario_ids": {
+                item.tool_name: item.scenario_id
+                for item in decision.tool_decisions
+                if isinstance(item.scenario_id, str) and item.scenario_id
+            },
+            "write_policy_risk_features": {
+                item.tool_name: dict(item.risk_features or {})
+                for item in decision.tool_decisions
+                if isinstance(item.risk_features, Mapping)
+            },
+            "write_policy_unresolved_risk_factors": {
+                item.tool_name: list(item.unresolved_risk_factors)
+                for item in decision.tool_decisions
+                if item.unresolved_risk_factors
+            },
+            "write_policy_intervention_kinds": {
+                item.tool_name: item.intervention_kind
+                for item in decision.tool_decisions
+                if isinstance(item.intervention_kind, str)
+                and item.intervention_kind
+            },
+            "write_policy_confidence_states": {
+                item.tool_name: item.confidence_state
+                for item in decision.tool_decisions
+                if isinstance(item.confidence_state, str) and item.confidence_state
+            },
+            "write_policy_request_evidence": {
+                str(tool_name): dict(evidence)
+                for tool_name, evidence in decision.request_evidence.items()
+                if isinstance(tool_name, str) and isinstance(evidence, Mapping)
+            },
+            "write_policy_request_evidence_diagnostics": dict(
+                decision.request_evidence_diagnostics or {}
+            ),
+            "write_policy_profile_concept_id": decision.profile_concept_id,
+            "write_policy_profile_diagnostics": dict(
+                decision.profile_diagnostics or {}
+            ),
+            "write_policy_requires_confirmation": [
+                item.tool_name
+                for item in decision.tool_decisions
+                if item.requires_confirmation
+            ],
+            "mutation_guardrail_events": list(mutation_guardrail_events),
+            "approval_required": any(
+                item.requires_confirmation and not item.allowed
+                for item in decision.tool_decisions
+            ),
+        }
+        if isinstance(aux_log, list):
+            outputs["aux_llm_calls"] = aux_log
+        return WorkflowActionResult(outputs=outputs)
 
     def _action_preflight_specialised_suggest(
         self, request: Any
@@ -7557,6 +7644,24 @@ class InternalMCPChatOrchestrator:
             if isinstance(data.get("write_policy_confidence_states"), Mapping)
             else {}
         )
+        write_policy_request_evidence = (
+            {
+                str(tool_name): dict(evidence)
+                for tool_name, evidence in dict(
+                    data.get("write_policy_request_evidence")
+                ).items()
+                if isinstance(tool_name, str) and isinstance(evidence, Mapping)
+            }
+            if isinstance(data.get("write_policy_request_evidence"), Mapping)
+            else {}
+        )
+        write_policy_request_evidence_diagnostics = (
+            dict(data.get("write_policy_request_evidence_diagnostics"))
+            if isinstance(
+                data.get("write_policy_request_evidence_diagnostics"), Mapping
+            )
+            else {}
+        )
         write_policy_profile_concept_id = str(
             data.get("write_policy_profile_concept_id") or ""
         ).strip()
@@ -7718,6 +7823,14 @@ class InternalMCPChatOrchestrator:
                 write_policy_confidence_states = dict(
                     resolved_write_policy.confidence_states
                 )
+                write_policy_request_evidence = {
+                    str(tool_name): dict(evidence)
+                    for tool_name, evidence in resolved_write_policy.request_evidence.items()
+                    if isinstance(tool_name, str) and isinstance(evidence, Mapping)
+                }
+                write_policy_request_evidence_diagnostics = dict(
+                    resolved_write_policy.request_evidence_diagnostics
+                )
                 write_policy_profile_concept_id = str(
                     resolved_write_policy.profile_concept_id or ""
                 ).strip()
@@ -7812,6 +7925,16 @@ class InternalMCPChatOrchestrator:
                     "write_policy_unresolved_risk_factors": tool_unresolved_risk_factors,
                     "write_policy_intervention_kind": tool_intervention_kind or None,
                     "write_policy_confidence_state": tool_confidence_state or None,
+                    "write_policy_request_evidence": (
+                        dict(write_policy_request_evidence.get(tool_name) or {})
+                        if write_policy_request_evidence.get(tool_name)
+                        else {}
+                    ),
+                    "write_policy_request_evidence_diagnostics": (
+                        dict(write_policy_request_evidence_diagnostics)
+                        if write_policy_request_evidence_diagnostics
+                        else {}
+                    ),
                     "write_policy_profile_concept_id": (
                         write_policy_profile_concept_id or None
                     ),
@@ -7980,6 +8103,16 @@ class InternalMCPChatOrchestrator:
                     invocation_record["write_policy_confidence_state"] = (
                         tool_confidence_state or None
                     )
+                    invocation_record["write_policy_request_evidence"] = (
+                        dict(write_policy_request_evidence.get(tool_name) or {})
+                        if write_policy_request_evidence.get(tool_name)
+                        else {}
+                    )
+                    invocation_record["write_policy_request_evidence_diagnostics"] = (
+                        dict(write_policy_request_evidence_diagnostics)
+                        if write_policy_request_evidence_diagnostics
+                        else {}
+                    )
                     invocation_record["write_policy_profile_concept_id"] = (
                         write_policy_profile_concept_id or None
                     )
@@ -8122,6 +8255,14 @@ class InternalMCPChatOrchestrator:
         }
         data["write_policy_intervention_kinds"] = dict(write_policy_intervention_kinds)
         data["write_policy_confidence_states"] = dict(write_policy_confidence_states)
+        data["write_policy_request_evidence"] = {
+            str(tool_name): dict(evidence)
+            for tool_name, evidence in write_policy_request_evidence.items()
+            if isinstance(tool_name, str) and isinstance(evidence, Mapping)
+        }
+        data["write_policy_request_evidence_diagnostics"] = dict(
+            write_policy_request_evidence_diagnostics
+        )
         data["write_policy_profile_concept_id"] = (
             write_policy_profile_concept_id or None
         )
@@ -23003,6 +23144,8 @@ class InternalMCPChatOrchestrator:
                 unresolved_risk_factors={},
                 intervention_kinds={},
                 confidence_states={},
+                request_evidence={},
+                request_evidence_diagnostics={},
                 profile_concept_id=None,
                 profile_diagnostics={},
             )
@@ -23030,6 +23173,10 @@ class InternalMCPChatOrchestrator:
         )
         intervention_kinds = workflow_result.data.get("write_policy_intervention_kinds")
         confidence_states = workflow_result.data.get("write_policy_confidence_states")
+        request_evidence = workflow_result.data.get("write_policy_request_evidence")
+        request_evidence_diagnostics = workflow_result.data.get(
+            "write_policy_request_evidence_diagnostics"
+        )
         profile_concept_id = workflow_result.data.get("write_policy_profile_concept_id")
         profile_diagnostics = workflow_result.data.get(
             "write_policy_profile_diagnostics"
@@ -23117,6 +23264,20 @@ class InternalMCPChatOrchestrator:
             confidence_states=(
                 dict(confidence_states)
                 if isinstance(confidence_states, Mapping)
+                else {}
+            ),
+            request_evidence={
+                str(tool_name): dict(evidence)
+                for tool_name, evidence in (
+                    dict(request_evidence).items()
+                    if isinstance(request_evidence, Mapping)
+                    else []
+                )
+                if isinstance(tool_name, str) and isinstance(evidence, Mapping)
+            },
+            request_evidence_diagnostics=(
+                dict(request_evidence_diagnostics)
+                if isinstance(request_evidence_diagnostics, Mapping)
                 else {}
             ),
             profile_concept_id=(

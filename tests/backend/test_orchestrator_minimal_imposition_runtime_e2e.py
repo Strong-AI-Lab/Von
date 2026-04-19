@@ -69,6 +69,28 @@ class _CapturingLLM:
         return self._responses.pop(0)
 
 
+def _write_request_evidence_response(
+    tool_name: str,
+    *,
+    request_state: str = "low_confidence",
+    confirmation_state: str = "low_confidence",
+    rationale: str = "test stub",
+) -> str:
+    return (
+        '{'
+        '"schema_version":"write_tool_request_evidence.v1",'
+        '"tool_evidence":['
+        "{"
+        f'"tool_name":"{tool_name}",'
+        f'"request_state":"{request_state}",'
+        f'"confirmation_state":"{confirmation_state}",'
+        f'"rationale":"{rationale}"'
+        "}"
+        "]"
+        "}"
+    )
+
+
 def _runtime_profile() -> tuple[dict[str, Any], dict[str, Any]]:
     return (
         {
@@ -116,6 +138,7 @@ def test_runtime_profile_allows_low_risk_additive_write_without_interruption(
     llm = _CapturingLLM(
         [
             '{"action":"call_tool","tool":"download_paper","payload":{"arxiv_id":"2510.06248"}}',
+            _write_request_evidence_response("download_paper"),
             "Done.",
         ]
     )
@@ -156,6 +179,7 @@ def test_runtime_profile_blocks_low_confidence_recoverable_mutation(monkeypatch)
     llm = _CapturingLLM(
         [
             '{"action":"call_tool","tool":"update_concept","payload":{"concept_id":"#V#guarded","update_data":{"description":"updated"}}}',
+            _write_request_evidence_response("update_concept"),
             "Done.",
         ]
     )
@@ -203,6 +227,11 @@ def test_runtime_profile_allows_explicit_recoverable_mutation(monkeypatch):
     llm = _CapturingLLM(
         [
             '{"action":"call_tool","tool":"update_concept","payload":{"concept_id":"#V#guarded","update_data":{"description":"updated"}}}',
+            _write_request_evidence_response(
+                "update_concept",
+                request_state="explicit_request",
+                rationale="current prompt explicitly requests the update",
+            ),
             "Done.",
         ]
     )
@@ -244,6 +273,7 @@ def test_runtime_profile_blocks_high_fan_out_process_sensitive_additive_write(
     llm = _CapturingLLM(
         [
             '{"action":"call_tool","tool":"workflow_bind_event","payload":{"event_type":"task.created","workflow_id":"#V#rumination_workflow"}}',
+            _write_request_evidence_response("workflow_bind_event"),
             "Done.",
         ]
     )
@@ -286,6 +316,7 @@ def test_runtime_profile_requires_confirmation_for_destructive_write(monkeypatch
     llm = _CapturingLLM(
         [
             '{"action":"call_tool","tool":"delete_concept","payload":{"concept_id":"#V#guarded"}}',
+            _write_request_evidence_response("delete_concept"),
             "Done.",
             "Done.",
         ]
@@ -328,6 +359,7 @@ def test_runtime_profile_requires_explicit_request_for_external_write(monkeypatc
     llm = _CapturingLLM(
         [
             '{"action":"call_tool","tool":"jira_update_issue","payload":{"issue_key":"JVNAUTOSCI-1","update_fields":{"summary":"new"}}}',
+            _write_request_evidence_response("jira_update_issue"),
             "Done.",
         ]
     )
@@ -370,6 +402,7 @@ def test_runtime_profile_loader_failure_falls_back_to_baseline_policy(monkeypatc
     llm = _CapturingLLM(
         [
             '{"action":"call_tool","tool":"download_paper","payload":{"arxiv_id":"2510.06248"}}',
+            _write_request_evidence_response("download_paper"),
             "Done.",
         ]
     )
