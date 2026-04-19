@@ -314,9 +314,9 @@ def test_format_tool_result_shapes_search_concepts_payload_for_live_follow_up():
     assert payload["total_count"] == 5
     assert payload["returned_count"] == 5
     assert payload["omitted_low_signal_results"] == 2
-    assert payload["result_quality"]["strength"] == "strong"
-    assert "secondary" in payload["result_quality"]["response_guidance"].lower()
-    assert "omitted" in payload["result_quality"]["note"].lower()
+    assert payload["retrieval_diagnostics"]["scope_only"] is False
+    assert payload["retrieval_diagnostics"]["top_relevance_score"] == 96.0
+    assert "omitted" in payload["retrieval_diagnostics"]["note"].lower()
     assert [item["name"] for item in payload["results"]] == [
         "Under Preparation Paper",
         "Paper Draft",
@@ -365,9 +365,9 @@ def test_format_tool_result_marks_search_concepts_payload_weak_when_matches_are_
 
     parsed = json.loads(encoded)
     payload = parsed["payload"]
-    assert payload["result_quality"]["strength"] == "weak"
-    assert "tentative" in payload["result_quality"]["response_guidance"].lower()
-    assert payload["results"][0]["lexical_grounding"] == "none"
+    assert payload["retrieval_diagnostics"]["scope_only"] is False
+    assert payload["retrieval_diagnostics"]["top_relevance_score"] == 58.0
+    assert "weak relevance scores" in payload["retrieval_diagnostics"]["note"].lower()
 
 
 def test_format_tool_result_shapes_search_arxiv_payload_for_live_follow_up():

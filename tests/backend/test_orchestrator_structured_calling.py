@@ -1355,7 +1355,7 @@ def test_structured_candidate_resolver_suppresses_general_task_family_for_jira_t
     assert "task_list" not in lowered
 
 
-def test_guided_retrieval_retry_uses_user_anchor_for_research_briefing() -> None:
+def test_missing_tool_retry_does_not_force_guided_retrieval_from_research_briefing_context() -> None:
     gateway = MagicMock()
     gateway.describe_methods.return_value = {
         "search_knowledge_base": {},
@@ -1367,12 +1367,12 @@ def test_guided_retrieval_retry_uses_user_anchor_for_research_briefing() -> None
     }
     orchestrator = InternalMCPChatOrchestrator(gateway=gateway)
 
-    calls = orchestrator._infer_guided_retrieval_retry_tool_calls(
-        user_text=(
+    calls = orchestrator._infer_missing_tool_call_retry_tool_calls(
+        user_prompt=(
             "Prepare a short research briefing for me: my represented papers, "
             "relevant recent arXiv work, and any linked Jira tasks."
         ),
-        context_messages=[
+        augmented_context=[
             {
                 "role": "system",
                 "content": (
@@ -1384,7 +1384,7 @@ def test_guided_retrieval_retry_uses_user_anchor_for_research_briefing() -> None
                 ),
             }
         ],
-        expected_outcome_contract={
+        turn_expected_outcome_contract={
             "summary": (
                 "A concise research briefing comprising verified user papers, "
                 "recent relevant arXiv work, and related Jira tasks."
@@ -1400,23 +1400,10 @@ def test_guided_retrieval_retry_uses_user_anchor_for_research_briefing() -> None
         invoked_tool_names=[],
     )
 
-    assert calls is not None
-    by_tool = {str(call["tool"]): call for call in calls}
-    assert "find_relations_with_argument" not in by_tool
-    assert (
-        by_tool["search_arxiv"]["payload"]["query"] == '"Michael Witbrock"'
-    )
-    assert (
-        by_tool["search_web"]["payload"]["query"]
-        == '"Michael Witbrock" research papers'
-    )
-    assert (
-        by_tool["jira_search"]["payload"]["jql"]
-        == '(text ~ "\\"#V#michael_witbrock\\"" OR text ~ "\\"Michael Witbrock\\"") ORDER BY updated DESC'
-    )
+    assert calls is None
 
 
-def test_guided_retrieval_retry_filters_open_jira_tasks_and_focuses_kb_query() -> None:
+def test_missing_tool_retry_does_not_force_guided_retrieval_from_open_jira_context() -> None:
     gateway = MagicMock()
     gateway.describe_methods.return_value = {
         "search_knowledge_base": {},
@@ -1425,12 +1412,12 @@ def test_guided_retrieval_retry_filters_open_jira_tasks_and_focuses_kb_query() -
     }
     orchestrator = InternalMCPChatOrchestrator(gateway=gateway)
 
-    calls = orchestrator._infer_guided_retrieval_retry_tool_calls(
-        user_text=(
+    calls = orchestrator._infer_missing_tool_call_retry_tool_calls(
+        user_prompt=(
             "Which of my open Jira tasks seem most closely connected to the "
             "papers and projects you know about me?"
         ),
-        context_messages=[
+        augmented_context=[
             {
                 "role": "system",
                 "content": (
@@ -1441,7 +1428,7 @@ def test_guided_retrieval_retry_filters_open_jira_tasks_and_focuses_kb_query() -
                 ),
             }
         ],
-        expected_outcome_contract={
+        turn_expected_outcome_contract={
             "summary": (
                 "A grounded answer relating the user's open Jira tasks to their "
                 "represented papers and projects."
@@ -1458,19 +1445,41 @@ def test_guided_retrieval_retry_filters_open_jira_tasks_and_focuses_kb_query() -
         invoked_tool_names=[],
     )
 
-    assert calls is not None
-    by_tool = {str(call["tool"]): call for call in calls}
-    assert by_tool["search_knowledge_base"]["payload"]["query"] == (
-        "Michael Witbrock papers projects"
+    assert calls is None
+
+
+def test_missing_tool_retry_does_not_force_guided_retrieval_from_non_english_prompt() -> None:
+    gateway = MagicMock()
+    gateway.describe_methods.return_value = {
+        "search_knowledge_base": {},
+        "search_concepts": {},
+        "search_web": {},
+    }
+    orchestrator = InternalMCPChatOrchestrator(gateway=gateway)
+
+    calls = orchestrator._infer_missing_tool_call_retry_tool_calls(
+        user_prompt="¿Qué relaciones representadas tienen los estudiantes de SAIL?",
+        augmented_context=[
+            {
+                "role": "system",
+                "content": (
+                    "Selector guidance: Use search_concepts or relation lookup when "
+                    "needed, but keep routing selector-owned."
+                ),
+            }
+        ],
+        turn_expected_outcome_contract={
+            "summary": (
+                "A grounded answer about represented SAIL-student relationships."
+            ),
+            "selector_guidance": (
+                "Use represented KB/ontology retrieval if the selected workflow needs it."
+            ),
+        },
+        invoked_tool_names=[],
     )
-    assert by_tool["search_concepts"]["payload"]["query"] == (
-        "Michael Witbrock papers projects"
-    )
-    assert by_tool["search_concepts"]["payload"]["match_type"] == "any"
-    assert by_tool["jira_search"]["payload"]["jql"] == (
-        'statusCategory != Done AND (text ~ "\\"#V#michael_witbrock\\"" OR '
-        'text ~ "\\"Michael Witbrock\\"") ORDER BY updated DESC'
-    )
+
+    assert calls is None
 
 
 def test_structured_candidate_resolver_caps_hinted_kb_web_planner_sets():

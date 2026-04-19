@@ -152,7 +152,7 @@ def test_apply_vontology_template_search_concepts_empty_query_uses_filter_contex
     assert 'for ""' not in summary
 
 
-def test_apply_vontology_template_search_concepts_empty_query_defaults_to_all_concepts():
+def test_apply_vontology_template_search_concepts_empty_query_omits_empty_query_suffix():
     payload = {
         "results": [{"concept_id": "#V#one"}],
         "query_info": {"query": ""},
@@ -163,7 +163,7 @@ def test_apply_vontology_template_search_concepts_empty_query_defaults_to_all_co
         payload,
     )
 
-    assert summary == 'Found 1 concepts for "all concepts"'
+    assert summary == "Found 1 concepts"
     assert 'for ""' not in summary
 
 
@@ -1321,59 +1321,41 @@ def test_extract_explicit_prompt_tool_requirements_matches_invoke_verb():
     assert "download_paper" in result
 
 
-def test_extract_explicit_prompt_tool_requirements_mcp_family_github_read():
-    """'GitHub MCP read tools' should resolve to all github_read_* tools."""
+def test_extract_explicit_prompt_tool_requirements_ignores_mcp_family_phrases():
+    """Natural-language MCP family phrases are not explicit tool names."""
     catalogue = _GitHubMCPGateway().describe_methods()
     result = InternalMCPChatOrchestrator._extract_explicit_prompt_tool_requirements(
         "Use the GitHub MCP read tools to fetch docs/engineering/manual.md",
         method_catalogue=catalogue,
     )
-    assert "github_read_file" in result
-    assert "github_read_tree" in result
-    # 'search' doesn't match 'read' qualifier
-    assert "github_search_code" not in result
-    # 'jira' doesn't match 'github' provider
-    assert "jira_search" not in result
+    assert result == []
 
 
-def test_extract_explicit_prompt_tool_requirements_mcp_family_no_qualifier():
-    """'GitHub MCP tools' (no qualifier) should match all github_* tools."""
+def test_extract_explicit_prompt_tool_requirements_ignores_unqualified_mcp_family_phrases():
+    """Unqualified MCP-family wording is still not an explicit tool request."""
     catalogue = _GitHubMCPGateway().describe_methods()
     result = InternalMCPChatOrchestrator._extract_explicit_prompt_tool_requirements(
         "Use the GitHub MCP tools to explore the repo",
         method_catalogue=catalogue,
     )
-    assert "github_read_file" in result
-    assert "github_read_tree" in result
-    assert "github_search_code" in result
-    assert "jira_search" not in result
+    assert result == []
 
 
-def test_extract_explicit_prompt_tool_requirements_mcp_family_jira():
-    """'Jira MCP tools' should match jira_* tools."""
+def test_extract_explicit_prompt_tool_requirements_ignores_jira_mcp_family_phrases():
+    """Jira MCP family wording is not treated as an explicit tool requirement."""
     catalogue = _GitHubMCPGateway().describe_methods()
     result = InternalMCPChatOrchestrator._extract_explicit_prompt_tool_requirements(
         "Use the Jira MCP tools to find the task",
         method_catalogue=catalogue,
     )
-    assert "jira_search" in result
-    assert "github_read_file" not in result
-
-
-def test_extract_explicit_prompt_tool_requirements_mcp_family_requires_catalogue():
-    """MCP family pattern should not produce results without a catalogue."""
-    result = InternalMCPChatOrchestrator._extract_explicit_prompt_tool_requirements(
-        "Use the GitHub MCP read tools to fetch docs/manual.md",
-        method_catalogue=None,
-    )
     assert result == []
 
 
 def test_extract_explicit_prompt_tool_requirements_deduplicates():
-    """If a tool is matched by both verb+name and MCP family, only list it once."""
+    """Repeated explicit tool mentions should only surface once."""
     catalogue = {"github_read_file": {"description": "read a file from GitHub"}}
     result = InternalMCPChatOrchestrator._extract_explicit_prompt_tool_requirements(
-        "Use github_read_file via the GitHub MCP read tools",
+        "Use github_read_file and then call github_read_file again",
         method_catalogue=catalogue,
     )
     assert result.count("github_read_file") == 1

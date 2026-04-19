@@ -2377,57 +2377,6 @@ class InternalMCPChatOrchestrator:
         flags=re.IGNORECASE,
     )
     _PROMPT_URL_PATTERN = re.compile(r"\bhttps?://[^\s<>()\"']+", re.IGNORECASE)
-    _URL_READING_SHORT_FRAME_TEXTS: frozenset[str] = frozenset(
-        {
-            "read this",
-            "read this page",
-            "read this link",
-            "read this url",
-            "extract this",
-            "extract this page",
-            "extract this link",
-            "analyse this",
-            "analyze this",
-            "inspect this",
-            "review this",
-            "summarise this",
-            "summarize this",
-            "open this",
-            "visit this",
-            "look at this",
-            "check this",
-            "check this out",
-            "what about this",
-            "please read this",
-            "please extract this",
-            "please analyse this",
-            "please analyze this",
-            "please inspect this",
-            "please summarise this",
-            "please summarize this",
-            "please review this",
-            "please open this",
-            "please visit this",
-            "this",
-            "this link",
-            "this url",
-            "this page",
-        }
-    )
-    _URL_READING_INTENT_PATTERN = re.compile(
-        r"\b("
-        r"read|extract|inspect|analyse|analyze|review|open|visit|parse|"
-        r"summaris(?:e|ed|ing)|summariz(?:e|ed|ing)|scrape|crawl|"
-        r"look\s+at|check\s+out|what(?:'s|\s+is)\s+on|what\s+does(?:\s+this)?\s+say"
-        r")\b",
-        flags=re.IGNORECASE,
-    )
-    # Matches natural-language MCP tool-family references such as
-    # "GitHub MCP read tools" or "Jira MCP tools".
-    _PROMPT_MCP_TOOL_FAMILY_PATTERN = re.compile(
-        r"\b([a-z][a-z0-9_]*)\s+MCP\s+(?:([a-z]+)\s+)?tools?\b",
-        flags=re.IGNORECASE,
-    )
     # NOTE: Concept verification intent (verify/check/confirm/exist) is now
     # workflow/LLM-owned — the selector and LLM decide when to call
     # concept_exists or fetch_concept.  The former Python regex pattern
@@ -11433,13 +11382,7 @@ class InternalMCPChatOrchestrator:
         *,
         method_catalogue: Mapping[str, Any] | None = None,
     ) -> list[str]:
-        """Return tool names explicitly requested via prompt phrases.
-
-        Detects both direct tool-name references ("call fetch_concept",
-        "use search_concepts") and natural-language MCP tool-family
-        references ("GitHub MCP read tools") resolved against the
-        catalogue.
-        """
+        """Return tool names explicitly named in the prompt."""
 
         if not isinstance(user_prompt, str) or not user_prompt.strip():
             return []
@@ -11470,20 +11413,6 @@ class InternalMCPChatOrchestrator:
                 continue
             resolved = catalogue_lookup.get(lowered, candidate)
             _add_tool(resolved)
-
-        # MCP tool-family references (e.g. "GitHub MCP read tools").
-        if catalogue_lookup:
-            for match in cls._PROMPT_MCP_TOOL_FAMILY_PATTERN.finditer(user_prompt):
-                provider = str(match.group(1) or "").strip().lower()
-                qualifier = str(match.group(2) or "").strip().lower()
-                if not provider:
-                    continue
-                for cat_key, canonical in catalogue_lookup.items():
-                    if provider not in cat_key:
-                        continue
-                    if qualifier and qualifier not in cat_key:
-                        continue
-                    _add_tool(canonical)
 
         return required_tools
 
@@ -17046,8 +16975,8 @@ class InternalMCPChatOrchestrator:
         data: Mapping[str, Any],
         *,
         limit: int = 50,
-    ) -> str:
-        """Build a human-meaningful search descriptor for search-like payloads."""
+    ) -> str | None:
+        """Build a structural search descriptor for search-like payloads."""
 
         query_info = data.get("query_info")
         info = query_info if isinstance(query_info, Mapping) else {}
@@ -17091,22 +17020,7 @@ class InternalMCPChatOrchestrator:
             label = "; ".join(parts)
             return label[:limit] + "..." if len(label) > limit else label
 
-        return "all concepts"
-
-    @staticmethod
-    def _tokenise_search_text(value: Any, *, max_tokens: int = 12) -> list[str]:
-        if not isinstance(value, str):
-            return []
-        tokens: list[str] = []
-        seen: set[str] = set()
-        for token in re.findall(r"[A-Za-z0-9]+", value.lower()):
-            if len(token) < 3 or token.isdigit() or token in seen:
-                continue
-            seen.add(token)
-            tokens.append(token)
-            if len(tokens) >= max_tokens:
-                break
-        return tokens
+        return None
 
     @staticmethod
     def _score_search_result_row(row: Mapping[str, Any]) -> float | None:
@@ -17117,22 +17031,6 @@ class InternalMCPChatOrchestrator:
         if isinstance(similarity, (int, float)):
             return float(similarity) * 100.0
         return None
-
-    @classmethod
-    def _compute_search_query_overlap(
-        cls,
-        query_tokens: Sequence[str],
-        *values: Any,
-    ) -> float | None:
-        if not query_tokens:
-            return None
-        haystack_tokens: set[str] = set()
-        for value in values:
-            haystack_tokens.update(cls._tokenise_search_text(value))
-        if not haystack_tokens:
-            return 0.0
-        matched = sum(1 for token in query_tokens if token in haystack_tokens)
-        return matched / len(query_tokens)
 
     @classmethod
     def _compact_search_hierarchy_path(cls, hierarchy: Any) -> str | None:
@@ -17161,11 +17059,11 @@ class InternalMCPChatOrchestrator:
         *,
         max_results: int = 5,
     ) -> dict[str, Any]:
-        """Return a compact, quality-aware search view for same-turn LLM use.
+        """Return a compact search view for same-turn LLM use.
 
-        The live summariser only needs authoritative query context plus the
-        strongest search evidence. Low-signal tails inflate context and can cause
-        the model to narrate unrelated concepts as if they were meaningful.
+        The live summariser only needs authoritative query/filter context plus
+        the strongest search evidence. Python should not add lexical-overlap
+        scoring or answer-writing guidance on top of the tool results.
         """
 
         raw_results = payload.get("results")
@@ -17182,7 +17080,6 @@ class InternalMCPChatOrchestrator:
             raw_query = info.get("query")
         query_text = raw_query.strip() if isinstance(raw_query, str) else ""
         query_label = cls._build_search_query_label(payload, limit=120)
-        query_tokens = cls._tokenise_search_text(query_text)
 
         total_count_raw = payload.get("total_count")
         total_count = (
@@ -17213,7 +17110,6 @@ class InternalMCPChatOrchestrator:
         if not shown_rows and result_rows:
             shown_rows = result_rows[: min(max_results, 3)]
         shown_results: list[dict[str, Any]] = []
-        overlap_values: list[float] = []
         score_values: list[float] = []
 
         for row in shown_rows:
@@ -17243,85 +17139,46 @@ class InternalMCPChatOrchestrator:
             if isinstance(similarity, (int, float)):
                 compact_row["similarity_score"] = round(float(similarity), 3)
 
-            overlap = cls._compute_search_query_overlap(
-                query_tokens,
-                name,
-                concept_id,
-            )
-            if overlap is not None:
-                overlap_values.append(overlap)
-                compact_row["query_token_overlap"] = round(overlap, 3)
-                if overlap >= 0.5:
-                    compact_row["lexical_grounding"] = "high"
-                elif overlap > 0.0:
-                    compact_row["lexical_grounding"] = "partial"
-                else:
-                    compact_row["lexical_grounding"] = "none"
-
             hierarchy_path = cls._compact_search_hierarchy_path(row.get("hierarchy"))
             if hierarchy_path:
                 compact_row["primary_path"] = hierarchy_path
 
             shown_results.append(compact_row)
 
-        scope_only = bool(query_label == "all concepts" and not query_text)
+        scope_only = False
         if not query_text and (
             info.get("instance_of") or info.get("scope_root") or info.get("filter_kind")
         ):
             scope_only = True
 
         if not shown_results:
-            quality_strength = "none"
-            response_guidance = "Report that no matching concepts were found."
-            quality_note = "No concept results were available."
+            diagnostics_note = "No concept results were available."
         elif scope_only:
-            quality_strength = "scope_listing"
-            response_guidance = (
-                "Treat these as scoped results, not lexical verification of a query."
+            diagnostics_note = (
+                "This search used structural filters or scope constraints without a concrete query."
             )
-            quality_note = "This search used filters or scope constraints without a concrete query."
         else:
             best_score = score_values[0] if score_values else None
-            best_overlap = overlap_values[0] if overlap_values else None
-            if (
-                best_score is not None
-                and best_score >= 95.0
-                and (best_overlap is None or best_overlap >= 0.34)
-            ):
-                quality_strength = "strong"
-                response_guidance = (
-                    "You can identify the strongest match directly, but keep lower-ranked "
-                    "results secondary."
+            if best_score is None:
+                diagnostics_note = (
+                    "Top-ranked results did not include numeric relevance scores."
                 )
-                quality_note = "Top-ranked results look like strong name matches."
-            elif (
-                best_score is not None
-                and best_score >= 80.0
-                and (best_overlap is None or best_overlap > 0.0)
-            ):
-                quality_strength = "usable"
-                response_guidance = (
-                    "Describe these as best candidates rather than claiming a single "
-                    "verified match unless the evidence is explicit."
-                )
-                quality_note = "There are plausible candidate matches worth naming."
+            elif best_score >= 95.0:
+                diagnostics_note = "Top-ranked results carry very high relevance scores."
+            elif best_score >= 80.0:
+                diagnostics_note = "Top-ranked results carry moderate relevance scores."
             else:
-                quality_strength = "weak"
-                response_guidance = (
-                    "Use tentative language only; do not present any result as verified, "
-                    "and call out weak or noisy search quality."
-                )
-                quality_note = (
-                    "Top-ranked results are weak, noisy, or lexically mismatched."
-                )
+                diagnostics_note = "Top-ranked results carry weak relevance scores."
 
             if omitted_low_signal_results > 0:
-                quality_note += (
+                diagnostics_note += (
                     f" {omitted_low_signal_results} low-signal result(s) were omitted "
                     "from the live context."
                 )
 
-        compact_query_info: dict[str, Any] = {"query": query_label}
+        compact_query_info: dict[str, Any] = {}
+        if query_label:
+            compact_query_info["query"] = query_label
         for key in (
             "match_type",
             "instance_of",
@@ -17349,10 +17206,12 @@ class InternalMCPChatOrchestrator:
             "shown_count": len(shown_results),
             "omitted_result_count": max(0, returned_count - len(shown_results)),
             "results": shown_results,
-            "result_quality": {
-                "strength": quality_strength,
-                "note": quality_note,
-                "response_guidance": response_guidance,
+            "retrieval_diagnostics": {
+                "scope_only": scope_only,
+                "top_relevance_score": (
+                    round(score_values[0], 3) if score_values else None
+                ),
+                "note": diagnostics_note,
             },
         }
 
@@ -18336,7 +18195,7 @@ class InternalMCPChatOrchestrator:
             result = re.sub(r"\s+", " ", result).strip()
 
             # Guard against low-signal empty-query rendering patterns.
-            result = re.sub(r'for\s*""', 'for "all concepts"', result)
+            result = re.sub(r'\s+for\s*""', "", result)
             result = re.sub(r"\bfor\s*$", "", result).strip()
 
             if not result or result == template:
@@ -22210,387 +22069,6 @@ class InternalMCPChatOrchestrator:
             payload["assignee_concept_id"] = assignee_concept_id.strip()
         return payload
 
-    @staticmethod
-    def _extract_retry_user_anchor(
-        combined_text: str,
-        concept_ids: Sequence[str] = (),
-    ) -> tuple[str | None, str | None]:
-        user_anchor_name: str | None = None
-        user_anchor_concept_id: str | None = None
-        user_anchor_match = re.search(
-            r"(?:current user context|current user)\s*:\s*([^\n(]+?)\s*\((#V#[^)]+)\)",
-            combined_text,
-            flags=re.IGNORECASE,
-        )
-        if user_anchor_match is not None:
-            user_anchor_name = user_anchor_match.group(1).strip() or None
-            user_anchor_concept_id = user_anchor_match.group(2).strip() or None
-        if user_anchor_concept_id is None:
-            candidate_concept_ids = [
-                concept_id
-                for concept_id in concept_ids
-                if "workflow" not in concept_id.lower()
-            ]
-            if candidate_concept_ids:
-                user_anchor_concept_id = candidate_concept_ids[0]
-        return user_anchor_name, user_anchor_concept_id
-
-    @staticmethod
-    def _guided_retrieval_focus_terms(
-        *,
-        lower_prompt: str,
-        combined_context: str,
-    ) -> tuple[str, ...]:
-        focus_terms: list[str] = []
-
-        def _add_term(term: str, *tokens: str) -> None:
-            if term in focus_terms:
-                return
-            if any(token in lower_prompt or token in combined_context for token in tokens):
-                focus_terms.append(term)
-
-        _add_term(
-            "papers",
-            "paper",
-            "papers",
-            "publication",
-            "publications",
-            "represented papers",
-            "authorship",
-        )
-        _add_term("projects", "project", "projects")
-        _add_term(
-            "research",
-            "research",
-            "research theme",
-            "research themes",
-            "collaborator",
-            "collaborators",
-        )
-        return tuple(focus_terms)
-
-    @staticmethod
-    def _combined_context_mentions_open_jira_items(combined_context: str) -> bool:
-        if not isinstance(combined_context, str) or not combined_context.strip():
-            return False
-        lowered = combined_context.lower()
-        if "jira" not in lowered:
-            return False
-        return any(
-            token in lowered
-            for token in (
-                "open jira task",
-                "open jira tasks",
-                "open jira issue",
-                "open jira issues",
-                "open task",
-                "open tasks",
-                "open issue",
-                "open issues",
-                "unresolved jira",
-                "still-open jira",
-                "statuscategory != done",
-            )
-        )
-
-    @classmethod
-    def _build_guided_jira_search_jql(
-        cls,
-        *,
-        combined_context: str,
-        user_anchor_name: str | None,
-        user_anchor_concept_id: str | None,
-    ) -> str | None:
-        anchor_clauses: list[str] = []
-        if user_anchor_concept_id:
-            anchor_clauses.append(f'text ~ "\\"{user_anchor_concept_id}\\""')
-        if user_anchor_name:
-            anchor_clauses.append(f'text ~ "\\"{user_anchor_name}\\""')
-        if not anchor_clauses:
-            return None
-
-        anchor_expression = (
-            f"({' OR '.join(anchor_clauses)})"
-            if len(anchor_clauses) > 1
-            else anchor_clauses[0]
-        )
-        if cls._combined_context_mentions_open_jira_items(combined_context):
-            return f"statusCategory != Done AND {anchor_expression} ORDER BY updated DESC"
-        return f"{anchor_expression} ORDER BY updated DESC"
-
-    @classmethod
-    def _build_guided_retrieval_query(
-        cls,
-        *,
-        tool_name: str,
-        user_text: str,
-        combined_context: str,
-        user_anchor_name: str | None,
-    ) -> str:
-        prompt_text = str(user_text or "").strip()
-        lower_prompt = prompt_text.lower()
-        anchor_name = (
-            str(user_anchor_name).strip()
-            if isinstance(user_anchor_name, str) and str(user_anchor_name).strip()
-            else ""
-        )
-        focus_terms = cls._guided_retrieval_focus_terms(
-            lower_prompt=lower_prompt,
-            combined_context=combined_context,
-        )
-
-        first_person_profile_prompt = (
-            anchor_name
-            and any(token in lower_prompt for token in (" my ", " me ", "mine", "my "))
-            and bool(focus_terms or "arxiv" in lower_prompt or "briefing" in lower_prompt)
-        )
-        grounding_prompt = any(
-            token in combined_context
-            for token in (
-                "authorship/ownership",
-                "authorship",
-                "ownership relationships",
-                "represented papers",
-                "papers authored",
-                "papers owned",
-            )
-        )
-
-        if tool_name == "search_arxiv" and anchor_name and (
-            first_person_profile_prompt or grounding_prompt
-        ):
-            return f'"{anchor_name}"'
-
-        if tool_name == "search_web" and anchor_name and (
-            first_person_profile_prompt or grounding_prompt
-        ):
-            return f'"{anchor_name}" research papers'
-
-        if tool_name in {"search_knowledge_base", "search_concepts"} and anchor_name and (
-            first_person_profile_prompt or grounding_prompt
-        ):
-            query_tokens = [anchor_name, *focus_terms]
-            if len(query_tokens) > 1:
-                return " ".join(query_tokens)
-
-        return prompt_text
-
-    def _infer_guided_retrieval_retry_tool_calls(
-        self,
-        *,
-        user_text: str,
-        context_messages: Sequence[Mapping[str, Any]] | None = None,
-        expected_outcome_contract: Mapping[str, Any] | None = None,
-        invoked_tool_names: Sequence[str] | None = None,
-    ) -> list[_ToolCallRequest] | None:
-        """Force a small retrieval plan when workflow guidance names the steps.
-
-        This is intentionally limited to read/search tools that are explicitly
-        indicated by the surrounding workflow-authored guidance. It exists to
-        preserve recovery for tool-calling turns whose selector/expected-outcome
-        context clearly says to search KB first and then consult an external
-        surface, but where the model fails to emit executable tool calls.
-        """
-
-        prompt_text = user_text.strip()
-        if not prompt_text:
-            return None
-
-        context_bits: list[str] = [prompt_text]
-        for message in context_messages or ():
-            if not isinstance(message, Mapping):
-                continue
-            content = message.get("content")
-            if isinstance(content, str) and content.strip():
-                context_bits.append(content.strip())
-        if isinstance(expected_outcome_contract, Mapping):
-            for field_name in (
-                "summary",
-                "grounding_requirement",
-                "precision_policy",
-                "selector_guidance",
-                "answering_guidance",
-                "reasoning",
-            ):
-                field_value = expected_outcome_contract.get(field_name)
-                if isinstance(field_value, str) and field_value.strip():
-                    context_bits.append(field_value.strip())
-        combined_context = "\n".join(context_bits).lower()
-        if not combined_context:
-            return None
-
-        try:
-            described_methods = self._gateway.describe_methods()
-        except Exception:
-            described_methods = {}
-        available_tools = {
-            str(tool_name).strip().lower()
-            for tool_name in (
-                described_methods.keys() if isinstance(described_methods, Mapping) else ()
-            )
-            if isinstance(tool_name, str) and str(tool_name).strip()
-        }
-        if not available_tools:
-            return None
-        invoked_lookup = {
-            str(tool_name).strip().lower()
-            for tool_name in (invoked_tool_names or ())
-            if isinstance(tool_name, str) and str(tool_name).strip()
-        }
-        concept_ids = self._extract_concept_ids_from_text("\n".join(context_bits))
-        user_anchor_name, user_anchor_concept_id = self._extract_retry_user_anchor(
-            "\n".join(context_bits),
-            concept_ids,
-        )
-
-        wants_kb_search = (
-            "search_knowledge_base" in combined_context
-            or (
-                ("knowledge base" in combined_context or " in my kb" in combined_context)
-                and any(
-                    phrase in combined_context
-                    for phrase in (
-                        "research theme",
-                        "research themes",
-                        "represented theme",
-                        "represented themes",
-                        "extract the current research themes",
-                    )
-                )
-            )
-        )
-        wants_concept_search = (
-            "search_concepts" in combined_context
-            or "concept search" in combined_context
-        )
-        wants_web_search = (
-            "search_web" in combined_context or "web search" in combined_context
-        )
-        wants_arxiv_search = (
-            "search_arxiv" in combined_context or "arxiv search" in combined_context
-        )
-        wants_jira_search = (
-            "jira_search" in combined_context
-            or "jira retrieval" in combined_context
-            or "linked jira task" in combined_context
-            or "linked jira tasks" in combined_context
-        )
-        if not (
-            wants_kb_search
-            or wants_concept_search
-            or wants_web_search
-            or wants_arxiv_search
-            or wants_jira_search
-        ):
-            return None
-
-        forced_calls: list[_ToolCallRequest] = []
-        if (
-            wants_kb_search
-            and "search_knowledge_base" in available_tools
-            and "search_knowledge_base" not in invoked_lookup
-        ):
-            kb_query = self._build_guided_retrieval_query(
-                tool_name="search_knowledge_base",
-                user_text=prompt_text,
-                combined_context=combined_context,
-                user_anchor_name=user_anchor_name,
-            )
-            forced_calls.append(
-                {
-                    "action": "call_tool",
-                    "tool": "search_knowledge_base",
-                    "payload": {"query": kb_query, "top_k": 5},
-                }
-            )
-        if (
-            wants_concept_search
-            and "search_concepts" in available_tools
-            and "search_concepts" not in invoked_lookup
-        ):
-            concept_query = self._build_guided_retrieval_query(
-                tool_name="search_concepts",
-                user_text=prompt_text,
-                combined_context=combined_context,
-                user_anchor_name=user_anchor_name,
-            )
-            forced_calls.append(
-                {
-                    "action": "call_tool",
-                    "tool": "search_concepts",
-                    "payload": {
-                        "query": concept_query,
-                        "match_type": (
-                            "any" if concept_query != prompt_text else "all"
-                        ),
-                        "include_description": True,
-                        "limit": 8,
-                    },
-                }
-            )
-        if (
-            wants_jira_search
-            and "jira_search" in available_tools
-            and "jira_search" not in invoked_lookup
-        ):
-            guided_jql = self._build_guided_jira_search_jql(
-                combined_context=combined_context,
-                user_anchor_name=user_anchor_name,
-                user_anchor_concept_id=user_anchor_concept_id,
-            )
-            if guided_jql:
-                forced_calls.append(
-                    {
-                        "action": "call_tool",
-                        "tool": "jira_search",
-                        "payload": {
-                            "jql": guided_jql,
-                            "max_results": 10,
-                        },
-                    }
-                )
-        if (
-            wants_web_search
-            and "search_web" in available_tools
-            and "search_web" not in invoked_lookup
-        ):
-            forced_calls.append(
-                {
-                    "action": "call_tool",
-                    "tool": "search_web",
-                    "payload": {
-                        "query": self._build_guided_retrieval_query(
-                            tool_name="search_web",
-                            user_text=prompt_text,
-                            combined_context=combined_context,
-                            user_anchor_name=user_anchor_name,
-                        ),
-                        "max_results": 5,
-                    },
-                }
-            )
-        if (
-            wants_arxiv_search
-            and "search_arxiv" in available_tools
-            and "search_arxiv" not in invoked_lookup
-        ):
-            forced_calls.append(
-                {
-                    "action": "call_tool",
-                    "tool": "search_arxiv",
-                    "payload": {
-                        "query": self._build_guided_retrieval_query(
-                            tool_name="search_arxiv",
-                            user_text=prompt_text,
-                            combined_context=combined_context,
-                            user_anchor_name=user_anchor_name,
-                        ),
-                        "max_results": 5,
-                    },
-                }
-            )
-        return forced_calls or None
-
     def _infer_missing_tool_call_retry_tool_calls(
         self,
         augmented_context: Sequence[Mapping[str, Any]],
@@ -22670,14 +22148,6 @@ class InternalMCPChatOrchestrator:
         )
         if required_forced:
             return required_forced
-        guided_retrieval_forced = self._infer_guided_retrieval_retry_tool_calls(
-            user_text=last_user_text,
-            context_messages=augmented_context,
-            expected_outcome_contract=turn_expected_outcome_contract,
-            invoked_tool_names=invoked_tool_names,
-        )
-        if guided_retrieval_forced:
-            return guided_retrieval_forced
         return None
 
     def _resolve_allowed_write_tools(

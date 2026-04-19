@@ -40,6 +40,8 @@ def test_no_prompt_semantic_regex_patterns_in_orchestrator() -> None:
         "_PROMPT_SCHOLARLY_REPRESENTATION_INTENT_PATTERN",
         "_PROMPT_PAPER_INTENT_PATTERN",
         "_PROMPT_REPRESENTATION_INTENT_PATTERN",
+        "_PROMPT_MCP_TOOL_FAMILY_PATTERN",
+        "_URL_READING_INTENT_PATTERN",
     ]
 
     for name in banned_prefixes:
@@ -66,6 +68,23 @@ def test_no_prompt_semantic_regex_patterns_in_orchestrator() -> None:
         f"New prompt-semantic regex patterns detected: {semantic_pattern_attrs}. "
         "All prompt-intent inference must be workflow/LLM-owned, not Python regex."
     )
+
+
+def test_no_guided_retrieval_retry_heuristics_left_in_orchestrator() -> None:
+    """Python must not reconstruct retrieval plans from lexical context."""
+    from src.backend.integrations.internal_mcp import orchestrator as mod
+
+    banned_attributes = [
+        "_guided_retrieval_focus_terms",
+        "_build_guided_retrieval_query",
+        "_infer_guided_retrieval_retry_tool_calls",
+        "_build_guided_jira_search_jql",
+    ]
+    for name in banned_attributes:
+        assert not hasattr(mod.InternalMCPChatOrchestrator, name), (
+            f"{name} was re-introduced in orchestrator. Retrieval recovery must "
+            "remain workflow/LLM-owned rather than Python-authored lexical forcing."
+        )
 
 
 def test_no_python_lexical_selector_guidance_in_policy_service() -> None:
