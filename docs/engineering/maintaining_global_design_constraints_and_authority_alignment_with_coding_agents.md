@@ -221,6 +221,20 @@ surfaces as they are cleaned up. They are not a proof that drift is impossible,
 but they materially reduce the chance of silently reintroducing conventional
 Python-first behaviour.
 
+Keep these tripwires narrow and structurally precise. Prefer symbol-, AST-, or
+contract-aware checks over raw keyword grep when the guarded file can
+legitimately mention the retired concept in comments, docstrings, or
+telemetry-facing prose. The goal is to catch semantic-policy drift, not to
+punish explanatory text.
+
+Current examples of this narrower style are:
+
+- `orchestrator.py`: retired semantic-regex helper names and code-fallback
+  markers
+- `workflow_capability_service.py`: retired BM25/stopword/tokeniser artefacts
+- `write_tool_policy.py`: any regex expansion beyond the bounded confirmation
+  and destructive-confirmation backstops
+
 ## 11. Broader engineering and research context
 
 This note is also motivated by a more general problem that appears to be emerging in current coding-agent practice.

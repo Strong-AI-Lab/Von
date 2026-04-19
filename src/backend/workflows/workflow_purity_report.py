@@ -108,17 +108,72 @@ CORE_SUPPORT_PROMPT_SOURCE_FILES = (
     "src/backend/integrations/internal_mcp/orchestrator.py",
 )
 
+ORCHESTRATOR_RETIRED_SUPPORT_SYMBOLS = {
+    "_PROMPT_MCP_TOOL_FAMILY_PATTERN": "retired_semantic_regex_symbol",
+    "_URL_READING_INTENT_PATTERN": "retired_semantic_regex_symbol",
+    "_guided_retrieval_focus_terms": "retired_guided_retrieval_helper",
+    "_build_guided_retrieval_query": "retired_guided_retrieval_helper",
+    "_infer_guided_retrieval_retry_tool_calls": "retired_guided_retrieval_helper",
+    "_build_guided_jira_search_jql": "retired_guided_retrieval_helper",
+    "_extract_topic_keywords_from_context": "retired_topic_keyword_helper",
+}
+ORCHESTRATOR_RETIRED_SUPPORT_SYMBOL_PATTERNS = {
+    "retired_prompt_semantic_regex_symbol": re.compile(
+        r"^_PROMPT_.*(?:INTENT|HINT|SEMANTIC|INFERENCE|ANALYTICAL).*_PATTERN$"
+    ),
+}
+WORKFLOW_CAPABILITY_RETIRED_SYMBOL_PATTERNS = {
+    "retired_workflow_capability_bm25_symbol": re.compile(
+        r"(?i)(?:^|_)bm25(?:$|_)"
+    ),
+    "retired_workflow_capability_stopword_symbol": re.compile(
+        r"(?i)(?:^|_)stop_?words?(?:$|_)"
+    ),
+    "retired_workflow_capability_tokeniser_symbol": re.compile(
+        r"(?i)^_?tokeni[sz]e(?:_re|_text|_query|r)?$"
+    ),
+    "retired_workflow_capability_token_normaliser_symbol": re.compile(
+        r"(?i)^_?(?:normalise|normalize)_tokens?$"
+    ),
+}
+WORKFLOW_CAPABILITY_RETIRED_IMPORT_MODULES = {
+    "rank_bm25": "retired_workflow_capability_bm25_import",
+}
+WORKFLOW_CAPABILITY_RETIRED_IMPORT_NAMES = {
+    "BM25Okapi": "retired_workflow_capability_bm25_import_name",
+    "InMemoryBM25Retriever": "retired_workflow_capability_bm25_import_name",
+}
+WRITE_TOOL_POLICY_ALLOWED_REGEX_PATTERN_NAMES = frozenset(
+    {"_CONFIRMATION_PATTERN", "_DESTRUCTIVE_MUTATION_PATTERN"}
+)
+
 CORE_SUPPORT_POLICY_CONTRACTS = (
     {
         "name": "orchestrator_support_surface_authority",
         "path": "src/backend/integrations/internal_mcp/orchestrator.py",
         "forbidden_patterns": {
-            "domain_specific_arxiv_literal": re.compile(r"\barxiv\b", re.IGNORECASE),
             "code_fallback_source_marker": re.compile(
                 r"['\"]source['\"]\s*:\s*['\"]code_fallback['\"]",
                 re.IGNORECASE,
             ),
         },
+        "banned_symbol_names": ORCHESTRATOR_RETIRED_SUPPORT_SYMBOLS,
+        "banned_symbol_patterns": ORCHESTRATOR_RETIRED_SUPPORT_SYMBOL_PATTERNS,
+    },
+    {
+        "name": "workflow_capability_retrieval_authority",
+        "path": "src/backend/services/workflow_capability_service.py",
+        "banned_symbol_patterns": WORKFLOW_CAPABILITY_RETIRED_SYMBOL_PATTERNS,
+        "banned_import_modules": WORKFLOW_CAPABILITY_RETIRED_IMPORT_MODULES,
+        "banned_import_names": WORKFLOW_CAPABILITY_RETIRED_IMPORT_NAMES,
+    },
+    {
+        "name": "write_tool_policy_regex_backstop_scope",
+        "path": "src/backend/workflows/write_tool_policy.py",
+        "allowed_regex_pattern_names": sorted(
+            WRITE_TOOL_POLICY_ALLOWED_REGEX_PATTERN_NAMES
+        ),
+        "allowed_regex_helper_functions": ("prompt_explicitly_denies_write",),
     },
 )
 
@@ -348,6 +403,243 @@ def _extract_top_level_function_source(
             "text": function_text,
         }
     return None
+
+
+def _iter_contract_symbol_records(tree: ast.AST) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            records.append(
+                {
+                    "name": str(node.name),
+                    "line": int(getattr(node, "lineno", 0) or 0),
+                    "kind": "definition",
+                }
+            )
+            continue
+
+        if isinstance(node, ast.Assign):
+            target_names: list[str] = []
+            for target in node.targets:
+                target_names.extend(_extract_target_names(target))
+            for name in target_names:
+                records.append(
+                    {
+                        "name": str(name),
+                        "line": int(getattr(node, "lineno", 0) or 0),
+                        "kind": "assignment",
+                    }
+                )
+            continue
+
+        if isinstance(node, ast.AnnAssign):
+            for name in _extract_target_names(node.target):
+                records.append(
+                    {
+                        "name": str(name),
+                        "line": int(getattr(node, "lineno", 0) or 0),
+                        "kind": "assignment",
+                    }
+                )
+            continue
+
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                records.append(
+                    {
+                        "name": str(alias.asname or alias.name.split(".")[-1]),
+                        "line": int(getattr(node, "lineno", 0) or 0),
+                        "kind": "import",
+                        "import_module": str(alias.name),
+                        "import_name": str(alias.name.split(".")[-1]),
+                    }
+                )
+            continue
+
+        if isinstance(node, ast.ImportFrom):
+            module_name = str(node.module or "")
+            for alias in node.names:
+                records.append(
+                    {
+                        "name": str(alias.asname or alias.name),
+                        "line": int(getattr(node, "lineno", 0) or 0),
+                        "kind": "import",
+                        "import_module": module_name,
+                        "import_name": str(alias.name),
+                    }
+                )
+    return records
+
+
+def _scan_contract_symbol_drift(
+    *,
+    tree: ast.AST,
+    relative_path: str,
+    contract: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    violations: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, int]] = set()
+    banned_symbol_names = {
+        str(name): str(reason)
+        for name, reason in dict(contract.get("banned_symbol_names") or {}).items()
+        if str(name).strip() and str(reason).strip()
+    }
+    banned_symbol_patterns = [
+        (str(reason), pattern)
+        for reason, pattern in dict(contract.get("banned_symbol_patterns") or {}).items()
+        if str(reason).strip() and isinstance(pattern, re.Pattern)
+    ]
+    banned_import_modules = {
+        str(name): str(reason)
+        for name, reason in dict(contract.get("banned_import_modules") or {}).items()
+        if str(name).strip() and str(reason).strip()
+    }
+    banned_import_names = {
+        str(name): str(reason)
+        for name, reason in dict(contract.get("banned_import_names") or {}).items()
+        if str(name).strip() and str(reason).strip()
+    }
+
+    def _append_violation(*, line: int, pattern: str, symbol: str | None = None) -> None:
+        key = (pattern, str(symbol or ""), int(line))
+        if key in seen:
+            return
+        seen.add(key)
+        payload = {
+            "path": relative_path,
+            "line": int(line),
+            "pattern": str(pattern),
+        }
+        if symbol:
+            payload["symbol"] = str(symbol)
+        violations.append(payload)
+
+    for record in _iter_contract_symbol_records(tree):
+        name = str(record.get("name") or "")
+        line = int(record.get("line") or 0)
+        import_module = str(record.get("import_module") or "")
+        import_name = str(record.get("import_name") or "")
+
+        exact_reason = banned_symbol_names.get(name)
+        if exact_reason:
+            _append_violation(line=line, pattern=exact_reason, symbol=name)
+
+        for reason, pattern in banned_symbol_patterns:
+            if pattern.search(name):
+                _append_violation(line=line, pattern=reason, symbol=name)
+
+        if import_module in banned_import_modules:
+            _append_violation(
+                line=line,
+                pattern=banned_import_modules[import_module],
+                symbol=import_module,
+            )
+
+        if import_name in banned_import_names:
+            _append_violation(
+                line=line,
+                pattern=banned_import_names[import_name],
+                symbol=import_name,
+            )
+
+    return violations
+
+
+def _scan_allowed_regex_backstop_scope(
+    *,
+    tree: ast.AST,
+    relative_path: str,
+    allowed_pattern_names: Sequence[str],
+    allowed_helper_functions: Sequence[str] = (),
+) -> list[dict[str, Any]]:
+    allowed_names = {str(name) for name in allowed_pattern_names if str(name).strip()}
+    allowed_helpers = {
+        str(name) for name in allowed_helper_functions if str(name).strip()
+    }
+    violations: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, int]] = set()
+
+    def _append_violation(
+        *,
+        line: int,
+        pattern: str,
+        symbol: str | None = None,
+        call_name: str | None = None,
+    ) -> None:
+        key = (pattern, str(symbol or call_name or ""), int(line))
+        if key in seen:
+            return
+        seen.add(key)
+        payload = {
+            "path": relative_path,
+            "line": int(line),
+            "pattern": str(pattern),
+        }
+        if symbol:
+            payload["symbol"] = str(symbol)
+        if call_name:
+            payload["call"] = str(call_name)
+        violations.append(payload)
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, ast.Attribute):
+            continue
+        if not isinstance(node.func.value, ast.Name):
+            continue
+        if node.func.value.id != "re":
+            continue
+        call_name = str(node.func.attr)
+        line = int(getattr(node, "lineno", 0) or 0)
+        current_parent = getattr(node, "parent", None)
+        while current_parent is not None:
+            if isinstance(current_parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if str(current_parent.name) in allowed_helpers:
+                    break
+            current_parent = getattr(current_parent, "parent", None)
+        else:
+            current_parent = None
+        if current_parent is not None and isinstance(
+            current_parent, (ast.FunctionDef, ast.AsyncFunctionDef)
+        ):
+            continue
+        is_module_level_compile = False
+        module_level_symbols: list[str] = []
+
+        if call_name == "compile":
+            parent = getattr(node, "parent", None)
+            grandparent = getattr(parent, "parent", None)
+            if isinstance(parent, ast.Assign) and isinstance(grandparent, ast.Module):
+                is_module_level_compile = True
+                for target in parent.targets:
+                    module_level_symbols.extend(_extract_target_names(target))
+            elif isinstance(parent, ast.AnnAssign) and isinstance(grandparent, ast.Module):
+                is_module_level_compile = True
+                module_level_symbols.extend(_extract_target_names(parent.target))
+
+        if is_module_level_compile and module_level_symbols:
+            disallowed_symbols = sorted(
+                symbol for symbol in module_level_symbols if symbol not in allowed_names
+            )
+            for symbol in disallowed_symbols:
+                _append_violation(
+                    line=line,
+                    pattern="unexpected_write_tool_regex_backstop",
+                    symbol=symbol,
+                    call_name=call_name,
+                )
+            if not disallowed_symbols:
+                continue
+            continue
+
+        _append_violation(
+            line=line,
+            pattern="unexpected_write_tool_regex_backstop",
+            call_name=call_name,
+        )
+
+    return violations
 
 
 def _scan_direct_instance_create_callsites(project_root: Path) -> dict[str, Any]:
@@ -646,6 +938,12 @@ def _scan_core_support_policy_contracts(project_root: Path) -> dict[str, Any]:
             )
             continue
         text = path.read_text(encoding="utf-8")
+        try:
+            tree = ast.parse(text, filename=relative_path)
+        except SyntaxError:
+            tree = None
+        if tree is not None:
+            _annotate_ast_parents(tree)
         contract_violations: list[dict[str, Any]] = []
         for pattern_name, pattern in dict(
             contract.get("forbidden_patterns") or {}
@@ -660,6 +958,42 @@ def _scan_core_support_policy_contracts(project_root: Path) -> dict[str, Any]:
                         "pattern": str(pattern_name),
                     }
                 )
+        if tree is not None:
+            contract_violations.extend(
+                _scan_contract_symbol_drift(
+                    tree=tree,
+                    relative_path=relative_path,
+                    contract=contract,
+                )
+            )
+            allowed_regex_pattern_names = tuple(
+                str(name)
+                for name in contract.get("allowed_regex_pattern_names", ())
+                if str(name).strip()
+            )
+            if allowed_regex_pattern_names:
+                allowed_regex_helper_functions = tuple(
+                    str(name)
+                    for name in contract.get("allowed_regex_helper_functions", ())
+                    if str(name).strip()
+                )
+                contract_violations.extend(
+                    _scan_allowed_regex_backstop_scope(
+                        tree=tree,
+                        relative_path=relative_path,
+                        allowed_pattern_names=allowed_regex_pattern_names,
+                        allowed_helper_functions=allowed_regex_helper_functions,
+                    )
+                )
+        contract_violations = sorted(
+            contract_violations,
+            key=lambda item: (
+                int(item.get("line", 0) or 0),
+                str(item.get("pattern") or ""),
+                str(item.get("symbol") or ""),
+                str(item.get("call") or ""),
+            ),
+        )
         contracts.append(
             {
                 "name": str(contract["name"]),

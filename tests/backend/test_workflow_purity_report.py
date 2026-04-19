@@ -780,20 +780,45 @@ def test_build_workflow_purity_report_flags_python_authored_workflow_prompt_sour
     ]
 
 
-def test_build_workflow_purity_report_flags_core_support_prompt_and_policy_drift(
+def test_build_workflow_purity_report_flags_post_cleanup_support_surface_drift(
     tmp_path: Path,
 ) -> None:
     _write(
         "src/backend/integrations/internal_mcp/orchestrator.py",
         (
+            "import re\n\n"
             "class Orchestrator:\n"
+            "    _PROMPT_MCP_TOOL_FAMILY_PATTERN = re.compile(r'web|jira')\n\n"
             "    def build_prompt(self):\n"
             '        return """Current turn request to route:\\n'
             "Use the surrounding turn context to resolve references and continuity.\\n"
             "Keep this request as the immediate routing objective.\\n"
             '"""\n\n'
+            "    def _extract_topic_keywords_from_context(self):\n"
+            "        return ()\n\n"
             "    def mark_source(self):\n"
-            "        return {'source': 'code_fallback', 'topic': 'arxiv'}\n"
+            "        return {'source': 'code_fallback'}\n"
+        ),
+        root=tmp_path,
+    )
+    _write(
+        "src/backend/services/workflow_capability_service.py",
+        (
+            '"""Retired BM25/stopword core should only be mentioned in prose."""\n'
+            "from rank_bm25 import BM25Okapi\n\n"
+            "_STOP_WORDS = {'the', 'a'}\n\n"
+            "def _tokenise_query(value):\n"
+            "    return [value]\n"
+        ),
+        root=tmp_path,
+    )
+    _write(
+        "src/backend/workflows/write_tool_policy.py",
+        (
+            "import re\n\n"
+            "_CONFIRMATION_PATTERN = re.compile(r'yes')\n"
+            "EXTRA_PATTERN = re.compile(r'create|update')\n"
+            "INLINE_ALLOW = re.search(r'create', 'create task')\n"
         ),
         root=tmp_path,
     )
@@ -839,15 +864,87 @@ def test_build_workflow_purity_report_flags_core_support_prompt_and_policy_drift
     assert support_prompt_sources[0]["path"] == (
         "src/backend/integrations/internal_mcp/orchestrator.py"
     )
-    assert support_prompt_sources[0]["line"] == 3
+    assert support_prompt_sources[0]["line"] == 7
     assert str(support_prompt_sources[0]["preview"]).startswith(
         "Current turn request to route:\n"
         "Use the surrounding turn context to resolve references and continuity.\n"
         "Keep this request"
     )
     support_contracts = report["details"]["support_surface_policy_contracts"]
-    assert report["counters"]["support_surface_policy_contract_violation_count"] == 2
-    assert sorted(item["pattern"] for item in support_contracts["violations"]) == [
+    assert report["counters"]["support_surface_policy_contract_violation_count"] == 9
+    patterns = [item["pattern"] for item in support_contracts["violations"]]
+    assert patterns.count("unexpected_write_tool_regex_backstop") == 2
+    assert sorted(set(patterns)) == [
         "code_fallback_source_marker",
-        "domain_specific_arxiv_literal",
+        "retired_semantic_regex_symbol",
+        "retired_topic_keyword_helper",
+        "retired_workflow_capability_bm25_import",
+        "retired_workflow_capability_bm25_import_name",
+        "retired_workflow_capability_stopword_symbol",
+        "retired_workflow_capability_tokeniser_symbol",
+        "unexpected_write_tool_regex_backstop",
     ]
+    assert "domain_specific_arxiv_literal" not in patterns
+
+
+def test_build_workflow_purity_report_ignores_explanatory_docstrings_in_guarded_files(
+    tmp_path: Path,
+) -> None:
+    _write(
+        "src/backend/services/workflow_capability_service.py",
+        (
+            '"""This file replaced the old BM25 and stopword implementation."""\n'
+            "# BM25 / stopword references in comments should stay non-authoritative.\n"
+            "def describe():\n"
+            "    return 'workflow retrieval support'\n"
+        ),
+        root=tmp_path,
+    )
+    _write(
+        "src/backend/workflows/write_tool_policy.py",
+        (
+            '"""Bounded regex backstops remain allowed here."""\n'
+            "import re\n\n"
+            "_CONFIRMATION_PATTERN = re.compile(r'yes')\n"
+            "_DESTRUCTIVE_MUTATION_PATTERN = re.compile(r'delete')\n"
+        ),
+        root=tmp_path,
+    )
+    baseline_path = (
+        tmp_path / "tests" / "backend" / "fixtures" / "workflow_purity_baseline.json"
+    )
+    baseline_path.parent.mkdir(parents=True, exist_ok=True)
+    baseline_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "workflow_purity_baseline.v1",
+                "counters": {
+                    "built_in_registration_count": 0,
+                    "remaining_python_workflow_family_count": 0,
+                    "python_authored_canonical_workflow_source_count": 0,
+                    "python_authored_workflow_prompt_source_count": 0,
+                    "python_authored_support_prompt_source_count": 0,
+                    "direct_instance_create_callsite_count": 0,
+                    "env_event_binding_count": 0,
+                    "legacy_selector_mode_count": 0,
+                    "builtin_capability_override_count": 0,
+                    "non_vontology_discoverable_workflow_count": 0,
+                    "repo_seed_authority_drift_path_count": 0,
+                    "vontology_first_seed_fallback_violation_count": 0,
+                    "workflow_id_special_case_count": 0,
+                    "supervised_fail_open_fallback_count": 0,
+                    "support_surface_policy_contract_violation_count": 0,
+                    "synthesized_launch_contract_count": 0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = build_workflow_purity_report(
+        registry=None,
+        project_root=tmp_path,
+        baseline_path=baseline_path,
+    )
+
+    assert report["counters"]["support_surface_policy_contract_violation_count"] == 0
