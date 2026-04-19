@@ -35,59 +35,12 @@ _FILE_SUBTYPE_RULES: tuple[dict[str, Any], ...] = (
     },
 )
 
-_ORGANISATION_SUFFIX_PATTERN = re.compile(
-    r"\b("
-    r"(?:[A-Z][A-Za-z0-9&'().,\-]*(?:[ \t]+[A-Z][A-Za-z0-9&'().,\-]*){0,8})[ \t]+"
-    r"(?:"
-    r"University|Institute|Organisation|Organization|Agency|Council|Ministry|"
-    r"Department|Centre|Center|Committee|Commission|Foundation|Association|"
-    r"Alliance|Consortium|Laboratory|Laboratories|Lab|School|Company|"
-    r"Corporation|Limited|Ltd|Inc|LLC|Group|Office|Authority|Bank|Society|"
-    r"Hospital|College|Press|Secretariat|Trust"
-    r")"
-    r")\b"
-)
-_ORGANISATION_PREFIX_PATTERN = re.compile(
-    r"\b("
-    r"(?:"
-    r"University|Institute|Organisation|Organization|Agency|Council|Ministry|"
-    r"Department|Centre|Center|Committee|Commission|Foundation|Association|"
-    r"Alliance|Consortium|Laboratory|Laboratories|Lab|School|Company|"
-    r"Corporation|Bank|Society|Hospital|College|Office|Authority|Press|Secretariat|Trust"
-    r")[ \t]+of[ \t]+"
-    r"(?:[A-Z][A-Za-z0-9&'().,\-]*(?:[ \t]+[A-Z][A-Za-z0-9&'().,\-]*){0,8})"
-    r")\b"
-)
-_ALL_CAPS_ORG_PATTERN = re.compile(r"\b[A-Z][A-Z0-9&.\-]{1,15}\b")
 _DIAGRAM_KEYWORD_PATTERN = re.compile(
     r"\b(diagram|ecosystem|governance|network|stakeholder|consortium|"
     r"alliance|architecture|workflow|pipeline|flow|map|chart)\b",
     re.IGNORECASE,
 )
 _RELATION_CONNECTOR_PATTERN = re.compile(r"(?:->|=>|→|↔|<->|--|—|-)")
-_ORGANISATION_STOPWORDS = frozenset(
-    {
-        "AND",
-        "OR",
-        "FOR",
-        "THE",
-        "WITH",
-        "FROM",
-        "THIS",
-        "THAT",
-        "FIGURE",
-        "TABLE",
-        "DATA",
-        "MODEL",
-        "SYSTEM",
-        "INPUT",
-        "OUTPUT",
-        "OCR",
-        "PDF",
-        "API",
-        "HTTP",
-    }
-)
 
 
 def _utc_now_iso() -> str:
@@ -206,6 +159,185 @@ def _normalise_candidate_name(value: str) -> str:
     return cleaned
 
 
+def _coerce_segment_id(
+    value: Any,
+    *,
+    fallback_prefix: str,
+    index: int,
+) -> str:
+    cleaned = _normalise_optional_text(value)
+    if cleaned:
+        return cleaned
+    return f"{fallback_prefix}_{index + 1}"
+
+
+def _prepare_diagram_interpretation_segments(
+    *,
+    prose_text: str | None,
+    diagram_segments: Sequence[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], set[str]]:
+    prepared_segments: list[dict[str, Any]] = []
+    prose_segment_ids: set[str] = set()
+
+    prose_value = _normalise_optional_text(prose_text)
+    if prose_value:
+        segment_id = "prose_segment_1"
+        prose_segment_ids.add(segment_id)
+        prepared_segments.append(
+            {
+                "segment_id": segment_id,
+                "source_type": "prose_text",
+                "page_number": None,
+                "figure_id": None,
+                "extraction_method": "pymupdf_text_layer",
+                "text": prose_value,
+            }
+        )
+
+    for index, raw_segment in enumerate(diagram_segments):
+        if not isinstance(raw_segment, Mapping):
+            continue
+        text_value = _normalise_optional_text(raw_segment.get("text"))
+        if not text_value:
+            continue
+        prepared_segments.append(
+            {
+                "segment_id": _coerce_segment_id(
+                    raw_segment.get("segment_id"),
+                    fallback_prefix="diagram_segment",
+                    index=index,
+                ),
+                "source_type": "diagram_segment",
+                "page_number": (
+                    raw_segment.get("page_number")
+                    if isinstance(raw_segment.get("page_number"), int)
+                    else None
+                ),
+                "figure_id": _normalise_optional_text(raw_segment.get("figure_id")),
+                "extraction_method": _normalise_optional_text(
+                    raw_segment.get("extraction_method")
+                ),
+                "text": text_value,
+            }
+        )
+
+    return prepared_segments, prose_segment_ids
+
+
+def _build_segment_lookup(
+    segments: Sequence[Mapping[str, Any]],
+) -> dict[str, Mapping[str, Any]]:
+    lookup: dict[str, Mapping[str, Any]] = {}
+    for segment in segments:
+        if not isinstance(segment, Mapping):
+            continue
+        segment_id = _normalise_optional_text(segment.get("segment_id"))
+        if not segment_id:
+            continue
+        lookup[segment_id] = segment
+    return lookup
+
+
+def _build_candidate_provenance(
+    segment_refs: Sequence[str],
+    *,
+    segment_lookup: Mapping[str, Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], bool, bool]:
+    provenance: list[dict[str, Any]] = []
+    has_prose = False
+    has_diagram = False
+    for segment_ref in segment_refs:
+        segment = segment_lookup.get(segment_ref)
+        if not isinstance(segment, Mapping):
+            continue
+        source_type = _normalise_optional_text(segment.get("source_type")) or "unknown"
+        provenance.append(
+            {
+                "source": source_type,
+                "segment_id": segment_ref,
+                "page_number": (
+                    segment.get("page_number")
+                    if isinstance(segment.get("page_number"), int)
+                    else None
+                ),
+                "figure_id": _normalise_optional_text(segment.get("figure_id")),
+                "extraction_method": _normalise_optional_text(
+                    segment.get("extraction_method")
+                ),
+            }
+        )
+        if source_type == "prose_text":
+            has_prose = True
+        elif source_type == "diagram_segment":
+            has_diagram = True
+    return provenance, has_prose, has_diagram
+
+
+def _normalise_authoritative_organisation_candidate(
+    raw_candidate: Mapping[str, Any],
+    *,
+    segment_lookup: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    name = _normalise_optional_text(raw_candidate.get("name"))
+    if not name:
+        return None
+    segment_refs = [
+        item.strip()
+        for item in (raw_candidate.get("segment_refs") or [])
+        if isinstance(item, str) and item.strip()
+    ]
+    provenance, has_prose, has_diagram = _build_candidate_provenance(
+        segment_refs,
+        segment_lookup=segment_lookup,
+    )
+    if not provenance:
+        return None
+    return {
+        "name": name,
+        "segment_refs": list(segment_refs),
+        "evidence_excerpt": _normalise_optional_text(
+            raw_candidate.get("evidence_excerpt")
+        ),
+        "provenance": provenance,
+        "_has_prose": has_prose,
+        "_has_diagram": has_diagram,
+    }
+
+
+def _normalise_authoritative_relationship_candidate(
+    raw_candidate: Mapping[str, Any],
+    *,
+    segment_lookup: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    source_name = _normalise_optional_text(raw_candidate.get("source_name"))
+    target_name = _normalise_optional_text(raw_candidate.get("target_name"))
+    relation_hint = _normalise_optional_text(raw_candidate.get("relation_hint"))
+    if not source_name or not target_name or not relation_hint:
+        return None
+    segment_refs = [
+        item.strip()
+        for item in (raw_candidate.get("segment_refs") or [])
+        if isinstance(item, str) and item.strip()
+    ]
+    provenance, _has_prose, has_diagram = _build_candidate_provenance(
+        segment_refs,
+        segment_lookup=segment_lookup,
+    )
+    if not provenance:
+        return None
+    return {
+        "source_name": source_name,
+        "target_name": target_name,
+        "relation_hint": relation_hint,
+        "segment_refs": list(segment_refs),
+        "evidence_excerpt": _normalise_optional_text(
+            raw_candidate.get("evidence_excerpt")
+        ),
+        "provenance": provenance,
+        "_has_diagram": has_diagram,
+    }
+
+
 def is_pdf_file(*, content_type: str | None, filename: str | None) -> bool:
     content_type_clean = _normalise_optional_text(content_type)
     if isinstance(content_type_clean, str) and content_type_clean.lower().startswith(
@@ -225,80 +357,41 @@ def extract_organisation_candidates_from_text(
     extraction_method: str | None = None,
     max_candidates: int = 40,
 ) -> list[dict[str, Any]]:
-    """Extract candidate organisation names from text with provenance metadata."""
+    """Extract candidate organisations via the authoritative interpretation path."""
 
     source_text = _normalise_optional_text(text)
     if not source_text:
         return []
 
-    candidate_map: dict[str, dict[str, Any]] = {}
-
-    def _register(raw_name: str, *, rule: str, base_confidence: float) -> None:
-        name = _normalise_candidate_name(raw_name)
-        if not name or len(name) < 3:
-            return
-        upper_name = name.upper()
-        if upper_name in _ORGANISATION_STOPWORDS:
-            return
-
-        key = name.casefold()
-        row = candidate_map.get(key)
-        if row is None:
-            row = {
-                "name": name,
-                "confidence": float(base_confidence),
-                "evidence_count": 1,
-                "evidence_rules": {rule},
-            }
-            candidate_map[key] = row
-        else:
-            row["confidence"] = max(float(row.get("confidence", 0.0)), base_confidence)
-            row["evidence_count"] = int(row.get("evidence_count", 0)) + 1
-            rules = row.get("evidence_rules")
-            if not isinstance(rules, set):
-                rules = set()
-            rules.add(rule)
-            row["evidence_rules"] = rules
-
-    for match in _ORGANISATION_PREFIX_PATTERN.finditer(source_text):
-        _register(match.group(1), rule="org_prefix", base_confidence=0.8)
-
-    for match in _ORGANISATION_SUFFIX_PATTERN.finditer(source_text):
-        _register(match.group(1), rule="org_suffix", base_confidence=0.82)
-
-    for match in _ALL_CAPS_ORG_PATTERN.finditer(source_text):
-        token = match.group(0).strip()
-        if len(token) < 3:
-            continue
-        if token in _ORGANISATION_STOPWORDS:
-            continue
-        _register(token, rule="all_caps", base_confidence=0.55)
-
-    rows = sorted(
-        candidate_map.values(),
-        key=lambda item: (-float(item.get("confidence", 0.0)), str(item.get("name", ""))),
+    from .file_copy_diagram_interpretation_vontology_service import (
+        infer_file_copy_diagram_semantics,
     )
-    rows = rows[: max(1, int(max_candidates))]
 
-    extracted_at = _utc_now_iso()
-    output: list[dict[str, Any]] = []
-    for row in rows:
-        output.append(
-            {
-                "name": row["name"],
-                "confidence": round(float(row["confidence"]), 3),
-                "evidence_count": int(row["evidence_count"]),
-                "evidence_rules": sorted(str(rule) for rule in (row.get("evidence_rules") or [])),
-                "provenance": {
-                    "source": source,
-                    "page_number": page_number,
-                    "figure_id": figure_id,
-                    "extraction_method": extraction_method,
-                    "extracted_at": extracted_at,
-                },
-            }
+    source_type = source or ("prose_text" if source == "pdf_prose_text" else "diagram_segment")
+    segment = {
+        "segment_id": "single_segment_1",
+        "source_type": source_type,
+        "page_number": page_number,
+        "figure_id": figure_id,
+        "extraction_method": extraction_method,
+        "text": source_text,
+    }
+    payload, _diagnostics = infer_file_copy_diagram_semantics(
+        segments=[segment],
+        max_candidates=max_candidates,
+    )
+    segment_lookup = _build_segment_lookup([segment])
+    rows: list[dict[str, Any]] = []
+    for raw_candidate in payload.get("organisation_candidates") or []:
+        if not isinstance(raw_candidate, Mapping):
+            continue
+        row = _normalise_authoritative_organisation_candidate(
+            raw_candidate,
+            segment_lookup=segment_lookup,
         )
-    return output
+        if row is not None:
+            rows.append(row)
+    return _merge_organisation_candidates(rows, max_candidates=max_candidates)
 
 
 def extract_relationship_candidates_from_text(
@@ -310,64 +403,45 @@ def extract_relationship_candidates_from_text(
     extraction_method: str | None = None,
     max_candidates: int = 40,
 ) -> list[dict[str, Any]]:
-    """Extract lightweight relation candidates from diagram-like connector text."""
+    """Extract relation candidates via the authoritative interpretation path."""
 
     source_text = _normalise_optional_text(text)
     if not source_text:
         return []
-    names = [item.strip() for item in organisation_names if isinstance(item, str) and item.strip()]
-    if len(names) < 2:
-        return []
 
-    candidate_rows: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str, int | None, str | None]] = set()
-    lowered_pairs = [(name, name.casefold()) for name in names]
+    from .file_copy_diagram_interpretation_vontology_service import (
+        infer_file_copy_diagram_semantics,
+    )
 
-    for line in source_text.splitlines():
-        cleaned_line = _normalise_whitespace(line)
-        if not cleaned_line:
+    segment = {
+        "segment_id": "single_segment_1",
+        "source_type": "diagram_segment",
+        "page_number": page_number,
+        "figure_id": figure_id,
+        "extraction_method": extraction_method,
+        "text": source_text,
+    }
+    payload, _diagnostics = infer_file_copy_diagram_semantics(
+        segments=[segment],
+        max_candidates=max_candidates,
+        allowed_organisation_names=[
+            item.strip()
+            for item in organisation_names
+            if isinstance(item, str) and item.strip()
+        ],
+    )
+    segment_lookup = _build_segment_lookup([segment])
+    rows: list[dict[str, Any]] = []
+    for raw_candidate in payload.get("relationship_candidates") or []:
+        if not isinstance(raw_candidate, Mapping):
             continue
-        connector_match = _RELATION_CONNECTOR_PATTERN.search(cleaned_line)
-        if connector_match is None:
-            continue
-        connector = connector_match.group(0)
-        relation_hint = "directed_link" if connector in {"->", "=>", "→"} else "association"
-
-        hits: list[tuple[int, str]] = []
-        lowered_line = cleaned_line.casefold()
-        for original_name, folded_name in lowered_pairs:
-            idx = lowered_line.find(folded_name)
-            if idx >= 0:
-                hits.append((idx, original_name))
-        if len(hits) < 2:
-            continue
-        hits.sort(key=lambda item: item[0])
-
-        for index in range(len(hits) - 1):
-            left = hits[index][1]
-            right = hits[index + 1][1]
-            key = (left.casefold(), right.casefold(), relation_hint, page_number, figure_id)
-            if key in seen:
-                continue
-            seen.add(key)
-            candidate_rows.append(
-                {
-                    "source_name": left,
-                    "target_name": right,
-                    "relation_hint": relation_hint,
-                    "confidence": 0.58 if relation_hint == "directed_link" else 0.5,
-                    "provenance": {
-                        "source": "pdf_diagram_relation_candidate",
-                        "page_number": page_number,
-                        "figure_id": figure_id,
-                        "extraction_method": extraction_method,
-                        "connector": connector,
-                        "line_excerpt": cleaned_line[:260],
-                    },
-                }
-            )
-
-    return candidate_rows[: max(1, int(max_candidates))]
+        row = _normalise_authoritative_relationship_candidate(
+            raw_candidate,
+            segment_lookup=segment_lookup,
+        )
+        if row is not None:
+            rows.append(row)
+    return _merge_relationship_candidates(rows, max_candidates=max_candidates)
 
 
 def _merge_organisation_candidates(
@@ -382,49 +456,153 @@ def _merge_organisation_candidates(
             continue
         key = raw_name.strip().casefold()
         target = merged.get(key)
-        provenance = row.get("provenance")
+        provenance = list(row.get("provenance") or [])
+        evidence_excerpt = _normalise_optional_text(row.get("evidence_excerpt"))
+        segment_refs = [
+            item.strip()
+            for item in (row.get("segment_refs") or [])
+            if isinstance(item, str) and item.strip()
+        ]
         if target is None:
             target = {
                 "name": raw_name.strip(),
-                "confidence": float(row.get("confidence") or 0.0),
-                "evidence_count": int(row.get("evidence_count") or 0),
-                "evidence_rules": set(row.get("evidence_rules") or []),
-                "provenance": [dict(provenance)] if isinstance(provenance, Mapping) else [],
+                "segment_refs": set(segment_refs),
+                "evidence_excerpts": [evidence_excerpt] if evidence_excerpt else [],
+                "provenance": [
+                    dict(item)
+                    for item in provenance
+                    if isinstance(item, Mapping)
+                ],
             }
             merged[key] = target
             continue
-        target["confidence"] = max(
-            float(target.get("confidence") or 0.0),
-            float(row.get("confidence") or 0.0),
-        )
-        target["evidence_count"] = int(target.get("evidence_count") or 0) + int(
-            row.get("evidence_count") or 0
-        )
-        rules = target.get("evidence_rules")
-        if not isinstance(rules, set):
-            rules = set()
-        rules.update(row.get("evidence_rules") or [])
-        target["evidence_rules"] = rules
-        if isinstance(provenance, Mapping):
-            provenance_entries = target.get("provenance")
-            if not isinstance(provenance_entries, list):
-                provenance_entries = []
-            provenance_entries.append(dict(provenance))
-            target["provenance"] = provenance_entries
+        refs = target.get("segment_refs")
+        if not isinstance(refs, set):
+            refs = set()
+        refs.update(segment_refs)
+        target["segment_refs"] = refs
+        excerpts = target.get("evidence_excerpts")
+        if not isinstance(excerpts, list):
+            excerpts = []
+        if evidence_excerpt and evidence_excerpt not in excerpts:
+            excerpts.append(evidence_excerpt)
+        target["evidence_excerpts"] = excerpts
+        provenance_entries = target.get("provenance")
+        if not isinstance(provenance_entries, list):
+            provenance_entries = []
+        for item in provenance:
+            if isinstance(item, Mapping):
+                provenance_entries.append(dict(item))
+        target["provenance"] = provenance_entries
 
     sorted_rows = sorted(
         merged.values(),
-        key=lambda item: (-float(item.get("confidence") or 0.0), str(item.get("name") or "")),
+        key=lambda item: (
+            -len(list(item.get("provenance") or [])),
+            str(item.get("name") or ""),
+        ),
+    )
+    sorted_rows = sorted_rows[: max(1, int(max_candidates))]
+    output: list[dict[str, Any]] = []
+    for row in sorted_rows:
+        provenance_entries = list(row.get("provenance") or [])
+        evidence_excerpts = [
+            str(item)
+            for item in (row.get("evidence_excerpts") or [])
+            if isinstance(item, str) and item.strip()
+        ]
+        output.append(
+            {
+                "name": row.get("name"),
+                "evidence_count": len(provenance_entries),
+                "evidence_excerpts": evidence_excerpts,
+                "provenance": provenance_entries,
+            }
+        )
+    return output
+
+
+def _merge_relationship_candidates(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    max_candidates: int,
+) -> list[dict[str, Any]]:
+    merged: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for row in rows:
+        source_name = _normalise_optional_text(row.get("source_name"))
+        target_name = _normalise_optional_text(row.get("target_name"))
+        relation_hint = _normalise_optional_text(row.get("relation_hint"))
+        if not source_name or not target_name or not relation_hint:
+            continue
+        key = (
+            source_name.casefold(),
+            target_name.casefold(),
+            relation_hint.casefold(),
+        )
+        provenance = list(row.get("provenance") or [])
+        evidence_excerpt = _normalise_optional_text(row.get("evidence_excerpt"))
+        segment_refs = [
+            item.strip()
+            for item in (row.get("segment_refs") or [])
+            if isinstance(item, str) and item.strip()
+        ]
+        target = merged.get(key)
+        if target is None:
+            merged[key] = {
+                "source_name": source_name,
+                "target_name": target_name,
+                "relation_hint": relation_hint,
+                "segment_refs": set(segment_refs),
+                "evidence_excerpts": [evidence_excerpt] if evidence_excerpt else [],
+                "provenance": [
+                    dict(item)
+                    for item in provenance
+                    if isinstance(item, Mapping)
+                ],
+            }
+            continue
+        refs = target.get("segment_refs")
+        if not isinstance(refs, set):
+            refs = set()
+        refs.update(segment_refs)
+        target["segment_refs"] = refs
+        excerpts = target.get("evidence_excerpts")
+        if not isinstance(excerpts, list):
+            excerpts = []
+        if evidence_excerpt and evidence_excerpt not in excerpts:
+            excerpts.append(evidence_excerpt)
+        target["evidence_excerpts"] = excerpts
+        provenance_entries = target.get("provenance")
+        if not isinstance(provenance_entries, list):
+            provenance_entries = []
+        for item in provenance:
+            if isinstance(item, Mapping):
+                provenance_entries.append(dict(item))
+        target["provenance"] = provenance_entries
+
+    sorted_rows = sorted(
+        merged.values(),
+        key=lambda item: (
+            -len(list(item.get("provenance") or [])),
+            str(item.get("source_name") or ""),
+            str(item.get("target_name") or ""),
+            str(item.get("relation_hint") or ""),
+        ),
     )
     sorted_rows = sorted_rows[: max(1, int(max_candidates))]
     output: list[dict[str, Any]] = []
     for row in sorted_rows:
         output.append(
             {
-                "name": row.get("name"),
-                "confidence": round(float(row.get("confidence") or 0.0), 3),
-                "evidence_count": int(row.get("evidence_count") or 0),
-                "evidence_rules": sorted(str(rule) for rule in (row.get("evidence_rules") or [])),
+                "source_name": row.get("source_name"),
+                "target_name": row.get("target_name"),
+                "relation_hint": row.get("relation_hint"),
+                "evidence_count": len(list(row.get("provenance") or [])),
+                "evidence_excerpts": [
+                    str(item)
+                    for item in (row.get("evidence_excerpts") or [])
+                    if isinstance(item, str) and item.strip()
+                ],
                 "provenance": list(row.get("provenance") or []),
             }
         )
@@ -437,62 +615,53 @@ def summarise_diagram_organisation_candidates(
     diagram_segments: Sequence[Mapping[str, Any]],
     max_candidates: int = 40,
 ) -> dict[str, Any]:
-    """Summarise prose vs diagram organisation candidates with provenance separation."""
+    """Summarise authoritative organisation/relation candidates by provenance."""
 
-    prose_rows = extract_organisation_candidates_from_text(
-        text=prose_text,
-        source="pdf_prose_text",
-        extraction_method="pymupdf_text_layer",
+    from .file_copy_diagram_interpretation_vontology_service import (
+        infer_file_copy_diagram_semantics,
+    )
+
+    prepared_segments, prose_segment_ids = _prepare_diagram_interpretation_segments(
+        prose_text=prose_text,
+        diagram_segments=diagram_segments,
+    )
+    payload, diagnostics = infer_file_copy_diagram_semantics(
+        segments=prepared_segments,
         max_candidates=max_candidates,
     )
+    segment_lookup = _build_segment_lookup(prepared_segments)
+
+    prose_rows: list[dict[str, Any]] = []
     diagram_rows: list[dict[str, Any]] = []
     relationship_rows: list[dict[str, Any]] = []
 
-    for segment in diagram_segments:
-        text_value = segment.get("text")
-        if not isinstance(text_value, str) or not text_value.strip():
+    for raw_candidate in payload.get("organisation_candidates") or []:
+        if not isinstance(raw_candidate, Mapping):
             continue
-        page_number_raw = segment.get("page_number")
-        page_number = int(page_number_raw) if isinstance(page_number_raw, int) else None
-        figure_id = (
-            str(segment.get("figure_id")).strip()
-            if isinstance(segment.get("figure_id"), str) and str(segment.get("figure_id")).strip()
-            else None
+        row = _normalise_authoritative_organisation_candidate(
+            raw_candidate,
+            segment_lookup=segment_lookup,
         )
-        extraction_method = (
-            str(segment.get("extraction_method")).strip()
-            if isinstance(segment.get("extraction_method"), str)
-            and str(segment.get("extraction_method")).strip()
-            else None
-        )
-        page_candidates = extract_organisation_candidates_from_text(
-            text=text_value,
-            source="pdf_diagram_segment",
-            page_number=page_number,
-            figure_id=figure_id,
-            extraction_method=extraction_method,
-            max_candidates=max_candidates,
-        )
-        diagram_rows.extend(page_candidates)
-        relationship_rows.extend(
-            extract_relationship_candidates_from_text(
-                text=text_value,
-                organisation_names=[str(row.get("name")) for row in page_candidates],
-                page_number=page_number,
-                figure_id=figure_id,
-                extraction_method=extraction_method,
-                max_candidates=max_candidates,
-            )
-        )
+        if row is None:
+            continue
+        if bool(row.get("_has_prose")):
+            prose_rows.append(row)
+        if bool(row.get("_has_diagram")):
+            diagram_rows.append(row)
 
-    prose_candidates = _merge_organisation_candidates(
-        prose_rows,
-        max_candidates=max_candidates,
-    )
-    diagram_candidates = _merge_organisation_candidates(
-        diagram_rows,
-        max_candidates=max_candidates,
-    )
+    for raw_candidate in payload.get("relationship_candidates") or []:
+        if not isinstance(raw_candidate, Mapping):
+            continue
+        row = _normalise_authoritative_relationship_candidate(
+            raw_candidate,
+            segment_lookup=segment_lookup,
+        )
+        if row is None or not bool(row.get("_has_diagram")):
+            continue
+        relationship_rows.append(row)
+
+    prose_candidates = _merge_organisation_candidates(prose_rows, max_candidates=max_candidates)
+    diagram_candidates = _merge_organisation_candidates(diagram_rows, max_candidates=max_candidates)
     prose_names = {
         str(row.get("name")).casefold()
         for row in prose_candidates
@@ -508,8 +677,13 @@ def summarise_diagram_organisation_candidates(
         "prose_organisations": prose_candidates,
         "diagram_organisations": diagram_candidates,
         "diagram_only_organisations": diagram_only,
-        "diagram_relationship_candidates": relationship_rows[: max(1, int(max_candidates))],
+        "diagram_relationship_candidates": _merge_relationship_candidates(
+            relationship_rows,
+            max_candidates=max_candidates,
+        ),
         "requires_human_confirmation": True,
+        "authority_diagnostics": diagnostics,
+        "prose_segment_ids": sorted(prose_segment_ids),
     }
 
 

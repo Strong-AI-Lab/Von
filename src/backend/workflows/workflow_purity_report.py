@@ -146,6 +146,12 @@ WORKFLOW_CAPABILITY_RETIRED_IMPORT_NAMES = {
 WRITE_TOOL_POLICY_ALLOWED_REGEX_PATTERN_NAMES = frozenset(
     {"_CONFIRMATION_PATTERN", "_DESTRUCTIVE_MUTATION_PATTERN"}
 )
+FILE_COPY_INTERPRETATION_RETIRED_SYMBOLS = {
+    "_ORGANISATION_SUFFIX_PATTERN": "retired_file_copy_semantic_regex_symbol",
+    "_ORGANISATION_PREFIX_PATTERN": "retired_file_copy_semantic_regex_symbol",
+    "_ALL_CAPS_ORG_PATTERN": "retired_file_copy_semantic_regex_symbol",
+    "_ORGANISATION_STOPWORDS": "retired_file_copy_stopword_symbol",
+}
 
 CORE_SUPPORT_POLICY_CONTRACTS = (
     {
@@ -174,6 +180,11 @@ CORE_SUPPORT_POLICY_CONTRACTS = (
             WRITE_TOOL_POLICY_ALLOWED_REGEX_PATTERN_NAMES
         ),
         "allowed_regex_helper_functions": ("prompt_explicitly_denies_write",),
+    },
+    {
+        "name": "file_copy_interpretation_authority_surface",
+        "path": "src/backend/services/file_copy_interpretation_service.py",
+        "banned_symbol_names": FILE_COPY_INTERPRETATION_RETIRED_SYMBOLS,
     },
 )
 

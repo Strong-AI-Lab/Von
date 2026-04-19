@@ -14,6 +14,7 @@ _SERVICE_EXPORT_MODULES = {
     "annotation_extraction_service": ".annotation_extraction_service",
     "concept_normalization": ".concept_normalization",
     "concept_service": ".concept_service",
+    "file_copy_diagram_interpretation_vontology_service": ".file_copy_diagram_interpretation_vontology_service",
     "knowledge_acquisition_profile_vontology_service": ".knowledge_acquisition_profile_vontology_service",
     "meta_relations_service": ".meta_relations_service",
     "minimal_imposition_benchmark_profile_vontology_service": ".minimal_imposition_benchmark_profile_vontology_service",
@@ -43,6 +44,9 @@ if TYPE_CHECKING:
     from . import annotation_extraction_service as annotation_extraction_service
     from . import concept_normalization as concept_normalization
     from . import concept_service as concept_service
+    from . import (
+        file_copy_diagram_interpretation_vontology_service as file_copy_diagram_interpretation_vontology_service,
+    )
     from . import (
         knowledge_acquisition_profile_vontology_service as knowledge_acquisition_profile_vontology_service,
     )
@@ -112,6 +116,7 @@ __all__ = [
     "annotation_extraction_service",
     "concept_normalization",
     "concept_service",
+    "file_copy_diagram_interpretation_vontology_service",
     "knowledge_acquisition_profile_vontology_service",
     "meta_relations_service",
     "minimal_imposition_benchmark_profile_vontology_service",
