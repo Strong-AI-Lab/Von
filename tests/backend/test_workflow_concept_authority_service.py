@@ -4,6 +4,11 @@ from typing import Any, cast
 import pytest
 
 from src.backend.workflows import workflow_concept_authority_service as authority_service
+from src.backend.workflows.engine import (
+    WorkflowActionInvocation,
+    WorkflowDefinition,
+    WorkflowStateSpec,
+)
 from src.backend.workflows.vontology_loader import (
     load_workflow_definition_from_vontology,
     resolve_workflow_publication_lifecycle,
@@ -628,6 +633,9 @@ def _built_action_inputs_match(*, loaded_state: Any, built_state: Any) -> bool:
         loaded_inputs = dict(getattr(loaded_action, "inputs", {}) or {})
         built_inputs = dict(getattr(built_action, "inputs", {}) or {})
         for key in list(loaded_inputs.keys()):
+            if key in {"__prompt_resolution_diagnostics"} and key not in built_inputs:
+                loaded_inputs.pop(key, None)
+                continue
             if key.startswith("__parent_") and key not in built_inputs:
                 loaded_inputs.pop(key, None)
         if loaded_inputs == built_inputs:
@@ -1452,3 +1460,60 @@ def test_publish_workflow_definition_from_definition_marks_workflow_published(
         "concept_data",
         "text_relation:#V#hasWorkflowLifecycleJson",
     }
+
+
+def test_publish_workflow_definition_from_definition_rejects_transient_execution_defaults(
+    _reset_mock_workflow_graph_db,
+) -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#transient_publish_blocked_workflow",
+        initial_state="start",
+        states={
+            "start": WorkflowStateSpec(
+                state_id="start",
+                actions=(
+                    WorkflowActionInvocation(
+                        action_id="workflow_gap.execute_candidate",
+                        inputs={
+                            "default_request_text": "Recover this missing workflow.",
+                            "prompt_concept_id": "#V#workflow_gap_candidate_execution_prompt",
+                        },
+                    ),
+                ),
+                terminal=True,
+            ),
+        },
+        termination_states=("start",),
+        purpose="Workflow with invalid persisted turn defaults.",
+    )
+
+    report = authority_service.publish_workflow_definition_from_definition(
+        definition=definition,
+        create_missing=True,
+        purpose="Should fail pre-publication transient-default guard.",
+    )
+
+    assert report.get("published_workflow_ids") == []
+    errors = report.get("errors_by_workflow_id") or {}
+    assert errors == {
+        "#V#transient_publish_blocked_workflow": (
+            "publication_validation_failed:"
+            "workflow_transient_execution_input_invalid"
+        )
+    }
+    validation = (
+        report.get("validation_failures_by_workflow_id") or {}
+    )["#V#transient_publish_blocked_workflow"]
+    assert validation["errors"] == ["workflow_transient_execution_input_invalid"]
+    assert validation["transient_execution_input_issues"] == [
+        {
+            "state_id": "start",
+            "action_id": "workflow_gap.execute_candidate",
+            "tool_param": "default_request_text",
+            "reason_code": "transient_request_text_default_persisted",
+        }
+    ]
+    assert (
+        load_workflow_definition_from_vontology("#V#transient_publish_blocked_workflow")
+        is None
+    )

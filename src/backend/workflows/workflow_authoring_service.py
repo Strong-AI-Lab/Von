@@ -6,7 +6,8 @@ data rather than hiding graph-shaping logic inside one-off handler code.
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+import copy
+from typing import Any, Mapping, Sequence
 
 from .engine import (
     WorkflowActionInvocation,
@@ -16,10 +17,298 @@ from .engine import (
     build_transition_condition,
 )
 from .subworkflow_contracts import WORKFLOW_SUBWORKFLOW_ACTION_ID
+from .static_input_binding_utils import coerce_static_input_binding
+
+_TRANSIENT_WORKFLOW_EXECUTION_INPUT_SUFFIX_REASON_CODES: tuple[
+    tuple[str, str],
+    ...,
+] = (
+    ("request_text", "transient_request_text_default_persisted"),
+    ("recent_turns_json", "transient_recent_turns_default_persisted"),
+    ("base_response_text", "transient_base_response_default_persisted"),
+)
 
 
 def _clean_text(value: Any) -> str:
     return str(value or "").strip() if isinstance(value, str) else ""
+
+
+def _transient_workflow_execution_input_reason_code(key: Any) -> str | None:
+    key_text = _clean_text(key).casefold()
+    if not key_text:
+        return None
+    for suffix, reason_code in _TRANSIENT_WORKFLOW_EXECUTION_INPUT_SUFFIX_REASON_CODES:
+        if key_text == suffix or key_text.endswith(f"_{suffix}"):
+            return reason_code
+    return None
+
+
+def _build_context_input_mapping_spec(
+    *,
+    tool_param: Any,
+    raw_value: Any,
+) -> dict[str, Any] | None:
+    tool_param_text = _clean_text(tool_param)
+    if not tool_param_text or not isinstance(raw_value, Mapping):
+        return None
+
+    context_key = _clean_text(
+        raw_value.get("$context_key") or raw_value.get("context_key")
+    )
+    if not context_key:
+        return None
+
+    spec: dict[str, Any] = {
+        "tool_param": tool_param_text,
+        "context_key": context_key,
+    }
+    mapping_concept_id = _clean_text(
+        raw_value.get("$mapping_concept_id") or raw_value.get("mapping_concept_id")
+    )
+    if mapping_concept_id:
+        spec["mapping_concept_id"] = mapping_concept_id
+    if "$required" in raw_value or "required" in raw_value:
+        spec["required"] = bool(raw_value.get("$required", raw_value.get("required", True)))
+    return spec
+
+
+def _split_action_inputs_for_authoring(
+    *,
+    inputs: Mapping[str, Any],
+    invoked_workflow_id: str | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    static_input_bindings: list[dict[str, Any]] = []
+    context_input_mappings: list[dict[str, Any]] = []
+
+    for tool_param, raw_value in inputs.items():
+        tool_param_text = _clean_text(tool_param)
+        if not tool_param_text:
+            continue
+        if tool_param_text == "workflow_id" and _clean_text(invoked_workflow_id):
+            continue
+
+        context_mapping = _build_context_input_mapping_spec(
+            tool_param=tool_param_text,
+            raw_value=raw_value,
+        )
+        if context_mapping is not None:
+            context_input_mappings.append(context_mapping)
+            continue
+
+        binding = coerce_static_input_binding(tool_param_text, raw_value)
+        if binding is None:
+            continue
+        static_input_bindings.append(
+            {
+                "tool_param": binding[0],
+                "value": copy.deepcopy(binding[1]),
+            }
+        )
+
+    return static_input_bindings, context_input_mappings
+
+
+def _normalise_static_input_bindings_payload(
+    raw_payload: Any,
+) -> list[tuple[str, Any]]:
+    bindings: list[tuple[str, Any]] = []
+    if isinstance(raw_payload, Mapping):
+        iterable = raw_payload.items()
+    elif isinstance(raw_payload, Sequence) and not isinstance(raw_payload, str):
+        iterable = raw_payload
+    else:
+        iterable = ()
+
+    for item in iterable:
+        if isinstance(item, Mapping):
+            tool_param = _clean_text(item.get("tool_param") or item.get("key"))
+            value = item.get("value")
+        elif (
+            isinstance(item, Sequence)
+            and not isinstance(item, (str, bytes, bytearray))
+            and len(item) == 2
+        ):
+            tool_param = _clean_text(item[0])
+            value = item[1]
+        else:
+            continue
+        binding = coerce_static_input_binding(tool_param, value)
+        if binding is not None:
+            bindings.append(binding)
+    return bindings
+
+
+def _normalise_context_input_mappings_payload(
+    raw_payload: Any,
+) -> list[dict[str, Any]]:
+    if not isinstance(raw_payload, Sequence) or isinstance(
+        raw_payload,
+        (str, bytes, bytearray),
+    ):
+        return []
+
+    mappings: list[dict[str, Any]] = []
+    for item in raw_payload:
+        if not isinstance(item, Mapping):
+            continue
+        tool_param = _clean_text(item.get("tool_param"))
+        context_key = _clean_text(item.get("context_key"))
+        if not tool_param or not context_key:
+            continue
+        mapping: dict[str, Any] = {
+            "tool_param": tool_param,
+            "context_key": context_key,
+        }
+        mapping_concept_id = _clean_text(
+            item.get("mapping_concept_id") or item.get("$mapping_concept_id")
+        )
+        if mapping_concept_id:
+            mapping["mapping_concept_id"] = mapping_concept_id
+        if "required" in item or "$required" in item:
+            mapping["required"] = bool(item.get("required", item.get("$required", True)))
+        mappings.append(mapping)
+    return mappings
+
+
+def _build_action_inputs_from_authoring_row(
+    row: Mapping[str, Any],
+    *,
+    subworkflow_id: str | None = None,
+) -> dict[str, Any]:
+    inputs_raw = row.get("inputs")
+    inputs = (
+        {
+            str(key): copy.deepcopy(value)
+            for key, value in inputs_raw.items()
+            if isinstance(key, str) and str(key).strip()
+        }
+        if isinstance(inputs_raw, Mapping)
+        else {}
+    )
+
+    for tool_param, value in _normalise_static_input_bindings_payload(
+        row.get("static_input_bindings")
+    ):
+        inputs[tool_param] = copy.deepcopy(value)
+
+    for mapping in _normalise_context_input_mappings_payload(
+        row.get("context_input_mappings")
+    ):
+        mapping_value: dict[str, Any] = {"$context_key": mapping["context_key"]}
+        mapping_concept_id = _clean_text(mapping.get("mapping_concept_id"))
+        if mapping_concept_id:
+            mapping_value["$mapping_concept_id"] = mapping_concept_id
+        if "required" in mapping:
+            mapping_value["$required"] = bool(mapping["required"])
+        inputs[mapping["tool_param"]] = mapping_value
+
+    subworkflow_id_text = _clean_text(subworkflow_id)
+    if subworkflow_id_text:
+        inputs["workflow_id"] = subworkflow_id_text
+    return inputs
+
+
+def strip_transient_execution_defaults_from_authoring_spec(
+    authoring_spec: Mapping[str, Any],
+) -> dict[str, Any]:
+    cleaned_spec = copy.deepcopy(dict(authoring_spec))
+    steps = cleaned_spec.get("steps")
+    if not isinstance(steps, list):
+        return cleaned_spec
+
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+
+        inputs = step.get("inputs")
+        if isinstance(inputs, Mapping):
+            step["inputs"] = {
+                str(key): copy.deepcopy(value)
+                for key, value in inputs.items()
+                if isinstance(key, str)
+                and str(key).strip()
+                and _transient_workflow_execution_input_reason_code(key) is None
+            }
+
+        static_input_bindings = step.get("static_input_bindings")
+        if isinstance(static_input_bindings, Mapping):
+            step["static_input_bindings"] = {
+                str(key): copy.deepcopy(value)
+                for key, value in static_input_bindings.items()
+                if isinstance(key, str)
+                and str(key).strip()
+                and _transient_workflow_execution_input_reason_code(key) is None
+            }
+        elif isinstance(static_input_bindings, Sequence) and not isinstance(
+            static_input_bindings,
+            (str, bytes, bytearray),
+        ):
+            cleaned_bindings: list[Any] = []
+            for item in static_input_bindings:
+                if not isinstance(item, Mapping):
+                    continue
+                tool_param = _clean_text(item.get("tool_param") or item.get("key"))
+                if (
+                    not tool_param
+                    or _transient_workflow_execution_input_reason_code(tool_param) is not None
+                ):
+                    continue
+                cleaned_bindings.append(copy.deepcopy(dict(item)))
+            step["static_input_bindings"] = cleaned_bindings
+
+    return cleaned_spec
+
+
+def collect_transient_execution_input_issues(
+    definition: WorkflowDefinition,
+) -> list[dict[str, Any]]:
+    states = definition.states if isinstance(definition.states, Mapping) else {}
+    issues: list[dict[str, Any]] = []
+
+    for state_id, state_spec in states.items():
+        if not isinstance(state_spec, WorkflowStateSpec):
+            continue
+        actions = tuple(getattr(state_spec, "actions", ()) or ())
+        for action in actions:
+            if not isinstance(action, WorkflowActionInvocation):
+                continue
+            action_id = _clean_text(getattr(action, "action_id", ""))
+            subworkflow_id = _clean_text(getattr(action, "subworkflow_id", ""))
+            inputs = getattr(action, "inputs", None)
+            if not isinstance(inputs, Mapping):
+                continue
+            for tool_param, raw_value in inputs.items():
+                tool_param_text = _clean_text(tool_param)
+                reason_code = _transient_workflow_execution_input_reason_code(
+                    tool_param_text
+                )
+                if not reason_code:
+                    continue
+                if tool_param_text == "workflow_id" and subworkflow_id:
+                    continue
+                if _build_context_input_mapping_spec(
+                    tool_param=tool_param_text,
+                    raw_value=raw_value,
+                ) is not None:
+                    continue
+                issues.append(
+                    {
+                        "state_id": str(state_id),
+                        "action_id": action_id,
+                        "tool_param": tool_param_text,
+                        "reason_code": reason_code,
+                    }
+                )
+
+    return sorted(
+        issues,
+        key=lambda item: (
+            str(item.get("state_id") or ""),
+            str(item.get("action_id") or ""),
+            str(item.get("tool_param") or ""),
+            str(item.get("reason_code") or ""),
+        ),
+    )
 
 
 def _build_transition(
@@ -136,8 +425,10 @@ def _build_action_from_row(row: Mapping[str, Any]) -> WorkflowActionInvocation |
     if not action_id and not subworkflow_id:
         return None
 
-    inputs_raw = row.get("inputs")
-    inputs = dict(inputs_raw) if isinstance(inputs_raw, Mapping) else {}
+    inputs = _build_action_inputs_from_authoring_row(
+        row,
+        subworkflow_id=subworkflow_id,
+    )
     prompt_contract_raw = row.get("prompt_contract")
     prompt_contract = (
         dict(prompt_contract_raw) if isinstance(prompt_contract_raw, Mapping) else None
@@ -246,7 +537,16 @@ def serialise_workflow_definition_to_authoring_spec(
             if execution_mode:
                 row["execution_mode"] = execution_mode
             if isinstance(action.inputs, Mapping) and action.inputs:
-                row["inputs"] = dict(action.inputs)
+                static_input_bindings, context_input_mappings = (
+                    _split_action_inputs_for_authoring(
+                        inputs=action.inputs,
+                        invoked_workflow_id=subworkflow_id or None,
+                    )
+                )
+                if static_input_bindings:
+                    row["static_input_bindings"] = static_input_bindings
+                if context_input_mappings:
+                    row["context_input_mappings"] = context_input_mappings
             if isinstance(action.prompt_contract, Mapping) and action.prompt_contract:
                 row["prompt_contract"] = dict(action.prompt_contract)
             if isinstance(action.llm_policy, Mapping) and action.llm_policy:
@@ -446,5 +746,7 @@ def build_workflow_definition_from_authoring_spec(
 
 __all__ = [
     "build_workflow_definition_from_authoring_spec",
+    "collect_transient_execution_input_issues",
     "serialise_workflow_definition_to_authoring_spec",
+    "strip_transient_execution_defaults_from_authoring_spec",
 ]

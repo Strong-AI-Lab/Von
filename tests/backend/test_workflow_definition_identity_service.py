@@ -150,6 +150,78 @@ def test_validate_contract_rejects_actionless_output_only_contract() -> None:
     assert validation.get("vacuous_state_ids") == ["start"]
 
 
+def test_validate_contract_rejects_transient_execution_defaults_in_static_inputs() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#transient_input_invalid_workflow",
+        initial_state="start",
+        states={
+            "start": WorkflowStateSpec(
+                state_id="start",
+                actions=(
+                    WorkflowActionInvocation(
+                        action_id="workflow_gap.execute_candidate",
+                        inputs={
+                            "workflow_gap_request_text": "Recover this workflow.",
+                            "prompt_concept_id": "#V#workflow_gap_candidate_execution_prompt",
+                        },
+                    ),
+                ),
+                terminal=True,
+            ),
+        },
+        termination_states=("start",),
+        purpose="test",
+    )
+
+    validation = validate_workflow_definition_contract(definition=definition)
+
+    assert validation["valid"] is False
+    assert "workflow_transient_execution_input_invalid" in (
+        validation.get("errors") or []
+    )
+    assert validation.get("transient_execution_input_issues") == [
+        {
+            "state_id": "start",
+            "action_id": "workflow_gap.execute_candidate",
+            "tool_param": "workflow_gap_request_text",
+            "reason_code": "transient_request_text_default_persisted",
+        }
+    ]
+
+
+def test_validate_contract_allows_transient_execution_keys_when_context_mapped() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#transient_input_context_mapped_workflow",
+        initial_state="start",
+        states={
+            "start": WorkflowStateSpec(
+                state_id="start",
+                actions=(
+                    WorkflowActionInvocation(
+                        action_id="workflow_gap.execute_candidate",
+                        inputs={
+                            "workflow_gap_request_text": {
+                                "$context_key": "workflow_gap_request_text"
+                            },
+                            "workflow_gap_base_response_text": {
+                                "$context_key": "workflow_gap_base_response_text"
+                            },
+                        },
+                    ),
+                ),
+                terminal=True,
+            ),
+        },
+        termination_states=("start",),
+        purpose="test",
+    )
+
+    validation = validate_workflow_definition_contract(definition=definition)
+
+    assert validation["valid"] is True
+    assert validation.get("transient_execution_input_issues") == []
+
+
 def _child_workflow_definition(
     *,
     workflow_id: str = "#V#child_workflow",

@@ -53,7 +53,10 @@ from ..workflow_template_profile_service import (
     WORKFLOW_GAP_CANDIDATE_EXECUTION_TEMPLATE_ID,
     resolve_workflow_spec_template,
 )
-from ..workflow_authoring_service import serialise_workflow_definition_to_authoring_spec
+from ..workflow_authoring_service import (
+    serialise_workflow_definition_to_authoring_spec,
+    strip_transient_execution_defaults_from_authoring_spec,
+)
 from ..workflow_definition_identity_service import build_workflow_definition_identity
 from ..vontology_loader import load_workflow_definition_from_vontology
 from ..workflow_gap_workflow_contracts import (
@@ -1204,39 +1207,6 @@ def _normalise_candidate_execution_inputs(
             merged[key] = value
     return merged
 
-
-def _strip_transient_candidate_execution_defaults(
-    workflow_spec: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Remove per-turn fallback payloads before publishing a reusable workflow."""
-
-    cleaned_spec = dict(workflow_spec)
-    raw_steps = workflow_spec.get("steps")
-    if not isinstance(raw_steps, list):
-        return cleaned_spec
-
-    cleaned_steps: list[Any] = []
-    for raw_step in raw_steps:
-        if not isinstance(raw_step, Mapping):
-            cleaned_steps.append(raw_step)
-            continue
-        cleaned_step = dict(raw_step)
-        inputs = raw_step.get("inputs")
-        if isinstance(inputs, Mapping):
-            cleaned_inputs = dict(inputs)
-            for transient_key in (
-                "default_request_text",
-                "default_recent_turns_json",
-                "default_base_response_text",
-            ):
-                cleaned_inputs.pop(transient_key, None)
-            cleaned_step["inputs"] = cleaned_inputs
-        cleaned_steps.append(cleaned_step)
-
-    cleaned_spec["steps"] = cleaned_steps
-    return cleaned_spec
-
-
 def _handle_collect_context(request: WorkflowActionRequest) -> WorkflowActionResult:
     prompt = (
         _clean_text(request.data.get("workflow_gap_request_text"))
@@ -1512,7 +1482,7 @@ def _handle_prepare_candidate_spec(request: WorkflowActionRequest) -> WorkflowAc
                 "gap_summary": gap_summary,
             },
         )
-        candidate_workflow_spec = _strip_transient_candidate_execution_defaults(
+        candidate_workflow_spec = strip_transient_execution_defaults_from_authoring_spec(
             candidate_workflow_spec
         )
     except Exception as exc:

@@ -37,6 +37,7 @@ from .execution_contracts import (
     WORKFLOW_FOR_EACH_ALLOWED_SUCCESS_POLICIES,
 )
 from .workflow_state_contracts import has_actionless_pre_action_contract
+from .workflow_authoring_service import collect_transient_execution_input_issues
 from .write_tool_policy import (
     normalise_workflow_step_mutation_authority_spec,
 )
@@ -757,6 +758,7 @@ def validate_workflow_definition_contract(
             "terminal_success_contract_issues": [],
             "required_effects_contract_issues": [],
             "prompt_contract_issues": [],
+            "transient_execution_input_issues": [],
         }
 
     states_raw = getattr(definition, "states", {})
@@ -795,6 +797,9 @@ def validate_workflow_definition_contract(
     terminal_success_contract_issues: list[dict[str, Any]] = []
     required_effects_contract_issues: list[dict[str, Any]] = []
     prompt_contract_issues: list[dict[str, Any]] = []
+    transient_execution_input_issues = collect_transient_execution_input_issues(
+        definition
+    )
     declared_fork_ids: set[str] = set()
 
     supported_action_set: set[str] = set()
@@ -1512,6 +1517,15 @@ def validate_workflow_definition_contract(
             str(item.get("reason_code") or ""),
         ),
     )
+    transient_execution_input_issues = sorted(
+        transient_execution_input_issues,
+        key=lambda item: (
+            str(item.get("state_id") or ""),
+            str(item.get("action_id") or ""),
+            str(item.get("tool_param") or ""),
+            str(item.get("reason_code") or ""),
+        ),
+    )
     workflow_id_issues = sorted(
         workflow_id_issues,
         key=lambda item: str(item.get("reason_code") or ""),
@@ -1557,6 +1571,8 @@ def validate_workflow_definition_contract(
         for item in prompt_contract_issues
     ):
         errors.append("workflow_prompt_contract_invalid")
+    if transient_execution_input_issues:
+        errors.append("workflow_transient_execution_input_invalid")
     if subworkflow_contract_issues:
         unresolved_reason_codes = {
             "subworkflow_workflow_not_found",
@@ -1607,6 +1623,7 @@ def validate_workflow_definition_contract(
         "terminal_success_contract_issues": terminal_success_contract_issues,
         "required_effects_contract_issues": required_effects_contract_issues,
         "prompt_contract_issues": prompt_contract_issues,
+        "transient_execution_input_issues": transient_execution_input_issues,
     }
 
 

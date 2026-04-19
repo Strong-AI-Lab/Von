@@ -11,6 +11,7 @@ from src.backend.workflows.engine import (
 from src.backend.workflows import workflow_concept_authority_service as authority_mod
 from src.backend.workflows.workflow_authoring_service import (
     build_workflow_definition_from_authoring_spec,
+    strip_transient_execution_defaults_from_authoring_spec,
     serialise_workflow_definition_to_authoring_spec,
 )
 
@@ -25,7 +26,10 @@ def test_authoring_roundtrip_preserves_workflow_metadata_and_description_alias()
                 actions=(
                     WorkflowActionInvocation(
                         action_id="search_concepts",
-                        inputs={"query": "demo"},
+                        inputs={
+                            "query": {"$context_key": "user_query"},
+                            "top_k": 5,
+                        },
                     ),
                 ),
                 transitions=(
@@ -67,7 +71,18 @@ def test_authoring_roundtrip_preserves_workflow_metadata_and_description_alias()
     assert authoring_spec["workflow_metadata"]["background_launch_policy"] == {
         "mode": "manual"
     }
+    assert "inputs" not in authoring_spec["steps"][0]
+    assert authoring_spec["steps"][0]["static_input_bindings"] == [
+        {"tool_param": "top_k", "value": 5}
+    ]
+    assert authoring_spec["steps"][0]["context_input_mappings"] == [
+        {"tool_param": "query", "context_key": "user_query"}
+    ]
     assert rebuilt.purpose == "Demo workflow description"
+    assert rebuilt.states["start"].actions[0].inputs == {
+        "query": {"$context_key": "user_query"},
+        "top_k": 5,
+    }
     assert rebuilt.metadata["required_effects"] == ["effect.ready"]
     assert rebuilt.metadata["postcondition_probe"] == {
         "kind": "output_field",
@@ -132,6 +147,83 @@ def test_build_workflow_definition_from_authoring_spec_accepts_plain_transition_
         "done",
         "failed",
     }
+
+
+def test_build_workflow_definition_from_authoring_spec_accepts_explicit_input_schemas():
+    definition = build_workflow_definition_from_authoring_spec(
+        {
+            "workflow_id": "#V#explicit_inputs_workflow",
+            "initial_state_key": "start",
+            "steps": [
+                {
+                    "state_id": "start",
+                    "action_id": "demo.action",
+                    "static_input_bindings": [
+                        {"tool_param": "limit", "value": 5},
+                    ],
+                    "context_input_mappings": [
+                        {
+                            "tool_param": "query",
+                            "context_key": "user_query",
+                            "required": True,
+                            "mapping_concept_id": "#V#mapping_query",
+                        }
+                    ],
+                    "next_state": "done",
+                },
+                {"state_id": "done", "terminal": True},
+            ],
+        }
+    )
+
+    assert definition.states["start"].actions[0].inputs == {
+        "limit": 5,
+        "query": {
+            "$context_key": "user_query",
+            "$mapping_concept_id": "#V#mapping_query",
+            "$required": True,
+        },
+    }
+
+
+def test_strip_transient_execution_defaults_from_authoring_spec_removes_persisted_turn_defaults():
+    cleaned = strip_transient_execution_defaults_from_authoring_spec(
+        {
+            "workflow_id": "#V#candidate_workflow",
+            "steps": [
+                {
+                    "state_id": "start",
+                    "inputs": {
+                        "default_request_text": "Recover this workflow.",
+                        "query": "stable",
+                    },
+                    "static_input_bindings": [
+                        {
+                            "tool_param": "workflow_gap_base_response_text",
+                            "value": "Fallback reply.",
+                        },
+                        {"tool_param": "limit", "value": 5},
+                    ],
+                    "context_input_mappings": [
+                        {
+                            "tool_param": "workflow_gap_request_text",
+                            "context_key": "workflow_gap_request_text",
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    step = cleaned["steps"][0]
+    assert step["inputs"] == {"query": "stable"}
+    assert step["static_input_bindings"] == [{"tool_param": "limit", "value": 5}]
+    assert step["context_input_mappings"] == [
+        {
+            "tool_param": "workflow_gap_request_text",
+            "context_key": "workflow_gap_request_text",
+        }
+    ]
 
 
 def test_authoring_roundtrip_preserves_explicit_step_concept_ids():

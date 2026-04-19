@@ -55,6 +55,8 @@ from .static_input_binding_utils import (
 from .vontology_loader import (
     WORKFLOW_GRAPH_PREDICATE_ALIASES,
     WORKFLOW_STEP_CONTROL_FLOW_CONCEPT_DATA_KEY,
+    _mapping_pair_from_concept_id,
+    _tool_output_mapping_pair_from_concept_id,
     build_workflow_process_graph,
     load_workflow_definition_from_vontology,
 )
@@ -1017,16 +1019,18 @@ def _build_publication_spec_from_definition(
     if not isinstance(states, Mapping) or not states:
         raise ValueError("workflow_definition_states_missing")
 
+    workflow_id_text = str(getattr(definition, "workflow_id", "") or "").strip()
     steps: list[_CanonicalStepPublicationSpec] = []
-    for state_id, state_spec in states.items():
-        state_id_text = str(state_id or "").strip()
-        if not state_id_text or not isinstance(state_spec, WorkflowStateSpec):
+    for raw_state_id, state_spec in states.items():
+        raw_state_id_text = str(raw_state_id or "").strip()
+        if not raw_state_id_text or not isinstance(state_spec, WorkflowStateSpec):
             continue
 
         actions = tuple(getattr(state_spec, "actions", ()) or ())
         if len(actions) > 1:
             raise ValueError(
-                f"workflow_definition_multiple_actions_unsupported:{definition.workflow_id}:{state_id_text}"
+                "workflow_definition_multiple_actions_unsupported:"
+                f"{definition.workflow_id}:{raw_state_id_text}"
             )
         action = actions[0] if actions else None
         state_metadata = (
@@ -1034,15 +1038,24 @@ def _build_publication_spec_from_definition(
             if isinstance(state_spec.metadata, Mapping) and state_spec.metadata
             else {}
         )
-        step_concept_id = str(
+        step_concept_id_raw = str(
             state_metadata.get("workflow_step_concept_id") or ""
         ).strip() or None
+        state_id_text, step_concept_id = _normalise_publication_state_identity(
+            workflow_id=workflow_id_text,
+            state_id=raw_state_id_text,
+            step_concept_id=step_concept_id_raw,
+        )
 
         action_id: str | None = None
         action_concept_id: str | None = None
         execution_mode: str | None = None
+        llm_policy: Mapping[str, Any] | None = None
+        validation_policy: Mapping[str, Any] | None = None
         invoked_workflow_id: str | None = None
         prompt_concept_ids: tuple[str, ...] = ()
+        static_input_bindings: list[tuple[str, Any]] = []
+        context_input_mapping_specs: list[_CanonicalContextInputMappingSpec] = []
         if action is not None:
             action_id_text = str(getattr(action, "action_id", "") or "").strip()
             action_id = action_id_text or None
@@ -1054,6 +1067,15 @@ def _build_publication_spec_from_definition(
                 getattr(action, "execution_mode", "") or ""
             ).strip()
             execution_mode = execution_mode_text or None
+            action_llm_policy = getattr(action, "llm_policy", None)
+            if (
+                isinstance(action_llm_policy, Mapping)
+                and str(execution_mode_text or "").strip().lower() == "llm"
+            ):
+                llm_policy = dict(action_llm_policy)
+            action_validation_policy = getattr(action, "validation_policy", None)
+            if isinstance(action_validation_policy, Mapping):
+                validation_policy = dict(action_validation_policy)
             invoked_workflow_id_text = str(
                 getattr(action, "subworkflow_id", "") or ""
             ).strip()
@@ -1061,6 +1083,83 @@ def _build_publication_spec_from_definition(
             if invoked_workflow_id and not action_id:
                 action_id = WORKFLOW_SUBWORKFLOW_ACTION_ID
             prompt_concept_ids = _extract_publication_prompt_concept_ids(action)
+            action_inputs = getattr(action, "inputs", None)
+            if isinstance(action_inputs, Mapping):
+                for tool_param, raw_value in action_inputs.items():
+                    tool_param_text = str(tool_param or "").strip()
+                    if not tool_param_text:
+                        continue
+                    if tool_param_text == "workflow_id" and invoked_workflow_id:
+                        continue
+                    if tool_param_text.startswith("__parent_"):
+                        continue
+                    if isinstance(raw_value, Mapping):
+                        context_key = str(raw_value.get("$context_key") or "").strip()
+                        if context_key:
+                            mapping_concept_id = str(
+                                raw_value.get("$mapping_concept_id") or ""
+                            ).strip() or _runtime_context_input_mapping_concept_id(
+                                workflow_id=workflow_id_text,
+                                state_id=state_id_text,
+                                tool_param=tool_param_text,
+                                context_key=context_key,
+                            )
+                            context_input_mapping_specs.append(
+                                _CanonicalContextInputMappingSpec(
+                                    concept_id=mapping_concept_id,
+                                    context_key=context_key,
+                                    tool_param=tool_param_text,
+                                    required=bool(
+                                        raw_value.get(
+                                            "$required",
+                                            raw_value.get("required", True),
+                                        )
+                                    ),
+                                )
+                            )
+                            continue
+                    binding = coerce_static_input_binding(tool_param_text, raw_value)
+                    if binding is not None:
+                        static_input_bindings.append(binding)
+
+        mutation_authority: dict[str, Any] | None = None
+        raw_mutation_authority = state_metadata.get("mutation_authority")
+        if isinstance(raw_mutation_authority, Mapping):
+            mutation_authority = {
+                str(key): value
+                for key, value in raw_mutation_authority.items()
+                if str(key or "").strip()
+            }
+        tool_output_mapping_specs: list[_CanonicalToolOutputMappingSpec] = []
+        raw_tool_output_mappings = state_metadata.get("tool_output_context_mappings")
+        if isinstance(raw_tool_output_mappings, list):
+            for item in raw_tool_output_mappings:
+                if not isinstance(item, Mapping):
+                    continue
+                tool_output_field = str(item.get("tool_output_field") or "").strip()
+                context_key = str(item.get("context_key") or "").strip()
+                if not tool_output_field or not context_key:
+                    continue
+                mapping_concept_id = str(item.get("mapping_concept_id") or "").strip()
+                if not mapping_concept_id:
+                    mapping_concept_id = _runtime_tool_output_mapping_concept_id(
+                        workflow_id=workflow_id_text,
+                        state_id=state_id_text,
+                        tool_output_field=tool_output_field,
+                        context_key=context_key,
+                    )
+                tool_output_mapping_specs.append(
+                    _CanonicalToolOutputMappingSpec(
+                        concept_id=mapping_concept_id,
+                        tool_output_field=tool_output_field,
+                        context_key=context_key,
+                    )
+                )
+        writes_context_keys = tuple(
+            str(item or "").strip()
+            for item in (state_metadata.get("writes_context_keys") or [])
+            if isinstance(item, str) and str(item or "").strip()
+        )
 
         next_state: str | None = None
         on_true_state: str | None = None
@@ -1073,7 +1172,13 @@ def _build_publication_spec_from_definition(
         conditional_transitions: list[_CanonicalConditionalTransitionPublicationSpec] = []
 
         for transition in tuple(getattr(state_spec, "transitions", ()) or ()):
-            to_state = str(getattr(transition, "to_state", "") or "").strip()
+            raw_to_state = str(getattr(transition, "to_state", "") or "").strip()
+            to_state, _ignored_transition_step_concept_id = (
+                _normalise_publication_state_identity(
+                    workflow_id=workflow_id_text,
+                    state_id=raw_to_state,
+                )
+            )
             if not to_state:
                 continue
             reason = str(getattr(transition, "reason", "") or "").strip()
@@ -1105,6 +1210,38 @@ def _build_publication_spec_from_definition(
                     )
                 )
 
+        explicit_transition_condition_specs = state_metadata.get(
+            "transition_condition_specs"
+        )
+        if isinstance(explicit_transition_condition_specs, list):
+            explicit_publication_branches: list[
+                _CanonicalConditionalTransitionPublicationSpec
+            ] = []
+            for item in explicit_transition_condition_specs:
+                if not isinstance(item, Mapping):
+                    continue
+                raw_to_state = str(item.get("to_state") or "").strip()
+                to_state, _ignored_transition_step_concept_id = (
+                    _normalise_publication_state_identity(
+                        workflow_id=workflow_id_text,
+                        state_id=raw_to_state,
+                    )
+                )
+                if not to_state:
+                    continue
+                condition_spec = item.get("condition_spec")
+                if not isinstance(condition_spec, Mapping):
+                    condition_spec = {"kind": "always"}
+                explicit_publication_branches.append(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state=to_state,
+                        condition_spec=dict(condition_spec),
+                        reason=str(item.get("reason") or "").strip() or None,
+                    )
+                )
+            if explicit_publication_branches:
+                conditional_transitions = explicit_publication_branches
+
         steps.append(
             _CanonicalStepPublicationSpec(
                 state_id=state_id_text,
@@ -1113,7 +1250,24 @@ def _build_publication_spec_from_definition(
                 action_concept_id=action_concept_id,
                 prompt_concept_ids=prompt_concept_ids,
                 execution_mode=execution_mode,
+                llm_policy=llm_policy,
+                validation_policy=validation_policy,
+                mutation_authority=mutation_authority,
                 invoked_workflow_id=invoked_workflow_id,
+                static_input_bindings=dedupe_static_input_bindings(static_input_bindings),
+                context_input_mapping_specs=tuple(
+                    {
+                        (item.concept_id, item.context_key, item.tool_param): item
+                        for item in context_input_mapping_specs
+                    }.values()
+                ),
+                tool_output_mapping_specs=tuple(
+                    {
+                        (item.concept_id, item.tool_output_field, item.context_key): item
+                        for item in tool_output_mapping_specs
+                    }.values()
+                ),
+                writes_context_keys=writes_context_keys,
                 next_state=next_state,
                 on_true_state=on_true_state,
                 on_false_state=on_false_state,
@@ -1132,6 +1286,13 @@ def _build_publication_spec_from_definition(
     initial_state = str(getattr(definition, "initial_state", "") or "").strip()
     if not initial_state:
         initial_state = steps[0].state_id
+    else:
+        initial_state, _ignored_initial_step_concept_id = (
+            _normalise_publication_state_identity(
+                workflow_id=workflow_id_text,
+                state_id=initial_state,
+            )
+        )
 
     return _CanonicalWorkflowPublicationSpec(
         initial_state=initial_state,
@@ -1188,8 +1349,15 @@ def _build_definition_from_publication_spec(
                     and key.strip()
                 }
             )
-        if step.context_input_mapping_specs:
-            for mapping_spec in step.context_input_mapping_specs:
+        context_input_mapping_specs = (
+            step.context_input_mapping_specs
+            if step.context_input_mapping_specs
+            else _context_input_mapping_specs_from_mapping_concept_ids(
+                step.context_input_mappings
+            )
+        )
+        if context_input_mapping_specs:
+            for mapping_spec in context_input_mapping_specs:
                 if not isinstance(mapping_spec.tool_param, str) or not mapping_spec.tool_param.strip():
                     continue
                 if (
@@ -1358,32 +1526,51 @@ def _build_definition_from_publication_spec(
         state_metadata: dict[str, Any] = {}
         if step.invoked_workflow_id:
             state_metadata["invokes_workflow"] = step.invoked_workflow_id
-            state_metadata["subworkflow_contract"] = {
-                "workflow_id": step.invoked_workflow_id
-            }
-        if step.context_input_mapping_specs:
+        subworkflow_contract = _build_publication_subworkflow_contract(
+            invoked_workflow_id=step.invoked_workflow_id,
+            action_inputs=action_inputs,
+            tool_output_mapping_specs=(),
+        )
+        if subworkflow_contract is not None:
+            state_metadata["subworkflow_contract"] = subworkflow_contract
+        if context_input_mapping_specs:
             reads_context_keys = [
                 mapping_spec.context_key.strip()
-                for mapping_spec in step.context_input_mapping_specs
+                for mapping_spec in context_input_mapping_specs
                 if isinstance(mapping_spec.context_key, str)
                 and mapping_spec.context_key.strip()
                 and bool(mapping_spec.required)
             ]
             if reads_context_keys:
                 state_metadata["reads_context_keys"] = reads_context_keys
-        if step.tool_output_mapping_specs:
+        tool_output_mapping_specs = (
+            step.tool_output_mapping_specs
+            if step.tool_output_mapping_specs
+            else _tool_output_mapping_specs_from_mapping_concept_ids(
+                step.tool_output_context_mappings
+            )
+        )
+        if tool_output_mapping_specs:
             state_metadata["tool_output_context_mappings"] = [
                 {
                     "tool_output_field": mapping_spec.tool_output_field,
                     "context_key": mapping_spec.context_key,
                     "mapping_concept_id": mapping_spec.concept_id,
                 }
-                for mapping_spec in step.tool_output_mapping_specs
+                for mapping_spec in tool_output_mapping_specs
                 if isinstance(mapping_spec.tool_output_field, str)
                 and mapping_spec.tool_output_field.strip()
                 and isinstance(mapping_spec.context_key, str)
                 and mapping_spec.context_key.strip()
             ]
+        if "subworkflow_contract" in state_metadata:
+            enriched_subworkflow_contract = _build_publication_subworkflow_contract(
+                invoked_workflow_id=step.invoked_workflow_id,
+                action_inputs=action_inputs,
+                tool_output_mapping_specs=tool_output_mapping_specs,
+            )
+            if enriched_subworkflow_contract is not None:
+                state_metadata["subworkflow_contract"] = enriched_subworkflow_contract
         if step.writes_context_keys:
             state_metadata["writes_context_keys"] = [
                 item.strip()
@@ -1486,6 +1673,131 @@ def _resolve_step_invoked_workflow_id(
 
 def _step_concept_id(*, workflow_id: str, state_id: str) -> str:
     return f"#V#workflow_step_{_workflow_slug(workflow_id)}_{_slugify_token(state_id)}"
+
+
+def _normalise_publication_state_identity(
+    *,
+    workflow_id: str,
+    state_id: str,
+    step_concept_id: str | None = None,
+) -> tuple[str, str | None]:
+    state_id_text = str(state_id or "").strip()
+    step_concept_id_text = str(step_concept_id or "").strip() or None
+    if not state_id_text:
+        return "", step_concept_id_text
+    if not workflow_id:
+        return state_id_text, step_concept_id_text
+
+    step_prefix = f"#V#workflow_step_{_workflow_slug(workflow_id)}_"
+    if state_id_text.startswith(step_prefix):
+        logical_state_id = state_id_text[len(step_prefix) :].strip()
+        if logical_state_id:
+            return logical_state_id, step_concept_id_text or state_id_text
+    return state_id_text, step_concept_id_text
+
+
+def _context_input_mapping_specs_from_mapping_concept_ids(
+    mapping_concept_ids: Sequence[str] | None,
+) -> tuple[_CanonicalContextInputMappingSpec, ...]:
+    specs: list[_CanonicalContextInputMappingSpec] = []
+    for mapping_concept_id in mapping_concept_ids or ():
+        mapping_concept_id_text = str(mapping_concept_id or "").strip()
+        if not mapping_concept_id_text:
+            continue
+        context_key, tool_param = _mapping_pair_from_concept_id(mapping_concept_id_text)
+        if not context_key or not tool_param:
+            continue
+        specs.append(
+            _CanonicalContextInputMappingSpec(
+                concept_id=mapping_concept_id_text,
+                context_key=context_key,
+                tool_param=tool_param,
+                required=True,
+            )
+        )
+    return tuple(
+        {
+            (item.concept_id, item.context_key, item.tool_param): item
+            for item in specs
+        }.values()
+    )
+
+
+def _tool_output_mapping_specs_from_mapping_concept_ids(
+    mapping_concept_ids: Sequence[str] | None,
+) -> tuple[_CanonicalToolOutputMappingSpec, ...]:
+    specs: list[_CanonicalToolOutputMappingSpec] = []
+    for mapping_concept_id in mapping_concept_ids or ():
+        mapping_concept_id_text = str(mapping_concept_id or "").strip()
+        if not mapping_concept_id_text:
+            continue
+        tool_output_field, context_key = _tool_output_mapping_pair_from_concept_id(
+            mapping_concept_id_text
+        )
+        if not tool_output_field or not context_key:
+            continue
+        specs.append(
+            _CanonicalToolOutputMappingSpec(
+                concept_id=mapping_concept_id_text,
+                tool_output_field=tool_output_field,
+                context_key=context_key,
+            )
+        )
+    return tuple(
+        {
+            (item.concept_id, item.tool_output_field, item.context_key): item
+            for item in specs
+        }.values()
+    )
+
+
+def _build_publication_subworkflow_contract(
+    *,
+    invoked_workflow_id: str | None,
+    action_inputs: Mapping[str, Any],
+    tool_output_mapping_specs: Sequence[
+        ParentSpecificityToolOutputMappingSpec
+        | WorkflowGapOutputMappingSpec
+        | _CanonicalToolOutputMappingSpec
+    ]
+    | None,
+) -> dict[str, Any] | None:
+    resolved_workflow_id = str(invoked_workflow_id or "").strip()
+    workflow_id_context_key = ""
+    workflow_id_input = action_inputs.get("workflow_id")
+    if isinstance(workflow_id_input, Mapping):
+        workflow_id_context_key = str(
+            workflow_id_input.get("$context_key") or ""
+        ).strip()
+
+    if not resolved_workflow_id and not workflow_id_context_key:
+        return None
+
+    provided_inputs = [
+        str(key).strip()
+        for key in action_inputs.keys()
+        if isinstance(key, str)
+        and str(key).strip()
+        and not str(key).strip().startswith("__parent_")
+    ]
+    mapped_outputs = [
+        item.tool_output_field[len("result.") :].strip()
+        for item in (tool_output_mapping_specs or ())
+        if isinstance(item.tool_output_field, str)
+        and item.tool_output_field.startswith("result.")
+        and item.tool_output_field[len("result.") :].strip()
+    ]
+
+    contract: dict[str, Any] = {
+        "workflow_id": resolved_workflow_id,
+    }
+    if workflow_id_context_key:
+        contract["workflow_id_context_key"] = workflow_id_context_key
+    if provided_inputs:
+        contract["provided_inputs"] = list(dict.fromkeys(provided_inputs))
+    if mapped_outputs:
+        contract["mapped_outputs"] = list(dict.fromkeys(mapped_outputs))
+    return contract
 
 
 def _terminal_effect_id(*, workflow_id: str, state_id: str) -> str:
@@ -2332,11 +2644,7 @@ def publish_canonical_chat_workflow_graphs(
     seed_workflow_text_relations = seed_canonical_workflow_text_relations()
     for workflow_id in target_workflow_ids:
         seed_spec = seed_publication_specs.get(workflow_id)
-        current_spec = available_publication_specs.get(workflow_id)
-        if seed_spec is not None and (
-            current_spec is None
-            or not _publication_spec_has_executable_actions(current_spec)
-        ):
+        if seed_spec is not None:
             available_publication_specs[workflow_id] = seed_spec
     available_workflow_text_relations = _merge_workflow_text_relations(
         available_workflow_text_relations,
@@ -2418,17 +2726,10 @@ def publish_canonical_chat_workflow_graphs(
             registration_spec = _build_publication_spec_from_definition(
                 registration_definition
             )
-            registration_spec_has_actions = _publication_spec_has_executable_actions(
-                registration_spec
-            )
             current_spec_has_actions = bool(
                 spec is not None and _publication_spec_has_executable_actions(spec)
             )
-            if (
-                spec is None
-                or registration_spec_has_actions
-                or not current_spec_has_actions
-            ):
+            if spec is None or not current_spec_has_actions:
                 spec = registration_spec
                 available_publication_specs[workflow_id] = spec
         if spec is None:
@@ -2446,6 +2747,28 @@ def publish_canonical_chat_workflow_graphs(
                 workflow_id=workflow_id,
                 spec=spec,
             )
+
+        prepublication_validation = validate_workflow_definition_contract(
+            definition=registration_definition,
+            known_workflow_ids=known_workflow_ids,
+            workflow_definition_loader=_resolve_workflow_definition_for_validation,
+        )
+        transient_execution_input_issues = (
+            prepublication_validation.get("transient_execution_input_issues") or []
+            if isinstance(prepublication_validation, Mapping)
+            else []
+        )
+        if transient_execution_input_issues:
+            validation_failures_by_workflow_id[workflow_id] = {
+                "errors": ["workflow_transient_execution_input_invalid"],
+                "contract_validation": prepublication_validation,
+                "transient_execution_input_issues": transient_execution_input_issues,
+            }
+            errors_by_workflow_id[workflow_id] = (
+                "publication_validation_failed:"
+                "workflow_transient_execution_input_invalid"
+            )
+            continue
 
         workflow_doc, workflow_load_error = _load_concept(workflow_id)
         if workflow_load_error:
@@ -2578,7 +2901,7 @@ def publish_canonical_chat_workflow_graphs(
                 if isinstance(step.execution_mode, str) and step.execution_mode.strip()
                 else runtime_details.execution_mode
             )
-            llm_policy = (
+            raw_llm_policy = (
                 dict(step.llm_policy)
                 if isinstance(step.llm_policy, Mapping)
                 else (
@@ -2586,6 +2909,14 @@ def publish_canonical_chat_workflow_graphs(
                     if isinstance(runtime_details.llm_policy, Mapping)
                     else None
                 )
+            )
+            llm_policy = (
+                raw_llm_policy
+                if (
+                    isinstance(raw_llm_policy, Mapping)
+                    and str(execution_mode or "").strip().lower() == "llm"
+                )
+                else None
             )
             validation_policy = (
                 dict(step.validation_policy)
