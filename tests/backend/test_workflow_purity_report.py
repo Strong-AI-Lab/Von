@@ -948,3 +948,65 @@ def test_build_workflow_purity_report_ignores_explanatory_docstrings_in_guarded_
     )
 
     assert report["counters"]["support_surface_policy_contract_violation_count"] == 0
+
+
+def test_build_workflow_purity_report_detects_annotation_and_workflow_creation_drift(
+    tmp_path: Path,
+) -> None:
+    _write(
+        "src/backend/services/annotation_extraction_service.py",
+        "def _infer_type_label(text):\n    return 'person'\n",
+        root=tmp_path,
+    )
+    _write(
+        "src/backend/workflows/durable/workflow_creation_workflow.py",
+        (
+            "_AUTO_WORKFLOW_ID_STOPWORDS = {'the'}\n"
+            "def _extract_labeled_value(text):\n    return text\n"
+        ),
+        root=tmp_path,
+    )
+    baseline_path = (
+        tmp_path / "tests" / "backend" / "fixtures" / "workflow_purity_baseline.json"
+    )
+    baseline_path.parent.mkdir(parents=True, exist_ok=True)
+    baseline_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "workflow_purity_baseline.v1",
+                "counters": {
+                    "built_in_registration_count": 0,
+                    "remaining_python_workflow_family_count": 0,
+                    "python_authored_canonical_workflow_source_count": 0,
+                    "python_authored_workflow_prompt_source_count": 0,
+                    "python_authored_support_prompt_source_count": 0,
+                    "direct_instance_create_callsite_count": 0,
+                    "env_event_binding_count": 0,
+                    "legacy_selector_mode_count": 0,
+                    "builtin_capability_override_count": 0,
+                    "non_vontology_discoverable_workflow_count": 0,
+                    "repo_seed_authority_drift_path_count": 0,
+                    "vontology_first_seed_fallback_violation_count": 0,
+                    "workflow_id_special_case_count": 0,
+                    "supervised_fail_open_fallback_count": 0,
+                    "support_surface_policy_contract_violation_count": 0,
+                    "synthesized_launch_contract_count": 0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = build_workflow_purity_report(
+        registry=None,
+        project_root=tmp_path,
+        baseline_path=baseline_path,
+    )
+
+    patterns = {
+        item["pattern"]
+        for item in report["details"]["support_surface_policy_contracts"]["violations"]
+    }
+    assert "retired_annotation_type_inference_symbol" in patterns
+    assert "retired_workflow_authoring_stopword_symbol" in patterns
+    assert "retired_workflow_authoring_label_parser_symbol" in patterns

@@ -37,6 +37,7 @@ _SERVICE_EXPORT_MODULES = {
     "text_value_service": ".text_value_service",
     "vontology_service": ".vontology_service",
     "workflow_continuation_service": ".workflow_continuation_service",
+    "workflow_authoring_request_interpretation_vontology_service": ".workflow_authoring_request_interpretation_vontology_service",
     "workflow_gap_vontology_service": ".workflow_gap_vontology_service",
 }
 
@@ -97,6 +98,9 @@ if TYPE_CHECKING:
     from . import text_value_service as text_value_service
     from . import vontology_service as vontology_service
     from . import workflow_continuation_service as workflow_continuation_service
+    from . import (
+        workflow_authoring_request_interpretation_vontology_service as workflow_authoring_request_interpretation_vontology_service,
+    )
     from . import workflow_gap_vontology_service as workflow_gap_vontology_service
 
 
@@ -138,6 +142,7 @@ __all__ = [
     "testing_workflow_vontology_service",
     "text_value_service",
     "vontology_service",
+    "workflow_authoring_request_interpretation_vontology_service",
     "workflow_continuation_service",
     "workflow_gap_vontology_service",
 ]

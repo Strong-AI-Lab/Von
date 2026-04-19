@@ -152,6 +152,15 @@ FILE_COPY_INTERPRETATION_RETIRED_SYMBOLS = {
     "_ALL_CAPS_ORG_PATTERN": "retired_file_copy_semantic_regex_symbol",
     "_ORGANISATION_STOPWORDS": "retired_file_copy_stopword_symbol",
 }
+ANNOTATION_EXTRACTION_RETIRED_SYMBOLS = {
+    "_infer_type_label": "retired_annotation_type_inference_symbol",
+}
+WORKFLOW_CREATION_RETIRED_SYMBOLS = {
+    "_AUTO_WORKFLOW_ID_STOPWORDS": "retired_workflow_authoring_stopword_symbol",
+    "_extract_labeled_value": "retired_workflow_authoring_label_parser_symbol",
+    "_extract_phd_student_profile": "retired_workflow_authoring_label_parser_symbol",
+    "_derive_generated_workflow_id": "retired_workflow_authoring_stopword_symbol",
+}
 
 CORE_SUPPORT_POLICY_CONTRACTS = (
     {
@@ -185,6 +194,16 @@ CORE_SUPPORT_POLICY_CONTRACTS = (
         "name": "file_copy_interpretation_authority_surface",
         "path": "src/backend/services/file_copy_interpretation_service.py",
         "banned_symbol_names": FILE_COPY_INTERPRETATION_RETIRED_SYMBOLS,
+    },
+    {
+        "name": "annotation_extraction_authority_surface",
+        "path": "src/backend/services/annotation_extraction_service.py",
+        "banned_symbol_names": ANNOTATION_EXTRACTION_RETIRED_SYMBOLS,
+    },
+    {
+        "name": "workflow_creation_authority_surface",
+        "path": "src/backend/workflows/durable/workflow_creation_workflow.py",
+        "banned_symbol_names": WORKFLOW_CREATION_RETIRED_SYMBOLS,
     },
 )
 

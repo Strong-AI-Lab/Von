@@ -12,6 +12,10 @@ from ...services import concept_search_service, concept_service
 from ...services.concept_service import ConceptNotFoundError
 from ...services.relationship_write_service import add_relationship
 from ...services.workflow_discovery_service import discover_workflows
+from ...services.workflow_authoring_request_interpretation_vontology_service import (
+    infer_workflow_authoring_identity,
+    infer_workflow_authoring_profile,
+)
 from ...services.workflow_authoring_vontology_service import (
     build_workflow_authoring_prompt_contract,
     get_workflow_authoring_prompt_health_status,
@@ -107,59 +111,6 @@ WORKFLOW_CREATION_SYNTHESIS_POLICY_MISSING_ERROR = (
 )
 WORKFLOW_PUBLICATION_LIFECYCLE_SCHEMA_VERSION = "workflow_publication_lifecycle.v1"
 WORKFLOW_PUBLICATION_LIFECYCLE_TEXT_PREDICATE = "#V#hasWorkflowLifecycleJson"
-_AUTO_WORKFLOW_ID_KEYWORD_LIMIT = 5
-_AUTO_WORKFLOW_ID_KEYWORD_MAX_CHARS = 48
-_AUTO_WORKFLOW_ID_STOPWORDS = frozenset(
-    {
-        "a",
-        "an",
-        "and",
-        "be",
-        "can",
-        "create",
-        "description",
-        "for",
-        "from",
-        "how",
-        "i",
-        "in",
-        "into",
-        "is",
-        "it",
-        "look",
-        "manually",
-        "me",
-        "my",
-        "need",
-        "new",
-        "of",
-        "on",
-        "or",
-        "our",
-        "please",
-        "request",
-        "show",
-        "tell",
-        "that",
-        "the",
-        "then",
-        "this",
-        "to",
-        "use",
-        "using",
-        "we",
-        "what",
-        "when",
-        "why",
-        "will",
-        "with",
-        "workflow",
-        "workflows",
-        "would",
-        "you",
-        "your",
-    }
-)
 
 
 def _clean_text(value: Any) -> str:
@@ -176,19 +127,12 @@ def _normalise_slug(value: Any, *, fallback: str) -> str:
     return slug or fallback
 
 
-def _derive_generated_workflow_id(request_text: str) -> str:
-    slug = _normalise_slug(request_text, fallback="generated")
-    tokens = [token for token in slug.split("_") if token]
-    keywords = [token for token in tokens if token not in _AUTO_WORKFLOW_ID_STOPWORDS]
-    if not keywords:
-        keywords = [token for token in tokens if token != "workflow"]
-    keyword_fragment = "_".join(keywords[:_AUTO_WORKFLOW_ID_KEYWORD_LIMIT]).strip("_")
-    keyword_fragment = keyword_fragment[:_AUTO_WORKFLOW_ID_KEYWORD_MAX_CHARS].rstrip("_")
-    if not keyword_fragment:
-        keyword_fragment = "generated"
-    digest = hashlib.sha1(request_text.strip().lower().encode("utf-8")).hexdigest()[:8]
+def _derive_generated_workflow_id_from_name(workflow_name: str) -> str:
+    cleaned_name = _clean_text(workflow_name) or "Generated Workflow"
+    slug = _normalise_slug(cleaned_name, fallback="generated")
+    digest = hashlib.sha1(cleaned_name.strip().lower().encode("utf-8")).hexdigest()[:8]
     return _normalise_concept_id(
-        f"#V#{keyword_fragment}_{digest}_workflow",
+        f"#V#{slug}_{digest}_workflow",
         fallback_slug="generated_workflow",
     )
 
@@ -327,21 +271,55 @@ def _extract_author_names(context: Mapping[str, Any]) -> list[str]:
     return []
 
 
-def _extract_labeled_value(*, source_text: str, labels: tuple[str, ...]) -> str:
-    text = _clean_text(source_text)
-    if not text:
-        return ""
-    for label in labels:
-        pattern = re.compile(
-            rf"(?im)^\s*{re.escape(label)}\s*:\s*(.+)$",
+def _resolve_workflow_authoring_identity(
+    *,
+    context: Mapping[str, Any],
+    environment: WorkflowEnvironment | None = None,
+) -> dict[str, Any]:
+    request_text = _extract_request_text(context)
+    explicit_workflow_name = _clean_text(
+        context.get("target_workflow_name")
+        or context.get("workflow_name")
+        or context.get("name")
+    )
+    explicit_workflow_id = _clean_text(
+        context.get("target_workflow_id") or context.get("workflow_id")
+    )
+    explicit_workflow_description = _clean_text(
+        context.get("workflow_description") or context.get("description")
+    )
+    diagnostics: dict[str, Any] = {"status": "skipped_explicit_identity"}
+    inferred_payload: dict[str, Any] = {}
+    if request_text and (not explicit_workflow_name and not explicit_workflow_id):
+        inferred_payload, diagnostics = infer_workflow_authoring_identity(
+            request_text=request_text,
+            llm_client=getattr(environment, "llm_client", None),
+            model=getattr(environment, "model", None),
         )
-        match = pattern.search(text)
-        if match:
-            return _clean_text(match.group(1))
-    return ""
+
+    workflow_name = explicit_workflow_name or _clean_text(
+        inferred_payload.get("target_workflow_name")
+    )
+    workflow_id = explicit_workflow_id or _clean_text(
+        inferred_payload.get("target_workflow_id")
+    )
+    workflow_description = explicit_workflow_description or _clean_text(
+        inferred_payload.get("workflow_description")
+    )
+
+    return {
+        "workflow_name": workflow_name,
+        "workflow_id": workflow_id,
+        "workflow_description": workflow_description,
+        "identity_inference_diagnostics": diagnostics,
+    }
 
 
-def _extract_phd_student_profile(context: Mapping[str, Any]) -> dict[str, Any]:
+def _resolve_phd_student_profile(
+    *,
+    context: Mapping[str, Any],
+    environment: WorkflowEnvironment | None = None,
+) -> dict[str, Any]:
     source_text = _clean_text(
         context.get("phd_student_description")
         or context.get("student_description")
@@ -353,24 +331,21 @@ def _extract_phd_student_profile(context: Mapping[str, Any]) -> dict[str, Any]:
     if not source_text:
         source_text = _extract_request_text(context)
 
-    student_name = _clean_text(
+    diagnostics: dict[str, Any] = {"status": "skipped_no_source_text"}
+    inferred_profile: dict[str, Any] = {}
+    if source_text:
+        inferred_profile, diagnostics = infer_workflow_authoring_profile(
+            source_text=source_text,
+            llm_client=getattr(environment, "llm_client", None),
+            model=getattr(environment, "model", None),
+        )
+
+    student_name = _normalise_person_name(
         context.get("phd_student_name")
         or context.get("student_name")
         or context.get("name")
+        or inferred_profile.get("student_name")
     )
-    if not student_name:
-        student_name = _extract_labeled_value(
-            source_text=source_text,
-            labels=(
-                "phd student name",
-                "doctoral student name",
-                "student name",
-                "student",
-                "name",
-            ),
-        )
-    student_name = _normalise_person_name(student_name)
-
     supervisor_names = _extract_person_names_from_value(
         context.get("supervisor_names")
         or context.get("supervisors")
@@ -378,40 +353,22 @@ def _extract_phd_student_profile(context: Mapping[str, Any]) -> dict[str, Any]:
         or context.get("advisors")
     )
     if not supervisor_names:
-        supervisor_text = _extract_labeled_value(
-            source_text=source_text,
-            labels=("supervisors", "supervisor", "advisors", "advisor"),
+        supervisor_names = _extract_person_names_from_value(
+            inferred_profile.get("supervisor_names")
         )
-        if supervisor_text:
-            supervisor_names = _extract_person_names_from_value(supervisor_text)
 
     research_topic = _clean_text(
         context.get("research_topic")
         or context.get("research_area")
         or context.get("topic")
+        or inferred_profile.get("research_topic")
     )
-    if not research_topic:
-        research_topic = _extract_labeled_value(
-            source_text=source_text,
-            labels=(
-                "research topic",
-                "research area",
-                "research focus",
-                "topic",
-            ),
-        )
-    research_topic = _clean_text(research_topic)
-
     institution = _clean_text(
         context.get("institution")
         or context.get("university")
         or context.get("department")
+        or inferred_profile.get("institution")
     )
-    if not institution:
-        institution = _extract_labeled_value(
-            source_text=source_text,
-            labels=("institution", "university", "department"),
-        )
 
     return {
         "student_name": student_name,
@@ -419,6 +376,7 @@ def _extract_phd_student_profile(context: Mapping[str, Any]) -> dict[str, Any]:
         "research_topic": research_topic,
         "institution": institution,
         "source_text": source_text,
+        "profile_interpretation_diagnostics": diagnostics,
     }
 
 
@@ -587,11 +545,9 @@ def _resolve_workflow_template_spec(
     context: Mapping[str, Any],
     request_text: str,
     workflow_id: str,
+    workflow_name: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     explicit_template_id = _workflow_template_id_from_context(context)
-    workflow_name = _titleise(
-        workflow_id[3:] if workflow_id.startswith("#V#") else workflow_id
-    )
     request_summary = _clean_text(request_text[:160]) if request_text else "workflow_created"
     workflow_description = request_text
     rendered_spec, template_resolution = resolve_workflow_spec_template(
@@ -945,16 +901,34 @@ def _infer_postcondition_probe(step_rows: Iterable[Mapping[str, Any]]) -> dict[s
     return {}
 
 
-def _normalise_workflow_spec(context: Mapping[str, Any]) -> dict[str, Any]:
+def _normalise_workflow_spec(
+    context: Mapping[str, Any],
+    *,
+    environment: WorkflowEnvironment | None = None,
+) -> dict[str, Any]:
     request_text = _extract_request_text(context)
     raw_spec = _extract_workflow_spec(context)
     template_resolution: dict[str, Any] = {}
+    identity = _resolve_workflow_authoring_identity(
+        context={**context, **raw_spec},
+        environment=environment,
+    )
     candidate_workflow_id = (
         _clean_text(raw_spec.get("workflow_id"))
         or _clean_text(context.get("target_workflow_id"))
+        or _clean_text(identity.get("workflow_id"))
+    )
+    authored_workflow_name = _clean_text(
+        raw_spec.get("name")
+        or raw_spec.get("workflow_name")
+        or context.get("target_workflow_name")
+        or context.get("workflow_name")
+        or identity.get("workflow_name")
     )
     if not candidate_workflow_id:
-        candidate_workflow_id = _derive_generated_workflow_id(request_text)
+        candidate_workflow_id = _derive_generated_workflow_id_from_name(
+            authored_workflow_name or "Generated Workflow"
+        )
     workflow_id = _normalise_concept_id(
         candidate_workflow_id,
         fallback_slug="generated_workflow",
@@ -965,16 +939,18 @@ def _normalise_workflow_spec(context: Mapping[str, Any]) -> dict[str, Any]:
             context=context,
             request_text=request_text,
             workflow_id=workflow_id,
+            workflow_name=authored_workflow_name
+            or _titleise(workflow_id[3:] if workflow_id.startswith("#V#") else workflow_id),
         )
 
     workflow_name = _clean_text(
         raw_spec.get("name") or raw_spec.get("workflow_name")
-    ) or _titleise(
+    ) or authored_workflow_name or _titleise(
         workflow_id[3:] if workflow_id.startswith("#V#") else workflow_id
     )
     workflow_description = _clean_text(
         raw_spec.get("description") or raw_spec.get("workflow_description")
-    ) or request_text
+    ) or _clean_text(identity.get("workflow_description")) or request_text
     parent_type_id = _normalise_concept_id(
         raw_spec.get("parent_type_id")
         or context.get("parent_type_id")
@@ -1036,6 +1012,7 @@ def _normalise_workflow_spec(context: Mapping[str, Any]) -> dict[str, Any]:
         "text_relations": text_relations,
         "synthesis_policy_text": _clean_text(raw_spec.get("synthesis_policy_text")),
         "template_resolution": template_resolution,
+        "identity_inference_diagnostics": identity.get("identity_inference_diagnostics"),
     }
 
 
@@ -1278,7 +1255,7 @@ def _handle_discover_existing_workflows(
 
 
 def _handle_identify_need(request: WorkflowActionRequest) -> WorkflowActionResult:
-    spec = _normalise_workflow_spec(request.data)
+    spec = _normalise_workflow_spec(request.data, environment=request.environment)
     parent_type_id = str(spec.get("parent_type_id") or DEFAULT_WORKFLOW_PARENT_TYPE_ID)
     outputs = _add_contract_output(
         outputs={
@@ -1293,7 +1270,7 @@ def _handle_identify_need(request: WorkflowActionRequest) -> WorkflowActionResul
 
 
 def _handle_design_structure(request: WorkflowActionRequest) -> WorkflowActionResult:
-    spec = _normalise_workflow_spec(request.data)
+    spec = _normalise_workflow_spec(request.data, environment=request.environment)
     parent_type_id = str(spec.get("parent_type_id") or DEFAULT_WORKFLOW_PARENT_TYPE_ID)
     outputs = _add_contract_output(
         outputs={
@@ -1306,7 +1283,7 @@ def _handle_design_structure(request: WorkflowActionRequest) -> WorkflowActionRe
 
 
 def _handle_create_workflow_type(request: WorkflowActionRequest) -> WorkflowActionResult:
-    spec = _normalise_workflow_spec(request.data)
+    spec = _normalise_workflow_spec(request.data, environment=request.environment)
     parent_type_id = str(spec.get("parent_type_id") or DEFAULT_WORKFLOW_PARENT_TYPE_ID)
     workflow_id = str(spec["workflow_id"])
     workflow_name = str(spec["workflow_name"])
@@ -1345,7 +1322,7 @@ def _handle_ensure_workflow_identity(
 
 
 def _handle_create_step_concepts(request: WorkflowActionRequest) -> WorkflowActionResult:
-    spec = _normalise_workflow_spec(request.data)
+    spec = _normalise_workflow_spec(request.data, environment=request.environment)
     parent_type_id = str(spec.get("parent_type_id") or DEFAULT_WORKFLOW_PARENT_TYPE_ID)
     workflow_name = _clean_text(spec.get("workflow_name")) or "Generated Workflow"
     workflow_id = str(spec["workflow_id"])
@@ -1382,7 +1359,7 @@ def _handle_materialise_workflow_definition(
 ) -> WorkflowActionResult:
     from .. import workflow_concept_authority_service as workflow_authority_service
 
-    spec = _normalise_workflow_spec(request.data)
+    spec = _normalise_workflow_spec(request.data, environment=request.environment)
     parent_type_id = str(spec.get("parent_type_id") or DEFAULT_WORKFLOW_PARENT_TYPE_ID)
     workflow_id = str(spec["workflow_id"])
     workflow_name = str(spec["workflow_name"])
@@ -1896,7 +1873,10 @@ def _handle_resolve_phd_student_candidate(
             if key not in merged_context:
                 merged_context[key] = value
 
-    profile = _extract_phd_student_profile(merged_context)
+    profile = _resolve_phd_student_profile(
+        context=merged_context,
+        environment=request.environment,
+    )
     student_name = _normalise_person_name(profile.get("student_name"))
     if not student_name:
         return WorkflowActionResult(
@@ -1964,6 +1944,9 @@ def _handle_resolve_phd_student_candidate(
             "institution": _clean_text(profile.get("institution")),
             "phd_student_source_text": _clean_text(profile.get("source_text")),
             "phd_student_resolution_mode": "exact_name_unique_match_or_create",
+            "phd_student_profile_interpretation": dict(
+                profile.get("profile_interpretation_diagnostics") or {}
+            ),
         },
     )
 
@@ -2399,7 +2382,7 @@ def _verify_postconditions(
 
 
 def _handle_verify_discoverability(request: WorkflowActionRequest) -> WorkflowActionResult:
-    spec = _normalise_workflow_spec(request.data)
+    spec = _normalise_workflow_spec(request.data, environment=request.environment)
     parent_type_id = str(spec.get("parent_type_id") or DEFAULT_WORKFLOW_PARENT_TYPE_ID)
     workflow_id = str(spec["workflow_id"])
     discovered = set(discover_workflow_ids())
@@ -2518,7 +2501,7 @@ def _handle_verify_discoverability(request: WorkflowActionRequest) -> WorkflowAc
 
 
 def _handle_finalise(request: WorkflowActionRequest) -> WorkflowActionResult:
-    spec = _normalise_workflow_spec(request.data)
+    spec = _normalise_workflow_spec(request.data, environment=request.environment)
     parent_type_id = str(spec.get("parent_type_id") or DEFAULT_WORKFLOW_PARENT_TYPE_ID)
     workflow_id = str(
         request.data.get("workflow_concept_id") or spec.get("workflow_id") or ""

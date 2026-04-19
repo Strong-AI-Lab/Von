@@ -981,21 +981,39 @@ def test_text_only_phd_student_request_routes_create_execute_end_to_end() -> Non
     )
 
     student_description = (
-        "Student Name: Alex Example\n"
-        "Supervisors: Grace Hopper\n"
-        "Research Topic: Neuro-Symbolic Systems\n"
-        "Institution: University of Auckland"
+        "Doctorando: Alex Example\n"
+        "Supervisora: Grace Hopper\n"
+        "Tema de investigación: Neuro-Symbolic Systems\n"
+        "Institución: University of Auckland"
     )
-    generated_run = WorkflowExecutor(registry=action_registry, max_transitions=40).run(
-        generated_definition,
-        environment=env,
-        data={"phd_student_description": student_description},
-    )
+    with patch(
+        "src.backend.workflows.durable.workflow_creation_workflow.infer_workflow_authoring_profile",
+        return_value=(
+            {
+                "schema_version": "workflow_authoring_profile_interpretation.v1",
+                "student_name": "Alex Example",
+                "supervisor_names": ["Grace Hopper"],
+                "research_topic": "Neuro-Symbolic Systems",
+                "institution": "University of Auckland",
+                "source_text": student_description,
+            },
+            {"status": "ok"},
+        ),
+    ):
+        generated_run = WorkflowExecutor(registry=action_registry, max_transitions=40).run(
+            generated_definition,
+            environment=env,
+            data={"phd_student_description": student_description},
+        )
     assert generated_run.completed is True
     assert generated_run.data.get("phd_student_candidate_resolved") is True
     assert generated_run.data.get("phd_student_relationships_asserted") is True
     assert generated_run.data.get("phd_student_text_grounded") is True
     assert generated_run.data.get("phd_student_representation_verified") is True
+    assert (
+        (generated_run.data.get("phd_student_profile_interpretation") or {}).get("status")
+        == "ok"
+    )
 
     student_concept_id = str(generated_run.data.get("phd_student_concept_id") or "")
     assert student_concept_id
@@ -1079,16 +1097,33 @@ def test_generated_phd_student_workflow_fails_closed_for_ambiguous_student() -> 
         create_as_instance=True,
     )
 
-    generated_run = WorkflowExecutor(registry=action_registry, max_transitions=40).run(
-        generated_definition,
-        environment=env,
-        data={
-            "phd_student_description": (
-                "Student Name: Pat Lee\n"
-                "Research Topic: Symbolic Learning Systems"
-            )
-        },
-    )
+    with patch(
+        "src.backend.workflows.durable.workflow_creation_workflow.infer_workflow_authoring_profile",
+        return_value=(
+            {
+                "schema_version": "workflow_authoring_profile_interpretation.v1",
+                "student_name": "Pat Lee",
+                "supervisor_names": [],
+                "research_topic": "Symbolic Learning Systems",
+                "institution": "",
+                "source_text": (
+                    "Student Name: Pat Lee\n"
+                    "Research Topic: Symbolic Learning Systems"
+                ),
+            },
+            {"status": "ok"},
+        ),
+    ):
+        generated_run = WorkflowExecutor(registry=action_registry, max_transitions=40).run(
+            generated_definition,
+            environment=env,
+            data={
+                "phd_student_description": (
+                    "Student Name: Pat Lee\n"
+                    "Research Topic: Symbolic Learning Systems"
+                )
+            },
+        )
     assert generated_run.completed is True
     assert "failed" in str(generated_run.final_state or "").lower()
     failure_error = str(generated_run.data.get("last_action_error") or "")
@@ -1114,8 +1149,20 @@ def test_normalise_workflow_spec_derives_bounded_stable_generated_workflow_id() 
         "about supervision."
     )
 
-    first = _normalise_workflow_spec({"prompt": prompt})
-    second = _normalise_workflow_spec({"prompt": prompt})
+    with patch(
+        "src.backend.workflows.durable.workflow_creation_workflow.infer_workflow_authoring_identity",
+        return_value=(
+            {
+                "schema_version": "workflow_authoring_identity_inference.v1",
+                "target_workflow_name": "Targeted Supervision Graph Workflow",
+                "target_workflow_id": None,
+                "workflow_description": "Inspect supervision-related graph structure.",
+            },
+            {"status": "ok"},
+        ),
+    ):
+        first = _normalise_workflow_spec({"prompt": prompt})
+        second = _normalise_workflow_spec({"prompt": prompt})
     workflow_id = str(first.get("workflow_id") or "")
 
     assert workflow_id == second.get("workflow_id")
@@ -1123,6 +1170,7 @@ def test_normalise_workflow_spec_derives_bounded_stable_generated_workflow_id() 
     assert workflow_id.endswith("_workflow")
     assert len(workflow_id[3:]) <= WORKFLOW_ID_HYGIENE_MAX_SLUG_LENGTH
     assert "manually_retrieve_the_v_timothy_pistotti_concept" not in workflow_id
+    assert "targeted_supervision_graph_workflow" in workflow_id
     assert assess_workflow_id_hygiene(workflow_id)["valid"] is True
 
 

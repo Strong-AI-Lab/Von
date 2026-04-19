@@ -2,7 +2,7 @@ import os
 import json
 import re
 import time
-from typing import List, Dict, Any, Optional  # Optional kept for existing type hints
+from typing import List, Dict, Any, Optional
 from ..services import concept_service
 from ..prompt.annotation_prompt import AnnotationPromptBuilder
 import logging
@@ -72,26 +72,6 @@ def fallback_nonjson_metric_stats() -> Dict[str, Any]:
 
 
 _PROMPT_BUILDER = AnnotationPromptBuilder(PROMPT_CONCEPT_ID, ttl_sec=_LLM_PROMPT_TTL)
-
-
-def _infer_type_label(text: str) -> Optional[str]:
-    """Heuristic raw label inference for spans with no LLM-provided type.
-    Minimal to avoid false positives. Returns a raw label (e.g. 'person') or None.
-    We purposely do not return ontology IDs here; mapping is a separate step.
-    """
-    if not isinstance(text, str):
-        return None
-    stripped = text.strip()
-    if not stripped or len(stripped) > 120 or " " not in stripped:
-        return None
-    tokens = stripped.split()
-    if not (2 <= len(tokens) <= 4):
-        return None
-    pattern = re.compile(r"^[A-Z][a-z]{2,}(?:-[A-Z][a-z]{2,})?$")
-    for tok in tokens:
-        if not pattern.match(tok):
-            return None
-    return "person"
 
 
 def _map_label_to_concept_id(label: str) -> Optional[str]:
@@ -484,6 +464,49 @@ def build_prompt_preview_with_output(text: str) -> Dict[str, Any]:
     return {"preview": preview, "output": output}
 
 
+def _candidate_variants_for_structural_fallback(candidate: str) -> list[str]:
+    cleaned = str(candidate or "").strip().strip('"').strip("'").strip()
+    if not cleaned:
+        return []
+
+    variants: list[str] = [cleaned]
+    without_paren = re.sub(r"\s*\([^)]*\)\s*$", "", cleaned).strip()
+    if without_paren and without_paren not in variants:
+        variants.append(without_paren)
+
+    for pattern in (r"\s*:\s+", r"\s+-\s+", r"\s+–\s+", r"\s+—\s+"):
+        parts = [part.strip() for part in re.split(pattern, cleaned, maxsplit=1) if part.strip()]
+        if len(parts) < 2:
+            continue
+        for part in parts:
+            if part not in variants:
+                variants.append(part)
+
+    variants.sort(key=len, reverse=True)
+    return variants
+
+
+def _find_structural_fallback_span(
+    *,
+    text: str,
+    candidate: str,
+) -> tuple[int, int, str] | None:
+    if not isinstance(text, str) or not text:
+        return None
+    lowered_text = text.lower()
+    for variant in _candidate_variants_for_structural_fallback(candidate):
+        lowered_variant = variant.lower()
+        if not lowered_variant:
+            continue
+        start = lowered_text.find(lowered_variant)
+        if start == -1:
+            continue
+        end = start + len(variant)
+        if 0 <= start < end <= len(text):
+            return start, end, text[start:end]
+    return None
+
+
 def llm_generate_spans(text: str, max_spans: int = 40) -> List[Dict[str, Any]]:
     try:
         client = get_llm_client()
@@ -518,40 +541,22 @@ def llm_generate_spans(text: str, max_spans: int = 40) -> List[Dict[str, Any]]:
         parsed = json.loads(json_text)
     except Exception as e:
         logger.debug(f"LLM span JSON parse failure: {e}")
-        # Fallback: attempt to parse numbered / bulleted list of candidate entity mentions.
+        # Fallback: attempt to parse numbered / bulleted list items without
+        # introducing language-specific heading or stopword semantics.
         try:
             fallback_lines = []
             raw_lines = raw.splitlines() if isinstance(raw, str) else []
-            # Heuristic: keep lines that look like list items or follow an Entities/Concepts heading.
-            heading_detected = False
             spans: List[Dict[str, Any]] = []
-            heading_pattern = re.compile(
-                r"^\s*(entities|concepts)(/concepts)?\s*:?", re.IGNORECASE
-            )
             item_pattern = re.compile(r"^\s*(\d+\s*[\).:-]|[-*+])\s*(.+)$")
-            stop_tokens = {"and", "the", "of", "a", "an"}
             for line in raw_lines:
                 stripped = line.strip()
                 if not stripped:
                     continue
-                if heading_pattern.match(stripped):
-                    heading_detected = True
-                    continue
                 m = item_pattern.match(stripped)
                 if m:
                     candidate = m.group(2).strip().strip('"').strip()
-                    if candidate:
-                        # Terminate at trailing parenthetical explanation only keep core text? For now keep full to preserve context.
-                        norm = candidate.lower()
-                        if norm not in stop_tokens and len(candidate) <= 200:
-                            fallback_lines.append(candidate)
-                elif heading_detected:
-                    # After a heading, allow plain lines until a blank encountered.
-                    if (
-                        len(stripped.split()) <= 12
-                        and stripped.lower() not in stop_tokens
-                    ):
-                        fallback_lines.append(stripped)
+                    if candidate and len(candidate) <= 200:
+                        fallback_lines.append(candidate)
             # Deduplicate preserving first occurrence (case-insensitive)
             seen_lower = set()
             dedup = []
@@ -561,135 +566,21 @@ def llm_generate_spans(text: str, max_spans: int = 40) -> List[Dict[str, Any]]:
                     continue
                 seen_lower.add(low)
                 dedup.append(entry)
-            # Convert each to a simple span by naive search (first occurrence) to integrate with existing pipeline expectations.
-            # Normalisation helpers (Unicode NFC + casefold) to improve match rate for diacritics
-            import unicodedata
-
-            def _norm(s: str) -> str:
-                try:
-                    return unicodedata.normalize("NFC", s).casefold()
-                except Exception:
-                    return s.lower()
-
-            norm_text = _norm(text)
-            expanded_count = (
-                0  # metric for how many spans we expanded beyond first token
-            )
 
             for entry in dedup:
-                original_candidate = entry.strip()
-                if not original_candidate:
+                located = _find_structural_fallback_span(text=text, candidate=entry)
+                if located is None:
                     continue
-
-                # Strip leading/trailing quotes
-                cand = original_candidate.strip('"').strip()
-                # Split on first ':' or ' - ' to isolate left side (entity : type) patterns
-                split_match = re.split(r"\s*[:\-]\s+", cand, maxsplit=1)
-                if split_match:
-                    cand = split_match[0].strip() or cand
-                # Remove trailing parenthetical
-                if "(" in cand:
-                    cand_no_paren = re.sub(r"\s*\([^)]*\)\s*$", "", cand).strip()
-                    if cand_no_paren:
-                        cand = cand_no_paren
-
-                # If pipe present, try each side (prefer longer that appears in text)
-                pipe_variants = (
-                    [p.strip() for p in cand.split("|") if p.strip()]
-                    if "|" in cand
-                    else [cand]
+                start_idx, end_idx, matched_text = located
+                spans.append(
+                    {
+                        "text": matched_text,
+                        "start": start_idx,
+                        "end": end_idx,
+                        "type": None,
+                        "source": ["llm", "fallback"],
+                    }
                 )
-                pipe_variants.sort(key=lambda s: -len(s))  # longest first
-
-                matched_idx = -1
-                matched_phrase = None
-                for variant in pipe_variants:
-                    norm_variant = _norm(variant)
-                    idx = norm_text.find(norm_variant)
-                    if idx != -1:
-                        matched_idx = idx
-                        matched_phrase = variant
-                        break
-                # If still not found try full candidate normalised
-                if matched_idx == -1:
-                    norm_full = _norm(cand)
-                    matched_idx = norm_text.find(norm_full)
-                    if matched_idx != -1:
-                        matched_phrase = cand
-
-                # First-token fallback with greedy forward expansion if multi-token
-                greedy_expanded = False
-                if matched_idx == -1:
-                    tokens = cand.split()
-                    if tokens:
-                        first_tok = tokens[0]
-                        norm_first = _norm(first_tok)
-                        idx = norm_text.find(norm_first)
-                        if idx != -1:
-                            # Attempt to expand sequentially with following tokens
-                            matched_idx = idx
-                            # Map back to original text substring start using difference in casefold length.
-                            # We re-find in original text slice for robust alignment.
-                            # Build a mapping from normalised positions to original positions (lazy simple approach):
-                            # We scan forward from idx in original text to build span.
-                            # Start with first token length.
-                            orig_start = idx  # Because casefold may change length, we refine below.
-                            # Find approximate original start by locating first_tok case-insensitive near idx
-                            search_window_lo = max(0, idx - 10)
-                            search_window_hi = min(len(text), idx + len(first_tok) + 10)
-                            window = text[search_window_lo:search_window_hi]
-                            rel = window.lower().find(first_tok.lower())
-                            if rel != -1:
-                                orig_start = search_window_lo + rel
-                            current_end = orig_start + len(first_tok)
-                            # Greedy expansion
-                            for nxt in tokens[1:]:
-                                # Skip whitespace in original text
-                                while (
-                                    current_end < len(text)
-                                    and text[current_end].isspace()
-                                ):
-                                    current_end += 1
-                                seg = text[current_end : current_end + len(nxt)]
-                                if seg.lower() == nxt.lower():
-                                    current_end += len(nxt)
-                                    greedy_expanded = True
-                                else:
-                                    break
-                            matched_phrase = text[orig_start:current_end]
-                            matched_idx = orig_start
-                if matched_idx == -1 or not matched_phrase:
-                    # Synthetic / not found
-                    spans.append(
-                        {
-                            "text": cand,
-                            "start": 0,
-                            "end": 0,
-                            "type": None,
-                            "source": ["llm", "fallback"],
-                        }
-                    )
-                    if len(spans) >= max_spans:
-                        break
-                    continue
-
-                # Final sanity: clamp length & bounds
-                end_idx = matched_idx + len(matched_phrase)
-                if (
-                    0 <= matched_idx < end_idx <= len(text)
-                    and (end_idx - matched_idx) <= 300
-                ):
-                    spans.append(
-                        {
-                            "text": text[matched_idx:end_idx],
-                            "start": matched_idx,
-                            "end": end_idx,
-                            "type": None,
-                            "source": ["llm", "fallback"],
-                        }
-                    )
-                    if greedy_expanded:
-                        expanded_count += 1
                 if len(spans) >= max_spans:
                     break
             if spans:
@@ -716,12 +607,6 @@ def llm_generate_spans(text: str, max_spans: int = 40) -> List[Dict[str, Any]]:
                         _FALLBACK_NONJSON_METRIC["last_response_preview"] = raw[
                             :500
                         ] + ("…" if len(raw) > 500 else "")
-                    if expanded_count:
-                        # Append (not replace) a simple metric for visibility; avoid altering existing keys' semantics
-                        _FALLBACK_NONJSON_METRIC["expanded_spans"] = (
-                            int(_FALLBACK_NONJSON_METRIC.get("expanded_spans", 0))
-                            + expanded_count
-                        )
                 except Exception:
                     pass
                 try:
@@ -944,15 +829,8 @@ def extract_annotations(
     else:
         spans = []
 
-    # Heuristic type inference (Option B - JVNAUTOSCI-614 follow-up) applied post-merge so it covers
-    # both JSON LLM spans and fallback list-derived spans equally. Only infer when type missing/falsey.
     for s in spans:
         try:
-            if not s.get("type") and isinstance(s.get("text"), str):
-                inferred = _infer_type_label(s["text"])
-                if inferred:
-                    s["type"] = inferred  # raw label
-                    s["_inferred_type"] = True
             # If we have a raw non-ontology type label, attempt mapping to concept id.
             tval = s.get("type")
             if isinstance(tval, str) and tval and not tval.startswith("#V#"):

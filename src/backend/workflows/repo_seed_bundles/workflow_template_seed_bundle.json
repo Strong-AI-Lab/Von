@@ -271,6 +271,12 @@
           "workflow_request_summary": "{request_summary}"
         },
         "verification_inputs": {
+          "phd_student_name": "Verification Student",
+          "supervisor_names": [
+            "Verification Supervisor"
+          ],
+          "research_topic": "Verification Topic",
+          "institution": "Verification University",
           "phd_student_description": "Student Name: Verification Student\nSupervisors: Verification Supervisor\nResearch Topic: Verification Topic\nInstitution: Verification University"
         },
         "steps": [
