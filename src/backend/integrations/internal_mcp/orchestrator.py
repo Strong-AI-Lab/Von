@@ -12200,13 +12200,7 @@ class InternalMCPChatOrchestrator:
             _add_tool("get_related_concepts")
         if text_relation_summary_requested:
             _add_tool("get_text_relations_summary")
-        if any(
-            token in contract_text
-            for token in (
-                "find_relations_with_argument",
-                "relation-bearing evidence",
-            )
-        ):
+        if cls._turn_contract_requests_relation_argument_retrieval(contract_text):
             _add_tool("find_relations_with_argument")
         if "arxiv" in contract_text:
             _add_tool("search_arxiv")
@@ -12238,6 +12232,39 @@ class InternalMCPChatOrchestrator:
                 _add_tool(tool_name)
 
         return tuple(required_tools)
+
+    @staticmethod
+    def _turn_contract_requests_relation_argument_retrieval(
+        contract_text: str,
+    ) -> bool:
+        lowered = str(contract_text or "").strip().lower()
+        if not lowered:
+            return False
+        return any(
+            token in lowered
+            for token in (
+                "find_relations_with_argument",
+                "relation-bearing evidence",
+                "relation instance",
+                "relation instances",
+                "relationship instance",
+                "relationship instances",
+                "usage pattern",
+                "usage patterns",
+                "member-level relation",
+                "member-level relations",
+                "member relation",
+                "member relations",
+                "group or its members",
+                "or its members",
+                "their members",
+                "members of the",
+                "lab members",
+                "identified as members",
+                "entities identified as",
+                "relations of identified",
+            )
+        )
 
     @classmethod
     def _infer_required_tool_surface_families(
@@ -17505,6 +17532,139 @@ class InternalMCPChatOrchestrator:
             if value not in (None, [], {})
         }
 
+    @classmethod
+    def _shape_find_relations_with_argument_payload_for_llm(
+        cls,
+        payload: Mapping[str, Any],
+        *,
+        max_hits: int = 5,
+        max_text_chars: int = 220,
+    ) -> dict[str, Any]:
+        raw_hits = payload.get("hits")
+        hits = (
+            [hit for hit in raw_hits if isinstance(hit, Mapping)]
+            if isinstance(raw_hits, list)
+            else []
+        )
+        compact_hits: list[dict[str, Any]] = []
+        predicate_values: list[str] = []
+
+        def _preview_name(preview: Any) -> str | None:
+            if not isinstance(preview, Mapping):
+                return None
+            raw_name = preview.get("name")
+            if isinstance(raw_name, str) and raw_name.strip():
+                return raw_name.strip()
+            raw_concept_id = preview.get("concept_id")
+            if isinstance(raw_concept_id, str) and raw_concept_id.strip():
+                return raw_concept_id.strip()
+            return None
+
+        def _preview_concept_id(preview: Any) -> str | None:
+            if not isinstance(preview, Mapping):
+                return None
+            raw_concept_id = preview.get("concept_id")
+            if isinstance(raw_concept_id, str) and raw_concept_id.strip():
+                return raw_concept_id.strip()
+            return None
+
+        for hit in hits[:max_hits]:
+            compact_hit: dict[str, Any] = {}
+            source_concept_id = hit.get("source_concept_id")
+            if isinstance(source_concept_id, str) and source_concept_id.strip():
+                compact_hit["source_concept_id"] = source_concept_id.strip()
+            source_name = _preview_name(hit.get("source_concept_preview"))
+            if source_name:
+                compact_hit["source_name"] = source_name
+
+            predicate_concept_id = hit.get("predicate_concept_id")
+            if (
+                isinstance(predicate_concept_id, str)
+                and predicate_concept_id.strip()
+            ):
+                predicate_value = predicate_concept_id.strip()
+                compact_hit["predicate_concept_id"] = predicate_value
+                if predicate_value not in predicate_values:
+                    predicate_values.append(predicate_value)
+
+            relation_kind = hit.get("relation_kind")
+            if isinstance(relation_kind, str) and relation_kind.strip():
+                compact_hit["relation_kind"] = relation_kind.strip()
+
+            relation_state = hit.get("relation_state")
+            if isinstance(relation_state, str) and relation_state.strip():
+                compact_hit["relation_state"] = relation_state.strip()
+
+            argument_indexes = hit.get("argument_indexes")
+            if isinstance(argument_indexes, list):
+                compact_hit["argument_indexes"] = [
+                    int(index)
+                    for index in argument_indexes
+                    if isinstance(index, (int, float))
+                ][:4]
+
+            score = hit.get("score")
+            if isinstance(score, (int, float)):
+                compact_hit["score"] = round(float(score), 3)
+
+            target_concept_id = _preview_concept_id(hit.get("target_concept_preview"))
+            target_name = _preview_name(hit.get("target_concept_preview"))
+            target_value = hit.get("target_value")
+            if target_concept_id:
+                compact_hit["target_concept_id"] = target_concept_id
+            elif isinstance(target_value, str) and target_value.strip():
+                compact_hit["target_concept_id"] = target_value.strip()
+            if target_name:
+                compact_hit["target_name"] = target_name
+            elif isinstance(target_value, str) and target_value.strip():
+                compact_hit["target_value_preview"] = target_value.strip()[:max_text_chars]
+
+            text_snippet = hit.get("text_snippet")
+            if isinstance(text_snippet, str) and text_snippet.strip():
+                compact_hit["text_preview"] = text_snippet.strip()[:max_text_chars]
+            elif (
+                isinstance(target_value, str)
+                and target_value.strip()
+                and not target_concept_id
+            ):
+                compact_hit["text_preview"] = target_value.strip()[:max_text_chars]
+
+            if compact_hit:
+                compact_hits.append(compact_hit)
+
+        total_hits = payload.get("total_hits")
+        if not isinstance(total_hits, (int, float)):
+            total_hits = len(hits)
+
+        concept_id = payload.get("concept_id")
+        if not isinstance(concept_id, str):
+            concept_id = None
+
+        diagnostics_note = (
+            "No relation hits were available."
+            if not hits
+            else (
+                f"{len(predicate_values)} distinct predicate(s) were observed across "
+                f"{len(compact_hits)} shown relation hit(s)."
+            )
+        )
+
+        compact_payload: dict[str, Any] = {
+            "_llm_view": "find_relations_with_argument_results.v1",
+            "concept_id": concept_id,
+            "total_hits": int(total_hits),
+            "shown_hit_count": len(compact_hits),
+            "omitted_hit_count": max(0, int(total_hits) - len(compact_hits)),
+            "predicates": predicate_values[:12],
+            "hits": compact_hits,
+            "retrieval_diagnostics": {"note": diagnostics_note},
+        }
+        return {
+            key: value
+            for key, value in compact_payload.items()
+            if value not in (None, [], {})
+        }
+
     def _prepare_tool_payload_for_llm(self, tool_name: str, payload: Any) -> Any:
         if not isinstance(tool_name, str) or not isinstance(payload, Mapping):
             return payload
@@ -17515,6 +17675,8 @@ class InternalMCPChatOrchestrator:
             return self._shape_get_text_relations_summary_payload_for_llm(payload)
         if tool_lower == "get_related_concepts":
             return self._shape_get_related_concepts_payload_for_llm(payload)
+        if tool_lower == "find_relations_with_argument":
+            return self._shape_find_relations_with_argument_payload_for_llm(payload)
         if tool_lower == "search_web":
             return self._shape_search_web_payload_for_llm(payload)
         if tool_lower == "search_arxiv":
@@ -22059,6 +22221,7 @@ class InternalMCPChatOrchestrator:
         user_text: str,
         context_messages: Sequence[Mapping[str, Any]] | None = None,
         missing_required_tools: Sequence[str],
+        tool_invocations: Sequence[Mapping[str, Any]] | None = None,
         missing_required_fetch_concept_ids: Sequence[str] | None = None,
         missing_required_read_file_copy_ids: Sequence[str] | None = None,
         missing_required_scholarly_representation_file_copy_ids: (
@@ -22121,6 +22284,18 @@ class InternalMCPChatOrchestrator:
             if candidate_concept_ids:
                 user_anchor_concept_id = candidate_concept_ids[0]
 
+        pure_ontology_follow_up = self._missing_tools_are_pure_ontology_follow_up(
+            missing_required_tools
+        )
+        ontology_follow_up_concept_ids = (
+            self._extract_search_concepts_follow_up_concept_ids(
+                tool_invocations,
+                max_concept_ids=2,
+            )
+            if pure_ontology_follow_up
+            else []
+        )
+
         forced_calls: list[_ToolCallRequest] = []
         for tool_name in missing_required_tools:
             name = str(tool_name).strip()
@@ -22174,6 +22349,21 @@ class InternalMCPChatOrchestrator:
                 continue
 
             if name == "find_relations_with_argument":
+                if ontology_follow_up_concept_ids:
+                    for concept_id in ontology_follow_up_concept_ids:
+                        forced_calls.append(
+                            {
+                                "action": "call_tool",
+                                "tool": name,
+                                "payload": {
+                                    "concept_id": concept_id,
+                                    "limit": 20,
+                                },
+                            }
+                        )
+                    continue
+                if pure_ontology_follow_up:
+                    continue
                 if not user_anchor_concept_id:
                     continue
                 forced_calls.append(
@@ -22460,6 +22650,7 @@ class InternalMCPChatOrchestrator:
                 "search_concepts",
                 "get_text_relations_summary",
                 "get_related_concepts",
+                "find_relations_with_argument",
             }
             for tool_name in missing_tools
         ):
@@ -22481,7 +22672,9 @@ class InternalMCPChatOrchestrator:
 
         concept_ids = cls._extract_search_concepts_follow_up_concept_ids(
             tool_invocations,
-            max_concept_ids=1,
+            max_concept_ids=(
+                2 if "find_relations_with_argument" in missing_tools else 1
+            ),
         )
         if not concept_ids:
             return None
@@ -22505,8 +22698,64 @@ class InternalMCPChatOrchestrator:
                         "payload": {"concept_id": primary_concept_id},
                     }
                 )
+            elif tool_name == "find_relations_with_argument":
+                for concept_id in concept_ids:
+                    forced_calls.append(
+                        {
+                            "action": "call_tool",
+                            "tool": tool_name,
+                            "payload": {
+                                "concept_id": concept_id,
+                                "limit": 20,
+                            },
+                        }
+                    )
+
+        if (
+            any(
+                tool_name in {"get_text_relations_summary", "get_related_concepts"}
+                for tool_name in missing_tools
+            )
+            and "find_relations_with_argument" not in missing_tools
+            and not any(
+                isinstance(invocation, Mapping)
+                and str(invocation.get("tool") or "").strip().lower()
+                == "find_relations_with_argument"
+                and cls._tool_invocation_completed_successfully(invocation)
+                for invocation in (tool_invocations or [])
+            )
+        ):
+            for concept_id in concept_ids:
+                forced_calls.append(
+                    {
+                        "action": "call_tool",
+                        "tool": "find_relations_with_argument",
+                        "payload": {
+                            "concept_id": concept_id,
+                            "limit": 20,
+                        },
+                    }
+                )
 
         return forced_calls or None
+
+    @staticmethod
+    def _missing_tools_are_pure_ontology_follow_up(
+        missing_required_tools: Sequence[str],
+    ) -> bool:
+        tool_names = {
+            str(item).strip().lower()
+            for item in (missing_required_tools or [])
+            if isinstance(item, str) and str(item).strip()
+        }
+        if not tool_names:
+            return False
+        return tool_names <= {
+            "search_concepts",
+            "get_text_relations_summary",
+            "get_related_concepts",
+            "find_relations_with_argument",
+        }
 
     @staticmethod
     def _build_task_create_retry_payload(
@@ -22602,6 +22851,7 @@ class InternalMCPChatOrchestrator:
             missing_required_tools=(
                 list(missing_required_tools) if missing_required_tools else []
             ),
+            tool_invocations=tool_invocations,
             missing_required_fetch_concept_ids=(
                 list(missing_required_fetch_concept_ids)
                 if missing_required_fetch_concept_ids
@@ -22630,8 +22880,6 @@ class InternalMCPChatOrchestrator:
                 else None
             ),
         )
-        if required_forced:
-            return required_forced
         ontology_follow_up = self._infer_ontology_follow_up_retry_tool_calls(
             user_text=last_user_text,
             missing_required_tools=(
@@ -22639,6 +22887,26 @@ class InternalMCPChatOrchestrator:
             ),
             tool_invocations=tool_invocations,
         )
+        if required_forced and ontology_follow_up:
+            missing_tools_list = (
+                list(missing_required_tools) if missing_required_tools else []
+            )
+            if self._missing_tools_are_pure_ontology_follow_up(missing_tools_list):
+                merged_calls: list[_ToolCallRequest] = []
+                seen_calls: set[str] = set()
+                for tool_call in [*ontology_follow_up, *required_forced]:
+                    try:
+                        key = json.dumps(tool_call, sort_keys=True, default=str)
+                    except Exception:
+                        key = str(tool_call)
+                    if key in seen_calls:
+                        continue
+                    seen_calls.add(key)
+                    merged_calls.append(tool_call)
+                if merged_calls:
+                    return merged_calls
+        if required_forced:
+            return required_forced
         if ontology_follow_up:
             return ontology_follow_up
         return None
@@ -25145,6 +25413,7 @@ class InternalMCPChatOrchestrator:
             "jira_search": "issues",
             "search_arxiv": "papers",
             "get_text_relations_summary": "groups",
+            "find_relations_with_argument": "hits",
         }
         list_field = list_fields_by_tool.get(tool_name, "results")
         raw_items = payload.get(list_field)
@@ -25283,6 +25552,83 @@ class InternalMCPChatOrchestrator:
         return lines
 
     @classmethod
+    def _build_find_relations_with_argument_follow_up_lines(
+        cls,
+        payload: Mapping[str, Any],
+    ) -> list[str]:
+        shaped_payload = cls._shape_find_relations_with_argument_payload_for_llm(
+            payload,
+            max_hits=4,
+            max_text_chars=140,
+        )
+        lines: list[str] = []
+        total_hits = shaped_payload.get("total_hits")
+        concept_id = shaped_payload.get("concept_id")
+        if isinstance(total_hits, int):
+            line = f"- find_relations_with_argument returned {total_hits} relation hit"
+            if total_hits != 1:
+                line += "s"
+            if isinstance(concept_id, str) and concept_id.strip():
+                line += f' for concept_id "{concept_id.strip()}"'
+            lines.append(line + ".")
+
+        predicates = shaped_payload.get("predicates")
+        if isinstance(predicates, list):
+            predicate_fragments = [
+                str(predicate).strip()
+                for predicate in predicates[:4]
+                if isinstance(predicate, str) and str(predicate).strip()
+            ]
+            if predicate_fragments:
+                lines.append(
+                    f"- Relation predicates observed: {'; '.join(predicate_fragments)}."
+                )
+
+        hits = shaped_payload.get("hits")
+        if not isinstance(hits, list):
+            return lines
+
+        fragments: list[str] = []
+        for hit in hits[:4]:
+            if not isinstance(hit, Mapping):
+                continue
+            source_label = hit.get("source_name") or hit.get("source_concept_id")
+            predicate = hit.get("predicate_concept_id")
+            target_label = (
+                hit.get("target_name")
+                or hit.get("target_concept_id")
+                or hit.get("target_value_preview")
+            )
+            text_preview = hit.get("text_preview")
+            if (
+                isinstance(source_label, str)
+                and source_label.strip()
+                and isinstance(predicate, str)
+                and predicate.strip()
+                and isinstance(target_label, str)
+                and target_label.strip()
+            ):
+                fragments.append(
+                    f"{source_label.strip()} via {predicate.strip()} -> {target_label.strip()}"
+                )
+                continue
+            if (
+                isinstance(predicate, str)
+                and predicate.strip()
+                and isinstance(text_preview, str)
+                and text_preview.strip()
+            ):
+                fragments.append(f"{predicate.strip()}: {text_preview.strip()}")
+                continue
+            if isinstance(text_preview, str) and text_preview.strip():
+                fragments.append(text_preview.strip())
+        if fragments:
+            lines.append(
+                f"- Relation-bearing evidence excerpts: {'; '.join(fragments)}."
+            )
+        return lines
+
+    @classmethod
     def _build_tool_follow_up_stage_messages(
         cls,
         *,
@@ -25306,6 +25652,7 @@ class InternalMCPChatOrchestrator:
                 "search_web",
                 "get_text_relations_summary",
                 "get_related_concepts",
+                "find_relations_with_argument",
             }:
                 continue
             if not cls._tool_invocation_completed_successfully(invocation):
@@ -25334,6 +25681,7 @@ class InternalMCPChatOrchestrator:
                 if query_value is None and tool_name in {
                     "get_text_relations_summary",
                     "get_related_concepts",
+                    "find_relations_with_argument",
                 }:
                     query_label = "concept_id"
                     query_value = arguments.get("concept_id")
@@ -25351,6 +25699,7 @@ class InternalMCPChatOrchestrator:
                 "search_web": "result",
                 "get_text_relations_summary": "predicate group",
                 "get_related_concepts": "related evidence result",
+                "find_relations_with_argument": "relation hit",
             }.get(tool_name, "result")
             count_label = noun if count == 1 else f"{noun}s"
             line = f"- {tool_name} returned {count} {count_label}"
@@ -25367,6 +25716,10 @@ class InternalMCPChatOrchestrator:
             elif tool_name == "get_related_concepts":
                 summary_lines.extend(
                     cls._build_related_concepts_follow_up_lines(payload)
+                )
+            elif tool_name == "find_relations_with_argument":
+                summary_lines.extend(
+                    cls._build_find_relations_with_argument_follow_up_lines(payload)
                 )
 
         if not summary_lines:

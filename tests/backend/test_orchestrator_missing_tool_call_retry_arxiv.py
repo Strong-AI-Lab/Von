@@ -45,6 +45,10 @@ class _Gateway:
                 "category": "read",
                 "description": "Retrieve related concepts for a concept",
             },
+            "find_relations_with_argument": {
+                "category": "read",
+                "description": "Retrieve relation hits for a concept argument",
+            },
             "task_create": {
                 "category": "write",
                 "description": "Create a Von task",
@@ -1086,8 +1090,215 @@ def test_tool_calling_backfill_chains_ontology_follow_up_after_search_concepts()
             "action": "call_tool",
             "tool": "get_text_relations_summary",
             "payload": {"concept_id": "#V#sail_student_group"},
+        },
+        {
+            "action": "call_tool",
+            "tool": "find_relations_with_argument",
+            "payload": {
+                "concept_id": "#V#sail_student_group",
+                "limit": 20,
+            },
         }
     ]
+
+
+def test_tool_calling_backfill_chains_member_relation_follow_up_from_turn_contract():
+    orchestrator = _build_orchestrator_stub()
+
+    orchestrator._build_follow_up_llm_context = cast(
+        Any, lambda augmented_context, max_chars=4000: list(augmented_context or [])
+    )
+    orchestrator._build_stage_llm_context = cast(
+        Any, lambda **kwargs: (list(kwargs.get("base_context") or []), {})
+    )
+    orchestrator._run_llm_with_fallbacks = cast(
+        Any,
+        lambda **kwargs: (
+            "I still need member-level relation evidence before answering.",
+            "gemma4:26b",
+            None,
+        ),
+    )
+    orchestrator._run_missing_tool_call_recovery_workflow = cast(
+        Any, lambda **kwargs: {}
+    )
+    orchestrator._augment_prompt_requirements_with_turn_contract = cast(
+        Any,
+        InternalMCPChatOrchestrator._augment_prompt_requirements_with_turn_contract,
+    )
+
+    class _PromptRequirements:
+        required_tools: list[str] = []
+        required_fetch_concept_ids: list[str] = []
+        required_read_file_copy_ids: list[str] = []
+        required_scholarly_representation_file_copy_ids: list[str] = []
+        required_create_type_name: str | None = None
+        required_url_extraction_tool: str | None = None
+        required_url_extraction_url: str | None = None
+        unavailable_required_tools: list[str] = []
+        scholarly_representation_intent = False
+        missing_tools: list[str] = []
+        missing_fetch_concept_ids: list[str] = []
+        missing_read_file_copy_ids: list[str] = []
+        missing_scholarly_representation_file_copy_ids: list[str] = []
+        missing_retry_reason: str | None = None
+
+    orchestrator._evaluate_prompt_requirements = cast(
+        Any, lambda **kwargs: _PromptRequirements()
+    )
+
+    discovery_query = (
+        "What predicates are salient to SAIL students?\n\n"
+        "Turn-intent routing guidance:\n"
+        "- Routing guidance: Prioritize `search_concepts` to identify the best ontology "
+        "anchor, then inspect relationship instances linking the group or its members "
+        "to other entities.\n"
+        "- Grounding requirement: Every listed predicate must be supported by "
+        "relationship instances or retrieved relation evidence linking the group or "
+        "its members.\n"
+        "- Success target: Identify predicates that demonstrate a verifiable "
+        "relationship usage pattern associated with the group or its members."
+    )
+
+    request = SimpleNamespace(
+        data={
+            "prompt": "What predicates are salient to SAIL students?",
+            "augmented_context": [],
+            "policy_state": SimpleNamespace(enabled=False, policy=None),
+            "registry_snapshot": {},
+            "user_concept_id": "#V#michael_witbrock",
+            "org_concept_id": "#V#sail",
+            "model_for_stage": lambda stage: "gemma4:26b",
+            "record_llm_call": lambda **kwargs: None,
+            "aux_llm_calls": [],
+            "llm_calls": [],
+            "emit_progress": None,
+            "iteration_count": 1,
+            "remaining_tool_calls": [],
+            "invocations": [
+                {
+                    "tool": "search_concepts",
+                    "status": "ok",
+                    "effective_payload": {
+                        "success": True,
+                        "results": [
+                            {
+                                "concept_id": "#V#sail_student_group",
+                                "name": "SAIL Student Group",
+                                "relevance_score": 98.0,
+                            }
+                        ],
+                    },
+                }
+            ],
+            "prompt_requirement_url_policy": {},
+            "workflow_discovery_result": {"query": discovery_query},
+            "missing_tool_call_retry_attempts": 0,
+            "missing_tool_call_retry_budget": 2,
+            "prefer_default_model": False,
+        },
+        environment=SimpleNamespace(
+            llm_client=object(),
+            model="gemma4:26b",
+            max_tool_invocations=6,
+        ),
+        trace=None,
+        workflow_id="#V#tool_calling_workflow",
+        workflow_state_id="backfill",
+        workflow_state_metadata={},
+        action_id="tool_calling.backfill",
+    )
+
+    result = orchestrator._action_tool_calling_backfill(cast(Any, request))
+
+    assert "find_relations_with_argument" in request.data["missing_prompt_tools"]
+    assert result.outputs["more_tool_calls"] is True
+    assert result.outputs["tool_calls_present"] is True
+    assert result.outputs["missing_tool_call_recovery_outcome"] == (
+        "retry_succeeded_parent_fallback"
+    )
+    assert result.outputs["tool_calls"] == [
+        {
+            "action": "call_tool",
+            "tool": "get_text_relations_summary",
+            "payload": {"concept_id": "#V#sail_student_group"},
+        },
+        {
+            "action": "call_tool",
+            "tool": "find_relations_with_argument",
+            "payload": {
+                "concept_id": "#V#sail_student_group",
+                "limit": 20,
+            },
+        },
+    ]
+
+
+def test_missing_tool_retry_prefers_search_anchor_over_user_anchor_for_ontology_relation_follow_up():
+    orchestrator = _build_orchestrator_stub()
+
+    forced = orchestrator._infer_missing_tool_call_retry_tool_calls(
+        [
+            {
+                "role": "system",
+                "content": "CURRENT USER CONTEXT: Michael Witbrock (#V#michael_witbrock)",
+            }
+        ],
+        user_prompt="What predicates are salient to SAIL students?",
+        missing_required_tools=["find_relations_with_argument"],
+        tool_invocations=[
+            {
+                "tool": "search_concepts",
+                "status": "ok",
+                "effective_payload": {
+                    "success": True,
+                    "results": [
+                        {
+                            "concept_id": "#V#sail_student_group",
+                            "name": "SAIL Student Group",
+                            "relevance_score": 98.0,
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+
+    assert forced == [
+        {
+            "action": "call_tool",
+            "tool": "find_relations_with_argument",
+            "payload": {
+                "concept_id": "#V#sail_student_group",
+                "limit": 20,
+            },
+        }
+    ]
+
+
+def test_turn_contract_with_member_entity_guidance_requires_relation_argument_retrieval():
+    required_tools = InternalMCPChatOrchestrator._infer_turn_contract_required_tools(
+        turn_expected_outcome_contract={
+            "summary": (
+                "A list of predicates actively used in relationships or properties "
+                "associated with entities identified as SAIL students."
+            ),
+            "grounding_requirement": (
+                "Predicates must be explicitly retrieved from the relationship "
+                "structures associated with entities identifiable as members of "
+                "the SAIL lab."
+            ),
+            "selector_guidance": (
+                "Prefer Vontology retrieval routes that inspect relations of "
+                "identified lab members."
+            ),
+        },
+        method_catalogue=_Gateway.describe_methods(),
+    )
+
+    assert "search_concepts" in required_tools
+    assert "get_text_relations_summary" in required_tools
+    assert "find_relations_with_argument" in required_tools
 
 
 def test_tool_calling_backfill_retries_when_required_ontology_tools_remain_missing():
