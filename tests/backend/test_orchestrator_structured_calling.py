@@ -1263,6 +1263,52 @@ def test_turn_contract_requirement_augmentation_prefers_jira_search_over_task_li
     assert "list_my_tasks" not in augmented.required_tools
 
 
+def test_turn_contract_requirement_augmentation_adds_predicate_relation_summary_tools():
+    evaluation = _PromptRequirementEvaluation()
+
+    augmented = (
+        InternalMCPChatOrchestrator._augment_prompt_requirements_with_turn_contract(
+            evaluation=evaluation,
+            turn_expected_outcome_contract={
+                "summary": "Identify predicates salient to SAIL students.",
+                "selector_guidance": (
+                    "Use search_concepts to locate the student group, then "
+                    "get_text_relations_summary to identify associated predicates."
+                ),
+                "grounding_requirement": (
+                    "Predicates must be substantiated by retrieved represented "
+                    "relationships or text relations."
+                ),
+            },
+            method_catalogue={
+                "search_knowledge_base": {},
+                "search_concepts": {},
+                "find_relations_with_argument": {},
+                "get_text_relations_summary": {},
+            },
+            tool_invocations=(),
+        )
+    )
+
+    assert augmented.required_tools == (
+        "search_concepts",
+        "get_text_relations_summary",
+    )
+    assert augmented.missing_tools == augmented.required_tools
+
+
+def test_turn_contract_required_relation_summary_tools_count_as_knowledge_base_surface():
+    families = InternalMCPChatOrchestrator._infer_required_tool_surface_families(
+        required_tools=(
+            "search_concepts",
+            "get_related_concepts",
+            "get_text_relations_summary",
+        )
+    )
+
+    assert families == ("knowledge_base",)
+
+
 def test_structured_candidate_resolver_suppresses_general_task_family_for_jira_task_prompt():
     from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
 

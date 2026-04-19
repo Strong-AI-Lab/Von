@@ -8815,6 +8815,136 @@ def test_discovered_custom_workflow_failure_falls_through_to_tool_pipeline_befor
     )
 
 
+def test_custom_workflow_fallback_handoff_preserves_turn_expected_outcome_contract(
+    monkeypatch,
+):
+    import src.backend.services.workflow_selection_policy_service as policy_module
+
+    monkeypatch.setattr(policy_module, "get_live_selection_policy", lambda: None)
+    monkeypatch.setenv("VON_WORKFLOW_SELECTOR_ALLOW_POLICY_UNSAFE", "1")
+
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    selected_workflow_id = "#V#predicate_schema_wrapper_workflow"
+    _register_terminal_custom_workflow(
+        orchestrator,
+        workflow_id=selected_workflow_id,
+        purpose="Predicate/schema wrapper workflow for tool handoff contract tests.",
+    )
+
+    expected_contract = {
+        "summary": "Identify predicates salient to SAIL students.",
+        "grounding_requirement": (
+            "Predicates must be substantiated by represented relationships or text relations."
+        ),
+        "precision_policy": "Prefer omission over unsupported predicate claims.",
+        "selector_guidance": (
+            "Use search_concepts and get_text_relations_summary before answering."
+        ),
+        "answering_guidance": "List only grounded predicates and say when evidence is missing.",
+        "reasoning": "Predicate/schema turns need grounded ontology retrieval rather than generic chat.",
+    }
+    expected_discovery_contract = {
+        "summary": expected_contract["summary"],
+        "grounding_requirement": expected_contract["grounding_requirement"],
+        "selector_guidance": expected_contract["selector_guidance"],
+    }
+    class _ContractAwareSelectorLLM:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def generate(
+            self,
+            prompt: str,
+            context: Optional[Sequence[Mapping[str, Any]]] = None,
+            model=None,
+        ):
+            self.calls.append(
+                {"prompt": prompt, "context": list(context or []), "model": model}
+            )
+            if "expected-success inference policy" in prompt:
+                return "{}"
+            if prompt == "Select workflow":
+                return selected_workflow_id
+            return "Recovered through the general tool workflow."
+
+    llm = _ContractAwareSelectorLLM()
+    tool_pipeline_payload: dict[str, Any] = {}
+
+    def _fake_execute_workflow(workflow_id: str, **kwargs: Any):
+        if workflow_id == selected_workflow_id:
+            return SimpleNamespace(
+                data={"response_text": "Selected specialised workflow failed."},
+                final_state="#V#workflow_step_predicate_schema_wrapper_failed",
+                completed=True,
+                error=None,
+            )
+        if workflow_id == TOOL_CALLING_WORKFLOW_ID:
+            tool_pipeline_payload.update(dict(kwargs))
+            return SimpleNamespace(
+                data={
+                    "final_response": "Recovered through the general tool workflow.",
+                    "tool_messages": [],
+                    "invocations": [{"tool": "get_text_relations_summary"}],
+                    "iteration_count": 1,
+                },
+                final_state="complete",
+                completed=True,
+            )
+        raise AssertionError(f"Unexpected workflow execution: {workflow_id}")
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _fake_execute_workflow)
+
+    result = orchestrator.run(
+        prompt="What predicates are salient to SAIL students?",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+        workflow_discovery_result={
+            "matches": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Predicate Schema Wrapper Workflow",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                }
+            ],
+            "candidates": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Predicate Schema Wrapper Workflow",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                }
+            ],
+            "query": (
+                "What predicates are salient to SAIL students?\n\n"
+                "Turn-intent routing guidance:\n"
+                f"- Routing guidance: {expected_contract['selector_guidance']}\n"
+                f"- Grounding requirement: {expected_contract['grounding_requirement']}\n"
+                f"- Success target: {expected_contract['summary']}"
+            ),
+        },
+    )
+
+    assert result.response_text == "Recovered through the general tool workflow."
+    handoff_data = tool_pipeline_payload["data"]
+    assert handoff_data["turn_expected_outcome_profile"] == expected_discovery_contract
+    assert handoff_data["turn_expected_outcome_contract"] == expected_discovery_contract
+    assert handoff_data["turn_expected_outcome_summary"] == expected_discovery_contract[
+        "summary"
+    ]
+    assert handoff_data["turn_expected_grounding_requirement"] == (
+        expected_discovery_contract["grounding_requirement"]
+    )
+    assert handoff_data["turn_selector_guidance"] == expected_discovery_contract[
+        "selector_guidance"
+    ]
+    assert "turn_expected_precision_policy" not in handoff_data
+    assert "turn_answering_guidance" not in handoff_data
+    assert "turn_expected_outcome_reasoning" not in handoff_data
+
+
 def test_entity_representation_failure_family_replays_with_truthful_gap_recovery_after_tool_pipeline_attempt(
     monkeypatch,
 ):

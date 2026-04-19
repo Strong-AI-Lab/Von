@@ -4859,14 +4859,9 @@ class InternalMCPChatOrchestrator:
             return None
 
         shared_aux_llm_calls = data.get("aux_llm_calls")
-        turn_expected_outcome_contract = self._build_turn_expected_outcome_contract(
-            data
+        turn_expected_outcome_payload = (
+            self._build_turn_expected_outcome_context_payload(data)
         )
-        turn_expected_outcome_profile = self._copy_string_key_mapping(
-            data.get("turn_expected_outcome_profile")
-        )
-        if not turn_expected_outcome_profile and turn_expected_outcome_contract:
-            turn_expected_outcome_profile = dict(turn_expected_outcome_contract)
         workflow_context = {
             "user_prompt": data.get("prompt") or "",
             "response_text": (
@@ -4928,26 +4923,7 @@ class InternalMCPChatOrchestrator:
             ),
             "emit_progress": data.get("emit_progress"),
         }
-        if turn_expected_outcome_profile:
-            workflow_context["turn_expected_outcome_profile"] = dict(
-                turn_expected_outcome_profile
-            )
-        if turn_expected_outcome_contract:
-            workflow_context["turn_expected_outcome_contract"] = dict(
-                turn_expected_outcome_contract
-            )
-            contract_field_mapping = {
-                "summary": "turn_expected_outcome_summary",
-                "grounding_requirement": "turn_expected_grounding_requirement",
-                "precision_policy": "turn_expected_precision_policy",
-                "selector_guidance": "turn_selector_guidance",
-                "answering_guidance": "turn_answering_guidance",
-                "reasoning": "turn_expected_outcome_reasoning",
-            }
-            for contract_field, context_key in contract_field_mapping.items():
-                field_value = turn_expected_outcome_contract.get(contract_field)
-                if isinstance(field_value, str) and field_value.strip():
-                    workflow_context[context_key] = field_value.strip()
+        workflow_context.update(turn_expected_outcome_payload)
 
         recovery_model_raw = model_for_stage("tool_recovery")
         recovery_model = (
@@ -9933,6 +9909,12 @@ class InternalMCPChatOrchestrator:
                 "concept/relation retrieval",
                 "relation retrieval",
                 "represented relation evidence",
+                "represented relationship",
+                "represented relationships",
+                "predicate",
+                "predicates",
+                "text relation",
+                "text relations",
                 "entity-relative relationship",
                 "prefer kb/concept/relation retrieval tools over inventory/listing tools",
             )
@@ -12007,6 +11989,53 @@ class InternalMCPChatOrchestrator:
         return contract
 
     @classmethod
+    def _extract_turn_expected_outcome_contract_from_discovery_query(
+        cls,
+        workflow_discovery_result: Mapping[str, Any] | None,
+    ) -> dict[str, str]:
+        if not isinstance(workflow_discovery_result, Mapping):
+            return {}
+
+        direct_contract = cls._copy_string_key_mapping(
+            workflow_discovery_result.get("turn_expected_outcome_contract")
+        )
+        direct_contract = direct_contract or {}
+        if direct_contract:
+            return direct_contract
+
+        discovery_query_text = workflow_discovery_result.get("discovery_query_input")
+        if not isinstance(discovery_query_text, str) or not discovery_query_text.strip():
+            discovery_query_text = workflow_discovery_result.get("query")
+        if (
+            not isinstance(discovery_query_text, str)
+            or "Turn-intent routing guidance:" not in discovery_query_text
+        ):
+            return {}
+
+        guidance_block = discovery_query_text.split(
+            "Turn-intent routing guidance:", 1
+        )[-1]
+        contract: dict[str, str] = {}
+        field_by_label = {
+            "routing guidance": "selector_guidance",
+            "grounding requirement": "grounding_requirement",
+            "success target": "summary",
+        }
+        for raw_line in guidance_block.splitlines():
+            line = raw_line.strip()
+            if not line.startswith("-"):
+                continue
+            body = line[1:].strip()
+            if ":" not in body:
+                continue
+            label_text, value_text = body.split(":", 1)
+            field_name = field_by_label.get(label_text.strip().lower())
+            value = value_text.strip()
+            if field_name and value:
+                contract[field_name] = value
+        return contract
+
+    @classmethod
     def _turn_contract_text_fragments(
         cls,
         turn_expected_outcome_contract: Mapping[str, Any] | None,
@@ -12097,6 +12126,18 @@ class InternalMCPChatOrchestrator:
                 "concept/relation retrieval",
                 "relation retrieval",
                 "represented relation evidence",
+                "represented relationship",
+                "represented relationships",
+                "retrieved relationship",
+                "retrieved relationships",
+                "predicate",
+                "predicates",
+                "associated predicate",
+                "associated predicates",
+                "text relation",
+                "text relations",
+                "schema predicate",
+                "schema predicates",
                 "authorship or ownership",
                 "author or owner",
                 "ownership relationship",
@@ -12105,7 +12146,19 @@ class InternalMCPChatOrchestrator:
                 "belonging to the user",
             )
         )
-        kb_retrieval_requested = relation_grounding_requested or any(
+        text_relation_summary_requested = any(
+            token in contract_text
+            for token in (
+                "get_text_relations_summary",
+                "text relation",
+                "text relations",
+                "predicate",
+                "predicates",
+                "associated predicate",
+                "associated predicates",
+            )
+        )
+        kb_retrieval_requested = any(
             token in contract_text
             for token in (
                 "kb retrieval",
@@ -12114,7 +12167,7 @@ class InternalMCPChatOrchestrator:
                 "represented knowledge",
                 "search_knowledge_base",
             )
-        )
+        ) or (relation_grounding_requested and not text_relation_summary_requested)
 
         if kb_retrieval_requested:
             _add_tool("search_knowledge_base")
@@ -12127,6 +12180,16 @@ class InternalMCPChatOrchestrator:
             )
         ):
             _add_tool("search_concepts")
+        if any(
+            token in contract_text
+            for token in (
+                "get_related_concepts",
+                "related concepts",
+            )
+        ):
+            _add_tool("get_related_concepts")
+        if text_relation_summary_requested:
+            _add_tool("get_text_relations_summary")
         if any(
             token in contract_text
             for token in (
@@ -12177,6 +12240,8 @@ class InternalMCPChatOrchestrator:
                 "search_knowledge_base",
                 "search_concepts",
                 "find_relations_with_argument",
+                "get_related_concepts",
+                "get_text_relations_summary",
                 "fetch_concept",
                 "list_papers",
                 "resolve_concept_by_name",
@@ -24514,6 +24579,46 @@ class InternalMCPChatOrchestrator:
         return contract
 
     @classmethod
+    def _build_turn_expected_outcome_context_payload(
+        cls,
+        data: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        turn_expected_outcome_profile = cls._copy_string_key_mapping(
+            data.get("turn_expected_outcome_profile")
+        )
+        turn_expected_outcome_profile = turn_expected_outcome_profile or {}
+        turn_expected_outcome_contract = cls._build_turn_expected_outcome_contract(
+            data
+        )
+
+        payload: dict[str, Any] = {}
+        if turn_expected_outcome_profile:
+            payload["turn_expected_outcome_profile"] = dict(
+                turn_expected_outcome_profile
+            )
+        elif turn_expected_outcome_contract:
+            payload["turn_expected_outcome_profile"] = dict(
+                turn_expected_outcome_contract
+            )
+        if not turn_expected_outcome_contract:
+            return payload
+
+        payload["turn_expected_outcome_contract"] = dict(turn_expected_outcome_contract)
+        contract_field_mapping = {
+            "summary": "turn_expected_outcome_summary",
+            "grounding_requirement": "turn_expected_grounding_requirement",
+            "precision_policy": "turn_expected_precision_policy",
+            "selector_guidance": "turn_selector_guidance",
+            "answering_guidance": "turn_answering_guidance",
+            "reasoning": "turn_expected_outcome_reasoning",
+        }
+        for contract_field, context_key in contract_field_mapping.items():
+            field_value = turn_expected_outcome_contract.get(contract_field)
+            if isinstance(field_value, str) and field_value.strip():
+                payload[context_key] = field_value.strip()
+        return payload
+
+    @classmethod
     def _build_turn_expected_outcome_stage_messages(
         cls,
         *,
@@ -24805,6 +24910,7 @@ class InternalMCPChatOrchestrator:
         workflow_discovery_result: Mapping[str, Any] | None,
         requested_query: str,
         discovery_query_input: str,
+        expected_outcome_contract: Mapping[str, Any] | None = None,
         refreshed: bool = False,
     ) -> dict[str, Any]:
         payload = cls._copy_string_key_mapping(workflow_discovery_result) or {}
@@ -24824,6 +24930,10 @@ class InternalMCPChatOrchestrator:
             payload["requested_query"] = clean_requested_query
         if clean_discovery_query_input:
             payload["discovery_query_input"] = clean_discovery_query_input
+
+        contract_payload = cls._copy_string_key_mapping(expected_outcome_contract) or {}
+        if contract_payload:
+            payload["turn_expected_outcome_contract"] = contract_payload
 
         existing_query = payload.get("query")
         if not isinstance(existing_query, str) or not existing_query.strip():
@@ -24989,6 +25099,7 @@ class InternalMCPChatOrchestrator:
                 workflow_discovery_result=raw_discovery,
                 requested_query=prompt_text,
                 discovery_query_input=discovery_query_input,
+                expected_outcome_contract=expected_outcome_contract,
             )
         elif prompt_text:
             if callable(progress_note):
@@ -25005,6 +25116,7 @@ class InternalMCPChatOrchestrator:
                 workflow_discovery_result=discovered,
                 requested_query=prompt_text,
                 discovery_query_input=discovery_query_input,
+                expected_outcome_contract=expected_outcome_contract,
                 refreshed=refresh_discovery,
             )
         else:
@@ -27915,6 +28027,13 @@ class InternalMCPChatOrchestrator:
                 augmented_context
             )
         )
+        if not routing_turn_expected_outcome_contract:
+            routing_turn_expected_outcome_contract = (
+                self._extract_turn_expected_outcome_contract_from_discovery_query(
+                    workflow_discovery_result
+                )
+                or {}
+            )
         routing_explicit_required_tools = tuple(routing_prompt_requirements.required_tools)
         routing_prompt_requirements = self._augment_prompt_requirements_with_turn_contract(
             evaluation=routing_prompt_requirements,
@@ -34436,6 +34555,15 @@ class InternalMCPChatOrchestrator:
                 "completion_gate_escalation_signal": False,
                 "completion_gate_escalation_reason": None,
             }
+            tc_data.update(
+                self._build_turn_expected_outcome_context_payload(
+                    {
+                        "turn_expected_outcome_contract": (
+                            routing_turn_expected_outcome_contract
+                        )
+                    }
+                )
+            )
             if isinstance(prior_failed_selected_workflow_snapshot, Mapping):
                 tc_data["prior_failed_selected_workflow"] = dict(
                     prior_failed_selected_workflow_snapshot
