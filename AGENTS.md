@@ -142,6 +142,10 @@ Verify all of the following:
 - any context additions or reductions are visible in telemetry
 - any heuristic fallback is explicitly temporary and non-authoritative
 - repo-side seeds or snapshots could be deleted without losing authority
+- multi-agent delegation paths, if applicable, correctly propagate shared episodic memory and negotiate capabilities rather than assuming monolithic execution
+- workflow executions remain LLM-supervised with no black-box steps, producing rich Turn Execution Records
+- the task contributes to or respects automated policy learning loops (e.g., guideline induction from Turn Execution Records) rather than introducing hard-coded prompt tweaks
+- ephemeral theories used during execution are either properly promoted to durable knowledge or safely discarded
 
 ## 5. Prompt and model rules
 
@@ -266,6 +270,22 @@ If something went wrong in a coding thread, consider whether:
 - a benchmark or acceptance path is inadequate
 - `AGENTS.md` or one of the situation-specific docs should be sharpened
 - `docs/engineering/operational_engineering_guide.md` should absorb durable practical engineering lessons that do not belong in `AGENTS.md`
+
+Promote stable lessons. Do not bloat this file with narrow or temporary observations.
+
+## 11. Bottom line
+
+Von is not mainly a Python application with some prompts attached.
+
+It is a neuro-symbolic agentic system in which:
+
+- enduring knowledge matters
+- workflow and prompt authority matter
+- model portfolios and learned policy matter
+- explicit representation matters
+- evaluation and observability matter
+- and Python exists to support those things rather than replace them
+g lessons that do not belong in `AGENTS.md`
 
 Promote stable lessons. Do not bloat this file with narrow or temporary observations.
 

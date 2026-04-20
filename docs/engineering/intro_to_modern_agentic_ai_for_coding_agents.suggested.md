@@ -13,6 +13,15 @@ For Von, that is often backwards.
 
 Von is being built as a deployable neuro-symbolic assistant system for teams, demonstrated first for research-team support. It must stay able to absorb newer models, fine-tunes, prompt optimisers, routing methods, memory architectures, and reinforcement-learning advances without repeatedly relocating decision policy into code.
 
+### 1.1 Four Pillars of Agentic Evolution
+
+To drive progress towards the vision of Von as an advanced neuro-symbolic assistant, the primary direction for Von's agentic evolution is built on four key pillars:
+
+1. **Closing the Workflow Execution "Black Box" Gap**: Ensuring LLM-supervised workflow paths where all automated and sub-agent executions are observable and produce parseable Turn Execution Records.
+2. **Materialising Ephemeral Theories**: Supporting self-evolution by allowing agents to generate, test, and either promote or discard temporary working models (ephemeral theories) for self-modification and capability discovery.
+3. **Maturing Multi-Agent Coordination**: Extending the Von Workflow Language (VWL) and the Orchestrator to support robust agent-to-agent delegation, capability negotiation, and shared episodic memory contexts.
+4. **Transitioning to True Policy Learning**: Moving away from manual prompt tweaks towards automated learning loops that parse Turn Execution Records to induce guidelines, update retrieval strategies, and dynamically adjust model routing.
+
 ## 2. When to read it
 
 Per `AGENTS.md`, this document is mandatory before finalising the plan for any substantial implementation task.
