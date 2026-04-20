@@ -33,6 +33,8 @@ _tool_metadata_cache: dict[str, "ToolMetadata"] = {}
 _cache_timestamp: float = 0.0
 _cache_loaded: bool = False
 
+_NON_FAMILY_TOOL_CATEGORIES = frozenset({"read", "write"})
+
 
 @dataclass
 class ToolMetadata:
@@ -756,6 +758,36 @@ def get_display_template(tool_name: str) -> str | None:
 def get_tool_planner_hint(tool_name: str) -> str | None:
     """Get a short planner-facing hint for tool selection."""
     return get_tool_metadata(tool_name).planner_hint
+
+
+def get_tool_family(tool_name: str) -> str:
+    """Resolve the canonical tool family for planner/listing support.
+
+    Authority order:
+    1. Vontology-backed tool metadata category when it names an actual family
+    2. Canonical tool-contract registry family
+    3. ``unknown`` when neither surface can classify the tool
+    """
+
+    metadata = get_tool_metadata(tool_name)
+    category = str(metadata.category or "").strip().lower()
+    if category and category not in _NON_FAMILY_TOOL_CATEGORIES:
+        return category
+
+    try:
+        from src.backend.integrations.internal_mcp.tool_contract_registry import (
+            get_canonical_tool_registry,
+        )
+
+        contract = get_canonical_tool_registry().get(tool_name)
+    except Exception:
+        contract = None
+
+    family = str(getattr(contract, "family", "") or "").strip().lower()
+    if family:
+        return family
+
+    return "unknown"
 
 
 def invalidate_cache() -> None:

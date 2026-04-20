@@ -145,6 +145,7 @@ from src.backend.services.namespace_service import derive_actor_context_from_nam
 
 # Tool metadata service for Vontology-driven tool display (JVNAUTOSCI-1073)
 from src.backend.services.tool_metadata_service import (
+    get_tool_family,
     get_tool_metadata,
     get_tool_planner_hint,
     get_tool_salience,
@@ -2665,135 +2666,7 @@ class InternalMCPChatOrchestrator:
         # Gemini limits may vary by model. We keep a conservative default.
         "gemini": 128,
     }
-    _STRUCTURED_TOOL_HINTED_PLANNER_CAP = 16
-    _STRUCTURED_TOOL_FAMILY_PREFIXES: tuple[tuple[str, str], ...] = (
-        ("jira_", "jira"),
-        ("github_", "github"),
-        ("workflow_", "workflow"),
-        ("turn_execution_", "workflow"),
-        ("experiment_", "workflow"),
-        ("testing_", "workflow"),
-        ("gmail_", "gmail"),
-        ("rag_", "rag"),
-        ("search_", "search"),
-        ("qna_search", "search"),
-        ("context_search", "search"),
-        ("extract_url", "search"),
-        ("resilient_extract_url", "search"),
-        ("task_", "task"),
-        ("create_task", "task"),
-        ("list_my_tasks", "task"),
-        ("assign_task", "task"),
-        ("update_task_status", "task"),
-        ("shared_conversation_", "conversation"),
-        ("renderer_", "renderer"),
-        ("linkedin_", "linkedin"),
-        ("mongodb_", "database"),
-    )
-    _STRUCTURED_TOOL_FAMILY_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
-        (
-            "jira",
-            (
-                "jira",
-                "atlassian",
-                "ticket",
-                "issue",
-                "epic",
-                "sprint",
-                "backlog",
-            ),
-        ),
-        (
-            "github",
-            (
-                "github",
-                "pull request",
-                "pr ",
-                "commit",
-                "branch",
-                "repo",
-                "review",
-            ),
-        ),
-        (
-            "workflow",
-            (
-                "workflow",
-                "testing workflow",
-                "experiment",
-                "verdict",
-                "promotion recommendation",
-                "meeting invitation",
-                "regression suite",
-                "scheduler",
-                "schedule",
-                "event binding",
-                "durable",
-                "instance",
-                "orchestration",
-            ),
-        ),
-        ("gmail", ("gmail", "email", "inbox", "mail")),
-        (
-            "rag",
-            (
-                "rag",
-                "knowledge base",
-                "indexed",
-                "vector",
-                "semantic search",
-                "session",
-            ),
-        ),
-        (
-            "search",
-            (
-                "search",
-                "latest",
-                "recent",
-                "current",
-                "look up",
-                "web",
-                "url",
-                "website",
-                "news",
-            ),
-        ),
-        (
-            "arxiv",
-            (
-                "arxiv",
-                "arxiv id",
-                "arxiv.org",
-                "pdf",
-                "doi",
-                "preprint",
-                "cached paper",
-                "cached papers",
-            ),
-        ),
-        ("task", ("task", "to-do", "todo", "assignment", "assignee", "due date")),
-        ("conversation", ("shared conversation", "invite", "chat session")),
-        (
-            "renderer",
-            ("renderer", "render plan", "visualisation", "diagram", "graph"),
-        ),
-        ("linkedin", ("linkedin", "profile export", "linkedin export")),
-        ("database", ("mongodb", "atlas", "collection", "database")),
-        (
-            "vontology",
-            (
-                "#v#",
-                "vontology",
-                "ontology",
-                "concept",
-                "predicate",
-                "relationship",
-                "text relation",
-                "namespace",
-            ),
-        ),
-    )
+    _STRUCTURED_TOOL_PLANNER_SHORTLIST_CAP = 16
     # Deterministic concept-id fields for write-category tools.
     #
     # We normalise these before execution so writable operations are robust to
@@ -10143,41 +10016,31 @@ class InternalMCPChatOrchestrator:
             return "summariser"
         return "planner"
 
-    @classmethod
-    def _structured_tool_family_for_name(cls, tool_name: str) -> str:
-        lowered = str(tool_name or "").strip().lower()
-        if not lowered:
-            return "unknown"
-
-        if lowered in {
-            "list_papers",
-            "read_paper",
-            "get_paper_metadata",
-            "download_paper",
-            "finalise_cached_paper",
-            "materialise_scholarly_representation_for_file_copy",
-        } or "arxiv" in lowered:
-            return "arxiv"
-
-        for prefix, family in cls._STRUCTURED_TOOL_FAMILY_PREFIXES:
-            if lowered.startswith(prefix):
+    @staticmethod
+    def _coerce_structured_tool_family_from_metadata(
+        metadata: Mapping[str, Any] | None,
+    ) -> str | None:
+        if not isinstance(metadata, Mapping):
+            return None
+        for key in ("tool_family", "family", "structured_tool_family"):
+            raw_value = metadata.get(key)
+            if not isinstance(raw_value, str) or not raw_value.strip():
+                continue
+            family = raw_value.strip().lower()
+            if family not in {"read", "write"}:
                 return family
+        return None
 
-        if "workflow" in lowered:
-            return "workflow"
-        if "jira" in lowered:
-            return "jira"
-        if "github" in lowered:
-            return "github"
-        if "gmail" in lowered:
-            return "gmail"
-        if "rag" in lowered or "knowledge_base" in lowered:
-            return "rag"
-        if "search" in lowered or "extract_url" in lowered:
-            return "search"
-        if "task" in lowered:
-            return "task"
-        return "vontology"
+    @classmethod
+    def _resolve_structured_tool_family(
+        cls,
+        tool_name: str,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> str:
+        family = cls._coerce_structured_tool_family_from_metadata(metadata)
+        if family:
+            return family
+        return str(get_tool_family(tool_name) or "unknown").strip().lower() or "unknown"
 
     @staticmethod
     def _recent_tool_names_from_context(
@@ -10213,28 +10076,6 @@ class InternalMCPChatOrchestrator:
         return tool_names
 
     @staticmethod
-    def _recent_user_prompts_from_context(
-        context: Sequence[Mapping[str, Any]] | None,
-    ) -> list[str]:
-        if not isinstance(context, Sequence):
-            return []
-
-        prompts: list[str] = []
-        for message in reversed(list(context)[-24:]):
-            if not isinstance(message, Mapping):
-                continue
-            role = str(message.get("role") or "").strip().lower()
-            if role != "user":
-                continue
-            raw_content = message.get("content")
-            if not isinstance(raw_content, str):
-                continue
-            text = raw_content.strip()
-            if text:
-                prompts.append(text)
-        return prompts
-
-    @staticmethod
     def _context_text_fragments(
         context: Sequence[Mapping[str, Any]] | None,
     ) -> list[str]:
@@ -10249,50 +10090,6 @@ class InternalMCPChatOrchestrator:
             if isinstance(content, str) and content.strip():
                 fragments.append(content.strip())
         return fragments
-
-    @classmethod
-    def _should_suppress_task_family_hint(
-        cls,
-        *,
-        combined_text: str,
-        required_tools: Sequence[str],
-    ) -> bool:
-        required_lookup = {
-            str(tool_name).strip().lower()
-            for tool_name in required_tools
-            if isinstance(tool_name, str) and str(tool_name).strip()
-        }
-        if not required_lookup.intersection({"jira_search", "jira_get_issue"}):
-            return False
-        if not any(
-            token in combined_text
-            for token in (
-                "jira task",
-                "jira tasks",
-                "linked jira",
-                "jira issue",
-                "jira issues",
-                "task/jira",
-                "jira toolset",
-                "jira toolsets",
-            )
-        ):
-            return False
-        return not any(
-            token in combined_text
-            for token in (
-                "von task",
-                "internal task",
-                "my tasks",
-                "to-do",
-                "todo",
-                "task list",
-                "list_my_tasks",
-                "task_create",
-                "task_update_status",
-                "task_search",
-            )
-        )
 
     @classmethod
     def _relation_grounding_requested_for_structured_planner(
@@ -10333,12 +10130,22 @@ class InternalMCPChatOrchestrator:
     def _collect_structured_tool_family_hints(
         cls,
         *,
-        prompt: str,
         context: Sequence[Mapping[str, Any]] | None,
         required_tools: Sequence[str],
+        method_catalogue: Mapping[str, Any] | None,
     ) -> tuple[str, ...]:
         hints: list[str] = []
         seen: set[str] = set()
+
+        catalogue_lookup: dict[str, Mapping[str, Any]] = {}
+        if isinstance(method_catalogue, Mapping):
+            for tool_name, metadata in method_catalogue.items():
+                if (
+                    isinstance(tool_name, str)
+                    and tool_name.strip()
+                    and isinstance(metadata, Mapping)
+                ):
+                    catalogue_lookup[tool_name.strip().lower()] = metadata
 
         def _add_hint(family: str) -> None:
             value = str(family or "").strip().lower()
@@ -10348,44 +10155,20 @@ class InternalMCPChatOrchestrator:
             hints.append(value)
 
         for tool_name in required_tools:
-            _add_hint(cls._structured_tool_family_for_name(tool_name))
+            _add_hint(
+                cls._resolve_structured_tool_family(
+                    tool_name,
+                    catalogue_lookup.get(tool_name.strip().lower()),
+                )
+            )
 
         for tool_name in cls._recent_tool_names_from_context(context):
-            _add_hint(cls._structured_tool_family_for_name(tool_name))
-
-        prompt_text = str(prompt or "").strip().lower()
-        context_fragments = cls._context_text_fragments(context)
-        context_text = "\n".join(
-            text.strip().lower()
-            for text in context_fragments[-8:]
-            if isinstance(text, str) and text.strip()
-        )
-        recent_user_prompts = cls._recent_user_prompts_from_context(context)
-        if recent_user_prompts:
-            recent_user_text = "\n".join(
-                text.strip().lower()
-                for text in recent_user_prompts[-8:]
-                if isinstance(text, str) and text.strip()
+            _add_hint(
+                cls._resolve_structured_tool_family(
+                    tool_name,
+                    catalogue_lookup.get(tool_name.strip().lower()),
+                )
             )
-            context_text = "\n".join(
-                fragment for fragment in (context_text, recent_user_text) if fragment
-            )
-
-        combined_text = "\n".join(
-            fragment for fragment in (prompt_text, context_text) if fragment
-        )
-        if combined_text:
-            for family, tokens in cls._STRUCTURED_TOOL_FAMILY_HINTS:
-                if any(token in combined_text for token in tokens):
-                    _add_hint(family)
-            if re.search(r"https?://\S+", combined_text):
-                _add_hint("search")
-            if cls._should_suppress_task_family_hint(
-                combined_text=combined_text,
-                required_tools=required_tools,
-            ):
-                hints = [family for family in hints if family != "task"]
-                seen.discard("task")
 
         return tuple(hints)
 
@@ -10506,9 +10289,9 @@ class InternalMCPChatOrchestrator:
         write_explicitly_denied = prompt_explicitly_denies_write(prompt)
 
         hinted_families = self._collect_structured_tool_family_hints(
-            prompt=prompt,
             context=context,
             required_tools=required_tools,
+            method_catalogue=method_catalogue,
         )
         hinted_family_lookup = {family.lower() for family in hinted_families}
 
@@ -10588,7 +10371,10 @@ class InternalMCPChatOrchestrator:
             cached = family_cache.get(key)
             if cached is not None:
                 return cached
-            value = self._structured_tool_family_for_name(tool_name).lower()
+            value = self._resolve_structured_tool_family(
+                tool_name,
+                _tool_metadata(tool_name),
+            ).lower()
             family_cache[key] = value
             return value
 
@@ -10611,25 +10397,6 @@ class InternalMCPChatOrchestrator:
         _append_bucket(required_tools)
         _append_bucket(baseline_tools)
         _append_bucket(family_matched_tools)
-        if (
-            profile == "planner"
-            and hinted_family_lookup
-            and not required_tools
-            and len(candidate_names) > self._STRUCTURED_TOOL_HINTED_PLANNER_CAP
-        ):
-            hinted_cap = max(
-                1,
-                min(
-                    int(self._STRUCTURED_TOOL_HINTED_PLANNER_CAP),
-                    int(effective_cap),
-                ),
-            )
-            for truncated_tool in candidate_names[hinted_cap:]:
-                _mark_excluded(truncated_tool, "family_hint_cap")
-            candidate_names = list(candidate_names[:hinted_cap])
-            included_lookup = {name.lower() for name in candidate_names}
-            warnings.append(f"family_hint_cap_applied:{hinted_cap}")
-
         if profile == "planner":
             if not hinted_family_lookup:
                 _append_bucket(read_tools)
@@ -10659,6 +10426,21 @@ class InternalMCPChatOrchestrator:
         else:
             _append_bucket(read_tools)
             _append_bucket(write_tool_names)
+
+        if profile == "planner" and not required_tools:
+            planner_cap = max(
+                1,
+                min(
+                    int(self._STRUCTURED_TOOL_PLANNER_SHORTLIST_CAP),
+                    int(effective_cap),
+                ),
+            )
+            if len(candidate_names) > planner_cap:
+                for truncated_tool in candidate_names[planner_cap:]:
+                    _mark_excluded(truncated_tool, "planner_shortlist_cap")
+                candidate_names = list(candidate_names[:planner_cap])
+                included_lookup = {name.lower() for name in candidate_names}
+                warnings.append(f"planner_shortlist_cap_applied:{planner_cap}")
 
         if not candidate_names:
             warnings.append("empty_candidate_set_fallback_to_safe_baseline")
@@ -10720,7 +10502,7 @@ class InternalMCPChatOrchestrator:
                 "tool": tool_name,
                 "reason": reason,
                 "category": _tool_category(tool_name),
-                "family": self._structured_tool_family_for_name(tool_name),
+                "family": _tool_family(tool_name),
             }
             for tool_name, reason in sorted(
                 excluded_reasons.items(),
@@ -11185,6 +10967,7 @@ class InternalMCPChatOrchestrator:
         catalogue = self._gateway.describe_methods()
         family_order = (
             "search",
+            "arxiv",
             "workflow",
             "rag",
             "jira",
@@ -11204,7 +10987,11 @@ class InternalMCPChatOrchestrator:
             name = str(raw_name or "").strip()
             if not name or not is_tool_visible(name):
                 continue
-            category = self._structured_tool_family_for_name(name)
+            metadata = catalogue.get(raw_name)
+            category = self._resolve_structured_tool_family(
+                name,
+                metadata if isinstance(metadata, Mapping) else None,
+            )
             families.setdefault(category, []).append(name)
 
         ordered_families = [

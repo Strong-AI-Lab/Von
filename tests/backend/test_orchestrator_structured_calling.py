@@ -895,7 +895,7 @@ def test_structured_path_missing_tool_call_recovery_smoke(
 
 
 def test_structured_candidate_resolver_enforces_provider_cap():
-    """Structured planner candidates stay bounded without dragging in the full catalogue."""
+    """Structured planner candidates stay bounded without prompt-keyword family gating."""
 
     from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
 
@@ -928,6 +928,7 @@ def test_structured_candidate_resolver_enforces_provider_cap():
     assert "qna_search" in lowered
     assert "read_tool_139" not in lowered
     assert len(resolution.candidate_tool_names) < 20
+    assert "planner_shortlist_cap_applied:16" in resolution.warnings
 
 
 def test_structured_calling_passes_capped_tool_list_to_llm():
@@ -1014,6 +1015,7 @@ def test_structured_calling_passes_capped_tool_list_to_llm():
         llm_client.available_tool_names
     )
     assert selection_logs[0]["truncation_applied"] is False
+    assert "planner_shortlist_cap_applied:16" in selection_logs[0]["warnings"]
 
 
 def test_structured_candidate_resolver_readds_required_tool_deterministically():
@@ -1062,8 +1064,40 @@ def test_structured_candidate_resolver_readds_required_tool_deterministically():
     assert second.candidate_tool_names == first.candidate_tool_names
 
 
-def test_structured_candidate_resolver_prefers_workflow_testing_family_for_planner():
-    """Workflow-testing prompts should not drag unrelated read tools into planning."""
+def test_tool_listing_uses_authority_backed_family_resolution():
+    from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
+
+    gateway = MagicMock(spec=InternalMCPGateway)
+    gateway.enabled = True
+    gateway.describe_methods.return_value = {
+        "search_concepts": {
+            "name": "search_concepts",
+            "description": "Search concepts",
+            "input_schema": {"required": {"query": str}, "optional": {}, "allow_unknown": True},
+            "output_schema": None,
+            "category": "read",
+        },
+        "custom_workflow_probe": {
+            "name": "custom_workflow_probe",
+            "description": "Probe workflow state",
+            "family": "workflow",
+            "input_schema": {"required": {"workflow_id": str}, "optional": {}, "allow_unknown": True},
+            "output_schema": None,
+            "category": "read",
+        },
+    }
+
+    orch = InternalMCPChatOrchestrator(gateway=gateway)
+    listing = orch._tool_listing()
+
+    assert "- workflow:" in listing
+    assert "custom_workflow_probe" in listing
+    assert "- vontology:" in listing
+    assert "search_concepts" in listing
+
+
+def test_structured_candidate_resolver_uses_required_tools_for_workflow_testing_planner():
+    """Workflow testing tool narrowing should come from required tools, not prompt keywords."""
 
     from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
 
@@ -1087,7 +1121,13 @@ def test_structured_candidate_resolver_prefers_workflow_testing_family_for_plann
         provider="openai",
         tool_definitions=tool_defs,
         method_catalogue=catalogue,
-        required_prompt_tools=[],
+        required_prompt_tools=[
+            "testing_prepare_meeting_invitation_spec",
+            "experiment_start_run",
+            "experiment_execute_target_workflow",
+            "experiment_compute_verdict",
+            "workflow_execute",
+        ],
     )
 
     lowered = {name.lower() for name in resolution.candidate_tool_names}
@@ -1098,11 +1138,12 @@ def test_structured_candidate_resolver_prefers_workflow_testing_family_for_plann
     assert "workflow_execute" in lowered
     assert "gmail_list_messages" not in lowered
     assert "jira_search" not in lowered
+    assert "workflow" in resolution.hinted_families
     assert len(resolution.candidate_tool_names) < 20
 
 
-def test_structured_candidate_resolver_uses_context_for_entity_relative_kb_hints():
-    """Contextual routing guidance should hint KB/relation tools without paper->arxiv bias."""
+def test_structured_candidate_resolver_uses_context_for_entity_relative_kb_tools():
+    """Relation-grounding context should narrow tools without prompt-keyword family hints."""
 
     from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
 
@@ -1174,7 +1215,63 @@ def test_structured_candidate_resolver_uses_context_for_entity_relative_kb_hints
     assert "resolve_concept_by_name" in lowered
     assert "find_relations_with_argument" in lowered
     assert "list_papers" not in lowered
-    assert "arxiv" not in resolution.hinted_families
+    assert resolution.hinted_families == ()
+
+
+def test_structured_candidate_resolver_does_not_hint_families_from_prompt_keywords():
+    from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
+
+    gateway = MagicMock(spec=InternalMCPGateway)
+    gateway.enabled = True
+    catalogue = {
+        "jira_search": {
+            "name": "jira_search",
+            "description": "Search Jira issues",
+            "input_schema": {"required": {"jql": str}, "optional": {}, "allow_unknown": True},
+            "output_schema": None,
+            "category": "read",
+        },
+        "task_list": {
+            "name": "task_list",
+            "description": "List Von tasks",
+            "input_schema": {"required": {}, "optional": {}, "allow_unknown": True},
+            "output_schema": None,
+            "category": "read",
+        },
+        "search_web": {
+            "name": "search_web",
+            "description": "Search the web",
+            "input_schema": {"required": {"query": str}, "optional": {}, "allow_unknown": True},
+            "output_schema": None,
+            "category": "read",
+        },
+    }
+    gateway.describe_methods.return_value = catalogue
+
+    orch = InternalMCPChatOrchestrator(gateway=gateway)
+    tool_defs = orch._convert_mcp_tools_to_structured_definitions(
+        method_catalogue=catalogue
+    )
+    resolution = orch._resolve_structured_tool_candidates(
+        prompt="Check the Jira backlog and compare it with my task list.",
+        context=[
+            {
+                "role": "system",
+                "content": (
+                    "Expected answer contract for this turn:\n"
+                    "- Selector guidance: Compare Jira issues and Von tasks.\n"
+                ),
+            }
+        ],
+        stage="tool_call",
+        workflow_action_id="tool_calling.plan",
+        provider="openai",
+        tool_definitions=tool_defs,
+        method_catalogue=catalogue,
+        required_prompt_tools=[],
+    )
+
+    assert resolution.hinted_families == ()
 
 
 def test_turn_contract_requirement_augmentation_adds_multi_surface_briefing_tools():
@@ -1528,8 +1625,8 @@ def test_missing_tool_retry_does_not_force_guided_retrieval_from_non_english_pro
     assert calls is None
 
 
-def test_structured_candidate_resolver_caps_hinted_kb_web_planner_sets():
-    """Hybrid KB+web prompts should not drag the full hinted catalogue into planning."""
+def test_structured_candidate_resolver_caps_unhinted_planner_shortlists():
+    """Planner shortlists should stay bounded even without family hints."""
 
     from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
 
@@ -1628,7 +1725,8 @@ def test_structured_candidate_resolver_caps_hinted_kb_web_planner_sets():
     assert not any(name.startswith("concept_write_") for name in lowered)
     assert len(resolution.candidate_tool_names) <= 16
     assert any(
-        warning == "family_hint_cap_applied:16" for warning in resolution.warnings
+        warning == "planner_shortlist_cap_applied:16"
+        for warning in resolution.warnings
     )
 
 

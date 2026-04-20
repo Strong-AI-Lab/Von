@@ -111,6 +111,10 @@ CORE_SUPPORT_PROMPT_SOURCE_FILES = (
 ORCHESTRATOR_RETIRED_SUPPORT_SYMBOLS = {
     "_PROMPT_MCP_TOOL_FAMILY_PATTERN": "retired_semantic_regex_symbol",
     "_URL_READING_INTENT_PATTERN": "retired_semantic_regex_symbol",
+    "_STRUCTURED_TOOL_FAMILY_PREFIXES": "retired_structured_tool_family_heuristic",
+    "_STRUCTURED_TOOL_FAMILY_HINTS": "retired_structured_tool_family_heuristic",
+    "_structured_tool_family_for_name": "retired_structured_tool_family_heuristic",
+    "_should_suppress_task_family_hint": "retired_structured_tool_family_heuristic",
     "_guided_retrieval_focus_terms": "retired_guided_retrieval_helper",
     "_build_guided_retrieval_query": "retired_guided_retrieval_helper",
     "_infer_guided_retrieval_retry_tool_calls": "retired_guided_retrieval_helper",
