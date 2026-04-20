@@ -1235,3 +1235,187 @@ def test_tool_calling_backfill_surfaces_relation_argument_evidence(monkeypatch) 
     assert "find_relations_with_argument returned 2 relation hits" in context_text
     assert "Relation predicates observed: #V#member_of_organisation" in context_text
     assert "Relation-bearing evidence excerpts" in context_text
+
+
+def test_tool_calling_backfill_prioritises_positive_evidence_over_zero_result_surfaces(
+    monkeypatch,
+) -> None:
+    orchestrator = _bare_orchestrator()
+
+    captured: dict[str, Any] = {}
+
+    def _run_llm_with_fallbacks(**kwargs: Any) -> tuple[str, str, Mapping[str, Any]]:
+        context_messages = cast(list[Mapping[str, Any]], kwargs.get("context") or [])
+        captured["context"] = context_messages
+        context_text = "\n".join(
+            str(message.get("content") or "")
+            for message in context_messages
+            if isinstance(message, Mapping)
+        )
+        positive_index = context_text.find("Positive retrieval signals for this turn:")
+        zero_index = context_text.find(
+            "Zero-result or inconclusive retrieval surfaces for this turn:"
+        )
+        if (
+            positive_index != -1
+            and zero_index != -1
+            and positive_index < zero_index
+            and "Treat zero-result notes as query-specific misses only." in context_text
+            and "Relation-bearing evidence excerpts" in context_text
+            and "#V#linked_to_user" in context_text
+            and "Example Record" in context_text
+        ):
+            return (
+                "I found grounded represented evidence linking Example Record to the current user.",
+                "gpt-test",
+                {},
+            )
+        return "I couldn't find any grounded represented links.", "gpt-test", {}
+
+    monkeypatch.setattr(orchestrator, "_run_llm_with_fallbacks", _run_llm_with_fallbacks)
+    monkeypatch.setattr(
+        orchestrator,
+        "_interpret_model_turn",
+        lambda _text: SimpleNamespace(tool_calls=[], tool_call_parse_error=None),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_evaluate_prompt_requirements",
+        lambda **_kwargs: SimpleNamespace(
+            required_tools=[],
+            required_fetch_concept_ids=[],
+            required_read_file_copy_ids=[],
+            required_scholarly_representation_file_copy_ids=[],
+            required_create_type_name=None,
+            missing_tools=[],
+            missing_fetch_concept_ids=[],
+            missing_read_file_copy_ids=[],
+            missing_scholarly_representation_file_copy_ids=[],
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_augment_prompt_requirements_with_turn_contract",
+        lambda **_kwargs: _kwargs["evaluation"],
+    )
+    monkeypatch.setattr(
+        orchestrator, "_store_prompt_requirement_evaluation", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        orchestrator, "_run_missing_tool_call_recovery_workflow", lambda **_kwargs: {}
+    )
+    monkeypatch.setattr(
+        orchestrator, "_sanitise_user_visible_action_output", lambda text, **_kwargs: text
+    )
+    monkeypatch.setattr(
+        orchestrator, "_resolve_environment_max_tool_invocations", lambda _env: 4
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_assess_missing_tool_call",
+        lambda **_kwargs: SimpleNamespace(retry_reason=None),
+    )
+
+    relation_payload = {
+        "concept_id": "#V#test_user",
+        "total_hits": 1,
+        "hits": [
+            {
+                "source_concept_id": "#V#example_record",
+                "predicate_concept_id": "#V#linked_to_user",
+                "relation_kind": "binary",
+                "argument_indexes": [2],
+                "target_value": "#V#test_user",
+                "source_concept_preview": {
+                    "concept_id": "#V#example_record",
+                    "name": "Example Record",
+                    "kind": "individual",
+                },
+                "target_concept_preview": {
+                    "concept_id": "#V#test_user",
+                    "name": "Test User",
+                    "kind": "individual",
+                },
+                "relation_metadata": {
+                    "relation_id": "struct::example_record::linked_to_user",
+                    "match_type": "exact",
+                },
+                "score": 1.0,
+                "is_asserted": True,
+                "relation_state": "asserted",
+            }
+        ],
+    }
+
+    request = SimpleNamespace(
+        data={
+            "augmented_context": [
+                {"role": "system", "content": "system-one"},
+                {
+                    "role": "user",
+                    "content": "List grounded represented records linked to the current user.",
+                },
+            ],
+            "policy_state": None,
+            "registry_snapshot": None,
+            "user_concept_id": "#V#test_user",
+            "org_concept_id": "#V#test_org",
+            "model_for_stage": lambda _stage: "gpt-test",
+            "record_llm_call": lambda **_kwargs: None,
+            "aux_llm_calls": [],
+            "llm_calls": [],
+            "iteration_count": 1,
+            "remaining_tool_calls": [],
+            "invocations": [
+                {
+                    "tool": "search_knowledge_base",
+                    "arguments": {"query": "current user represented links"},
+                    "payload": {
+                        "query": "current user represented links",
+                        "count": 0,
+                        "results": [],
+                    },
+                },
+                {
+                    "tool": "find_relations_with_argument",
+                    "arguments": {"concept_id": "#V#test_user"},
+                    "payload": relation_payload,
+                },
+            ],
+            "method_catalogue": {},
+            "prompt": "List grounded represented records linked to the current user.",
+            "prompt_for_requirements": (
+                "List grounded represented records linked to the current user."
+            ),
+            "turn_expected_outcome_summary": (
+                "List grounded represented records linked to the current user."
+            ),
+            "turn_expected_grounding_requirement": (
+                "Only surface represented records when they are grounded in retrieved evidence."
+            ),
+            "turn_answering_guidance": (
+                "Prefer concrete grounded evidence over count-only or zero-result summaries."
+            ),
+            "emit_progress": None,
+        },
+        environment=SimpleNamespace(llm_client=object(), model="gpt-test"),
+    )
+
+    result = orchestrator._action_tool_calling_backfill(request)
+
+    assert result.outputs["final_response"] == (
+        "I found grounded represented evidence linking Example Record to the current user."
+    )
+    context_text = "\n".join(
+        str(message.get("content") or "")
+        for message in cast(list[Mapping[str, Any]], captured["context"])
+        if isinstance(message, Mapping)
+    )
+    assert "Positive retrieval signals for this turn:" in context_text
+    assert "Zero-result or inconclusive retrieval surfaces for this turn:" in context_text
+    assert (
+        context_text.find("Positive retrieval signals for this turn:")
+        < context_text.find("Zero-result or inconclusive retrieval surfaces for this turn:")
+    )
+    assert "Treat zero-result notes as query-specific misses only." in context_text
+    assert "Example Record via #V#linked_to_user -> Test User" in context_text

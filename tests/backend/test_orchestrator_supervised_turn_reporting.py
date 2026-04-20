@@ -81,6 +81,23 @@ def test_supervised_turn_preserves_gate_reported_response_when_follow_up_is_requ
     assert result.completion_gate_verdict.get("requires_follow_up") is True
 
 
+def test_sanitise_user_visible_action_output_strips_internal_status_suffix() -> None:
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _DummyGateway()))
+    aux_log: list[dict[str, Any]] = []
+
+    result = orchestrator._sanitise_user_visible_action_output(
+        "Grounded answer text.\n\nExecution status: required tool execution was not completed.",
+        aux_log=aux_log,
+        source_stage="test",
+    )
+
+    assert result == "Grounded answer text."
+    assert any(
+        entry.get("reason") == "internal_status_suffix_stripped"
+        for entry in aux_log
+    )
+
+
 def test_supervised_turn_still_fails_closed_without_gate_reported_response(
     monkeypatch,
 ) -> None:
@@ -1419,6 +1436,114 @@ def test_execute_selected_captures_child_failure_for_recovery_path(
     assert report["final_state"] == "failed"
     assert report["error"] == "selected route failed closed"
     assert report["response_text"] == "selected route failed closed"
+
+
+def test_execute_selected_strips_internal_execution_status_from_user_response(
+    monkeypatch,
+) -> None:
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _DummyGateway()))
+    monkeypatch.setattr(
+        orchestrator,
+        "execute_workflow",
+        lambda *args, **kwargs: SimpleNamespace(
+            completed=True,
+            final_state="completed",
+            error=None,
+            data={
+                "response_text": (
+                    "I found grounded represented evidence for the current user.\n\n"
+                    "Execution status: requested mutation was not executed. "
+                    "Blocking effect IDs: effect_prompt_required_evidence_search_web_1."
+                )
+            },
+        ),
+    )
+
+    result = orchestrator._action_turn_execution_execute_selected(
+        SimpleNamespace(
+            data={
+                "selected_workflow_id": "#V#tool_calling_workflow",
+                "selected_workflow_trace": {},
+                "conversation_session_id": "session-1",
+                "turn_id": "turn-1",
+            },
+            environment=SimpleNamespace(
+                llm_client=_DummyLLM(),
+                model="test-model",
+                user_namespace="#V#user",
+                auxiliary_system_prompt=None,
+            ),
+            trace=None,
+        )
+    )
+
+    assert result.status == "success"
+    assert (
+        result.outputs["selected_workflow_user_response"]
+        == "I found grounded represented evidence for the current user."
+    )
+    assert "Execution status:" not in result.outputs["response_text"]
+    assert (
+        result.outputs["completion_report"]["response_text"]
+        == "I found grounded represented evidence for the current user."
+    )
+
+
+def test_execute_selected_ignores_count_only_response_and_uses_tool_result_fallback(
+    monkeypatch,
+) -> None:
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _DummyGateway()))
+    monkeypatch.setattr(
+        orchestrator,
+        "execute_workflow",
+        lambda *args, **kwargs: SimpleNamespace(
+            completed=True,
+            final_state="completed",
+            error=None,
+            data={
+                "response_text": "5 results",
+                "invocations": [
+                    {
+                        "tool": "search_concepts",
+                        "status": "ok",
+                        "result_preview": {
+                            "response_text": (
+                                "I found grounded represented evidence linking "
+                                "Example Record to the current user."
+                            )
+                        },
+                    }
+                ],
+            },
+        ),
+    )
+
+    result = orchestrator._action_turn_execution_execute_selected(
+        SimpleNamespace(
+            data={
+                "selected_workflow_id": "#V#tool_calling_workflow",
+                "selected_workflow_trace": {},
+                "conversation_session_id": "session-1",
+                "turn_id": "turn-1",
+            },
+            environment=SimpleNamespace(
+                llm_client=_DummyLLM(),
+                model="test-model",
+                user_namespace="#V#user",
+                auxiliary_system_prompt=None,
+            ),
+            trace=None,
+        )
+    )
+
+    assert result.status == "success"
+    assert (
+        result.outputs["selected_workflow_user_response"]
+        == "I found grounded represented evidence linking Example Record to the current user."
+    )
+    assert result.outputs["response_text"] == (
+        "I found grounded represented evidence linking Example Record to the current user."
+    )
 
 
 def test_execute_selected_routes_chat_assistant_via_direct_response(

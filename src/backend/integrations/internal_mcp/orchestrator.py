@@ -12603,10 +12603,7 @@ class InternalMCPChatOrchestrator:
             _add_tool("find_relations_with_argument")
         if "arxiv" in contract_text:
             _add_tool("search_arxiv")
-        if any(
-            token in contract_text
-            for token in ("web search", "search_web", "public web", "external web")
-        ):
+        if cls._turn_contract_requests_web_retrieval(contract_text):
             _add_tool("search_web")
         if "jira" in contract_text:
             _add_tool("jira_search")
@@ -12643,11 +12640,22 @@ class InternalMCPChatOrchestrator:
             token in lowered
             for token in (
                 "find_relations_with_argument",
+                "vontology relations",
+                "via vontology relations",
+                "ontology relations",
                 "relation-bearing evidence",
                 "relation instance",
                 "relation instances",
                 "relationship instance",
                 "relationship instances",
+                "explicit relations",
+                "explicit ontology relations",
+                "ground the relationship",
+                "grounding the relationship",
+                "verifiable relationship",
+                "verifiable relationships",
+                "relationship-backed metadata",
+                "relationship between the",
                 "usage pattern",
                 "usage patterns",
                 "member-level relation",
@@ -12662,6 +12670,37 @@ class InternalMCPChatOrchestrator:
                 "identified as members",
                 "entities identified as",
                 "relations of identified",
+            )
+        )
+
+    @classmethod
+    def _turn_contract_requests_web_retrieval(
+        cls,
+        contract_text: str,
+    ) -> bool:
+        lowered = str(contract_text or "").strip().lower()
+        if not lowered:
+            return False
+        if (
+            "search_web" in lowered
+            or "public web" in lowered
+            or "external web" in lowered
+        ):
+            return True
+        if "web search" not in lowered:
+            return False
+        return not any(
+            token in lowered
+            for token in (
+                "over general web search",
+                "over web search",
+                "rather than web search",
+                "instead of web search",
+                "before web search",
+                "before general web search",
+                "ahead of web search",
+                "avoid web search",
+                "without web search",
             )
         )
 
@@ -13088,6 +13127,24 @@ class InternalMCPChatOrchestrator:
         stripped = text.strip()
         if not stripped:
             return text
+
+        execution_status_match = re.search(r"(?m)^\s*Execution status:", stripped)
+        if execution_status_match and execution_status_match.start() > 0:
+            safe_prefix = stripped[: execution_status_match.start()].rstrip()
+            if safe_prefix:
+                if isinstance(aux_log, list):
+                    try:
+                        aux_log.append(
+                            {
+                                "type": "action_output_sanitised",
+                                "reason": "internal_status_suffix_stripped",
+                                "source_stage": source_stage or "",
+                                "original_preview": stripped[:240],
+                            }
+                        )
+                    except Exception:
+                        pass
+                return safe_prefix
 
         reason: str | None = None
         if self._is_json_action_response(stripped):
@@ -26430,6 +26487,50 @@ class InternalMCPChatOrchestrator:
             )
         return lines
 
+    @staticmethod
+    def _tool_follow_up_result_noun(tool_name: str) -> str:
+        return {
+            "jira_search": "issue",
+            "search_knowledge_base": "result",
+            "search_concepts": "concept",
+            "search_arxiv": "paper",
+            "search_web": "result",
+            "get_text_relations_summary": "predicate group",
+            "get_related_concepts": "related evidence result",
+            "find_relations_with_argument": "relation hit",
+        }.get(tool_name, "result")
+
+    @staticmethod
+    def _tool_follow_up_signal_priority(
+        *,
+        tool_name: str,
+        count: int,
+        invocation_index: int,
+    ) -> tuple[int, int, int]:
+        positive_priority = {
+            "find_relations_with_argument": 0,
+            "get_text_relations_summary": 1,
+            "get_related_concepts": 2,
+            "search_knowledge_base": 3,
+            "search_concepts": 4,
+            "jira_search": 5,
+            "search_arxiv": 6,
+            "search_web": 7,
+        }
+        zero_result_priority = {
+            "search_knowledge_base": 0,
+            "search_concepts": 1,
+            "find_relations_with_argument": 2,
+            "get_related_concepts": 3,
+            "get_text_relations_summary": 4,
+            "jira_search": 5,
+            "search_arxiv": 6,
+            "search_web": 7,
+        }
+        if count > 0:
+            return (0, positive_priority.get(tool_name, 99), invocation_index)
+        return (1, zero_result_priority.get(tool_name, 99), invocation_index)
+
     @classmethod
     def _build_tool_follow_up_stage_messages(
         cls,
@@ -26441,11 +26542,13 @@ class InternalMCPChatOrchestrator:
             invocations_raw if isinstance(invocations_raw, list) else []
         )
 
-        summary_lines: list[str] = []
-        for invocation in invocations:
+        tool_blocks: list[tuple[tuple[int, int, int], list[str], bool]] = []
+        for invocation_index, invocation in enumerate(invocations):
             if not isinstance(invocation, Mapping):
                 continue
-            tool_name = str(invocation.get("tool") or invocation.get("method") or "").strip()
+            tool_name = str(
+                invocation.get("tool") or invocation.get("method") or ""
+            ).strip()
             if tool_name not in {
                 "jira_search",
                 "search_knowledge_base",
@@ -26493,43 +26596,67 @@ class InternalMCPChatOrchestrator:
                 else None
             )
 
-            noun = {
-                "jira_search": "issue",
-                "search_knowledge_base": "result",
-                "search_concepts": "concept",
-                "search_arxiv": "paper",
-                "search_web": "result",
-                "get_text_relations_summary": "predicate group",
-                "get_related_concepts": "related evidence result",
-                "find_relations_with_argument": "relation hit",
-            }.get(tool_name, "result")
+            noun = cls._tool_follow_up_result_noun(tool_name)
             count_label = noun if count == 1 else f"{noun}s"
             line = f"- {tool_name} returned {count} {count_label}"
             if query_text:
                 line = f'{line} for {query_label} "{query_text}"'
-            summary_lines.append(line + ".")
+            block_lines = [line + "."]
 
             if tool_name == "search_knowledge_base":
-                summary_lines.extend(
+                block_lines.extend(
                     cls._build_search_knowledge_base_follow_up_lines(payload)
                 )
             elif tool_name == "search_concepts":
-                summary_lines.extend(cls._build_search_concepts_follow_up_lines(payload))
+                block_lines.extend(
+                    cls._build_search_concepts_follow_up_lines(payload)
+                )
             elif tool_name == "get_text_relations_summary":
-                summary_lines.extend(
+                block_lines.extend(
                     cls._build_text_relations_summary_follow_up_lines(payload)
                 )
             elif tool_name == "get_related_concepts":
-                summary_lines.extend(
+                block_lines.extend(
                     cls._build_related_concepts_follow_up_lines(payload)
                 )
             elif tool_name == "find_relations_with_argument":
-                summary_lines.extend(
+                block_lines.extend(
                     cls._build_find_relations_with_argument_follow_up_lines(payload)
                 )
+            tool_blocks.append(
+                (
+                    cls._tool_follow_up_signal_priority(
+                        tool_name=tool_name,
+                        count=count,
+                        invocation_index=invocation_index,
+                    ),
+                    block_lines,
+                    count > 0,
+                )
+            )
 
-        if not summary_lines:
+        if not tool_blocks:
             return []
+
+        ordered_blocks = sorted(tool_blocks, key=lambda item: item[0])
+        positive_blocks = [
+            lines for _sort_key, lines, is_positive in ordered_blocks if is_positive
+        ]
+        zero_result_blocks = [
+            lines for _sort_key, lines, is_positive in ordered_blocks if not is_positive
+        ]
+
+        summary_lines: list[str] = []
+        if positive_blocks:
+            summary_lines.append("Positive retrieval signals for this turn:")
+            for block_lines in positive_blocks:
+                summary_lines.extend(block_lines)
+        if zero_result_blocks:
+            summary_lines.append(
+                "Zero-result or inconclusive retrieval surfaces for this turn:"
+            )
+            for block_lines in zero_result_blocks:
+                summary_lines.extend(block_lines)
 
         return [
             {
@@ -26539,11 +26666,19 @@ class InternalMCPChatOrchestrator:
                         "Retrieved evidence summary for this turn:",
                         *summary_lines,
                         (
-                            "Ground the answer in these observed retrieval results and "
-                            "the concrete predicate or relation evidence they surfaced. "
+                            "Ground the answer in the most concrete positive retrieval "
+                            "evidence above, especially when later retrieval surfaces "
+                            "surface grounded predicates, relations, titles, or evidence excerpts."
+                        ),
+                        (
+                            "Treat zero-result notes as query-specific misses only. "
+                            "They do not override later positive evidence from other retrieval surfaces, "
+                            "and they should not be generalised into a global absence claim."
+                        ),
+                        (
                             "Do not claim that a retrieval surface returned no results "
                             "when the retrieved payload for that surface is non-empty, "
-                            "and do not collapse concrete predicate evidence into count-only summaries."
+                            "and do not collapse concrete evidence into count-only summaries."
                         ),
                     ]
                 ),

@@ -338,6 +338,86 @@ class _GroundedKbLookupGatewayStub:
         )
 
 
+class _MixedGroundedEvidenceGatewayStub:
+    enabled = True
+
+    def __init__(self) -> None:
+        self.invocations: list[dict[str, Any]] = []
+
+    def describe_methods(self) -> dict[str, Any]:
+        return {
+            "search_knowledge_base": {
+                "description": "Return represented knowledge matches for the current turn.",
+                "category": "read",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                    },
+                },
+            },
+            "find_relations_with_argument": {
+                "description": "Return relation instances for the requested concept.",
+                "category": "read",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "concept_id": {"type": "string"},
+                    },
+                },
+            },
+        }
+
+    def invoke(self, tool_name: str, payload: dict[str, Any]):
+        self.invocations.append({"tool": tool_name, "payload": dict(payload)})
+        if tool_name == "search_knowledge_base":
+            return SimpleNamespace(
+                payload={
+                    "success": True,
+                    "query": payload.get("query"),
+                    "count": 0,
+                    "results": [],
+                },
+                duration_ms=5,
+            )
+        if tool_name == "find_relations_with_argument":
+            return SimpleNamespace(
+                payload={
+                    "success": True,
+                    "concept_id": payload.get("concept_id"),
+                    "total_hits": 1,
+                    "hits": [
+                        {
+                            "source_concept_id": "#V#example_record",
+                            "predicate_concept_id": "#V#linked_to_user",
+                            "relation_kind": "binary",
+                            "argument_indexes": [2],
+                            "target_value": "#V#test_user",
+                            "source_concept_preview": {
+                                "concept_id": "#V#example_record",
+                                "name": "Example Record",
+                                "kind": "individual",
+                            },
+                            "target_concept_preview": {
+                                "concept_id": "#V#test_user",
+                                "name": "Test User",
+                                "kind": "individual",
+                            },
+                            "relation_metadata": {
+                                "relation_id": "struct::example_record::linked_to_user",
+                                "match_type": "exact",
+                            },
+                            "score": 1.0,
+                            "is_asserted": True,
+                            "relation_state": "asserted",
+                        }
+                    ],
+                },
+                duration_ms=5,
+            )
+        raise AssertionError(f"Unexpected tool call: {tool_name}")
+
+
 class _AffiliationLookupGatewayStub:
     enabled = True
 
@@ -475,6 +555,78 @@ class _GroundedKbLookupLLM:
         return "I found one grounded represented record: Example Record."
 
 
+class _MixedGroundedEvidenceLLM:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def generate(self, prompt, context=None, model=None):
+        context_messages = list(context or [])
+        self.calls.append(
+            {"prompt": prompt, "context": context_messages, "model": model}
+        )
+        context_text = "\n".join(
+            str(message.get("content") or "")
+            for message in context_messages
+            if isinstance(message, dict)
+        )
+        if isinstance(prompt, str) and "expected-success inference policy" in prompt:
+            return (
+                '{"expected_outcome_summary":"List grounded represented records linked to the current user.",'
+                '"grounding_requirement":"Only surface represented records that are supported by retrieved evidence.",'
+                '"precision_policy":"Prefer explicit uncertainty over unsupported linkage.",'
+                '"selector_guidance":"Use grounded retrieval surfaces and keep the authenticated actor context in scope.",'
+                '"answering_guidance":"Prefer concrete retrieved evidence over count-only or zero-result summaries.",'
+                '"reasoning":"Mixed retrieval turns should not let an early zero-result surface suppress later grounded evidence."}'
+            )
+        if isinstance(prompt, str) and prompt.strip().startswith("Select workflow"):
+            return (
+                '{"workflow_id":"#V#tool_calling_workflow",'
+                '"confidence":0.95,'
+                '"reasoning":"This is a grounded represented-knowledge lookup that should execute retrieval before answering."}'
+            )
+        if prompt == "List grounded represented records linked to the current user.":
+            if (
+                "Expected answer contract for this turn" in context_text
+                and "CURRENT USER CONTEXT: Test User (#V#test_user)" in context_text
+            ):
+                return (
+                    '{"action":"call_tool","tool":"search_knowledge_base",'
+                    '"payload":{"query":"current user represented links"}}'
+                )
+            return "I need grounded represented retrieval first."
+        if isinstance(prompt, str) and prompt.startswith(
+            "Provide a final answer to the user now that the tool result is available."
+        ):
+            if (
+                "search_knowledge_base returned 0 results" in context_text
+                and "Relation-bearing evidence excerpts" not in context_text
+            ):
+                return (
+                    '{"action":"call_tool","tool":"find_relations_with_argument",'
+                    '"payload":{"concept_id":"#V#test_user"}}'
+                )
+            positive_index = context_text.find(
+                "Positive retrieval signals for this turn:"
+            )
+            zero_index = context_text.find(
+                "Zero-result or inconclusive retrieval surfaces for this turn:"
+            )
+            if (
+                positive_index != -1
+                and zero_index != -1
+                and positive_index < zero_index
+                and "Treat zero-result notes as query-specific misses only." in context_text
+                and "Relation-bearing evidence excerpts" in context_text
+                and "Example Record" in context_text
+            ):
+                return (
+                    "I found grounded represented evidence linking Example Record "
+                    "to the current user."
+                )
+            return "I couldn't find any grounded represented links."
+        return "I found grounded represented evidence linking Example Record to the current user."
+
+
 class _ExplicitEntityRelationLookupLLM:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
@@ -531,11 +683,13 @@ def _make_app(
         | _AuthorshipLLM
         | _EntityRelativeToolPipelineLLM
         | _GroundedKbLookupLLM
+        | _MixedGroundedEvidenceLLM
         | _ExplicitEntityRelationLookupLLM
     ),
     gateway_override: Any | None = None,
     discovery_override: Any | None = None,
     use_live_discovery: bool = False,
+    max_tool_invocations: int = 1,
 ) -> Flask:
     import src.backend.workflows.durable.registry_factory as registry_factory
 
@@ -637,7 +791,7 @@ def _make_app(
         monkeypatch,
         gateway=cast(Any, gateway),
         selector_enabled=True,
-        max_tool_invocations=1,
+        max_tool_invocations=max_tool_invocations,
     )
     monkeypatch.setattr(
         orchestrator,
@@ -1022,6 +1176,74 @@ def test_generate_grounded_kb_lookup_preserves_turn_context_into_payload_and_sum
     )
     assert routing_contract_state.get("fields", {}).get("summary") == (
         "List grounded represented records linked to the current user."
+    )
+
+
+def test_generate_grounded_follow_up_prefers_positive_relation_evidence_over_zero_result_surface(
+    monkeypatch,
+) -> None:
+    llm = _MixedGroundedEvidenceLLM()
+    gateway = _MixedGroundedEvidenceGatewayStub()
+    app = _make_app(
+        monkeypatch,
+        llm=llm,
+        gateway_override=gateway,
+        discovery_override=_tool_calling_discovery,
+        max_tool_invocations=3,
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/von/generate",
+        json={"prompt": "List grounded represented records linked to the current user."},
+    )
+    assert response.status_code == 200
+
+    body = response.get_json()
+    assert isinstance(body, dict)
+    response_text = str(body.get("response") or "")
+    assert response_text == (
+        "I found grounded represented evidence linking Example Record to the current user."
+    )
+    assert response_text != "I couldn't find any grounded represented links."
+
+    assert [row["tool"] for row in gateway.invocations] == [
+        "search_knowledge_base",
+        "find_relations_with_argument",
+    ]
+
+    summariser_calls = [
+        call
+        for call in llm.calls
+        if isinstance(call.get("prompt"), str)
+        and call["prompt"].startswith(
+            "Provide a final answer to the user now that the tool result is available."
+        )
+    ]
+    assert len(summariser_calls) >= 2
+    final_summariser_context_text = "\n".join(
+        str(message.get("content") or "")
+        for message in (summariser_calls[-1].get("context") or [])
+        if isinstance(message, dict)
+    )
+    assert "Positive retrieval signals for this turn:" in final_summariser_context_text
+    assert (
+        "Zero-result or inconclusive retrieval surfaces for this turn:"
+        in final_summariser_context_text
+    )
+    assert (
+        final_summariser_context_text.find("Positive retrieval signals for this turn:")
+        < final_summariser_context_text.find(
+            "Zero-result or inconclusive retrieval surfaces for this turn:"
+        )
+    )
+    assert (
+        "Treat zero-result notes as query-specific misses only."
+        in final_summariser_context_text
+    )
+    assert "Relation-bearing evidence excerpts" in final_summariser_context_text
+    assert "Example Record via #V#linked_to_user -> Test User" in (
+        final_summariser_context_text
     )
 
 

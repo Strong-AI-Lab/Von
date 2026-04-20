@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from typing import Any, Mapping, Sequence
 
@@ -101,6 +102,8 @@ def _looks_like_execution_bookkeeping_response(
         return True
     if lowered.startswith("workflow completed successfully"):
         return True
+    if lowered.startswith("execution status:"):
+        return True
 
     if workflow_id:
         workflow_text = workflow_id.strip()
@@ -118,6 +121,38 @@ def _looks_like_execution_bookkeeping_response(
         return True
 
     return False
+
+
+def _looks_like_count_only_result_summary(text: Any) -> bool:
+    candidate = _coerce_non_empty_text(text)
+    if not candidate:
+        return False
+    return bool(
+        re.fullmatch(
+            r"\d+\s+(?:result|results|item|items|concept|concepts|"
+            r"relation hit|relation hits|predicate group|predicate groups|"
+            r"related evidence result|related evidence results)",
+            candidate.strip().lower(),
+        )
+    )
+
+
+def _sanitise_user_response_candidate(text: Any) -> str | None:
+    candidate = _coerce_non_empty_text(text)
+    if not candidate:
+        return None
+
+    execution_status_match = re.search(r"(?m)^\s*Execution status:", candidate)
+    if execution_status_match:
+        candidate = candidate[: execution_status_match.start()].rstrip()
+        if not candidate:
+            return None
+
+    if _looks_like_execution_bookkeeping_response(candidate):
+        return None
+    if _looks_like_count_only_result_summary(candidate):
+        return None
+    return candidate
 
 
 def _render_structured_observation_lines(observations: Any) -> list[str]:
@@ -354,7 +389,9 @@ def _derive_tool_batch_user_response(
         result_preview = invocation.get("result_preview")
         if isinstance(result_preview, Mapping):
             for field_name in ("response_text", "final_response", "summary", "message"):
-                candidate = _coerce_non_empty_text(result_preview.get(field_name))
+                candidate = _sanitise_user_response_candidate(
+                    result_preview.get(field_name)
+                )
                 if not candidate or _looks_like_machine_json_text(candidate):
                     continue
                 lowered = candidate.lower()
@@ -362,7 +399,9 @@ def _derive_tool_batch_user_response(
                     continue
                 seen_candidates.add(lowered)
                 candidate_texts.append(candidate)
-        result_summary = _coerce_non_empty_text(invocation.get("result_summary"))
+        result_summary = _sanitise_user_response_candidate(
+            invocation.get("result_summary")
+        )
         if result_summary and not result_summary.lower().startswith("error:"):
             lowered = result_summary.lower()
             if lowered not in seen_candidates:
@@ -484,7 +523,7 @@ def render_selected_workflow_user_response(
         (completion_report_map, "response_text"),
         (workflow_execution_summary_map, "response_text"),
     ):
-        candidate = _coerce_non_empty_text(payload.get(field_name))
+        candidate = _sanitise_user_response_candidate(payload.get(field_name))
         if not candidate:
             continue
         lowered = candidate.lower()
@@ -496,14 +535,21 @@ def render_selected_workflow_user_response(
     for candidate_text in candidate_texts:
         if _looks_like_machine_json_text(candidate_text):
             continue
-        if _looks_like_execution_bookkeeping_response(
-            candidate_text,
-            workflow_id=selected_workflow_id,
-        ):
-            continue
         if artefact_lines:
             return "\n".join([*artefact_lines, "", candidate_text])
         return candidate_text
+
+    invocation_records = child_outputs_map.get("invocations")
+    if isinstance(invocation_records, Sequence) and not isinstance(
+        invocation_records, (str, bytes, bytearray)
+    ):
+        derived_tool_response = _sanitise_user_response_candidate(
+            _derive_tool_batch_user_response(invocation_records)
+        )
+        if derived_tool_response:
+            if artefact_lines:
+                return "\n".join([*artefact_lines, "", derived_tool_response])
+            return derived_tool_response
 
     if failure_text:
         return failure_text

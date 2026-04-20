@@ -221,7 +221,12 @@ def test_missing_tool_call_retry_chains_text_relation_summary_after_search_conce
             "action": "call_tool",
             "tool": "get_text_relations_summary",
             "payload": {"concept_id": "#V#sail_student_group"},
-        }
+        },
+        {
+            "action": "call_tool",
+            "tool": "find_relations_with_argument",
+            "payload": {"concept_id": "#V#sail_student_group", "limit": 20},
+        },
     ]
 
 
@@ -255,7 +260,12 @@ def test_missing_tool_call_retry_chains_related_concepts_after_search_concepts()
             "action": "call_tool",
             "tool": "get_related_concepts",
             "payload": {"concept_id": "#V#sail_student_group"},
-        }
+        },
+        {
+            "action": "call_tool",
+            "tool": "find_relations_with_argument",
+            "payload": {"concept_id": "#V#sail_student_group", "limit": 20},
+        },
     ]
 
 
@@ -296,7 +306,12 @@ def test_missing_tool_call_retry_skips_file_copy_result_for_ontology_follow_up()
             "action": "call_tool",
             "tool": "get_text_relations_summary",
             "payload": {"concept_id": "#V#sail_student_group"},
-        }
+        },
+        {
+            "action": "call_tool",
+            "tool": "find_relations_with_argument",
+            "payload": {"concept_id": "#V#sail_student_group", "limit": 20},
+        },
     ]
 
 
@@ -351,7 +366,15 @@ def test_missing_tool_call_retry_skips_predicate_meta_result_for_ontology_follow
             "action": "call_tool",
             "tool": "get_related_concepts",
             "payload": {"concept_id": "#V#current_uo_asail_ph_d_student"},
-        }
+        },
+        {
+            "action": "call_tool",
+            "tool": "find_relations_with_argument",
+            "payload": {
+                "concept_id": "#V#current_uo_asail_ph_d_student",
+                "limit": 20,
+            },
+        },
     ]
 
 
@@ -1301,6 +1324,53 @@ def test_turn_contract_with_member_entity_guidance_requires_relation_argument_re
     assert "find_relations_with_argument" in required_tools
 
 
+def test_turn_contract_preferring_kb_over_general_web_search_does_not_require_search_web():
+    required_tools = InternalMCPChatOrchestrator._infer_turn_contract_required_tools(
+        turn_expected_outcome_contract={
+            "summary": (
+                "A precise list of grounded represented records linked to the "
+                "authenticated user."
+            ),
+            "grounding_requirement": (
+                "Evidence must come from the authenticated knowledge base or "
+                "explicit ontology relations."
+            ),
+            "selector_guidance": (
+                "Prioritize retrieval from the authenticated knowledge base and "
+                "relationship-based lookups over general web search."
+            ),
+        },
+        method_catalogue=_Gateway.describe_methods(),
+    )
+
+    assert "search_knowledge_base" in required_tools
+    assert "search_web" not in required_tools
+
+
+def test_turn_contract_with_explicit_relation_grounding_language_requires_relation_tools():
+    required_tools = InternalMCPChatOrchestrator._infer_turn_contract_required_tools(
+        turn_expected_outcome_contract={
+            "summary": (
+                "A list of represented artefacts explicitly linked to the "
+                "authenticated user."
+            ),
+            "grounding_requirement": (
+                "Evidence must explicitly ground the relationship between the "
+                "artefact and the user's identity via Vontology relations or "
+                "unambiguous metadata attribution."
+            ),
+            "selector_guidance": (
+                "Prioritize retrieval from the knowledge base and ontology when "
+                "searching for relations between the user and candidate entities."
+            ),
+        },
+        method_catalogue=_Gateway.describe_methods(),
+    )
+
+    assert "search_knowledge_base" in required_tools
+    assert "find_relations_with_argument" in required_tools
+
+
 def test_tool_calling_backfill_retries_when_required_ontology_tools_remain_missing():
     orchestrator = _build_orchestrator_stub()
 
@@ -1421,7 +1491,12 @@ def test_tool_calling_backfill_retries_when_required_ontology_tools_remain_missi
             "action": "call_tool",
             "tool": "get_text_relations_summary",
             "payload": {"concept_id": "#V#sail_student_group"},
-        }
+        },
+        {
+            "action": "call_tool",
+            "tool": "find_relations_with_argument",
+            "payload": {"concept_id": "#V#sail_student_group", "limit": 20},
+        },
     ]
 
 
