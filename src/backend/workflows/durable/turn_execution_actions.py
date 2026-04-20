@@ -272,6 +272,15 @@ def _build_turn_execution_prepare_selector_context_handler() -> Any:
         passthrough_keys = (
             "workflow_discovery_result",
             "workflow_discovery",
+            "turn_expected_outcome_profile",
+            "turn_expected_outcome_contract",
+            "turn_expected_outcome_contract_state",
+            "turn_expected_outcome_summary",
+            "turn_expected_grounding_requirement",
+            "turn_expected_precision_policy",
+            "turn_selector_guidance",
+            "turn_answering_guidance",
+            "turn_expected_outcome_reasoning",
             "selector_prompt_available",
             "selector_prompt_id",
             "selector_prompt_text",
@@ -338,6 +347,10 @@ def _build_turn_execution_execute_selected_handler() -> Any:
                 child_outputs={},
                 child_result_snapshot={},
                 selected_workflow_trace=request.data.get("selected_workflow_trace"),
+                turn_expected_outcome_contract=(
+                    request.data.get("turn_expected_outcome_contract_state")
+                    or request.data.get("turn_expected_outcome_contract")
+                ),
                 workflow_routing=request.data.get("workflow_routing"),
                 workflow_discovery=(
                     request.data.get("workflow_discovery_result")
@@ -450,6 +463,10 @@ def _build_turn_execution_execute_selected_handler() -> Any:
             child_outputs=child_payload,
             child_result_snapshot=child_payload,
             selected_workflow_trace=request.data.get("selected_workflow_trace"),
+            turn_expected_outcome_contract=(
+                request.data.get("turn_expected_outcome_contract_state")
+                or request.data.get("turn_expected_outcome_contract")
+            ),
             workflow_routing=request.data.get("workflow_routing"),
             workflow_discovery=(
                 request.data.get("workflow_discovery_result")
@@ -595,6 +612,10 @@ def _build_turn_execution_execute_tool_batch_handler(
                 else None
             ),
             selected_workflow_id=request.data.get("selected_workflow_id"),
+            turn_expected_outcome_contract=(
+                request.data.get("turn_expected_outcome_contract_state")
+                or request.data.get("turn_expected_outcome_contract")
+            ),
             reasoning=_coerce_non_empty_text(
                 request.data.get("turn_next_action_reasoning")
             ),

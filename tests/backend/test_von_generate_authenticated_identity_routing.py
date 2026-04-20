@@ -1003,6 +1003,26 @@ def test_generate_grounded_kb_lookup_preserves_turn_context_into_payload_and_sum
     execution = turn_record.get("execution") or {}
     selected_workflow_trace = execution.get("selected_workflow_trace") or {}
     assert selected_workflow_trace.get("selected_execution_mode") == "tool_pipeline"
+    contract_state = selected_workflow_trace.get("expected_outcome_contract_state") or {}
+    assert contract_state.get("schema_version") == "turn_expected_outcome_contract.v1"
+    assert contract_state.get("fields", {}).get("summary") == (
+        "List grounded represented records linked to the current user."
+    )
+    turn_record_contract_state = (
+        turn_record.get("turn_expected_outcome_contract_state") or {}
+    )
+    assert turn_record_contract_state.get("fields", {}).get("summary") == (
+        "List grounded represented records linked to the current user."
+    )
+    routing_contract_state = (
+        (turn_record.get("workflow_routing_diagnostics") or {}).get(
+            "turn_expected_outcome_contract_state"
+        )
+        or {}
+    )
+    assert routing_contract_state.get("fields", {}).get("summary") == (
+        "List grounded represented records linked to the current user."
+    )
 
 
 def test_generate_entity_relative_tool_pipeline_uses_live_workflow_retrieval_surface(

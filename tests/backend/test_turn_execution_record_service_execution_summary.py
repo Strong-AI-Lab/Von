@@ -853,6 +853,78 @@ def test_turn_record_uses_selected_workflow_trace_for_supervised_custom_failure(
     )
 
 
+def test_turn_record_preserves_first_class_turn_expected_outcome_contract_snapshot() -> (
+    None
+):
+    expected_contract = {
+        "summary": "Answer only with grounded represented records.",
+        "grounding_requirement": (
+            "Only surface records that are grounded in represented evidence."
+        ),
+        "precision_policy": "Prefer omission over unsupported claims.",
+    }
+    record = build_turn_execution_record(
+        request_id="req-expected-contract-1",
+        session_id="session-expected-contract-1",
+        namespace="#V#user",
+        user_id="#V#user",
+        org_id="#V#org",
+        prompt_text="List grounded represented records linked to the current user.",
+        response_text="Example Record",
+        interaction_timestamp_utc="2026-04-20T06:12:00Z",
+        workflow_discovery={
+            "matches": [{"concept_id": "#V#tool_calling_workflow"}],
+            "turn_expected_outcome_contract": expected_contract,
+        },
+        workflow_routing={
+            "workflow_id": "#V#tool_calling_workflow",
+            "verdict": "rag_selected",
+            "source": "selector",
+        },
+        selected_workflow_trace={
+            "selected_workflow_id": "#V#tool_calling_workflow",
+            "expected_outcome_contract": expected_contract,
+        },
+        turn_expected_outcome_contract={
+            "schema_version": "turn_expected_outcome_contract.v1",
+            "fields": expected_contract,
+            "field_count": len(expected_contract),
+            "sources": ["turn_expected_outcome_contract"],
+        },
+        tool_invocations=[],
+        turn_execution_diagnostics={
+            "latest_progress": {
+                "counters": {"tools_started": 0, "tools_completed": 0},
+                "diagnostic_events": [],
+            }
+        },
+        aux_llm_calls=[],
+    )
+
+    assert record["turn_expected_outcome_contract"] == expected_contract
+    contract_state = record["turn_expected_outcome_contract_state"]
+    assert contract_state["schema_version"] == "turn_expected_outcome_contract.v1"
+    assert contract_state["fields"] == expected_contract
+    assert (
+        record["workflow_routing_diagnostics"]["turn_expected_outcome_contract"]
+        == expected_contract
+    )
+    assert (
+        record["execution"]["selected_workflow_trace"]["expected_outcome_contract"]
+        == expected_contract
+    )
+    assert (
+        record["execution"]["selected_workflow_trace"][
+            "expected_outcome_contract_state"
+        ]["fields"]
+        == expected_contract
+    )
+    assert (
+        record["execution"]["summary"]["turn_expected_outcome_contract_field_count"]
+        == len(expected_contract)
+    )
+
+
 def test_build_workflow_routing_diagnostics_preserves_selector_exchange_and_dispatch_events() -> (
     None
 ):

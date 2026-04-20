@@ -588,6 +588,14 @@ def test_prepare_selector_context_emits_prompt_and_grounding_contract(
     assert "#V#chat_assistant_workflow" in (
         ((prompt_entry.get("candidate_list") or {}).get("text")) or ""
     )
+    contract_state = result.outputs["turn_expected_outcome_contract_state"]
+    assert contract_state["schema_version"] == "turn_expected_outcome_contract.v1"
+    assert contract_state["fields"]["summary"] == (
+        "Answer only with papers that can be grounded to the user."
+    )
+    assert contract_state["fields"]["grounding_requirement"] == (
+        "Only mention papers when authorship or ownership is grounded."
+    )
 
 
 def test_turn_execution_route_reuses_augmented_context_for_selector_and_tracks_lineage(

@@ -8931,6 +8931,11 @@ def test_custom_workflow_fallback_handoff_preserves_turn_expected_outcome_contra
     handoff_data = tool_pipeline_payload["data"]
     assert handoff_data["turn_expected_outcome_profile"] == expected_discovery_contract
     assert handoff_data["turn_expected_outcome_contract"] == expected_discovery_contract
+    contract_state = handoff_data["turn_expected_outcome_contract_state"]
+    assert contract_state["schema_version"] == "turn_expected_outcome_contract.v1"
+    assert contract_state["fields"] == expected_discovery_contract
+    assert contract_state["field_count"] == len(expected_discovery_contract)
+    assert "turn_expected_outcome_contract" in (contract_state.get("sources") or [])
     assert handoff_data["turn_expected_outcome_summary"] == expected_discovery_contract[
         "summary"
     ]

@@ -21,6 +21,10 @@ from ..definitions import (
     KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
     TURN_COMPLETION_GATE_WORKFLOW_ID,
 )
+from ..turn_expected_outcome_contract import (
+    TurnExpectedOutcomeContract,
+    build_turn_expected_outcome_boundary_payload,
+)
 
 
 def _safe_str(value: Any) -> str | None:
@@ -261,6 +265,42 @@ def _bounded_snapshot(
 
     text = repr(value)
     return text[:max_string_length] + "..." if len(text) > max_string_length else text
+
+
+def _resolve_turn_expected_outcome_contract(*sources: Any) -> TurnExpectedOutcomeContract:
+    resolved_sources: list[TurnExpectedOutcomeContract | Mapping[str, Any] | None] = []
+    for source in sources:
+        if isinstance(source, TurnExpectedOutcomeContract):
+            resolved_sources.append(source)
+            continue
+        if not isinstance(source, Mapping):
+            resolved_sources.append(TurnExpectedOutcomeContract.from_mapping(source))
+            continue
+        resolved_sources.extend(
+            (
+                TurnExpectedOutcomeContract.from_mapping(
+                    source.get("turn_expected_outcome_contract_state"),
+                    source="turn_expected_outcome_contract_state",
+                ),
+                TurnExpectedOutcomeContract.from_mapping(
+                    source.get("turn_expected_outcome_contract"),
+                    source="turn_expected_outcome_contract",
+                ),
+                TurnExpectedOutcomeContract.from_mapping(
+                    source.get("expected_outcome_contract_state"),
+                    source="expected_outcome_contract_state",
+                ),
+                TurnExpectedOutcomeContract.from_mapping(
+                    source.get("expected_outcome_contract"),
+                    source="expected_outcome_contract",
+                ),
+                TurnExpectedOutcomeContract.from_mapping(
+                    source,
+                    source="context_mapping",
+                ),
+            )
+        )
+    return TurnExpectedOutcomeContract.merge_preferred(*resolved_sources)
 
 
 def _summarise_tool_batch_result_payload(payload: Any) -> str | None:
@@ -537,6 +577,7 @@ def build_turn_execution_selected_workflow_outputs(
     rendered_child_response_text: str | None = None,
     child_result_snapshot: Mapping[str, Any] | None = None,
     selected_workflow_trace: Mapping[str, Any] | None = None,
+    turn_expected_outcome_contract: Mapping[str, Any] | None = None,
     workflow_routing: Mapping[str, Any] | None = None,
     workflow_discovery: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -556,6 +597,14 @@ def build_turn_execution_selected_workflow_outputs(
         dict(child_result_snapshot)
         if isinstance(child_result_snapshot, Mapping)
         else None
+    )
+    resolved_turn_expected_outcome_contract = _resolve_turn_expected_outcome_contract(
+        turn_expected_outcome_contract,
+        selected_workflow_trace,
+        child_outputs_map,
+    )
+    turn_expected_outcome_contract_payload = (
+        resolved_turn_expected_outcome_contract.to_dict()
     )
     derived_user_response = _coerce_non_empty_text(rendered_response) or (
         render_selected_workflow_user_response(
@@ -603,23 +652,39 @@ def build_turn_execution_selected_workflow_outputs(
         for key, value in child_snapshot.items():
             if isinstance(key, str) and key not in completion_report_map:
                 completion_report_map[key] = value
+    if turn_expected_outcome_contract_payload:
+        completion_report_map["turn_expected_outcome_contract"] = dict(
+            turn_expected_outcome_contract_payload
+        )
+        completion_report_map["turn_expected_outcome_contract_state"] = (
+            resolved_turn_expected_outcome_contract.to_state_payload()
+        )
 
     final_response = derived_user_response
     current_response = derived_user_response
     response_text = derived_user_response
 
+    selected_workflow_trace_payload = (
+        {
+            str(key): value
+            for key, value in selected_workflow_trace.items()
+            if isinstance(key, str)
+        }
+        if isinstance(selected_workflow_trace, Mapping)
+        else {}
+    )
+    if turn_expected_outcome_contract_payload:
+        selected_workflow_trace_payload["expected_outcome_contract"] = dict(
+            turn_expected_outcome_contract_payload
+        )
+        selected_workflow_trace_payload["expected_outcome_contract_state"] = (
+            resolved_turn_expected_outcome_contract.to_state_payload()
+        )
+
     outputs: dict[str, Any] = {
         "completion_report": completion_report_map,
         "selected_workflow_trace": {
-            **(
-                {
-                    str(key): value
-                    for key, value in selected_workflow_trace.items()
-                    if isinstance(key, str)
-                }
-                if isinstance(selected_workflow_trace, Mapping)
-                else {}
-            ),
+            **selected_workflow_trace_payload,
             "selected_workflow_id": clean_selected_workflow_id,
             "child_workflow_completed": bool(child_completed),
             "child_workflow_final_state": _safe_str(final_state),
@@ -677,6 +742,11 @@ def build_turn_execution_selected_workflow_outputs(
         outputs["current_response"] = current_response
     if response_text:
         outputs["response_text"] = response_text
+    outputs.update(
+        build_turn_expected_outcome_boundary_payload(
+            resolved_turn_expected_outcome_contract
+        )
+    )
     return outputs
 
 
@@ -688,6 +758,7 @@ def build_turn_recovery_tool_batch_outputs(
     existing_tool_messages: Sequence[Mapping[str, Any]] | None = None,
     selected_workflow_trace: Mapping[str, Any] | None = None,
     selected_workflow_id: str | None = None,
+    turn_expected_outcome_contract: Mapping[str, Any] | None = None,
     reasoning: str | None = None,
     omitted_call_count: int = 0,
 ) -> dict[str, Any]:
@@ -721,6 +792,13 @@ def build_turn_recovery_tool_batch_outputs(
         ),
         None,
     )
+    resolved_turn_expected_outcome_contract = _resolve_turn_expected_outcome_contract(
+        turn_expected_outcome_contract,
+        selected_workflow_trace,
+    )
+    turn_expected_outcome_contract_payload = (
+        resolved_turn_expected_outcome_contract.to_dict()
+    )
     derived_user_response = _derive_tool_batch_user_response(invocation_records)
     status = "completed"
     if failed_records:
@@ -748,6 +826,13 @@ def build_turn_recovery_tool_batch_outputs(
         execution_payload["error"] = first_error
     if derived_user_response:
         execution_payload["response_text"] = derived_user_response
+    if turn_expected_outcome_contract_payload:
+        execution_payload["turn_expected_outcome_contract"] = dict(
+            turn_expected_outcome_contract_payload
+        )
+        execution_payload["turn_expected_outcome_contract_state"] = (
+            resolved_turn_expected_outcome_contract.to_state_payload()
+        )
 
     batch_tool_messages = [
         {"role": "tool", "content": _render_tool_batch_message_content(record)}
@@ -795,6 +880,13 @@ def build_turn_recovery_tool_batch_outputs(
     merged_selected_workflow_trace["recovery_tool_batch_execution"] = dict(
         execution_payload
     )
+    if turn_expected_outcome_contract_payload:
+        merged_selected_workflow_trace["expected_outcome_contract"] = dict(
+            turn_expected_outcome_contract_payload
+        )
+        merged_selected_workflow_trace["expected_outcome_contract_state"] = (
+            resolved_turn_expected_outcome_contract.to_state_payload()
+        )
 
     outputs: dict[str, Any] = {
         "completion_report": dict(execution_payload),
@@ -815,6 +907,11 @@ def build_turn_recovery_tool_batch_outputs(
         ),
         "selected_workflow_error": first_error or "",
     }
+    outputs.update(
+        build_turn_expected_outcome_boundary_payload(
+            resolved_turn_expected_outcome_contract
+        )
+    )
     return outputs
 
 
@@ -877,6 +974,24 @@ def run_turn_execution_critic(
         turn_execution_diagnostics=data.get("turn_execution_diagnostics"),
         aux_llm_calls=aux_calls,
         selected_workflow_trace=data.get("selected_workflow_trace"),
+        turn_expected_outcome_contract=(
+            data.get("turn_expected_outcome_contract_state")
+            or data.get("turn_expected_outcome_contract")
+            or (
+                data.get("selected_workflow_trace", {}).get(
+                    "expected_outcome_contract_state"
+                )
+                if isinstance(data.get("selected_workflow_trace"), Mapping)
+                else None
+            )
+            or (
+                data.get("selected_workflow_trace", {}).get(
+                    "expected_outcome_contract"
+                )
+                if isinstance(data.get("selected_workflow_trace"), Mapping)
+                else None
+            )
+        ),
         critic_verdict=data.get("critic_verdict"),
         completion_gate_verdict=data.get("completion_gate_verdict"),
         completion_report=data.get("completion_report"),

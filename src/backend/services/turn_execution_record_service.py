@@ -37,6 +37,7 @@ from ..workflows.conversation_turn_stage_model import (
 from ..workflows.required_effects_contracts import (
     WORKFLOW_REQUIRED_EFFECTS_CONTRACT_SCHEMA_VERSION,
 )
+from ..workflows.turn_expected_outcome_contract import TurnExpectedOutcomeContract
 
 logger = logging.getLogger(__name__)
 
@@ -2361,6 +2362,43 @@ def _normalise_workflow_candidate_details(values: Any) -> list[dict[str, Any]]:
 
     return normalised
 
+def _resolve_turn_expected_outcome_contract_snapshot(
+    *sources: Any,
+) -> TurnExpectedOutcomeContract:
+    resolved_sources: list[TurnExpectedOutcomeContract | Mapping[str, Any] | None] = []
+    for source in sources:
+        if isinstance(source, TurnExpectedOutcomeContract):
+            resolved_sources.append(source)
+            continue
+        if not isinstance(source, Mapping):
+            resolved_sources.append(TurnExpectedOutcomeContract.from_mapping(source))
+            continue
+        resolved_sources.extend(
+            (
+                TurnExpectedOutcomeContract.from_mapping(
+                    source.get("turn_expected_outcome_contract_state"),
+                    source="turn_expected_outcome_contract_state",
+                ),
+                TurnExpectedOutcomeContract.from_mapping(
+                    source.get("turn_expected_outcome_contract"),
+                    source="turn_expected_outcome_contract",
+                ),
+                TurnExpectedOutcomeContract.from_mapping(
+                    source.get("expected_outcome_contract_state"),
+                    source="expected_outcome_contract_state",
+                ),
+                TurnExpectedOutcomeContract.from_mapping(
+                    source.get("expected_outcome_contract"),
+                    source="expected_outcome_contract",
+                ),
+                TurnExpectedOutcomeContract.from_mapping(
+                    source,
+                    source="context_mapping",
+                ),
+            )
+        )
+    return TurnExpectedOutcomeContract.merge_preferred(*resolved_sources)
+
 
 def build_workflow_routing_diagnostics(
     *,
@@ -2368,6 +2406,7 @@ def build_workflow_routing_diagnostics(
     workflow_routing: Mapping[str, Any] | None,
     turn_execution_diagnostics: Mapping[str, Any] | None,
     aux_llm_calls: Sequence[Mapping[str, Any]] | None,
+    turn_expected_outcome_contract: Mapping[str, Any] | None = None,
     execution_summary: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     workflow_discovery_payload = (
@@ -2375,6 +2414,16 @@ def build_workflow_routing_diagnostics(
     )
     workflow_routing_payload = (
         workflow_routing if isinstance(workflow_routing, Mapping) else {}
+    )
+    resolved_turn_expected_outcome_contract = (
+        _resolve_turn_expected_outcome_contract_snapshot(
+            turn_expected_outcome_contract,
+            workflow_discovery_payload,
+            workflow_routing_payload,
+        )
+    )
+    turn_expected_outcome_contract_payload = (
+        resolved_turn_expected_outcome_contract.to_dict()
     )
     selector_prompt_entries = _collect_aux_entries(
         aux_llm_calls, entry_type="workflow_selector_prompt"
@@ -2704,6 +2753,16 @@ def build_workflow_routing_diagnostics(
         "selected_workflow_id": _safe_str(workflow_routing_payload.get("workflow_id")),
         "selector_verdict": _safe_str(workflow_routing_payload.get("verdict")),
         "selector_source": _safe_str(workflow_routing_payload.get("source")),
+        "turn_expected_outcome_contract": (
+            dict(turn_expected_outcome_contract_payload)
+            if turn_expected_outcome_contract_payload
+            else None
+        ),
+        "turn_expected_outcome_contract_state": (
+            resolved_turn_expected_outcome_contract.to_state_payload()
+            if turn_expected_outcome_contract_payload
+            else None
+        ),
         "selection_rationale": _safe_str(
             workflow_routing_payload.get("selection_rationale")
         )
@@ -5951,6 +6010,7 @@ def build_turn_execution_record(
     turn_execution_diagnostics: Mapping[str, Any] | None = None,
     aux_llm_calls: Sequence[Mapping[str, Any]] | None = None,
     selected_workflow_trace: Mapping[str, Any] | None = None,
+    turn_expected_outcome_contract: Mapping[str, Any] | None = None,
     critic_verdict: Mapping[str, Any] | None = None,
     completion_gate_verdict: Mapping[str, Any] | None = None,
     completion_report: Mapping[str, Any] | None = None,
@@ -5987,6 +6047,33 @@ def build_turn_execution_record(
     ]
     if not search_evidence_payload:
         search_evidence_payload = build_search_tool_evidence(tool_invocations)
+    resolved_turn_expected_outcome_contract = (
+        _resolve_turn_expected_outcome_contract_snapshot(
+            turn_expected_outcome_contract,
+            selected_workflow_trace,
+            workflow_discovery,
+            completion_report,
+        )
+    )
+    turn_expected_outcome_contract_payload = (
+        resolved_turn_expected_outcome_contract.to_dict()
+    )
+    selected_workflow_trace_payload = (
+        {
+            str(key): value
+            for key, value in selected_workflow_trace.items()
+            if isinstance(key, str)
+        }
+        if isinstance(selected_workflow_trace, Mapping)
+        else None
+    )
+    if selected_workflow_trace_payload is not None and turn_expected_outcome_contract_payload:
+        selected_workflow_trace_payload["expected_outcome_contract"] = dict(
+            turn_expected_outcome_contract_payload
+        )
+        selected_workflow_trace_payload["expected_outcome_contract_state"] = (
+            resolved_turn_expected_outcome_contract.to_state_payload()
+        )
     execution_summary = _summarise_tool_execution_context(
         workflow_routing=workflow_routing,
         turn_execution_diagnostics=(
@@ -5996,7 +6083,7 @@ def build_turn_execution_record(
         ),
         aux_llm_calls=aux_llm_calls,
         serialised_invocations=serialised_invocations,
-        selected_workflow_trace=selected_workflow_trace,
+        selected_workflow_trace=selected_workflow_trace_payload,
     )
     workflow_routing_diagnostics = build_workflow_routing_diagnostics(
         workflow_discovery=workflow_discovery,
@@ -6007,6 +6094,11 @@ def build_turn_execution_record(
             else None
         ),
         aux_llm_calls=aux_llm_calls,
+        turn_expected_outcome_contract=(
+            resolved_turn_expected_outcome_contract.to_state_payload()
+            if turn_expected_outcome_contract_payload
+            else None
+        ),
         execution_summary=execution_summary,
     )
 
@@ -6257,6 +6349,12 @@ def build_turn_execution_record(
     execution_summary_with_contract["search_evidence_count"] = len(
         search_evidence_payload
     )
+    execution_summary_with_contract["turn_expected_outcome_contract_field_count"] = (
+        len(turn_expected_outcome_contract_payload)
+    )
+    execution_summary_with_contract["turn_expected_outcome_contract_sources"] = list(
+        resolved_turn_expected_outcome_contract.sources
+    )
     execution_summary_with_contract[
         "required_evidence_answer_consistency_blocked"
     ] = bool(prompt_required_evidence_answer_consistency_blocker)
@@ -6299,12 +6397,32 @@ def build_turn_execution_record(
             "selector_source": selector_source,
             "workflow_discovery": workflow_discovery_normalised,
         },
+        "turn_expected_outcome_contract": (
+            dict(turn_expected_outcome_contract_payload)
+            if turn_expected_outcome_contract_payload
+            else None
+        ),
+        "turn_expected_outcome_contract_state": (
+            resolved_turn_expected_outcome_contract.to_state_payload()
+            if turn_expected_outcome_contract_payload
+            else None
+        ),
         "workflow_routing_diagnostics": workflow_routing_diagnostics,
         "required_effects": required_effects,
         "execution": {
             "tool_invocations": serialised_invocations,
             "search_evidence": search_evidence_payload,
             "summary": execution_summary_with_contract,
+            "turn_expected_outcome_contract": (
+                dict(turn_expected_outcome_contract_payload)
+                if turn_expected_outcome_contract_payload
+                else None
+            ),
+            "turn_expected_outcome_contract_state": (
+                resolved_turn_expected_outcome_contract.to_state_payload()
+                if turn_expected_outcome_contract_payload
+                else None
+            ),
             "required_effects_contract": primary_required_effects_contract,
             "prompt_required_mutation_contract": prompt_required_mutation_contract,
             "workflow_required_effects_contract": workflow_required_effects_contract,
@@ -6312,7 +6430,7 @@ def build_turn_execution_record(
             "retry": retry,
             "workflow_stage_model": build_conversation_turn_stage_model_snapshot(),
             "workflow_stage_path": workflow_stage_path,
-            "selected_workflow_trace": selected_workflow_trace,
+            "selected_workflow_trace": selected_workflow_trace_payload,
         },
         "postcondition_checks": postcondition_checks,
         "critic": {
