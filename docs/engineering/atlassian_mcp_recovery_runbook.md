@@ -4,6 +4,11 @@ This runbook documents the canonical recovery path for recurring Atlassian MCP a
 
 Use this when Atlassian MCP appears logged in, but requests still fail with `401 invalid_token` or token acquisition is cancelled.
 
+Transport note:
+
+- Atlassian MCP should now be on the Streamable HTTP endpoint `https://mcp.atlassian.com/v1/mcp`.
+- If a live config surface still points at `https://mcp.atlassian.com/v1/sse`, auth resets alone are not enough; fix the transport first.
+
 ## Failure Signature
 
 Typical log pattern in `mcpServer.mcp.config.*.atlassian.log`:
@@ -17,6 +22,27 @@ Notes:
 - Successful recovery ends with `Discovered 28 tools` (tool count may change in future releases; treat this as an example signal).
 
 ## Standard Recovery (Always First)
+
+0. Verify the active config surfaces are on the canonical endpoint:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\powershell\verify_atlassian_mcp_transport.ps1 -ShowCodexList
+```
+
+If the Codex CLI config is stale, repair it first:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\powershell\setup_atlassian_codex_mcp.ps1
+```
+
+For current Codex CLI builds, the Atlassian block should be a native streamable-HTTP entry:
+
+```toml
+[mcp_servers.atlassian]
+url = "https://mcp.atlassian.com/v1/mcp"
+```
+
+If the verifier reports `legacy_wrapper`, the config is still using the old `npx mcp-remote ...` shape and `codex mcp login atlassian` will not treat it as an OAuth-capable streamable server.
 
 1. Command Palette -> `MCP: Browse MCP Servers` -> Atlassian -> Restart.
 2. If Restart is unavailable: `Extensions: Focus on MCP Servers - Installed View` -> Atlassian -> Restart/Stop/Start.
@@ -123,8 +149,17 @@ Check Atlassian MCP log for successful initialisation:
 
 Absence of recurring `401 invalid_token` confirms recovery.
 
+For Codex CLI validation from the same machine:
+
+```powershell
+codex exec -s read-only "Using Atlassian MCP, find Jira issue JVNAUTOSCI-1946 and return its key, summary, and status."
+```
+
+If that fails while the transport inventory still shows `/v1/sse`, fix the transport before repeating OAuth recovery.
+
 ## Additional Guidance
 
 - Do not switch to Jira API token authentication as a substitute for Atlassian MCP OAuth; they are separate auth paths.
 - Do not bypass MCP with ad-hoc REST scripts when MCP is flaky; recover the MCP session itself.
 - If needed, repeat this runbook for both Insiders and Stable because each host keeps separate state.
+- The SQLite reset patterns in the helper script intentionally match `mcp.atlassian.com` broadly, so they still cover both historic `/v1/sse` and current `/v1/mcp` dynamic-auth rows.

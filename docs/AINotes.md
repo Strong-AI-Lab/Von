@@ -7,7 +7,7 @@ Rules of thumb:
 - Prefer pointers over prose.
 - When something is no longer relevant, delete it (or move it to the archive).
 
-Last updated: 2026-02-08
+Last updated: 2026-04-20
 
 ---
 
@@ -55,6 +55,11 @@ Push the feature branch before merging so the remote tracking ref exists; otherw
 
 ## Recent decisions / changes worth remembering
 - Presenter “spoken vs screen” behaviour is documented in Jira (JVNAUTOSCI-894); avoid duplicating the write-up here.
+- 2026-04-20: Atlassian MCP transport verification/migration follow-through
+	- Repo workspace config now ships an Atlassian MCP entry in `.vscode/mcp.json` on `https://mcp.atlassian.com/v1/mcp`.
+	- Added `scripts/powershell/verify_atlassian_mcp_transport.ps1` to inventory live config surfaces (`~/.codex/config.toml`, workspace `.vscode/mcp.json`, VS Code user `mcp.json`) and optionally run `codex mcp list` / a read-only smoke test.
+	- `scripts/powershell/setup_atlassian_codex_mcp.ps1` now preserves the rest of the user Codex config and upserts the Atlassian block instead of overwriting the whole file.
+	- Current Codex expects Atlassian as a native streamable-HTTP config entry (`url = "https://mcp.atlassian.com/v1/mcp"`), not a legacy `npx mcp-remote ...` wrapper, if you want `codex mcp login atlassian` to work.
 - 2026-02-08: Atlassian MCP reliability fix
 	- Root cause: mixed MCP endpoints and overly narrow Copilot model sampling.
 	- Canonical Atlassian MCP endpoint is now `https://mcp.atlassian.com/v1/mcp` (not `/v1/sse`).
@@ -62,6 +67,7 @@ Push the feature branch before merging so the remote tracking ref exists; otherw
 		- `~/.codex/config.toml` (`[mcp_servers.atlassian].url`)
 		- workspace `.vscode/mcp.json` (`servers.atlassian.url`)
 		- VS Code user MCP config (`%APPDATA%\\Code\\User\\mcp.json`, and Insiders equivalent if present)
+	- Use `scripts/powershell/verify_atlassian_mcp_transport.ps1 -ShowCodexList` before assuming the live machine matches the repo docs.
 	- If Atlassian tools only appear on some models, widen `chat.mcp.serverSampling` for Atlassian in both workspace and user settings.
 - 2026-02-08: Von internal Jira proxy health check
 	- Internal Jira path (`jira_proxy_mcp.py` -> `mcp_server.py`) uses `ATLASSIAN_EMAIL` + `ATLASSIAN_API_TOKEN` (Basic auth), not Atlassian MCP OAuth.
