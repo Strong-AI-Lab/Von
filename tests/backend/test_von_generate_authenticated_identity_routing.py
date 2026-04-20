@@ -627,6 +627,60 @@ class _MixedGroundedEvidenceLLM:
         return "I found grounded represented evidence linking Example Record to the current user."
 
 
+class _FalseNegativeGroundedEvidenceLLM:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def generate(self, prompt, context=None, model=None):
+        context_messages = list(context or [])
+        self.calls.append(
+            {"prompt": prompt, "context": context_messages, "model": model}
+        )
+        context_text = "\n".join(
+            str(message.get("content") or "")
+            for message in context_messages
+            if isinstance(message, dict)
+        )
+        if isinstance(prompt, str) and "expected-success inference policy" in prompt:
+            return (
+                '{"expected_outcome_summary":"List grounded represented records linked to the current user.",'
+                '"grounding_requirement":"Only surface represented records that are supported by retrieved evidence.",'
+                '"precision_policy":"Prefer explicit uncertainty over unsupported linkage.",'
+                '"selector_guidance":"Use grounded retrieval surfaces and keep the authenticated actor context in scope.",'
+                '"answering_guidance":"Prefer concrete retrieved evidence over count-only or zero-result summaries.",'
+                '"reasoning":"Mixed retrieval turns should not let an early zero-result surface suppress later grounded evidence."}'
+            )
+        if isinstance(prompt, str) and prompt.strip().startswith("Select workflow"):
+            return (
+                '{"workflow_id":"#V#tool_calling_workflow",'
+                '"confidence":0.95,'
+                '"reasoning":"This is a grounded represented-knowledge lookup that should execute retrieval before answering."}'
+            )
+        if prompt == "List grounded represented records linked to the current user.":
+            if (
+                "Expected answer contract for this turn" in context_text
+                and "CURRENT USER CONTEXT: Test User (#V#test_user)" in context_text
+            ):
+                return (
+                    '{"action":"call_tool","tool":"search_knowledge_base",'
+                    '"payload":{"query":"current user represented links"}}'
+                )
+            return "I need grounded represented retrieval first."
+        if isinstance(prompt, str) and prompt.startswith(
+            "Provide a final answer to the user now that the tool result is available."
+        ):
+            if (
+                "search_knowledge_base returned 0 results" in context_text
+                and "Relation-bearing evidence excerpts" not in context_text
+            ):
+                return (
+                    '{"action":"call_tool","tool":"find_relations_with_argument",'
+                    '"payload":{"concept_id":"#V#test_user"}}'
+                )
+            return "I couldn't find any grounded represented links."
+        return "I couldn't find any grounded represented links."
+
+
 class _ExplicitEntityRelationLookupLLM:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
@@ -894,6 +948,7 @@ def _make_app(
         | _EntityRelativeToolPipelineLLM
         | _GroundedKbLookupLLM
         | _MixedGroundedEvidenceLLM
+        | _FalseNegativeGroundedEvidenceLLM
         | _ExplicitEntityRelationLookupLLM
         | _PredicateExtentRoutingLLM
     ),
@@ -1456,6 +1511,56 @@ def test_generate_grounded_follow_up_prefers_positive_relation_evidence_over_zer
     assert "Example Record via #V#linked_to_user -> Test User" in (
         final_summariser_context_text
     )
+
+
+def test_generate_grounded_false_negative_turn_is_recorded_as_false_success(
+    monkeypatch,
+) -> None:
+    llm = _FalseNegativeGroundedEvidenceLLM()
+    gateway = _MixedGroundedEvidenceGatewayStub()
+    app = _make_app(
+        monkeypatch,
+        llm=llm,
+        gateway_override=gateway,
+        discovery_override=_tool_calling_discovery,
+        max_tool_invocations=3,
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/von/generate",
+        json={"prompt": "List grounded represented records linked to the current user."},
+    )
+    assert response.status_code == 200
+
+    body = response.get_json()
+    assert isinstance(body, dict)
+    assert body.get("response") == "I couldn't find any grounded represented links."
+
+    observed_tools = [row["tool"] for row in gateway.invocations]
+    assert observed_tools[0] == "search_knowledge_base"
+    assert "find_relations_with_argument" in observed_tools
+
+    llm_debug = body.get("llm_debug") or {}
+    turn_record = llm_debug.get("turn_execution_record") or {}
+    execution_correctness = turn_record.get("execution_correctness") or {}
+    assert execution_correctness.get("overall_outcome") == "false_success"
+    assert execution_correctness.get("failure_mode") == "false_completion_claim"
+    gate_labels = execution_correctness.get("gate_labels") or {}
+    assert gate_labels.get("required_evidence_answer_consistency_blocked") is True
+
+    completion_gate = turn_record.get("completion_gate") or {}
+    assert (
+        "prompt_required_evidence_positive_results_contradict_low_information_answer"
+        in (completion_gate.get("blocking_failure_codes") or [])
+    )
+    blocker = (
+        (completion_gate.get("evidence_payload") or {}).get(
+            "required_evidence_answer_consistency_blocker"
+        )
+        or {}
+    )
+    assert blocker.get("response_surface_kind") == "insufficiency_claim"
 
 
 def test_generate_entity_relative_tool_pipeline_uses_live_workflow_retrieval_surface(

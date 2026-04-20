@@ -1635,3 +1635,48 @@ def test_build_turn_execution_correctness_summary_marks_missing_custom_dispatch_
     assert summary["overall_outcome"] == "false_success"
     assert summary["metric_labels"]["successful_completion"] is False
     assert summary["metric_labels"]["false_success"] is True
+
+
+def test_build_turn_execution_correctness_summary_marks_answer_evidence_contradiction_false_success() -> (
+    None
+):
+    summary = build_turn_execution_correctness_summary(
+        completion_gate={
+            "decision": "partial",
+            "decision_reason": (
+                "Required evidence retrieval returned positive results, but the "
+                "answer remained a count-only result summary."
+            ),
+            "safe_to_claim_completion": False,
+            "requires_follow_up": True,
+            "blocking_failure_codes": [
+                "prompt_required_evidence_positive_results_contradict_low_information_answer"
+            ],
+            "evidence_payload": {
+                "required_evidence_answer_consistency_blocker": {
+                    "effect_type": "required_evidence_answer_consistency",
+                    "response_surface_kind": "count_only_result_summary",
+                }
+            },
+        },
+        required_effects=[],
+        critic_summary={"not_verified_count": 0, "inconclusive_count": 0},
+        final_response={
+            "completion_claim_detected": False,
+            "completion_claim_validated": True,
+        },
+        workflow_selection={
+            "selected_workflow_id": "#V#tool_calling_workflow",
+            "selector_verdict": "tool_seeking",
+            "selector_source": "selector",
+        },
+        workflow_routing_diagnostics={},
+    )
+
+    assert summary["failure_mode"] == "false_completion_claim"
+    assert summary["overall_outcome"] == "false_success"
+    assert summary["likely_failure_to_act"] is True
+    assert summary["metric_labels"]["false_success"] is True
+    assert (
+        summary["gate_labels"]["required_evidence_answer_consistency_blocked"] is True
+    )

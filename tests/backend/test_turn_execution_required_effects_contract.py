@@ -627,6 +627,111 @@ def test_prompt_required_evidence_contract_blocks_false_empty_jira_answer() -> N
     )
 
 
+def test_prompt_required_evidence_contract_blocks_low_information_answer_when_positive_results_exist() -> (
+    None
+):
+    record = _build_record(
+        prompt_text="List grounded represented records linked to the current user.",
+        response_text="2 results",
+        required_prompt_tools=["search_knowledge_base"],
+        tool_invocations=[
+            {
+                "tool": "search_knowledge_base",
+                "arguments": {"query": "current user represented links"},
+                "effective_payload": {
+                    "success": True,
+                    "count": 1,
+                    "results": [
+                        {
+                            "id": "result:1",
+                            "text": "Example Record is linked to Test User.",
+                        }
+                    ],
+                },
+                "result_summary": "Found 1 result",
+            }
+        ],
+    )
+
+    execution = record.get("execution")
+    assert isinstance(execution, dict)
+    assert execution.get("summary", {}).get(
+        "required_evidence_answer_consistency_blocked"
+    ) is True
+
+    completion_gate = record.get("completion_gate") or {}
+    assert completion_gate.get("decision") == "partial"
+    assert completion_gate.get("safe_to_claim_completion") is False
+    assert completion_gate.get("requires_follow_up") is True
+    assert (
+        "prompt_required_evidence_positive_results_contradict_low_information_answer"
+        in (completion_gate.get("blocking_failure_codes") or [])
+    )
+
+    blocker = (
+        (completion_gate.get("evidence_payload") or {}).get(
+            "required_evidence_answer_consistency_blocker"
+        )
+        or {}
+    )
+    assert blocker.get("response_surface_kind") == "count_only_result_summary"
+    observed_signals = blocker.get("observed_result_signals") or []
+    assert observed_signals[0]["tool"] == "search_knowledge_base"
+    assert observed_signals[0]["result_count"] == 1
+
+
+def test_prompt_required_evidence_contract_blocks_low_information_answer_when_retrieval_degrades() -> (
+    None
+):
+    record = _build_record(
+        prompt_text="List grounded represented records linked to the current user.",
+        response_text="I couldn't find any grounded represented links.",
+        required_prompt_tools=["search_knowledge_base"],
+        tool_invocations=[
+            {
+                "tool": "search_knowledge_base",
+                "arguments": {"query": "current user represented links"},
+                "effective_payload": {
+                    "success": True,
+                    "fallback_used": True,
+                    "fallback_reason": "rag_query_degraded:RateLimitError",
+                    "count": 0,
+                    "results": [],
+                },
+                "result_summary": "0 results after degraded fallback",
+            }
+        ],
+    )
+
+    execution = record.get("execution")
+    assert isinstance(execution, dict)
+    assert execution.get("summary", {}).get(
+        "required_evidence_answer_consistency_blocked"
+    ) is True
+
+    completion_gate = record.get("completion_gate") or {}
+    assert completion_gate.get("decision") == "partial"
+    assert completion_gate.get("safe_to_claim_completion") is False
+    assert completion_gate.get("requires_follow_up") is True
+    assert (
+        "prompt_required_evidence_degraded_retrieval_not_safe_for_low_information_answer"
+        in (completion_gate.get("blocking_failure_codes") or [])
+    )
+
+    blocker = (
+        (completion_gate.get("evidence_payload") or {}).get(
+            "required_evidence_answer_consistency_blocker"
+        )
+        or {}
+    )
+    assert blocker.get("response_surface_kind") == "insufficiency_claim"
+    degraded_signals = blocker.get("degraded_tool_signals") or []
+    assert degraded_signals[0]["tool"] == "search_knowledge_base"
+    assert degraded_signals[0]["fallback_reason"] == (
+        "rag_query_degraded:RateLimitError"
+    )
+
+
 def test_prompt_required_mutation_contract_blocks_missing_task_create() -> None:
     record = _build_record(
         prompt_text=(

@@ -9472,10 +9472,17 @@ class InternalMCPChatOrchestrator:
             # Track whether we're replacing an empty response or appending to
             # a substantive one — the downstream presenter uses this to decide
             # whether the user saw only ledger diagnostics.
+            preserve_existing_user_response = bool(
+                unresolved_effect_types == {"required_evidence_answer_consistency"}
+                and isinstance(final_response, str)
+                and final_response.strip()
+            )
             ledger_replaced_empty = not (
                 isinstance(final_response, str) and final_response.strip()
             )
-            if isinstance(final_response, str) and final_response.strip():
+            if preserve_existing_user_response:
+                pass
+            elif isinstance(final_response, str) and final_response.strip():
                 if "Execution status:" not in final_response:
                     final_response = f"{final_response.rstrip()}\n\n{status_line}"
             else:
@@ -9494,6 +9501,9 @@ class InternalMCPChatOrchestrator:
                                 "type": "completion_ledger_injection",
                                 "decision": decision,
                                 "ledger_replaced_empty_response": ledger_replaced_empty,
+                                "ledger_preserved_existing_user_response": (
+                                    preserve_existing_user_response
+                                ),
                                 "decision_authority": {
                                     "origin": "python",
                                     "decision_class": "completion_ledger_injection",

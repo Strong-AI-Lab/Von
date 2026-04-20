@@ -195,6 +195,10 @@ _VERIFICATION_READ_TOOL_PREFIXES = (
 _SEARCH_EVIDENCE_TOOL_NAMES = {
     "context_search",
     "find_concepts_by_name",
+    "find_relations_with_argument",
+    "get_predicate_incidence",
+    "get_related_concepts",
+    "get_text_relations_summary",
     "jira_search",
     "qna_search",
     "search_arxiv",
@@ -225,6 +229,29 @@ _JIRA_EMPTY_RESULT_CLAIM_MARKERS = (
     "did not find any open jira tasks",
     "search returned no issues",
     "returned no issues",
+)
+_LOW_INFORMATION_RETRIEVAL_ANSWER_MARKERS = (
+    "couldn't find",
+    "could not find",
+    "didn't find",
+    "did not find",
+    "don't have enough grounded",
+    "do not have enough grounded",
+    "not enough grounded information",
+    "not enough grounded evidence",
+    "no grounded",
+    "no represented",
+    "no records found",
+    "no record found",
+    "no results found",
+    "no result found",
+    "none found",
+    "nothing found",
+)
+_COUNT_ONLY_RESULT_SUMMARY_PATTERN = re.compile(
+    r"\d+\s+(?:result|results|item|items|concept|concepts|record|records|"
+    r"relation hit|relation hits|predicate group|predicate groups|"
+    r"related evidence result|related evidence results)"
 )
 
 _MUTATION_INTENT_TERMS = (
@@ -848,6 +875,12 @@ def _classify_turn_execution_failure_mode(item: Mapping[str, Any]) -> str:
     execution_signal_blocker = _derive_execution_signal_completion_blocker(
         execution_summary=dispatch
     )
+    required_evidence_answer_consistency_blocked = bool(
+        item.get("required_evidence_answer_consistency_blocked", False)
+    )
+
+    if required_evidence_answer_consistency_blocked:
+        return "false_completion_claim"
 
     if decision == "failed":
         return "mutation_failed_or_blocked"
@@ -1016,6 +1049,11 @@ def build_turn_execution_correctness_summary(
     safe_to_claim_completion = bool(
         completion_gate_payload.get("safe_to_claim_completion", not requires_follow_up)
     )
+    required_evidence_answer_consistency_blocked = (
+        _completion_gate_has_required_evidence_answer_consistency_blocker(
+            completion_gate_payload
+        )
+    )
 
     failure_mode = _classify_turn_execution_failure_mode(
         {
@@ -1030,6 +1068,9 @@ def build_turn_execution_correctness_summary(
                 "completion_claim_validated"
             ),
             "workflow_routing_diagnostics": workflow_routing_payload,
+            "required_evidence_answer_consistency_blocked": (
+                required_evidence_answer_consistency_blocked
+            ),
         }
     )
     likely_failure_to_act = is_turn_execution_likely_failure_to_act(failure_mode)
@@ -1095,6 +1136,9 @@ def build_turn_execution_correctness_summary(
             "decision": decision,
             "requires_follow_up": requires_follow_up,
             "safe_to_claim_completion": safe_to_claim_completion,
+            "required_evidence_answer_consistency_blocked": (
+                required_evidence_answer_consistency_blocked
+            ),
             "completion_claim_detected": bool(
                 final_response_payload.get("completion_claim_detected", False)
             ),
@@ -1392,11 +1436,46 @@ def _normalise_text_for_matching(value: Any) -> str:
 def _extract_search_evidence_result_count(entry: Mapping[str, Any]) -> int | None:
     result_value = entry.get("result")
     if isinstance(result_value, Mapping):
-        for field_name in ("issues", "results", "papers"):
+        for field_name in (
+            "issues",
+            "results",
+            "papers",
+            "hits",
+            "relations",
+            "rows",
+            "groups",
+            "concepts",
+            "documents",
+            "items",
+            "related_concepts",
+            "predicate_rows",
+            "predicates",
+        ):
             raw_items = result_value.get(field_name)
             if isinstance(raw_items, list):
                 return len(raw_items)
-        for field_name in ("total", "total_count", "total_results", "count"):
+        paging = result_value.get("paging")
+        if isinstance(paging, Mapping):
+            for field_name in ("returned", "total_available", "count"):
+                raw_count = paging.get(field_name)
+                try:
+                    if raw_count is None:
+                        continue
+                    return max(0, int(raw_count))
+                except Exception:
+                    continue
+        for field_name in (
+            "total",
+            "total_count",
+            "total_results",
+            "count",
+            "document_count",
+            "result_count",
+            "groups_found",
+            "relation_hit_count",
+            "grounded_instance_count",
+            "total_hits",
+        ):
             raw_count = result_value.get(field_name)
             try:
                 if raw_count is None:
@@ -1408,7 +1487,7 @@ def _extract_search_evidence_result_count(entry: Mapping[str, Any]) -> int | Non
     result_summary = _safe_str(entry.get("result_summary"))
     if result_summary:
         match = re.search(
-            r"\bfound\s+(\d+)\s+(?:jira\s+)?(?:issue|issues|result|results|paper|papers|concept|concepts)\b",
+            r"\bfound\s+(\d+)\s+(?:jira\s+)?(?:issue|issues|result|results|paper|papers|concept|concepts|record|records|hit|hits|group|groups)\b",
             result_summary,
             flags=re.IGNORECASE,
         )
@@ -1427,17 +1506,45 @@ def _response_claims_empty_jira_results(response_text: Any) -> bool:
     return any(marker in normalised for marker in _JIRA_EMPTY_RESULT_CLAIM_MARKERS)
 
 
-def _derive_prompt_required_evidence_answer_consistency_blocker(
-    *,
+def _classify_low_information_retrieval_answer_surface(
     response_text: Any,
-    prompt_required_evidence_contract: Mapping[str, Any] | None,
-    search_evidence: Sequence[Mapping[str, Any]] | None,
-) -> dict[str, Any] | None:
-    if not isinstance(prompt_required_evidence_contract, Mapping):
+) -> str | None:
+    normalised = _normalise_text_for_matching(response_text)
+    if not normalised:
         return None
-    if not _response_claims_empty_jira_results(response_text):
+    if _COUNT_ONLY_RESULT_SUMMARY_PATTERN.fullmatch(normalised):
+        return "count_only_result_summary"
+    if len(normalised) > 320:
         return None
+    if any(marker in normalised for marker in _LOW_INFORMATION_RETRIEVAL_ANSWER_MARKERS):
+        return "insufficiency_claim"
+    return None
 
+
+def _search_evidence_entry_was_degraded(entry: Mapping[str, Any]) -> bool:
+    if (_safe_str(entry.get("status")) or "").lower() != "ok":
+        return True
+    if _safe_str(entry.get("error")):
+        return True
+    result_value = entry.get("result")
+    if not isinstance(result_value, Mapping):
+        return False
+    if bool(result_value.get("fallback_used")):
+        return True
+    if _safe_str(result_value.get("fallback_reason")):
+        return True
+    return (_safe_str(result_value.get("status")) or "").lower() in {
+        "error",
+        "failed",
+        "failure",
+    }
+
+
+def _collect_required_evidence_tool_names(
+    prompt_required_evidence_contract: Mapping[str, Any] | None,
+) -> list[str]:
+    if not isinstance(prompt_required_evidence_contract, Mapping):
+        return []
     artefact_context_raw = prompt_required_evidence_contract.get("artefact_context")
     artefact_context = (
         artefact_context_raw if isinstance(artefact_context_raw, Mapping) else {}
@@ -1445,20 +1552,59 @@ def _derive_prompt_required_evidence_answer_consistency_blocker(
     required_tools = _dedupe_string_sequence(
         artefact_context.get("required_tools") or []
     )
-    if not required_tools:
-        for effect in prompt_required_evidence_contract.get("required_effects") or []:
-            if not isinstance(effect, Mapping):
-                continue
-            required_tools.extend(effect.get("required_tools") or [])
-        required_tools = _dedupe_string_sequence(required_tools)
-    if "jira_search" not in {tool_name.lower() for tool_name in required_tools}:
+    if required_tools:
+        return required_tools
+    for effect in prompt_required_evidence_contract.get("required_effects") or []:
+        if not isinstance(effect, Mapping):
+            continue
+        required_tools.extend(effect.get("required_tools") or [])
+    return _dedupe_string_sequence(required_tools)
+
+
+def _derive_prompt_required_evidence_answer_consistency_blocker(
+    *,
+    response_text: Any,
+    prompt_required_evidence_contract: Mapping[str, Any] | None,
+    search_evidence: Sequence[Mapping[str, Any]] | None,
+    turn_expected_outcome_contract: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    if not isinstance(prompt_required_evidence_contract, Mapping) and not isinstance(
+        turn_expected_outcome_contract, Mapping
+    ):
+        return None
+
+    response_surface_kind = _classify_low_information_retrieval_answer_surface(
+        response_text
+    )
+    if response_surface_kind is None and not _response_claims_empty_jira_results(
+        response_text
+    ):
+        return None
+
+    required_tools = _collect_required_evidence_tool_names(
+        prompt_required_evidence_contract
+    )
+    required_tool_lookup = {tool_name.lower() for tool_name in required_tools}
+    use_all_search_evidence_entries = bool(
+        isinstance(turn_expected_outcome_contract, Mapping)
+        and turn_expected_outcome_contract
+    )
+    relevant_entries = [
+        entry
+        for entry in search_evidence or ()
+        if isinstance(entry, Mapping)
+        and (
+            use_all_search_evidence_entries
+            or not required_tool_lookup
+            or (_safe_str(entry.get("tool")) or "").lower() in required_tool_lookup
+        )
+    ]
+    if not relevant_entries:
         return None
 
     best_jira_entry: Mapping[str, Any] | None = None
     best_result_count = 0
-    for entry in search_evidence or ():
-        if not isinstance(entry, Mapping):
-            continue
+    for entry in relevant_entries:
         tool_name = (_safe_str(entry.get("tool")) or "").lower()
         if tool_name != "jira_search":
             continue
@@ -1470,25 +1616,131 @@ def _derive_prompt_required_evidence_answer_consistency_blocker(
         if result_count > best_result_count:
             best_result_count = result_count
             best_jira_entry = entry
-    if best_jira_entry is None:
+    if _response_claims_empty_jira_results(response_text) and best_jira_entry is not None:
+        arguments = best_jira_entry.get("arguments")
+        jql_text = None
+        if isinstance(arguments, Mapping):
+            jql_text = _safe_str(arguments.get("jql"))
+
+        status_reason = (
+            f"Jira retrieval returned {best_result_count} issue(s), but the answer claimed that no Jira issues or tasks were found."
+        )
+        if jql_text:
+            status_reason = f'{status_reason} Observed JQL: "{jql_text}".'
+
+        failure_code = (
+            "prompt_required_evidence_jira_search_nonempty_results_contradict_empty_answer"
+        )
+        return {
+            "effect_id": "effect_prompt_required_evidence_jira_answer_consistency",
+            "effect_type": "required_evidence_answer_consistency",
+            "status": "not_satisfied",
+            "status_reason": status_reason,
+            "failure_code": failure_code,
+            "failure_codes": [failure_code],
+            "decision": "partial",
+            "decision_reason": status_reason,
+            "repeat_eligible": True,
+            "observed_result_count": best_result_count,
+            "tool": "jira_search",
+            "jql": jql_text,
+            "response_surface_kind": "empty_jira_claim",
+        }
+
+    if response_surface_kind is None:
         return None
 
-    arguments = best_jira_entry.get("arguments")
-    jql_text = None
-    if isinstance(arguments, Mapping):
-        jql_text = _safe_str(arguments.get("jql"))
+    positive_entries: list[tuple[Mapping[str, Any], int]] = []
+    degraded_entries: list[Mapping[str, Any]] = []
+    for entry in relevant_entries:
+        result_count = _extract_search_evidence_result_count(entry)
+        if result_count is not None and result_count > 0:
+            positive_entries.append((entry, result_count))
+            continue
+        if _search_evidence_entry_was_degraded(entry):
+            degraded_entries.append(entry)
 
+    if not positive_entries and not degraded_entries:
+        return None
+
+    if positive_entries:
+        observed_result_signals = [
+            {
+                "tool": _safe_str(entry.get("tool")),
+                "result_count": result_count,
+                "query": _safe_str(entry.get("query")),
+            }
+            for entry, result_count in positive_entries[:3]
+        ]
+        signal_fragments = []
+        for signal in observed_result_signals:
+            tool_name = signal.get("tool") or "unknown_tool"
+            result_count = signal.get("result_count") or 0
+            query_text = signal.get("query")
+            fragment = f"{tool_name}={result_count}"
+            if query_text:
+                fragment = f'{fragment} for "{query_text}"'
+            signal_fragments.append(fragment)
+        status_reason = (
+            "Required evidence retrieval returned positive results ("
+            + "; ".join(signal_fragments)
+            + "), but the answer remained a "
+            + response_surface_kind.replace("_", " ")
+            + "."
+        )
+        failure_code = (
+            "prompt_required_evidence_positive_results_contradict_low_information_answer"
+        )
+        return {
+            "effect_id": "effect_prompt_required_evidence_answer_consistency",
+            "effect_type": "required_evidence_answer_consistency",
+            "status": "not_satisfied",
+            "status_reason": status_reason,
+            "failure_code": failure_code,
+            "failure_codes": [failure_code],
+            "decision": "partial",
+            "decision_reason": status_reason,
+            "repeat_eligible": True,
+            "response_surface_kind": response_surface_kind,
+            "observed_result_signals": observed_result_signals,
+        }
+
+    degraded_tool_signals = []
+    for entry in degraded_entries[:3]:
+        result_value = entry.get("result")
+        fallback_reason = (
+            _safe_str(result_value.get("fallback_reason"))
+            if isinstance(result_value, Mapping)
+            else None
+        ) or _safe_str(entry.get("error"))
+        degraded_tool_signals.append(
+            {
+                "tool": _safe_str(entry.get("tool")),
+                "query": _safe_str(entry.get("query")),
+                "fallback_reason": fallback_reason,
+            }
+        )
+    degraded_fragments = []
+    for signal in degraded_tool_signals:
+        tool_name = signal.get("tool") or "unknown_tool"
+        fragment = tool_name
+        if signal.get("query"):
+            fragment = f'{fragment} for "{signal["query"]}"'
+        if signal.get("fallback_reason"):
+            fragment = f'{fragment} ({signal["fallback_reason"]})'
+        degraded_fragments.append(fragment)
     status_reason = (
-        f"Jira retrieval returned {best_result_count} issue(s), but the answer claimed that no Jira issues or tasks were found."
+        "Evidence-grounded retrieval degraded or failed ("
+        + "; ".join(degraded_fragments)
+        + "), so the "
+        + response_surface_kind.replace("_", " ")
+        + " answer was not safe to treat as completed."
     )
-    if jql_text:
-        status_reason = f'{status_reason} Observed JQL: "{jql_text}".'
-
     failure_code = (
-        "prompt_required_evidence_jira_search_nonempty_results_contradict_empty_answer"
+        "prompt_required_evidence_degraded_retrieval_not_safe_for_low_information_answer"
     )
     return {
-        "effect_id": "effect_prompt_required_evidence_jira_answer_consistency",
+        "effect_id": "effect_prompt_required_evidence_answer_consistency",
         "effect_type": "required_evidence_answer_consistency",
         "status": "not_satisfied",
         "status_reason": status_reason,
@@ -1497,10 +1749,30 @@ def _derive_prompt_required_evidence_answer_consistency_blocker(
         "decision": "partial",
         "decision_reason": status_reason,
         "repeat_eligible": True,
-        "observed_result_count": best_result_count,
-        "tool": "jira_search",
-        "jql": jql_text,
+        "response_surface_kind": response_surface_kind,
+        "degraded_tool_signals": degraded_tool_signals,
     }
+
+
+def _completion_gate_has_required_evidence_answer_consistency_blocker(
+    completion_gate: Mapping[str, Any] | None,
+) -> bool:
+    if not isinstance(completion_gate, Mapping):
+        return False
+    evidence_payload_raw = completion_gate.get("evidence_payload")
+    evidence_payload = (
+        evidence_payload_raw if isinstance(evidence_payload_raw, Mapping) else {}
+    )
+    blocker = evidence_payload.get("required_evidence_answer_consistency_blocker")
+    if isinstance(blocker, Mapping):
+        return True
+    for code in _dedupe_string_sequence(completion_gate.get("blocking_failure_codes") or []):
+        lowered = code.lower()
+        if lowered.startswith("prompt_required_evidence_") and (
+            "contradict" in lowered or "not_safe" in lowered
+        ):
+            return True
+    return False
 
 
 def _apply_completion_gate_blocker(
@@ -6262,6 +6534,7 @@ def build_turn_execution_record(
             response_text=response_text,
             prompt_required_evidence_contract=prompt_required_evidence_contract,
             search_evidence=search_evidence_payload,
+            turn_expected_outcome_contract=turn_expected_outcome_contract_payload,
         )
     )
     existing_gate_failure_codes = {
