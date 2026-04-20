@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from src.backend.integrations.internal_mcp import build_default_catalogue
 from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
 from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
@@ -12,6 +14,24 @@ def _build_gateway() -> InternalMCPGateway:
         catalogue=build_default_catalogue(),
         transport=InternalMCPTransport(),
         enabled=True,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _stub_file_copy_entity_representation_candidates(monkeypatch):
+    monkeypatch.setattr(
+        "src.backend.services.file_copy_entity_representation_vontology_service.infer_file_copy_entity_representation_candidates",
+        lambda **_kwargs: (
+            {
+                "schema_version": (
+                    "file_copy_entity_representation_interpretation.v1"
+                ),
+                "person_candidate": {"applicable": False},
+                "company_candidate": {"applicable": False},
+                "meeting_candidate": {"applicable": False},
+            },
+            {"status": "fixture_stub"},
+        ),
     )
 
 

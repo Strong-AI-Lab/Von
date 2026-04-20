@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 
-def test_materialise_company_representation_for_webpage_persists_core_effects(monkeypatch):
+def test_materialise_company_representation_for_authority_candidate_persists_core_effects(
+    monkeypatch,
+):
     from src.backend.services.company_file_representation_service import (
         materialise_company_representation_for_file_copy,
     )
@@ -36,23 +38,35 @@ def test_materialise_company_representation_for_webpage_persists_core_effects(mo
         return {"success": True, "forward_modified": True}
 
     monkeypatch.setattr(
-        "src.backend.services.company_file_representation_service.upsert_text_for_concept",
+        "src.backend.services.file_copy_entity_representation_support.upsert_text_for_concept",
         _fake_upsert_text_for_concept,
     )
     monkeypatch.setattr(
         "src.backend.services.company_file_representation_service.add_relationship",
         _fake_add_relationship,
     )
+    monkeypatch.setattr(
+        "src.backend.services.company_file_representation_service.infer_file_copy_entity_representation_candidates",
+        lambda **_kwargs: (
+            {
+                "schema_version": "file_copy_entity_representation_interpretation.v1",
+                "company_candidate": {
+                    "applicable": True,
+                    "representation_mode": "web_page",
+                    "company_name": "Example Labs Ltd",
+                    "aliases": ["Example Labs"],
+                    "urls": ["https://examplelabs.ai/about"],
+                    "descriptors": ["Builds safe AI products."],
+                },
+            },
+            {"status": "ok"},
+        ),
+    )
 
     result = materialise_company_representation_for_file_copy(
         user_concept_id="#V#user_test",
         file_copy_concept_id="#V#uploaded_file_copy_company_1",
-        extracted_text=(
-            "Company: Example Labs Ltd\n"
-            "Website: https://examplelabs.ai/about\n"
-            "Our mission is to build safe AI products.\n"
-            "Products: research and tooling.\n"
-        ),
+        extracted_text="Company profile content",
         original_filename="example-company-webpage.txt",
         interpretation={"description": "Extracted from the company about page."},
     )
@@ -80,18 +94,31 @@ def test_materialise_company_representation_for_webpage_persists_core_effects(mo
     ]
 
 
-def test_materialise_company_representation_fails_when_url_unresolved():
+def test_materialise_company_representation_fails_when_url_unresolved(monkeypatch):
     from src.backend.services.company_file_representation_service import (
         materialise_company_representation_for_file_copy,
+    )
+
+    monkeypatch.setattr(
+        "src.backend.services.company_file_representation_service.infer_file_copy_entity_representation_candidates",
+        lambda **_kwargs: (
+            {
+                "schema_version": "file_copy_entity_representation_interpretation.v1",
+                "company_candidate": {
+                    "applicable": True,
+                    "representation_mode": "web_page",
+                    "company_name": "Example Labs Ltd",
+                    "urls": [],
+                },
+            },
+            {"status": "ok"},
+        ),
     )
 
     result = materialise_company_representation_for_file_copy(
         user_concept_id="#V#user_test",
         file_copy_concept_id="#V#uploaded_file_copy_company_2",
-        extracted_text=(
-            "Company: Example Labs Ltd\n"
-            "Our mission is to build safe AI products.\n"
-        ),
+        extracted_text="Company profile content",
         original_filename="company-website-profile.txt",
     )
 
@@ -102,9 +129,22 @@ def test_materialise_company_representation_fails_when_url_unresolved():
     assert result["company_concept_id"] is None
 
 
-def test_materialise_company_representation_is_not_attempted_for_unrelated_text():
+def test_materialise_company_representation_is_not_attempted_for_unrelated_text(
+    monkeypatch,
+):
     from src.backend.services.company_file_representation_service import (
         materialise_company_representation_for_file_copy,
+    )
+
+    monkeypatch.setattr(
+        "src.backend.services.company_file_representation_service.infer_file_copy_entity_representation_candidates",
+        lambda **_kwargs: (
+            {
+                "schema_version": "file_copy_entity_representation_interpretation.v1",
+                "company_candidate": {"applicable": False},
+            },
+            {"status": "no_candidates"},
+        ),
     )
 
     result = materialise_company_representation_for_file_copy(

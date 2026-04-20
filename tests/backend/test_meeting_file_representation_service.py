@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 
-def test_materialise_meeting_representation_for_transcript_persists_core_effects(
+def test_materialise_meeting_representation_for_authority_candidate_persists_core_effects(
     monkeypatch,
 ):
     from src.backend.services.meeting_file_representation_service import (
@@ -38,23 +38,35 @@ def test_materialise_meeting_representation_for_transcript_persists_core_effects
         return {"success": True, "forward_modified": True}
 
     monkeypatch.setattr(
-        "src.backend.services.meeting_file_representation_service.upsert_text_for_concept",
+        "src.backend.services.file_copy_entity_representation_support.upsert_text_for_concept",
         _fake_upsert_text_for_concept,
     )
     monkeypatch.setattr(
         "src.backend.services.meeting_file_representation_service.add_relationship",
         _fake_add_relationship,
     )
+    monkeypatch.setattr(
+        "src.backend.services.meeting_file_representation_service.infer_file_copy_entity_representation_candidates",
+        lambda **_kwargs: (
+            {
+                "schema_version": "file_copy_entity_representation_interpretation.v1",
+                "meeting_candidate": {
+                    "applicable": True,
+                    "representation_mode": "transcript",
+                    "meeting_name": "Weekly Research Sync",
+                    "datetime_candidates": ["2026-03-05 10:00"],
+                    "participants": ["Jane Doe", "John Smith"],
+                    "outcomes": ["Jane to prepare summary for next week."],
+                },
+            },
+            {"status": "ok"},
+        ),
+    )
 
     result = materialise_meeting_representation_for_file_copy(
         user_concept_id="#V#user_test",
         file_copy_concept_id="#V#uploaded_file_copy_meeting_1",
-        extracted_text=(
-            "Meeting: Weekly Research Sync\n"
-            "Date: 2026-03-05 10:00\n"
-            "Attendees: Jane Doe, John Smith\n"
-            "Action item: Jane to prepare summary for next week.\n"
-        ),
+        extracted_text="Meeting transcript content",
         original_filename="weekly-research-transcript.txt",
         interpretation={"description": "Transcript extracted from uploaded meeting notes."},
     )
@@ -82,19 +94,32 @@ def test_materialise_meeting_representation_for_transcript_persists_core_effects
     ]
 
 
-def test_materialise_meeting_representation_fails_when_identity_unresolved():
+def test_materialise_meeting_representation_fails_when_identity_unresolved(
+    monkeypatch,
+):
     from src.backend.services.meeting_file_representation_service import (
         materialise_meeting_representation_for_file_copy,
+    )
+
+    monkeypatch.setattr(
+        "src.backend.services.meeting_file_representation_service.infer_file_copy_entity_representation_candidates",
+        lambda **_kwargs: (
+            {
+                "schema_version": "file_copy_entity_representation_interpretation.v1",
+                "meeting_candidate": {
+                    "applicable": True,
+                    "representation_mode": "transcript",
+                    "meeting_name": "",
+                },
+            },
+            {"status": "ok"},
+        ),
     )
 
     result = materialise_meeting_representation_for_file_copy(
         user_concept_id="#V#user_test",
         file_copy_concept_id="#V#uploaded_file_copy_meeting_2",
-        extracted_text=(
-            "Meeting transcript\n"
-            "Agenda\n"
-            "Minutes\n"
-        ),
+        extracted_text="Meeting transcript",
         original_filename="meeting-transcript.txt",
     )
 
@@ -105,9 +130,22 @@ def test_materialise_meeting_representation_fails_when_identity_unresolved():
     assert result["meeting_concept_id"] is None
 
 
-def test_materialise_meeting_representation_is_not_attempted_for_unrelated_text():
+def test_materialise_meeting_representation_is_not_attempted_for_unrelated_text(
+    monkeypatch,
+):
     from src.backend.services.meeting_file_representation_service import (
         materialise_meeting_representation_for_file_copy,
+    )
+
+    monkeypatch.setattr(
+        "src.backend.services.meeting_file_representation_service.infer_file_copy_entity_representation_candidates",
+        lambda **_kwargs: (
+            {
+                "schema_version": "file_copy_entity_representation_interpretation.v1",
+                "meeting_candidate": {"applicable": False},
+            },
+            {"status": "no_candidates"},
+        ),
     )
 
     result = materialise_meeting_representation_for_file_copy(

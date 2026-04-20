@@ -17,6 +17,24 @@ def _build_gateway() -> InternalMCPGateway:
     )
 
 
+@pytest.fixture(autouse=True)
+def _stub_file_copy_entity_representation_candidates(monkeypatch):
+    monkeypatch.setattr(
+        "src.backend.services.file_copy_entity_representation_vontology_service.infer_file_copy_entity_representation_candidates",
+        lambda **_kwargs: (
+            {
+                "schema_version": (
+                    "file_copy_entity_representation_interpretation.v1"
+                ),
+                "person_candidate": {"applicable": False},
+                "company_candidate": {"applicable": False},
+                "meeting_candidate": {"applicable": False},
+            },
+            {"status": "fixture_stub"},
+        ),
+    )
+
+
 @dataclass(frozen=True)
 class GatewayScenario:
     domain_id: str

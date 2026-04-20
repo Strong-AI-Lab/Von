@@ -1,5 +1,25 @@
 from __future__ import annotations
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _stub_file_copy_entity_representation_candidates(monkeypatch):
+    monkeypatch.setattr(
+        "src.backend.services.file_copy_entity_representation_vontology_service.infer_file_copy_entity_representation_candidates",
+        lambda **_kwargs: (
+            {
+                "schema_version": (
+                    "file_copy_entity_representation_interpretation.v1"
+                ),
+                "person_candidate": {"applicable": False},
+                "company_candidate": {"applicable": False},
+                "meeting_candidate": {"applicable": False},
+            },
+            {"status": "fixture_stub"},
+        ),
+    )
+
 
 def test_index_file_copy_indexes_blob_backed_text(monkeypatch):
     from src.backend.integrations.internal_mcp import catalogue as cat
@@ -759,6 +779,118 @@ def test_interpret_file_copy_fails_closed_when_meeting_representation_unverified
         for row in persist_errors
         if isinstance(row, dict)
     )
+
+
+def test_interpret_file_copy_uses_shared_entity_representation_candidates(
+    monkeypatch,
+):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.catalogue._read_file_copy",
+        lambda **_kwargs: {
+            "success": True,
+            "text": "Weekly Research Sync transcript content.",
+            "content_type": "text/plain",
+            "original_filename": "weekly-research-transcript.txt",
+            "size_bytes": 256,
+            "byte_length": 256,
+            "blob": {
+                "backend": "local",
+                "key": "uploads/user/hash/weekly-research-transcript.txt",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.file_copy_interpretation_service.build_document_interpretation",
+        lambda **_kwargs: {
+            "kind": "document",
+            "description": "Document text extracted: Weekly Research Sync transcript content.",
+            "subject_tags": ["document"],
+            "content_text": "Weekly Research Sync transcript content.",
+            "content_length": 40,
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.arxiv_paper_link_service.materialise_scholarly_representation_for_file_copy",
+        lambda **_kwargs: {
+            "success": True,
+            "attempted": False,
+            "verified": False,
+            "reason": "requires_explicit_materialisation_tool",
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: "#V#user",
+    )
+    monkeypatch.setattr(
+        "src.backend.services.file_copy_entity_representation_vontology_service.infer_file_copy_entity_representation_candidates",
+        lambda **_kwargs: (
+            {
+                "schema_version": (
+                    "file_copy_entity_representation_interpretation.v1"
+                ),
+                "person_candidate": {"applicable": False},
+                "company_candidate": {"applicable": False},
+                "meeting_candidate": {
+                    "applicable": True,
+                    "representation_mode": "transcript",
+                    "meeting_name": "Weekly Research Sync",
+                    "datetime_candidates": ["2026-03-05 10:00"],
+                    "participants": ["Jane Doe", "John Smith"],
+                    "outcomes": ["Jane to prepare summary for next week."],
+                },
+            },
+            {"status": "ok"},
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.concept_search_service.search_concepts",
+        lambda **_kwargs: {"results": []},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.concept_service.create_concept",
+        lambda **_kwargs: {"success": True},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.concept_service.update_concept",
+        lambda *_args, **_kwargs: {"success": True},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.file_copy_entity_representation_support.upsert_text_for_concept",
+        lambda **_kwargs: {"relation_id": "rel-meeting-shared"},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.relationship_write_service.add_relationship",
+        lambda **_kwargs: {"success": True, "forward_modified": True},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.meeting_file_representation_service.add_relationship",
+        lambda **_kwargs: {"success": True, "forward_modified": True},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.text_value_service.upsert_singleton_text_relation",
+        lambda **_kwargs: {"relation_id": "rel-doc"},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.rag_text_relation_change_hook_service.maybe_sync_concept_text_relations_to_rag",
+        lambda **_kwargs: None,
+    )
+
+    result = cat._interpret_file_copy(
+        concept_id="#V#file_copy_meeting_shared_test",
+        namespace="#V#user@org",
+    )
+
+    assert result["success"] is True
+    assert result["diagnostics"]["entity_representation"]["status"] == "ok"
+    meeting_representation = result.get("meeting_representation") or {}
+    assert meeting_representation.get("attempted") is True
+    assert meeting_representation.get("verified") is True
+    assert meeting_representation.get("meeting_name") == "Weekly Research Sync"
+    assert meeting_representation.get("representation_mode") == "transcript"
+    assert "Jane Doe" in (meeting_representation.get("participants") or [])
 
 
 def test_interpret_file_copy_includes_pdf_diagram_analysis(monkeypatch):

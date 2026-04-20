@@ -4253,6 +4253,9 @@ def _interpret_file_copy(**kwargs):
         is_image_file,
         is_pdf_file,
     )
+    from ...services.file_copy_entity_representation_vontology_service import (
+        infer_file_copy_entity_representation_candidates,
+    )
     from ...services.rag_text_relation_change_hook_service import (
         maybe_sync_concept_text_relations_to_rag,
     )
@@ -4746,6 +4749,37 @@ def _interpret_file_copy(**kwargs):
                         }
                     )
 
+        entity_representation_candidates: Mapping[str, Any] | None = None
+        entity_representation_diagnostics: dict[str, Any] = {"status": "not_run"}
+        if isinstance(extracted_text, str) and extracted_text.strip():
+            (
+                entity_representation_candidates,
+                entity_representation_diagnostics,
+            ) = infer_file_copy_entity_representation_candidates(
+                extracted_text=extracted_text,
+                original_filename=(
+                    original_filename if isinstance(original_filename, str) else None
+                ),
+                content_type=content_type if isinstance(content_type, str) else None,
+                interpretation=interpretation,
+            )
+
+        person_candidate = (
+            entity_representation_candidates.get("person_candidate")
+            if isinstance(entity_representation_candidates, Mapping)
+            else None
+        )
+        company_candidate = (
+            entity_representation_candidates.get("company_candidate")
+            if isinstance(entity_representation_candidates, Mapping)
+            else None
+        )
+        meeting_candidate = (
+            entity_representation_candidates.get("meeting_candidate")
+            if isinstance(entity_representation_candidates, Mapping)
+            else None
+        )
+
         person_representation = materialise_person_representation_for_file_copy(
             user_concept_id=(
                 user_concept_id.strip()
@@ -4758,6 +4792,7 @@ def _interpret_file_copy(**kwargs):
                 original_filename if isinstance(original_filename, str) else None
             ),
             interpretation=interpretation,
+            representation_candidate=person_candidate,
             logger=logger,
         )
         if (
@@ -4785,6 +4820,7 @@ def _interpret_file_copy(**kwargs):
                 original_filename if isinstance(original_filename, str) else None
             ),
             interpretation=interpretation,
+            representation_candidate=company_candidate,
             logger=logger,
         )
         if (
@@ -4812,6 +4848,7 @@ def _interpret_file_copy(**kwargs):
                 original_filename if isinstance(original_filename, str) else None
             ),
             interpretation=interpretation,
+            representation_candidate=meeting_candidate,
             logger=logger,
         )
         if (
@@ -4828,6 +4865,7 @@ def _interpret_file_copy(**kwargs):
             )
     else:
         subtype_assertion_outcome = "persist_disabled"
+        entity_representation_diagnostics = {"status": "persist_disabled"}
         person_representation = {
             "attempted": False,
             "verified": False,
@@ -4895,6 +4933,7 @@ def _interpret_file_copy(**kwargs):
             "subtype_assertion": subtype_assertion,
             "arxiv_id_candidates": arxiv_id_candidates,
             "selected_arxiv_id": selected_arxiv_id,
+            "entity_representation": entity_representation_diagnostics,
             "diagram_analysis": {
                 "enabled": include_pdf_diagram_analysis,
                 "available": (

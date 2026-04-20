@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 
-def test_materialise_person_representation_for_cv_persists_core_effects(monkeypatch):
+def test_materialise_person_representation_for_authority_candidate_persists_core_effects(
+    monkeypatch,
+):
     from src.backend.services.person_file_representation_service import (
         materialise_person_representation_for_file_copy,
     )
@@ -36,24 +38,36 @@ def test_materialise_person_representation_for_cv_persists_core_effects(monkeypa
         return {"success": True, "forward_modified": True}
 
     monkeypatch.setattr(
-        "src.backend.services.person_file_representation_service.upsert_text_for_concept",
+        "src.backend.services.file_copy_entity_representation_support.upsert_text_for_concept",
         _fake_upsert_text_for_concept,
     )
     monkeypatch.setattr(
         "src.backend.services.person_file_representation_service.add_relationship",
         _fake_add_relationship,
     )
+    monkeypatch.setattr(
+        "src.backend.services.person_file_representation_service.infer_file_copy_entity_representation_candidates",
+        lambda **_kwargs: (
+            {
+                "schema_version": "file_copy_entity_representation_interpretation.v1",
+                "person_candidate": {
+                    "applicable": True,
+                    "representation_mode": "cv",
+                    "person_name": "Jane Doe",
+                    "emails": ["jane.doe@example.org"],
+                    "phone_numbers": ["+64 21 123 4567"],
+                    "affiliations": ["University of Auckland"],
+                    "roles": ["Senior Researcher"],
+                },
+            },
+            {"status": "ok"},
+        ),
+    )
 
     result = materialise_person_representation_for_file_copy(
         user_concept_id="#V#user_test",
         file_copy_concept_id="#V#uploaded_file_copy_person_1",
-        extracted_text=(
-            "Name: Jane Doe\n"
-            "Email: jane.doe@example.org\n"
-            "Role: Senior Researcher\n"
-            "Affiliation: University of Auckland\n"
-            "Phone: +64 21 123 4567\n"
-        ),
+        extracted_text="Candidate CV details",
         original_filename="jane-doe-cv.pdf",
         interpretation={"description": "CV extracted from uploaded document."},
     )
@@ -84,20 +98,31 @@ def test_materialise_person_representation_for_cv_persists_core_effects(monkeypa
     ]
 
 
-def test_materialise_person_representation_fails_when_identity_unresolved():
+def test_materialise_person_representation_fails_when_identity_unresolved(monkeypatch):
     from src.backend.services.person_file_representation_service import (
         materialise_person_representation_for_file_copy,
+    )
+
+    monkeypatch.setattr(
+        "src.backend.services.person_file_representation_service.infer_file_copy_entity_representation_candidates",
+        lambda **_kwargs: (
+            {
+                "schema_version": "file_copy_entity_representation_interpretation.v1",
+                "person_candidate": {
+                    "applicable": True,
+                    "representation_mode": "business_card",
+                    "person_name": "",
+                    "emails": ["info@example.org"],
+                },
+            },
+            {"status": "ok"},
+        ),
     )
 
     result = materialise_person_representation_for_file_copy(
         user_concept_id="#V#user_test",
         file_copy_concept_id="#V#uploaded_file_copy_person_2",
-        extracted_text=(
-            "Business Card\n"
-            "Email: info@example.org\n"
-            "Phone: +64 21 555 1111\n"
-            "Address: Auckland\n"
-        ),
+        extracted_text="Business card details",
         original_filename="contact-card.png",
     )
 
@@ -108,9 +133,22 @@ def test_materialise_person_representation_fails_when_identity_unresolved():
     assert result["person_concept_id"] is None
 
 
-def test_materialise_person_representation_is_not_attempted_for_unrelated_text():
+def test_materialise_person_representation_is_not_attempted_for_unrelated_text(
+    monkeypatch,
+):
     from src.backend.services.person_file_representation_service import (
         materialise_person_representation_for_file_copy,
+    )
+
+    monkeypatch.setattr(
+        "src.backend.services.person_file_representation_service.infer_file_copy_entity_representation_candidates",
+        lambda **_kwargs: (
+            {
+                "schema_version": "file_copy_entity_representation_interpretation.v1",
+                "person_candidate": {"applicable": False},
+            },
+            {"status": "no_candidates"},
+        ),
     )
 
     result = materialise_person_representation_for_file_copy(

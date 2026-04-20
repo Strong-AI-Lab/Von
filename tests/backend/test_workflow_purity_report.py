@@ -1010,3 +1010,73 @@ def test_build_workflow_purity_report_detects_annotation_and_workflow_creation_d
     assert "retired_annotation_type_inference_symbol" in patterns
     assert "retired_workflow_authoring_stopword_symbol" in patterns
     assert "retired_workflow_authoring_label_parser_symbol" in patterns
+
+
+def test_build_workflow_purity_report_detects_file_copy_representation_drift(
+    tmp_path: Path,
+) -> None:
+    _write(
+        "src/backend/services/person_file_representation_service.py",
+        "_EMAIL_PATTERN = None\n"
+        "def _extract_candidate_names(text):\n    return []\n",
+        root=tmp_path,
+    )
+    _write(
+        "src/backend/services/company_file_representation_service.py",
+        "_COMPANY_LABEL_PATTERN = None\n"
+        "def _extract_candidate_company_names(text):\n    return []\n",
+        root=tmp_path,
+    )
+    _write(
+        "src/backend/services/meeting_file_representation_service.py",
+        "_MEETING_TEXT_HINT_PATTERN = None\n"
+        "def _extract_participants(text):\n    return []\n",
+        root=tmp_path,
+    )
+    baseline_path = (
+        tmp_path / "tests" / "backend" / "fixtures" / "workflow_purity_baseline.json"
+    )
+    baseline_path.parent.mkdir(parents=True, exist_ok=True)
+    baseline_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "workflow_purity_baseline.v1",
+                "counters": {
+                    "built_in_registration_count": 0,
+                    "remaining_python_workflow_family_count": 0,
+                    "python_authored_canonical_workflow_source_count": 0,
+                    "python_authored_workflow_prompt_source_count": 0,
+                    "python_authored_support_prompt_source_count": 0,
+                    "direct_instance_create_callsite_count": 0,
+                    "env_event_binding_count": 0,
+                    "legacy_selector_mode_count": 0,
+                    "builtin_capability_override_count": 0,
+                    "non_vontology_discoverable_workflow_count": 0,
+                    "repo_seed_authority_drift_path_count": 0,
+                    "vontology_first_seed_fallback_violation_count": 0,
+                    "workflow_id_special_case_count": 0,
+                    "supervised_fail_open_fallback_count": 0,
+                    "support_surface_policy_contract_violation_count": 0,
+                    "synthesized_launch_contract_count": 0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = build_workflow_purity_report(
+        registry=None,
+        project_root=tmp_path,
+        baseline_path=baseline_path,
+    )
+
+    patterns = {
+        item["pattern"]
+        for item in report["details"]["support_surface_policy_contracts"]["violations"]
+    }
+    assert "retired_person_file_copy_semantic_regex_symbol" in patterns
+    assert "retired_person_file_copy_semantic_helper_symbol" in patterns
+    assert "retired_company_file_copy_semantic_regex_symbol" in patterns
+    assert "retired_company_file_copy_semantic_helper_symbol" in patterns
+    assert "retired_meeting_file_copy_semantic_regex_symbol" in patterns
+    assert "retired_meeting_file_copy_semantic_helper_symbol" in patterns
