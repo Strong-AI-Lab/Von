@@ -286,6 +286,21 @@ class _WorkflowDispatchSelectionState:
     routing_info: WorkflowRoutingInfo | None
 
 
+@dataclass(frozen=True)
+class _TurnContractDispatchPreflightResult:
+    """Explicit dispatch-preflight result for turn contract satisfaction."""
+
+    status: str
+    selected_workflow_id: str | None
+    required_tools: tuple[str, ...] = ()
+    required_surface_families: tuple[str, ...] = ()
+    external_surface_families: tuple[str, ...] = ()
+    selected_workflow_can_satisfy_contract: bool | None = None
+    override_reason: str | None = None
+    reasoning: str | None = None
+    turn_expected_outcome_contract: Mapping[str, Any] | None = None
+
+
 @dataclass
 class _CustomWorkflowDispatchSupport:
     """Support surface for launchability and override handling inside dispatch."""
@@ -304,6 +319,222 @@ class _CustomWorkflowDispatchSupport:
     custom_workflow_launchability_probe_cache: dict[str, dict[str, Any]] = field(
         default_factory=dict
     )
+
+    def evaluate_turn_contract_dispatch_preflight(
+        self,
+        state: _WorkflowDispatchSelectionState,
+        *,
+        turn_expected_outcome_contract: Mapping[str, Any] | None,
+        required_tools: Sequence[str],
+        required_surface_families: Sequence[str],
+        external_surface_families: Sequence[str],
+    ) -> _TurnContractDispatchPreflightResult:
+        required_tools_tuple = tuple(
+            str(item).strip()
+            for item in required_tools
+            if isinstance(item, str) and str(item).strip()
+        )
+        required_surface_families_tuple = tuple(
+            str(item).strip()
+            for item in required_surface_families
+            if isinstance(item, str) and str(item).strip()
+        )
+        external_surface_families_tuple = tuple(
+            str(item).strip()
+            for item in external_surface_families
+            if isinstance(item, str) and str(item).strip()
+        )
+        contract_payload = (
+            {
+                str(key): value
+                for key, value in turn_expected_outcome_contract.items()
+                if isinstance(key, str)
+            }
+            if isinstance(turn_expected_outcome_contract, Mapping)
+            else None
+        )
+        common_kwargs = {
+            "selected_workflow_id": state.selected_workflow_id_text,
+            "required_tools": required_tools_tuple,
+            "required_surface_families": required_surface_families_tuple,
+            "external_surface_families": external_surface_families_tuple,
+            "turn_expected_outcome_contract": contract_payload,
+        }
+        if not required_tools_tuple:
+            return _TurnContractDispatchPreflightResult(
+                status="no_contract_requirements",
+                selected_workflow_can_satisfy_contract=None,
+                reasoning=(
+                    "The turn contract did not add any required tools for dispatch "
+                    "preflight verification."
+                ),
+                **common_kwargs,
+            )
+        if len(required_surface_families_tuple) < 2:
+            return _TurnContractDispatchPreflightResult(
+                status="single_surface_contract",
+                selected_workflow_can_satisfy_contract=True,
+                reasoning=(
+                    "The turn contract stayed within a single retrieval surface, so "
+                    "no multi-surface dispatch override was required."
+                ),
+                **common_kwargs,
+            )
+        if not external_surface_families_tuple:
+            return _TurnContractDispatchPreflightResult(
+                status="no_external_surface_requirement",
+                selected_workflow_can_satisfy_contract=True,
+                reasoning=(
+                    "The turn contract required multiple surfaces, but none were "
+                    "external multi-surface evidence families that require the "
+                    "general tool workflow."
+                ),
+                **common_kwargs,
+            )
+        if state.selected_uses_tool_pipeline_contract:
+            return _TurnContractDispatchPreflightResult(
+                status="selected_workflow_satisfies_contract",
+                selected_workflow_can_satisfy_contract=True,
+                reasoning=(
+                    "The selected workflow already advertises the tool-pipeline "
+                    "contract needed to satisfy the turn's multi-surface evidence "
+                    "requirements."
+                ),
+                **common_kwargs,
+            )
+        if not state.selector_requests_custom_workflow:
+            return _TurnContractDispatchPreflightResult(
+                status="non_custom_route_selected",
+                selected_workflow_can_satisfy_contract=None,
+                reasoning=(
+                    "Dispatch preflight did not have a selected custom workflow to "
+                    "verify against the multi-surface evidence contract."
+                ),
+                **common_kwargs,
+            )
+        return _TurnContractDispatchPreflightResult(
+            status="override_required",
+            selected_workflow_can_satisfy_contract=False,
+            override_reason=(
+                "selected_custom_workflow_cannot_satisfy_multi_surface_turn_contract"
+            ),
+            reasoning=(
+                "The selected custom workflow did not advertise tool-pipeline "
+                "execution, but the turn contract required retrieval across "
+                "multiple evidence surfaces including external ones, so the "
+                "general tool workflow must be selected instead."
+            ),
+            **common_kwargs,
+        )
+
+    def record_turn_contract_dispatch_preflight(
+        self,
+        result: _TurnContractDispatchPreflightResult,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "type": "workflow_dispatch_turn_contract_check",
+            "status": result.status,
+            "selected_workflow_id": result.selected_workflow_id,
+            "selected_workflow_can_satisfy_contract": (
+                result.selected_workflow_can_satisfy_contract
+            ),
+            "required_tools": list(result.required_tools),
+            "required_surface_families": list(result.required_surface_families),
+            "external_surface_families": list(result.external_surface_families),
+            "override_reason": result.override_reason,
+            "reasoning": result.reasoning,
+        }
+        if isinstance(result.turn_expected_outcome_contract, Mapping):
+            payload["turn_expected_outcome_contract"] = dict(
+                result.turn_expected_outcome_contract
+            )
+        self.aux_llm_calls.append(
+            annotate_python_decision_event(
+                payload,
+                stage="workflow_dispatch",
+                component="internal_mcp_orchestrator",
+                function="record_turn_contract_dispatch_preflight",
+                decision_class="workflow_dispatch_turn_contract_check",
+                decision_source="turn_expected_outcome_contract",
+                changed_outcome=False,
+                reason_code=result.override_reason or result.status,
+                possible_inappropriate_python_code_use=False,
+            )
+        )
+        if self.trace_enabled and self.trace is not None:
+            self.trace.metadata["workflow_dispatch_turn_contract_check"] = dict(
+                payload
+            )
+
+    def apply_turn_contract_dispatch_preflight(
+        self,
+        state: _WorkflowDispatchSelectionState,
+        *,
+        turn_expected_outcome_contract: Mapping[str, Any] | None,
+        required_tools: Sequence[str],
+        required_surface_families: Sequence[str],
+        external_surface_families: Sequence[str],
+    ) -> _TurnContractDispatchPreflightResult:
+        result = self.evaluate_turn_contract_dispatch_preflight(
+            state,
+            turn_expected_outcome_contract=turn_expected_outcome_contract,
+            required_tools=required_tools,
+            required_surface_families=required_surface_families,
+            external_surface_families=external_surface_families,
+        )
+        self.record_turn_contract_dispatch_preflight(result)
+        if result.status == "selected_workflow_satisfies_contract":
+            workflow_label = (
+                self.resolve_selected_workflow_name(state.selected_workflow_id_text)
+                or state.selected_workflow_id_text
+                or "selected workflow"
+            )
+            self.record_dispatch_prepare_note(
+                step_id="turn_contract_dispatch_preflight",
+                step_label="Verify dispatch turn contract",
+                result_summary=(
+                    f"{workflow_label} satisfied the multi-surface turn contract "
+                    "without requiring dispatch override."
+                ),
+                workflow_id=state.selected_workflow_id_text,
+                workflow_name=self.resolve_selected_workflow_name(
+                    state.selected_workflow_id_text
+                ),
+            )
+        elif result.status == "override_required":
+            self.record_dispatch_prepare_note(
+                step_id="turn_contract_dispatch_preflight",
+                step_label="Verify dispatch turn contract",
+                result_summary=(
+                    "Selected custom workflow could not satisfy the multi-surface "
+                    "turn contract; using the general tool workflow instead."
+                ),
+                workflow_id=TOOL_CALLING_WORKFLOW_ID,
+                workflow_name=self.resolve_selected_workflow_name(
+                    TOOL_CALLING_WORKFLOW_ID
+                ),
+            )
+            self.force_tool_pipeline_routing(
+                state,
+                reason=cast(str, result.override_reason),
+                excluded_selector_verdicts=[state.selector_verdict or "rag_selected"],
+                reasoning_text=result.reasoning,
+                extra_payload={
+                    "turn_contract_required_tools": list(result.required_tools),
+                    "turn_contract_required_surface_families": list(
+                        result.required_surface_families
+                    ),
+                    "turn_contract_external_surface_families": list(
+                        result.external_surface_families
+                    ),
+                    "turn_expected_outcome_contract": (
+                        dict(result.turn_expected_outcome_contract)
+                        if isinstance(result.turn_expected_outcome_contract, Mapping)
+                        else {}
+                    ),
+                },
+            )
+        return result
 
     def force_tool_pipeline_routing(
         self,
@@ -29716,6 +29947,7 @@ class InternalMCPChatOrchestrator:
                 "workflow_selector_prompt",
                 "workflow_selector",
                 "workflow_selector_override",
+                "workflow_dispatch_turn_contract_check",
                 "workflow_model_policy_stage",
                 "workflow_dispatch_boundary",
             }
@@ -35033,44 +35265,6 @@ class InternalMCPChatOrchestrator:
             )
             _sync_selected_workflow_locals_from_state()
 
-        def _maybe_force_tool_pipeline_for_multi_surface_turn_contract() -> None:
-            if not selector_requests_custom_workflow:
-                return
-            if selected_uses_tool_pipeline_contract:
-                return
-            if not routing_contract_required_tools:
-                return
-            if len(routing_contract_required_tool_surface_families) < 2:
-                return
-            if not routing_contract_external_surface_families:
-                return
-            _force_tool_pipeline_routing(
-                reason=(
-                    "selected_custom_workflow_cannot_satisfy_multi_surface_turn_contract"
-                ),
-                excluded_selector_verdicts=[selector_verdict or "rag_selected"],
-                reasoning_text=(
-                    "The selected custom workflow did not advertise tool-pipeline "
-                    "execution, but the turn contract required retrieval across "
-                    "multiple evidence surfaces including external ones, so the "
-                    "general tool workflow was selected instead."
-                ),
-                extra_payload={
-                    "turn_contract_required_tools": list(
-                        routing_contract_required_tools
-                    ),
-                    "turn_contract_required_surface_families": list(
-                        routing_contract_required_tool_surface_families
-                    ),
-                    "turn_contract_external_surface_families": list(
-                        routing_contract_external_surface_families
-                    ),
-                    "turn_expected_outcome_contract": dict(
-                        routing_turn_expected_outcome_contract
-                    ),
-                },
-            )
-
         selector_safe_general_fallback_payload = (
             _build_selector_safe_general_fallback_payload(
                 selected_workflow_id=selected_workflow_id_text,
@@ -35095,7 +35289,14 @@ class InternalMCPChatOrchestrator:
                 )
             )
 
-        _maybe_force_tool_pipeline_for_multi_surface_turn_contract()
+        custom_workflow_dispatch_support.apply_turn_contract_dispatch_preflight(
+            dispatch_selection_state,
+            turn_expected_outcome_contract=routing_turn_expected_outcome_contract,
+            required_tools=routing_contract_required_tools,
+            required_surface_families=routing_contract_required_tool_surface_families,
+            external_surface_families=routing_contract_external_surface_families,
+        )
+        _sync_selected_workflow_locals_from_state()
 
         def _build_custom_workflow_dispatch_data(
             workflow_id_override: str | None = None,

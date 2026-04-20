@@ -6363,6 +6363,38 @@ def test_multi_surface_turn_contract_overrides_selected_custom_workflow_to_tool_
         "arxiv",
         "jira",
     ]
+    contract_check_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "workflow_dispatch_turn_contract_check"
+        ),
+        None,
+    )
+    assert contract_check_entry is not None
+    assert contract_check_entry.get("status") == "override_required"
+    assert contract_check_entry.get("selected_workflow_id") == selected_workflow_id
+    assert contract_check_entry.get("selected_workflow_can_satisfy_contract") is False
+    assert contract_check_entry.get("required_surface_families") == [
+        "knowledge_base",
+        "arxiv",
+        "jira",
+    ]
+    prepare_step_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "workflow_dispatch_prepare_step"
+            and entry.get("step_id") == "turn_contract_dispatch_preflight"
+        ),
+        None,
+    )
+    assert prepare_step_entry is not None
+    assert "could not satisfy the multi-surface turn contract" in str(
+        prepare_step_entry.get("result_summary") or ""
+    ).lower()
 
     override_entry = next(
         (
@@ -6388,6 +6420,158 @@ def test_multi_surface_turn_contract_overrides_selected_custom_workflow_to_tool_
         "arxiv",
         "jira",
     ]
+
+
+def test_multi_surface_turn_contract_records_satisfied_tool_pipeline_dispatch_check(
+    monkeypatch,
+):
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_load_base_system_prompt_from_vontology",
+        lambda **_kwargs: ("You are Von.", "#V#test_base_system_prompt"),
+    )
+    monkeypatch.setattr(
+        orchestrator._gateway,
+        "describe_methods",
+        lambda: {
+            "search_knowledge_base": {"category": "read"},
+            "search_concepts": {"category": "read"},
+            "search_arxiv": {"category": "read"},
+            "jira_search": {"category": "read"},
+        },
+    )
+
+    execute_calls: list[str] = []
+
+    def _execute_workflow(workflow_id: str, **_kwargs: Any):
+        execute_calls.append(workflow_id)
+        if workflow_id != TOOL_CALLING_WORKFLOW_ID:
+            raise AssertionError(f"Unexpected workflow execution: {workflow_id}")
+        return SimpleNamespace(
+            data={
+                "final_response": "Research actions via tool pipeline.",
+                "tool_messages": [],
+                "invocations": [],
+                "iteration_count": 1,
+            },
+            final_state="complete",
+            completed=True,
+        )
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
+
+    result = orchestrator.run(
+        prompt=(
+            "Prepare my next three research actions from my represented papers, "
+            "recent arXiv work, and linked Jira tasks."
+        ),
+        context=[
+            {
+                "role": "system",
+                "content": (
+                    "Expected answer contract for this turn:\n"
+                    "- Success target: Three grounded research actions based on "
+                    "represented papers, relevant recent arXiv work, and linked Jira tasks.\n"
+                    "- Grounding requirement: Papers and tasks must be grounded in "
+                    "represented or retrieved evidence.\n"
+                    "- Selector guidance: Use KB/concept retrieval, arXiv search, "
+                    "and Jira retrieval."
+                ),
+            }
+        ],
+        llm_client=_CapturingLLM(
+            [
+                json.dumps(
+                    {
+                        "workflow_id": TOOL_CALLING_WORKFLOW_ID,
+                        "confidence": 0.94,
+                        "reasoning": (
+                            "This needs multi-surface retrieval through the "
+                            "general tool workflow."
+                        ),
+                    }
+                )
+            ]
+        ),
+        model=None,
+        user_namespace="#V#user",
+        workflow_discovery_result={
+            "matches": [
+                {
+                    "concept_id": TOOL_CALLING_WORKFLOW_ID,
+                    "name": "Tool Calling Workflow",
+                    "description": "General-purpose multi-surface tool workflow.",
+                    "routing_eligible": True,
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "candidate_source": "workflow_discovery",
+                    "relevance_score": 0.98,
+                    "confidence_score": 0.98,
+                }
+            ],
+            "candidates": [
+                {
+                    "concept_id": TOOL_CALLING_WORKFLOW_ID,
+                    "name": "Tool Calling Workflow",
+                    "description": "General-purpose multi-surface tool workflow.",
+                    "routing_eligible": True,
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "candidate_source": "workflow_discovery",
+                    "relevance_score": 0.98,
+                    "confidence_score": 0.98,
+                }
+            ],
+            "match_count": 1,
+        },
+    )
+
+    assert execute_calls == [TOOL_CALLING_WORKFLOW_ID]
+    assert result.response_text == "Research actions via tool pipeline."
+    assert result.workflow_routing is not None
+    assert result.workflow_routing.workflow_id == TOOL_CALLING_WORKFLOW_ID
+    assert result.workflow_routing.verdict == "rag_selected"
+    contract_check_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "workflow_dispatch_turn_contract_check"
+        ),
+        None,
+    )
+    assert contract_check_entry is not None
+    assert contract_check_entry.get("status") == "selected_workflow_satisfies_contract"
+    assert contract_check_entry.get("selected_workflow_id") == TOOL_CALLING_WORKFLOW_ID
+    assert contract_check_entry.get("selected_workflow_can_satisfy_contract") is True
+    assert contract_check_entry.get("required_surface_families") == [
+        "knowledge_base",
+        "arxiv",
+        "jira",
+    ]
+    assert not any(
+        isinstance(entry, dict)
+        and entry.get("type") == "workflow_selector_override"
+        and entry.get("reason")
+        == "selected_custom_workflow_cannot_satisfy_multi_surface_turn_contract"
+        for entry in result.aux_llm_calls
+    )
+    prepare_step_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "workflow_dispatch_prepare_step"
+            and entry.get("step_id") == "turn_contract_dispatch_preflight"
+        ),
+        None,
+    )
+    assert prepare_step_entry is not None
+    assert "satisfied the multi-surface turn contract" in str(
+        prepare_step_entry.get("result_summary") or ""
+    ).lower()
 
 
 def test_url_read_prompt_stays_selector_owned_without_python_url_preselection(

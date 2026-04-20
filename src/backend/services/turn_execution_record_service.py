@@ -2456,6 +2456,10 @@ def build_workflow_routing_diagnostics(
         aux_llm_calls,
         entry_type="workflow_dispatch_boundary",
     )
+    turn_contract_check_entries = _collect_aux_entries(
+        aux_llm_calls,
+        entry_type="workflow_dispatch_turn_contract_check",
+    )
     dispatch_prepare_events = _collect_aux_entries(
         aux_llm_calls,
         entry_type="workflow_dispatch_prepare_step",
@@ -2707,6 +2711,9 @@ def build_workflow_routing_diagnostics(
     )
     last_dispatch_boundary = (
         _safe_str(dispatch_events[-1].get("boundary")) if dispatch_events else None
+    )
+    latest_turn_contract_check = (
+        turn_contract_check_entries[-1] if turn_contract_check_entries else {}
     )
     dispatch_prepare_steps: list[dict[str, Any]] = []
     dispatch_prepare_total_duration_ms = 0
@@ -2987,6 +2994,52 @@ def build_workflow_routing_diagnostics(
                 "slowest_step_label": dispatch_prepare_slowest_step_label,
                 "slowest_step_duration_ms": dispatch_prepare_slowest_step_duration_ms,
                 "steps": dispatch_prepare_steps,
+            },
+            "turn_contract_check": {
+                "status": _safe_str(latest_turn_contract_check.get("status")),
+                "selected_workflow_id": _safe_str(
+                    latest_turn_contract_check.get("selected_workflow_id")
+                ),
+                "selected_workflow_can_satisfy_contract": (
+                    latest_turn_contract_check.get(
+                        "selected_workflow_can_satisfy_contract"
+                    )
+                    if isinstance(
+                        latest_turn_contract_check.get(
+                            "selected_workflow_can_satisfy_contract"
+                        ),
+                        bool,
+                    )
+                    else None
+                ),
+                "required_tools": _dedupe_string_sequence(
+                    latest_turn_contract_check.get("required_tools") or []
+                ),
+                "required_surface_families": _dedupe_string_sequence(
+                    latest_turn_contract_check.get("required_surface_families") or []
+                ),
+                "external_surface_families": _dedupe_string_sequence(
+                    latest_turn_contract_check.get("external_surface_families") or []
+                ),
+                "override_reason": _safe_str(
+                    latest_turn_contract_check.get("override_reason")
+                ),
+                "reasoning": _safe_str(latest_turn_contract_check.get("reasoning")),
+                "turn_expected_outcome_contract": (
+                    dict(
+                        cast(
+                            Mapping[str, Any],
+                            latest_turn_contract_check.get(
+                                "turn_expected_outcome_contract"
+                            ),
+                        )
+                    )
+                    if isinstance(
+                        latest_turn_contract_check.get("turn_expected_outcome_contract"),
+                        Mapping,
+                    )
+                    else None
+                ),
             },
             "tool_execution": {
                 "planned_count": _safe_non_negative_int(

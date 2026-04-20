@@ -977,6 +977,35 @@ def test_build_workflow_routing_diagnostics_preserves_selector_exchange_and_disp
                 "duration_ms": 11,
             },
             {
+                "type": "workflow_dispatch_turn_contract_check",
+                "status": "override_required",
+                "selected_workflow_id": "#V#meeting_invitation_testing_workflow",
+                "selected_workflow_can_satisfy_contract": False,
+                "required_tools": [
+                    "search_knowledge_base",
+                    "search_concepts",
+                    "search_web",
+                ],
+                "required_surface_families": [
+                    "knowledge_base",
+                    "web",
+                ],
+                "external_surface_families": ["web"],
+                "override_reason": (
+                    "selected_custom_workflow_cannot_satisfy_multi_surface_turn_contract"
+                ),
+                "reasoning": (
+                    "The selected custom workflow did not advertise tool-pipeline "
+                    "execution, so dispatch had to use the general tool workflow."
+                ),
+                "turn_expected_outcome_contract": {
+                    "success_target": "Grounded meeting invitation test plan.",
+                    "selector_guidance": (
+                        "Use represented meeting context and live web confirmation."
+                    ),
+                },
+            },
+            {
                 "type": "workflow_selector_prompt",
                 "prompt_id": "#V#chat_turn_classifier_prompt",
                 "requested_prompt_ids": ["#V#chat_turn_classifier_prompt"],
@@ -1249,6 +1278,41 @@ def test_build_workflow_routing_diagnostics_preserves_selector_exchange_and_disp
     assert diagnostics["dispatch"]["pre_dispatch"]["slowest_step_id"] == (
         "selector_candidate_preparation"
     )
+    assert diagnostics["dispatch"]["turn_contract_check"]["status"] == (
+        "override_required"
+    )
+    assert diagnostics["dispatch"]["turn_contract_check"]["selected_workflow_id"] == (
+        "#V#meeting_invitation_testing_workflow"
+    )
+    assert (
+        diagnostics["dispatch"]["turn_contract_check"][
+            "selected_workflow_can_satisfy_contract"
+        ]
+        is False
+    )
+    assert diagnostics["dispatch"]["turn_contract_check"]["required_tools"] == [
+        "search_knowledge_base",
+        "search_concepts",
+        "search_web",
+    ]
+    assert diagnostics["dispatch"]["turn_contract_check"][
+        "required_surface_families"
+    ] == [
+        "knowledge_base",
+        "web",
+    ]
+    assert diagnostics["dispatch"]["turn_contract_check"][
+        "external_surface_families"
+    ] == ["web"]
+    assert diagnostics["dispatch"]["turn_contract_check"]["override_reason"] == (
+        "selected_custom_workflow_cannot_satisfy_multi_surface_turn_contract"
+    )
+    assert diagnostics["dispatch"]["turn_contract_check"]["turn_expected_outcome_contract"] == {
+        "success_target": "Grounded meeting invitation test plan.",
+        "selector_guidance": (
+            "Use represented meeting context and live web confirmation."
+        ),
+    }
     assert diagnostics["dispatch"]["selected_execution_mode"] == "tool_pipeline"
     assert diagnostics["dispatch"]["contract_resolution_status"] == "resolved"
     assert diagnostics["dispatch"]["failure_codes"] == ["tool_dispatch_not_started"]
