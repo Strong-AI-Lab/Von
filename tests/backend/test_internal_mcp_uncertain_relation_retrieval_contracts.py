@@ -111,3 +111,49 @@ def test_find_relations_with_argument_supports_uncertain_only_mode() -> None:
     assert all(hit.get("relation_state") == "uncertain" for hit in hits)
     assert all(hit.get("is_asserted") is False for hit in hits)
 
+
+def test_get_predicate_incidence_supports_type_mode_via_gateway() -> None:
+    gateway = _gateway()
+    ConceptsRepository.insert_one(
+        {
+            "concept_id": "#V#alice_student",
+            "relationships": {
+                "is_an_instance_of": ["#V#sail_student"],
+                "#V#member_of_organisation": ["#V#sail"],
+                "#V#has_phd_supervisor": ["#V#michael_witbrock"],
+            },
+        }
+    )
+    ConceptsRepository.insert_one(
+        {
+            "concept_id": "#V#bob_student",
+            "relationships": {
+                "is_an_instance_of": ["#V#sail_student"],
+                "#V#member_of_organisation": ["#V#sail"],
+            },
+        }
+    )
+    ConceptsRepository.insert_one({"concept_id": "#V#sail", "relationships": {}})
+    ConceptsRepository.insert_one(
+        {"concept_id": "#V#michael_witbrock", "relationships": {}}
+    )
+
+    payload = gateway.invoke(
+        "get_predicate_incidence",
+        {
+            "instance_of": "#V#sail_student",
+            "direct_instances_only": True,
+            "include_concept_preview": False,
+        },
+    ).payload
+
+    assert payload["mode"] == "type"
+    assert payload["instance_of"] == "#V#sail_student"
+    assert payload["instance_count_considered"] == 2
+    rows = {
+        row["predicate_concept_id"]: row for row in payload.get("predicates") or []
+    }
+    assert rows["#V#member_of_organisation"]["relation_hit_count"] == 2
+    assert rows["#V#member_of_organisation"]["grounded_instance_count"] == 2
+    assert rows["#V#has_phd_supervisor"]["relation_hit_count"] == 1
+

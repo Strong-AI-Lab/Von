@@ -49,6 +49,10 @@ class _Gateway:
                 "category": "read",
                 "description": "Retrieve relation hits for a concept argument",
             },
+            "get_predicate_incidence": {
+                "category": "read",
+                "description": "Summarise predicate incidence for an entity or type",
+            },
             "task_create": {
                 "category": "write",
                 "description": "Create a Von task",
@@ -1299,6 +1303,60 @@ def test_missing_tool_retry_prefers_search_anchor_over_user_anchor_for_ontology_
     ]
 
 
+def test_missing_tool_retry_uses_predicate_incidence_before_filtered_relation_hits_for_explicit_predicate_turn():
+    orchestrator = _build_orchestrator_stub()
+
+    forced = orchestrator._infer_missing_tool_call_retry_tool_calls(
+        [
+            {
+                "role": "system",
+                "content": "CURRENT USER CONTEXT: Michael Witbrock (#V#michael_witbrock)",
+            }
+        ],
+        user_prompt="What concepts am I in in a #V#author_of relation with?",
+        missing_required_tools=[
+            "get_predicate_incidence",
+            "find_relations_with_argument",
+        ],
+        tool_invocations=[
+            {
+                "tool": "search_concepts",
+                "status": "ok",
+                "effective_payload": {
+                    "success": True,
+                    "results": [
+                        {
+                            "concept_id": "#V#author_of",
+                            "kind": "predicate",
+                            "relevance_score": 99.0,
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+
+    assert forced == [
+        {
+            "action": "call_tool",
+            "tool": "get_predicate_incidence",
+            "payload": {
+                "concept_id": "#V#michael_witbrock",
+                "predicate_filter": ["#V#author_of"],
+            },
+        },
+        {
+            "action": "call_tool",
+            "tool": "find_relations_with_argument",
+            "payload": {
+                "concept_id": "#V#michael_witbrock",
+                "predicate_filter": ["#V#author_of"],
+                "limit": 20,
+            },
+        },
+    ]
+
+
 def test_turn_contract_with_member_entity_guidance_requires_relation_argument_retrieval():
     required_tools = InternalMCPChatOrchestrator._infer_turn_contract_required_tools(
         turn_expected_outcome_contract={
@@ -1321,6 +1379,7 @@ def test_turn_contract_with_member_entity_guidance_requires_relation_argument_re
 
     assert "search_concepts" in required_tools
     assert "get_text_relations_summary" in required_tools
+    assert "get_predicate_incidence" in required_tools
     assert "find_relations_with_argument" in required_tools
 
 
@@ -1368,6 +1427,7 @@ def test_turn_contract_with_explicit_relation_grounding_language_requires_relati
     )
 
     assert "search_knowledge_base" in required_tools
+    assert "get_predicate_incidence" in required_tools
     assert "find_relations_with_argument" in required_tools
 
 

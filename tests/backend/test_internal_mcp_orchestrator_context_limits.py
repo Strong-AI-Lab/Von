@@ -608,6 +608,73 @@ def test_format_tool_result_shapes_text_relations_summary_payload_for_live_follo
     assert "distinct predicate" in payload["retrieval_diagnostics"]["note"]
 
 
+def test_format_tool_result_shapes_get_predicate_incidence_payload_for_live_follow_up():
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=cast(Any, _StubGateway()),
+        max_tool_invocations=1,
+        max_tool_result_chars=5_000,
+        max_tool_result_field_chars=1_500,
+        max_context_chars=80_000,
+    )
+
+    encoded = orchestrator._format_tool_result(
+        "get_predicate_incidence",
+        {
+            "mode": "entity",
+            "concept_id": "#V#michael_witbrock",
+            "total_predicates": 2,
+            "predicates": [
+                {
+                    "predicate_concept_id": "#V#author_of",
+                    "predicate_preview": {
+                        "name": "author of",
+                        "kind": "predicate",
+                    },
+                    "relation_hit_count": 12,
+                    "grounding_count": 7,
+                    "binary_relation_hit_count": 12,
+                    "subject_argument_hit_count": 12,
+                    "object_argument_hit_count": 0,
+                    "argument_indexes": [1],
+                    "sample_groundings": [
+                        {
+                            "grounding_kind": "concept",
+                            "concept_id": "#V#paper_one",
+                            "name": "Paper One",
+                        },
+                        {
+                            "grounding_kind": "text",
+                            "text_preview": "Grounded textual mention of authorship evidence.",
+                        },
+                    ],
+                }
+            ],
+            "paging": {
+                "limit": 50,
+                "offset": 0,
+                "returned": 1,
+                "total_available": 2,
+            },
+        },
+        1.0,
+        "ok",
+    )
+
+    parsed = json.loads(encoded)
+    payload = parsed["payload"]
+    assert payload["_llm_view"] == "predicate_incidence_results.v1"
+    assert payload["mode"] == "entity"
+    assert payload["concept_id"] == "#V#michael_witbrock"
+    assert payload["total_predicates"] == 2
+    assert payload["shown_predicate_count"] == 1
+    assert payload["predicates"][0]["predicate_concept_id"] == "#V#author_of"
+    assert payload["predicates"][0]["predicate_name"] == "author of"
+    assert payload["predicates"][0]["relation_hit_count"] == 12
+    assert payload["predicates"][0]["grounding_count"] == 7
+    assert payload["predicates"][0]["sample_groundings"][0]["concept_id"] == "#V#paper_one"
+    assert "predicate row" in payload["retrieval_diagnostics"]["note"]
+
+
 def test_format_tool_result_shapes_related_concepts_payload_for_live_follow_up():
     orchestrator = InternalMCPChatOrchestrator(
         gateway=cast(Any, _StubGateway()),

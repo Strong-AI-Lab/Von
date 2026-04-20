@@ -675,6 +675,216 @@ class _ExplicitEntityRelationLookupLLM:
         return "Michael Witbrock is affiliated with Test Org."
 
 
+class _PredicateExtentRoutingGatewayStub:
+    enabled = True
+
+    def __init__(self) -> None:
+        self.invocations: list[dict[str, Any]] = []
+
+    def describe_methods(self) -> dict[str, Any]:
+        return {
+            "get_predicate_incidence": {
+                "description": (
+                    "Summarise distinct predicates around a concept before choosing a "
+                    "predicate-specific extent or filtered relation lookup."
+                ),
+                "category": "read",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "concept_id": {"type": "string"},
+                        "predicate_filter": {"type": "array"},
+                    },
+                },
+            },
+            "find_relations_with_argument": {
+                "description": "Return grounded relation hits for a concept argument.",
+                "category": "read",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "concept_id": {"type": "string"},
+                        "predicate_filter": {"type": "array"},
+                    },
+                },
+            },
+        }
+
+    def invoke(self, tool_name: str, payload: dict[str, Any]):
+        self.invocations.append({"tool": tool_name, "payload": dict(payload)})
+        if tool_name == "get_predicate_incidence":
+            return SimpleNamespace(
+                payload={
+                    "mode": "entity",
+                    "concept_id": "#V#test_user",
+                    "total_predicates": 1,
+                    "predicates": [
+                        {
+                            "predicate_concept_id": "#V#author_of",
+                            "predicate_preview": {
+                                "name": "author of",
+                                "kind": "predicate",
+                            },
+                            "relation_hit_count": 2,
+                            "grounding_count": 2,
+                            "subject_argument_hit_count": 2,
+                            "object_argument_hit_count": 0,
+                            "argument_indexes": [1],
+                            "sample_groundings": [
+                                {
+                                    "grounding_kind": "concept",
+                                    "concept_id": "#V#test_paper_one",
+                                    "name": "Test Paper One",
+                                },
+                                {
+                                    "grounding_kind": "concept",
+                                    "concept_id": "#V#test_paper_two",
+                                    "name": "Test Paper Two",
+                                },
+                            ],
+                        }
+                    ],
+                    "paging": {
+                        "limit": 50,
+                        "offset": 0,
+                        "returned": 1,
+                        "total_available": 1,
+                    },
+                },
+                duration_ms=5,
+            )
+        if tool_name == "find_relations_with_argument":
+            return SimpleNamespace(
+                payload={
+                    "concept_id": payload.get("concept_id"),
+                    "total_hits": 2,
+                    "hits": [
+                        {
+                            "source_concept_id": "#V#test_user",
+                            "predicate_concept_id": "#V#author_of",
+                            "relation_kind": "binary",
+                            "argument_indexes": [1],
+                            "target_value": "#V#test_paper_one",
+                            "source_concept_preview": {
+                                "concept_id": "#V#test_user",
+                                "name": "Test User",
+                                "kind": "individual",
+                            },
+                            "target_concept_preview": {
+                                "concept_id": "#V#test_paper_one",
+                                "name": "Test Paper One",
+                                "kind": "individual",
+                            },
+                            "relation_metadata": {
+                                "relation_id": "struct::test_user::author_of::paper_one",
+                                "match_type": "exact",
+                            },
+                            "score": 1.0,
+                            "is_asserted": True,
+                            "relation_state": "asserted",
+                        },
+                        {
+                            "source_concept_id": "#V#test_user",
+                            "predicate_concept_id": "#V#author_of",
+                            "relation_kind": "binary",
+                            "argument_indexes": [1],
+                            "target_value": "#V#test_paper_two",
+                            "source_concept_preview": {
+                                "concept_id": "#V#test_user",
+                                "name": "Test User",
+                                "kind": "individual",
+                            },
+                            "target_concept_preview": {
+                                "concept_id": "#V#test_paper_two",
+                                "name": "Test Paper Two",
+                                "kind": "individual",
+                            },
+                            "relation_metadata": {
+                                "relation_id": "struct::test_user::author_of::paper_two",
+                                "match_type": "exact",
+                            },
+                            "score": 1.0,
+                            "is_asserted": True,
+                            "relation_state": "asserted",
+                        },
+                    ],
+                    "paging": {
+                        "limit": 20,
+                        "offset": 0,
+                        "returned": 2,
+                        "total_available": 2,
+                    },
+                },
+                duration_ms=5,
+            )
+        raise AssertionError(f"Unexpected tool call: {tool_name}")
+
+
+class _PredicateExtentRoutingLLM:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def generate(self, prompt, context=None, model=None):
+        context_messages = list(context or [])
+        self.calls.append(
+            {"prompt": prompt, "context": context_messages, "model": model}
+        )
+        context_text = "\n".join(
+            str(message.get("content") or "")
+            for message in context_messages
+            if isinstance(message, dict)
+        )
+        if isinstance(prompt, str) and "expected-success inference policy" in prompt:
+            return (
+                '{"expected_outcome_summary":"Identify the represented concepts that stand in the requested predicate relation to the authenticated user.",'
+                '"grounding_requirement":"Use ontology-native predicate incidence or relation evidence before naming related concepts.",'
+                '"precision_policy":"Prefer explicit insufficiency over unsupported relation claims.",'
+                '"selector_guidance":"Prefer ontology-native retrieval surfaces that narrow by predicate before broad relation-hit paging.",'
+                '"answering_guidance":"Use the predicate incidence evidence to choose the relevant predicate, then answer from grounded relation hits.",'
+                '"reasoning":"Explicit predicate-relative turns should not rely on broad unfiltered relation paging when authenticated actor context exists."}'
+            )
+        if isinstance(prompt, str) and prompt.strip().startswith("Select workflow"):
+            return (
+                '{"workflow_id":"#V#tool_calling_workflow",'
+                '"confidence":0.95,'
+                '"reasoning":"This is a grounded ontology relation turn that should use the tool pipeline."}'
+            )
+        if prompt == "What concepts am I in in a #V#author_of relation with?":
+            if (
+                "Expected answer contract for this turn" in context_text
+                and "CURRENT USER CONTEXT: Test User (#V#test_user)" in context_text
+            ):
+                return (
+                    '{"action":"call_tool","tool":"get_predicate_incidence",'
+                    '"payload":{"concept_id":"#V#test_user","predicate_filter":["#V#author_of"]}}'
+                )
+            return "I need grounded predicate incidence evidence first."
+        if isinstance(prompt, str) and prompt.startswith(
+            "Provide a final answer to the user now that the tool result is available."
+        ):
+            if (
+                "Predicate incidence summary" in context_text
+                and "#V#author_of" in context_text
+                and "Relation-bearing evidence excerpts" not in context_text
+            ):
+                return (
+                    '{"action":"call_tool","tool":"find_relations_with_argument",'
+                    '"payload":{"concept_id":"#V#test_user","predicate_filter":["#V#author_of"],"limit":20}}'
+                )
+            if (
+                "Predicate incidence summary" in context_text
+                and "Relation-bearing evidence excerpts" in context_text
+                and "Test Paper One" in context_text
+                and "Test Paper Two" in context_text
+            ):
+                return (
+                    "You are in a represented #V#author_of relation with "
+                    "Test Paper One and Test Paper Two."
+                )
+            return "I couldn't find any grounded #V#author_of relations yet."
+        return "You are in a represented #V#author_of relation with Test Paper One and Test Paper Two."
+
+
 def _make_app(
     monkeypatch,
     *,
@@ -685,6 +895,7 @@ def _make_app(
         | _GroundedKbLookupLLM
         | _MixedGroundedEvidenceLLM
         | _ExplicitEntityRelationLookupLLM
+        | _PredicateExtentRoutingLLM
     ),
     gateway_override: Any | None = None,
     discovery_override: Any | None = None,
@@ -1469,6 +1680,80 @@ def test_generate_explicit_entity_relation_lookup_uses_grounded_tool_pipeline(
     execution = turn_record.get("execution") or {}
     selected_workflow_trace = execution.get("selected_workflow_trace") or {}
     assert selected_workflow_trace.get("selected_execution_mode") == "tool_pipeline"
+
+
+def test_generate_explicit_predicate_relative_turn_uses_predicate_incidence_before_relation_hits(
+    monkeypatch,
+) -> None:
+    llm = _PredicateExtentRoutingLLM()
+    gateway = _PredicateExtentRoutingGatewayStub()
+    app = _make_app(
+        monkeypatch,
+        llm=llm,
+        gateway_override=gateway,
+        discovery_override=_tool_calling_discovery,
+        max_tool_invocations=3,
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/von/generate",
+        json={"prompt": "What concepts am I in in a #V#author_of relation with?"},
+    )
+    assert response.status_code == 200
+
+    body = response.get_json()
+    assert isinstance(body, dict)
+    assert body.get("response") == (
+        "You are in a represented #V#author_of relation with Test Paper One and Test Paper Two."
+    )
+
+    assert gateway.invocations
+    assert gateway.invocations[0]["tool"] == "get_predicate_incidence"
+    first_payload = gateway.invocations[0]["payload"]
+    assert first_payload["concept_id"] == "#V#test_user"
+    assert first_payload["predicate_filter"] == ["#V#author_of"]
+    assert first_payload["namespace"] == "#V#test_user@test_org"
+    if len(gateway.invocations) > 1:
+        assert gateway.invocations[1]["tool"] == "find_relations_with_argument"
+        second_payload = gateway.invocations[1]["payload"]
+        assert second_payload["concept_id"] == "#V#test_user"
+        assert second_payload["predicate_filter"] == ["#V#author_of"]
+        assert second_payload["limit"] == 20
+        assert second_payload["namespace"] == "#V#test_user@test_org"
+
+    summariser_calls = [
+        call
+        for call in llm.calls
+        if isinstance(call.get("prompt"), str)
+        and call["prompt"].startswith(
+            "Provide a final answer to the user now that the tool result is available."
+        )
+    ]
+    assert summariser_calls
+    final_summariser_context_text = "\n".join(
+        str(message.get("content") or "")
+        for message in (summariser_calls[-1].get("context") or [])
+        if isinstance(message, dict)
+    )
+    assert "Predicate incidence summary" in final_summariser_context_text
+    assert "#V#author_of" in final_summariser_context_text
+    assert "Test Paper One" in final_summariser_context_text
+    assert "Test Paper Two" in final_summariser_context_text
+    if len(gateway.invocations) > 1:
+        assert "Relation-bearing evidence excerpts" in final_summariser_context_text
+
+    llm_debug = body.get("llm_debug") or {}
+    tool_invocations = llm_debug.get("tool_invocations") or []
+    recorded_tools = [
+        (record.get("tool") or record.get("method"))
+        for record in tool_invocations
+        if isinstance(record, dict)
+    ]
+    assert recorded_tools
+    assert "get_predicate_incidence" in recorded_tools
+    if len(gateway.invocations) > 1:
+        assert "find_relations_with_argument" in recorded_tools
 
 
 def test_generate_threads_window_session_header_into_conversation_session_resolution(

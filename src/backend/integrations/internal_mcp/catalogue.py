@@ -174,6 +174,28 @@ def _find_relations_with_argument(**kwargs):
     )
 
 
+def _get_predicate_incidence(**kwargs):
+    from ...services.concept_relation_service import get_predicate_incidence
+
+    return get_predicate_incidence(
+        concept_id=kwargs.get("concept_id"),
+        instance_of=kwargs.get("instance_of"),
+        direct_instances_only=bool(kwargs.get("direct_instances_only", False)),
+        argument_index=kwargs.get("argument_index"),
+        predicate_filter=kwargs.get("predicate_filter"),
+        relation_kind=kwargs.get("relation_kind"),
+        scope=kwargs.get("scope"),
+        include_text_snippets=bool(kwargs.get("include_text_snippets", False)),
+        include_concept_preview=bool(kwargs.get("include_concept_preview", True)),
+        limit=kwargs.get("limit"),
+        offset=kwargs.get("offset"),
+        sort_by=kwargs.get("sort_by"),
+        include_uncertain=bool(kwargs.get("include_uncertain", False)),
+        uncertainty_mode=kwargs.get("uncertainty_mode"),
+        uncertainty_statuses=kwargs.get("uncertainty_statuses"),
+    )
+
+
 def _get_context(**kwargs):
     from ...services.settings_service import (
         resolve_llm_setting,
@@ -7041,6 +7063,67 @@ def _find_relations_with_argument_output_schema() -> Schema:
             "(source_concept_id, predicate_concept_id, relation_kind, argument_indexes, "
             "target_value, optional previews/snippets, relation_metadata, access_granted, "
             "follow_up_actions, score, optional uncertainty metadata), and paging metadata."
+        ),
+    )
+
+
+def _predicate_incidence_input_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "concept_id": (str, type(None)),
+            "instance_of": (str, type(None)),
+            "direct_instances_only": (bool, type(None)),
+            "argument_index": (int, str, type(None)),
+            "predicate_filter": (list, type(None)),
+            "relation_kind": (str, type(None)),
+            "scope": (str, type(None)),
+            "include_text_snippets": (bool, type(None)),
+            "include_concept_preview": (bool, type(None)),
+            "limit": (int, type(None)),
+            "offset": (int, type(None)),
+            "sort_by": (str, type(None)),
+            "include_uncertain": (bool, type(None)),
+            "uncertainty_mode": (str, type(None)),
+            "uncertainty_statuses": (list, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "get_predicate_incidence input: exactly one of concept_id (entity mode) or "
+            "instance_of (type mode). Optional direct_instances_only, argument_index, "
+            "predicate_filter, relation_kind ('any'|'binary'|'text'), include_text_snippets, "
+            "include_concept_preview, paging (limit/offset), sort_by "
+            "('relation_hit_count'|'grounding_count'|'grounded_instance_count'|'predicate'), "
+            "uncertainty retrieval controls, and optional namespace passthrough."
+        ),
+    )
+
+
+def _predicate_incidence_output_schema() -> Schema:
+    return Schema(
+        required={
+            "mode": str,
+            "total_predicates": int,
+            "predicates": list,
+            "paging": dict,
+        },
+        optional={
+            "concept_id": (str, type(None)),
+            "instance_of": (str, type(None)),
+            "type_ids_considered": (list, type(None)),
+            "instance_count_considered": (int, type(None)),
+            "direct_instances_only": (bool, type(None)),
+            "uncertainty_diagnostics": (dict, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "get_predicate_incidence output: mode ('entity'|'type'), total_predicates, "
+            "predicates[] (predicate_concept_id, relation_hit_count, grounding_count, "
+            "binary_relation_hit_count, text_relation_hit_count, subject_argument_hit_count, "
+            "object_argument_hit_count, argument_indexes, optional predicate_preview, "
+            "sample_groundings, and in type mode grounded_instance_count/sample_instances), "
+            "plus paging metadata and optional type/uncertainty diagnostics."
         ),
     )
 
@@ -25883,7 +25966,21 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             category="read",
             description=(
                 "Return the extent (all uses) of a predicate concept. Supports filtering by subject/object type, "
-                "source (text_relations|structured|all), pagination, and optional sampling (sample_size)."
+                "source (text_relations|structured|all), pagination, and optional sampling (sample_size). "
+                "If you do not yet know which predicate is relevant for an entity or type, use "
+                "get_predicate_incidence first."
+            ),
+        ),
+        MethodDefinition(
+            name="get_predicate_incidence",
+            handler=_get_predicate_incidence,
+            input_schema=_predicate_incidence_input_schema(),
+            output_schema=_predicate_incidence_output_schema(),
+            category="read",
+            description=(
+                "Summarise which predicates are actually observed around a concept or across "
+                "instances of a type. Use when you need distinct predicates plus counts before "
+                "choosing a predicate-specific extent or filtered relation lookup."
             ),
         ),
         MethodDefinition(

@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from src.backend.services.concept_relation_service import (
         build_concept_relations_payload,
         find_relations_with_argument,
+        get_predicate_incidence,
     )
     from src.backend.services.concept_search_service import search_concepts
     from src.backend.services.concept_embedding_service import (
@@ -271,6 +272,7 @@ _bind_imports(
     [
         "build_concept_relations_payload",
         "find_relations_with_argument",
+        "get_predicate_incidence",
     ],
 )
 _bind_imports("src.backend.services.concept_search_service", ["search_concepts"])
@@ -1899,6 +1901,69 @@ async def _handle_find_relations_with_argument(
                     "Use relation_kind in {any, binary, text}",
                 ],
                 related_concept_ids=[str(concept_id)],
+            )
+        ]
+
+
+async def _handle_get_predicate_incidence(arguments: dict[str, Any]) -> list[TextContent]:
+    concept_id = arguments.get("concept_id")
+    instance_of = arguments.get("instance_of")
+    if not (
+        (isinstance(concept_id, str) and concept_id.strip())
+        or (isinstance(instance_of, str) and instance_of.strip())
+    ):
+        return [
+            _json_error(
+                "Missing concept_id or instance_of parameter",
+                error_code="missing_parameter",
+                suggestions=[
+                    "Provide concept_id for entity-level predicate incidence",
+                    "Provide instance_of for type-level predicate incidence",
+                ],
+            )
+        ]
+
+    try:
+        payload = get_predicate_incidence(
+            concept_id=(str(concept_id).strip() if isinstance(concept_id, str) else None),
+            instance_of=(
+                str(instance_of).strip() if isinstance(instance_of, str) else None
+            ),
+            direct_instances_only=bool(arguments.get("direct_instances_only", False)),
+            argument_index=arguments.get("argument_index"),
+            predicate_filter=arguments.get("predicate_filter"),
+            relation_kind=arguments.get("relation_kind"),
+            scope=arguments.get("scope"),
+            include_text_snippets=bool(arguments.get("include_text_snippets", False)),
+            include_concept_preview=bool(
+                arguments.get("include_concept_preview", True)
+            ),
+            limit=arguments.get("limit"),
+            offset=arguments.get("offset"),
+            sort_by=arguments.get("sort_by"),
+            include_uncertain=bool(arguments.get("include_uncertain", False)),
+            uncertainty_mode=arguments.get("uncertainty_mode"),
+            uncertainty_statuses=arguments.get("uncertainty_statuses"),
+        )
+        return [_json_text(payload)]
+    except Exception as exc:
+        related_ids = [
+            value
+            for value in (
+                str(concept_id).strip() if isinstance(concept_id, str) else None,
+                str(instance_of).strip() if isinstance(instance_of, str) else None,
+            )
+            if value
+        ]
+        return [
+            _json_error(
+                f"Failed to compute predicate incidence: {exc}",
+                error_code="operation_failed",
+                suggestions=[
+                    "Provide exactly one of concept_id or instance_of",
+                    "Use relation_kind in {any, binary, text}",
+                ],
+                related_concept_ids=related_ids or None,
             )
         ]
 
@@ -4116,6 +4181,7 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "get_tree": _handle_get_tree,
     "fetch_concept": _handle_fetch_concept,
     "find_relations_with_argument": _handle_find_relations_with_argument,
+    "get_predicate_incidence": _handle_get_predicate_incidence,
     "fetch_concept_content": _handle_fetch_concept_content,
     "concept_exists": _handle_concept_exists,
     "search_concepts": _handle_search_concepts,
