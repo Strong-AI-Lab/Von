@@ -145,9 +145,11 @@ As of April 21, 2026:
 | `JVNAUTOSCI-1953` | `Done` | Structured tool-family keyword/prefix heuristics removed |
 | `JVNAUTOSCI-1954` | `Done` | Predicate-incidence lookup landed for entity/type incidence narrowing |
 | `JVNAUTOSCI-1955` | `Done` | Grounded false-negative turns no longer count as verified success |
+| `JVNAUTOSCI-1970` | `Done` | Remaining write-denial heuristic and hard-coded write-risk classes removed from the live write path |
 | `JVNAUTOSCI-1121` | `Done` | `/von/generate` lifecycle and response/debug support surfaces extracted from `von_routes.py` |
 | `JVNAUTOSCI-1120` | `To Do` | Frontend monolith cleanup remains open |
-| `JVNAUTOSCI-1825` | `To Do` | Flask app-factory decomposition remains open |
+| `JVNAUTOSCI-1825` | `Done` | `create_flask_app(...)` is now a materially smaller composition layer over extracted startup/admin support surfaces |
+| `JVNAUTOSCI-1971` | `To Do` | Buttonify still needs its remaining prose/heuristic option parsing removed |
 | `JVNAUTOSCI-768` | `To Do` | Vontology concept structure for tool heuristics still not landed |
 | `JVNAUTOSCI-770` | `To Do` | Rule-loader integration task still not landed |
 | `JVNAUTOSCI-1813` | `To Do` | Deferred structural exception-barrier task, not in the core `1116` line |
@@ -156,27 +158,7 @@ As of April 21, 2026:
 
 The remaining work is now more concentrated. The biggest live problems are no longer the same ones this note identified earlier.
 
-### 1. Prompt-required effect inference still carries a bounded denial heuristic
-
-**Location:** [turn_execution_record_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/services/turn_execution_record_service.py:41)
-
-The execution-time write policy no longer relies on `_CONFIRMATION_PATTERN`, `_DESTRUCTIVE_MUTATION_PATTERN`, or `prompt_explicitly_denies_write(...)`. Those semantics now come from the authored `write_tool_request_evidence` prompt surface. The remaining code-side denial heuristic is narrower: `turn_execution_record_service.py` still uses a bounded English denial matcher to suppress prompt-inferred required effects when the user explicitly says not to mutate.
-
-**Why this still matters:** this is still code-side English-language intent interpretation. It is no longer on the live execution-authorisation path, but it remains a prompt-semantics heuristic inside turn-record effect inference.
-
-### 2. Tool risk classification is still frozen in code
-
-**Location:** [write_tool_policy.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/workflows/write_tool_policy.py:129)
-
-Still present:
-
-- `_ADDITIVE_LOW_RISK_WRITE_TOOLS`
-- `_MUTATIVE_NON_DESTRUCTIVE_WRITE_TOOLS`
-- `_DESTRUCTIVE_WRITE_TOOLS`
-
-These are safety-relevant and fairly stable, but they are still hardcoded classification membership. This is exactly the kind of metadata that should ultimately come from represented tool metadata rather than code edits. `JVNAUTOSCI-768` and `JVNAUTOSCI-770` remain relevant here.
-
-### 3. Buttonify still parses options out of prose with regex-heavy logic
+### 1. Buttonify still parses options out of prose with regex-heavy logic
 
 **Location:** [buttonify_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/services/buttonify_service.py:152)
 
@@ -184,7 +166,7 @@ These are safety-relevant and fairly stable, but they are still hardcoded classi
 
 **Why this matters:** the right design is to have the LLM emit structured option metadata under an authority-backed contract, not to reverse-engineer interaction affordances from free text.
 
-### 4. The orchestrator remains the biggest structural risk
+### 2. The orchestrator remains the biggest structural risk
 
 **Location:** [orchestrator.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/integrations/internal_mcp/orchestrator.py:28634)
 
@@ -198,13 +180,19 @@ Even after the recent cleanups, `InternalMCPChatOrchestrator` is still an oversi
 
 This is the main structural reason new hacks tend to accumulate here first.
 
-### 5. Backend route layers improved materially, but the monolith is still too large
+### 3. Backend route layers improved materially, but the monolith is still too large
 
 **Location:** [von_routes.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/server/routes/von_routes.py)
 
 `JVNAUTOSCI-1121` is now done, and it made a real structural dent: the `/von/generate` durable-turn lifecycle, chat-history persistence, and success/error payload shaping helpers were extracted into `generate_route_support.py`, taking several hundred lines out of `von_routes.py` and giving later route work clearer seams. But the backend route layer is still large and mixed in responsibility, so this remains an ongoing structural concern rather than a solved problem.
 
-### 6. Catalogue size is still large, but the risk has shifted
+### 4. Flask app-factory sprawl is no longer the main route-layer blocker
+
+**Location:** [utils_flask.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/server/utils_flask.py)
+
+`JVNAUTOSCI-1825` is now done. The old `create_flask_app(...)` slab has been cut down materially by extracting request timing/configuration, startup bootstrap, chat-history admin context resolution, diagnostics helpers, and prewarm wiring into explicit support surfaces. The file is still large, but the structural risk has shifted away from one huge all-purpose app-factory function and toward the remaining large route modules themselves.
+
+### 5. Catalogue size is still large, but the risk has shifted
 
 **Location:** [catalogue.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/integrations/internal_mcp/catalogue.py:29952)
 
@@ -220,12 +208,12 @@ That means it is still a structural concern, but it is not the highest-priority 
 | Low-information answer-surface heuristic | Removed by `1956` | Keep the prompt-backed critic authoritative |
 | Turn contract stage-boundary plumbing | Fixed by `1929` | Done |
 | Multi-surface dispatch verification | Fixed by `1930` | Done |
-| Write confirmation / destructive regex | Still present | Needs authority-backed confirmation follow-on |
-| Hardcoded write-risk tool classes | Still present | Likely `768` / `770` related |
+| Write confirmation / destructive regex | Removed by `1970` | Keep represented authority surfaces canonical |
+| Hardcoded write-risk tool classes | Removed by `1970` | Keep represented runtime profile authoritative |
 | Buttonify regex option parsing | Still present | Needs dedicated follow-on |
 | Orchestrator monolith | Still present | Ongoing structural extraction |
 | Backend route monolith | Improved by `1121`, still present | Continue route/app-factory decomposition |
-| Flask app-factory sprawl | Still present | `1825` remains open |
+| Flask app-factory sprawl | Reduced materially by `1825` | No longer the sharpest open route-layer problem |
 
 ## Recommended Next Steps
 
@@ -233,14 +221,14 @@ The earlier version of this note said the most impactful next task was replacing
 
 The current best sequencing is:
 
-1. a follow-on for replacing the remaining write-tool confirmation / destructive regex backstops with an authority-backed confirmation protocol
-2. a follow-on for replacing `buttonify_service.py` prose parsing with structured output
-3. `JVNAUTOSCI-1825` — continue Flask app-factory and route-layer decomposition
-4. continued orchestrator extraction where it removes real mixed-responsibility pressure rather than opening noise tickets based only on file size
+1. `JVNAUTOSCI-1971` — replace `buttonify_service.py` prose parsing with authority-backed structured option extraction
+2. continued orchestrator extraction where it removes real mixed-responsibility pressure rather than opening noise tickets based only on file size
+3. further route-layer de-bloating after `1121`/`1825`, with the focus now on the remaining large route modules rather than the Flask app factory
+4. `JVNAUTOSCI-768` / `770` when represented tool metadata and rule-loader follow-through becomes the best lever for new capability work
 
 If the goal is specifically to continue the `1913` anti-egregious-path doctrine, the next most important principle is:
 
-> do not let the recent success at removing code-side semantic policy from the orchestrator hide the fact that write-confirmation semantics and UI-option parsing are still partly living in Python.
+> do not let the recent success at removing code-side semantic policy from the write path and the app factory hide the fact that UI-option parsing is still partly living in Python.
 
 That is where the next meaningful authority-alignment work now sits.
 

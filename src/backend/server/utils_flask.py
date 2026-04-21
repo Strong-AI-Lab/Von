@@ -976,504 +976,19 @@ def create_flask_app(
         __name__, static_folder=static_folder_path, template_folder=template_folder_path
     )  # Template folder set here is default, Blueprint can override
 
-    # --- Request Timing Middleware ---
-    # Log slow requests to help diagnose performance issues
-    SLOW_REQUEST_THRESHOLD_MS = float(
-        os.environ.get("VON_SLOW_REQUEST_THRESHOLD_MS", "1000")
-    )
-
-    @app.before_request
-    def _start_request_timer():
-        """Record request start time for timing middleware."""
-        g._request_start_time = time.perf_counter()
-
-    @app.after_request
-    def _log_slow_requests(response):
-        """Log requests that exceed the slow request threshold."""
-        start_time = getattr(g, "_request_start_time", None)
-        if start_time is not None:
-            elapsed_ms = (time.perf_counter() - start_time) * 1000
-            if elapsed_ms >= SLOW_REQUEST_THRESHOLD_MS:
-                app.logger.warning(
-                    "[slow_request] %s %s took %.1fms (threshold=%.0fms) status=%s",
-                    request.method,
-                    request.endpoint or request.path,
-                    elapsed_ms,
-                    SLOW_REQUEST_THRESHOLD_MS,
-                    response.status_code,
-                )
-            elif elapsed_ms >= 200:  # Log moderate latency at INFO level
-                app.logger.info(
-                    "[request_timing] %s %s %.1fms status=%s",
-                    request.method,
-                    request.path,
-                    elapsed_ms,
-                    response.status_code,
-                )
-        return response
-
-    # --- Configuration Setup ---
-    # Set secret key for session management (required for Google OAuth)
-    app.secret_key = os.environ.get("FLASK_SECRET_KEY", _DEV_SECRET_KEY)
-    strict_oauth_startup = google_oauth_strict_startup_enabled()
-
-    # Cookie defaults are conservative, and become strict-by-default when OAuth
-    # strict startup mode is enabled for hosted HTTPS deployments.
-    app.config["SESSION_COOKIE_HTTPONLY"] = _env_bool(
-        "FLASK_SESSION_COOKIE_HTTPONLY", True
-    )
-    app.config["SESSION_COOKIE_SECURE"] = _env_bool(
-        "FLASK_SESSION_COOKIE_SECURE", strict_oauth_startup
-    )
-    app.config["SESSION_COOKIE_SAMESITE"] = _normalise_session_cookie_samesite(
-        os.getenv("FLASK_SESSION_COOKIE_SAMESITE")
-    )
-
-    if strict_oauth_startup:
-        if app.secret_key == _DEV_SECRET_KEY:
-            raise RuntimeError(
-                "GOOGLE_OAUTH_STRICT_STARTUP requires FLASK_SECRET_KEY to be set to a non-default value."
-            )
-        if len(str(app.secret_key)) < 32:
-            raise RuntimeError(
-                "GOOGLE_OAUTH_STRICT_STARTUP requires FLASK_SECRET_KEY length >= 32 characters."
-            )
-        validate_google_oauth_startup_or_raise()
-
-    strict_mongo_startup = mongo_strict_startup_enabled()
-    if strict_mongo_startup:
-        validate_mongo_startup_or_raise()
-
-    startup_probe_enabled = mongo_startup_probe_enabled()
-    if startup_probe_enabled and not _is_running_under_pytest():
-        probe_result = run_mongo_startup_probe()
-        app.logger.info(
-            "Mongo startup probe succeeded (read=%s write=%s collection=%s).",
-            probe_result.get("read_ok"),
-            probe_result.get("write_ok"),
-            probe_result.get("write_collection"),
-        )
-
-    # Enable template auto-reload in development
-    app.config["TEMPLATES_AUTO_RELOAD"] = True
-
-    # --- Use Generic Config Keys ---
-    app.config["GENERATE_FUNC"] = generate_func  # Store the generate function
-    app.config["LIST_MODELS_FUNC"] = list_models_func  # Store the list models function
-
-    # Initialize storage (use setdefault for safety)
-    app.config.setdefault("PEOPLE", [])
-    app.config.setdefault("CONTEXT", [])
-    # Consider making the default model configurable or deriving it from the client
-    from ..languagemodels.model_defaults import DEFAULT_OLLAMA_MODEL
-
-    app.config.setdefault(
-        "MODEL", DEFAULT_OLLAMA_MODEL
-    )
-
-    @app.context_processor
-    def inject_feature_flags():
-        from ..services.feature_flags import (
-            get_expert_footer_enabled,
-            get_expert_tabs_enabled,
-        )
-
-        return {
-            "expert_tabs_enabled": get_expert_tabs_enabled(),
-            "expert_footer_enabled": get_expert_footer_enabled(),
-        }
-
-    # --- Register Blueprints ---
-    app.register_blueprint(von_bp, url_prefix="/von")  # MODIFIED
-    app.register_blueprint(
-        vontology_bp, url_prefix="/vontology/api/vontology"
-    )  # MODIFIED: Full prefix
-    app.register_blueprint(
-        concept_bp, url_prefix="/api/concepts"
-    )  # Register the new concept blueprint with prefix
-    app.register_blueprint(
-        settings_bp, url_prefix="/api/settings"
-    )  # Register the new settings blueprint with prefix
-    app.register_blueprint(
-        elicitation_bp, url_prefix="/api/elicitation"
-    )  # Register the new elicitation blueprint with prefix
-    app.register_blueprint(annotations_bp, url_prefix="/api/annotations")
-    app.register_blueprint(predicate_bp)  # Already has /api/predicates prefix
-    app.register_blueprint(workflows_bp)  # /api/workflows/*
-    app.register_blueprint(room_device_bp)
-    app.register_blueprint(client_capabilities_bp)
-    app.register_blueprint(speech_bp)
-    app.register_blueprint(admin_bp, url_prefix="/admin")
-    app.register_blueprint(
-        task_bp, url_prefix="/api/tasks"
-    )  # Task management (JVNAUTOSCI-1040)
-    app.register_blueprint(
-        message_bp, url_prefix="/api/messages"
-    )  # Inter-user messaging (JVNAUTOSCI-1071)
-    app.register_blueprint(
-        auth_bp, url_prefix="/von"
-    )  # Register the new auth blueprint with /von prefix to match Google OAuth config
-    app.register_blueprint(
-        agent_gmail_oauth_bp, url_prefix="/von"
-    )  # Agent Gmail OAuth endpoints (separate from user login)
-    # ---------------------------
-
-    def _slug_from_maybe_concept_id(value: object) -> str | None:
-        if not isinstance(value, str):
-            return None
-        raw = value.strip()
-        if not raw:
-            return None
-        return raw[3:] if raw.startswith("#V#") else raw
-
-    def _get_session_user_slug(flask_session: object) -> str | None:
-        get = getattr(flask_session, "get", None)
-        if not callable(get):
-            return None
-
-        user_id = _slug_from_maybe_concept_id(get("user_id"))
-        if user_id:
-            return user_id.lower().replace(" ", "_")
-
-        user_concept_id = get("user_concept_id")
-        user_slug = _slug_from_maybe_concept_id(user_concept_id)
-        if user_slug:
-            return user_slug.lower().replace(" ", "_")
-
-        return None
+    _install_request_timing_middleware(app)
+    _configure_flask_app_core(app, list_models_func, generate_func)
+    _register_default_blueprints(app)
 
     # --- Log App Version ---
     # Use app.logger if available, otherwise print
-    runtime_code_version = get_runtime_code_version()
-    try:
-        app.logger.setLevel(logging.INFO)  # Ensure INFO level is logged
-        app.logger.info(
-            f"--- Flask App Initializing - Version: {runtime_code_version} ---"
-        )
-    except Exception:
-        print(
-            f"--- Flask App Initializing - Version: {runtime_code_version} ---"
-        )  # Fallback print
-
-    # Internal MCP gateway bootstrap (disabled by default until flag flipped)
-    gateway_instance = None
-    try:
-        from ..integrations.internal_mcp import (
-            InternalMCPGateway,
-            InternalMCPTransport,
-            InternalMCPChatOrchestrator,
-            build_default_catalogue,
-        )
-
-        internal_mcp_enabled = os.getenv("VON_INTERNAL_MCP_ENABLE", "0").lower() in {
-            "1",
-            "true",
-        }
-        catalogue = build_default_catalogue()
-        transport = InternalMCPTransport()
-        gateway_instance = InternalMCPGateway(
-            catalogue=catalogue,
-            transport=transport,
-            enabled=internal_mcp_enabled,
-        )
-        method_count = len(catalogue.list_methods())
-        if internal_mcp_enabled:
-            app.logger.info(
-                "[mcp_gateway] Enabled with %d registered methods.", method_count
-            )
-        else:
-            app.logger.info(
-                "[mcp_gateway] Initialised (disabled). Set VON_INTERNAL_MCP_ENABLE=1 to activate. Methods=%d",
-                method_count,
-            )
-    except Exception as exc:  # pragma: no cover - defensive bootstrap
-        try:
-            app.logger.warning("[mcp_gateway] Failed to initialise: %s", exc)
-        except Exception:
-            pass
-        gateway_instance = None
-    app.config["INTERNAL_MCP_GATEWAY"] = gateway_instance
-    # Keep HTTP startup non-blocking: orchestrator construction can be expensive
-    # because it builds workflow/action registries (including Vontology policy checks).
-    # When this blocks the main thread, the process can be alive for minutes without
-    # binding the web port, which prevents run.ps1 health/browser flow from completing.
-    app.config["INTERNAL_MCP_ORCHESTRATOR"] = None
-    app.config["INTERNAL_MCP_ORCHESTRATOR_STATUS"] = {
-        "state": "disabled" if gateway_instance is None else "pending",
-        "ready": False,
-        "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-    }
-
-    if gateway_instance is not None:
-        orchestrator_logger = (
-            app.logger.getChild("mcp_orchestrator") if app.logger else None
-        )
-        blocking_orchestrator_start = os.getenv(
-            "VON_INTERNAL_MCP_ORCHESTRATOR_BLOCKING_STARTUP", "0"
-        ).strip().lower() in {"1", "true", "yes", "on"}
-
-        def _build_orchestrator() -> None:
-            start_perf = time.perf_counter()
-            app.config["INTERNAL_MCP_ORCHESTRATOR_STATUS"] = {
-                "state": "initialising",
-                "ready": False,
-                "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-            }
-            try:
-                try:
-                    bootstrap_max_tool_invocations = (
-                        get_internal_mcp_max_tool_invocations()
-                    )
-                except Exception:
-                    bootstrap_max_tool_invocations = 30
-                try:
-                    bootstrap_tool_batch_cap = get_internal_mcp_tool_batch_cap()
-                except Exception:
-                    bootstrap_tool_batch_cap = 10
-                orchestrator_instance = InternalMCPChatOrchestrator(
-                    gateway=gateway_instance,
-                    logger=orchestrator_logger,
-                    max_tool_invocations=bootstrap_max_tool_invocations,
-                    tool_batch_cap=bootstrap_tool_batch_cap,
-                    default_gmail_profile=os.getenv("VON_GMAIL_DEFAULT_PROFILE")
-                    or None,
-                )
-                duration_ms = int((time.perf_counter() - start_perf) * 1000)
-                app.config["INTERNAL_MCP_ORCHESTRATOR"] = orchestrator_instance
-                app.config["INTERNAL_MCP_ORCHESTRATOR_STATUS"] = {
-                    "state": "ready",
-                    "ready": True,
-                    "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-                    "duration_ms": duration_ms,
-                }
-                try:
-                    app.logger.info(
-                        "[mcp_orchestrator] Initialised in %dms (blocking_startup=%s).",
-                        duration_ms,
-                        blocking_orchestrator_start,
-                    )
-                except Exception:
-                    pass
-            except Exception as exc:  # pragma: no cover - defensive bootstrap
-                app.config["INTERNAL_MCP_ORCHESTRATOR_STATUS"] = {
-                    "state": "failed",
-                    "ready": False,
-                    "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-                    "error": str(exc),
-                }
-                try:
-                    app.logger.warning(
-                        "[mcp_orchestrator] Failed to initialise: %s", exc
-                    )
-                except Exception:
-                    pass
-
-        if blocking_orchestrator_start:
-            _build_orchestrator()
-        else:
-            try:
-                app.logger.info(
-                    "[mcp_orchestrator] Deferring initialisation to background thread "
-                    "(set VON_INTERNAL_MCP_ORCHESTRATOR_BLOCKING_STARTUP=1 to restore blocking startup)."
-                )
-            except Exception:
-                pass
-            try:
-                import threading
-
-                threading.Thread(
-                    target=_build_orchestrator,
-                    name="mcp_orchestrator_init",
-                    daemon=True,
-                ).start()
-            except Exception as exc:  # pragma: no cover - defensive bootstrap
-                app.config["INTERNAL_MCP_ORCHESTRATOR_STATUS"] = {
-                    "state": "failed",
-                    "ready": False,
-                    "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-                    "error": f"thread_start_failed:{exc}",
-                }
-                try:
-                    app.logger.warning(
-                        "[mcp_orchestrator] Failed to start async init thread: %s", exc
-                    )
-                except Exception:
-                    pass
-
-    # Start DB connection monitor (idempotent)
-    try:
-        ensure_monitor_started()
-    except Exception as _e:  # pragma: no cover
-        try:
-            app.logger.warning("Failed to start DB monitor: %s", _e)
-        except Exception:
-            pass
-
-    # Lightweight startup reconcile: requeue eligible sessions that are not indexed.
-    # Skip during pytest to avoid DB side-effects during test imports.
-    if not _is_running_under_pytest():
-        try:
-            import threading
-
-            if os.getenv("VON_RAG_STARTUP_REQUEUE", "1").lower() in {"1", "true"}:
-                threading.Thread(
-                    target=_startup_requeue_unindexed_interaction_sessions,
-                    args=(app.logger,),
-                    daemon=True,
-                    name="rag_startup_requeue",
-                ).start()
-        except Exception as exc:  # pragma: no cover
-            try:
-                app.logger.warning("[startup] Failed to start requeue thread: %s", exc)
-            except Exception:
-                pass
-
-    # --- Durable Workflow System Startup ---
-    # Keep HTTP startup non-blocking: durable startup can synchronously build
-    # workflow/action registries and perform recovery, which can take minutes
-    # and delay the first HTTP bind.
-    _set_durable_workflow_components_snapshot(app, None)
-    _set_durable_workflow_startup_status_snapshot(
-        app,
-        {
-            "state": "skipped_pytest" if _is_running_under_pytest() else "pending",
-            "ready": False,
-            "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-        },
-    )
-    if not _is_running_under_pytest():
-        blocking_durable_startup = os.getenv(
-            "VON_DURABLE_WORKFLOWS_BLOCKING_STARTUP", "0"
-        ).strip().lower() in {"1", "true", "yes", "on"}
-
-        def _bootstrap_durable_workflow_system() -> None:
-            _set_durable_workflow_startup_status_snapshot(
-                app,
-                {
-                    "state": "initialising",
-                    "ready": False,
-                    "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-                },
-            )
-            startup_perf = time.perf_counter()
-            try:
-                components = _start_durable_workflow_system(app.logger)
-                duration_ms = int((time.perf_counter() - startup_perf) * 1000)
-                if components is not None:
-                    _set_durable_workflow_components_snapshot(app, components)
-                    _set_durable_workflow_startup_status_snapshot(
-                        app,
-                        {
-                            "state": "ready",
-                            "ready": True,
-                            "started_at": _dt.datetime.now(
-                                _dt.timezone.utc
-                            ).isoformat(),
-                            "duration_ms": duration_ms,
-                            "workflow_bootstrap_summary": _build_durable_workflow_bootstrap_summary(
-                                components
-                            ),
-                        },
-                    )
-                    try:
-                        app.logger.info(
-                            "[durable_workflows] Initialised in %dms (blocking_startup=%s).",
-                            duration_ms,
-                            blocking_durable_startup,
-                        )
-                    except Exception:
-                        pass
-
-                    # Register atexit handler for graceful shutdown once running.
-                    import atexit
-
-                    atexit.register(_stop_durable_workflow_system)
-                else:
-                    _set_durable_workflow_startup_status_snapshot(
-                        app,
-                        {
-                            "state": "not_started",
-                            "ready": False,
-                            "started_at": _dt.datetime.now(
-                                _dt.timezone.utc
-                            ).isoformat(),
-                            "duration_ms": duration_ms,
-                        },
-                    )
-            except Exception as exc:  # pragma: no cover
-                _set_durable_workflow_startup_status_snapshot(
-                    app,
-                    {
-                        "state": "failed",
-                        "ready": False,
-                        "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-                        "error": str(exc),
-                    },
-                )
-                try:
-                    app.logger.warning(
-                        "[startup] Durable workflow system startup failed: %s", exc
-                    )
-                except Exception:
-                    pass
-
-        if blocking_durable_startup:
-            _bootstrap_durable_workflow_system()
-        else:
-            try:
-                app.logger.info(
-                    "[durable_workflows] Deferring startup to background thread "
-                    "(set VON_DURABLE_WORKFLOWS_BLOCKING_STARTUP=1 to restore blocking startup)."
-                )
-            except Exception:
-                pass
-            try:
-                import threading
-
-                threading.Thread(
-                    target=_bootstrap_durable_workflow_system,
-                    name="durable_workflow_startup",
-                    daemon=True,
-                ).start()
-            except Exception as exc:  # pragma: no cover
-                _set_durable_workflow_startup_status_snapshot(
-                    app,
-                    {
-                        "state": "failed",
-                        "ready": False,
-                        "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-                        "error": f"thread_start_failed:{exc}",
-                    },
-                )
-                try:
-                    app.logger.warning(
-                        "[durable_workflows] Failed to start async startup thread: %s",
-                        exc,
-                    )
-                except Exception:
-                    pass
-
-    # Prompt concept health logging
-    try:
-        pc_status = prompt_concept_health_status()
-        if not pc_status.get("available"):
-            app.logger.warning(
-                "Prompt concept %s missing or incomplete (source_field=%s, error=%s). LLM annotation requests will fail until resolved.",
-                PROMPT_CONCEPT_ID,
-                pc_status.get("source_field"),
-                pc_status.get("error"),
-            )
-        else:
-            app.logger.info(
-                "Prompt concept %s OK (source_field=%s)",
-                PROMPT_CONCEPT_ID,
-                pc_status.get("source_field"),
-            )
-    except Exception as e:  # pragma: no cover - defensive
-        try:
-            app.logger.warning("Prompt concept health check unexpected error: %s", e)
-        except Exception:
-            pass
+    _log_flask_app_initialisation(app)
+    gateway_instance = _initialise_internal_mcp_gateway(app)
+    _configure_internal_mcp_orchestrator_startup(app, gateway_instance)
+    _ensure_db_monitor_started(app)
+    _maybe_start_startup_rag_requeue(app)
+    _configure_durable_workflow_startup(app)
+    _log_prompt_concept_health(app)
 
     # (Prewarm logic moved below route registrations to avoid early first-request state.)
 
@@ -1481,7 +996,7 @@ def create_flask_app(
     @app.route("/")
     def root_redirect():
         """Redirect root to Von interface."""
-        return redirect(url_for("von.serve_page"))
+        return _build_root_redirect_response()
 
     # Capture process start time once for uptime reporting
     from datetime import datetime, timezone as _tz
@@ -1493,58 +1008,7 @@ def create_flask_app(
     @app.route("/health")
     def health_check():
         """Health check endpoint with pid and start time for process manager UI."""
-        # Get local IP address
-        import socket
-
-        local_ip = None
-        try:
-            # Create a socket to get the local IP (doesn't actually connect)
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            local_ip = s.getsockname()[0]
-            s.close()
-        except Exception as e:
-            print(f"[health] Local IP detection (method 1) failed: {e}")
-            try:
-                local_ip = socket.gethostbyname(socket.gethostname())
-                print(f"[health] Local IP from hostname: {local_ip}")
-            except Exception as e2:
-                print(f"[health] Local IP detection (method 2) failed: {e2}")
-                local_ip = "127.0.0.1"
-
-        # Get public IP address (cached in app config to avoid repeated external calls)
-        public_ip = app.config.get("PUBLIC_IP_ADDRESS")
-        if not public_ip:
-            try:
-                import urllib.request
-
-                with urllib.request.urlopen(
-                    "https://api.ipify.org?format=text", timeout=3
-                ) as response:
-                    public_ip = response.read().decode("utf-8").strip()
-                    app.config["PUBLIC_IP_ADDRESS"] = public_ip  # Cache it
-                    print(f"[health] Public IP fetched and cached: {public_ip}")
-            except Exception as e:
-                print(f"[health] Public IP fetch failed: {e}")
-                public_ip = None
-
-        # NOTE: Keep /health lightweight.
-        # Avoid DB calls here because the UI polls frequently and client-side aborts
-        # do not cancel server work. If a DB call hangs, it can occupy Waitress
-        # threads and block *all* endpoints (including /health) for minutes.
-        rag_pending_count = None
-        version_info = get_runtime_code_version_info()
-
-        return jsonify(
-            status="healthy",
-            version=version_info.get("version"),
-            version_details=version_info,
-            pid=os.getpid(),
-            start_time=app.config["SERVER_START_TIME"],
-            local_ip=local_ip,
-            public_ip=public_ip,
-            rag_pending_count=rag_pending_count,
-        )
+        return _build_health_check_response(app)
 
     @app.route("/admin/rag_status")
     def rag_status():
@@ -2203,150 +1667,7 @@ def create_flask_app(
           - namespace (optional)
         """
 
-        import os
-
-        def _describe_component(obj):
-            if obj is None:
-                return None
-            try:
-                cls = obj.__class__
-                info = {
-                    "class_name": getattr(cls, "__name__", None),
-                    "module": getattr(cls, "__module__", None),
-                }
-                for attr in ("model_name", "model", "name"):
-                    try:
-                        v = getattr(obj, attr, None)
-                        if isinstance(v, str) and v.strip():
-                            info[attr] = v.strip()
-                    except Exception:
-                        pass
-                return info
-            except Exception:
-                return None
-
-        try:
-            from src.backend.services.rag_service import (
-                RAGBackendUnavailable,
-                peek_rag_service,
-            )
-
-            ns = request.args.get("namespace")
-
-            # Do not initialise a RAG backend just to render diagnostics.
-            # Initialising LlamaIndex (or its embedder) can be slow and can block
-            # the UI if the dev server is single-threaded.
-            service = peek_rag_service()
-
-            if service is None:
-                effective_namespace = ns or os.getenv("VON_DEFAULT_NAMESPACE")
-                return jsonify(
-                    {
-                        "success": True,
-                        "service_initialised": False,
-                        "requested_namespace": ns,
-                        "effective_namespace": effective_namespace,
-                        "backend": {
-                            "requested": "llamaindex",
-                            "class_name": None,
-                            "module": None,
-                        },
-                        "persistence_dir": None,
-                        "index_persist_dir": None,
-                        "index_cached": False,
-                        "embedder": None,
-                        "llm": None,
-                        "openai_key_present": bool(os.getenv("OPENAI_API_KEY")),
-                        "last_query": None,
-                        "note": "RAG service not initialised yet; open this panel again after the first RAG query/index operation.",
-                    }
-                )
-
-            effective_namespace = None
-            try:
-                resolver = getattr(service, "_resolve_effective_namespace", None)
-                if callable(resolver):
-                    effective_namespace = resolver(ns)
-                else:
-                    effective_namespace = ns or os.getenv("VON_DEFAULT_NAMESPACE")
-            except Exception:
-                effective_namespace = ns or os.getenv("VON_DEFAULT_NAMESPACE")
-
-            index_persist_dir = None
-            try:
-                ns_dir = getattr(service, "_namespace_persist_dir", None)
-                if callable(ns_dir) and isinstance(effective_namespace, str):
-                    index_persist_dir = ns_dir(effective_namespace)
-            except Exception:
-                index_persist_dir = None
-
-            index_cached = False
-            try:
-                indices = getattr(service, "_indices", None)
-                if isinstance(indices, dict) and isinstance(effective_namespace, str):
-                    index_cached = effective_namespace in indices
-            except Exception:
-                index_cached = False
-
-            embedder = None
-            llm = None
-            try:
-                get_embedder = getattr(service, "get_runtime_embed_model", None)
-                if callable(get_embedder):
-                    embedder = _describe_component(get_embedder())
-
-                get_llm = getattr(service, "get_runtime_llm", None)
-                if callable(get_llm):
-                    llm = _describe_component(get_llm())
-
-                if embedder is None or llm is None:
-                    sc = getattr(service, "service_context", None)
-                    if sc is not None:
-                        if embedder is None:
-                            embedder = _describe_component(
-                                getattr(sc, "embed_model", None)
-                            )
-                        if llm is None:
-                            llm = _describe_component(getattr(sc, "llm", None))
-            except Exception:
-                pass
-
-            last_query = None
-            try:
-                last_query = getattr(service, "_last_query_info", None)
-            except Exception:
-                last_query = None
-
-            payload = {
-                "success": True,
-                "service_initialised": True,
-                "requested_namespace": ns,
-                "effective_namespace": effective_namespace,
-                "backend": {
-                    "class_name": service.__class__.__name__,
-                    "module": service.__class__.__module__,
-                },
-                "persistence_dir": getattr(service, "persistence_dir", None),
-                "index_persist_dir": index_persist_dir,
-                "index_cached": index_cached,
-                "embedder": embedder,
-                "llm": llm,
-                "openai_key_present": bool(os.getenv("OPENAI_API_KEY")),
-                "last_query": last_query,
-            }
-            return jsonify(payload)
-
-        except RAGBackendUnavailable as e:
-            return (
-                jsonify(
-                    success=False,
-                    error="rag_backend_unavailable",
-                    message=str(e),
-                ),
-                503,
-            )
-        except Exception as e:
-            return jsonify(success=False, error="unexpected", detail=str(e)), 500
+        return _handle_rag_runtime_request()
 
     @app.route("/admin/chat_history_backfill", methods=["POST"])
     def admin_chat_history_backfill():
@@ -2356,55 +1677,7 @@ def create_flask_app(
         Optional JSON body:
           {"max_sessions": int, "max_messages": int, "dry_run": bool}
         """
-        try:
-            from flask import session as flask_session
-            from src.backend.services.namespace_service import derive_namespace
-            from src.backend.services import chat_history_service
-
-            sess_user_slug = _get_session_user_slug(flask_session)
-            sess_user_concept_id = flask_session.get("user_concept_id")
-
-            if not (sess_user_slug or sess_user_concept_id):
-                return jsonify(error="Not authenticated"), 401
-
-            sess_org_raw = flask_session.get(
-                "organisation_concept_id"
-            ) or flask_session.get("org_id")
-            sess_org = _slug_from_maybe_concept_id(sess_org_raw)
-            sess_role = flask_session.get("role_in_org")
-
-            target_ns = flask_session.get("namespace")
-            if not target_ns and sess_user_slug:
-                target_ns = derive_namespace(sess_user_slug, sess_org)
-
-            if not isinstance(target_ns, str) or not target_ns:
-                return jsonify(error="Not authenticated"), 401
-
-            user_concept_id = (
-                sess_user_concept_id
-                if isinstance(sess_user_concept_id, str) and sess_user_concept_id
-                else (f"#V#{sess_user_slug}" if sess_user_slug else None)
-            )
-            if not user_concept_id:
-                return jsonify(error="Not authenticated"), 401
-
-            body = request.get_json(silent=True) or {}
-            max_sessions = int(body.get("max_sessions", 10))
-            max_messages = int(body.get("max_messages", 500))
-            dry_run = bool(body.get("dry_run", False))
-
-            res = chat_history_service.backfill_chat_history_for_user(
-                user_concept_id=user_concept_id,
-                target_namespace=target_ns,
-                organisation_concept_id=sess_org,
-                role_in_org=sess_role,
-                max_sessions=max_sessions,
-                max_messages=max_messages,
-                dry_run=dry_run,
-            )
-            return jsonify(res)
-        except Exception as e:
-            return jsonify(error="unexpected", detail=str(e)), 500
+        return _handle_admin_chat_history_backfill_request()
 
     @app.route("/admin/chat_history_reindex", methods=["POST"])
     def admin_chat_history_reindex():
@@ -2427,703 +1700,20 @@ def create_flask_app(
                         "chunk_size": int
                     }
         """
-        try:
-            from flask import session as flask_session
-            from src.backend.services.namespace_service import derive_namespace
-            from src.backend.services import chat_history_service
-
-            sess_user_slug = _get_session_user_slug(flask_session)
-            sess_user_concept_id = flask_session.get("user_concept_id")
-
-            if not (sess_user_slug or sess_user_concept_id):
-                return jsonify(error="Not authenticated"), 401
-
-            sess_org_raw = flask_session.get(
-                "organisation_concept_id"
-            ) or flask_session.get("org_id")
-            sess_org = _slug_from_maybe_concept_id(sess_org_raw)
-            sess_role = flask_session.get("role_in_org")
-
-            target_ns = request.args.get("namespace") or flask_session.get("namespace")
-            if not target_ns and sess_user_slug:
-                target_ns = derive_namespace(sess_user_slug, sess_org)
-
-            if not isinstance(target_ns, str) or not target_ns:
-                return jsonify(error="Not authenticated"), 401
-
-            # Prevent cross-user / cross-namespace actions.
-            sess_ns = flask_session.get("namespace")
-            if not sess_ns and sess_user_slug:
-                sess_ns = derive_namespace(sess_user_slug, sess_org)
-            if sess_ns != target_ns:
-                return (
-                    jsonify(error="namespace_mismatch", session_namespace=sess_ns),
-                    403,
-                )
-
-            user_concept_id = (
-                sess_user_concept_id
-                if isinstance(sess_user_concept_id, str) and sess_user_concept_id
-                else (f"#V#{sess_user_slug}" if sess_user_slug else None)
-            )
-            if not user_concept_id:
-                return jsonify(error="Not authenticated"), 401
-
-            body = request.get_json(silent=True) or {}
-            max_sessions = int(body.get("max_sessions", 50))
-            max_messages = int(body.get("max_messages", 5000))
-            reset_counters = bool(body.get("reset_counters", True))
-            dry_run = bool(body.get("dry_run", False))
-            session_ids = body.get("session_ids")
-            if not isinstance(session_ids, list):
-                session_ids = None
-
-            chunk_start = body.get("chunk_start")
-            chunk_size = body.get("chunk_size")
-            use_chunked = chunk_start is not None or chunk_size is not None
-
-            if use_chunked:
-                if (
-                    not session_ids
-                    or len(session_ids) != 1
-                    or not isinstance(session_ids[0], str)
-                ):
-                    return (
-                        jsonify(
-                            error="invalid_request",
-                            detail="chunked reindex requires exactly one session_id",
-                        ),
-                        400,
-                    )
-                sid = session_ids[0]
-                try:
-                    import time
-
-                    t0 = time.monotonic()
-                except Exception:
-                    t0 = None
-
-                try:
-                    app.logger.info(
-                        "[chat_history_reindex] chunk start user=%s ns=%s session=%s chunk_start=%s chunk_size=%s dry_run=%s",
-                        user_concept_id,
-                        target_ns,
-                        sid,
-                        int(chunk_start or 0),
-                        int(chunk_size or 25),
-                        bool(dry_run),
-                    )
-                except Exception:
-                    pass
-
-                res = chat_history_service.reindex_chat_history_session_chunk(
-                    user_concept_id=user_concept_id,
-                    target_namespace=target_ns,
-                    organisation_concept_id=sess_org,
-                    role_in_org=sess_role,
-                    session_id=sid,
-                    chunk_start=int(chunk_start or 0),
-                    chunk_size=int(chunk_size or 25),
-                    reset_counters=reset_counters,
-                    dry_run=dry_run,
-                )
-
-                try:
-                    elapsed_ms = (
-                        int((time.monotonic() - t0) * 1000) if t0 is not None else None
-                    )
-                    app.logger.info(
-                        "[chat_history_reindex] chunk done user=%s ns=%s session=%s attempted=%s ok=%s failed=%s next=%s done=%s elapsed_ms=%s errors=%s",
-                        user_concept_id,
-                        target_ns,
-                        sid,
-                        res.get("messages_indexed_attempted"),
-                        res.get("messages_indexed_success"),
-                        res.get("messages_indexed_failed"),
-                        res.get("next_chunk_start"),
-                        res.get("done"),
-                        elapsed_ms,
-                        len(res.get("errors") or []),
-                    )
-                except Exception:
-                    pass
-                return jsonify(res)
-
-            res = chat_history_service.reindex_chat_history_for_user_namespace(
-                user_concept_id=user_concept_id,
-                target_namespace=target_ns,
-                organisation_concept_id=sess_org,
-                role_in_org=sess_role,
-                session_ids=session_ids,
-                max_sessions=max_sessions,
-                max_messages=max_messages,
-                reset_counters=reset_counters,
-                dry_run=dry_run,
-            )
-            return jsonify(res)
-        except Exception as e:
-            return jsonify(error="unexpected", detail=str(e)), 500
+        return _handle_admin_chat_history_reindex_request(app)
 
     @app.route("/admin/rag_integrity", methods=["POST"])
     def admin_rag_integrity():
-        db = get_db()
-        if db is None:
-            return jsonify({"error": "db_unavailable"}), 503
-        sessions_coll = db["interaction_sessions"]
-        interactions_coll = (
-            db["interactions"] if "interactions" in db.list_collection_names() else None
-        )
-        # Optional namespace filter: interaction_sessions may store either a user-only
-        # namespace (#V#user) or a composite namespace (#V#user@org). For backwards
-        # compatibility, if a composite namespace is provided we scope to BOTH values.
-        ns = request.args.get("namespace")
-        session_ns_values: list[str] | None = None
-        if ns:
-            session_ns_values = [ns]
-            try:
-                from src.backend.services.namespace_service import parse_namespace
-
-                parsed = parse_namespace(ns)
-                if parsed.get("user_id"):
-                    user_only = f"#V#{parsed['user_id']}"
-                    if user_only not in session_ns_values:
-                        session_ns_values.append(user_only)
-            except Exception:
-                # If the namespace is not parseable, treat it as an opaque key.
-                pass
-
-        sess_filter = (
-            {"namespace": {"$in": session_ns_values}} if session_ns_values else {}
-        )
-        result = {
-            "sessions": sessions_coll.count_documents(sess_filter or {}),
-            "scoped_sessions": sessions_coll.count_documents(sess_filter or {}),
-            "interactions": (
-                interactions_coll.count_documents({})
-                if interactions_coll is not None
-                else 0
-            ),
-            "indexed": sessions_coll.count_documents(
-                {"indexing_status": "indexed", **sess_filter}
-            ),
-            "pending": sessions_coll.count_documents(
-                {"indexing_status": "pending", **sess_filter}
-            ),
-            "failed": sessions_coll.count_documents(
-                {"indexing_status": "failed", **sess_filter}
-            ),
-            "skipped": sessions_coll.count_documents(
-                {"indexing_status": "skipped", **sess_filter}
-            ),
-            "eligible_sessions": sessions_coll.count_documents(
-                {
-                    "$or": [
-                        {"history": {"$exists": True, "$ne": []}},
-                        {"summary": {"$exists": True, "$type": "string", "$ne": ""}},
-                    ],
-                    **sess_filter,
-                }
-            ),
-            "eligible_interactions": 0,
-            "anomalies": [],
-            "namespace": ns,
-            "session_namespace": (session_ns_values[0] if session_ns_values else None),
-            "session_namespaces": session_ns_values,
-        }
-        if interactions_coll is not None:
-            result["eligible_interactions"] = interactions_coll.count_documents(
-                {
-                    "$or": [
-                        {"text": {"$exists": True, "$type": "string", "$ne": ""}},
-                        {"message": {"$exists": True, "$type": "string", "$ne": ""}},
-                    ]
-                }
-            )
-            # Anomaly example: interactions with text but session missing pending/indexed
-            sample_with_text = interactions_coll.find(
-                {
-                    "$or": [
-                        {"text": {"$exists": True, "$type": "string", "$ne": ""}},
-                        {"message": {"$exists": True, "$type": "string", "$ne": ""}},
-                    ]
-                },
-                {"session_id": 1},
-            ).limit(25)
-            orphan_sessions = []
-            for it in sample_with_text:
-                sid = it.get("session_id")
-                if sid is None:
-                    continue
-                sess = sessions_coll.find_one({"_id": sid}, {"indexing_status": 1})
-                if not sess or sess.get("indexing_status") not in (
-                    "pending",
-                    "indexed",
-                    "failed",
-                    "skipped",
-                ):
-                    orphan_sessions.append(str(sid))
-            if orphan_sessions:
-                result["anomalies"].append(
-                    {"type": "orphan_text_interactions", "session_ids": orphan_sessions}
-                )
-        return jsonify(result)
+        return _handle_admin_rag_integrity_request()
 
     @app.route("/admin/rag_sync", methods=["POST"])
     def admin_rag_sync():
-        from ..services.rag_sync_service import sync_to_chat_store
-
-        payload = request.get_json(silent=True) or {}
-        namespace = payload.get("namespace")
-        user_concept_id = payload.get("user_concept_id")
-        organisation_concept_id = payload.get("organisation_concept_id")
-        try:
-            result = sync_to_chat_store(
-                namespace=namespace,
-                user_concept_id=user_concept_id,
-                organisation_concept_id=organisation_concept_id,
-            )
-            return jsonify(result)
-        except Exception as e:
-            return jsonify({"success": False, "error": str(e)}), 500
+        return _handle_admin_rag_sync_request()
 
     @app.route("/diag")
     def diagnostics():
         """Lightweight diagnostics endpoint exposing runtime/process/cache info."""
-        # Lazy imports to avoid overhead if unused
-        import threading
-        import time
-
-        rss_mb = None
-        thread_count = None
-        try:
-            import psutil  # type: ignore
-
-            p = psutil.Process()
-            rss_mb = round(p.memory_info().rss / (1024 * 1024), 2)
-            thread_count = p.num_threads()
-        except Exception:
-            try:
-                import tracemalloc
-
-                if tracemalloc.is_tracing():
-                    snap = tracemalloc.take_snapshot()
-                    rss_mb = round(
-                        sum([s.size for s in snap.statistics("filename")])
-                        / (1024 * 1024),
-                        2,
-                    )
-            except Exception:
-                pass
-            thread_count = len(threading.enumerate())
-
-        # Uptime
-        from datetime import datetime, timezone as _tz
-
-        try:
-            start_iso = app.config.get("SERVER_START_TIME")
-            start_dt = (
-                datetime.fromisoformat(start_iso.replace("Z", "+00:00"))
-                if start_iso
-                else None
-            )
-            uptime_sec = (
-                (datetime.now(_tz.utc) - start_dt).total_seconds() if start_dt else None
-            )
-        except Exception:
-            uptime_sec = None
-
-        # Gather model cache stats if available
-        model_cache_summary = []
-        try:
-            from ...languagemodels.llm_interface import _MODEL_CACHE, _MODEL_CACHE_TTL  # type: ignore
-
-            now_ts = time.time()
-            for key, meta in _MODEL_CACHE.items():
-                models = meta.get("models") or []
-                model_cache_summary.append(
-                    {
-                        "key": key,
-                        "count": len(models),
-                        "age_sec": round(now_ts - meta.get("fetched_at", 0), 1),
-                        "build_time_sec": round(meta.get("build_time", 0), 3),
-                        "source": meta.get("source"),
-                        "error": meta.get("error"),
-                        "hit_count": meta.get("hit_count", 0),
-                        "ttl_sec": _MODEL_CACHE_TTL,
-                    }
-                )
-        except Exception:
-            pass
-
-        # Vontology tree cache stats (improved node counting)
-        tree_cache = {}
-        try:
-            from .routes.vontology_routes import _TREE_CACHE  # type: ignore
-
-            now_ts = time.time()
-            ttl_env = os.getenv("VONTOLOGY_TREE_TTL")
-            if _TREE_CACHE:
-                rec = _TREE_CACHE.get("Thing")
-                if rec and isinstance(rec, tuple) and len(rec) >= 5:
-                    ts, payload, build_secs, alloc_kb, hits = rec
-                    # Traverse to count nodes if payload matches expected shape { 'tree': [ root_node ] }
-                    node_count = None
-                    try:
-                        if isinstance(payload, dict) and isinstance(
-                            payload.get("tree"), list
-                        ):
-                            stack = list(payload["tree"])
-                            c = 0
-                            while stack:
-                                n = stack.pop()
-                                c += 1
-                                ch = n.get("children") if isinstance(n, dict) else None
-                                if isinstance(ch, list):
-                                    stack.extend(ch)
-                            node_count = c
-                    except Exception:
-                        pass
-                    tree_cache = {
-                        "cached": True,
-                        "age_sec": round(now_ts - ts, 1),
-                        "build_time_sec": round(build_secs, 3),
-                        "alloc_kb": round(alloc_kb, 1),
-                        "ttl_sec": (
-                            int(ttl_env) if ttl_env and ttl_env.isdigit() else None
-                        ),
-                        "node_count": node_count,
-                        "hits": hits,
-                    }
-                else:
-                    tree_cache = {"cached": True}
-            else:
-                tree_cache = {"cached": False}
-        except Exception:
-            tree_cache = {"cached": False, "error": "unavailable"}
-
-        # Instance counts cache stats (size and TTL)
-        counts_cache = {}
-        try:
-            from .routes.vontology_routes import _INSTANCE_COUNTS_CACHE  # type: ignore
-            from ..services.vontology_concept_stats_service import (
-                get_vontology_concept_stats_cache_summary,
-            )
-
-            ttl_env = os.getenv("VONTOLOGY_COUNTS_TTL")
-            size = (
-                len(_INSTANCE_COUNTS_CACHE)
-                if isinstance(_INSTANCE_COUNTS_CACHE, dict)
-                else None
-            )
-            summary = get_vontology_concept_stats_cache_summary()
-            counts_cache = {
-                "size": size,
-                "ttl_sec": int(ttl_env) if ttl_env and ttl_env.isdigit() else None,
-                "stats_cache": summary,
-            }
-        except Exception:
-            counts_cache = {"error": "unavailable"}
-
-        salient_cache = {}
-        try:
-            from .routes.vontology_routes import _SALIENT_CACHE, _SALIENT_STATS  # type: ignore
-
-            cache_obj = _SALIENT_CACHE if isinstance(_SALIENT_CACHE, dict) else {}
-            cache_size = len(cache_obj) if isinstance(cache_obj, dict) else None
-            split_entries = 0
-            sample_scope = None
-            if isinstance(cache_obj, dict):
-                split_entries = sum(
-                    1
-                    for key in cache_obj.keys()
-                    if isinstance(key, str) and key.endswith("|split")
-                )
-                for value in cache_obj.values():
-                    if not isinstance(value, tuple) or len(value) < 4:
-                        continue
-                    scope_payload = value[3]
-                    if not isinstance(scope_payload, dict):
-                        continue
-                    raw_map = scope_payload.get("raw_scope_map") or {}
-                    if not isinstance(raw_map, dict):
-                        raw_map = {}
-                    sample_scope = {
-                        "predicates_by_scope_keys": list(
-                            (scope_payload.get("predicates_by_scope") or {}).keys()
-                        ),
-                        "predicate_origin_keys": list(
-                            (scope_payload.get("predicate_origins") or {}).keys()
-                        ),
-                        "raw_scope_counts": {
-                            k: len(v) if isinstance(v, (list, set, tuple)) else 0
-                            for k, v in raw_map.items()
-                        },
-                    }
-                    break
-            salient_cache = {
-                "size": cache_size,
-                "split_entries": split_entries,
-                "stats": (
-                    dict(_SALIENT_STATS) if isinstance(_SALIENT_STATS, dict) else None
-                ),
-                "ttl_sec": 30,
-                "sample_scope_payload": sample_scope,
-            }
-        except Exception:
-            salient_cache = {"error": "unavailable"}
-
-        mcp_helper_inventory = {}
-        try:
-            from ..mcp_server.process_guard import get_mcp_helper_inventory
-
-            mcp_helper_inventory = get_mcp_helper_inventory()
-        except Exception:
-            mcp_helper_inventory = {"success": False, "error": "unavailable"}
-
-        # Entity counts stats (lightweight)
-        entity_counts_stats = {}
-        try:
-            from .routes.vontology_routes import _ENTITY_COUNTS_STATS  # type: ignore
-
-            # Provide a shallow copy and round ema
-            ema = _ENTITY_COUNTS_STATS.get("ema_ms")
-            entity_counts_stats = {
-                "total_calls": int(_ENTITY_COUNTS_STATS.get("total_calls") or 0),
-                "last_ts": _ENTITY_COUNTS_STATS.get("last_ts"),
-                "ema_ms": None if ema is None else round(float(ema), 1),
-            }
-        except Exception:
-            entity_counts_stats = {"error": "unavailable"}
-
-        # Mongo connection diagnostics (best-effort; avoid leaking credentials)
-        try:
-            from ..db.mongo_client import get_effective_mongo_uri, is_using_fallback_uri  # type: ignore
-
-            _eff_uri = get_effective_mongo_uri()
-            # Redact credentials if present
-            redacted_uri = _eff_uri
-            if "://" in redacted_uri and "@" in redacted_uri:
-                scheme, rest = redacted_uri.split("://", 1)
-                if "@" in rest:
-                    creds, hostpart = rest.split("@", 1)
-                    # Keep only username (if any) and mask password
-                    if ":" in creds:
-                        user = creds.split(":", 1)[0]
-                        redacted_uri = f"{scheme}://{user}:***@{hostpart}"
-                    else:
-                        redacted_uri = f"{scheme}://***@{hostpart}"
-            mongo_diag = {
-                "effective_mongo_uri": redacted_uri,
-                "using_fallback": is_using_fallback_uri(),
-            }
-        except Exception:
-            mongo_diag = {"effective_mongo_uri": None, "using_fallback": None}
-
-        # Access control / session visibility diagnostics
-        session_user = None
-        effective_user = None
-        header_user = None
-        normalised_header_user = None
-        header_user_validation = None
-        header_user_raw_exact_exists = None
-        header_user_normalised_exact_exists = None
-        user_visibility_sample = None
-        try:
-            from flask import session as _session
-
-            session_user = _session.get("user_concept_id")
-            from ..security.access_control import (
-                _normalise_concept_id,  # type: ignore
-                _validate_person_concept,  # type: ignore
-                get_effective_user_concept_id,
-            )
-            from ..services.concept_service import (
-                _find_raw_concept_by_exact_concept_id,  # type: ignore
-            )
-
-            # Peek raw headers for fallback diagnostic (do not validate here)
-            try:
-                header_user = request.headers.get(
-                    "X-User-Concept-ID"
-                ) or request.headers.get("X-User-Client-ID")
-            except Exception:
-                header_user = None
-            effective_user = get_effective_user_concept_id()
-            if header_user:
-                normalised_header_user = _normalise_concept_id(header_user)
-                header_user_validation = _validate_person_concept(header_user)
-                header_user_raw_exact_exists = bool(
-                    _find_raw_concept_by_exact_concept_id(header_user)
-                )
-                if normalised_header_user:
-                    header_user_normalised_exact_exists = bool(
-                        _find_raw_concept_by_exact_concept_id(normalised_header_user)
-                    )
-            # Sample: count how many user-specific concepts would be visible for current effective user
-            try:
-                from ..db.mongo_client import get_concepts_collection  # type: ignore
-
-                coll = get_concepts_collection()
-                if coll is not None:
-                    total_user_specific = coll.count_documents(
-                        {"relationships.specific_to_user": {"$exists": True, "$ne": []}}
-                    )
-                    if effective_user:
-                        visible_user_specific = coll.count_documents(
-                            {"relationships.specific_to_user": effective_user}
-                        )
-                    else:
-                        visible_user_specific = 0
-                    user_visibility_sample = {
-                        "total_user_specific": int(total_user_specific),
-                        "visible_for_effective_user": int(visible_user_specific),
-                    }
-            except Exception:
-                pass
-        except Exception:
-            pass
-
-        # GUID coverage stats
-        guid_stats = {}
-        try:
-            from ..db.mongo_client import get_concepts_collection
-
-            coll = get_concepts_collection()
-            if coll is not None:
-                total_concepts = coll.count_documents({})
-                with_guid = coll.count_documents({"guid": {"$exists": True}})
-                guid_stats = {
-                    "total_concepts": total_concepts,
-                    "with_guid": with_guid,
-                    "coverage_percent": (
-                        round((with_guid / total_concepts * 100), 1)
-                        if total_concepts > 0
-                        else 0
-                    ),
-                }
-        except Exception:
-            guid_stats = {"error": "unavailable"}
-
-        search_proxy_stats = {}
-        try:
-            from ..integrations.internal_mcp import search_proxy_mcp as _search_proxy_mod  # type: ignore
-
-            proxy_instance = getattr(_search_proxy_mod, "_proxy_instance", None)
-            if proxy_instance is None:
-                search_proxy_stats = {"initialised": False}
-            else:
-                stats = proxy_instance.get_stats()
-                search_proxy_stats = {
-                    "initialised": True,
-                    "call_count": stats.get("call_count"),
-                    "error_count": stats.get("error_count"),
-                    "command": getattr(proxy_instance._config, "command", None),
-                }
-        except Exception as exc:  # pragma: no cover - defensive
-            search_proxy_stats = {"error": str(exc)}
-
-        version_info = get_runtime_code_version_info()
-
-        diag = {
-            "status": "ok",
-            "version": version_info.get("version"),
-            "version_details": version_info,
-            "pid": os.getpid(),
-            "rss_mb": rss_mb,
-            "thread_count": thread_count,
-            "uptime_sec": uptime_sec,
-            "session_user_concept_id": session_user,
-            "effective_user_concept_id": effective_user,
-            "header_user_concept_id": header_user,
-            "normalised_header_user_concept_id": normalised_header_user,
-            "header_user_validation": header_user_validation,
-            "header_user_raw_exact_exists": header_user_raw_exact_exists,
-            "header_user_normalised_exact_exists": header_user_normalised_exact_exists,
-            "user_visibility_sample": user_visibility_sample,
-            "model_cache": model_cache_summary,
-            "tree_cache": tree_cache,
-            "instance_counts_cache": counts_cache,
-            "salient_cache": salient_cache,
-            "mcp_helper_inventory": mcp_helper_inventory,
-            "entity_counts": entity_counts_stats,
-            "guid_stats": guid_stats,
-            "search_proxy": search_proxy_stats,
-            "python_version": sys.version.split()[0],
-        }
-        diag["mongo"] = mongo_diag
-        try:
-            from ..services.namespace_isolation_diagnostics_service import (
-                get_namespace_isolation_diagnostics_snapshot,
-            )
-
-            diag["namespace_isolation_diagnostics"] = (
-                get_namespace_isolation_diagnostics_snapshot(
-                    include_recent_events=False
-                )
-            )
-        except Exception as exc:
-            diag["namespace_isolation_diagnostics"] = {
-                "available": False,
-                "error": type(exc).__name__,
-            }
-        # Durable workflow system status (best-effort)
-        try:
-            from ..workflows.durable.startup import get_system_status
-
-            durable_status = get_system_status()
-            diag["durable_workflows"] = durable_status
-        except Exception as exc:
-            diag["durable_workflows"] = {
-                "error": str(exc),
-                "available": False,
-            }
-        gateway = app.config.get("INTERNAL_MCP_GATEWAY")
-        if gateway is None:
-            diag["internal_mcp_gateway"] = {"configured": False}
-        else:
-            try:
-                diag["internal_mcp_gateway"] = gateway.get_diagnostics()
-            except Exception as exc:  # pragma: no cover - defensive
-                diag["internal_mcp_gateway"] = {
-                    "configured": True,
-                    "error": str(exc),
-                }
-        diag["internal_mcp_orchestrator_startup"] = app.config.get(
-            "INTERNAL_MCP_ORCHESTRATOR_STATUS"
-        )
-        diag["durable_workflow_startup"] = app.config.get(
-            "DURABLE_WORKFLOW_STARTUP_STATUS"
-        )
-        # Annotation / phrase cache stats (best-effort)
-        try:
-            from ..services.annotation_extraction_service import phrase_cache_stats, fallback_nonjson_metric_stats  # type: ignore
-
-            diag["annotations"] = {
-                "phrase_cache": phrase_cache_stats(),
-                "fallback_nonjson": fallback_nonjson_metric_stats(),
-            }
-        except Exception:
-            pass
-        # Import / orphan metrics (JVNAUTOSCI-584) best-effort inclusion
-        try:
-            from .routes.settings_routes import _IMPORT_METRICS, _ORPHAN_SCAN_METRICS  # type: ignore
-
-            if _IMPORT_METRICS:
-                # Provide shallow copy to avoid mutation by caller
-                diag["import_metrics"] = dict(_IMPORT_METRICS)
-            if _ORPHAN_SCAN_METRICS:
-                diag["orphan_metrics"] = dict(_ORPHAN_SCAN_METRICS)
-        except Exception:
-            pass
-        # Append accessor stats (best-effort)
-        try:
-            from ...vontology.utils_vontology import _ACCESSOR_STATS  # type: ignore
-
-            # Copy to avoid mutation during serialization
-            diag["accessor_stats"] = {k: dict(v) for k, v in _ACCESSOR_STATS.items()}
-        except Exception:
-            pass
-        return jsonify(diag)
+        return _build_diagnostics_response(app)
 
     @app.route("/api/system/db_status")
     def db_status():
@@ -3137,40 +1727,13 @@ def create_flask_app(
                 "timestamp": iso8601,
             }
         """
-        from datetime import datetime, timezone as _tz
-
-        using_fallback = None
-        atlas_detected = None
-        host_only = None
-        try:
-            from ..db.mongo_client import get_effective_mongo_uri, is_using_fallback_uri  # type: ignore
-
-            eff = get_effective_mongo_uri()
-            using_fallback = is_using_fallback_uri()
-            if eff:
-                # strip credentials and keep host portion (after @ and before first /)
-                try:
-                    after_scheme = eff.split("://", 1)[1] if "://" in eff else eff
-                    if "@" in after_scheme:
-                        after_scheme = after_scheme.split("@", 1)[1]
-                    host_only = after_scheme.split("/", 1)[0]
-                except Exception:
-                    host_only = None
-                atlas_detected = "mongodb.net" in eff.lower()
-        except Exception:
-            pass
-        return jsonify(
-            using_fallback=using_fallback,
-            atlas_detected=atlas_detected,
-            effective_host=host_only,
-            timestamp=datetime.now(_tz.utc).isoformat().replace("+00:00", "Z"),
-        )
+        return _build_db_status_response()
 
     # --- API Endpoint for Version ---
     @app.route("/api/version")
     def get_version():
         """API endpoint to get the version of the app."""
-        return jsonify(get_runtime_code_version_info())
+        return _build_runtime_version_response()
 
     # --- Graceful Shutdown Endpoint (admin) ---
     @app.route("/admin/shutdown", methods=["POST"])
@@ -3181,26 +1744,13 @@ def create_flask_app(
         If token missing or mismatch returns 401.
         Intended for controlled stop via run.ps1 script.
         """
-        expected = os.environ.get("VON_ADMIN_TOKEN")
-        provided = request.headers.get("X-Admin-Token")
-        if not expected:
-            return jsonify(success=False, error="shutdown_disabled"), 403
-        if provided != expected:
-            return jsonify(success=False, error="unauthorized"), 401
-
-        func = request.environ.get("werkzeug.server.shutdown")
-        _start_async_process_shutdown(
-            app.logger,
-            werkzeug_shutdown=func if callable(func) else None,
-        )
-        status = "shutting_down" if callable(func) else "shutting_down_fallback"
-        return jsonify(success=True, status=status), 202
+        return _handle_admin_shutdown_request(app)
 
     # Backwards-compatible alias for tests and older clients that call the shorter '/api/vontology' path.
     @app.route("/api/vontology/instance_counts")
     def alias_instance_counts():
         # Delegate to the blueprint handler
-        return get_instance_counts()
+        return _build_instance_counts_alias_response()
 
     # --- Workflow Model Policy Diagnostics (JVNAUTOSCI-998) ---
     @app.route("/admin/policy_comparison")
@@ -3210,76 +1760,1536 @@ def create_flask_app(
         Returns a diagnostic report showing differences between the two.
         Used to validate graph parity before deprecating JSON fallback.
         """
-        try:
-            from ..services.workflow_policy_graph_service import (
-                compare_policy_json_vs_graph,
-            )
-
-            policy_id = request.args.get(
-                "policy_id", "#V#default_workflow_model_policy"
-            )
-            report = compare_policy_json_vs_graph(policy_id)
-            return jsonify(report)
-        except Exception as e:
-            return jsonify(error=str(e), status="error"), 500
+        return _handle_admin_policy_comparison_request()
 
     # Optional background prewarm (model list + tree) to reduce first-request latency.
     # Placed AFTER all routes to ensure decorators complete before any internal
     # test_client calls. Skipped when running under pytest (env PYTEST_CURRENT_TEST) or
     # when app.testing already true, or when disabled via env/config.
-    def _start_prewarm():  # local closure
+    _register_optional_prewarm(app)
+
+    return app
+
+
+def _slug_from_maybe_concept_id(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    return raw[3:] if raw.startswith("#V#") else raw
+
+
+def _get_session_user_slug(flask_session: object) -> str | None:
+    get = getattr(flask_session, "get", None)
+    if not callable(get):
+        return None
+
+    user_id = _slug_from_maybe_concept_id(get("user_id"))
+    if user_id:
+        return user_id.lower().replace(" ", "_")
+
+    user_concept_id = get("user_concept_id")
+    user_slug = _slug_from_maybe_concept_id(user_concept_id)
+    if user_slug:
+        return user_slug.lower().replace(" ", "_")
+
+    return None
+
+
+def _install_request_timing_middleware(app: Flask) -> None:
+    """Attach lightweight request timing middleware."""
+    slow_request_threshold_ms = float(
+        os.environ.get("VON_SLOW_REQUEST_THRESHOLD_MS", "1000")
+    )
+
+    @app.before_request
+    def _start_request_timer():
+        g._request_start_time = time.perf_counter()
+
+    @app.after_request
+    def _log_slow_requests(response):
+        start_time = getattr(g, "_request_start_time", None)
+        if start_time is not None:
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            if elapsed_ms >= slow_request_threshold_ms:
+                app.logger.warning(
+                    "[slow_request] %s %s took %.1fms (threshold=%.0fms) status=%s",
+                    request.method,
+                    request.endpoint or request.path,
+                    elapsed_ms,
+                    slow_request_threshold_ms,
+                    response.status_code,
+                )
+            elif elapsed_ms >= 200:
+                app.logger.info(
+                    "[request_timing] %s %s %.1fms status=%s",
+                    request.method,
+                    request.path,
+                    elapsed_ms,
+                    response.status_code,
+                )
+        return response
+
+
+def _configure_flask_app_core(
+    app: Flask,
+    list_models_func: Callable[[], List[str]],
+    generate_func: Callable[[str, Optional[List[Dict[str, str]]], Optional[str]], str],
+) -> None:
+    """Apply core Flask config and feature-flag context wiring."""
+    app.secret_key = os.environ.get("FLASK_SECRET_KEY", _DEV_SECRET_KEY)
+    strict_oauth_startup = google_oauth_strict_startup_enabled()
+
+    app.config["SESSION_COOKIE_HTTPONLY"] = _env_bool(
+        "FLASK_SESSION_COOKIE_HTTPONLY", True
+    )
+    app.config["SESSION_COOKIE_SECURE"] = _env_bool(
+        "FLASK_SESSION_COOKIE_SECURE", strict_oauth_startup
+    )
+    app.config["SESSION_COOKIE_SAMESITE"] = _normalise_session_cookie_samesite(
+        os.getenv("FLASK_SESSION_COOKIE_SAMESITE")
+    )
+
+    if strict_oauth_startup:
+        if app.secret_key == _DEV_SECRET_KEY:
+            raise RuntimeError(
+                "GOOGLE_OAUTH_STRICT_STARTUP requires FLASK_SECRET_KEY to be set to a non-default value."
+            )
+        if len(str(app.secret_key)) < 32:
+            raise RuntimeError(
+                "GOOGLE_OAUTH_STRICT_STARTUP requires FLASK_SECRET_KEY length >= 32 characters."
+            )
+        validate_google_oauth_startup_or_raise()
+
+    if mongo_strict_startup_enabled():
+        validate_mongo_startup_or_raise()
+
+    if mongo_startup_probe_enabled() and not _is_running_under_pytest():
+        probe_result = run_mongo_startup_probe()
+        app.logger.info(
+            "Mongo startup probe succeeded (read=%s write=%s collection=%s).",
+            probe_result.get("read_ok"),
+            probe_result.get("write_ok"),
+            probe_result.get("write_collection"),
+        )
+
+    app.config["TEMPLATES_AUTO_RELOAD"] = True
+    app.config["GENERATE_FUNC"] = generate_func
+    app.config["LIST_MODELS_FUNC"] = list_models_func
+    app.config.setdefault("PEOPLE", [])
+    app.config.setdefault("CONTEXT", [])
+
+    from ..languagemodels.model_defaults import DEFAULT_OLLAMA_MODEL
+
+    app.config.setdefault("MODEL", DEFAULT_OLLAMA_MODEL)
+
+    @app.context_processor
+    def inject_feature_flags():
+        from ..services.feature_flags import (
+            get_expert_footer_enabled,
+            get_expert_tabs_enabled,
+        )
+
+        return {
+            "expert_tabs_enabled": get_expert_tabs_enabled(),
+            "expert_footer_enabled": get_expert_footer_enabled(),
+        }
+
+
+def _register_default_blueprints(app: Flask) -> None:
+    """Register the standard route blueprints for the Von web server."""
+    app.register_blueprint(von_bp, url_prefix="/von")
+    app.register_blueprint(vontology_bp, url_prefix="/vontology/api/vontology")
+    app.register_blueprint(concept_bp, url_prefix="/api/concepts")
+    app.register_blueprint(settings_bp, url_prefix="/api/settings")
+    app.register_blueprint(elicitation_bp, url_prefix="/api/elicitation")
+    app.register_blueprint(annotations_bp, url_prefix="/api/annotations")
+    app.register_blueprint(predicate_bp)
+    app.register_blueprint(workflows_bp)
+    app.register_blueprint(room_device_bp)
+    app.register_blueprint(client_capabilities_bp)
+    app.register_blueprint(speech_bp)
+    app.register_blueprint(admin_bp, url_prefix="/admin")
+    app.register_blueprint(task_bp, url_prefix="/api/tasks")
+    app.register_blueprint(message_bp, url_prefix="/api/messages")
+    app.register_blueprint(auth_bp, url_prefix="/von")
+    app.register_blueprint(agent_gmail_oauth_bp, url_prefix="/von")
+
+
+def _log_flask_app_initialisation(app: Flask) -> None:
+    runtime_code_version = get_runtime_code_version()
+    try:
+        app.logger.setLevel(logging.INFO)
+        app.logger.info(
+            "--- Flask App Initializing - Version: %s ---", runtime_code_version
+        )
+    except Exception:
+        print(f"--- Flask App Initializing - Version: {runtime_code_version} ---")
+
+
+def _initialise_internal_mcp_gateway(app: Flask):
+    """Build the internal MCP gateway and persist it into app config."""
+    gateway_instance = None
+    try:
+        from ..integrations.internal_mcp import (
+            InternalMCPChatOrchestrator,
+            InternalMCPGateway,
+            InternalMCPTransport,
+            build_default_catalogue,
+        )
+
+        del InternalMCPChatOrchestrator
+        internal_mcp_enabled = os.getenv("VON_INTERNAL_MCP_ENABLE", "0").lower() in {
+            "1",
+            "true",
+        }
+        catalogue = build_default_catalogue()
+        transport = InternalMCPTransport()
+        gateway_instance = InternalMCPGateway(
+            catalogue=catalogue,
+            transport=transport,
+            enabled=internal_mcp_enabled,
+        )
+        method_count = len(catalogue.list_methods())
+        if internal_mcp_enabled:
+            app.logger.info(
+                "[mcp_gateway] Enabled with %d registered methods.", method_count
+            )
+        else:
+            app.logger.info(
+                "[mcp_gateway] Initialised (disabled). Set VON_INTERNAL_MCP_ENABLE=1 to activate. Methods=%d",
+                method_count,
+            )
+    except Exception as exc:  # pragma: no cover - defensive bootstrap
         try:
-            if os.getenv("VON_PREWARM_DISABLE") in (
-                "1",
-                "true",
-                "TRUE",
-                "True",
-            ) or app.config.get("PREWARM_DISABLE"):
-                app.logger.info("Prewarm disabled by VON_PREWARM_DISABLE/ config flag.")
-                return
-            import threading
-            import time as _time
+            app.logger.warning("[mcp_gateway] Failed to initialise: %s", exc)
+        except Exception:
+            pass
+        gateway_instance = None
 
-            def _prewarm_worker():
-                t0 = _time.time()
-                try:
-                    try:
-                        lm_func = app.config.get("LIST_MODELS_FUNC")
-                        if callable(lm_func):
-                            models = lm_func()
-                            app.logger.info(
-                                "[prewarm] Listed %d models.",
-                                len(models) if isinstance(models, list) else -1,
-                            )
-                    except Exception as e:
-                        app.logger.warning("[prewarm] Model list failed: %s", e)
-                    try:
-                        with app.test_client() as c:
-                            r = c.get("/vontology/api/vontology/tree?refresh=1")
-                            if r.status_code == 200:
-                                app.logger.info(
-                                    "[prewarm] Tree build OK (len bytes=%s)",
-                                    len(r.data),
-                                )
-                            else:
-                                app.logger.warning(
-                                    "[prewarm] Tree build non-200 status=%s",
-                                    r.status_code,
-                                )
-                    except Exception as e:
-                        app.logger.warning("[prewarm] Tree build failed: %s", e)
-                finally:
-                    app.logger.info("[prewarm] Completed in %.2fs", _time.time() - t0)
+    app.config["INTERNAL_MCP_GATEWAY"] = gateway_instance
+    return gateway_instance
 
-            threading.Thread(
-                target=_prewarm_worker, name="prewarm-thread", daemon=True
-            ).start()
-        except Exception as e:
+
+def _configure_internal_mcp_orchestrator_startup(app: Flask, gateway_instance) -> None:
+    """Initialise or defer the internal MCP orchestrator."""
+    app.config["INTERNAL_MCP_ORCHESTRATOR"] = None
+    app.config["INTERNAL_MCP_ORCHESTRATOR_STATUS"] = {
+        "state": "disabled" if gateway_instance is None else "pending",
+        "ready": False,
+        "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+    }
+
+    if gateway_instance is None:
+        return
+
+    from ..integrations.internal_mcp import InternalMCPChatOrchestrator
+
+    orchestrator_logger = app.logger.getChild("mcp_orchestrator") if app.logger else None
+    blocking_orchestrator_start = os.getenv(
+        "VON_INTERNAL_MCP_ORCHESTRATOR_BLOCKING_STARTUP", "0"
+    ).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _build_orchestrator() -> None:
+        start_perf = time.perf_counter()
+        app.config["INTERNAL_MCP_ORCHESTRATOR_STATUS"] = {
+            "state": "initialising",
+            "ready": False,
+            "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+        }
+        try:
             try:
-                app.logger.warning("[prewarm] Failed to start: %s", e)
+                bootstrap_max_tool_invocations = get_internal_mcp_max_tool_invocations()
+            except Exception:
+                bootstrap_max_tool_invocations = 30
+            try:
+                bootstrap_tool_batch_cap = get_internal_mcp_tool_batch_cap()
+            except Exception:
+                bootstrap_tool_batch_cap = 10
+            orchestrator_instance = InternalMCPChatOrchestrator(
+                gateway=gateway_instance,
+                logger=orchestrator_logger,
+                max_tool_invocations=bootstrap_max_tool_invocations,
+                tool_batch_cap=bootstrap_tool_batch_cap,
+                default_gmail_profile=os.getenv("VON_GMAIL_DEFAULT_PROFILE") or None,
+            )
+            duration_ms = int((time.perf_counter() - start_perf) * 1000)
+            app.config["INTERNAL_MCP_ORCHESTRATOR"] = orchestrator_instance
+            app.config["INTERNAL_MCP_ORCHESTRATOR_STATUS"] = {
+                "state": "ready",
+                "ready": True,
+                "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                "duration_ms": duration_ms,
+            }
+            try:
+                app.logger.info(
+                    "[mcp_orchestrator] Initialised in %dms (blocking_startup=%s).",
+                    duration_ms,
+                    blocking_orchestrator_start,
+                )
+            except Exception:
+                pass
+        except Exception as exc:  # pragma: no cover - defensive bootstrap
+            app.config["INTERNAL_MCP_ORCHESTRATOR_STATUS"] = {
+                "state": "failed",
+                "ready": False,
+                "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                "error": str(exc),
+            }
+            try:
+                app.logger.warning("[mcp_orchestrator] Failed to initialise: %s", exc)
             except Exception:
                 pass
 
+    if blocking_orchestrator_start:
+        _build_orchestrator()
+        return
+
+    try:
+        app.logger.info(
+            "[mcp_orchestrator] Deferring initialisation to background thread "
+            "(set VON_INTERNAL_MCP_ORCHESTRATOR_BLOCKING_STARTUP=1 to restore blocking startup)."
+        )
+    except Exception:
+        pass
+
+    try:
+        threading.Thread(
+            target=_build_orchestrator,
+            name="mcp_orchestrator_init",
+            daemon=True,
+        ).start()
+    except Exception as exc:  # pragma: no cover - defensive bootstrap
+        app.config["INTERNAL_MCP_ORCHESTRATOR_STATUS"] = {
+            "state": "failed",
+            "ready": False,
+            "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+            "error": f"thread_start_failed:{exc}",
+        }
+        try:
+            app.logger.warning(
+                "[mcp_orchestrator] Failed to start async init thread: %s", exc
+            )
+        except Exception:
+            pass
+
+
+def _ensure_db_monitor_started(app: Flask) -> None:
+    try:
+        ensure_monitor_started()
+    except Exception as exc:  # pragma: no cover
+        try:
+            app.logger.warning("Failed to start DB monitor: %s", exc)
+        except Exception:
+            pass
+
+
+def _maybe_start_startup_rag_requeue(app: Flask) -> None:
+    """Requeue eligible unindexed sessions on startup outside pytest."""
+    if _is_running_under_pytest():
+        return
+
+    try:
+        if os.getenv("VON_RAG_STARTUP_REQUEUE", "1").lower() in {"1", "true"}:
+            threading.Thread(
+                target=_startup_requeue_unindexed_interaction_sessions,
+                args=(app.logger,),
+                daemon=True,
+                name="rag_startup_requeue",
+            ).start()
+    except Exception as exc:  # pragma: no cover
+        try:
+            app.logger.warning("[startup] Failed to start requeue thread: %s", exc)
+        except Exception:
+            pass
+
+
+def _configure_durable_workflow_startup(app: Flask) -> None:
+    """Initialise or defer durable workflow runtime startup."""
+    _set_durable_workflow_components_snapshot(app, None)
+    _set_durable_workflow_startup_status_snapshot(
+        app,
+        {
+            "state": "skipped_pytest" if _is_running_under_pytest() else "pending",
+            "ready": False,
+            "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+        },
+    )
+
+    if _is_running_under_pytest():
+        return
+
+    blocking_durable_startup = os.getenv(
+        "VON_DURABLE_WORKFLOWS_BLOCKING_STARTUP", "0"
+    ).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _bootstrap_durable_workflow_system() -> None:
+        _set_durable_workflow_startup_status_snapshot(
+            app,
+            {
+                "state": "initialising",
+                "ready": False,
+                "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+            },
+        )
+        startup_perf = time.perf_counter()
+        try:
+            components = _start_durable_workflow_system(app.logger)
+            duration_ms = int((time.perf_counter() - startup_perf) * 1000)
+            if components is not None:
+                _set_durable_workflow_components_snapshot(app, components)
+                _set_durable_workflow_startup_status_snapshot(
+                    app,
+                    {
+                        "state": "ready",
+                        "ready": True,
+                        "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                        "duration_ms": duration_ms,
+                        "workflow_bootstrap_summary": _build_durable_workflow_bootstrap_summary(
+                            components
+                        ),
+                    },
+                )
+                try:
+                    app.logger.info(
+                        "[durable_workflows] Initialised in %dms (blocking_startup=%s).",
+                        duration_ms,
+                        blocking_durable_startup,
+                    )
+                except Exception:
+                    pass
+
+                import atexit
+
+                atexit.register(_stop_durable_workflow_system)
+            else:
+                _set_durable_workflow_startup_status_snapshot(
+                    app,
+                    {
+                        "state": "not_started",
+                        "ready": False,
+                        "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                        "duration_ms": duration_ms,
+                    },
+                )
+        except Exception as exc:  # pragma: no cover
+            _set_durable_workflow_startup_status_snapshot(
+                app,
+                {
+                    "state": "failed",
+                    "ready": False,
+                    "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                    "error": str(exc),
+                },
+            )
+            try:
+                app.logger.warning(
+                    "[startup] Durable workflow system startup failed: %s", exc
+                )
+            except Exception:
+                pass
+
+    if blocking_durable_startup:
+        _bootstrap_durable_workflow_system()
+        return
+
+    try:
+        app.logger.info(
+            "[durable_workflows] Deferring startup to background thread "
+            "(set VON_DURABLE_WORKFLOWS_BLOCKING_STARTUP=1 to restore blocking startup)."
+        )
+    except Exception:
+        pass
+
+    try:
+        threading.Thread(
+            target=_bootstrap_durable_workflow_system,
+            name="durable_workflow_startup",
+            daemon=True,
+        ).start()
+    except Exception as exc:  # pragma: no cover
+        _set_durable_workflow_startup_status_snapshot(
+            app,
+            {
+                "state": "failed",
+                "ready": False,
+                "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                "error": f"thread_start_failed:{exc}",
+            },
+        )
+        try:
+            app.logger.warning(
+                "[durable_workflows] Failed to start async startup thread: %s",
+                exc,
+            )
+        except Exception:
+            pass
+
+
+def _log_prompt_concept_health(app: Flask) -> None:
+    try:
+        pc_status = prompt_concept_health_status()
+        if not pc_status.get("available"):
+            app.logger.warning(
+                "Prompt concept %s missing or incomplete (source_field=%s, error=%s). LLM annotation requests will fail until resolved.",
+                PROMPT_CONCEPT_ID,
+                pc_status.get("source_field"),
+                pc_status.get("error"),
+            )
+        else:
+            app.logger.info(
+                "Prompt concept %s OK (source_field=%s)",
+                PROMPT_CONCEPT_ID,
+                pc_status.get("source_field"),
+            )
+    except Exception as exc:  # pragma: no cover - defensive
+        try:
+            app.logger.warning("Prompt concept health check unexpected error: %s", exc)
+        except Exception:
+            pass
+
+
+def _build_root_redirect_response():
+    return redirect(url_for("von.serve_page"))
+
+
+def _build_health_check_response(app: Flask):
+    import socket
+    import urllib.request
+
+    local_ip = None
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.connect(("8.8.8.8", 80))
+        local_ip = sock.getsockname()[0]
+        sock.close()
+    except Exception as exc:
+        print(f"[health] Local IP detection (method 1) failed: {exc}")
+        try:
+            local_ip = socket.gethostbyname(socket.gethostname())
+            print(f"[health] Local IP from hostname: {local_ip}")
+        except Exception as inner_exc:
+            print(f"[health] Local IP detection (method 2) failed: {inner_exc}")
+            local_ip = "127.0.0.1"
+
+    public_ip = app.config.get("PUBLIC_IP_ADDRESS")
+    if not public_ip:
+        try:
+            with urllib.request.urlopen(
+                "https://api.ipify.org?format=text", timeout=3
+            ) as response:
+                public_ip = response.read().decode("utf-8").strip()
+                app.config["PUBLIC_IP_ADDRESS"] = public_ip
+                print(f"[health] Public IP fetched and cached: {public_ip}")
+        except Exception as exc:
+            print(f"[health] Public IP fetch failed: {exc}")
+            public_ip = None
+
+    version_info = get_runtime_code_version_info()
+    return jsonify(
+        status="healthy",
+        version=version_info.get("version"),
+        version_details=version_info,
+        pid=os.getpid(),
+        start_time=app.config["SERVER_START_TIME"],
+        local_ip=local_ip,
+        public_ip=public_ip,
+        rag_pending_count=None,
+    )
+
+
+def _describe_runtime_component(obj):
+    if obj is None:
+        return None
+    try:
+        cls = obj.__class__
+        info = {
+            "class_name": getattr(cls, "__name__", None),
+            "module": getattr(cls, "__module__", None),
+        }
+        for attr in ("model_name", "model", "name"):
+            try:
+                value = getattr(obj, attr, None)
+                if isinstance(value, str) and value.strip():
+                    info[attr] = value.strip()
+            except Exception:
+                pass
+        return info
+    except Exception:
+        return None
+
+
+def _handle_rag_runtime_request():
+    import os
+
+    try:
+        from src.backend.services.rag_service import (
+            RAGBackendUnavailable,
+            peek_rag_service,
+        )
+
+        namespace = request.args.get("namespace")
+        service = peek_rag_service()
+
+        if service is None:
+            effective_namespace = namespace or os.getenv("VON_DEFAULT_NAMESPACE")
+            return jsonify(
+                {
+                    "success": True,
+                    "service_initialised": False,
+                    "requested_namespace": namespace,
+                    "effective_namespace": effective_namespace,
+                    "backend": {
+                        "requested": "llamaindex",
+                        "class_name": None,
+                        "module": None,
+                    },
+                    "persistence_dir": None,
+                    "index_persist_dir": None,
+                    "index_cached": False,
+                    "embedder": None,
+                    "llm": None,
+                    "openai_key_present": bool(os.getenv("OPENAI_API_KEY")),
+                    "last_query": None,
+                    "note": "RAG service not initialised yet; open this panel again after the first RAG query/index operation.",
+                }
+            )
+
+        try:
+            resolver = getattr(service, "_resolve_effective_namespace", None)
+            if callable(resolver):
+                effective_namespace = resolver(namespace)
+            else:
+                effective_namespace = namespace or os.getenv("VON_DEFAULT_NAMESPACE")
+        except Exception:
+            effective_namespace = namespace or os.getenv("VON_DEFAULT_NAMESPACE")
+
+        index_persist_dir = None
+        try:
+            namespace_dir = getattr(service, "_namespace_persist_dir", None)
+            if callable(namespace_dir) and isinstance(effective_namespace, str):
+                index_persist_dir = namespace_dir(effective_namespace)
+        except Exception:
+            index_persist_dir = None
+
+        index_cached = False
+        try:
+            indices = getattr(service, "_indices", None)
+            if isinstance(indices, dict) and isinstance(effective_namespace, str):
+                index_cached = effective_namespace in indices
+        except Exception:
+            index_cached = False
+
+        embedder = None
+        llm = None
+        try:
+            get_embedder = getattr(service, "get_runtime_embed_model", None)
+            if callable(get_embedder):
+                embedder = _describe_runtime_component(get_embedder())
+
+            get_llm = getattr(service, "get_runtime_llm", None)
+            if callable(get_llm):
+                llm = _describe_runtime_component(get_llm())
+
+            if embedder is None or llm is None:
+                service_context = getattr(service, "service_context", None)
+                if service_context is not None:
+                    if embedder is None:
+                        embedder = _describe_runtime_component(
+                            getattr(service_context, "embed_model", None)
+                        )
+                    if llm is None:
+                        llm = _describe_runtime_component(
+                            getattr(service_context, "llm", None)
+                        )
+        except Exception:
+            pass
+
+        try:
+            last_query = getattr(service, "_last_query_info", None)
+        except Exception:
+            last_query = None
+
+        return jsonify(
+            {
+                "success": True,
+                "service_initialised": True,
+                "requested_namespace": namespace,
+                "effective_namespace": effective_namespace,
+                "backend": {
+                    "class_name": service.__class__.__name__,
+                    "module": service.__class__.__module__,
+                },
+                "persistence_dir": getattr(service, "persistence_dir", None),
+                "index_persist_dir": index_persist_dir,
+                "index_cached": index_cached,
+                "embedder": embedder,
+                "llm": llm,
+                "openai_key_present": bool(os.getenv("OPENAI_API_KEY")),
+                "last_query": last_query,
+            }
+        )
+    except RAGBackendUnavailable as exc:
+        return (
+            jsonify(
+                success=False,
+                error="rag_backend_unavailable",
+                message=str(exc),
+            ),
+            503,
+        )
+    except Exception as exc:
+        return jsonify(success=False, error="unexpected", detail=str(exc)), 500
+
+
+def _resolve_chat_history_admin_context(
+    flask_session: object,
+    *,
+    requested_namespace: str | None = None,
+    enforce_namespace_match: bool,
+):
+    from src.backend.services.namespace_service import derive_namespace
+
+    get = getattr(flask_session, "get", None)
+    if not callable(get):
+        return None, (jsonify(error="Not authenticated"), 401)
+
+    session_user_slug = _get_session_user_slug(flask_session)
+    session_user_concept_id = get("user_concept_id")
+    if not (session_user_slug or session_user_concept_id):
+        return None, (jsonify(error="Not authenticated"), 401)
+
+    session_org_raw = get("organisation_concept_id") or get("org_id")
+    organisation_slug = _slug_from_maybe_concept_id(session_org_raw)
+    role_in_org = get("role_in_org")
+
+    session_namespace = get("namespace")
+    if not session_namespace and session_user_slug:
+        session_namespace = derive_namespace(session_user_slug, organisation_slug)
+
+    target_namespace = requested_namespace or session_namespace
+    if not isinstance(target_namespace, str) or not target_namespace:
+        return None, (jsonify(error="Not authenticated"), 401)
+
+    if enforce_namespace_match and session_namespace != target_namespace:
+        return None, (
+            jsonify(error="namespace_mismatch", session_namespace=session_namespace),
+            403,
+        )
+
+    user_concept_id = (
+        session_user_concept_id
+        if isinstance(session_user_concept_id, str) and session_user_concept_id
+        else (f"#V#{session_user_slug}" if session_user_slug else None)
+    )
+    if not user_concept_id:
+        return None, (jsonify(error="Not authenticated"), 401)
+
+    return (
+        {
+            "user_concept_id": user_concept_id,
+            "target_namespace": target_namespace,
+            "organisation_concept_id": organisation_slug,
+            "role_in_org": role_in_org,
+            "session_namespace": session_namespace,
+        },
+        None,
+    )
+
+
+def _handle_admin_chat_history_backfill_request():
+    try:
+        from flask import session as flask_session
+        from src.backend.services import chat_history_service
+
+        context, error = _resolve_chat_history_admin_context(
+            flask_session,
+            enforce_namespace_match=False,
+        )
+        if error is not None:
+            return error
+        assert context is not None
+
+        body = request.get_json(silent=True) or {}
+        result = chat_history_service.backfill_chat_history_for_user(
+            user_concept_id=context["user_concept_id"],
+            target_namespace=context["target_namespace"],
+            organisation_concept_id=context["organisation_concept_id"],
+            role_in_org=context["role_in_org"],
+            max_sessions=int(body.get("max_sessions", 10)),
+            max_messages=int(body.get("max_messages", 500)),
+            dry_run=bool(body.get("dry_run", False)),
+        )
+        return jsonify(result)
+    except Exception as exc:
+        return jsonify(error="unexpected", detail=str(exc)), 500
+
+
+def _handle_admin_chat_history_reindex_request(app: Flask):
+    try:
+        from flask import session as flask_session
+        from src.backend.services import chat_history_service
+
+        context, error = _resolve_chat_history_admin_context(
+            flask_session,
+            requested_namespace=request.args.get("namespace")
+            or flask_session.get("namespace"),
+            enforce_namespace_match=True,
+        )
+        if error is not None:
+            return error
+        assert context is not None
+
+        body = request.get_json(silent=True) or {}
+        max_sessions = int(body.get("max_sessions", 50))
+        max_messages = int(body.get("max_messages", 5000))
+        reset_counters = bool(body.get("reset_counters", True))
+        dry_run = bool(body.get("dry_run", False))
+        session_ids = body.get("session_ids")
+        if not isinstance(session_ids, list):
+            session_ids = None
+
+        chunk_start = body.get("chunk_start")
+        chunk_size = body.get("chunk_size")
+        use_chunked = chunk_start is not None or chunk_size is not None
+
+        if use_chunked:
+            if (
+                not session_ids
+                or len(session_ids) != 1
+                or not isinstance(session_ids[0], str)
+            ):
+                return (
+                    jsonify(
+                        error="invalid_request",
+                        detail="chunked reindex requires exactly one session_id",
+                    ),
+                    400,
+                )
+
+            session_id = session_ids[0]
+            try:
+                t0 = time.monotonic()
+            except Exception:
+                t0 = None
+
+            try:
+                app.logger.info(
+                    "[chat_history_reindex] chunk start user=%s ns=%s session=%s chunk_start=%s chunk_size=%s dry_run=%s",
+                    context["user_concept_id"],
+                    context["target_namespace"],
+                    session_id,
+                    int(chunk_start or 0),
+                    int(chunk_size or 25),
+                    bool(dry_run),
+                )
+            except Exception:
+                pass
+
+            result = chat_history_service.reindex_chat_history_session_chunk(
+                user_concept_id=context["user_concept_id"],
+                target_namespace=context["target_namespace"],
+                organisation_concept_id=context["organisation_concept_id"],
+                role_in_org=context["role_in_org"],
+                session_id=session_id,
+                chunk_start=int(chunk_start or 0),
+                chunk_size=int(chunk_size or 25),
+                reset_counters=reset_counters,
+                dry_run=dry_run,
+            )
+
+            try:
+                elapsed_ms = (
+                    int((time.monotonic() - t0) * 1000) if t0 is not None else None
+                )
+                app.logger.info(
+                    "[chat_history_reindex] chunk done user=%s ns=%s session=%s attempted=%s ok=%s failed=%s next=%s done=%s elapsed_ms=%s errors=%s",
+                    context["user_concept_id"],
+                    context["target_namespace"],
+                    session_id,
+                    result.get("messages_indexed_attempted"),
+                    result.get("messages_indexed_success"),
+                    result.get("messages_indexed_failed"),
+                    result.get("next_chunk_start"),
+                    result.get("done"),
+                    elapsed_ms,
+                    len(result.get("errors") or []),
+                )
+            except Exception:
+                pass
+
+            return jsonify(result)
+
+        result = chat_history_service.reindex_chat_history_for_user_namespace(
+            user_concept_id=context["user_concept_id"],
+            target_namespace=context["target_namespace"],
+            organisation_concept_id=context["organisation_concept_id"],
+            role_in_org=context["role_in_org"],
+            session_ids=session_ids,
+            max_sessions=max_sessions,
+            max_messages=max_messages,
+            reset_counters=reset_counters,
+            dry_run=dry_run,
+        )
+        return jsonify(result)
+    except Exception as exc:
+        return jsonify(error="unexpected", detail=str(exc)), 500
+
+
+def _resolve_namespace_scope_values(namespace: str | None) -> list[str] | None:
+    if not namespace:
+        return None
+
+    session_namespaces = [namespace]
+    try:
+        from src.backend.services.namespace_service import parse_namespace
+
+        parsed = parse_namespace(namespace)
+        if parsed.get("user_id"):
+            user_only_namespace = f"#V#{parsed['user_id']}"
+            if user_only_namespace not in session_namespaces:
+                session_namespaces.append(user_only_namespace)
+    except Exception:
+        pass
+
+    return session_namespaces
+
+
+def _handle_admin_rag_integrity_request():
+    db = get_db()
+    if db is None:
+        return jsonify({"error": "db_unavailable"}), 503
+
+    sessions_coll = db["interaction_sessions"]
+    interactions_coll = (
+        db["interactions"] if "interactions" in db.list_collection_names() else None
+    )
+    namespace = request.args.get("namespace")
+    session_namespaces = _resolve_namespace_scope_values(namespace)
+    session_filter = (
+        {"namespace": {"$in": session_namespaces}} if session_namespaces else {}
+    )
+
+    result = {
+        "sessions": sessions_coll.count_documents(session_filter or {}),
+        "scoped_sessions": sessions_coll.count_documents(session_filter or {}),
+        "interactions": (
+            interactions_coll.count_documents({})
+            if interactions_coll is not None
+            else 0
+        ),
+        "indexed": sessions_coll.count_documents(
+            {"indexing_status": "indexed", **session_filter}
+        ),
+        "pending": sessions_coll.count_documents(
+            {"indexing_status": "pending", **session_filter}
+        ),
+        "failed": sessions_coll.count_documents(
+            {"indexing_status": "failed", **session_filter}
+        ),
+        "skipped": sessions_coll.count_documents(
+            {"indexing_status": "skipped", **session_filter}
+        ),
+        "eligible_sessions": sessions_coll.count_documents(
+            {
+                "$or": [
+                    {"history": {"$exists": True, "$ne": []}},
+                    {"summary": {"$exists": True, "$type": "string", "$ne": ""}},
+                ],
+                **session_filter,
+            }
+        ),
+        "eligible_interactions": 0,
+        "anomalies": [],
+        "namespace": namespace,
+        "session_namespace": (session_namespaces[0] if session_namespaces else None),
+        "session_namespaces": session_namespaces,
+    }
+
+    if interactions_coll is not None:
+        result["eligible_interactions"] = interactions_coll.count_documents(
+            {
+                "$or": [
+                    {"text": {"$exists": True, "$type": "string", "$ne": ""}},
+                    {"message": {"$exists": True, "$type": "string", "$ne": ""}},
+                ]
+            }
+        )
+        sample_with_text = interactions_coll.find(
+            {
+                "$or": [
+                    {"text": {"$exists": True, "$type": "string", "$ne": ""}},
+                    {"message": {"$exists": True, "$type": "string", "$ne": ""}},
+                ]
+            },
+            {"session_id": 1},
+        ).limit(25)
+        orphan_sessions = []
+        for item in sample_with_text:
+            session_id = item.get("session_id")
+            if session_id is None:
+                continue
+            session_doc = sessions_coll.find_one({"_id": session_id}, {"indexing_status": 1})
+            if not session_doc or session_doc.get("indexing_status") not in (
+                "pending",
+                "indexed",
+                "failed",
+                "skipped",
+            ):
+                orphan_sessions.append(str(session_id))
+        if orphan_sessions:
+            result["anomalies"].append(
+                {"type": "orphan_text_interactions", "session_ids": orphan_sessions}
+            )
+
+    return jsonify(result)
+
+
+def _handle_admin_rag_sync_request():
+    from ..services.rag_sync_service import sync_to_chat_store
+
+    payload = request.get_json(silent=True) or {}
+    try:
+        result = sync_to_chat_store(
+            namespace=payload.get("namespace"),
+            user_concept_id=payload.get("user_concept_id"),
+            organisation_concept_id=payload.get("organisation_concept_id"),
+        )
+        return jsonify(result)
+    except Exception as exc:
+        return jsonify({"success": False, "error": str(exc)}), 500
+
+
+def _build_diagnostics_response(app: Flask):
+    import threading
+
+    rss_mb = None
+    thread_count = None
+    try:
+        import psutil  # type: ignore
+
+        process = psutil.Process()
+        rss_mb = round(process.memory_info().rss / (1024 * 1024), 2)
+        thread_count = process.num_threads()
+    except Exception:
+        try:
+            import tracemalloc
+
+            if tracemalloc.is_tracing():
+                snap = tracemalloc.take_snapshot()
+                rss_mb = round(
+                    sum([item.size for item in snap.statistics("filename")])
+                    / (1024 * 1024),
+                    2,
+                )
+        except Exception:
+            pass
+        thread_count = len(threading.enumerate())
+
+    from datetime import datetime, timezone as _tz
+
+    try:
+        start_iso = app.config.get("SERVER_START_TIME")
+        start_dt = (
+            datetime.fromisoformat(start_iso.replace("Z", "+00:00"))
+            if start_iso
+            else None
+        )
+        uptime_sec = (
+            (datetime.now(_tz.utc) - start_dt).total_seconds() if start_dt else None
+        )
+    except Exception:
+        uptime_sec = None
+
+    model_cache_summary = []
+    try:
+        from ...languagemodels.llm_interface import _MODEL_CACHE, _MODEL_CACHE_TTL  # type: ignore
+
+        now_ts = time.time()
+        for key, meta in _MODEL_CACHE.items():
+            models = meta.get("models") or []
+            model_cache_summary.append(
+                {
+                    "key": key,
+                    "count": len(models),
+                    "age_sec": round(now_ts - meta.get("fetched_at", 0), 1),
+                    "build_time_sec": round(meta.get("build_time", 0), 3),
+                    "source": meta.get("source"),
+                    "error": meta.get("error"),
+                    "hit_count": meta.get("hit_count", 0),
+                    "ttl_sec": _MODEL_CACHE_TTL,
+                }
+            )
+    except Exception:
+        pass
+
+    tree_cache = {}
+    try:
+        from .routes.vontology_routes import _TREE_CACHE  # type: ignore
+
+        now_ts = time.time()
+        ttl_env = os.getenv("VONTOLOGY_TREE_TTL")
+        if _TREE_CACHE:
+            record = _TREE_CACHE.get("Thing")
+            if record and isinstance(record, tuple) and len(record) >= 5:
+                ts, payload, build_secs, alloc_kb, hits = record
+                node_count = None
+                try:
+                    if isinstance(payload, dict) and isinstance(payload.get("tree"), list):
+                        stack = list(payload["tree"])
+                        count = 0
+                        while stack:
+                            node = stack.pop()
+                            count += 1
+                            children = node.get("children") if isinstance(node, dict) else None
+                            if isinstance(children, list):
+                                stack.extend(children)
+                        node_count = count
+                except Exception:
+                    pass
+                tree_cache = {
+                    "cached": True,
+                    "age_sec": round(now_ts - ts, 1),
+                    "build_time_sec": round(build_secs, 3),
+                    "alloc_kb": round(alloc_kb, 1),
+                    "ttl_sec": int(ttl_env) if ttl_env and ttl_env.isdigit() else None,
+                    "node_count": node_count,
+                    "hits": hits,
+                }
+            else:
+                tree_cache = {"cached": True}
+        else:
+            tree_cache = {"cached": False}
+    except Exception:
+        tree_cache = {"cached": False, "error": "unavailable"}
+
+    counts_cache = {}
+    try:
+        from .routes.vontology_routes import _INSTANCE_COUNTS_CACHE  # type: ignore
+        from ..services.vontology_concept_stats_service import (
+            get_vontology_concept_stats_cache_summary,
+        )
+
+        ttl_env = os.getenv("VONTOLOGY_COUNTS_TTL")
+        size = len(_INSTANCE_COUNTS_CACHE) if isinstance(_INSTANCE_COUNTS_CACHE, dict) else None
+        counts_cache = {
+            "size": size,
+            "ttl_sec": int(ttl_env) if ttl_env and ttl_env.isdigit() else None,
+            "stats_cache": get_vontology_concept_stats_cache_summary(),
+        }
+    except Exception:
+        counts_cache = {"error": "unavailable"}
+
+    salient_cache = {}
+    try:
+        from .routes.vontology_routes import _SALIENT_CACHE, _SALIENT_STATS  # type: ignore
+
+        cache_obj = _SALIENT_CACHE if isinstance(_SALIENT_CACHE, dict) else {}
+        cache_size = len(cache_obj) if isinstance(cache_obj, dict) else None
+        split_entries = 0
+        sample_scope = None
+        if isinstance(cache_obj, dict):
+            split_entries = sum(
+                1
+                for key in cache_obj.keys()
+                if isinstance(key, str) and key.endswith("|split")
+            )
+            for value in cache_obj.values():
+                if not isinstance(value, tuple) or len(value) < 4:
+                    continue
+                scope_payload = value[3]
+                if not isinstance(scope_payload, dict):
+                    continue
+                raw_map = scope_payload.get("raw_scope_map") or {}
+                if not isinstance(raw_map, dict):
+                    raw_map = {}
+                sample_scope = {
+                    "predicates_by_scope_keys": list(
+                        (scope_payload.get("predicates_by_scope") or {}).keys()
+                    ),
+                    "predicate_origin_keys": list(
+                        (scope_payload.get("predicate_origins") or {}).keys()
+                    ),
+                    "raw_scope_counts": {
+                        key: len(value)
+                        if isinstance(value, (list, set, tuple))
+                        else 0
+                        for key, value in raw_map.items()
+                    },
+                }
+                break
+        salient_cache = {
+            "size": cache_size,
+            "split_entries": split_entries,
+            "stats": dict(_SALIENT_STATS) if isinstance(_SALIENT_STATS, dict) else None,
+            "ttl_sec": 30,
+            "sample_scope_payload": sample_scope,
+        }
+    except Exception:
+        salient_cache = {"error": "unavailable"}
+
+    try:
+        from ..mcp_server.process_guard import get_mcp_helper_inventory
+
+        mcp_helper_inventory = get_mcp_helper_inventory()
+    except Exception:
+        mcp_helper_inventory = {"success": False, "error": "unavailable"}
+
+    entity_counts_stats = {}
+    try:
+        from .routes.vontology_routes import _ENTITY_COUNTS_STATS  # type: ignore
+
+        ema = _ENTITY_COUNTS_STATS.get("ema_ms")
+        entity_counts_stats = {
+            "total_calls": int(_ENTITY_COUNTS_STATS.get("total_calls") or 0),
+            "last_ts": _ENTITY_COUNTS_STATS.get("last_ts"),
+            "ema_ms": None if ema is None else round(float(ema), 1),
+        }
+    except Exception:
+        entity_counts_stats = {"error": "unavailable"}
+
+    try:
+        from ..db.mongo_client import get_effective_mongo_uri, is_using_fallback_uri  # type: ignore
+
+        effective_uri = get_effective_mongo_uri()
+        redacted_uri = effective_uri
+        if "://" in redacted_uri and "@" in redacted_uri:
+            scheme, rest = redacted_uri.split("://", 1)
+            if "@" in rest:
+                creds, hostpart = rest.split("@", 1)
+                if ":" in creds:
+                    user = creds.split(":", 1)[0]
+                    redacted_uri = f"{scheme}://{user}:***@{hostpart}"
+                else:
+                    redacted_uri = f"{scheme}://***@{hostpart}"
+        mongo_diag = {
+            "effective_mongo_uri": redacted_uri,
+            "using_fallback": is_using_fallback_uri(),
+        }
+    except Exception:
+        mongo_diag = {"effective_mongo_uri": None, "using_fallback": None}
+
+    session_user = None
+    effective_user = None
+    header_user = None
+    normalised_header_user = None
+    header_user_validation = None
+    header_user_raw_exact_exists = None
+    header_user_normalised_exact_exists = None
+    user_visibility_sample = None
+    try:
+        from flask import session as flask_session
+        from ..security.access_control import (
+            _normalise_concept_id,  # type: ignore
+            _validate_person_concept,  # type: ignore
+            get_effective_user_concept_id,
+        )
+        from ..services.concept_service import (
+            _find_raw_concept_by_exact_concept_id,  # type: ignore
+        )
+
+        session_user = flask_session.get("user_concept_id")
+        try:
+            header_user = request.headers.get("X-User-Concept-ID") or request.headers.get(
+                "X-User-Client-ID"
+            )
+        except Exception:
+            header_user = None
+        effective_user = get_effective_user_concept_id()
+        if header_user:
+            normalised_header_user = _normalise_concept_id(header_user)
+            header_user_validation = _validate_person_concept(header_user)
+            header_user_raw_exact_exists = bool(
+                _find_raw_concept_by_exact_concept_id(header_user)
+            )
+            if normalised_header_user:
+                header_user_normalised_exact_exists = bool(
+                    _find_raw_concept_by_exact_concept_id(normalised_header_user)
+                )
+
+        try:
+            from ..db.mongo_client import get_concepts_collection  # type: ignore
+
+            coll = get_concepts_collection()
+            if coll is not None:
+                total_user_specific = coll.count_documents(
+                    {"relationships.specific_to_user": {"$exists": True, "$ne": []}}
+                )
+                if effective_user:
+                    visible_user_specific = coll.count_documents(
+                        {"relationships.specific_to_user": effective_user}
+                    )
+                else:
+                    visible_user_specific = 0
+                user_visibility_sample = {
+                    "total_user_specific": int(total_user_specific),
+                    "visible_for_effective_user": int(visible_user_specific),
+                }
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    guid_stats = {}
+    try:
+        from ..db.mongo_client import get_concepts_collection
+
+        coll = get_concepts_collection()
+        if coll is not None:
+            total_concepts = coll.count_documents({})
+            with_guid = coll.count_documents({"guid": {"$exists": True}})
+            guid_stats = {
+                "total_concepts": total_concepts,
+                "with_guid": with_guid,
+                "coverage_percent": (
+                    round((with_guid / total_concepts * 100), 1)
+                    if total_concepts > 0
+                    else 0
+                ),
+            }
+    except Exception:
+        guid_stats = {"error": "unavailable"}
+
+    search_proxy_stats = {}
+    try:
+        from ..integrations.internal_mcp import search_proxy_mcp as search_proxy_module  # type: ignore
+
+        proxy_instance = getattr(search_proxy_module, "_proxy_instance", None)
+        if proxy_instance is None:
+            search_proxy_stats = {"initialised": False}
+        else:
+            stats = proxy_instance.get_stats()
+            search_proxy_stats = {
+                "initialised": True,
+                "call_count": stats.get("call_count"),
+                "error_count": stats.get("error_count"),
+                "command": getattr(proxy_instance._config, "command", None),
+            }
+    except Exception as exc:  # pragma: no cover - defensive
+        search_proxy_stats = {"error": str(exc)}
+
+    version_info = get_runtime_code_version_info()
+    diag = {
+        "status": "ok",
+        "version": version_info.get("version"),
+        "version_details": version_info,
+        "pid": os.getpid(),
+        "rss_mb": rss_mb,
+        "thread_count": thread_count,
+        "uptime_sec": uptime_sec,
+        "session_user_concept_id": session_user,
+        "effective_user_concept_id": effective_user,
+        "header_user_concept_id": header_user,
+        "normalised_header_user_concept_id": normalised_header_user,
+        "header_user_validation": header_user_validation,
+        "header_user_raw_exact_exists": header_user_raw_exact_exists,
+        "header_user_normalised_exact_exists": header_user_normalised_exact_exists,
+        "user_visibility_sample": user_visibility_sample,
+        "model_cache": model_cache_summary,
+        "tree_cache": tree_cache,
+        "instance_counts_cache": counts_cache,
+        "salient_cache": salient_cache,
+        "mcp_helper_inventory": mcp_helper_inventory,
+        "entity_counts": entity_counts_stats,
+        "guid_stats": guid_stats,
+        "search_proxy": search_proxy_stats,
+        "python_version": sys.version.split()[0],
+    }
+    diag["mongo"] = mongo_diag
+
+    try:
+        from ..services.namespace_isolation_diagnostics_service import (
+            get_namespace_isolation_diagnostics_snapshot,
+        )
+
+        diag["namespace_isolation_diagnostics"] = (
+            get_namespace_isolation_diagnostics_snapshot(include_recent_events=False)
+        )
+    except Exception as exc:
+        diag["namespace_isolation_diagnostics"] = {
+            "available": False,
+            "error": type(exc).__name__,
+        }
+
+    try:
+        from ..workflows.durable.startup import get_system_status
+
+        diag["durable_workflows"] = get_system_status()
+    except Exception as exc:
+        diag["durable_workflows"] = {"error": str(exc), "available": False}
+
+    gateway = app.config.get("INTERNAL_MCP_GATEWAY")
+    if gateway is None:
+        diag["internal_mcp_gateway"] = {"configured": False}
+    else:
+        try:
+            diag["internal_mcp_gateway"] = gateway.get_diagnostics()
+        except Exception as exc:  # pragma: no cover - defensive
+            diag["internal_mcp_gateway"] = {"configured": True, "error": str(exc)}
+
+    diag["internal_mcp_orchestrator_startup"] = app.config.get(
+        "INTERNAL_MCP_ORCHESTRATOR_STATUS"
+    )
+    diag["durable_workflow_startup"] = app.config.get(
+        "DURABLE_WORKFLOW_STARTUP_STATUS"
+    )
+
+    try:
+        from ..services.annotation_extraction_service import (
+            fallback_nonjson_metric_stats,
+            phrase_cache_stats,
+        )
+
+        diag["annotations"] = {
+            "phrase_cache": phrase_cache_stats(),
+            "fallback_nonjson": fallback_nonjson_metric_stats(),
+        }
+    except Exception:
+        pass
+
+    try:
+        from .routes.settings_routes import _IMPORT_METRICS, _ORPHAN_SCAN_METRICS  # type: ignore
+
+        if _IMPORT_METRICS:
+            diag["import_metrics"] = dict(_IMPORT_METRICS)
+        if _ORPHAN_SCAN_METRICS:
+            diag["orphan_metrics"] = dict(_ORPHAN_SCAN_METRICS)
+    except Exception:
+        pass
+
+    try:
+        from ...vontology.utils_vontology import _ACCESSOR_STATS  # type: ignore
+
+        diag["accessor_stats"] = {key: dict(value) for key, value in _ACCESSOR_STATS.items()}
+    except Exception:
+        pass
+
+    return jsonify(diag)
+
+
+def _build_db_status_response():
+    from datetime import datetime, timezone as _tz
+
+    using_fallback = None
+    atlas_detected = None
+    host_only = None
+    try:
+        from ..db.mongo_client import get_effective_mongo_uri, is_using_fallback_uri  # type: ignore
+
+        effective_uri = get_effective_mongo_uri()
+        using_fallback = is_using_fallback_uri()
+        if effective_uri:
+            try:
+                after_scheme = (
+                    effective_uri.split("://", 1)[1]
+                    if "://" in effective_uri
+                    else effective_uri
+                )
+                if "@" in after_scheme:
+                    after_scheme = after_scheme.split("@", 1)[1]
+                host_only = after_scheme.split("/", 1)[0]
+            except Exception:
+                host_only = None
+            atlas_detected = "mongodb.net" in effective_uri.lower()
+    except Exception:
+        pass
+    return jsonify(
+        using_fallback=using_fallback,
+        atlas_detected=atlas_detected,
+        effective_host=host_only,
+        timestamp=datetime.now(_tz.utc).isoformat().replace("+00:00", "Z"),
+    )
+
+
+def _build_runtime_version_response():
+    return jsonify(get_runtime_code_version_info())
+
+
+def _handle_admin_shutdown_request(app: Flask):
+    expected = os.environ.get("VON_ADMIN_TOKEN")
+    provided = request.headers.get("X-Admin-Token")
+    if not expected:
+        return jsonify(success=False, error="shutdown_disabled"), 403
+    if provided != expected:
+        return jsonify(success=False, error="unauthorized"), 401
+
+    werkzeug_shutdown = request.environ.get("werkzeug.server.shutdown")
+    _start_async_process_shutdown(
+        app.logger,
+        werkzeug_shutdown=werkzeug_shutdown if callable(werkzeug_shutdown) else None,
+    )
+    status = "shutting_down" if callable(werkzeug_shutdown) else "shutting_down_fallback"
+    return jsonify(success=True, status=status), 202
+
+
+def _build_instance_counts_alias_response():
+    return get_instance_counts()
+
+
+def _handle_admin_policy_comparison_request():
+    try:
+        from ..services.workflow_policy_graph_service import compare_policy_json_vs_graph
+
+        policy_id = request.args.get("policy_id", "#V#default_workflow_model_policy")
+        report = compare_policy_json_vs_graph(policy_id)
+        return jsonify(report)
+    except Exception as exc:
+        return jsonify(error=str(exc), status="error"), 500
+
+
+def _start_prewarm(app: Flask) -> None:
+    try:
+        if os.getenv("VON_PREWARM_DISABLE") in {"1", "true", "TRUE", "True"} or app.config.get(
+            "PREWARM_DISABLE"
+        ):
+            app.logger.info("Prewarm disabled by VON_PREWARM_DISABLE/ config flag.")
+            return
+
+        def _prewarm_worker():
+            t0 = time.time()
+            try:
+                try:
+                    list_models_func = app.config.get("LIST_MODELS_FUNC")
+                    if callable(list_models_func):
+                        models = list_models_func()
+                        app.logger.info(
+                            "[prewarm] Listed %d models.",
+                            len(models) if isinstance(models, list) else -1,
+                        )
+                except Exception as exc:
+                    app.logger.warning("[prewarm] Model list failed: %s", exc)
+                try:
+                    with app.test_client() as client:
+                        response = client.get("/vontology/api/vontology/tree?refresh=1")
+                        if response.status_code == 200:
+                            app.logger.info(
+                                "[prewarm] Tree build OK (len bytes=%s)",
+                                len(response.data),
+                            )
+                        else:
+                            app.logger.warning(
+                                "[prewarm] Tree build non-200 status=%s",
+                                response.status_code,
+                            )
+                except Exception as exc:
+                    app.logger.warning("[prewarm] Tree build failed: %s", exc)
+            finally:
+                app.logger.info("[prewarm] Completed in %.2fs", time.time() - t0)
+
+        threading.Thread(
+            target=_prewarm_worker,
+            name="prewarm-thread",
+            daemon=True,
+        ).start()
+    except Exception as exc:
+        try:
+            app.logger.warning("[prewarm] Failed to start: %s", exc)
+        except Exception:
+            pass
+
+
+def _register_optional_prewarm(app: Flask) -> None:
     if (
         not app.testing
         and "PYTEST_CURRENT_TEST" not in os.environ
@@ -3289,12 +3299,10 @@ def create_flask_app(
 
             @app.before_first_request  # type: ignore[attr-defined]
             def _defer_prewarm():  # type: ignore
-                _start_prewarm()
+                _start_prewarm(app)
 
         except Exception:
-            _start_prewarm()
-
-    return app
+            _start_prewarm(app)
 
 
 # Example usage (if running this file directly for testing)
