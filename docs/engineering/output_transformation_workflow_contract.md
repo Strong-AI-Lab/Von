@@ -33,8 +33,7 @@ Workflow actions should emit:
   },
   "input_payload": {
     "screen_text_chars": 128,
-    "user_prompt_chars": 42,
-    "heuristic_preflight_enabled": true
+    "user_prompt_chars": 42
   },
   "output_payload": {
     "options": ["Proceed", "Hold"],
@@ -57,7 +56,7 @@ Route code should:
 
 1. Invoke the transform workflow with final screen text and transform settings.
 2. Validate emitted options shape.
-3. Apply deterministic heuristic fallback when workflow output is empty/invalid.
+3. Fail closed / no-op when workflow output is empty or invalid; do not reconstruct options from prose.
 4. Attach output + diagnostics to existing response-transformation telemetry.
 
 ## Additional transform candidate

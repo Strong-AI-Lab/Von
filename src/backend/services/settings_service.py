@@ -1117,17 +1117,6 @@ def get_buttonify_model_enabled() -> bool:
     return True
 
 
-def get_buttonify_heuristic_preflight_enabled() -> bool:
-    """Return whether heuristic preflight can skip the buttonify model pass.
-
-    Defaults to True when unset or invalid. Controlled by
-    VON_BUTTONIFY_HEURISTIC_PREFLIGHT_ENABLE.
-    """
-
-    env_value = os.getenv("VON_BUTTONIFY_HEURISTIC_PREFLIGHT_ENABLE", "1")
-    return str(env_value).strip().lower() in {"1", "true", "yes", "y", "on"}
-
-
 def set_buttonify_model_enabled(enabled: bool) -> bool:
     if not isinstance(enabled, bool):
         enabled = bool(enabled)

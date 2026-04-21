@@ -5805,8 +5805,6 @@ class InternalMCPChatOrchestrator:
         if not isinstance(user_prompt, str):
             user_prompt = ""
 
-        # Buttonify is intentionally LLM-only: no heuristic preflight/fallback.
-        buttonify_preflight_enabled = False
         buttonify_prompt_text = request.data.get("buttonify_prompt_text")
         if not isinstance(buttonify_prompt_text, str):
             buttonify_prompt_text = ""
@@ -5837,7 +5835,6 @@ class InternalMCPChatOrchestrator:
         buttonify_suppression_reason = request.data.get("buttonify_suppression_reason")
         if not isinstance(buttonify_suppression_reason, str):
             buttonify_suppression_reason = None
-        buttonify_preflight_rejection_reason: str | None = None
 
         if buttonify_prompt_available and not buttonify_options:
             buttonify_model_attempted = True
@@ -6000,7 +5997,6 @@ class InternalMCPChatOrchestrator:
             input_payload={
                 "screen_text_chars": len(screen_text),
                 "user_prompt_chars": len(user_prompt),
-                "heuristic_preflight_enabled": buttonify_preflight_enabled,
             },
             output_payload={
                 "options": list(buttonify_options),
@@ -6013,7 +6009,6 @@ class InternalMCPChatOrchestrator:
                 "suppression_reason": buttonify_suppression_reason,
                 "prompt_available": buttonify_prompt_available,
                 "prompt_error": buttonify_prompt_error,
-                "preflight_rejection_reason": buttonify_preflight_rejection_reason,
                 "error_class": buttonify_error_class,
                 "model": buttonify_model_used if buttonify_model_attempted else None,
             },
@@ -6032,9 +6027,6 @@ class InternalMCPChatOrchestrator:
                 "buttonify_model_attempted": buttonify_model_attempted,
                 "buttonify_error_class": buttonify_error_class,
                 "buttonify_suppression_reason": buttonify_suppression_reason,
-                "buttonify_preflight_rejection_reason": (
-                    buttonify_preflight_rejection_reason
-                ),
                 "output_transformation_contract": contract,
             }
         )

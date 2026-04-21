@@ -149,7 +149,7 @@ As of April 21, 2026:
 | `JVNAUTOSCI-1121` | `Done` | `/von/generate` lifecycle and response/debug support surfaces extracted from `von_routes.py` |
 | `JVNAUTOSCI-1120` | `To Do` | Frontend monolith cleanup remains open |
 | `JVNAUTOSCI-1825` | `Done` | `create_flask_app(...)` is now a materially smaller composition layer over extracted startup/admin support surfaces |
-| `JVNAUTOSCI-1971` | `To Do` | Buttonify still needs its remaining prose/heuristic option parsing removed |
+| `JVNAUTOSCI-1971` | `Done` | Residual buttonify heuristic/prose-recovery helpers and stale compatibility surfaces removed; live path is structured-output-only |
 | `JVNAUTOSCI-768` | `To Do` | Vontology concept structure for tool heuristics still not landed |
 | `JVNAUTOSCI-770` | `To Do` | Rule-loader integration task still not landed |
 | `JVNAUTOSCI-1813` | `To Do` | Deferred structural exception-barrier task, not in the core `1116` line |
@@ -158,13 +158,13 @@ As of April 21, 2026:
 
 The remaining work is now more concentrated. The biggest live problems are no longer the same ones this note identified earlier.
 
-### 1. Buttonify still parses options out of prose with regex-heavy logic
+### 1. Buttonify’s residual heuristic helper slab has now been removed
 
 **Location:** [buttonify_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/services/buttonify_service.py:152)
 
-`parse_buttonify_options_json(...)` and its telemetry variant still try to infer option structure from generated prose. That is an older style of Python-owned semantic recovery. It is not the worst remaining problem, but it is still the wrong long-term shape.
+The live route/workflow path was already structured-output-first through `#V#chat_buttonify_workflow` and `buttonify_options_json`, but `buttonify_service.py` still carried residual heuristic/prose-recovery helpers and stale tests/docs that obscured the intended authority boundary.
 
-**Why this matters:** the right design is to have the LLM emit structured option metadata under an authority-backed contract, not to reverse-engineer interaction affordances from free text.
+That residual slab is now gone. Buttonify options are validated from structured output only, and malformed/non-JSON output fails closed instead of being reverse-engineered from prose.
 
 ### 2. The orchestrator remains the biggest structural risk
 
@@ -210,7 +210,7 @@ That means it is still a structural concern, but it is not the highest-priority 
 | Multi-surface dispatch verification | Fixed by `1930` | Done |
 | Write confirmation / destructive regex | Removed by `1970` | Keep represented authority surfaces canonical |
 | Hardcoded write-risk tool classes | Removed by `1970` | Keep represented runtime profile authoritative |
-| Buttonify regex option parsing | Still present | Needs dedicated follow-on |
+| Residual buttonify heuristic helper slab | Removed by `1971` | Keep structured-output validation fail-closed |
 | Orchestrator monolith | Still present | Ongoing structural extraction |
 | Backend route monolith | Improved by `1121`, still present | Continue route/app-factory decomposition |
 | Flask app-factory sprawl | Reduced materially by `1825` | No longer the sharpest open route-layer problem |
@@ -221,14 +221,13 @@ The earlier version of this note said the most impactful next task was replacing
 
 The current best sequencing is:
 
-1. `JVNAUTOSCI-1971` — replace `buttonify_service.py` prose parsing with authority-backed structured option extraction
-2. continued orchestrator extraction where it removes real mixed-responsibility pressure rather than opening noise tickets based only on file size
-3. further route-layer de-bloating after `1121`/`1825`, with the focus now on the remaining large route modules rather than the Flask app factory
-4. `JVNAUTOSCI-768` / `770` when represented tool metadata and rule-loader follow-through becomes the best lever for new capability work
+1. continued orchestrator extraction where it removes real mixed-responsibility pressure rather than opening noise tickets based only on file size
+2. further route-layer de-bloating after `1121`/`1825`, with the focus now on the remaining large route modules rather than the Flask app factory
+3. `JVNAUTOSCI-768` / `770` when represented tool metadata and rule-loader follow-through becomes the best lever for new capability work
 
 If the goal is specifically to continue the `1913` anti-egregious-path doctrine, the next most important principle is:
 
-> do not let the recent success at removing code-side semantic policy from the write path and the app factory hide the fact that UI-option parsing is still partly living in Python.
+> do not let the recent success at removing code-side semantic policy from the write path and buttonify path hide the fact that the largest remaining risks are now structural monolith pressure and the next represented-metadata follow-through tasks.
 
 That is where the next meaningful authority-alignment work now sits.
 

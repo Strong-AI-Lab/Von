@@ -19,7 +19,7 @@ def test_build_response_transformation_event_contains_required_contract_fields()
         input_summary={"response_text_chars": 12},
         output_summary={"options": ["Proceed"]},
         options_emitted_count=1,
-        source_path="heuristic_preflight",
+        source_path="llm",
         latency_ms=5.2,
         model_id=None,
         suppression_reason=None,

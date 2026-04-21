@@ -88,9 +88,8 @@ When markdown rendering is active, the UI transforms certain patterns into promp
 - Auto-send uses `submitChatPromptImmediately()`. See [src/frontend/web/von_interface/static/js/chatTab.js](src/frontend/web/von_interface/static/js/chatTab.js#L740-L820).
 
 ### Optional model-driven buttonify
-When `VON_BUTTONIFY_MODEL_ENABLE=1`, the backend can run a lightweight model pass (stage `buttonify`) to emit structured quick replies in `llm_debug.buttonify.options`.  
-Before that model pass, the route now runs a heuristic preflight (`VON_BUTTONIFY_HEURISTIC_PREFLIGHT_ENABLE=1`, default on). If explicit options are already present, it skips the extra model call and records `llm_debug.buttonify.source="heuristic_preflight"`.  
-If preflight does not find options, the model pass runs and the source is `llm` or `heuristic_fallback`.
+When `VON_BUTTONIFY_MODEL_ENABLE=1`, the backend runs the `buttonify` stage / `#V#chat_buttonify_workflow` to emit structured quick replies in `llm_debug.buttonify.options`.  
+The live backend path is structured-output-only: there is no heuristic preflight or prose-scraping fallback. If the workflow/LLM path cannot emit valid JSON options, buttonify no-ops with source `none`; successful structured extraction records source `llm`.
 
 ### Canonical response-transformation telemetry contract
 All response transformations now emit a canonical, per-turn telemetry payload in `llm_debug.response_transformations` (schema `response_transformations_v1`).

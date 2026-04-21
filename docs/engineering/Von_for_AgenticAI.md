@@ -65,7 +65,7 @@ That matters because it reduces the tendency for "temporary" deterministic seman
 
 The turn-correctness path has improved significantly.
 
-Committed work through `JVNAUTOSCI-1955` stopped grounded false-negative turns from being silently marked as verified success. In the current local worktree, that path has moved further again: the old low-information answer-surface heuristic is being replaced by an explicit prompt-backed postcondition critic subworkflow, with:
+Committed work through `JVNAUTOSCI-1956` stopped grounded false-negative turns from being silently marked as verified success and removed the remaining low-information answer-surface fallback from the primary completion path. The prompt-backed postcondition critic now exists as an explicit subworkflow, with:
 
 - a dedicated prompt seed for the critic;
 - explicit evidence-bundle construction;
@@ -120,22 +120,17 @@ Current hotspots include:
 
 This is still semantic policy in Python. It is better than the earlier slab, but it is not the correct end state.
 
-#### 3.3.2 Write policy still depends on hard-coded risk classes and regex intent
+#### 3.3.2 The earlier write-policy hotspot has already moved
 
-`src/backend/workflows/write_tool_policy.py` still contains:
+`JVNAUTOSCI-1970` removed the remaining live write-denial heuristic and hard-coded write-risk classes from the main write path. Earlier draft language pointing at `_ADDITIVE_LOW_RISK_WRITE_TOOLS`, `_MUTATIVE_NON_DESTRUCTIVE_WRITE_TOOLS`, `_DESTRUCTIVE_WRITE_TOOLS`, `_CONFIRMATION_PATTERN`, `_DESTRUCTIVE_MUTATION_PATTERN`, and `prompt_explicitly_denies_write(...)` is therefore stale as a guide to the next architecture step.
 
-- `_ADDITIVE_LOW_RISK_WRITE_TOOLS`
-- `_MUTATIVE_NON_DESTRUCTIVE_WRITE_TOOLS`
-- `_DESTRUCTIVE_WRITE_TOOLS`
-- `_CONFIRMATION_PATTERN`
-- `_DESTRUCTIVE_MUTATION_PATTERN`
-- `prompt_explicitly_denies_write(...)`
+The broader lesson about multilingual policy risk still matters, but it is no longer the sharpest remaining Python-policy seam.
 
-These are safety-relevant and bounded, but they are still code-side classification and intent inference. This is one of the clearest remaining multilingual policy risks.
+#### 3.3.3 Buttonify had one remaining residual authority seam
 
-#### 3.3.3 Buttonify still reverse-engineers structure from prose
+The live buttonify path already ran through `#V#chat_buttonify_workflow` and structured `buttonify_options_json` validation. The remaining problem was narrower: `src/backend/services/buttonify_service.py` still carried residual heuristic/prose-recovery helpers, and stale docs/tests made it look as if Python could still reconstruct UI options from prose.
 
-`src/backend/services/buttonify_service.py` still tries to recover structured option metadata from free text by parsing generated prose. That is an older design style and not where Von should stay. The correct end state is structured option emission under an explicit authority-backed contract.
+`JVNAUTOSCI-1971` removes that residual helper slab so buttonify options now come only from the authority-backed structured output contract, with Python limited to validation, normalisation, and telemetry.
 
 #### 3.3.4 Predicate-incidence is the right abstraction but may become expensive
 
@@ -152,10 +147,10 @@ That means the design is correct, but the scaling strategy still needs work.
 
 One live engineering caution is worth making explicit.
 
-The current local worktree contains uncommitted architectural work beyond the latest merged commit, especially around the prompt-backed postcondition critic. That work looks directionally correct, but it means any high-level architecture note must distinguish:
+The main risk is now documentation lag rather than an unmerged critic prototype. High-level notes need to distinguish carefully between:
 
 - what is already committed and merged;
-- what exists only in the current working tree;
+- what exists only in a current working tree;
 - what remains aspirational.
 
 That distinction matters because otherwise the repo risks documenting local intent as if it were already part of the durable shipped architecture.
@@ -256,7 +251,7 @@ Von should therefore treat critic workflows as standard architecture, not an aft
 - recovery-decision workflows;
 - long-horizon reflection and promotion workflows.
 
-The in-flight prompt-backed postcondition critic is therefore important not just as a bug fix, but as part of the right architectural doctrine.
+The landed prompt-backed postcondition critic is therefore important not just as a bug fix, but as part of the right architectural doctrine.
 
 ### 4.8 Capability plug-ins and secure deployment surfaces
 
@@ -344,8 +339,6 @@ The biggest gaps are now less about obvious hacky routing and more about missing
 Von still needs to remove the remaining Python-owned semantic policy surfaces, especially:
 
 - contract-text tool inference in the orchestrator;
-- write confirmation and destructive-intent regex interpretation;
-- prose-to-option parsing in buttonify;
 - any remaining hard-coded tool and risk metadata that belongs in represented authority.
 
 This is still necessary groundwork. A system cannot become truly multilingual, general, and maintainable while core policy still depends on hidden English token lists.
@@ -444,10 +437,10 @@ Recent work on critic pathways and answer-first discipline helps here, but the b
 The most important near-term engineering work is:
 
 1. finish replacing remaining Python semantic policy surfaces with represented authority or prompt-backed critic/evaluator surfaces;
-2. complete and land the prompt-backed postcondition critic path end to end;
-3. continue extracting mixed responsibilities out of the orchestrator and route monoliths;
-4. keep anti-drift tests and purity checks aligned with the newer architecture;
-5. harden scaling and telemetry around new support surfaces such as predicate incidence.
+2. continue extracting mixed responsibilities out of the orchestrator and route monoliths;
+3. keep anti-drift tests and purity checks aligned with the newer architecture;
+4. harden scaling and telemetry around new support surfaces such as predicate incidence;
+5. keep documentation and programme notes aligned with the actually landed authority surfaces so follow-on work targets the right remaining seams.
 
 ### 7.2 Medium-term platform priorities
 

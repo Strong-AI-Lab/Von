@@ -197,17 +197,6 @@ _DIAGNOSTIC_EXPORT_STRUCTURAL_ONLY_KEYS = {
 }
 
 
-def get_buttonify_heuristic_preflight_enabled() -> bool:
-    """Legacy compatibility shim for removed buttonify heuristic preflight.
-
-    Buttonify is intentionally LLM-only now, so this always returns ``False``.
-    Keeping the symbol defined prevents late-turn ``NameError`` failures from
-    stale runtime/eval paths that still reference the historic function name.
-    """
-
-    return False
-
-
 def _env_int(name: str, default: int, *, min_value: int) -> int:
     try:
         value = int(os.getenv(name, str(default)))
@@ -10558,7 +10547,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             and hasattr(orchestrator, "execute_workflow")
             and hasattr(orchestrator, "_run_llm_with_fallbacks")
         )
-        buttonify_preflight_enabled = False
         buttonify_model_used = model_name
         buttonify_source = "none"
         buttonify_prompt_id = None
@@ -10570,7 +10558,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         buttonify_suppression_reason = None
         buttonify_model_attempted = False
         buttonify_workflow_used = False
-        buttonify_preflight_rejection_reason = None
         buttonify_filtering_boundary: dict[str, Any] | None = None
 
         if not buttonify_enabled:
@@ -10581,8 +10568,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             buttonify_suppression_reason = "empty_response"
         else:
             buttonify_status = "no_op"
-            # Buttonify is intentionally LLM-only: no heuristic preflight/fallback.
-            buttonify_preflight_enabled = False
             if show_tool_use_progress:
                 _emit_generate_progress(
                     {
@@ -10613,7 +10598,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                             "user_prompt": prompt_text,
                             "buttonify_enabled": buttonify_enabled,
                             "buttonify_allowed": buttonify_allowed,
-                            "buttonify_preflight_enabled": buttonify_preflight_enabled,
                             "buttonify_prompt_ids": list(BUTTONIFY_PROMPT_IDS),
                             "default_model": model_name,
                             "policy_state": policy_state,
@@ -10683,12 +10667,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 ):
                     buttonify_suppression_reason = workflow_payload.get(
                         "buttonify_suppression_reason"
-                    )
-                if isinstance(
-                    workflow_payload.get("buttonify_preflight_rejection_reason"), str
-                ):
-                    buttonify_preflight_rejection_reason = workflow_payload.get(
-                        "buttonify_preflight_rejection_reason"
                     )
                 contract_payload = workflow_payload.get(
                     "output_transformation_contract"
@@ -10776,10 +10754,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 "prompt_truncated": buttonify_prompt_truncated,
                 "prompt_available": buttonify_prompt_available,
                 "prompt_error": buttonify_prompt_error,
-                "heuristic_preflight_enabled": buttonify_preflight_enabled,
                 "workflow_used": buttonify_workflow_used,
                 "workflow_available": buttonify_workflow_available,
-                "preflight_rejection_reason": buttonify_preflight_rejection_reason,
             }
             if isinstance(buttonify_filtering_boundary, Mapping):
                 buttonify_meta["filtering_boundary"] = dict(
@@ -10798,7 +10774,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 input_summary={
                     "buttonify_enabled": buttonify_enabled,
                     "buttonify_allowed": buttonify_allowed,
-                    "heuristic_preflight_enabled": buttonify_preflight_enabled,
                     "response_text_chars": (
                         len(response_text) if isinstance(response_text, str) else 0
                     ),

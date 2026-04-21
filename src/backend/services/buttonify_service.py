@@ -1,8 +1,4 @@
-"""Shared helpers for buttonify output transformation.
-
-Keep heuristics and JSON option parsing centralised so route-level and
-workflow-level callers stay behaviourally aligned.
-"""
+"""Structured-output helpers for buttonify option validation and telemetry."""
 
 from __future__ import annotations
 
@@ -37,116 +33,6 @@ def _normalise_buttonify_option_with_reason(value: str | None) -> tuple[str | No
     if len(cleaned.split()) > 4:
         return None, "too_many_words"
     return cleaned, None
-
-
-def normalise_buttonify_option(value: str | None) -> str | None:
-    cleaned, _ = _normalise_buttonify_option_with_reason(value)
-    return cleaned
-
-
-def dedupe_buttonify_options(
-    values: Iterable[str | None],
-    *,
-    max_options: int = 4,
-) -> list[str]:
-    options: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        cleaned = normalise_buttonify_option(value)
-        if not cleaned:
-            continue
-        key = cleaned.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        options.append(cleaned)
-        if len(options) >= max_options:
-            break
-    return options
-
-
-def extract_buttonify_options_heuristic(
-    text: str | None,
-    *,
-    max_options: int = 4,
-) -> list[str]:
-    if not isinstance(text, str) or not text.strip():
-        return []
-
-    options: list[str] = []
-    seen: set[str] = set()
-
-    def _add_option(raw: str | None) -> None:
-        nonlocal options
-        if len(options) >= max_options:
-            return
-        cleaned = normalise_buttonify_option(raw)
-        if not cleaned:
-            return
-        key = cleaned.lower()
-        if key in seen:
-            return
-        seen.add(key)
-        options.append(cleaned)
-
-    quote_patterns = [
-        r'"([^"\n\r]{1,200})"',
-        r"“([^”\n\r]{1,200})”",
-        r"‘([^’\n\r]{1,200})’",
-        r"(?<!\w)'([^'\n\r]{1,200})'(?!\w)",
-    ]
-
-    for pattern in quote_patterns:
-        for match in re.findall(pattern, text):
-            _add_option(match)
-            if len(options) >= max_options:
-                return options[:max_options]
-
-    for line in text.splitlines():
-        match = re.match(r"\s*(?:[-*•]|\d+[.)])\s+(.+)", line)
-        if not match:
-            continue
-        _add_option(match.group(1))
-        if len(options) >= max_options:
-            return options[:max_options]
-
-    if not options:
-        marker = re.search(
-            r"(?:reply|respond|answer|choose|pick)\s+(?:with\s+)?one\s+of\s*[:\-–—]?\s*(.+)",
-            text,
-            re.IGNORECASE,
-        )
-        if marker:
-            tail = marker.group(1)
-            for part in re.split(r"\s*(?:,|/|;|\bor\b)\s*", tail):
-                _add_option(part)
-                if len(options) >= max_options:
-                    return options[:max_options]
-
-    implicit = re.search(
-        r"\b(?:would|do)\s+(?:you\s+)?(?:like|want)\s+(?:to\s+)?([^?.!\n]{1,80}?)\s+or\s+([^?.!\n]{1,80}?)[?.!]",
-        text,
-        re.IGNORECASE,
-    )
-    if implicit:
-        _add_option(implicit.group(1))
-        _add_option(implicit.group(2))
-
-    if not options:
-        if re.search(r"\byes\s*/\s*no\b|\byes\s+or\s+no\b", text, re.IGNORECASE):
-            _add_option("Yes")
-            _add_option("No")
-        else:
-            trimmed = text.strip()
-            if trimmed.endswith("?") and re.match(
-                r"\s*(?:Do|Would|Is|Are|Did|Can|Should|Will|Have|Has)\b",
-                trimmed,
-                re.IGNORECASE,
-            ):
-                _add_option("Yes")
-                _add_option("No")
-
-    return options[:max_options]
 
 
 def parse_buttonify_options_json(
@@ -308,29 +194,6 @@ def sanitise_buttonify_options_with_telemetry(
         "rejected_preview": list(rejected_preview),
     }
     return accepted, telemetry
-
-
-def sanitise_buttonify_heuristic_options(
-    values: Iterable[str | None],
-    *,
-    max_options: int = 4,
-) -> list[str]:
-    """Compatibility wrapper for heuristic call sites."""
-    return sanitise_buttonify_options(values, max_options=max_options)
-
-
-def select_buttonify_preflight_options(
-    values: Iterable[str | None],
-    *,
-    max_options: int = 4,
-) -> tuple[list[str], str | None]:
-    """Return preflight options only when confidence is high enough to skip LLM."""
-    accepted = sanitise_buttonify_heuristic_options(values, max_options=max_options)
-    if len(accepted) >= 2:
-        return accepted, None
-    if not accepted:
-        return [], "heuristic_preflight_rejected_code_like_candidates"
-    return [], "heuristic_preflight_low_confidence"
 
 
 def enforce_buttonify_prompt_contract(prompt_text: str | None) -> str:
