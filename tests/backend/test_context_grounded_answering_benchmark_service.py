@@ -17,9 +17,13 @@ def test_load_context_grounded_answering_benchmark_cases_reads_default_seed_bund
     )
 
     cases = result["cases"]
-    assert len(cases) == 5
+    assert len(cases) == 6
     assert any(
         case.case_id == "represented_context_tool_pipeline_answer"
+        for case in cases
+    )
+    assert any(
+        case.case_id == "authenticated_entity_information_specialised_workflow"
         for case in cases
     )
 
@@ -29,23 +33,27 @@ def test_build_context_grounded_answering_benchmark_report_from_seed_bundle() ->
 
     assert result["success"] is True
     metrics = result["metrics"]
-    assert metrics["scanned_count"] == 5
-    assert metrics["exact_path_case_count"] == 5
-    assert metrics["telemetry_check_count"] == 10
-    assert metrics["validation_surface_count"] == 5
+    assert metrics["scanned_count"] == 6
+    assert metrics["exact_path_case_count"] == 6
+    assert metrics["telemetry_check_count"] == 12
+    assert metrics["validation_surface_count"] == 6
     assert metrics["authoritative_source_counts"] == {
         "authenticated_user_context": 1,
         "authenticated_org_context": 1,
         "workflow_continuation_context": 1,
-        "workflow_result": 1,
+        "workflow_result": 2,
         "represented_context": 1,
     }
     assert metrics["execution_mode_counts"] == {
         "direct_response": 2,
-        "custom_workflow": 2,
+        "custom_workflow": 3,
         "tool_pipeline": 1,
     }
-    assert metrics["answer_property_counts"]["answer_first"] == 5
+    assert metrics["answer_property_counts"]["answer_first"] == 6
+    assert (
+        metrics["answer_property_counts"]["names_authenticated_user_and_grounded_papers"]
+        == 1
+    )
     assert (
         metrics["coverage_tag_counts"]["represented_context_factual_answering"] == 1
     )
@@ -74,7 +82,7 @@ def test_build_context_grounded_answering_benchmark_report_from_seed_bundle() ->
     )
 
     replay_cases = result["replay_cases"]
-    assert len(replay_cases) == 5
+    assert len(replay_cases) == 6
     represented_case = next(
         case
         for case in replay_cases
@@ -84,4 +92,14 @@ def test_build_context_grounded_answering_benchmark_report_from_seed_bundle() ->
     assert (
         represented_case["validation_surfaces"][0]["reference"]
         == "tests/backend/test_orchestrator_structured_calling.py::test_structured_tool_pipeline_preserves_answer_first_represented_context_response"
+    )
+    specialised_entity_case = next(
+        case
+        for case in replay_cases
+        if case["case_id"] == "authenticated_entity_information_specialised_workflow"
+    )
+    assert specialised_entity_case["expected_execution_mode"] == "custom_workflow"
+    assert (
+        specialised_entity_case["validation_surfaces"][0]["reference"]
+        == "tests/backend/test_von_generate_authenticated_identity_routing.py::test_generate_authenticated_entity_information_turn_routes_to_specialised_workflow"
     )

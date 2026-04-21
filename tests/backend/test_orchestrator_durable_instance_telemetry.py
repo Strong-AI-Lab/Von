@@ -286,6 +286,8 @@ def test_execute_workflow_persists_completed_durable_instance_with_turn_summary(
     create_call = fake_manager.create_for_event_calls[0]
     create_inputs = create_call.get("inputs")
     assert isinstance(create_inputs, dict)
+    assert create_inputs.get("prompt") == "Proceed with predicates."
+    assert create_inputs.get("prompt_preview") == "Proceed with predicates."
     turn_contract = create_inputs.get("turn_execution_contract")
     assert isinstance(turn_contract, dict)
     assert turn_contract.get("schema_version") == "turn_execution_contract.v1"

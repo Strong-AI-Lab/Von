@@ -222,6 +222,7 @@ def _build_durable_workflow_bootstrap_summary(
 
     for key in (
         "entity_workflow_bootstrap",
+        "entity_information_retrieval_workflow_bootstrap",
         "conversation_turn_workflow_bootstrap",
         "paper_workflow_bootstrap",
         "episode_evaluation_workflow_bootstrap",
@@ -424,6 +425,9 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         from ..services.entity_representation_workflow_vontology_service import (
             bootstrap_canonical_entity_representation_workflows,
         )
+        from ..services.entity_information_retrieval_workflow_vontology_service import (
+            bootstrap_canonical_entity_information_retrieval_workflow,
+        )
         from ..services.episode_evaluation_workflow_vontology_service import (
             bootstrap_canonical_episode_evaluation_workflow,
         )
@@ -464,6 +468,12 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         entity_workflow_bootstrap_report = _run_workflow_family_bootstrap(
             label="entity workflow",
             bootstrap_fn=bootstrap_canonical_entity_representation_workflows,
+        )
+        entity_information_retrieval_workflow_bootstrap_report = (
+            _run_workflow_family_bootstrap(
+                label="entity-information retrieval workflow",
+                bootstrap_fn=bootstrap_canonical_entity_information_retrieval_workflow,
+            )
         )
         conversation_turn_workflow_bootstrap_report = _run_workflow_family_bootstrap(
             label="conversation-turn workflow",
@@ -527,6 +537,9 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             ),
         )
         result["entity_workflow_bootstrap"] = entity_workflow_bootstrap_report
+        result["entity_information_retrieval_workflow_bootstrap"] = (
+            entity_information_retrieval_workflow_bootstrap_report
+        )
         result["conversation_turn_workflow_bootstrap"] = (
             conversation_turn_workflow_bootstrap_report
         )
@@ -547,6 +560,15 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             app_logger.warning(
                 "[durable_workflows] entity workflow bootstrap failed: %s",
                 entity_workflow_bootstrap_report,
+            )
+        if not bool(
+            entity_information_retrieval_workflow_bootstrap_report.get(
+                "success", False
+            )
+        ):
+            app_logger.warning(
+                "[durable_workflows] entity-information retrieval workflow bootstrap failed: %s",
+                entity_information_retrieval_workflow_bootstrap_report,
             )
         if not bool(conversation_turn_workflow_bootstrap_report.get("success", False)):
             app_logger.warning(

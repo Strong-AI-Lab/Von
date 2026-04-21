@@ -78,6 +78,7 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     from src.backend.workflows.durable import startup as durable_startup
     from src.backend.services import (
         conversation_turn_workflow_vontology_service as conversation_turn_workflow_bootstrap,
+        entity_information_retrieval_workflow_vontology_service as entity_information_retrieval_workflow_bootstrap,
         entity_representation_workflow_vontology_service as entity_workflow_bootstrap,
         episode_evaluation_workflow_vontology_service as episode_evaluation_workflow_bootstrap,
         identity_resolution_schedule_bootstrap_service as schedule_bootstrap,
@@ -190,6 +191,15 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
         },
     )
     monkeypatch.setattr(
+        entity_information_retrieval_workflow_bootstrap,
+        "bootstrap_canonical_entity_information_retrieval_workflow",
+        lambda: {
+            "success": True,
+            "workflow_ids": ["#V#entity_information_retrieval_workflow"],
+            "publication": {"skipped": True},
+        },
+    )
+    monkeypatch.setattr(
         conversation_turn_workflow_bootstrap,
         "bootstrap_canonical_conversation_turn_workflows",
         lambda: {
@@ -283,6 +293,11 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     entity_workflow_bootstrap_report = result.get("entity_workflow_bootstrap")
     assert isinstance(entity_workflow_bootstrap_report, dict)
     assert entity_workflow_bootstrap_report.get("success") is True
+    entity_information_retrieval_workflow_bootstrap_report = result.get(
+        "entity_information_retrieval_workflow_bootstrap"
+    )
+    assert isinstance(entity_information_retrieval_workflow_bootstrap_report, dict)
+    assert entity_information_retrieval_workflow_bootstrap_report.get("success") is True
     conversation_turn_workflow_bootstrap_report = result.get(
         "conversation_turn_workflow_bootstrap"
     )

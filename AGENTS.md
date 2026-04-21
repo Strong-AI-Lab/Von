@@ -92,6 +92,7 @@ For frontend/browser user-view validation practice, also see
 29. Do not use size alone as the criterion for opening refactor tasks. A strong candidate usually combines size or repeated patch pressure with mixed responsibilities, weak test seams, user-visible interpretation risk, integration-boundary sprawl, or drift of workflow/control/verification logic away from represented authority.
 30. After a substantial workflow/orchestration refactor, perform a bounded structural scan of adjacent code for monoliths or authority-drift risks. Create linked follow-on Jira tasks when the architectural case is clear; do not create noise tickets based only on line count.
 31. In long coding sessions, perform periodic host-hygiene checks and clean up stale local helper processes spawned by the work. Before starting another local server, browser replay, or MCP-heavy batch after repeated retries/restarts, check for duplicate Von servers, stale Playwright/browser daemons, old MCP stdio helpers, and similar leftovers. Do not normalise piling up extra local services on new ports as a workaround for not cleaning up the old ones.
+32. For failures in reusable grounded-retrieval classes, especially "get information of a specific kind about an entity", the default repair order is: identify the workflow/subworkflow or authoritative bounded tool set that should have handled the turn; ensure that artefact exists as a usable Vontology/VWL workflow; validate it on the real Von path with replay and telemetry review while adjusting workflow/prompt/tool metadata in Vontology; and only then, if blocked by a missing reusable primitive or support surface, alter execution-related Python.
 
 ## 4. Workflow, prompt, and KB authority
 
@@ -107,6 +108,14 @@ Before implementing behaviour, name the intended authoritative artefacts in Jira
 
 Also state what code will remain support-only.
 Treat those artefacts as implementation surfaces, not as commentary about an implementation whose real policy still lives elsewhere in Python.
+
+For reusable grounded-retrieval failures, especially entity-relative information requests, task notes and Jira updates must also state:
+
+- which workflow, subworkflow, or bounded authoritative tool set should have handled the request;
+- whether that artefact already exists in Vontology/VWL or must be authored as part of the task;
+- which real-path replay and telemetry evidence will be used to validate the authoritative fix.
+
+Do not begin from a Python execution patch when the real missing capability is an absent or under-specified workflow. If the workflow/runtime cannot yet express the required behaviour cleanly, add only the missing reusable primitive or support surface in code and then return the authored behaviour to Vontology/VWL.
 
 ### 4.2 What counts as a design error
 

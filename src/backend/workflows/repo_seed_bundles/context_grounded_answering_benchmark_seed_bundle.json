@@ -223,6 +223,51 @@
           "JVNAUTOSCI-1863"
         ],
         "notes": "This closes the previously missing represented-context factual-answering class on the maintained benchmark surface."
+      },
+      {
+        "case_id": "authenticated_entity_information_specialised_workflow",
+        "prompt_text": "Tell me who I am and list my papers.",
+        "expected_authoritative_source": "workflow_result",
+        "expected_execution_mode": "custom_workflow",
+        "expected_workflow_id": "#V#entity_information_retrieval_workflow",
+        "coverage_tags": [
+          "authenticated_entity_information_retrieval",
+          "workflow_first_relation_grounding",
+          "answer_first_rendering"
+        ],
+        "answer_properties": [
+          {
+            "property_id": "answer_first",
+            "description": "The response should answer directly rather than foregrounding workflow bookkeeping."
+          },
+          {
+            "property_id": "names_authenticated_user_and_grounded_papers",
+            "description": "The response should identify the authenticated user and list only grounded papers."
+          }
+        ],
+        "telemetry_checks": [
+          {
+            "check_id": "workflow_routing_selected_entity_information_workflow",
+            "field_path": "llm_debug.workflow_routing.workflow_id",
+            "expected_value": "#V#entity_information_retrieval_workflow"
+          },
+          {
+            "check_id": "dispatch_mode_custom_workflow",
+            "field_path": "llm_debug.turn_execution_diagnostics.workflow_routing_diagnostics.dispatch.selected_execution_mode",
+            "expected_value": "custom_workflow"
+          }
+        ],
+        "validation_surfaces": [
+          {
+            "surface_kind": "exact_path_test",
+            "reference": "tests/backend/test_von_generate_authenticated_identity_routing.py::test_generate_authenticated_entity_information_turn_routes_to_specialised_workflow"
+          }
+        ],
+        "jira_issue_keys": [
+          "JVNAUTOSCI-1977",
+          "JVNAUTOSCI-1978"
+        ],
+        "notes": "This covers the workflow-first remediation path for authenticated entity-relative information retrieval, including grounded paper attribution."
       }
     ]
   }

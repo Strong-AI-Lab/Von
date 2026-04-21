@@ -24755,6 +24755,7 @@ class InternalMCPChatOrchestrator:
                     if isinstance(resolved_stage, str) and resolved_stage.strip()
                     else None
                 ),
+                "prompt": prompt if isinstance(prompt, str) else None,
                 "prompt_preview": prompt_preview,
                 "workflow_routing": _safe_mapping_snapshot(
                     data.get("workflow_routing")

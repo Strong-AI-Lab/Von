@@ -636,6 +636,30 @@ In those cases:
    bank entry, or one accidental combination of tools as a design smell rather
    than a successful fix.
 
+For failures in the reusable class "get information of a specific kind about an
+entity", apply the repair sequence explicitly:
+
+1. Identify the reusable workflow/subworkflow or bounded authoritative tool set
+   that should have answered the request.
+2. Ensure that artefact exists as a usable VWL/Vontology workflow before
+   normalising any Python-first fix.
+3. Replay the exact prompt and a small nearby family on the real Von path while
+   inspecting telemetry for:
+   - explicit entity resolution;
+   - predicate or relation inspection;
+   - extent retrieval;
+   - result-type filtering;
+   - non-empty user-visible answer production.
+4. Adjust workflow definitions, prompt text, routing metadata, tool metadata,
+   retrieval profiles, and other Vontology-governed artefacts until the real
+   route works for the right workflow-driven reason.
+5. Only if a missing reusable primitive, validator, telemetry surface, or
+   canonical tool support blocks that authority-first repair may
+   execution-related Python be changed.
+
+When this pattern is used, Jira should name both the missing workflow artefact
+and the replay/telemetry evidence that will prove the authored fix is real.
+
 Avoid:
 
 - code-side prompt bodies for durable policy

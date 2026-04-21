@@ -14,6 +14,9 @@ from src.backend.services.conversation_turn_workflow_vontology_service import (
     _load_expected_outcome_prompt_seed_text,
     _load_narration_prompt_seed_text,
 )
+from src.backend.services.entity_information_retrieval_workflow_vontology_service import (
+    _load_entity_information_retrieval_prompt_seed_text,
+)
 from src.backend.services.write_tool_request_evidence_vontology_service import (
     _load_write_tool_request_evidence_prompt_seed_text,
 )
@@ -263,6 +266,10 @@ def build_db_independent_orchestrator(
         "src.backend.integrations.internal_mcp.orchestrator.get_shared_workflow_registry_read_only",
         _build_test_registry,
     )
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.registry_factory.get_shared_workflow_registry_read_only",
+        _build_test_registry,
+    )
 
     def _build_test_action_registry() -> ActionRegistry:
         registry = ActionRegistry()
@@ -279,6 +286,10 @@ def build_db_independent_orchestrator(
 
     monkeypatch.setattr(
         "src.backend.integrations.internal_mcp.orchestrator.get_shared_durable_action_registry",
+        _build_test_action_registry,
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.registry_factory.get_shared_durable_action_registry",
         _build_test_action_registry,
     )
     monkeypatch.setattr(
@@ -377,6 +388,9 @@ def build_db_independent_orchestrator(
     }
     expected_outcome_prompt_id = "#V#prompt_turn_execution_expected_outcome_inference"
     narration_prompt_id = "#V#prompt_turn_execution_narrate_completion_report"
+    entity_information_retrieval_prompt_id = (
+        "#V#entity_information_retrieval_prompt"
+    )
     write_tool_request_evidence_prompt_id = (
         "#V#prompt_write_tool_request_evidence_inference"
     )
@@ -412,6 +426,13 @@ def build_db_independent_orchestrator(
                 return SimpleNamespace(
                     text=_load_narration_prompt_seed_text(),
                     prompt_id=narration_prompt_id,
+                    variables=dict(variables or {}),
+                    truncated=False,
+                )
+            if entity_information_retrieval_prompt_id in requested_prompt_ids:
+                return SimpleNamespace(
+                    text=_load_entity_information_retrieval_prompt_seed_text(),
+                    prompt_id=entity_information_retrieval_prompt_id,
                     variables=dict(variables or {}),
                     truncated=False,
                 )

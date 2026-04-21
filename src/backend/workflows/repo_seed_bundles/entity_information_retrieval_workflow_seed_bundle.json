@@ -1,0 +1,107 @@
+{
+  "family_id": "entity_information_retrieval_workflow_seed_bundle",
+  "managed_by": "entity_information_retrieval_workflow_vontology_service",
+  "schema_version": "repo_seed_workflow_bundle.v1",
+  "source_tag": "JVNAUTOSCI-1978",
+  "supported_action_ids": [
+    "llm.action"
+  ],
+  "workflows": [
+    {
+      "workflow_id": "#V#entity_information_retrieval_workflow",
+      "display_name": "Entity Information Retrieval Workflow",
+      "description": "Canonical reusable workflow for grounded retrieval of information of a requested kind about a resolved entity, especially authenticated self-relative questions about papers, affiliations, roles, and predicate-filtered extents.",
+      "content": "Resolve the target entity from authenticated or explicit context, identify the requested information kind, prefer predicate-incidence and relation retrieval before broad inventory or lexical search, filter retrieved results by the requested type or extent, and answer directly from grounded represented evidence.",
+      "type_ids": [
+        "#V#ai_workflow",
+        "#V#durable_workflow"
+      ],
+      "launch_input_contract": {
+        "schema_version": "workflow_launch_input_contract.v1",
+        "required_inputs": [
+          "prompt"
+        ],
+        "input_mappings": [
+          {
+            "target_context_key": "prompt",
+            "source_expression": "inputs.prompt",
+            "extractor": "identity",
+            "required": true,
+            "description": "Pass through the user's entity-information request."
+          }
+        ]
+      },
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"execution\",\"authoring_intent_required\":false,\"prefer_existing_capability\":false}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
+          "text": "{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"entity information retrieval workflow\",\"who am i and list my papers\",\"papers of mine\",\"my papers\",\"predicate extent lookup\",\"represented affiliation lookup\"],\"examples\":[\"Tell me who I am and list my papers.\",\"What papers of mine do you know about?\",\"What concepts am I in in a #V#author_of relation with?\",\"Which organisation is Michael Witbrock affiliated with in the represented knowledge?\"]}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowTerminalSuccessContractJson",
+          "text": "{\"schema_version\":\"workflow_terminal_success_contract.v1\",\"success_statuses\":[\"completed\"],\"required_summary_fields\":[\"workflow_id\",\"terminal_status\",\"final_state\",\"completed\"],\"require_terminal_status\":true,\"require_final_state\":true,\"require_completed_true\":true,\"require_completion_gate_safe_to_claim_completion\":false}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowRequiredEffectsContractJson",
+          "text": "{\"schema_version\":\"workflow_required_effects_contract.v1\",\"contract_id\":\"grounded_entity_information_retrieval_evidence\",\"required_effects\":[{\"effect_id\":\"grounded_entity_information_evidence\",\"effect_type\":\"grounded_retrieval\",\"description\":\"The workflow must use a represented-knowledge retrieval tool before claiming a grounded entity-information answer.\",\"required_tools\":[\"get_predicate_incidence\",\"find_relations_with_argument\",\"search_concepts\",\"search_knowledge_base\",\"fetch_concept\",\"get_related_concepts\"],\"required_tools_match\":\"any\",\"missing_failure_code\":\"entity_information_evidence_missing\",\"failed_failure_code\":\"entity_information_evidence_failed\"}]}",
+          "lang": "en-NZ"
+        }
+      ],
+      "publication_spec": {
+        "initial_state": "retrieve_grounded_entity_information",
+        "steps": [
+          {
+            "state_id": "retrieve_grounded_entity_information",
+            "action_id": "llm.action",
+            "execution_mode": "llm",
+            "prompt_concept_ids": [
+              "#V#entity_information_retrieval_prompt"
+            ],
+            "llm_policy": {
+              "policy_stage": "entity_information_retrieval",
+              "tool_mode": "allowed",
+              "allowed_tools": [
+                "get_predicate_incidence",
+                "find_relations_with_argument",
+                "search_concepts",
+                "search_knowledge_base",
+                "fetch_concept",
+                "get_related_concepts"
+              ],
+              "context_messages_context_key": "augmented_context",
+              "response_contract_text": "Answer the user directly from grounded represented evidence. Use tools before answering whenever the needed entity identity, predicate match, relation extent, or type filter is not already explicit in the available context. If grounded evidence is insufficient, say that clearly instead of guessing.",
+              "context_fields": [
+                {
+                  "context_key": "prompt",
+                  "label": "Current turn request"
+                },
+                {
+                  "context_key": "user_concept_id",
+                  "label": "Authenticated user concept"
+                },
+                {
+                  "context_key": "org_concept_id",
+                  "label": "Authenticated organisation concept"
+                }
+              ]
+            },
+            "next_state": "completed",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "completed"
+          },
+          {
+            "state_id": "failed"
+          }
+        ]
+      }
+    }
+  ]
+}
