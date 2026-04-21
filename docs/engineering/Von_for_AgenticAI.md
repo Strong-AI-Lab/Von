@@ -92,7 +92,7 @@ As of 21 April 2026:
 
 - `src/backend/integrations/internal_mcp/orchestrator.py` is still `34,741` lines
 - `src/backend/integrations/internal_mcp/catalogue.py` is still `27,466` lines
-- `src/backend/server/routes/von_routes.py` is still `13,906` lines
+- `src/backend/server/routes/von_routes.py` is still `13,348` lines
 
 So the direction is improving, but the largest files are still large enough to attract inline patching pressure and hidden policy drift.
 

@@ -128,7 +128,7 @@ Some honest current code-size facts:
 
 - `src/backend/integrations/internal_mcp/orchestrator.py` is still `34,741` lines
 - `src/backend/integrations/internal_mcp/catalogue.py` is still `27,466` lines
-- `src/backend/server/routes/von_routes.py` is still `13,906` lines
+- `src/backend/server/routes/von_routes.py` is still `13,348` lines
 
 So the codebase is materially cleaner in responsibility placement, but not yet dramatically smaller in its largest files.
 
@@ -145,7 +145,7 @@ As of April 21, 2026:
 | `JVNAUTOSCI-1953` | `Done` | Structured tool-family keyword/prefix heuristics removed |
 | `JVNAUTOSCI-1954` | `Done` | Predicate-incidence lookup landed for entity/type incidence narrowing |
 | `JVNAUTOSCI-1955` | `Done` | Grounded false-negative turns no longer count as verified success |
-| `JVNAUTOSCI-1121` | `To Do` | Backend route-layer monolith cleanup remains open |
+| `JVNAUTOSCI-1121` | `Done` | `/von/generate` lifecycle and response/debug support surfaces extracted from `von_routes.py` |
 | `JVNAUTOSCI-1120` | `To Do` | Frontend monolith cleanup remains open |
 | `JVNAUTOSCI-1825` | `To Do` | Flask app-factory decomposition remains open |
 | `JVNAUTOSCI-768` | `To Do` | Vontology concept structure for tool heuristics still not landed |
@@ -198,11 +198,11 @@ Even after the recent cleanups, `InternalMCPChatOrchestrator` is still an oversi
 
 This is the main structural reason new hacks tend to accumulate here first.
 
-### 5. Backend route layers are now the cleanest open de-bloating target
+### 5. Backend route layers improved materially, but the monolith is still too large
 
 **Location:** [von_routes.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/server/routes/von_routes.py)
 
-`JVNAUTOSCI-1121` is still open, and it is now the cleanest existing next step under `1116`. The backend route layer remains large and mixed in responsibility, and it is a better current structural target than continuing to open ever smaller orchestrator micro-cleanups without attacking the next monolith.
+`JVNAUTOSCI-1121` is now done, and it made a real structural dent: the `/von/generate` durable-turn lifecycle, chat-history persistence, and success/error payload shaping helpers were extracted into `generate_route_support.py`, taking several hundred lines out of `von_routes.py` and giving later route work clearer seams. But the backend route layer is still large and mixed in responsibility, so this remains an ongoing structural concern rather than a solved problem.
 
 ### 6. Catalogue size is still large, but the risk has shifted
 
@@ -224,18 +224,18 @@ That means it is still a structural concern, but it is not the highest-priority 
 | Hardcoded write-risk tool classes | Still present | Likely `768` / `770` related |
 | Buttonify regex option parsing | Still present | Needs dedicated follow-on |
 | Orchestrator monolith | Still present | Ongoing structural extraction |
-| Backend route monolith | Still present | `1121` is the cleanest next existing task |
+| Backend route monolith | Improved by `1121`, still present | Continue route/app-factory decomposition |
 | Flask app-factory sprawl | Still present | `1825` remains open |
 
 ## Recommended Next Steps
 
-The earlier version of this note said the most impactful next task was replacing `_STRUCTURED_TOOL_FAMILY_HINTS`. That is now outdated because `JVNAUTOSCI-1953` is done. It also predated the prompt-backed postcondition-critic landing that removed the remaining turn-record response-surface fallback under `JVNAUTOSCI-1956`.
+The earlier version of this note said the most impactful next task was replacing `_STRUCTURED_TOOL_FAMILY_HINTS`. That is now outdated because `JVNAUTOSCI-1953` is done. It also predated both the prompt-backed postcondition-critic landing that removed the remaining turn-record response-surface fallback under `JVNAUTOSCI-1956` and the first route-layer de-bloating landing under `JVNAUTOSCI-1121`.
 
 The current best sequencing is:
 
-1. `JVNAUTOSCI-1121` — refactor backend route layers
-2. a follow-on for replacing the remaining write-tool confirmation / destructive regex backstops with an authority-backed confirmation protocol
-3. a follow-on for replacing `buttonify_service.py` prose parsing with structured output
+1. a follow-on for replacing the remaining write-tool confirmation / destructive regex backstops with an authority-backed confirmation protocol
+2. a follow-on for replacing `buttonify_service.py` prose parsing with structured output
+3. `JVNAUTOSCI-1825` — continue Flask app-factory and route-layer decomposition
 4. continued orchestrator extraction where it removes real mixed-responsibility pressure rather than opening noise tickets based only on file size
 
 If the goal is specifically to continue the `1913` anti-egregious-path doctrine, the next most important principle is:
