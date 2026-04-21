@@ -4040,6 +4040,15 @@ class InternalMCPChatOrchestrator:
                             or None
                         ),
                         "tool_names": list(request_evidence.keys()),
+                        "request_evidence": {
+                            str(tool_name): dict(evidence)
+                            for tool_name, evidence in request_evidence.items()
+                            if isinstance(tool_name, str)
+                            and isinstance(evidence, Mapping)
+                        },
+                        "request_evidence_diagnostics": dict(
+                            request_evidence_diagnostics
+                        ),
                     }
                 )
 

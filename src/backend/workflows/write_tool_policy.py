@@ -19,6 +19,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
+from ..services.minimal_imposition_runtime_profile_vontology_service import (
+    resolve_runtime_profile_write_tool_risk_class,
+)
 from ..services.python_decision_authority_service import annotate_python_decision_event
 
 
@@ -120,72 +123,6 @@ _MUTATION_AUTHORITY_LEVEL_ORDER: tuple[str, ...] = (
 _MUTATION_AUTHORITY_LEVEL_RANKS: dict[str, int] = {
     level: index for index, level in enumerate(_MUTATION_AUTHORITY_LEVEL_ORDER)
 }
-
-_EXTERNAL_WRITE_PREFIXES: tuple[str, ...] = (
-    "jira_",
-    "github_",
-    "gmail_",
-)
-
-_ADDITIVE_LOW_RISK_WRITE_TOOLS: frozenset[str] = frozenset(
-    {
-        "create_concepts",
-        "add_relationship",
-        "add_names",
-        "upsert_text_relation",
-        "upsert_singleton_text_relation",
-        "download_paper",
-        "finalise_cached_paper",
-        "materialise_scholarly_representation_for_file_copy",
-        "import_url_file_copy",
-        "create_task",
-        "task_create",
-        "task_create_subtask",
-        "task_add_attachment",
-        "task_add_comment",
-        "task_add_worklog",
-        "task_link",
-        "assign_task",
-        "workflow_create_instance",
-        "workflow_bind_event",
-        "workflow_create_schedule",
-        "workflow_trigger_schedule",
-    }
-)
-
-_MUTATIVE_NON_DESTRUCTIVE_WRITE_TOOLS: frozenset[str] = frozenset(
-    {
-        "update_concept",
-        "update_text_relation",
-        "update_task_status",
-        "task_assign",
-        "task_bulk_update",
-        "task_set_parent",
-        "task_transition",
-        "task_unassign",
-        "task_update_fields",
-        "task_update_status",
-        "undo_relationship_removal",
-        "workflow_retry_instance",
-        "workflow_set_event_binding_enabled",
-        "workflow_set_schedule_enabled",
-    }
-)
-
-_DESTRUCTIVE_WRITE_TOOLS: frozenset[str] = frozenset(
-    {
-        "delete_concept",
-        "delete_text_relation",
-        "remove_relationship",
-        "remove_relationships_bulk",
-        "merge_concepts",
-        "task_delete",
-        "task_unlink",
-        "workflow_cancel_instance",
-        "workflow_delete_event_binding",
-        "workflow_delete_schedule",
-    }
-)
 
 @dataclass(frozen=True)
 class WriteToolDecision:
@@ -409,7 +346,11 @@ def resolve_workflow_execution_side_effect_policy(
     return None
 
 
-def classify_write_tool_risk(tool_name: str) -> str:
+def classify_write_tool_risk(
+    tool_name: str,
+    *,
+    runtime_profile: Mapping[str, Any] | None = None,
+) -> str:
     """Return the central write-risk class for a tool name."""
 
     if not isinstance(tool_name, str):
@@ -419,24 +360,17 @@ def classify_write_tool_risk(tool_name: str) -> str:
     if not lowered:
         return WRITE_RISK_EXTERNAL_NON_VONTOLOGY
 
-    if any(lowered.startswith(prefix) for prefix in _EXTERNAL_WRITE_PREFIXES):
-        return WRITE_RISK_EXTERNAL_NON_VONTOLOGY
-    if lowered in _DESTRUCTIVE_WRITE_TOOLS:
-        return WRITE_RISK_DESTRUCTIVE
-    if lowered in _MUTATIVE_NON_DESTRUCTIVE_WRITE_TOOLS:
-        return WRITE_RISK_MUTATIVE_NON_DESTRUCTIVE
-    if lowered in _ADDITIVE_LOW_RISK_WRITE_TOOLS:
-        return WRITE_RISK_ADDITIVE_LOW_RISK
-
-    if lowered.startswith(("delete_", "remove_", "merge_")):
-        return WRITE_RISK_DESTRUCTIVE
-    if lowered.startswith(("update_", "rename_", "assign_", "set_")):
-        return WRITE_RISK_MUTATIVE_NON_DESTRUCTIVE
-    if lowered.startswith(
-        ("create_", "add_", "upsert_", "download_", "finalise_", "finalize_")
-    ):
-        return WRITE_RISK_ADDITIVE_LOW_RISK
-
+    resolved_risk_class = resolve_runtime_profile_write_tool_risk_class(
+        lowered,
+        runtime_profile=runtime_profile,
+    )
+    if resolved_risk_class in {
+        WRITE_RISK_ADDITIVE_LOW_RISK,
+        WRITE_RISK_MUTATIVE_NON_DESTRUCTIVE,
+        WRITE_RISK_DESTRUCTIVE,
+        WRITE_RISK_EXTERNAL_NON_VONTOLOGY,
+    }:
+        return resolved_risk_class
     return WRITE_RISK_EXTERNAL_NON_VONTOLOGY
 
 
@@ -821,7 +755,10 @@ def _decide_single_tool(
     workflow_authority_invalid: bool,
     runtime_profile: Mapping[str, Any] | None,
 ) -> WriteToolDecision:
-    risk_class = classify_write_tool_risk(tool_name)
+    risk_class = classify_write_tool_risk(
+        tool_name,
+        runtime_profile=runtime_profile,
+    )
     runtime_policy = _runtime_decision_policy(runtime_profile)
     resolved_request_evidence = _resolve_request_evidence(
         tool_name=tool_name,
@@ -1602,7 +1539,7 @@ def _infer_blast_radius(
 
 def _infer_target_criticality(*, tool_name: str, risk_class: str) -> str:
     lowered = str(tool_name or "").strip().lower()
-    if any(lowered.startswith(prefix) for prefix in _EXTERNAL_WRITE_PREFIXES):
+    if risk_class == WRITE_RISK_EXTERNAL_NON_VONTOLOGY:
         return "external_system"
     if lowered.startswith("workflow_"):
         return "workflow_process"

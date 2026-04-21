@@ -871,6 +871,67 @@ def test_prompt_required_mutation_contract_is_satisfied_by_task_create_execution
     )
 
 
+def test_prompt_required_mutation_contract_respects_structured_write_denial() -> None:
+    record = _build_record(
+        prompt_text="Search for Qiming in the Vontology and do not create anything.",
+        response_text="I searched and did not create anything.",
+        required_prompt_tools=["create_concepts"],
+        aux_llm_calls=[
+            {
+                "type": "write_tool_request_evidence",
+                "request_evidence": {
+                    "create_concepts": {
+                        "request_state": "low_confidence",
+                        "confirmation_state": "low_confidence",
+                        "denial_state": "explicit_denial",
+                        "rationale": "The current prompt explicitly forbids creation.",
+                    }
+                },
+            }
+        ],
+    )
+
+    execution = record.get("execution")
+    assert isinstance(execution, dict)
+    assert execution.get("required_effects_contract") is None
+    required_effects = record.get("required_effects") or []
+    assert not any(
+        effect.get("effect_type") == "required_mutation"
+        for effect in required_effects
+        if isinstance(effect, dict)
+    )
+
+
+def test_prompt_representation_contract_respects_structured_write_denial() -> None:
+    record = _build_record(
+        prompt_text="Do not download or store this arXiv paper: https://arxiv.org/abs/2510.06248",
+        response_text="I did not download or store the paper.",
+        aux_llm_calls=[
+            {
+                "type": "write_tool_request_evidence",
+                "request_evidence": {
+                    "download_paper": {
+                        "request_state": "low_confidence",
+                        "confirmation_state": "low_confidence",
+                        "denial_state": "explicit_denial",
+                        "rationale": "The current prompt explicitly forbids download.",
+                    }
+                },
+            }
+        ],
+    )
+
+    execution = record.get("execution")
+    assert isinstance(execution, dict)
+    assert execution.get("required_effects_contract") is None
+    required_effects = record.get("required_effects") or []
+    assert not any(
+        effect.get("effect_type") == "scholarly_representation"
+        for effect in required_effects
+        if isinstance(effect, dict)
+    )
+
+
 def test_required_evidence_permission_denied_is_preserved_distinctly(
     monkeypatch,
 ) -> None:

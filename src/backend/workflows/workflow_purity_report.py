@@ -148,6 +148,15 @@ WORKFLOW_CAPABILITY_RETIRED_IMPORT_NAMES = {
     "InMemoryBM25Retriever": "retired_workflow_capability_bm25_import_name",
 }
 WRITE_TOOL_POLICY_ALLOWED_REGEX_PATTERN_NAMES = frozenset()
+WRITE_TOOL_POLICY_RETIRED_SYMBOLS = {
+    "_EXTERNAL_WRITE_PREFIXES": "retired_write_risk_prefix_classifier_symbol",
+    "_ADDITIVE_LOW_RISK_WRITE_TOOLS": "retired_write_risk_set_symbol",
+    "_MUTATIVE_NON_DESTRUCTIVE_WRITE_TOOLS": "retired_write_risk_set_symbol",
+    "_DESTRUCTIVE_WRITE_TOOLS": "retired_write_risk_set_symbol",
+}
+TURN_EXECUTION_RECORD_RETIRED_SYMBOLS = {
+    "_prompt_explicitly_denies_write": "retired_write_denial_regex_symbol",
+}
 FILE_COPY_INTERPRETATION_RETIRED_SYMBOLS = {
     "_ORGANISATION_SUFFIX_PATTERN": "retired_file_copy_semantic_regex_symbol",
     "_ORGANISATION_PREFIX_PATTERN": "retired_file_copy_semantic_regex_symbol",
@@ -243,9 +252,15 @@ CORE_SUPPORT_POLICY_CONTRACTS = (
     {
         "name": "write_tool_policy_regex_backstop_scope",
         "path": "src/backend/workflows/write_tool_policy.py",
+        "banned_symbol_names": WRITE_TOOL_POLICY_RETIRED_SYMBOLS,
         "allowed_regex_pattern_names": sorted(
             WRITE_TOOL_POLICY_ALLOWED_REGEX_PATTERN_NAMES
         ),
+    },
+    {
+        "name": "turn_execution_record_write_denial_scope",
+        "path": "src/backend/services/turn_execution_record_service.py",
+        "banned_symbol_names": TURN_EXECUTION_RECORD_RETIRED_SYMBOLS,
     },
     {
         "name": "file_copy_interpretation_authority_surface",

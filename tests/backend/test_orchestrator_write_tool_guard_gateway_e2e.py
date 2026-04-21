@@ -140,6 +140,7 @@ def test_orchestrator_allows_write_tool_when_user_requests_vontology_mutation(
     llm = _CapturingLLM(
         [
             f'{{"action":"call_tool","tool":"{_TOOL_NAME}","payload":{{"value":"allowed-write"}}}}',
+            '{"schema_version":"write_tool_request_evidence.v1","tool_evidence":[{"tool_name":"create_dummy_concept","request_state":"explicit_request","confirmation_state":"low_confidence","denial_state":"low_confidence","rationale":"current prompt explicitly requests creation in the Vontology"}]}',
             "Done.",
         ]
     )

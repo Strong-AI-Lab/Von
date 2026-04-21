@@ -45,52 +45,6 @@ TURN_EXECUTION_CORRECTNESS_SCHEMA_VERSION = "turn_execution_correctness.v1"
 WORKFLOW_ROUTING_DIAGNOSTICS_SCHEMA_VERSION = "workflow_routing_diagnostics.v1"
 TURN_EXECUTION_RECORDS_COLLECTION = "turn_execution_records"
 
-_WRITE_SIDE_EFFECT_DENIAL_VERBS: tuple[str, ...] = (
-    "create",
-    "add",
-    "insert",
-    "upsert",
-    "update",
-    "edit",
-    "change",
-    "delete",
-    "remove",
-    "rename",
-    "merge",
-    "link",
-    "unlink",
-    "set",
-    "download",
-    "fetch",
-    "save",
-    "store",
-    "cache",
-    "archive",
-    "persist",
-    "upload",
-    "finalise",
-    "finalize",
-    "comment",
-    "attach",
-    "transition",
-    "label",
-    "assign",
-)
-
-
-def _prompt_explicitly_denies_write(prompt: str) -> bool:
-    if not isinstance(prompt, str):
-        return False
-
-    lowered = prompt.lower()
-    return any(
-        re.search(
-            rf"\b(?:do not|don't|dont|never)\s+{re.escape(verb)}\b",
-            lowered,
-        )
-        for verb in _WRITE_SIDE_EFFECT_DENIAL_VERBS
-    )
-
 _TURN_EXECUTION_INDEXES_READY = False
 _TURN_EXECUTION_INDEXES_LOCK = threading.Lock()
 
@@ -510,6 +464,76 @@ def _safe_str(value: Any) -> str | None:
         return None
     cleaned = value.strip()
     return cleaned or None
+
+
+def _normalise_write_request_evidence_map(
+    raw_value: Any,
+) -> dict[str, dict[str, Any]]:
+    normalised: dict[str, dict[str, Any]] = {}
+    if isinstance(raw_value, Mapping):
+        iterable = raw_value.items()
+    elif isinstance(raw_value, Sequence) and not isinstance(raw_value, (str, bytes)):
+        iterable = [
+            (_safe_str(item.get("tool_name")), item)
+            for item in raw_value
+            if isinstance(item, Mapping)
+        ]
+    else:
+        return normalised
+
+    for raw_tool_name, raw_entry in iterable:
+        tool_name = _safe_str(raw_tool_name)
+        if not tool_name or not isinstance(raw_entry, Mapping):
+            continue
+        normalised[tool_name.lower()] = {
+            "request_state": _safe_str(raw_entry.get("request_state"))
+            or "low_confidence",
+            "confirmation_state": _safe_str(raw_entry.get("confirmation_state"))
+            or "low_confidence",
+            "denial_state": _safe_str(raw_entry.get("denial_state"))
+            or "low_confidence",
+            "rationale": _safe_str(raw_entry.get("rationale")),
+        }
+    return normalised
+
+
+def _extract_write_request_evidence_from_aux(
+    aux_llm_calls: Sequence[Mapping[str, Any]] | None,
+) -> dict[str, dict[str, Any]]:
+    if not isinstance(aux_llm_calls, Sequence) or isinstance(
+        aux_llm_calls, (str, bytes)
+    ):
+        return {}
+
+    merged: dict[str, dict[str, Any]] = {}
+    for entry in reversed(aux_llm_calls):
+        if not isinstance(entry, Mapping):
+            continue
+        if _safe_str(entry.get("type")) != "write_tool_request_evidence":
+            continue
+        normalised = _normalise_write_request_evidence_map(
+            entry.get("request_evidence") or entry.get("tool_evidence")
+        )
+        for tool_name, evidence in normalised.items():
+            merged.setdefault(tool_name, evidence)
+    return merged
+
+
+def _write_request_evidence_denies_tool(
+    write_request_evidence: Mapping[str, Mapping[str, Any]] | None,
+    tool_name: str,
+    *,
+    allow_recent_context: bool = True,
+) -> bool:
+    if not isinstance(write_request_evidence, Mapping):
+        return False
+    evidence = write_request_evidence.get(str(tool_name or "").strip().lower())
+    if not isinstance(evidence, Mapping):
+        return False
+    denial_state = _safe_str(evidence.get("denial_state")) or "low_confidence"
+    if denial_state == "explicit_denial":
+        return True
+    return allow_recent_context and denial_state == "recent_denial_context"
 
 
 def _safe_non_negative_int(value: Any, *, default: int = 0) -> int:
@@ -4342,7 +4366,19 @@ def _prompt_implies_low_risk_arxiv_representation(
     lowered = prompt_text.lower()
     if _looks_like_diagnostic_only_prompt(lowered):
         return False
-    if _prompt_explicitly_denies_write(prompt_text):
+    write_request_evidence = _extract_write_request_evidence_from_aux(aux_llm_calls)
+    if any(
+        _write_request_evidence_denies_tool(
+            write_request_evidence,
+            tool_name,
+        )
+        for tool_name in (
+            "download_paper",
+            "finalise_cached_paper",
+            "materialise_scholarly_representation_for_file_copy",
+            "import_url_file_copy",
+        )
+    ):
         return False
 
     arxiv_ids = extract_arxiv_id_candidates(prompt_text)
@@ -4521,6 +4557,7 @@ def _build_prompt_representation_effects(
     *,
     profile: Mapping[str, Any],
     targets: Sequence[str],
+    write_request_evidence: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     effects: list[dict[str, Any]] = []
     profile_id = _safe_str(profile.get("profile_id")) or "representation"
@@ -4532,14 +4569,26 @@ def _build_prompt_representation_effects(
         )
         if not required_tools:
             continue
+        filtered_required_tools = [
+            tool_name
+            for tool_name in required_tools
+            if not _write_request_evidence_denies_tool(
+                write_request_evidence,
+                tool_name,
+            )
+        ]
+        if not filtered_required_tools:
+            continue
         effect = _build_representation_required_effect_template(
             profile=profile,
-            required_tools=required_tools,
+            required_tools=filtered_required_tools,
             targets=[target],
         )
         effect["effect_id"] = f"effect_{profile_id}_representation_{index}"
         effect["artefact_source"] = target_source
-        effect["required_tools_match"] = "all" if len(required_tools) > 1 else "any"
+        effect["required_tools_match"] = (
+            "all" if len(filtered_required_tools) > 1 else "any"
+        )
         effect["status"] = "not_executed"
         effect["status_reason"] = (
             "No required representation tool execution was observed."
@@ -4636,7 +4685,7 @@ def _build_representation_required_effects_contract(
         return continuation_contract
 
     prompt_value = _safe_str(prompt_text)
-    if not prompt_value or _prompt_explicitly_denies_write(prompt_value):
+    if not prompt_value:
         return None
 
     prompt_requests_representation = _prompt_requests_representation_action(
@@ -4682,6 +4731,7 @@ def _build_representation_required_effects_contract(
     required_effects = _build_prompt_representation_effects(
         profile=profile,
         targets=targets,
+        write_request_evidence=_extract_write_request_evidence_from_aux(aux_llm_calls),
     )
     if not required_effects:
         failure_code = f"{profile_id}_representation_requirements_missing"
@@ -4862,7 +4912,7 @@ def _build_prompt_required_mutation_contract(
         return continuation_contract
 
     prompt_preview = _safe_str(prompt_text)
-    if not prompt_preview or _prompt_explicitly_denies_write(prompt_preview):
+    if not prompt_preview:
         return None
 
     tool_names = _dedupe_string_sequence(
@@ -4871,10 +4921,15 @@ def _build_prompt_required_mutation_contract(
             *_extract_required_tool_names_from_aux(aux_llm_calls),
         ]
     )
+    write_request_evidence = _extract_write_request_evidence_from_aux(aux_llm_calls)
     mutation_tools = [
         tool_name
         for tool_name in tool_names
         if _is_prompt_required_mutation_tool(tool_name)
+        and not _write_request_evidence_denies_tool(
+            write_request_evidence,
+            tool_name,
+        )
     ]
     if not mutation_tools:
         return None

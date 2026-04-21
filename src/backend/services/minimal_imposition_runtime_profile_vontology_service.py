@@ -54,6 +54,90 @@ _DEFAULT_DECISION_POLICY: dict[str, Any] = {
     "missing_profile_strategy": "fallback_with_diagnostics",
 }
 
+_VALID_WRITE_RISK_CLASSES = frozenset(
+    {
+        "additive_low_risk",
+        "mutative_non_destructive",
+        "destructive",
+        "external_non_vontology",
+    }
+)
+
+_DEFAULT_TOOL_RISK_CLASSES: dict[str, str] = {
+    "add_issue_comment": "external_non_vontology",
+    "add_names": "additive_low_risk",
+    "add_relationship": "additive_low_risk",
+    "assign_copilot_to_issue": "external_non_vontology",
+    "assign_task": "additive_low_risk",
+    "create_branch": "external_non_vontology",
+    "create_concepts": "additive_low_risk",
+    "create_or_update_file": "external_non_vontology",
+    "create_pull_request": "external_non_vontology",
+    "create_repository": "external_non_vontology",
+    "create_task": "additive_low_risk",
+    "delete_concept": "destructive",
+    "delete_file": "external_non_vontology",
+    "delete_text_relation": "destructive",
+    "download_paper": "additive_low_risk",
+    "finalise_cached_paper": "additive_low_risk",
+    "gmail_modify_labels": "external_non_vontology",
+    "import_url_file_copy": "additive_low_risk",
+    "issue_write": "external_non_vontology",
+    "jira_add_attachment": "external_non_vontology",
+    "jira_add_comment": "external_non_vontology",
+    "jira_create_issue": "external_non_vontology",
+    "jira_link_issue": "external_non_vontology",
+    "jira_move_issue": "external_non_vontology",
+    "jira_transition": "external_non_vontology",
+    "jira_update_issue": "external_non_vontology",
+    "materialise_scholarly_representation_for_file_copy": "additive_low_risk",
+    "mcp__github__add_issue_comment": "external_non_vontology",
+    "mcp__github__create_pull_request": "external_non_vontology",
+    "mcp__github__update_pull_request": "external_non_vontology",
+    "merge_concepts": "destructive",
+    "merge_pull_request": "external_non_vontology",
+    "pull_request_review_write": "external_non_vontology",
+    "push_files": "external_non_vontology",
+    "remove_relationship": "destructive",
+    "remove_relationships_bulk": "destructive",
+    "sub_issue_write": "external_non_vontology",
+    "task_add_attachment": "additive_low_risk",
+    "task_add_comment": "additive_low_risk",
+    "task_add_worklog": "additive_low_risk",
+    "task_assign": "mutative_non_destructive",
+    "task_bulk_update": "mutative_non_destructive",
+    "task_create": "additive_low_risk",
+    "task_create_subtask": "additive_low_risk",
+    "task_delete": "destructive",
+    "task_import_jira_issues": "external_non_vontology",
+    "task_link": "additive_low_risk",
+    "task_set_parent": "mutative_non_destructive",
+    "task_transition": "mutative_non_destructive",
+    "task_unassign": "mutative_non_destructive",
+    "task_unlink": "destructive",
+    "task_update_fields": "mutative_non_destructive",
+    "task_update_status": "mutative_non_destructive",
+    "undo_relationship_removal": "mutative_non_destructive",
+    "update_concept": "mutative_non_destructive",
+    "update_pull_request": "external_non_vontology",
+    "update_pull_request_branch": "external_non_vontology",
+    "update_task_status": "mutative_non_destructive",
+    "update_text_relation": "mutative_non_destructive",
+    "upsert_renderer_profile": "additive_low_risk",
+    "upsert_singleton_text_relation": "additive_low_risk",
+    "upsert_text_relation": "additive_low_risk",
+    "workflow_bind_event": "additive_low_risk",
+    "workflow_cancel_instance": "destructive",
+    "workflow_create_instance": "additive_low_risk",
+    "workflow_create_schedule": "additive_low_risk",
+    "workflow_delete_event_binding": "destructive",
+    "workflow_delete_schedule": "destructive",
+    "workflow_retry_instance": "mutative_non_destructive",
+    "workflow_set_event_binding_enabled": "mutative_non_destructive",
+    "workflow_set_schedule_enabled": "mutative_non_destructive",
+    "workflow_trigger_schedule": "additive_low_risk",
+}
+
 _CANONICAL_MINIMAL_IMPOSITION_RUNTIME_PROFILE_BLUEPRINTS: tuple[dict[str, Any], ...] = (
     {
         "profile_concept_id": DEFAULT_MINIMAL_IMPOSITION_RUNTIME_PROFILE_CONCEPT_ID,
@@ -67,6 +151,7 @@ _CANONICAL_MINIMAL_IMPOSITION_RUNTIME_PROFILE_BLUEPRINTS: tuple[dict[str, Any], 
             "external side-effects remain guarded."
         ),
         "decision_policy": dict(_DEFAULT_DECISION_POLICY),
+        "tool_risk_classes": dict(_DEFAULT_TOOL_RISK_CLASSES),
         "scenario_policies": [
             {
                 "scenario_id": "low_risk_additive_internal_write",
@@ -243,6 +328,21 @@ def _normalise_profile(
         if not cleaned_tool or not isinstance(override, Mapping):
             continue
         normalised_tool_overrides[cleaned_tool.lower()] = dict(override)
+    tool_risk_classes = raw_profile.get("tool_risk_classes")
+    raw_tool_risk_classes = (
+        dict(tool_risk_classes) if isinstance(tool_risk_classes, Mapping) else {}
+    )
+    normalised_tool_risk_classes: dict[str, str] = {}
+    for tool_name, raw_risk_class in raw_tool_risk_classes.items():
+        cleaned_tool = _safe_str(tool_name)
+        cleaned_risk_class = _safe_str(raw_risk_class)
+        if (
+            not cleaned_tool
+            or not cleaned_risk_class
+            or cleaned_risk_class not in _VALID_WRITE_RISK_CLASSES
+        ):
+            continue
+        normalised_tool_risk_classes[cleaned_tool.lower()] = cleaned_risk_class
 
     return {
         "profile_concept_id": profile_concept_id,
@@ -255,8 +355,51 @@ def _normalise_profile(
         "scenario_policies": [
             dict(item) for item in scenario_policies if isinstance(item, Mapping)
         ],
+        "tool_risk_classes": normalised_tool_risk_classes,
         "tool_feature_overrides": normalised_tool_overrides,
     }
+
+
+def canonical_minimal_imposition_runtime_tool_risk_classes() -> dict[str, str]:
+    merged: dict[str, str] = {}
+    for profile in _CANONICAL_MINIMAL_IMPOSITION_RUNTIME_PROFILE_BLUEPRINTS:
+        raw_tool_risk_classes = profile.get("tool_risk_classes")
+        if not isinstance(raw_tool_risk_classes, Mapping):
+            continue
+        for tool_name, raw_risk_class in raw_tool_risk_classes.items():
+            cleaned_tool = _safe_str(tool_name)
+            cleaned_risk_class = _safe_str(raw_risk_class)
+            if (
+                not cleaned_tool
+                or not cleaned_risk_class
+                or cleaned_risk_class not in _VALID_WRITE_RISK_CLASSES
+            ):
+                continue
+            merged[cleaned_tool.lower()] = cleaned_risk_class
+    return merged
+
+
+def resolve_runtime_profile_write_tool_risk_class(
+    tool_name: str | None,
+    *,
+    runtime_profile: Mapping[str, Any] | None = None,
+) -> str | None:
+    cleaned_tool = _safe_str(tool_name)
+    if not cleaned_tool:
+        return None
+    lowered = cleaned_tool.lower()
+
+    if isinstance(runtime_profile, Mapping):
+        tool_risk_classes = runtime_profile.get("tool_risk_classes")
+        if isinstance(tool_risk_classes, Mapping):
+            raw_risk_class = tool_risk_classes.get(lowered) or tool_risk_classes.get(
+                cleaned_tool
+            )
+            cleaned_risk_class = _safe_str(raw_risk_class)
+            if cleaned_risk_class in _VALID_WRITE_RISK_CLASSES:
+                return cleaned_risk_class
+
+    return canonical_minimal_imposition_runtime_tool_risk_classes().get(lowered)
 
 
 def resolve_minimal_imposition_runtime_profile_concept_id(
@@ -477,7 +620,9 @@ __all__ = [
     "MINIMAL_IMPOSITION_RUNTIME_PROFILE_TYPE_ID",
     "canonical_minimal_imposition_runtime_profile_blueprints",
     "canonical_minimal_imposition_runtime_profile_concept_ids",
+    "canonical_minimal_imposition_runtime_tool_risk_classes",
     "ensure_canonical_minimal_imposition_runtime_profiles",
     "load_minimal_imposition_runtime_profile",
+    "resolve_runtime_profile_write_tool_risk_class",
     "resolve_minimal_imposition_runtime_profile_concept_id",
 ]

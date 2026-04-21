@@ -103,6 +103,13 @@ def _runtime_profile() -> tuple[dict[str, Any], dict[str, Any]]:
                 "require_explicit_request_for_external": True,
                 "process_sensitive_additive_requires_clear_request": True,
             },
+            "tool_risk_classes": {
+                "download_paper": "additive_low_risk",
+                "update_concept": "mutative_non_destructive",
+                "delete_concept": "destructive",
+                "jira_update_issue": "external_non_vontology",
+                "workflow_bind_event": "additive_low_risk",
+            },
             "tool_feature_overrides": {
                 "workflow_bind_event": {
                     "blast_radius": "high",

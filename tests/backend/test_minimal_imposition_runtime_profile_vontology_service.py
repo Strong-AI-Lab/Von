@@ -87,6 +87,10 @@ def test_load_minimal_imposition_runtime_profile_uses_workflow_link(monkeypatch)
             "policy_version": "minimal_imposition_runtime.v1",
             "require_clear_request_for_recoverable_mutation": True,
         },
+        "tool_risk_classes": {
+            "download_paper": "additive_low_risk",
+            "delete_concept": "destructive",
+        },
         "scenario_policies": [{"scenario_id": "reversible_update"}],
         "tool_feature_overrides": {
             "workflow_bind_event": {
@@ -135,6 +139,8 @@ def test_load_minimal_imposition_runtime_profile_uses_workflow_link(monkeypatch)
         profile["decision_policy"]["require_clear_request_for_recoverable_mutation"]
         is True
     )
+    assert profile["tool_risk_classes"]["download_paper"] == "additive_low_risk"
+    assert profile["tool_risk_classes"]["delete_concept"] == "destructive"
     assert profile["tool_feature_overrides"]["workflow_bind_event"]["blast_radius"] == (
         "high"
     )

@@ -56,6 +56,25 @@ def test_classify_write_tool_risk_covers_policy_classes():
     )
 
 
+def test_classify_write_tool_risk_uses_runtime_profile_mapping():
+    from src.backend.workflows.write_tool_policy import (
+        WRITE_RISK_DESTRUCTIVE,
+        classify_write_tool_risk,
+    )
+
+    assert (
+        classify_write_tool_risk(
+            "download_paper",
+            runtime_profile={
+                "tool_risk_classes": {
+                    "download_paper": WRITE_RISK_DESTRUCTIVE,
+                }
+            },
+        )
+        == WRITE_RISK_DESTRUCTIVE
+    )
+
+
 def test_bare_arxiv_url_allows_additive_download_by_default():
     from src.backend.workflows.write_tool_policy import (
         REASON_DEFAULT_ALLOW_ADDITIVE_LOW_RISK,
