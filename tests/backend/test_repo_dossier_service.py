@@ -128,6 +128,11 @@ def test_repo_dossier_prompt_definition_get_returns_prompt_text(monkeypatch):
 
     monkeypatch.setattr(
         svc,
+        "get_concept_by_concept_id",
+        lambda concept_id: {"concept_id": concept_id},
+    )
+    monkeypatch.setattr(
+        svc,
         "get_texts_for_concept",
         lambda concept_id, limit=20: [
             {
@@ -145,6 +150,40 @@ def test_repo_dossier_prompt_definition_get_returns_prompt_text(monkeypatch):
     assert result["success"] is True
     assert result["selected_predicate"] == "hasContent"
     assert result["text"] == "System prompt body"
+
+
+def test_repo_dossier_prompt_definition_get_reports_missing_prompt_concept(monkeypatch):
+    from src.backend.services import repo_dossier_service as svc
+
+    def _raise_not_found(concept_id):
+        raise svc.ConceptNotFoundError(concept_id)
+
+    monkeypatch.setattr(svc, "get_concept_by_concept_id", _raise_not_found)
+
+    result = svc.repo_dossier_prompt_definition_get(
+        prompt_concept_id="#V#missing_prompt"
+    )
+
+    assert result["success"] is False
+    assert result["error"] == "prompt_concept_not_found"
+
+
+def test_repo_dossier_prompt_definition_get_reports_missing_prompt_content(monkeypatch):
+    from src.backend.services import repo_dossier_service as svc
+
+    monkeypatch.setattr(
+        svc,
+        "get_concept_by_concept_id",
+        lambda concept_id: {"concept_id": concept_id},
+    )
+    monkeypatch.setattr(svc, "get_texts_for_concept", lambda concept_id, limit=20: [])
+
+    result = svc.repo_dossier_prompt_definition_get(
+        prompt_concept_id="#V#empty_prompt"
+    )
+
+    assert result["success"] is False
+    assert result["error"] == "prompt_content_missing"
 
 
 def test_repo_dossier_git_metadata_rejects_untracked_paths(monkeypatch):

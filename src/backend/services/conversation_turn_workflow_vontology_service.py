@@ -16,6 +16,7 @@ from .workflow_repo_seed_bootstrap import bootstrap_repo_seed_workflow_bundle
 from ..workflows.definitions import (
     CHAT_ASSISTANT_WORKFLOW_ID,
     CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+    KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
     TOOL_CALLING_WORKFLOW_ID,
     TURN_COMPLETION_GATE_WORKFLOW_ID,
 )
@@ -34,6 +35,9 @@ _EXPECTED_OUTCOME_PROMPT_CONCEPT_ID = (
 _SELECTOR_PROMPT_CONCEPT_ID = "#V#chat_turn_classifier_prompt"
 _NARRATION_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_narrate_completion_report"
 _RECOVERY_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_recovery_decision"
+_POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID = (
+    "#V#prompt_turn_execution_postcondition_critic"
+)
 _EXPECTED_OUTCOME_PROMPT_SEED_ASSET_PATH = (
     Path(__file__).resolve().parents[1]
     / "workflows"
@@ -58,9 +62,16 @@ _RECOVERY_PROMPT_SEED_ASSET_PATH = (
     / "repo_seed_bundles"
     / "prompt_turn_execution_recovery_decision_seed.md"
 )
+_POSTCONDITION_CRITIC_PROMPT_SEED_ASSET_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "workflows"
+    / "repo_seed_bundles"
+    / "prompt_turn_execution_postcondition_critic_seed.md"
+)
 _TARGET_WORKFLOW_IDS: tuple[str, ...] = (
     CHAT_ASSISTANT_WORKFLOW_ID,
     TOOL_CALLING_WORKFLOW_ID,
+    KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
     TURN_COMPLETION_GATE_WORKFLOW_ID,
     CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
 )
@@ -93,6 +104,15 @@ def _load_recovery_prompt_seed_text() -> str:
     prompt_text = _RECOVERY_PROMPT_SEED_ASSET_PATH.read_text(encoding="utf-8").strip()
     if not prompt_text:
         raise ValueError("turn_execution_recovery_prompt_seed_missing")
+    return prompt_text
+
+
+def _load_postcondition_critic_prompt_seed_text() -> str:
+    prompt_text = _POSTCONDITION_CRITIC_PROMPT_SEED_ASSET_PATH.read_text(
+        encoding="utf-8"
+    ).strip()
+    if not prompt_text:
+        raise ValueError("turn_execution_postcondition_critic_prompt_seed_missing")
     return prompt_text
 
 
@@ -146,6 +166,16 @@ def _ensure_conversation_turn_prompt_support(
                 ),
                 parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
             ),
+            WorkflowPromptConceptSpec(
+                concept_id=_POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID,
+                name="Turn execution postcondition critic prompt",
+                description=(
+                    "Canonical postcondition-critic prompt for deciding whether "
+                    "a turn's answer is safely supported by the evidence actually "
+                    "produced by the selected workflow and verification reads."
+                ),
+                parent_concept_ids=(DEFAULT_PROMPT_TYPE_ID,),
+            ),
         ),
         provenance_source=_MANAGED_BY,
     )
@@ -195,6 +225,18 @@ def _ensure_conversation_turn_prompt_support(
             garbage_collect=True,
         )
         seeded_prompt_ids.append(_RECOVERY_PROMPT_CONCEPT_ID)
+    if force_prompt_seed or not prompt_concept_has_content(
+        _POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID
+    ):
+        upsert_singleton_text_relation(
+            subject_concept_id=_POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID,
+            predicate="hasContent",
+            text=_load_postcondition_critic_prompt_seed_text(),
+            lang="en-NZ",
+            context={"jira": _SOURCE_TAG, "source": _MANAGED_BY},
+            garbage_collect=True,
+        )
+        seeded_prompt_ids.append(_POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID)
 
     report = dict(report)
     errors_by_target = dict(report.get("errors_by_target") or {})
@@ -242,6 +284,17 @@ def _ensure_conversation_turn_prompt_support(
         validated_prompt_ids = list(report.get("validated_prompt_ids") or [])
         if _RECOVERY_PROMPT_CONCEPT_ID not in validated_prompt_ids:
             validated_prompt_ids.append(_RECOVERY_PROMPT_CONCEPT_ID)
+        report["validated_prompt_ids"] = validated_prompt_ids
+    if prompt_concept_has_content(_POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID):
+        errors_by_target.pop(_POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID, None)
+        missing_content_prompt_ids = [
+            prompt_id
+            for prompt_id in missing_content_prompt_ids
+            if prompt_id != _POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID
+        ]
+        validated_prompt_ids = list(report.get("validated_prompt_ids") or [])
+        if _POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID not in validated_prompt_ids:
+            validated_prompt_ids.append(_POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID)
         report["validated_prompt_ids"] = validated_prompt_ids
 
     report["errors_by_target"] = errors_by_target

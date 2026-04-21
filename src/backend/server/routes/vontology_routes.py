@@ -43,7 +43,7 @@ from ...vontology.utils_vontology import (
     build_pure_instance_query,
 )
 from ...db.repositories.concepts_repository import ConceptsRepository
-from ...db.repositories.concepts_repository import RELATIONSHIP_KINDS
+from ...services.concept_predicate_metadata_service import get_relationship_kinds_set
 from ...services.concept_service import (
     get_concept_by_id,
     ConceptNotFoundError,
@@ -3458,7 +3458,7 @@ def get_relationships_extent_route():
             predicate_id = _canonicalise_relationship_predicate(item.get("predicate"))
             if not predicate_id:
                 continue
-            if predicate_id in RELATIONSHIP_KINDS:
+            if predicate_id in get_relationship_kinds_set():
                 continue
             if requested_predicate and predicate_id != requested_predicate:
                 continue
@@ -3707,8 +3707,8 @@ def add_relationship_route():
     # Normalise structural predicates using the authoritative service (JVNAUTOSCI-986)
     from ...services.relationship_write_service import (
         normalise_structural_predicate,
-        RELATIONSHIP_KINDS,
     )
+    from ...services.concept_predicate_metadata_service import get_relationship_kinds_set as _get_rk_set
 
     kind = normalise_structural_predicate(kind)
 
@@ -3720,9 +3720,9 @@ def add_relationship_route():
             400,
         )
 
-    # Use shared RELATIONSHIP_KINDS (JVNAUTOSCI-986: single authoritative pathway)
+    # Use shared relationship kinds (JVNAUTOSCI-986: single authoritative pathway)
     is_dynamic_predicate = False
-    if kind not in RELATIONSHIP_KINDS:
+    if kind not in _get_rk_set():
         # Allow arbitrary predicate concept ids (starting with #V#) as dynamic, non-inverted edges
         if isinstance(kind, str) and kind.startswith("#V#"):
             is_dynamic_predicate = True

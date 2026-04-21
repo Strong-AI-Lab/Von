@@ -10,6 +10,8 @@ from __future__ import annotations
 import re
 from typing import Any, Mapping, cast
 
+from .concept_predicate_metadata_service import get_relationship_kinds_set
+from .concept_summary_field_resolver import get_concept_summary_field_resolver
 from .concept_service import (
     ConceptNotFoundError,
     enrich_concept_with_text_relations,
@@ -19,7 +21,6 @@ from .renderer_applicability_service import resolve_renderer_applicability_from_
 from .renderer_applicability_vontology_service import (
     load_renderer_definitions_from_concept_ids,
 )
-from .task_ontology_service import TASK_SOURCE_RELATIONSHIP_PREDICATES
 from .text_value_service import get_texts_for_concept
 from ..vontology.utils_vontology import get_concept_display_name_with_names_fallback
 
@@ -30,16 +31,6 @@ CONCEPT_PAGE_RENDERER_CONCEPT_IDS: tuple[str, ...] = (
     "#V#concept_page_event_renderer",
     "#V#concept_page_location_renderer",
     "#V#concept_page_text_summary_renderer",
-)
-
-_STRUCTURAL_RELATIONSHIP_KEYS: frozenset[str] = frozenset(
-    {
-        "is_a_type_of",
-        "is_an_instance_of",
-        "has_subtype",
-        "has_instance",
-        "related_to",
-    }
 )
 
 _GENERIC_TYPE_EXCLUSIONS: frozenset[str] = frozenset(
@@ -68,46 +59,6 @@ _PERSON_ROLE_EXCLUSIONS: frozenset[str] = frozenset(
         "#V#von_user",
     }
 )
-
-_TEXT_PREDICATE_ALIASES: dict[str, tuple[str, ...]] = {
-    "description": ("hasDescription", "#V#hasDescription"),
-    "content": ("hasContent", "#V#hasContent"),
-    "email": ("#V#has_email", "has_email"),
-    "publication_date": ("#V#has_publication_date", "has_publication_date"),
-    "task_status": ("#V#hasTaskStatus", "hasTaskStatus"),
-    "priority": ("#V#hasPriority", "hasPriority"),
-    "due_date": (
-        "#V#hasDueDate",
-        "#V#has_due_date",
-        "#V#has_due_time",
-        "#V#has_due",
-        "hasDueDate",
-        "has_due_date",
-    ),
-    "event_date": (
-        "#V#date_of_event",
-        "#V#has_start_time",
-        "date_of_event",
-        "has_start_time",
-    ),
-    "capacity": ("#V#has_capacity", "has_capacity", "#V#capacity", "capacity"),
-    "url": ("#V#has_url", "has_url"),
-}
-
-_RELATIONSHIP_PREDICATE_ALIASES: dict[str, tuple[str, ...]] = {
-    "affiliation": (
-        "#V#has_affiliation",
-        "#V#member_of_organisation",
-        "#V#member_of_faculty",
-        "#V#homeresearchorganisation",
-    ),
-    "author": ("#V#has_author", "#V#has_first_author"),
-    "meeting_participant": ("#V#meeting_participant", "#V#performed_by"),
-    "meeting_location": ("#V#meeting_location", "#V#has_location"),
-    "meeting_host": ("#V#meeting_host_organisation",),
-    "task_source": TASK_SOURCE_RELATIONSHIP_PREDICATES,
-    "authored_work": ("#V#author_of",),
-}
 
 
 def _normalise_strings(raw: Any) -> list[str]:
@@ -220,9 +171,10 @@ def _collect_present_predicates(
     relationships: Mapping[str, Any],
     text_rows: list[dict[str, Any]],
 ) -> list[str]:
+    structural_relationship_keys = get_relationship_kinds_set()
     predicates: list[str] = []
     for predicate, raw in relationships.items():
-        if not isinstance(predicate, str) or predicate in _STRUCTURAL_RELATIONSHIP_KEYS:
+        if not isinstance(predicate, str) or predicate in structural_relationship_keys:
             continue
         if _normalise_strings(raw):
             predicates.append(predicate)
@@ -248,7 +200,7 @@ def _index_text_rows(text_rows: list[dict[str, Any]]) -> dict[str, list[str]]:
 
 
 def _first_text_value(indexed: Mapping[str, list[str]], alias_key: str) -> str | None:
-    aliases = _TEXT_PREDICATE_ALIASES.get(alias_key, ())
+    aliases = get_concept_summary_field_resolver().get_text_predicates_for_field(alias_key)
     for alias in aliases:
         values = indexed.get(alias) or []
         if values:
@@ -257,7 +209,7 @@ def _first_text_value(indexed: Mapping[str, list[str]], alias_key: str) -> str |
 
 
 def _all_text_values(indexed: Mapping[str, list[str]], alias_key: str) -> list[str]:
-    aliases = _TEXT_PREDICATE_ALIASES.get(alias_key, ())
+    aliases = get_concept_summary_field_resolver().get_text_predicates_for_field(alias_key)
     values: list[str] = []
     for alias in aliases:
         values.extend(indexed.get(alias) or [])
@@ -269,7 +221,7 @@ def _relationship_values(
     alias_key: str,
     preview_cache: dict[str, str],
 ) -> list[str]:
-    aliases = _RELATIONSHIP_PREDICATE_ALIASES.get(alias_key, ())
+    aliases = get_concept_summary_field_resolver().get_relationship_predicates_for_field(alias_key)
     values: list[str] = []
     for alias in aliases:
         for raw in _normalise_strings(relationships.get(alias)):

@@ -147,9 +147,7 @@ WORKFLOW_CAPABILITY_RETIRED_IMPORT_NAMES = {
     "BM25Okapi": "retired_workflow_capability_bm25_import_name",
     "InMemoryBM25Retriever": "retired_workflow_capability_bm25_import_name",
 }
-WRITE_TOOL_POLICY_ALLOWED_REGEX_PATTERN_NAMES = frozenset(
-    {"_CONFIRMATION_PATTERN", "_DESTRUCTIVE_MUTATION_PATTERN"}
-)
+WRITE_TOOL_POLICY_ALLOWED_REGEX_PATTERN_NAMES = frozenset()
 FILE_COPY_INTERPRETATION_RETIRED_SYMBOLS = {
     "_ORGANISATION_SUFFIX_PATTERN": "retired_file_copy_semantic_regex_symbol",
     "_ORGANISATION_PREFIX_PATTERN": "retired_file_copy_semantic_regex_symbol",
@@ -248,7 +246,6 @@ CORE_SUPPORT_POLICY_CONTRACTS = (
         "allowed_regex_pattern_names": sorted(
             WRITE_TOOL_POLICY_ALLOWED_REGEX_PATTERN_NAMES
         ),
-        "allowed_regex_helper_functions": ("prompt_explicitly_denies_write",),
     },
     {
         "name": "file_copy_interpretation_authority_surface",
@@ -1071,12 +1068,12 @@ def _scan_core_support_policy_contracts(project_root: Path) -> dict[str, Any]:
                     contract=contract,
                 )
             )
-            allowed_regex_pattern_names = tuple(
-                str(name)
-                for name in contract.get("allowed_regex_pattern_names", ())
-                if str(name).strip()
-            )
-            if allowed_regex_pattern_names:
+            if "allowed_regex_pattern_names" in contract:
+                allowed_regex_pattern_names = tuple(
+                    str(name)
+                    for name in contract.get("allowed_regex_pattern_names", ())
+                    if str(name).strip()
+                )
                 allowed_regex_helper_functions = tuple(
                     str(name)
                     for name in contract.get("allowed_regex_helper_functions", ())

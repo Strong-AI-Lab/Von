@@ -1412,6 +1412,11 @@ def _build_definition_from_publication_spec(
                         else None
                     ),
                     prompt_contract=prompt_contract,
+                    subworkflow_id=(
+                        step.invoked_workflow_id
+                        if step.action_id == WORKFLOW_SUBWORKFLOW_ACTION_ID
+                        else None
+                    ),
                 ),
             )
             if isinstance(step.action_id, str) and step.action_id.strip()

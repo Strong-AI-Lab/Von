@@ -20,6 +20,7 @@ from src.backend.services.text_value_service import get_texts_for_concept
 from src.backend.workflows import (
     CHAT_ASSISTANT_WORKFLOW_ID,
     CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+    KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
     TOOL_CALLING_WORKFLOW_ID,
     workflow_concept_authority_service as authority_service,
 )
@@ -33,6 +34,9 @@ EXPECTED_OUTCOME_PROMPT_CONCEPT_ID = (
 SELECTOR_PROMPT_CONCEPT_ID = "#V#chat_turn_classifier_prompt"
 NARRATION_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_narrate_completion_report"
 RECOVERY_PROMPT_CONCEPT_ID = "#V#prompt_turn_execution_recovery_decision"
+POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID = (
+    "#V#prompt_turn_execution_postcondition_critic"
+)
 
 
 @pytest.fixture
@@ -60,7 +64,7 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     report = _ensure_conversation_turn_prompt_support()
 
     assert report.get("success") is True
-    assert report.get("seeded_prompt_count") == 4
+    assert report.get("seeded_prompt_count") == 5
 
     expected_outcome_rows = get_texts_for_concept(
         EXPECTED_OUTCOME_PROMPT_CONCEPT_ID,
@@ -143,6 +147,21 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
         '`"respond_with_answer"`, or `"respond_with_follow_up"`'
     ) in recovery_text
 
+    critic_rows = get_texts_for_concept(
+        POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID,
+        predicate="hasContent",
+        limit=5,
+    )
+    critic_text = next(
+        ((row or {}).get("text") for row in critic_rows if (row or {}).get("text")),
+        "",
+    )
+    assert isinstance(critic_text, str)
+    assert "postcondition critic for one completed Von turn" in critic_text
+    assert "required_evidence_answer_consistency_blocker" in critic_text
+    assert "effect_prompt_required_evidence_answer_consistency" in critic_text
+    assert "Focus on grounded answer consistency" in critic_text
+
 
 def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_links(
     _reset_mock_db: Any,
@@ -153,7 +172,7 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
     counts = publication.get("counts") or {}
     assert report.get("success") is True
     assert counts.get("errors") == 0
-    assert counts.get("workflows_published") == 4
+    assert counts.get("workflows_published") == 5
 
     chat_definition = load_workflow_definition_from_vontology(
         CHAT_ASSISTANT_WORKFLOW_ID
@@ -259,7 +278,32 @@ def test_bootstrap_materialises_conversation_turn_workflow_family_and_prompt_lin
         state_id="critic",
     )
     critic_action = turn_definition.states[critic_step_id].actions[0]
-    assert critic_action.action_id == "turn_execution.critic"
+    assert critic_action.action_id == "workflow_invoke_subworkflow"
+    assert critic_action.subworkflow_id == KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID
+
+    kb_critic_definition = load_workflow_definition_from_vontology(
+        KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID
+    )
+    assert kb_critic_definition is not None
+    evaluate_authoritative_prompt_step_id = authority_service._step_concept_id(
+        workflow_id=KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
+        state_id="evaluate_authoritative_prompt",
+    )
+    evaluate_authoritative_prompt = kb_critic_definition.states[
+        evaluate_authoritative_prompt_step_id
+    ]
+    evaluate_authoritative_prompt_action = evaluate_authoritative_prompt.actions[0]
+    assert evaluate_authoritative_prompt_action.action_id == "llm.action"
+    assert evaluate_authoritative_prompt_action.validation_policy == {
+        "output_format": "json_value"
+    }
+    evaluate_authoritative_prompt_contract = (
+        evaluate_authoritative_prompt_action.prompt_contract
+    )
+    assert isinstance(evaluate_authoritative_prompt_contract, dict)
+    assert evaluate_authoritative_prompt_contract.get("resolved_prompt_concept_id") == (
+        POSTCONDITION_CRITIC_PROMPT_CONCEPT_ID
+    )
 
     completion_gate_step_id = authority_service._step_concept_id(
         workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,

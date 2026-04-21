@@ -8,12 +8,14 @@ def _request_evidence(
     *,
     request_state: str = "low_confidence",
     confirmation_state: str = "low_confidence",
+    denial_state: str = "low_confidence",
     rationale: str | None = None,
 ) -> dict[str, dict[str, str | None]]:
     return {
         tool_name: {
             "request_state": request_state,
             "confirmation_state": confirmation_state,
+            "denial_state": denial_state,
             "rationale": rationale,
         }
     }
@@ -103,6 +105,11 @@ def test_explicit_denial_blocks_additive_write():
     decision = compute_allowed_write_tools(
         prompt="Do not download or store this arXiv paper: https://arxiv.org/abs/2510.06248",
         requested_tools=["download_paper"],
+        request_evidence=_request_evidence(
+            "download_paper",
+            denial_state="explicit_denial",
+            rationale="current prompt explicitly forbids downloading or storing the paper",
+        ),
         recent_user_prompts=[],
     )
 

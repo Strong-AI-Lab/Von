@@ -131,7 +131,6 @@ from src.backend.workflows.write_tool_policy import (
     build_mutation_guardrail_events,
     classify_write_tool_risk,
     compute_allowed_write_tools,
-    prompt_explicitly_denies_write,
     required_mutation_authority_level_for_risk,
 )
 from ...services.turn_execution_record_service import build_turn_execution_record
@@ -163,7 +162,7 @@ _TURN_EXECUTION_TOOL_PIPELINE_ACTION_IDS = frozenset(
     {
         "tool_calling.preflight_requirements",
         "tool_calling.respond",
-        "turn_execution.critic",
+        "workflow_invoke_subworkflow",
         "turn_execution.completion_gate",
     }
 )
@@ -3987,14 +3986,10 @@ class InternalMCPChatOrchestrator:
         request_evidence: dict[str, dict[str, Any]] = {}
         request_evidence_diagnostics: dict[str, Any] = {
             "schema_version": "write_tool_request_evidence.v1",
-            "status": (
-                "skipped_explicit_write_denial"
-                if prompt_explicitly_denies_write(prompt)
-                else "skipped_no_requested_tools"
-            ),
+            "status": "skipped_no_requested_tools",
             "requested_tool_count": len(requested_tool_list),
         }
-        if requested_tool_list and not prompt_explicitly_denies_write(prompt):
+        if requested_tool_list:
             request_evidence, request_evidence_diagnostics = (
                 infer_write_tool_request_evidence(
                     llm_client=request.environment.llm_client,
@@ -10296,7 +10291,6 @@ class InternalMCPChatOrchestrator:
             [name for name in ordered_tool_names if _is_write_tool(name)],
             key=lambda value: value.lower(),
         )
-        write_explicitly_denied = prompt_explicitly_denies_write(prompt)
 
         hinted_families = self._collect_structured_tool_family_hints(
             context=context,
@@ -10347,10 +10341,6 @@ class InternalMCPChatOrchestrator:
             ):
                 _mark_excluded(tool_name, "inventory_only_relation_grounding")
                 return
-            if _is_write_tool(tool_name):
-                if write_explicitly_denied:
-                    _mark_excluded(tool_name, "write_tool_explicitly_denied")
-                    return
             included_lookup.add(key)
             candidate_names.append(definitions_by_name[key].name)
 
@@ -10533,11 +10523,7 @@ class InternalMCPChatOrchestrator:
             provider_limit=provider_limit,
             cap_applied=cap_applied,
             truncation_applied=truncation_applied,
-            write_policy_reason=(
-                "explicit_write_denial_detected"
-                if write_explicitly_denied and write_tool_names
-                else "workflow_llm_owns_write_tool_selection"
-            ),
+            write_policy_reason="workflow_llm_owns_write_tool_selection",
             warnings=tuple(warnings),
         )
 

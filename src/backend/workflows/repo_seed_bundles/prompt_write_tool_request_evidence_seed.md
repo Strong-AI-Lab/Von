@@ -13,6 +13,7 @@ Task:
 - For each requested tool, decide whether the user has clearly requested that tool's side effect.
 - Only treat a recent prompt as evidence when the current prompt is a continuation, confirmation, or follow-up that clearly refers back to the recent request.
 - Do not treat "this tool could help" as evidence that the user requested the side effect.
+- Separately decide whether the user clearly denies that tool's side effect.
 - For destructive tools, separately decide whether explicit destructive confirmation is present.
 - If the request is unclear, return low confidence rather than guessing.
 - For additive ingestion tools, a directly supplied artefact or URL can count as an explicit request for that ingestion side effect when the current prompt clearly presents it for action.
@@ -25,6 +26,7 @@ Return strict JSON only with this shape:
       "tool_name": "exact requested tool name",
       "request_state": "explicit_request | recent_request_context | low_confidence",
       "confirmation_state": "explicit_confirmation | recent_confirmation_context | low_confidence",
+      "denial_state": "explicit_denial | recent_denial_context | low_confidence",
       "rationale": "brief explanation"
     }
   ]
@@ -37,4 +39,6 @@ Rules:
 - Use `recent_request_context` only when the recent preserved user context clearly carries the request and the current prompt is a continuation of it.
 - Use `explicit_confirmation` only when the current prompt itself authorises a destructive change.
 - Use `recent_confirmation_context` only when the current prompt is a clear continuation / approval of a recent destructive request.
+- Use `explicit_denial` only when the current prompt itself clearly forbids that tool's side effect.
+- Use `recent_denial_context` only when preserved recent context clearly carries the denial and the current prompt is a continuation of it rather than an override.
 - Otherwise use `low_confidence`.

@@ -56,6 +56,8 @@ RELATIONSHIP_KINDS: tuple[str, ...] = (
     "is_an_instance_of",
     "has_instance",
     "related_to",
+    "#V#authored_by",
+    "#V#has_author",
 )
 
 
@@ -320,7 +322,12 @@ class ConceptsRepository:
             collected: Dict[str, Set[str]] = {}
             if not source:
                 return collected
-            for rel_kind in RELATIONSHIP_KINDS:
+            try:
+                from ...services.concept_predicate_metadata_service import get_relationship_kinds
+                kinds: tuple[str, ...] = get_relationship_kinds()
+            except Exception:
+                kinds = RELATIONSHIP_KINDS
+            for rel_kind in kinds:
                 values = source.get(rel_kind)  # type: ignore[index]
                 if values is None:
                     continue

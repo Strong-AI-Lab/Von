@@ -52,6 +52,18 @@ def _coerce_non_negative_int(
     return coerced
 
 
+def _coerce_bool(value: Any, *, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
 def _normalise_string_list(raw_values: Any) -> list[str]:
     normalised: list[str] = []
     if not isinstance(raw_values, list):
@@ -999,6 +1011,11 @@ def run_turn_execution_critic(
     workflow_discovery_payload = (
         dict(workflow_discovery) if isinstance(workflow_discovery, Mapping) else None
     )
+    request_inputs = request.inputs if isinstance(request.inputs, Mapping) else {}
+    emit_default_critic_verdict = _coerce_bool(
+        request_inputs.get("emit_default_critic_verdict"),
+        default=True,
+    )
     workflow_routing = data.get("workflow_routing")
     workflow_routing_payload = (
         dict(workflow_routing) if isinstance(workflow_routing, Mapping) else None
@@ -1070,6 +1087,38 @@ def run_turn_execution_critic(
         if isinstance(raw_summary, Mapping):
             critic_summary = dict(raw_summary)
 
+    unresolved_check_count = (
+        int(critic_summary.get("not_verified_count") or 0)
+        + int(critic_summary.get("inconclusive_count") or 0)
+        + int(critic_summary.get("error_count") or 0)
+    )
+    critic_verdict_payload: dict[str, Any] | None = None
+    if isinstance(critic_payload, Mapping):
+        raw_verdict = critic_payload.get("verdict")
+        if isinstance(raw_verdict, Mapping):
+            critic_verdict_payload = {
+                str(key): value
+                for key, value in raw_verdict.items()
+                if isinstance(key, str)
+            }
+        elif emit_default_critic_verdict:
+            critic_verdict_payload = {}
+        if isinstance(critic_verdict_payload, dict):
+            critic_verdict_payload.setdefault(
+                "workflow_id", KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID
+            )
+            critic_verdict_payload.setdefault("summary", dict(critic_summary))
+            critic_verdict_payload.setdefault(
+                "has_unresolved_checks", unresolved_check_count > 0
+            )
+            critic_verdict_payload.setdefault(
+                "unresolved_check_count", unresolved_check_count
+            )
+            turn_execution_record["critic"] = {
+                **critic_payload,
+                "verdict": dict(critic_verdict_payload),
+            }
+
     required_effects = turn_execution_record.get("required_effects")
     if not isinstance(required_effects, list):
         required_effects = []
@@ -1077,7 +1126,66 @@ def run_turn_execution_critic(
     if not isinstance(postcondition_checks, list):
         postcondition_checks = []
 
-    if isinstance(raw_aux, list):
+    execution_payload = turn_execution_record.get("execution")
+    execution_payload_map = (
+        dict(execution_payload) if isinstance(execution_payload, Mapping) else {}
+    )
+    turn_execution_critic_evidence_bundle = {
+        "schema_version": "turn_execution_postcondition_critic_bundle.v1",
+        "request_id": turn_execution_record.get("request_id"),
+        "workflow_id": KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
+        "prompt_text": prompt_text,
+        "response_text": response_text,
+        "completion_report": data.get("completion_report"),
+        "turn_expected_outcome_contract_state": turn_execution_record.get(
+            "turn_expected_outcome_contract_state"
+        ),
+        "selected_workflow_trace": _bounded_snapshot(
+            execution_payload_map.get("selected_workflow_trace"),
+            max_depth=4,
+            max_items=8,
+            max_string_length=600,
+        ),
+        "required_effects": _bounded_snapshot(
+            list(required_effects),
+            max_depth=4,
+            max_items=8,
+            max_string_length=600,
+        ),
+        "postcondition_checks": _bounded_snapshot(
+            list(postcondition_checks),
+            max_depth=4,
+            max_items=8,
+            max_string_length=600,
+        ),
+        "critic_summary": dict(critic_summary),
+        "search_evidence": _bounded_snapshot(
+            execution_payload_map.get("search_evidence"),
+            max_depth=4,
+            max_items=6,
+            max_string_length=600,
+        ),
+        "required_prompt_tools": _bounded_snapshot(
+            execution_payload_map.get("required_prompt_tools"),
+            max_depth=3,
+            max_items=8,
+            max_string_length=200,
+        ),
+        "workflow_selection": _bounded_snapshot(
+            turn_execution_record.get("workflow_selection"),
+            max_depth=4,
+            max_items=8,
+            max_string_length=400,
+        ),
+        "workflow_routing_diagnostics": _bounded_snapshot(
+            turn_execution_record.get("workflow_routing_diagnostics"),
+            max_depth=4,
+            max_items=8,
+            max_string_length=400,
+        ),
+    }
+
+    if isinstance(raw_aux, list) and isinstance(critic_verdict_payload, dict):
         try:
             raw_aux.append(
                 annotate_python_decision_event(
@@ -1110,7 +1218,13 @@ def run_turn_execution_critic(
             "turn_execution_record": turn_execution_record,
             "required_effects": list(required_effects),
             "postcondition_checks": list(postcondition_checks),
+            "turn_execution_critic_evidence_bundle": turn_execution_critic_evidence_bundle,
             "critic_summary": dict(critic_summary),
+            "critic_verdict": (
+                dict(critic_verdict_payload)
+                if isinstance(critic_verdict_payload, dict)
+                else None
+            ),
             "completion_gate_decision": gate_decision,
             "completion_gate_requires_follow_up": gate_requires_follow_up,
             "completion_gate_safe_to_claim_completion": gate_safe_to_claim,

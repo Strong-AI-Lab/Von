@@ -4,9 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Optional, Sequence, cast
 
-from src.backend.integrations.internal_mcp.orchestrator import (
-    InternalMCPChatOrchestrator,
-)
+from orchestrator_test_harness import build_db_independent_orchestrator
 
 
 class _StubGateway:
@@ -23,7 +21,7 @@ class _StubGateway:
                 "description": "Create one or more Vontology concepts.",
                 "input_schema": {
                     "required": ["parent_id", "concepts"],
-                    "optional": [],
+                    "optional": ["created_by_concept_id"],
                     "allow_unknown": False,
                     "description": None,
                 },
@@ -66,13 +64,42 @@ class _CapturingLLM:
         return self._responses.pop(0)
 
 
-def test_read_only_prompt_blocks_write_tool_call() -> None:
+def _write_request_evidence_response(
+    tool_name: str,
+    *,
+    denial_state: str = "low_confidence",
+) -> str:
+    return (
+        "{"
+        '"schema_version":"write_tool_request_evidence.v1",'
+        '"tool_evidence":['
+        "{"
+        f'"tool_name":"{tool_name}",'
+        '"request_state":"low_confidence",'
+        '"confirmation_state":"low_confidence",'
+        f'"denial_state":"{denial_state}",'
+        '"rationale":"test stub"'
+        "}"
+        "]"
+        "}"
+    )
+
+
+def test_read_only_prompt_blocks_write_tool_call(monkeypatch) -> None:
     gateway = cast(Any, _StubGateway())
-    orchestrator = InternalMCPChatOrchestrator(gateway=gateway, max_tool_invocations=1)
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
+        gateway=gateway,
+        max_tool_invocations=1,
+    )
 
     llm = _CapturingLLM(
         [
             '{"action": "call_tool", "tool": "create_concepts", "payload": {"parent_id": "#V#thing", "concepts": [{"name": "qiming"}]}}',
+            _write_request_evidence_response(
+                "create_concepts",
+                denial_state="explicit_denial",
+            ),
             "OK, I won't create anything. What name should I search for?",
         ]
     )
@@ -85,7 +112,9 @@ def test_read_only_prompt_blocks_write_tool_call() -> None:
         user_namespace="#V#user",
     )
 
-    assert gateway.invoked == []
+    assert not any(
+        tool_name == "create_concepts" for tool_name, _payload in gateway.invoked
+    )
     assert any(
         inv.get("tool") == "create_concepts" and inv.get("blocked") is True
         for inv in result.tool_invocations

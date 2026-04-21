@@ -17,7 +17,6 @@ Minimal imposition here means:
 from __future__ import annotations
 
 from dataclasses import dataclass
-import re
 from typing import Any, Mapping, Sequence
 
 from ..services.python_decision_authority_service import annotate_python_decision_event
@@ -101,6 +100,8 @@ CONFIDENCE_RECENT_REQUEST = "recent_request_context"
 CONFIDENCE_IMPLICIT_LOW_RISK_DEFAULT = "implicit_low_risk_default"
 CONFIDENCE_EXPLICIT_CONFIRMATION = "explicit_confirmation"
 CONFIDENCE_RECENT_CONFIRMATION = "recent_confirmation_context"
+CONFIDENCE_EXPLICIT_DENIAL = "explicit_denial"
+CONFIDENCE_RECENT_DENIAL = "recent_denial_context"
 CONFIDENCE_LOW = "low_confidence"
 WRITE_TOOL_REQUEST_EVIDENCE_SCHEMA_VERSION = "write_tool_request_evidence.v1"
 
@@ -184,21 +185,6 @@ _DESTRUCTIVE_WRITE_TOOLS: frozenset[str] = frozenset(
         "workflow_delete_event_binding",
         "workflow_delete_schedule",
     }
-)
-
-_CONFIRMATION_PATTERN = re.compile(
-    r"\b("
-    r"confirm(?:ed|ation)?|approved?|i approve|go ahead|do it|yes\b|proceed|"
-    r"permission granted|you may proceed|continue with|carry on"
-    r")\b",
-    flags=re.IGNORECASE,
-)
-
-_DESTRUCTIVE_MUTATION_PATTERN = re.compile(
-    r"\b("
-    r"delete|remove|unlink|detach|drop|purge|erase|destroy|merge"
-    r")\b",
-    flags=re.IGNORECASE,
 )
 
 @dataclass(frozen=True)
@@ -498,7 +484,6 @@ def compute_allowed_write_tools(
     requested = _normalise_tool_names(requested_tools)
     requested_payload_map = _normalise_tool_payload_map(requested_tool_payloads)
     request_evidence_map = _normalise_request_evidence_map(request_evidence)
-    recent_prompts = _clean_prompt_list(recent_user_prompts)
     workflow_mutation_authority_spec = normalise_workflow_step_mutation_authority_spec(
         workflow_mutation_authority
     )
@@ -556,56 +541,6 @@ def compute_allowed_write_tools(
             profile_diagnostics=resolved_runtime_profile_diagnostics,
         )
 
-    if prompt_explicitly_denies_write(prompt):
-        tool_decisions = tuple(
-            WriteToolDecision(
-                tool_name=tool_name,
-                risk_class=classify_write_tool_risk(tool_name),
-                required_mutation_authority=required_mutation_authority_level_for_risk(
-                    classify_write_tool_risk(tool_name)
-                ),
-                effective_mutation_authority=effective_mutation_authority,
-                authority_sources=authority_sources,
-                allowed=False,
-                outcome=MUTATION_GUARDRAIL_DECISION_BLOCKED,
-                decision_basis=REASON_EXPLICIT_WRITE_DENIAL_DETECTED,
-                requires_confirmation=False,
-                blocked_reason=REASON_EXPLICIT_WRITE_DENIAL_DETECTED,
-                scenario_id=_scenario_id_for_risk(
-                    tool_name=tool_name,
-                    risk_class=classify_write_tool_risk(tool_name),
-                    risk_features={"confidence_state": CONFIDENCE_LOW},
-                ),
-                confidence_state=CONFIDENCE_LOW,
-                intervention_kind=INTERVENTION_DEFER_HIGH_RISK,
-                risk_features={
-                    "action_kind": classify_write_tool_risk(tool_name),
-                    "user_request_evidence": "explicit_write_denial",
-                    "uncertainty_state": CONFIDENCE_LOW,
-                },
-                unresolved_risk_factors=("explicit_write_denial",),
-            )
-            for tool_name in requested
-        )
-        return WriteToolPolicyDecision(
-            allowed_tools=frozenset(),
-            reason=REASON_EXPLICIT_WRITE_DENIAL_DETECTED,
-            decision_basis=REASON_EXPLICIT_WRITE_DENIAL_DETECTED,
-            outcome=MUTATION_GUARDRAIL_DECISION_BLOCKED,
-            effective_mutation_authority=effective_mutation_authority,
-            authority_sources=authority_sources,
-            user_denial_detected=True,
-            tool_decisions=tool_decisions,
-            request_evidence=request_evidence_map,
-            request_evidence_diagnostics=(
-                dict(request_evidence_diagnostics)
-                if isinstance(request_evidence_diagnostics, Mapping)
-                else None
-            ),
-            profile_concept_id=_safe_profile_concept_id(resolved_runtime_profile),
-            profile_diagnostics=resolved_runtime_profile_diagnostics,
-        )
-
     decisions: list[WriteToolDecision] = []
     allowed_tools: set[str] = set()
     overall_reason = ""
@@ -613,8 +548,6 @@ def compute_allowed_write_tools(
     for tool_name in requested:
         decision = _decide_single_tool(
             tool_name=tool_name,
-            prompt=prompt,
-            recent_user_prompts=recent_prompts,
             request_evidence=request_evidence_map.get(tool_name.lower()),
             tool_payload=requested_payload_map.get(tool_name.lower()),
             effective_mutation_authority=effective_mutation_authority,
@@ -651,7 +584,10 @@ def compute_allowed_write_tools(
         outcome=overall_decision.outcome,
         effective_mutation_authority=effective_mutation_authority,
         authority_sources=authority_sources,
-        user_denial_detected=False,
+        user_denial_detected=any(
+            item.blocked_reason == REASON_EXPLICIT_WRITE_DENIAL_DETECTED
+            for item in decisions
+        ),
         tool_decisions=tuple(decisions),
         request_evidence=request_evidence_map,
         request_evidence_diagnostics=(
@@ -818,25 +754,25 @@ def build_mutation_guardrail_events(
         decision_basis = str(decision.decision_basis or "").strip()
         decision_source = "execution_safety_check"
         if decision_basis == REASON_EXPLICIT_WRITE_DENIAL_DETECTED:
-            decision_source = "explicit_user_denial_parse"
+            decision_source = "write_request_denial_evidence"
         elif decision_basis in {
             REASON_DESTRUCTIVE_CONFIRMATION_REQUIRED,
             REASON_EXPLICIT_DESTRUCTIVE_CONFIRMATION,
             REASON_RECENT_DESTRUCTIVE_CONFIRMATION,
         }:
-            decision_source = "destructive_confirmation_check"
+            decision_source = "structured_destructive_confirmation_evidence"
         elif decision_basis in {
             REASON_EXPLICIT_NON_DESTRUCTIVE_MUTATION_REQUEST,
             REASON_RECENT_NON_DESTRUCTIVE_MUTATION_REQUEST,
             REASON_MUTATIVE_NON_DESTRUCTIVE_REQUEST_REQUIRED,
         }:
-            decision_source = "recoverable_mutation_request_check"
+            decision_source = "structured_write_request_evidence"
         elif decision_basis in {
             REASON_EXPLICIT_EXTERNAL_WRITE_REQUEST,
             REASON_RECENT_EXTERNAL_WRITE_REQUEST,
             REASON_EXTERNAL_WRITE_REQUIRES_EXPLICIT_REQUEST,
         }:
-            decision_source = "external_write_request_check"
+            decision_source = "structured_write_request_evidence"
         elif decision_basis in {
             REASON_INSUFFICIENT_MUTATION_AUTHORITY,
             REASON_WORKFLOW_MUTATION_AUTHORITY_INVALID,
@@ -875,99 +811,9 @@ def write_policy_reason_is_session_memory_eligible(reason: str | None) -> bool:
     }
 
 
-def prompt_grants_high_impact_kb_write_approval(
-    *,
-    prompt: str,
-    recent_user_prompts: list[str] | None = None,
-) -> bool:
-    """Compatibility shim for historic review-gate code paths.
-
-    High-impact approval now maps to explicit confirmation of a destructive
-    mutation in the current or immediately preceding preserved context.
-    """
-
-    return prompt_grants_destructive_write_confirmation(
-        prompt=prompt,
-        recent_user_prompts=recent_user_prompts,
-    )
-
-
-def prompt_grants_destructive_write_confirmation(
-    *,
-    prompt: str,
-    recent_user_prompts: list[str] | None = None,
-) -> bool:
-    """Return True when the user explicitly confirms a destructive mutation."""
-
-    prompt_text = prompt.strip() if isinstance(prompt, str) else ""
-    recent_prompts = _clean_prompt_list(recent_user_prompts)
-
-    prompt_confirms = bool(prompt_text and _CONFIRMATION_PATTERN.search(prompt_text))
-    prompt_is_destructive = bool(
-        prompt_text and _DESTRUCTIVE_MUTATION_PATTERN.search(prompt_text)
-    )
-    if prompt_confirms and prompt_is_destructive:
-        return True
-
-    if not prompt_confirms:
-        return False
-
-    return any(_DESTRUCTIVE_MUTATION_PATTERN.search(text) for text in recent_prompts)
-
-
-def prompt_explicitly_denies_write(prompt: str) -> bool:
-    """Return True when the user explicitly forbids write-side effects."""
-
-    if not isinstance(prompt, str):
-        return False
-
-    lowered = prompt.lower()
-    verbs = (
-        "create",
-        "add",
-        "insert",
-        "upsert",
-        "update",
-        "edit",
-        "change",
-        "delete",
-        "remove",
-        "rename",
-        "merge",
-        "link",
-        "unlink",
-        "set",
-        "download",
-        "fetch",
-        "save",
-        "store",
-        "cache",
-        "archive",
-        "persist",
-        "upload",
-        "finalise",
-        "finalize",
-        "comment",
-        "attach",
-        "transition",
-        "label",
-        "assign",
-    )
-
-    return any(
-        re.search(
-            rf"\b(?:do not|don't|dont|never)\s+{re.escape(verb)}\b",
-            lowered,
-        )
-        for verb in verbs
-    )
-
-
 def _decide_single_tool(
     *,
     tool_name: str,
-    prompt: str,
-    recent_user_prompts: Sequence[str],
     request_evidence: Mapping[str, Any] | None,
     tool_payload: Mapping[str, Any] | None,
     effective_mutation_authority: str,
@@ -981,12 +827,6 @@ def _decide_single_tool(
         tool_name=tool_name,
         request_evidence=request_evidence,
     )
-    if risk_class == WRITE_RISK_DESTRUCTIVE:
-        resolved_request_evidence = _apply_confirmation_backstop(
-            request_evidence=resolved_request_evidence,
-            prompt=prompt,
-            recent_user_prompts=recent_user_prompts,
-        )
     risk_features = _build_risk_features(
         tool_name=tool_name,
         tool_payload=tool_payload,
@@ -1001,6 +841,46 @@ def _decide_single_tool(
     )
     if workflow_authority_invalid:
         authority_block_source = "workflow"
+
+    denial_state = _allowed_denial_state(
+        resolved_request_evidence,
+        allow_recent_context=True,
+    )
+    if denial_state:
+        blocked_reason = REASON_EXPLICIT_WRITE_DENIAL_DETECTED
+        blocked_risk_features = _replace_risk_feature(
+            risk_features,
+            "uncertainty_state",
+            denial_state,
+        )
+        unresolved_risk_factors = _build_unresolved_risk_factors(
+            risk_class=risk_class,
+            risk_features=blocked_risk_features,
+            blocked_reason=blocked_reason,
+        )
+        return WriteToolDecision(
+            tool_name=tool_name,
+            risk_class=risk_class,
+            required_mutation_authority=required_mutation_authority_level_for_risk(
+                risk_class
+            ),
+            effective_mutation_authority=effective_mutation_authority,
+            authority_sources=authority_sources,
+            allowed=False,
+            outcome=MUTATION_GUARDRAIL_DECISION_BLOCKED,
+            decision_basis=blocked_reason,
+            blocked_reason=blocked_reason,
+            continuation_context_used=_denial_state_uses_continuation(denial_state),
+            scenario_id=_scenario_id_for_risk(
+                tool_name=tool_name,
+                risk_class=risk_class,
+                risk_features=blocked_risk_features,
+            ),
+            confidence_state=denial_state,
+            intervention_kind=INTERVENTION_DEFER_HIGH_RISK,
+            risk_features=blocked_risk_features,
+            unresolved_risk_factors=unresolved_risk_factors,
+        )
 
     if (
         mutation_authority_level_rank(effective_mutation_authority)
@@ -1674,6 +1554,7 @@ def _build_risk_features(
     )
     request_state = _request_evidence_request_state(request_evidence)
     confirmation_state = _request_evidence_confirmation_state(request_evidence)
+    denial_state = _request_evidence_denial_state(request_evidence)
     confidence_state = _request_evidence_confidence_state(request_evidence)
     return {
         "action_kind": action_kind,
@@ -1687,6 +1568,7 @@ def _build_risk_features(
         "user_request_evidence": confidence_state,
         "request_state": request_state,
         "confirmation_state": confirmation_state,
+        "denial_state": denial_state,
         "uncertainty_state": confidence_state,
         "request_evidence_rationale": _safe_str(request_evidence.get("rationale")),
     }
@@ -1764,6 +1646,8 @@ def _build_unresolved_risk_factors(
     blocked_reason: str,
 ) -> tuple[str, ...]:
     factors: list[str] = []
+    if blocked_reason == REASON_EXPLICIT_WRITE_DENIAL_DETECTED:
+        factors.append("explicit_write_denial")
     if blocked_reason in {
         REASON_MUTATIVE_NON_DESTRUCTIVE_REQUEST_REQUIRED,
         REASON_EXTERNAL_WRITE_REQUIRES_EXPLICIT_REQUEST,
@@ -1850,6 +1734,7 @@ def _normalise_request_evidence_map(
             "confirmation_state": _normalise_confirmation_state(
                 evidence.get("confirmation_state")
             ),
+            "denial_state": _normalise_denial_state(evidence.get("denial_state")),
             "rationale": _safe_str(evidence.get("rationale")),
         }
     return output
@@ -1869,6 +1754,13 @@ def _normalise_confirmation_state(value: Any) -> str:
     return CONFIDENCE_LOW
 
 
+def _normalise_denial_state(value: Any) -> str:
+    cleaned = str(value or "").strip()
+    if cleaned in {CONFIDENCE_EXPLICIT_DENIAL, CONFIDENCE_RECENT_DENIAL}:
+        return cleaned
+    return CONFIDENCE_LOW
+
+
 def _resolve_request_evidence(
     *,
     tool_name: str,
@@ -1880,6 +1772,7 @@ def _resolve_request_evidence(
             "tool_name": tool_name,
             "request_state": CONFIDENCE_LOW,
             "confirmation_state": CONFIDENCE_LOW,
+            "denial_state": CONFIDENCE_LOW,
             "rationale": None,
         }
     return {
@@ -1889,38 +1782,9 @@ def _resolve_request_evidence(
         "confirmation_state": _normalise_confirmation_state(
             request_evidence.get("confirmation_state")
         ),
+        "denial_state": _normalise_denial_state(request_evidence.get("denial_state")),
         "rationale": _safe_str(request_evidence.get("rationale")),
     }
-
-
-def _apply_confirmation_backstop(
-    *,
-    request_evidence: Mapping[str, Any],
-    prompt: str,
-    recent_user_prompts: Sequence[str],
-) -> dict[str, Any]:
-    existing_state = _normalise_confirmation_state(
-        request_evidence.get("confirmation_state")
-    )
-    if existing_state != CONFIDENCE_LOW:
-        return dict(request_evidence)
-    if prompt_grants_destructive_write_confirmation(
-        prompt=prompt,
-        recent_user_prompts=[],
-    ):
-        return {
-            **dict(request_evidence),
-            "confirmation_state": CONFIDENCE_EXPLICIT_CONFIRMATION,
-        }
-    if prompt_grants_destructive_write_confirmation(
-        prompt=prompt,
-        recent_user_prompts=list(recent_user_prompts),
-    ):
-        return {
-            **dict(request_evidence),
-            "confirmation_state": CONFIDENCE_RECENT_CONFIRMATION,
-        }
-    return dict(request_evidence)
 
 
 def _request_evidence_request_state(request_evidence: Mapping[str, Any]) -> str:
@@ -1931,7 +1795,14 @@ def _request_evidence_confirmation_state(request_evidence: Mapping[str, Any]) ->
     return _normalise_confirmation_state(request_evidence.get("confirmation_state"))
 
 
+def _request_evidence_denial_state(request_evidence: Mapping[str, Any]) -> str:
+    return _normalise_denial_state(request_evidence.get("denial_state"))
+
+
 def _request_evidence_confidence_state(request_evidence: Mapping[str, Any]) -> str:
+    denial_state = _request_evidence_denial_state(request_evidence)
+    if denial_state != CONFIDENCE_LOW:
+        return denial_state
     confirmation_state = _request_evidence_confirmation_state(request_evidence)
     if confirmation_state != CONFIDENCE_LOW:
         return confirmation_state
@@ -1954,6 +1825,19 @@ def _allowed_request_state(
     return None
 
 
+def _allowed_denial_state(
+    request_evidence: Mapping[str, Any],
+    *,
+    allow_recent_context: bool,
+) -> str | None:
+    denial_state = _request_evidence_denial_state(request_evidence)
+    if denial_state == CONFIDENCE_EXPLICIT_DENIAL:
+        return denial_state
+    if allow_recent_context and denial_state == CONFIDENCE_RECENT_DENIAL:
+        return denial_state
+    return None
+
+
 def _allowed_confirmation_state(
     request_evidence: Mapping[str, Any],
     *,
@@ -1973,6 +1857,10 @@ def _request_state_uses_continuation(state: str | None) -> bool:
 
 def _confirmation_state_uses_continuation(state: str | None) -> bool:
     return str(state or "").strip() == CONFIDENCE_RECENT_CONFIRMATION
+
+
+def _denial_state_uses_continuation(state: str | None) -> bool:
+    return str(state or "").strip() == CONFIDENCE_RECENT_DENIAL
 
 
 def _non_destructive_reason_for_request_state(state: str) -> str:

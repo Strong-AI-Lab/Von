@@ -65,15 +65,22 @@ class _CapturingLLM:
         return self._responses.pop(0)
 
 
-def _write_request_evidence_response(tool_name: str) -> str:
+def _write_request_evidence_response(
+    tool_name: str,
+    *,
+    request_state: str = "low_confidence",
+    confirmation_state: str = "low_confidence",
+    denial_state: str = "low_confidence",
+) -> str:
     return (
         '{'
         '"schema_version":"write_tool_request_evidence.v1",'
         '"tool_evidence":['
         "{"
         f'"tool_name":"{tool_name}",'
-        '"request_state":"low_confidence",'
-        '"confirmation_state":"low_confidence",'
+        f'"request_state":"{request_state}",'
+        f'"confirmation_state":"{confirmation_state}",'
+        f'"denial_state":"{denial_state}",'
         '"rationale":"test stub"'
         "}"
         "]"
@@ -134,6 +141,10 @@ def test_write_guard_blocks_download_paper_when_user_explicitly_denies_write(mon
     llm = _CapturingLLM(
         [
             '{"action":"call_tool","tool":"download_paper","payload":{"arxiv_id":"2510.06248"}}',
+            _write_request_evidence_response(
+                "download_paper",
+                denial_state="explicit_denial",
+            ),
             "Done.",
         ]
     )

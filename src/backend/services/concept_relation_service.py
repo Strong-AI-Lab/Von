@@ -8,7 +8,8 @@ import re
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
 from .text_value_service import get_texts_for_concept
-from ..db.repositories.concepts_repository import ConceptsRepository, RELATIONSHIP_KINDS
+from ..db.repositories.concepts_repository import ConceptsRepository
+from .concept_predicate_metadata_service import get_relationship_kinds_set
 from ..db.repositories.text_value_repository import (
     TextRelationsRepository,
     TextValuesRepository,
@@ -99,7 +100,7 @@ def build_concept_relations_payload(
         return _empty_payload(limit=limit, offset=offset)
 
     predicate_allow_list = set(predicate_filter or [])
-    structural_predicates = set(RELATIONSHIP_KINDS)
+    structural_predicates = set(get_relationship_kinds_set())
     if predicate_allow_list:
         structural_predicates.update(
             key for key in predicate_allow_list if isinstance(key, str)

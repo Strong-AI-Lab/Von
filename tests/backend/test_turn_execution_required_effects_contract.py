@@ -566,7 +566,7 @@ def test_prompt_required_evidence_contract_blocks_missing_surface() -> None:
     )
 
 
-def test_prompt_required_evidence_contract_blocks_false_empty_jira_answer() -> None:
+def test_prompt_required_evidence_contract_does_not_block_false_empty_jira_answer_without_authoritative_critic_verdict() -> None:
     record = _build_record(
         prompt_text=(
             "Which of my open Jira tasks seem most closely connected to the papers "
@@ -604,32 +604,29 @@ def test_prompt_required_evidence_contract_blocks_false_empty_jira_answer() -> N
     assert isinstance(execution, dict)
     assert execution.get("summary", {}).get(
         "required_evidence_answer_consistency_blocked"
-    ) is True
+    ) is False
+    assert execution.get("summary", {}).get(
+        "required_evidence_answer_consistency_source"
+    ) is None
 
     completion_gate = record.get("completion_gate") or {}
-    assert completion_gate.get("decision") == "partial"
-    assert completion_gate.get("safe_to_claim_completion") is False
-    assert completion_gate.get("requires_follow_up") is True
     assert (
         "prompt_required_evidence_jira_search_nonempty_results_contradict_empty_answer"
-        in (completion_gate.get("blocking_failure_codes") or [])
+        not in (completion_gate.get("blocking_failure_codes") or [])
     )
 
     evidence_payload = completion_gate.get("evidence_payload") or {}
     blocker = evidence_payload.get("required_evidence_answer_consistency_blocker") or {}
-    assert blocker.get("effect_type") == "required_evidence_answer_consistency"
-    assert blocker.get("observed_result_count") == 1
+    assert blocker == {}
     unresolved = evidence_payload.get("unresolved_preconditions") or []
-    assert any(
+    assert not any(
         isinstance(item, dict)
         and item.get("effect_type") == "required_evidence_answer_consistency"
         for item in unresolved
     )
 
 
-def test_prompt_required_evidence_contract_blocks_low_information_answer_when_positive_results_exist() -> (
-    None
-):
+def test_prompt_required_evidence_contract_does_not_block_without_authoritative_critic_verdict() -> None:
     record = _build_record(
         prompt_text="List grounded represented records linked to the current user.",
         response_text="2 results",
@@ -657,15 +654,15 @@ def test_prompt_required_evidence_contract_blocks_low_information_answer_when_po
     assert isinstance(execution, dict)
     assert execution.get("summary", {}).get(
         "required_evidence_answer_consistency_blocked"
-    ) is True
+    ) is False
+    assert execution.get("summary", {}).get(
+        "required_evidence_answer_consistency_source"
+    ) is None
 
     completion_gate = record.get("completion_gate") or {}
-    assert completion_gate.get("decision") == "partial"
-    assert completion_gate.get("safe_to_claim_completion") is False
-    assert completion_gate.get("requires_follow_up") is True
     assert (
         "prompt_required_evidence_positive_results_contradict_low_information_answer"
-        in (completion_gate.get("blocking_failure_codes") or [])
+        not in (completion_gate.get("blocking_failure_codes") or [])
     )
 
     blocker = (
@@ -674,15 +671,83 @@ def test_prompt_required_evidence_contract_blocks_low_information_answer_when_po
         )
         or {}
     )
-    assert blocker.get("response_surface_kind") == "count_only_result_summary"
-    observed_signals = blocker.get("observed_result_signals") or []
-    assert observed_signals[0]["tool"] == "search_knowledge_base"
-    assert observed_signals[0]["result_count"] == 1
+    assert blocker == {}
 
 
-def test_prompt_required_evidence_contract_blocks_low_information_answer_when_retrieval_degrades() -> (
+def test_prompt_required_evidence_contract_prefers_authoritative_critic_blocker() -> (
     None
 ):
+    record = _build_record(
+        prompt_text="List grounded represented records linked to the current user.",
+        response_text="The answer needs manual review before completion is claimed.",
+        required_prompt_tools=["search_knowledge_base"],
+        tool_invocations=[
+            {
+                "tool": "search_knowledge_base",
+                "arguments": {"query": "current user represented links"},
+                "effective_payload": {
+                    "success": True,
+                    "count": 1,
+                    "results": [
+                        {
+                            "id": "result:1",
+                            "text": "Example Record is linked to Test User.",
+                        }
+                    ],
+                },
+                "result_summary": "Found 1 result",
+            }
+        ],
+        critic_verdict={
+            "workflow_id": "#V#kb_mutation_postcondition_critic_workflow",
+            "required_evidence_answer_consistency_blocker": {
+                "effect_type": "required_evidence_answer_consistency",
+                "status": "not_satisfied",
+                "status_reason": (
+                    "Authoritative critic marked the answer as inconsistent with the retrieved evidence."
+                ),
+                "failure_code": (
+                    "authoritative_required_evidence_answer_consistency_mismatch"
+                ),
+                "decision": "partial",
+                "decision_reason": (
+                    "Authoritative critic marked the answer as inconsistent with the retrieved evidence."
+                ),
+                "repeat_eligible": True,
+            },
+        },
+    )
+
+    execution = record.get("execution")
+    assert isinstance(execution, dict)
+    assert execution.get("summary", {}).get(
+        "required_evidence_answer_consistency_blocked"
+    ) is True
+    assert execution.get("summary", {}).get(
+        "required_evidence_answer_consistency_source"
+    ) == "critic_verdict"
+
+    completion_gate = record.get("completion_gate") or {}
+    assert completion_gate.get("decision") == "partial"
+    assert completion_gate.get("safe_to_claim_completion") is False
+    assert completion_gate.get("requires_follow_up") is True
+    assert "authoritative_required_evidence_answer_consistency_mismatch" in (
+        completion_gate.get("blocking_failure_codes") or []
+    )
+
+    blocker = (
+        (completion_gate.get("evidence_payload") or {}).get(
+            "required_evidence_answer_consistency_blocker"
+        )
+        or {}
+    )
+    assert blocker.get("blocker_source") == "critic_verdict"
+    assert blocker.get("status_reason") == (
+        "Authoritative critic marked the answer as inconsistent with the retrieved evidence."
+    )
+
+
+def test_prompt_required_evidence_contract_does_not_block_degraded_retrieval_without_authoritative_critic_verdict() -> None:
     record = _build_record(
         prompt_text="List grounded represented records linked to the current user.",
         response_text="I couldn't find any grounded represented links.",
@@ -707,15 +772,15 @@ def test_prompt_required_evidence_contract_blocks_low_information_answer_when_re
     assert isinstance(execution, dict)
     assert execution.get("summary", {}).get(
         "required_evidence_answer_consistency_blocked"
-    ) is True
+    ) is False
+    assert execution.get("summary", {}).get(
+        "required_evidence_answer_consistency_source"
+    ) is None
 
     completion_gate = record.get("completion_gate") or {}
-    assert completion_gate.get("decision") == "partial"
-    assert completion_gate.get("safe_to_claim_completion") is False
-    assert completion_gate.get("requires_follow_up") is True
     assert (
         "prompt_required_evidence_degraded_retrieval_not_safe_for_low_information_answer"
-        in (completion_gate.get("blocking_failure_codes") or [])
+        not in (completion_gate.get("blocking_failure_codes") or [])
     )
 
     blocker = (
@@ -724,12 +789,7 @@ def test_prompt_required_evidence_contract_blocks_low_information_answer_when_re
         )
         or {}
     )
-    assert blocker.get("response_surface_kind") == "insufficiency_claim"
-    degraded_signals = blocker.get("degraded_tool_signals") or []
-    assert degraded_signals[0]["tool"] == "search_knowledge_base"
-    assert degraded_signals[0]["fallback_reason"] == (
-        "rag_query_degraded:RateLimitError"
-    )
+    assert blocker == {}
 
 
 def test_prompt_required_mutation_contract_blocks_missing_task_create() -> None:

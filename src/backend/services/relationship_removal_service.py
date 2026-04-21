@@ -17,12 +17,15 @@ from typing import Any, Dict, List, Mapping, Optional
 from flask import has_request_context, session
 
 from ..db.mongo_client import get_db
-from ..db.repositories.concepts_repository import ConceptsRepository, RELATIONSHIP_KINDS
+from ..db.repositories.concepts_repository import ConceptsRepository
+from .concept_predicate_metadata_service import (
+    get_relationship_kinds_set,
+    get_structural_inverse_map,
+)
 from ..security.access_control import can_access_concept, get_effective_user_concept_id
 from ..vontology.code_concepts_registry import build_virtual_concept_doc, is_code_concept_id
 from ..vontology.utils_vontology import invalidate_vontology_caches
 from .relationship_write_service import (
-    STRUCTURAL_INVERSE_MAP,
     normalise_structural_predicate,
     validate_predicate_concept,
 )
@@ -216,7 +219,7 @@ def _validate_predicate(predicate: Any) -> Dict[str, Any]:
             "is_text_predicate": True,
         }
 
-    if canonical in RELATIONSHIP_KINDS:
+    if canonical in get_relationship_kinds_set():
         return {
             "ok": True,
             "predicate": canonical,
@@ -459,7 +462,7 @@ def _summarise_dependencies(
     is_structural: bool,
     restricted_visibility: bool = False,
 ) -> Dict[str, Any]:
-    inverse_predicate = STRUCTURAL_INVERSE_MAP.get(predicate) if is_structural else None
+    inverse_predicate = get_structural_inverse_map().get(predicate) if is_structural else None
     source_outgoing_same_predicate = 0
     try:
         source_doc = ConceptsRepository.find_one(

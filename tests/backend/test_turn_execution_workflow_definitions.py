@@ -1,3 +1,4 @@
+import re
 from unittest.mock import MagicMock
 
 from representation_intent_regression_helpers import patch_representation_profile_loader
@@ -40,6 +41,35 @@ from workflow_test_support import (
 )
 
 
+def _build_stub_kb_postcondition_critic_definition() -> WorkflowDefinition:
+    return WorkflowDefinition(
+        workflow_id=KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
+        initial_state="evaluate",
+        states={
+            "evaluate": WorkflowStateSpec(
+                state_id="evaluate",
+                actions=(
+                    WorkflowActionInvocation(action_id="turn_execution.critic"),
+                ),
+                terminal=True,
+                metadata={
+                    "writes_context_keys": [
+                        "turn_execution_record",
+                        "required_effects",
+                        "postcondition_checks",
+                        "critic_summary",
+                        "critic_verdict",
+                        "completion_gate_decision",
+                        "completion_gate_requires_follow_up",
+                        "completion_gate_safe_to_claim_completion",
+                    ]
+                },
+            )
+        },
+        termination_states=("evaluate",),
+    )
+
+
 def test_tool_calling_workflow_includes_turn_execution_critic_and_gate() -> None:
     workflow = build_authoritative_test_workflow_definition(TOOL_CALLING_WORKFLOW_ID)
     assert workflow.initial_state == "preflight_requirements"
@@ -64,7 +94,11 @@ def test_tool_calling_workflow_includes_turn_execution_critic_and_gate() -> None
     )
 
     postcondition_critic = workflow.states["postcondition_critic"]
-    assert postcondition_critic.actions[0].action_id == "turn_execution.critic"
+    assert postcondition_critic.actions[0].action_id == "workflow_invoke_subworkflow"
+    assert (
+        postcondition_critic.actions[0].subworkflow_id
+        == KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID
+    )
     assert any(
         t.to_state == "completion_gate" for t in postcondition_critic.transitions
     )
@@ -109,7 +143,7 @@ def test_turn_completion_gate_workflow_fails_when_follow_up_is_required() -> Non
     )
 
 
-def test_conversation_turn_workflow_uses_deterministic_critic_and_gate() -> None:
+def test_conversation_turn_workflow_uses_authoritative_critic_subworkflow_and_gate() -> None:
     workflow = build_authoritative_test_workflow_definition(
         CONVERSATION_TURN_EXECUTION_WORKFLOW_ID
     )
@@ -234,7 +268,21 @@ def test_conversation_turn_workflow_uses_deterministic_critic_and_gate() -> None
     )
 
     critic = workflow.states["critic"]
-    assert critic.actions[0].action_id == "turn_execution.critic"
+    assert critic.actions[0].action_id == "workflow_invoke_subworkflow"
+    assert critic.actions[0].subworkflow_id == KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID
+    critic_mappings = critic.metadata.get("tool_output_context_mappings") or []
+    assert any(
+        isinstance(mapping, dict)
+        and mapping.get("context_key") == "turn_execution_record"
+        and mapping.get("tool_output_field") == "result.turn_execution_record"
+        for mapping in critic_mappings
+    )
+    assert any(
+        isinstance(mapping, dict)
+        and mapping.get("context_key") == "critic_verdict"
+        and mapping.get("tool_output_field") == "result.critic_verdict"
+        for mapping in critic_mappings
+    )
     assert any(t.to_state == "completion_gate" for t in critic.transitions)
 
     completion_gate = workflow.states["completion_gate"]
@@ -389,6 +437,71 @@ def test_conversation_turn_workflow_uses_deterministic_critic_and_gate() -> None
         t.to_state == "failed" and t.reason == "recovery_follow_up_ready"
         for t in recovery_follow_up.transitions
     )
+
+
+def test_kb_mutation_postcondition_critic_workflow_uses_prompt_backed_judgement() -> None:
+    workflow = build_authoritative_test_workflow_definition(
+        KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID
+    )
+
+    assert workflow.initial_state == "build_evidence"
+    assert "build_evidence" in workflow.states
+    assert "evaluate_authoritative_prompt" in workflow.states
+    assert "finalise_authoritative" in workflow.states
+    assert "finalise_fallback" in workflow.states
+    assert "completed" in workflow.states
+
+    build_evidence = workflow.states["build_evidence"]
+    build_evidence_action = build_evidence.actions[0]
+    assert build_evidence_action.action_id == "turn_execution.critic"
+    assert build_evidence_action.inputs.get("emit_default_critic_verdict") is False
+    assert any(
+        t.to_state == "evaluate_authoritative_prompt"
+        and t.reason == "evidence_built"
+        for t in build_evidence.transitions
+    )
+
+    evaluate_authoritative_prompt = workflow.states["evaluate_authoritative_prompt"]
+    evaluate_action = evaluate_authoritative_prompt.actions[0]
+    assert evaluate_action.action_id == "llm.action"
+    assert evaluate_action.execution_mode == WORKFLOW_STEP_EXECUTION_MODE_LLM
+    assert evaluate_action.validation_policy == {"output_format": "json_value"}
+    prompt_contract = evaluate_action.prompt_contract
+    assert isinstance(prompt_contract, dict)
+    assert prompt_contract.get("requested_prompt_concept_ids") == [
+        "#V#prompt_turn_execution_postcondition_critic"
+    ]
+    context_fields = (evaluate_action.llm_policy or {}).get("context_fields")
+    assert isinstance(context_fields, list)
+    assert any(
+        isinstance(field, dict)
+        and field.get("context_key") == "turn_execution_critic_evidence_bundle"
+        for field in context_fields
+    )
+    evaluate_mappings = (
+        evaluate_authoritative_prompt.metadata.get("tool_output_context_mappings") or []
+    )
+    assert any(
+        isinstance(mapping, dict)
+        and mapping.get("context_key") == "critic_verdict"
+        and mapping.get("tool_output_field") == "validated_json"
+        for mapping in evaluate_mappings
+    )
+    assert any(
+        t.to_state == "finalise_authoritative"
+        and t.reason == "authoritative_critic_decided"
+        for t in evaluate_authoritative_prompt.transitions
+    )
+    assert any(
+        t.to_state == "finalise_fallback" and t.reason == "on_failure"
+        for t in evaluate_authoritative_prompt.transitions
+    )
+
+    finalise_authoritative = workflow.states["finalise_authoritative"]
+    assert finalise_authoritative.actions[0].action_id == "turn_execution.critic"
+
+    finalise_fallback = workflow.states["finalise_fallback"]
+    assert finalise_fallback.actions[0].action_id == "turn_execution.critic"
 
 
 def test_test_registry_includes_turn_execution_workflows() -> None:
@@ -562,6 +675,14 @@ def test_conversation_turn_recovery_can_execute_direct_tool_batch() -> None:
 
     registry = ActionRegistry()
     register_control_flow_actions(registry, definition_loader=lambda _wid: None)
+    register_subworkflow_actions(
+        registry,
+        definition_loader=lambda workflow_id: (
+            _build_stub_kb_postcondition_critic_definition()
+            if workflow_id == KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID
+            else None
+        ),
+    )
     register_turn_execution_actions(registry)
     registry.register_if_absent(
         ActionSpec(
@@ -635,6 +756,7 @@ def test_conversation_turn_recovery_retry_progresses_across_multiple_prompt_targ
 
     definitions = {
         "#V#fake_multi_target_paper_workflow": _fake_selected_workflow_definition(),
+        KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID: _build_stub_kb_postcondition_critic_definition(),
     }
     execution_to_narration = next(
         transition
@@ -661,7 +783,15 @@ def test_conversation_turn_recovery_retry_progresses_across_multiple_prompt_targ
                 metadata=workflow.states["execution"].metadata,
             ),
             "critic": workflow.states["critic"],
-            "completion_gate": workflow.states["completion_gate"],
+            "completion_gate": WorkflowStateSpec(
+                state_id="completion_gate",
+                actions=(
+                    WorkflowActionInvocation(action_id="test.stub_retry_completion_gate"),
+                ),
+                transitions=workflow.states["completion_gate"].transitions,
+                terminal=False,
+                metadata=workflow.states["completion_gate"].metadata,
+            ),
             "recovery_decision": WorkflowStateSpec(
                 state_id="recovery_decision",
                 actions=(
@@ -696,6 +826,44 @@ def test_conversation_turn_recovery_retry_progresses_across_multiple_prompt_targ
     )
 
     processed_targets: list[str] = []
+
+    def _handle_retry_completion_gate(
+        request: WorkflowActionRequest,
+    ) -> WorkflowActionResult:
+        from src.backend.services.arxiv_paper_link_service import (
+            extract_arxiv_id_candidates,
+        )
+
+        prompt_text = str(request.data.get("prompt") or "")
+        target_tokens = re.findall(r"https?://\S+", prompt_text)
+        required_effects = []
+        unresolved = False
+        for index, target_token in enumerate(target_tokens, start=1):
+            arxiv_ids = extract_arxiv_id_candidates(target_token)
+            target_arxiv_id = arxiv_ids[0] if arxiv_ids else target_token
+            satisfied = target_arxiv_id in processed_targets
+            if not satisfied:
+                unresolved = True
+            required_effects.append(
+                {
+                    "effect_id": f"effect_prompt_target_{index}",
+                    "effect_type": "scholarly_representation",
+                    "status": "satisfied" if satisfied else "not_satisfied",
+                    "targets": [target_token],
+                }
+            )
+
+        return WorkflowActionResult(
+            outputs={
+                "required_effects": required_effects,
+                "completion_gate_decision": (
+                    "escalation_required" if unresolved else "completed"
+                ),
+                "completion_gate_requires_follow_up": unresolved,
+                "completion_gate_safe_to_claim_completion": not unresolved,
+                "completion_gate_repeat_eligible": unresolved,
+            }
+        )
 
     def _handle_materialise_target(
         request: WorkflowActionRequest,
@@ -756,6 +924,13 @@ def test_conversation_turn_recovery_retry_progresses_across_multiple_prompt_targ
             action_id="test.materialise_target",
             handler=_handle_materialise_target,
             description="Materialise one synthetic paper target for recovery-loop tests.",
+        )
+    )
+    registry.register_if_absent(
+        ActionSpec(
+            action_id="test.stub_retry_completion_gate",
+            handler=_handle_retry_completion_gate,
+            description="Return recovery-loop gate signals for unresolved prompt targets.",
         )
     )
     monkeypatch.setattr(

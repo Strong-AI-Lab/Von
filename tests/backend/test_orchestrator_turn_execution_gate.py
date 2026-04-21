@@ -180,6 +180,14 @@ def test_turn_execution_critic_detects_unresolved_kb_mutation() -> None:
     assert isinstance(unresolved_preconditions, list)
     assert unresolved_preconditions
 
+    critic_verdict = result.outputs.get("critic_verdict")
+    assert isinstance(critic_verdict, dict)
+    assert critic_verdict.get("workflow_id") == (
+        "#V#kb_mutation_postcondition_critic_workflow"
+    )
+    assert critic_verdict.get("summary") == result.outputs.get("critic_summary")
+    assert record.get("critic", {}).get("verdict") == critic_verdict
+
     assert any(
         entry.get("type") == "turn_execution_critic"
         for entry in aux_llm_calls
@@ -774,7 +782,7 @@ def test_turn_execution_critic_blocks_failed_custom_workflow_dispatch() -> None:
     assert len(required_effects) == 1
     effect = required_effects[0]
     assert effect.get("effect_type") == "workflow_execution"
-    assert effect.get("status") == "not_executed"
+    assert effect.get("status") == "not_satisfied"
     assert effect.get("failure_code") == (
         "metadata_validation_failed:"
         "metadata_write_context_key_missing:"
@@ -790,7 +798,7 @@ def test_turn_execution_critic_blocks_failed_custom_workflow_dispatch() -> None:
 
     completion_gate = record.get("completion_gate")
     assert isinstance(completion_gate, dict)
-    assert completion_gate.get("decision") == "escalation_required"
+    assert completion_gate.get("decision") == "failed"
     assert completion_gate.get("safe_to_claim_completion") is False
     assert completion_gate.get("requires_follow_up") is True
     assert completion_gate.get("blocking_failure_codes") == [
@@ -800,8 +808,16 @@ def test_turn_execution_critic_blocks_failed_custom_workflow_dispatch() -> None:
         "#V#onboarding_step_collect_student_info:"
         "#V#workflow_context_key_validated_type_name",
     ]
+    assert completion_gate.get("decision_reason") == (
+        "Mutation attempt failed or was blocked."
+    )
+    evidence_payload = completion_gate.get("evidence_payload")
+    assert isinstance(evidence_payload, dict)
+    unresolved_preconditions = evidence_payload.get("unresolved_preconditions")
+    assert isinstance(unresolved_preconditions, list)
+    assert len(unresolved_preconditions) == 1
     assert "before any action could start" in str(
-        completion_gate.get("decision_reason") or ""
+        unresolved_preconditions[0].get("status_reason") or ""
     )
 
 
@@ -861,23 +877,38 @@ def test_turn_execution_critic_blocks_planned_tool_run_without_success() -> None
     assert isinstance(record, dict)
     required_effects = record.get("required_effects")
     assert isinstance(required_effects, list)
-    assert required_effects == []
+    assert [effect.get("effect_id") for effect in required_effects] == [
+        "conversation_locator",
+        "conversation_history",
+    ]
+    assert all(effect.get("status") == "not_satisfied" for effect in required_effects)
+    assert all(
+        "required_evidence_permission_denied"
+        in list(effect.get("failure_codes") or [])
+        for effect in required_effects
+    )
 
     completion_gate = record.get("completion_gate")
     assert isinstance(completion_gate, dict)
     assert completion_gate.get("decision") == "failed"
     assert completion_gate.get("safe_to_claim_completion") is False
     assert completion_gate.get("requires_follow_up") is True
-    assert completion_gate.get("repeat_eligible") is False
+    assert completion_gate.get("repeat_eligible") is True
     assert completion_gate.get("blocking_failure_codes") == [
-        "planned_tool_execution_without_success"
+        "conversation_history_failed",
+        "conversation_locator_failed",
+        "required_evidence_permission_denied",
     ]
     evidence_payload = completion_gate.get("evidence_payload")
     assert isinstance(evidence_payload, dict)
-    blocker = evidence_payload.get("execution_signal_blocker")
-    assert isinstance(blocker, dict)
-    assert blocker.get("effect_type") == "tool_execution"
-    assert blocker.get("status") == "not_satisfied"
+    assert evidence_payload.get("execution_signal_blocker") is None
+    unresolved_preconditions = evidence_payload.get("unresolved_preconditions")
+    assert isinstance(unresolved_preconditions, list)
+    assert len(unresolved_preconditions) == 2
+    assert all(
+        precondition.get("status") == "not_satisfied"
+        for precondition in unresolved_preconditions
+    )
 
 
 def test_turn_execution_correctness_flags_completed_planned_tool_run_without_success_as_false_success() -> None:
@@ -955,7 +986,7 @@ def test_derive_completion_gate_blocks_workflow_terminal_failure_without_require
     )
 
 
-def test_derive_completion_gate_fails_when_contracted_workflow_reports_failed_terminal_status() -> None:
+def test_derive_completion_gate_fails_when_contracted_workflow_status_is_unexpected() -> None:
     completion_gate = _derive_completion_gate(
         required_effects=[],
         postcondition_checks=[],
@@ -1003,6 +1034,9 @@ def test_derive_completion_gate_fails_when_contracted_workflow_reports_failed_te
     assert completion_gate["blocking_failure_codes"] == [
         "contracted_workflow_terminal_status_unexpected"
     ]
+    assert completion_gate["decision_reason"] == (
+        "Contracted workflow terminal status failed is not listed as a success status."
+    )
 
 
 def test_derive_completion_gate_fails_when_contracted_workflow_terminal_status_missing() -> None:
@@ -1044,13 +1078,20 @@ def test_derive_completion_gate_fails_when_contracted_workflow_terminal_status_m
         },
     )
 
-    assert completion_gate["decision"] == "failed"
+    assert completion_gate["decision"] == "escalation_required"
     assert completion_gate["safe_to_claim_completion"] is False
     assert completion_gate["requires_follow_up"] is True
     assert completion_gate["repeat_eligible"] is False
     assert completion_gate["blocking_failure_codes"] == [
-        "contracted_workflow_terminal_status_missing"
+        "custom_workflow_dispatch_not_started"
     ]
+    evidence_payload = completion_gate["evidence_payload"]
+    assert evidence_payload["evaluation_basis"] == (
+        "required_effects_postcondition_checks_and_execution_signals"
+    )
+    blocker = evidence_payload["execution_signal_blocker"]
+    assert blocker["effect_type"] == "workflow_execution"
+    assert blocker["status"] == "not_executed"
 
 
 def test_derive_completion_gate_allows_contracted_workflow_success_status() -> None:

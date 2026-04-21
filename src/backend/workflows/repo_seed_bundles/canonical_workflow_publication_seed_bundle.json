@@ -1120,7 +1120,7 @@
           },
           {
             "action_concept_id": null,
-            "action_id": "turn_execution.critic",
+            "action_id": "workflow_invoke_subworkflow",
             "concept_id": null,
             "conditional_transitions": [
               {
@@ -1134,8 +1134,8 @@
             "context_input_mapping_specs": [],
             "context_input_mappings": [],
             "effects": [],
-            "execution_mode": null,
-            "invoked_workflow_id": null,
+            "execution_mode": "subworkflow",
+            "invoked_workflow_id": "#V#kb_mutation_postcondition_critic_workflow",
             "llm_policy": null,
             "mutation_authority": null,
             "next_state": null,
@@ -1150,7 +1150,33 @@
             "state_id": "postcondition_critic",
             "static_input_bindings": [],
             "tool_output_context_mappings": [],
-            "tool_output_mapping_specs": [],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_calling_postcondition_critic_result_turn_execution_record_to_turn_execution_record",
+                "context_key": "turn_execution_record",
+                "tool_output_field": "result.turn_execution_record"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_calling_postcondition_critic_result_required_effects_to_required_effects",
+                "context_key": "required_effects",
+                "tool_output_field": "result.required_effects"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_calling_postcondition_critic_result_postcondition_checks_to_postcondition_checks",
+                "context_key": "postcondition_checks",
+                "tool_output_field": "result.postcondition_checks"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_calling_postcondition_critic_result_critic_summary_to_critic_summary",
+                "context_key": "critic_summary",
+                "tool_output_field": "result.critic_summary"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_calling_postcondition_critic_result_critic_verdict_to_critic_verdict",
+                "context_key": "critic_verdict",
+                "tool_output_field": "result.critic_verdict"
+              }
+            ],
             "validation_policy": null,
             "writes_context_keys": []
           },
@@ -1275,8 +1301,107 @@
     },
     {
       "publication_spec": {
-        "initial_state": "evaluate",
+        "initial_state": "build_evidence",
         "steps": [
+          {
+            "action_concept_id": null,
+            "action_id": "turn_execution.critic",
+            "concept_id": null,
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "evidence_built",
+                "to_state": "evaluate_authoritative_prompt"
+              }
+            ],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": null,
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "build_evidence",
+            "static_input_bindings": [
+              [
+                "emit_default_critic_verdict",
+                false
+              ]
+            ],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [],
+            "validation_policy": null,
+            "writes_context_keys": []
+          },
+          {
+            "action_concept_id": null,
+            "action_id": "llm.action",
+            "concept_id": null,
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "authoritative_critic_decided",
+                "to_state": "finalise_authoritative"
+              }
+            ],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": "llm",
+            "invoked_workflow_id": null,
+            "llm_policy": {
+              "policy_stage": "postcondition_critic",
+              "tool_mode": "none",
+              "response_contract_text": "Return JSON with keys verdict, confidence, assessment_summary, required_evidence_answer_consistency_blocker, and recommendations.",
+              "context_fields": [
+                {
+                  "context_key": "turn_execution_critic_evidence_bundle",
+                  "label": "Turn execution critic evidence bundle"
+                }
+              ]
+            },
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "finalise_fallback",
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [
+              "#V#prompt_turn_execution_postcondition_critic"
+            ],
+            "state_id": "evaluate_authoritative_prompt",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_kb_mutation_postcondition_critic_validated_json_to_critic_verdict",
+                "context_key": "critic_verdict",
+                "tool_output_field": "validated_json"
+              }
+            ],
+            "validation_policy": {
+              "output_format": "json_value"
+            },
+            "writes_context_keys": [
+              "critic_verdict"
+            ]
+          },
           {
             "action_concept_id": null,
             "action_id": "turn_execution.critic",
@@ -1306,12 +1431,68 @@
             "on_true_state": null,
             "on_unknown_state": null,
             "prompt_concept_ids": [],
-            "state_id": "evaluate",
+            "state_id": "finalise_authoritative",
             "static_input_bindings": [],
             "tool_output_context_mappings": [],
             "tool_output_mapping_specs": [],
             "validation_policy": null,
-            "writes_context_keys": []
+            "writes_context_keys": [
+              "turn_execution_record",
+              "required_effects",
+              "postcondition_checks",
+              "turn_execution_critic_evidence_bundle",
+              "critic_summary",
+              "critic_verdict",
+              "completion_gate_decision",
+              "completion_gate_requires_follow_up",
+              "completion_gate_safe_to_claim_completion"
+            ]
+          },
+          {
+            "action_concept_id": null,
+            "action_id": "turn_execution.critic",
+            "concept_id": null,
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "fallback_evaluated",
+                "to_state": "completed"
+              }
+            ],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": null,
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "finalise_fallback",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [],
+            "validation_policy": null,
+            "writes_context_keys": [
+              "turn_execution_record",
+              "required_effects",
+              "postcondition_checks",
+              "turn_execution_critic_evidence_bundle",
+              "critic_summary",
+              "critic_verdict",
+              "completion_gate_decision",
+              "completion_gate_requires_follow_up",
+              "completion_gate_safe_to_claim_completion"
+            ]
           },
           {
             "action_concept_id": null,
@@ -1701,7 +1882,7 @@
             "state_id": "narration"
           },
           {
-            "action_id": "turn_execution.critic",
+            "action_id": "workflow_invoke_subworkflow",
             "conditional_transitions": [
               {
                 "condition_spec": {
@@ -1711,9 +1892,37 @@
                 "to_state": "completion_gate"
               }
             ],
-            "execution_mode": null,
+            "execution_mode": "subworkflow",
+            "invoked_workflow_id": "#V#kb_mutation_postcondition_critic_workflow",
             "llm_policy": null,
             "prompt_concept_ids": [],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_critic_result_turn_execution_record_to_turn_execution_record",
+                "context_key": "turn_execution_record",
+                "tool_output_field": "result.turn_execution_record"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_critic_result_required_effects_to_required_effects",
+                "context_key": "required_effects",
+                "tool_output_field": "result.required_effects"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_critic_result_postcondition_checks_to_postcondition_checks",
+                "context_key": "postcondition_checks",
+                "tool_output_field": "result.postcondition_checks"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_critic_result_critic_summary_to_critic_summary",
+                "context_key": "critic_summary",
+                "tool_output_field": "result.critic_summary"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_turn_execution_critic_result_critic_verdict_to_critic_verdict",
+                "context_key": "critic_verdict",
+                "tool_output_field": "result.critic_verdict"
+              }
+            ],
             "writes_context_keys": [],
             "state_id": "critic"
           },

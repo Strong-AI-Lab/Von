@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .text_value_service import get_texts_for_concept
+from .concept_service import ConceptNotFoundError, get_concept_by_concept_id
 from ..workflows.durable.registry_factory import (
     build_durable_workflow_registry_read_only,
 )
@@ -810,14 +811,24 @@ def repo_dossier_prompt_definition_get(**kwargs: Any) -> dict[str, Any]:
             minimum=200,
             maximum=_MAX_FILE_MAX_CHARS,
         )
+        try:
+            prompt_concept = get_concept_by_concept_id(prompt_concept_id)
+        except ConceptNotFoundError:
+            prompt_concept = None
+        if not isinstance(prompt_concept, Mapping):
+            raise RepoDossierError(
+                "prompt_concept_not_found",
+                "Prompt concept was not found in Vontology.",
+                {"prompt_concept_id": prompt_concept_id},
+            )
         rows = get_texts_for_concept(prompt_concept_id, limit=20)
         if not isinstance(rows, list):
             rows = []
         selected_row = _select_prompt_row([row for row in rows if isinstance(row, Mapping)])
         if selected_row is None:
             raise RepoDossierError(
-                "prompt_not_found",
-                "Prompt concept did not resolve to any authoritative prompt text.",
+                "prompt_content_missing",
+                "Prompt concept exists but did not resolve to any authoritative prompt text.",
                 {"prompt_concept_id": prompt_concept_id},
             )
         raw_text = str(selected_row.get("text") or "")

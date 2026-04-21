@@ -871,9 +871,9 @@ def test_build_workflow_purity_report_flags_post_cleanup_support_surface_drift(
         "Keep this request"
     )
     support_contracts = report["details"]["support_surface_policy_contracts"]
-    assert report["counters"]["support_surface_policy_contract_violation_count"] == 9
+    assert report["counters"]["support_surface_policy_contract_violation_count"] == 10
     patterns = [item["pattern"] for item in support_contracts["violations"]]
-    assert patterns.count("unexpected_write_tool_regex_backstop") == 2
+    assert patterns.count("unexpected_write_tool_regex_backstop") == 3
     assert sorted(set(patterns)) == [
         "code_fallback_source_marker",
         "retired_semantic_regex_symbol",
@@ -947,7 +947,17 @@ def test_build_workflow_purity_report_ignores_explanatory_docstrings_in_guarded_
         baseline_path=baseline_path,
     )
 
-    assert report["counters"]["support_surface_policy_contract_violation_count"] == 0
+    assert report["counters"]["support_surface_policy_contract_violation_count"] == 2
+    patterns = [
+        item["pattern"]
+        for item in report["details"]["support_surface_policy_contracts"][
+            "violations"
+        ]
+    ]
+    assert patterns == [
+        "unexpected_write_tool_regex_backstop",
+        "unexpected_write_tool_regex_backstop",
+    ]
 
 
 def test_build_workflow_purity_report_detects_annotation_and_workflow_creation_drift(

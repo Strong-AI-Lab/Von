@@ -46,7 +46,7 @@ def test_contract_resolution_uses_bounded_candidates_without_registry_scan(
             {
                 "tool_calling.preflight_requirements",
                 "tool_calling.respond",
-                "turn_execution.critic",
+                "workflow_invoke_subworkflow",
                 "turn_execution.completion_gate",
             }
         ),

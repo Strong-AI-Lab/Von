@@ -24,7 +24,11 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from ..db.repositories.concepts_repository import (
     ConceptsRepository,
-    RELATIONSHIP_KINDS,
+)
+from .concept_predicate_metadata_service import (
+    get_relationship_kinds_set,
+    get_structural_predicate_aliases,
+    get_structural_inverse_map,
 )
 from .feature_flags import get_event_workflow_integration_enabled
 from ..vontology.utils_vontology import is_predicate, is_type
@@ -34,26 +38,6 @@ from ..vontology.code_concepts_registry import (
 )
 
 _logger = logging.getLogger(__name__)
-
-# Canonical structural predicate concept IDs and their field mappings.
-# These are the only predicates that have special handling for inverse relationships
-# and directly determine kind classification.
-STRUCTURAL_PREDICATE_ALIASES: Dict[str, str] = {
-    "#V#is_a_type_of": "is_a_type_of",
-    "#V#has_subtype": "has_subtype",
-    "#V#is_an_instance_of": "is_an_instance_of",
-    "#V#has_instance": "has_instance",
-    "#V#related_to": "related_to",
-}
-
-# Inverse relationship mappings for structural predicates.
-STRUCTURAL_INVERSE_MAP: Dict[str, str] = {
-    "is_a_type_of": "has_subtype",
-    "has_subtype": "is_a_type_of",
-    "is_an_instance_of": "has_instance",
-    "has_instance": "is_an_instance_of",
-    "related_to": "related_to",
-}
 
 # Common predicate name aliases that map to structural field names.
 PREDICATE_NAME_ALIASES: Dict[str, str] = {
@@ -158,9 +142,10 @@ def normalise_structural_predicate(predicate: str) -> str:
 
     predicate = predicate.strip()
 
-    # Check #V# prefixed structural aliases first
-    if predicate in STRUCTURAL_PREDICATE_ALIASES:
-        return STRUCTURAL_PREDICATE_ALIASES[predicate]
+    # Check #V# prefixed structural aliases first (Vontology-backed)
+    aliases = get_structural_predicate_aliases()
+    if predicate in aliases:
+        return aliases[predicate]
 
     # Check common name aliases
     if predicate in PREDICATE_NAME_ALIASES:
@@ -181,7 +166,7 @@ def is_structural_predicate(predicate: str) -> bool:
         True if this is a structural predicate.
     """
     normalised = normalise_structural_predicate(predicate)
-    return normalised in RELATIONSHIP_KINDS
+    return normalised in get_relationship_kinds_set()
 
 
 def compute_kind_from_relationships(
@@ -332,7 +317,7 @@ def validate_predicate_concept(
         return False, "invalid_predicate_format", {"predicate": predicate}
 
     # Check if it's a structural predicate (always valid)
-    if predicate in STRUCTURAL_PREDICATE_ALIASES:
+    if predicate in get_structural_predicate_aliases():
         return True, None, None
 
     # Check for persisted or code-registered concept
@@ -395,7 +380,7 @@ def add_structural_relationship(
 
     normalised = normalise_structural_predicate(predicate)
 
-    if normalised not in RELATIONSHIP_KINDS:
+    if normalised not in get_relationship_kinds_set():
         return {
             "success": False,
             "error": "not_a_structural_predicate",
@@ -492,8 +477,9 @@ def add_structural_relationship(
     }
 
     # Maintain inverse relationship
-    if maintain_inverse and normalised in STRUCTURAL_INVERSE_MAP:
-        inv_kind = STRUCTURAL_INVERSE_MAP[normalised]
+    _inverse_map = get_structural_inverse_map()
+    if maintain_inverse and normalised in _inverse_map:
+        inv_kind = _inverse_map[normalised]
 
         try:
             repo._ensure_relationship_array(target_id, inv_kind)
@@ -644,7 +630,7 @@ def add_relationship(
 
     normalised = normalise_structural_predicate(predicate)
 
-    if normalised in RELATIONSHIP_KINDS:
+    if normalised in get_relationship_kinds_set():
         return add_structural_relationship(source_id, normalised, target, repo=repo)
     else:
         return add_dynamic_relationship(source_id, predicate, target, repo=repo)

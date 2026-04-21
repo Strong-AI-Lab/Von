@@ -94,6 +94,7 @@ def test_orchestrator_blocks_write_tool_on_read_only_prompt_with_real_gateway(
     llm = _CapturingLLM(
         [
             f'{{"action":"call_tool","tool":"{_TOOL_NAME}","payload":{{"value":"should-not-write"}}}}',
+            '{"schema_version":"write_tool_request_evidence.v1","tool_evidence":[{"tool_name":"create_dummy_concept","request_state":"low_confidence","confirmation_state":"low_confidence","denial_state":"explicit_denial","rationale":"current prompt explicitly says do not create anything"}]}',
             "Understood.",
         ]
     )

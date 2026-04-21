@@ -14,7 +14,7 @@ import threading
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .text_value_service import upsert_singleton_text_relation
+from .text_value_service import get_texts_for_concept, upsert_singleton_text_relation
 from .workflow_prompt_authority_service import (
     DEFAULT_PROMPT_TYPE_ID,
     WorkflowPromptConceptSpec,
@@ -28,9 +28,11 @@ from .workflow_prompt_authority_service import (
 from ..workflows.definitions import WRITE_TOOL_POLICY_WORKFLOW_ID
 from ..workflows.write_tool_policy import (
     CONFIDENCE_EXPLICIT_CONFIRMATION,
+    CONFIDENCE_EXPLICIT_DENIAL,
     CONFIDENCE_EXPLICIT_REQUEST,
     CONFIDENCE_LOW,
     CONFIDENCE_RECENT_CONFIRMATION,
+    CONFIDENCE_RECENT_DENIAL,
     CONFIDENCE_RECENT_REQUEST,
     WRITE_TOOL_REQUEST_EVIDENCE_SCHEMA_VERSION,
     classify_write_tool_risk,
@@ -82,6 +84,27 @@ def resolve_write_tool_request_evidence_prompt_concept_id(
     )
 
 
+def _write_tool_request_evidence_prompt_seed_needs_refresh() -> bool:
+    try:
+        rows = get_texts_for_concept(
+            subject_concept_id=WRITE_TOOL_REQUEST_EVIDENCE_PROMPT_CONCEPT_ID,
+            limit=16,
+        )
+    except Exception:
+        return False
+
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        predicate = safe_str(row.get("predicate"))
+        if predicate not in {"hasContent", "#V#hasContent"}:
+            continue
+        text = safe_str(row.get("text")) or ""
+        if text and "denial_state" not in text:
+            return True
+    return False
+
+
 def ensure_write_tool_request_evidence_prompt_support(
     *,
     force_prompt_seed: bool = False,
@@ -111,8 +134,13 @@ def ensure_write_tool_request_evidence_prompt_support(
     )
 
     seeded_prompt_ids: list[str] = []
-    if force_prompt_seed or not prompt_concept_has_content(
+    prompt_has_content = prompt_concept_has_content(
         WRITE_TOOL_REQUEST_EVIDENCE_PROMPT_CONCEPT_ID
+    )
+    if (
+        force_prompt_seed
+        or not prompt_has_content
+        or _write_tool_request_evidence_prompt_seed_needs_refresh()
     ):
         upsert_singleton_text_relation(
             subject_concept_id=WRITE_TOOL_REQUEST_EVIDENCE_PROMPT_CONCEPT_ID,
@@ -251,6 +279,7 @@ def _default_evidence_for_tool(tool_name: str) -> dict[str, Any]:
         "tool_name": tool_name,
         "request_state": CONFIDENCE_LOW,
         "confirmation_state": CONFIDENCE_LOW,
+        "denial_state": CONFIDENCE_LOW,
         "rationale": None,
     }
 
@@ -265,6 +294,13 @@ def _normalise_request_state(value: Any) -> str:
 def _normalise_confirmation_state(value: Any) -> str:
     cleaned = str(value or "").strip()
     if cleaned in {CONFIDENCE_EXPLICIT_CONFIRMATION, CONFIDENCE_RECENT_CONFIRMATION}:
+        return cleaned
+    return CONFIDENCE_LOW
+
+
+def _normalise_denial_state(value: Any) -> str:
+    cleaned = str(value or "").strip()
+    if cleaned in {CONFIDENCE_EXPLICIT_DENIAL, CONFIDENCE_RECENT_DENIAL}:
         return cleaned
     return CONFIDENCE_LOW
 
@@ -301,6 +337,7 @@ def _normalise_tool_evidence(
             "confirmation_state": _normalise_confirmation_state(
                 raw_entry.get("confirmation_state")
             ),
+            "denial_state": _normalise_denial_state(raw_entry.get("denial_state")),
             "rationale": safe_str(raw_entry.get("rationale")),
         }
     return default_map
