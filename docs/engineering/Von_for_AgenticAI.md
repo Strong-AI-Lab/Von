@@ -1,22 +1,521 @@
-Here's an analysis you just did. Based on this analysis, comprehensively add, edit or delete existing design and engineering (and AGENT guidance) documents to drive progress towards this vision.
+# Von for Agentic AI
 
-Based on the recent architectural design documents, workflow analyses, and the AAAIP (Aotearoa Agentic Artificial Intelligence Platform) ambition you provided, Von is evolving into a highly sophisticated neuro-symbolic agentic assistant system.
+**Status:** working architecture note
+**Updated:** 21 April 2026
+**Scope:** current Von architectural direction, recent progress, remaining gaps, and the path from a capable neuro-symbolic assistant toward minimal-imposition agentic AI in the stronger Von sense
 
-The overarching goal is to move away from the brittle "LLM-wrapped-in-Python" paradigm—where capabilities scale only by throwing larger models at a problem—and instead build a system based on capability composition, explicit enduring knowledge, and minimal-imposition collaboration.
+## 1. Purpose
 
-Here is a summary of the architecture we are aiming for, its implications, and the missing path we need to navigate to achieve fully helpful agentic AI.
+This note records the architecture Von is actually moving toward, not merely an aspirational marketing summary.
 
-The Target Von Architecture The intended architecture is built on several foundational pillars that directly support the AAAIP goals of continuous learning, long-term reasoning, and minimal human burden:
+It is intended to do four things:
 
-Vontology as the Cognitive Substrate (Enduring Knowledge): Instead of relying on ephemeral vector-search RAG or the latent weights of an LLM to remember things, Von uses explicit, structured, provenance-bearing knowledge graphs (Vontology). This allows the system to build episodic memories and track organizational workflows over months or years. It ensures that when the agent learns a new fact, it is culturally grounded, verifiable, and permanent. Workflow-First, KB-Authoritative Policy (VWL): The core behavioral policy of the agent—how it routes tasks, ranks data, plans, and orchestrates tools—is authored in Vontology Workflow Language (VWL) and prompt concepts, not hard-coded in Python. Python's role is strictly relegated to providing reusable runtime execution surfaces, validation, and telemetry. Hierarchical Model Portfolios: Directly aligning with the AAAIP goal, Von assumes a spectrum of models. It routes tasks dynamically: using small, fast local models for routine data transformations or deterministic steps, and frontier models for complex reasoning, synthesis, or ambiguity resolution. Minimal-Imposition Design: The system is designed to exhaust all available context (Vontology, Git repos, prior conversation turns) before interrupting a human. It defaults to executing low-risk, additive actions autonomously while gracefully escalating to human confirmation for destructive or high-stakes actions. Safe Continuous Learning (Ephemeral Theories): To adapt dynamically without catastrophic forgetting, the architecture includes a design for "Testing Workflows and Ephemeral Theories." This allows the agent to safely spin up isolated, bounded "theory slices" to experiment with new workflow paths, prompts, or hypotheses, and only promote them to the canonical Vontology once validated. Implications of this Architecture This architecture fundamentally changes how we build and maintain the system:
+1. state clearly what class of system Von is trying to become;
+2. distinguish recent real architectural progress from stale earlier diagnoses;
+3. identify the most important remaining gaps between the present system and Von's minimal-imposition agent platform vision;
+4. give engineering and research guidance for how to close those gaps without sliding back into "LLM wrapped in Python heuristics".
 
-Knowledge Engineering over Software Engineering: Adding a new behavior to Von often means authoring new Vontology relationships, concepts, and VWL definitions rather than writing new Python scripts. Constant Vigilance Against "Monolith Drift": Coding agents (and humans) naturally default to writing Python if/else logic to solve orchestration problems. We have to proactively scan for and refactor code where Python tries to absorb decision-making, verification, or stage-specific context manipulation. Evaluation is Complex: We cannot just rely on unit tests. Validating this system requires testing real call paths, evaluating long-horizon retrieval, and running isolated benchmark DB clones to ensure self-improving loops don't corrupt core knowledge. The Missing Path to Fully Helpful Agentic AI While the vision is strong, the recent architectural analyses reveal critical gaps between the intended design and the current implementation. To achieve the AAAIP goals, we need to focus on the following missing paths:
+This is not a full changelog. It is an architecture and programme note.
 
-Closing the Workflow Execution "Black Box" Gap Currently, there is a massive subversion of the intended architecture: the Custom Workflow Bypass. When a workflow is identified, Von hands it off to a purely deterministic Python state machine. The LLM is entirely removed from the execution loop between steps.
-Why it's a blocker: If the system silently ingests a paper, creates concepts, and links authors without the LLM participating in the execution, the agent cannot explain what it did or why. It violates the minimal-imposition principle by hiding uncertainty and provenance. The Fix: We must build the "LLM-Supervised Workflow Path." The deterministic Python handlers should run, but they must emit structured progress events back to the LLM so it can narrate the process, explain its actions, and keep the user informed in real-time. 2. Materializing Ephemeral Theories for Self-Evolution The Von goal emphasizes continuous learning and gain-of-function introspection. Right now, the "Testing Workflows" concept is largely a design document.
+## 2. Executive Summary
 
-Why it's a blocker: Without a first-class programmatic representation of isolated hypotheses and experiment records, the agent cannot safely self-evolve its own workflows or adapt to changing environments without risking corruption of the main knowledge base. The Fix: We need to implement the two-tier testing architecture (Tier 1: Ephemeral theory slices, Tier 2: Isolated benchmark worlds) to close the loop on self-improvement. 3. Maturing Multi-Agent Coordination The Von brief explicitly calls out "scalable, coordinated multi-agent systems." Von's current documentation is heavily indexed on a single-agent neuro-symbolic lifecycle (discovery → selector → dispatch → execute).
+Von should not evolve into a larger and larger chat application with more ad hoc Python control logic around an LLM.
 
-Why it's a blocker: Real-world organizational scaling (like healthcare or drug discovery) requires specialized agents operating in parallel, sharing context, and delegating sub-workflows to one another. The Fix: We need to extend VWL and the Orchestrator to support explicit agent-to-agent delegation, capability negotiation, and shared episodic memory contexts so multiple agents can collaborate on long-running tasks. 4. Transitioning from Prompt Tweaks to True Policy Learning While the system supports routing profiles and prompt concepts, the mechanism for how it learns from mistakes is still nascent. We need to implement automated learning loops that parse Turn Execution Records (the structured evidence of what happened during a turn) to induce new guidelines, update retrieval policies, or adjust routing weights without human intervention.
+The intended direction is a **deployable neuro-symbolic agent platform** in which:
 
-By restoring LLM supervision to our deterministic workflows, safely materializing our testing/learning loops, and expanding the orchestration layer to handle multi-agent delegation, Von will bridge the gap from a highly structured knowledge tool to a truly adaptive, minimal-imposition collaborator.
+- enduring knowledge lives in explicit represented form rather than only in latent model state;
+- durable behavioural policy is authored in Vontology, workflows, prompt programmes, KB assertions, and other inspectable authority surfaces;
+- Python provides reusable support surfaces such as execution, validation, telemetry, persistence, integration, and, where implementation in Pythin will not compromise agentic generality, safety;
+- a **portfolio of model scales** is used intentionally rather than pretending one model class should do everything;
+- the system learns and adapts by promoting evidence-backed knowledge, workflows, prompts, and policy artefacts into durable represented form;
+- knowledge representation may be in many forms: human or AI authored NL documents (in any language); propositions in a logical language based on predicate calculuse; knowledge in stronger, higher order, contextual or modal logics (think the representational power of the Cyc KB, as a baseline); potentially - embeddings; other forms
+- the agent acts with **minimal imposition**: it searches, retrieves, reasons, and explains before burdening people with clarification or process disruption;
+- long-horizon reasoning, episodic memory, explicit provenance, and safe revision matter as much as immediate answer quality.
+
+Recent work moved Von materially in that direction. The architecture is cleaner than it was ten days earlier, but the programme is not finished. Several major semantic-policy surfaces still remain in Python, enduring memory is still immature, multi-agent coordination is still mostly a future shape, and continual self-improvement remains more a direction than a fully closed operational loop.
+
+## 3. Current Architectural Assessment
+
+### 3.1 Real progress already made
+
+The most important recent progress is not merely code motion. Several major policy surfaces have already been removed from Python or pushed closer to represented authority.
+
+#### 3.1.1 Workflow discovery and routing
+
+Recent landings removed some of the worst old lexical routing doctrine:
+
+- workflow discovery no longer depends on the old BM25 / stopword capability-index path;
+- structured tool-family availability is no longer driven by prompt-keyword and prefix heuristics;
+- turn expected-outcome contract handling is now a first-class cross-stage boundary rather than loose per-case plumbing;
+- explicit predicate-relative ontology turns now have a proper intermediate support surface through `get_predicate_incidence(...)` rather than relying only on broad relation-hit paging.
+
+This is a meaningful shift away from language-specific pseudo-NLP toward retrieval-backed and authority-aligned support surfaces.
+
+#### 3.1.2 Domain-interpretation cleanup
+
+Multiple domain services that previously held English-language or regex-heavy semantic policy in Python have been moved toward authority-backed interpretation surfaces, especially in:
+
+- file-copy interpretation;
+- workflow authoring and annotation extraction;
+- write-request evidence inference.
+
+That matters because it reduces the tendency for "temporary" deterministic semantic logic to become the real policy substrate.
+
+#### 3.1.3 Turn correctness and postcondition evaluation
+
+The turn-correctness path has improved significantly.
+
+Committed work through `JVNAUTOSCI-1955` stopped grounded false-negative turns from being silently marked as verified success. In the current local worktree, that path has moved further again: the old low-information answer-surface heuristic is being replaced by an explicit prompt-backed postcondition critic subworkflow, with:
+
+- a dedicated prompt seed for the critic;
+- explicit evidence-bundle construction;
+- a subworkflow pathway for authoritative evaluation;
+- tests that exercise this critic pathway as a workflow-level support surface.
+
+That is the right direction. Correctness judgement should not remain a frozen Python string-matching layer.
+
+#### 3.1.4 Anti-drift and test quality
+
+Recent work also improved the meta-architecture:
+
+- anti-drift purity checks now guard several reclaimed support surfaces;
+- stale tests that pinned removed heuristics have been repaired;
+- real-path and near-real-path validations are increasingly being used instead of relying only on unit-shaped assertions.
+
+That matters because without this layer, the codebase would continuously regress back to heuristic patches.
+
+### 3.2 The current code reality is still mixed
+
+Despite the above progress, Von still has major oversized integration files.
+
+As of 21 April 2026:
+
+- `src/backend/integrations/internal_mcp/orchestrator.py` is still `34,741` lines
+- `src/backend/integrations/internal_mcp/catalogue.py` is still `27,466` lines
+- `src/backend/server/routes/von_routes.py` is still `13,906` lines
+
+So the direction is improving, but the largest files are still large enough to attract inline patching pressure and hidden policy drift.
+
+### 3.3 What is still wrong in the current architecture
+
+The most important surviving issues are now more concentrated.
+
+#### 3.3.1 The orchestrator still interprets semantics from contract text
+
+Even after the structured tool-family cleanup, the orchestrator still contains English token-list logic for deciding which tool surfaces are needed based on `contract_text`, especially around:
+
+- Jira retrieval
+- arXiv retrieval
+- KB retrieval
+- predicate and relation retrieval
+- relation-argument retrieval
+- web retrieval
+
+Current hotspots include:
+
+- `src/backend/integrations/internal_mcp/orchestrator.py`
+  - `_turn_contract_requests_relation_argument_retrieval(...)`
+  - `_turn_contract_requests_web_retrieval(...)`
+  - contract-text tool addition logic around the `required_tools` build path
+
+This is still semantic policy in Python. It is better than the earlier slab, but it is not the correct end state.
+
+#### 3.3.2 Write policy still depends on hard-coded risk classes and regex intent
+
+`src/backend/workflows/write_tool_policy.py` still contains:
+
+- `_ADDITIVE_LOW_RISK_WRITE_TOOLS`
+- `_MUTATIVE_NON_DESTRUCTIVE_WRITE_TOOLS`
+- `_DESTRUCTIVE_WRITE_TOOLS`
+- `_CONFIRMATION_PATTERN`
+- `_DESTRUCTIVE_MUTATION_PATTERN`
+- `prompt_explicitly_denies_write(...)`
+
+These are safety-relevant and bounded, but they are still code-side classification and intent inference. This is one of the clearest remaining multilingual policy risks.
+
+#### 3.3.3 Buttonify still reverse-engineers structure from prose
+
+`src/backend/services/buttonify_service.py` still tries to recover structured option metadata from free text by parsing generated prose. That is an older design style and not where Von should stay. The correct end state is structured option emission under an explicit authority-backed contract.
+
+#### 3.3.4 Predicate-incidence is the right abstraction but may become expensive
+
+The new `get_predicate_incidence(...)` surface is architecturally good, because it fills a real gap between:
+
+- `entity -> relation hits`
+- and `predicate -> extent`
+
+However, the current type-mode implementation gathers all relevant instances and then aggregates relation hits across them. For broad classes or high-degree entities, this is a real runtime and deployability concern.
+
+That means the design is correct, but the scaling strategy still needs work.
+
+### 3.4 A note on current state discipline
+
+One live engineering caution is worth making explicit.
+
+The current local worktree contains uncommitted architectural work beyond the latest merged commit, especially around the prompt-backed postcondition critic. That work looks directionally correct, but it means any high-level architecture note must distinguish:
+
+- what is already committed and merged;
+- what exists only in the current working tree;
+- what remains aspirational.
+
+That distinction matters because otherwise the repo risks documenting local intent as if it were already part of the durable shipped architecture.
+
+## 4. The Architecture Von Should Be Becoming
+
+The correct target is not "an LLM plus a growing pile of wrappers". It is a **capability-composed agentic system** with explicit, revisable, inspectable cognition.
+
+### 4.1 Vontology as the cognitive substrate
+
+Vontology should be treated as a first-class durable substrate for:
+
+- semantic memory;
+- represented concepts, predicates, and relations;
+- provenance-bearing knowledge;
+- workflow artefacts;
+- prompt programmes;
+- policy metadata;
+- long-horizon organisational state.
+
+This is crucial to Von's ambition. A system that only "remembers" through latent weights or ephemeral vector recall cannot be trusted to adapt over months or years while preserving inspectability, revision, and provenance.
+
+Von should therefore continue treating durable represented state as an implementation surface, not merely a cache.
+
+### 4.2 Workflows, prompts, and contracts as behavioural authority
+
+Durable behaviour policy should be authored in:
+
+- VWL workflow definitions;
+- prompt concepts and text relations;
+- represented routing metadata;
+- KB assertions and explicit constraints;
+- contract objects such as turn expected-outcome contracts and required-effects contracts.
+
+Python should not quietly decide ranking, matching, recommendation, retrieval strategy, or answer semantics through lexical helpers and conditionals if those policies can be represented cleanly elsewhere.
+
+### 4.3 Shared turn context as a first-class surface
+
+A genuinely agentic system cannot allow each stage to see materially different hidden contexts unless that reduction is explicit, justified, and telemetry-visible.
+
+Von should continue pushing toward:
+
+- one accumulated turn context reused across selector, planner, tool use, critic, and narration stages;
+- explicit stage-local additions where needed;
+- explicit telemetry of what each stage actually saw.
+
+Without this, Python becomes an invisible policy layer even when the prompts live in Vontology.
+
+### 4.4 Model hierarchy and capability composition
+
+Von should assume a model portfolio rather than a monolithic-model doctrine.
+
+That means:
+
+- smaller models for bounded, cheap, frequent, structurally constrained work;
+- stronger models for difficult synthesis, planning, ambiguity resolution, and critic functions;
+- specialised symbolic or deterministic modules for validation, persistence, and explicit typed structure;
+- routing and escalation policies that are inspectable and revisable.
+
+This aligns directly with the Von view that robustness should come from designed capability composition rather than pure parameter scaling.
+
+### 4.5 Explicit memory strata
+
+Von needs to treat memory as a set of distinct architectural layers, not one big "RAG" bucket.
+
+At minimum it should continue toward:
+
+- **semantic memory:** durable facts and relations;
+- **episodic memory:** traces of interactions, workflows, and long-running organisational processes;
+- **procedural memory:** workflows, prompts, playbooks, validators;
+- **policy memory:** learned routing guidance, critiques, context-conditional advice, and other reusable operational knowledge.
+
+This is essential if Von is to support long-horizon reasoning, continual learning, and adaptive deployability without repeatedly re-deriving everything from transient conversation context.
+
+### 4.6 Minimal-imposition operational behaviour
+
+Von should continue optimising for a form of helpfulness that reduces burden rather than only maximising answer fluency.
+
+That implies:
+
+- search and retrieval before clarification;
+- explicit uncertainty and provenance instead of bluffing;
+- preference for low-risk additive actions over unnecessary permission loops;
+- escalation for destructive or high-impact changes;
+- preserving institutional and scholarly practice rather than flattening it into a narrow internal schema.
+
+Minimal imposition is not merely a UX preference. It is a central operational criterion for real-world deployability.
+
+### 4.7 Critic and evaluator workflows as first-class citizens
+
+A powerful agent platform needs not only planners and executors, but also explicit evaluator and critic components.
+
+Von should therefore treat critic workflows as standard architecture, not an afterthought. This includes:
+
+- postcondition critics;
+- evidence-answer consistency critics;
+- uncertainty and failure-surface critics;
+- recovery-decision workflows;
+- long-horizon reflection and promotion workflows.
+
+The in-flight prompt-backed postcondition critic is therefore important not just as a bug fix, but as part of the right architectural doctrine.
+
+### 4.8 Capability plug-ins and secure deployment surfaces
+
+Von's longer-term platform direction points toward a "suite" of capability plug-ins deployable into partner and Living Lab environments, including sensitive environments where raw data cannot simply be exported.
+
+Von therefore needs to become a clean capability platform, not just an application bundle. That implies:
+
+- well-bounded integration surfaces;
+- deployable plugin/capability modules;
+- explicit trust, provenance, and namespace boundaries;
+- a clean split between represented authority and runtime substrate;
+- support for private local deployment with selective escalation to stronger remote models when policy allows.
+
+## 5. Engineering Implications of This Architecture
+
+This architecture changes how engineering work should be understood.
+
+### 5.1 More behaviour work becomes knowledge and workflow engineering
+
+Many changes that look like "implementation" in ordinary software should be authored in:
+
+- represented knowledge;
+- prompt concepts;
+- workflow definitions;
+- critic/evaluator artefacts;
+- reusable contracts and metadata.
+
+That is not avoiding engineering. It is doing engineering at the correct authority layer.
+
+### 5.2 Monolith drift is the main enemy
+
+Large integration surfaces naturally attract quick fixes. In Von, that is particularly true of:
+
+- `orchestrator.py`
+- `catalogue.py`
+- `von_routes.py`
+
+The main danger is not only file size. It is that mixed responsibilities invite:
+
+- hidden routing policy;
+- hidden verification policy;
+- stage-specific context shaping;
+- answer-surface repair patches;
+- integration-boundary drift.
+
+### 5.3 Evaluation has to become richer and more honest
+
+This architecture cannot be validated by ordinary unit tests alone.
+
+Useful evaluation must include:
+
+- exact or near-real call-path tests;
+- replay-based failure analysis;
+- retrieval quality and answer-grounding assessment;
+- long-horizon memory tasks;
+- calibration and uncertainty evaluation;
+- interruption burden and minimal-imposition metrics;
+- robustness across paraphrase, multilingual phrasing, and organisational variation;
+- cost and latency effects of richer multi-stage cognition.
+
+### 5.4 Telemetry is not optional polish
+
+If Von is to become a self-improving, inspectable agent platform, telemetry must remain first-class.
+
+That includes:
+
+- stage context lineage;
+- workflow discovery and routing traces;
+- selected-workflow traces;
+- evidence bundles for critic stages;
+- completion-gate diagnostics;
+- recovery-route traces;
+- long-horizon episodic records that can later be re-analysed or promoted.
+
+### 5.5 Security, provenance, and namespace discipline stay central
+
+A minimal-imposition agent that works in sensitive real environments cannot trade away access safety for convenience. Namespace discipline, provenance preservation, and clear authorisation boundaries must remain part of the design, not bolt-ons.
+
+## 6. What Is Still Missing on the Path to Fully Helpful Agentic AI
+
+The biggest gaps are now less about obvious hacky routing and more about missing higher-order capabilities.
+
+### 6.1 Remaining code-side semantic policy removal
+
+Von still needs to remove the remaining Python-owned semantic policy surfaces, especially:
+
+- contract-text tool inference in the orchestrator;
+- write confirmation and destructive-intent regex interpretation;
+- prose-to-option parsing in buttonify;
+- any remaining hard-coded tool and risk metadata that belongs in represented authority.
+
+This is still necessary groundwork. A system cannot become truly multilingual, general, and maintainable while core policy still depends on hidden English token lists.
+
+### 6.2 Enduring memory and consolidation
+
+Von has the right semantic-memory direction but still lacks a mature explicit memory architecture for:
+
+- episodic trace retention and retrieval;
+- promotion from episodic evidence to durable semantic knowledge;
+- revision and retraction pathways;
+- policy-memory induction from repeated failures or successes;
+- long-horizon task-state reconstruction across interruptions.
+
+Without this, Von will remain a capable turn-by-turn assistant rather than a truly enduring collaborator.
+
+### 6.3 Safe continual self-improvement
+
+Von's ambition requires gain-of-function introspection and adaptive self-evolution. That means Von needs more than prompt tweaks and Jira tasks after failures.
+
+It needs explicit self-improvement loops for:
+
+- benchmark and replay analysis;
+- prompt and workflow revision proposals;
+- retrieval-policy learning;
+- policy-memory induction;
+- isolated testing of candidate changes;
+- promotion only after evaluation and rollback-safe validation.
+
+The right model is not unconstrained self-modification. It is controlled improvement through represented, evaluable, promotable artefacts.
+
+### 6.4 Long-horizon temporal and institutional reasoning
+
+To support months-long or years-long processes, Von needs stronger representations and retrieval for:
+
+- temporal structure;
+- event sequences;
+- institutional procedures and obligations;
+- workflow histories and state transitions;
+- evolving user and team preferences;
+- conflict, uncertainty, and revision over time.
+
+The current architecture is becoming capable of this, but not yet fully equipped for it.
+
+### 6.5 Multimodal knowledge acquisition and fusion
+
+Von's target architecture points toward integration across text, images, speech, and other data sources. Von has made progress on file-copy interpretation, but a mature multimodal architecture still requires:
+
+- common provenance models across modalities;
+- authority-backed interpretation surfaces for multimodal evidence;
+- cross-modal linking into Vontology;
+- uncertainty-aware fusion rather than silent flattening into text summaries.
+
+### 6.6 Multi-agent coordination
+
+The current architecture is still primarily single-agent in its core lifecycle, even though it already contains many of the pieces needed for richer composition.
+
+What is still missing includes:
+
+- explicit agent identities and capability profiles;
+- safe delegation and subtask ownership;
+- shared episodic and semantic state across collaborating agents;
+- coordination protocols for handoff, arbitration, and conflict resolution;
+- evaluation of multi-agent failure modes such as context divergence and duplicated work.
+
+This is essential for Von's goal of coordinated agent systems in complex domains.
+
+### 6.7 Normative governance beyond simple obedience
+
+A deployable real-world agent needs to bridge rules, norms, uncertainty, and practical adaptation.
+
+Von still needs stronger explicit handling of:
+
+- organisational norms;
+- cultural and institutional constraints;
+- policy pluralism and conflict;
+- uncertainty-bearing recommendation rather than false certainty;
+- documented reasons for abstention, escalation, and refusal.
+
+### 6.8 User-facing transparency and calibration
+
+A fully helpful agent is not just one that retrieves better. It is one that:
+
+- exposes what it knows and how it knows it;
+- distinguishes evidence from conjecture;
+- reveals uncertainty when it matters;
+- remains answer-first while still preserving inspectable operational traces;
+- helps people trust the right things and distrust the right things.
+
+Recent work on critic pathways and answer-first discipline helps here, but the broader transparency model is still incomplete.
+
+## 7. A Concrete Path Forward
+
+### 7.1 Near-term engineering priorities
+
+The most important near-term engineering work is:
+
+1. finish replacing remaining Python semantic policy surfaces with represented authority or prompt-backed critic/evaluator surfaces;
+2. complete and land the prompt-backed postcondition critic path end to end;
+3. continue extracting mixed responsibilities out of the orchestrator and route monoliths;
+4. keep anti-drift tests and purity checks aligned with the newer architecture;
+5. harden scaling and telemetry around new support surfaces such as predicate incidence.
+
+### 7.2 Medium-term platform priorities
+
+After that, the most important platform-level advances are:
+
+1. explicit episodic memory and memory-promotion workflows;
+2. isolated self-improvement and benchmark worlds;
+3. richer retrieval and reasoning over time, events, and workflows;
+4. structured multimodal evidence acquisition and fusion;
+5. capability packaging for partner deployment.
+
+### 7.3 Longer-horizon Von priorities
+
+To reach the fuller Von vision, Von should grow into:
+
+- a compositional multi-agent platform;
+- a secure deployable capability suite for partners;
+- a system that can improve through represented policy and knowledge promotion;
+- a long-horizon collaborator that preserves and revises knowledge over months or years;
+- a platform that scales by combining specialised capabilities, explicit knowledge, and model hierarchy rather than only chasing larger parameter counts.
+
+### 7.4 Current programme umbrella in Jira
+
+The current umbrella Jira epic for this broader research and engineering direction is
+[`JVNAUTOSCI-1960`](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-1960), which now functions as the main shaping epic for the broader minimal-imposition agentic AI programme around Von.
+
+That epic is intended to **shape** the programme rather than prematurely overdetermine it. It does not replace the anti-hack and authority-alignment substrate work under `JVNAUTOSCI-1116` / `JVNAUTOSCI-1913`; instead, it integrates that line with the wider memory, evaluation, multimodal, multi-agent, and deployment questions required for a true minimal-imposition agent platform.
+
+At the time of writing, its main child tasks are:
+
+- [`JVNAUTOSCI-1961`](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-1961): define the minimal-imposition benchmark and deployment acceptance model for Von
+- [`JVNAUTOSCI-1962`](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-1962): define the enduring-memory and memory-promotion architecture across semantic, episodic, procedural, and policy memory
+- [`JVNAUTOSCI-1963`](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-1963): build isolated self-improvement loops with ephemeral theories and benchmark worlds
+- [`JVNAUTOSCI-1964`](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-1964): expand authority-backed critic and evaluator workflows for grounded helpfulness, calibration, and long-horizon quality
+- [`JVNAUTOSCI-1965`](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-1965): design represented multi-agent coordination, delegation, and shared-memory substrates for Von
+- [`JVNAUTOSCI-1966`](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-1966): define the multimodal evidence-fusion and provenance architecture for Von
+- [`JVNAUTOSCI-1967`](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-1967): design the capability-suite and secure partner-deployment architecture for Von
+- [`JVNAUTOSCI-1968`](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-1968): design the represented normative-governance, uncertainty, and escalation architecture for minimal-imposition deployment
+
+Taken together, these tasks mark the transition from "clean up anti-patterns in today's assistant" to "deliberately build the research and deployment substrate for the next class of deployable, minimal-imposition agent systems".
+
+## 8. Anti-Patterns to Keep Rejecting
+
+To preserve the architecture, the following remain design smells:
+
+- lexical pseudo-NLP in Python for durable routing, ranking, or classification policy;
+- hidden phase-specific context thinning;
+- prompt bodies in Python for Vontology-governed features;
+- code-side answer-repair heuristics that should really be critic or workflow policy;
+- treating vector search or transient context as if they were adequate substitutes for durable represented memory;
+- treating one giant general model as if it removes the need for architecture.
+
+## 9. Bottom Line
+
+Von is increasingly becoming the right kind of system.
+
+It is moving away from a brittle "application plus LLM" model and toward a represented, inspectable, capability-composed neuro-symbolic agent platform. Recent progress on workflow discovery, turn contracts, predicate-incidence retrieval, authority-backed interpretation surfaces, and critic/evaluation pathways is real.
+
+But the work is not done.
+
+The path to fully helpful minimal-imposition agentic AI still requires:
+
+- removal of the remaining Python semantic policy seams;
+- mature enduring memory and consolidation;
+- safe self-improvement loops;
+- multimodal knowledge fusion;
+- multi-agent coordination;
+- stronger temporal, institutional, and normative reasoning;
+- continued discipline about represented authority, telemetry, and evaluation.
+
+If Von continues in that direction, it can become not merely a useful assistant, but a genuine platform for the next class of deployable, provenance-bearing, minimal-imposition agent systems.
