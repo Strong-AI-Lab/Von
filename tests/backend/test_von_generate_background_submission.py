@@ -202,9 +202,11 @@ def test_resolve_generate_requested_model_overrides_scoped_setting_with_explicit
 def test_build_generate_conversation_turn_instance_inputs_preserves_requested_model() -> (
     None
 ):
-    import src.backend.server.routes.von_routes as von_routes
+    from src.backend.server.routes.generate_route_support import (
+        _build_generate_conversation_turn_instance_inputs,
+    )
 
-    payload = von_routes._build_generate_conversation_turn_instance_inputs(
+    payload = _build_generate_conversation_turn_instance_inputs(
         session_id="session-1",
         request_id="request-1",
         namespace_source="window_context",
