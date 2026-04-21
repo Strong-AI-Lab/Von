@@ -9,8 +9,42 @@ from src.backend.integrations.internal_mcp.orchestrator import (
     MISSING_TOOL_CALL_WORKFLOW_ID,
     _MissingToolCallDetectorSpec,
 )
+from src.backend.workflows.turn_expected_outcome_contract import (
+    build_turn_expected_outcome_boundary_payload,
+)
 
 _TEST_CLASSIFIER_PROMPT = "Answer YES or NO for: {response}"
+
+
+def _build_structured_turn_contract_payload(
+    *,
+    summary: str | None = None,
+    grounding_requirement: str | None = None,
+    precision_policy: str | None = None,
+    selector_guidance: str | None = None,
+    answering_guidance: str | None = None,
+    reasoning: str | None = None,
+    required_tools: Sequence[str] = (),
+) -> dict[str, Any]:
+    contract: dict[str, Any] = {}
+    for field_name, value in (
+        ("summary", summary),
+        ("grounding_requirement", grounding_requirement),
+        ("precision_policy", precision_policy),
+        ("selector_guidance", selector_guidance),
+        ("answering_guidance", answering_guidance),
+        ("reasoning", reasoning),
+    ):
+        if isinstance(value, str) and value.strip():
+            contract[field_name] = value.strip()
+    tools = [
+        str(item).strip()
+        for item in required_tools
+        if isinstance(item, str) and str(item).strip()
+    ]
+    if tools:
+        contract["required_tools"] = tools
+    return build_turn_expected_outcome_boundary_payload(contract)
 
 
 class _Gateway:
@@ -1181,19 +1215,25 @@ def test_tool_calling_backfill_chains_member_relation_follow_up_from_turn_contra
         Any, lambda **kwargs: _PromptRequirements()
     )
 
-    discovery_query = (
-        "What predicates are salient to SAIL students?\n\n"
-        "Turn-intent routing guidance:\n"
-        "- Routing guidance: Prioritize `search_concepts` to identify the best ontology "
-        "anchor, then inspect relationship instances linking the group or its members "
-        "to other entities.\n"
-        "- Grounding requirement: Every listed predicate must be supported by "
-        "relationship instances or retrieved relation evidence linking the group or "
-        "its members.\n"
-        "- Success target: Identify predicates that demonstrate a verifiable "
-        "relationship usage pattern associated with the group or its members.\n"
-        "- Required tools: search_concepts, get_text_relations_summary, "
-        "find_relations_with_argument"
+    discovery_contract = _build_structured_turn_contract_payload(
+        summary=(
+            "Identify predicates that demonstrate a verifiable relationship usage "
+            "pattern associated with the group or its members."
+        ),
+        grounding_requirement=(
+            "Every listed predicate must be supported by relationship instances or "
+            "retrieved relation evidence linking the group or its members."
+        ),
+        selector_guidance=(
+            "Prioritize `search_concepts` to identify the best ontology anchor, then "
+            "inspect relationship instances linking the group or its members to "
+            "other entities."
+        ),
+        required_tools=(
+            "search_concepts",
+            "get_text_relations_summary",
+            "find_relations_with_argument",
+        ),
     )
 
     request = SimpleNamespace(
@@ -1228,7 +1268,10 @@ def test_tool_calling_backfill_chains_member_relation_follow_up_from_turn_contra
                 }
             ],
             "prompt_requirement_url_policy": {},
-            "workflow_discovery_result": {"query": discovery_query},
+            "workflow_discovery_result": {
+                "query": "What predicates are salient to SAIL students?",
+                **discovery_contract,
+            },
             "missing_tool_call_retry_attempts": 0,
             "missing_tool_call_retry_budget": 2,
             "prefer_default_model": False,
@@ -1581,7 +1624,7 @@ def test_tool_calling_backfill_retries_when_required_ontology_tools_remain_missi
     ]
 
 
-def test_build_turn_expected_outcome_contract_falls_back_to_discovery_query_guidance():
+def test_build_turn_expected_outcome_contract_ignores_discovery_query_guidance_without_structured_state():
     orchestrator = _build_orchestrator_stub()
 
     discovery_query = (
@@ -1603,6 +1646,34 @@ def test_build_turn_expected_outcome_contract_falls_back_to_discovery_query_guid
         {"workflow_discovery_result": {"query": discovery_query}}
     )
 
+    assert contract == {}
+
+
+def test_build_turn_expected_outcome_contract_uses_structured_discovery_contract_state():
+    orchestrator = _build_orchestrator_stub()
+    discovery_contract = _build_structured_turn_contract_payload(
+        summary=(
+            "A precise list of predicates and relationship types that explicitly "
+            "connect 'SAIL students' to other entities or concepts within the "
+            "ontology or knowledge base."
+        ),
+        grounding_requirement=(
+            "All identified predicates or relationships must be verifiable through "
+            "Vontology schema inspection (predicates) or retrieved relation "
+            "instances (text relations) in the KG."
+        ),
+        selector_guidance=(
+            "Prioritize Vontology tools such as `search_concepts`, "
+            "`get_related_concepts`, and `get_text_relations_summary` to identify "
+            "the structural role of 'SAIL students' and their associated predicates."
+        ),
+        required_tools=("search_concepts", "get_text_relations_summary"),
+    )
+
+    contract = orchestrator._build_turn_expected_outcome_contract(
+        {"workflow_discovery_result": discovery_contract}
+    )
+
     assert contract == {
         "summary": (
             "A precise list of predicates and relationship types that explicitly "
@@ -1622,7 +1693,45 @@ def test_build_turn_expected_outcome_contract_falls_back_to_discovery_query_guid
     }
 
 
-def test_tool_calling_backfill_recovers_search_concepts_from_discovery_query_contract():
+def test_build_turn_expected_outcome_contract_object_ignores_prose_required_tools_when_structured_state_present():
+    orchestrator = _build_orchestrator_stub()
+    structured_contract = _build_structured_turn_contract_payload(
+        summary="List grounded represented records linked to the current user.",
+        grounding_requirement=(
+            "Only surface represented records supported by retrieved evidence."
+        ),
+        selector_guidance=(
+            "Use represented-knowledge retrieval and keep the authenticated actor "
+            "context in scope."
+        ),
+        required_tools=("search_knowledge_base",),
+    )
+
+    contract = orchestrator._build_turn_expected_outcome_contract_object(
+        {
+            **structured_contract,
+            "turn_expected_outcome_profile": {
+                "summary": "A stale profile summary should not override the contract state.",
+                "required_tools": ["jira_search"],
+            },
+            "augmented_context": [
+                {
+                    "role": "system",
+                    "content": (
+                        "Expected answer contract for this turn:\n"
+                        "- Required tools: jira_search, search_arxiv\n"
+                        "- Success target: Contradictory prose should be ignored."
+                    ),
+                }
+            ],
+        }
+    )
+
+    assert contract.required_tools == ("search_knowledge_base",)
+    assert contract.summary == "List grounded represented records linked to the current user."
+
+
+def test_tool_calling_backfill_recovers_search_concepts_from_structured_discovery_contract():
     orchestrator = _build_orchestrator_stub()
 
     orchestrator._build_follow_up_llm_context = cast(
@@ -1663,19 +1772,23 @@ def test_tool_calling_backfill_recovers_search_concepts_from_discovery_query_con
         Any, lambda **kwargs: _PromptRequirements()
     )
 
-    discovery_query = (
-        "What are key predicates or represented relationships for SAIL students?\n\n"
-        "Turn-intent routing guidance:\n"
-        "- Routing guidance: Prioritize Vontology tools such as `search_concepts`, "
-        "`get_related_concepts`, and `get_text_relations_summary` to identify the "
-        "structural role of 'SAIL students' and their associated predicates.\n"
-        "- Grounding requirement: All identified predicates or relationships must be "
-        "verifiable through Vontology schema inspection (predicates) or retrieved "
-        "relation instances (text relations) in the KG.\n"
-        "- Required tools: search_concepts, get_text_relations_summary\n"
-        "- Success target: A precise list of predicates and relationship types that "
-        "explicitly connect 'SAIL students' to other entities or concepts within the "
-        "ontology or knowledge base."
+    discovery_contract = _build_structured_turn_contract_payload(
+        summary=(
+            "A precise list of predicates and relationship types that explicitly "
+            "connect 'SAIL students' to other entities or concepts within the "
+            "ontology or knowledge base."
+        ),
+        grounding_requirement=(
+            "All identified predicates or relationships must be verifiable through "
+            "Vontology schema inspection (predicates) or retrieved relation "
+            "instances (text relations) in the KG."
+        ),
+        selector_guidance=(
+            "Prioritize Vontology tools such as `search_concepts`, "
+            "`get_related_concepts`, and `get_text_relations_summary` to identify "
+            "the structural role of 'SAIL students' and their associated predicates."
+        ),
+        required_tools=("search_concepts", "get_text_relations_summary"),
     )
 
     request = SimpleNamespace(
@@ -1708,7 +1821,13 @@ def test_tool_calling_backfill_recovers_search_concepts_from_discovery_query_con
                 }
             ],
             "prompt_requirement_url_policy": {},
-            "workflow_discovery_result": {"query": discovery_query},
+            "workflow_discovery_result": {
+                "query": (
+                    "What are key predicates or represented relationships for "
+                    "SAIL students?"
+                ),
+                **discovery_contract,
+            },
             "missing_tool_call_retry_attempts": 0,
             "missing_tool_call_retry_budget": 2,
             "prefer_default_model": False,

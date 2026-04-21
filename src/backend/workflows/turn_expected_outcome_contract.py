@@ -147,7 +147,7 @@ class TurnExpectedOutcomeContract:
     ) -> TurnExpectedOutcomeContract:
         merged_fields: dict[str, str] = {}
         merged_sources: list[str] = []
-        merged_required_tools: list[str] = []
+        merged_required_tools: tuple[str, ...] = ()
         for raw_contract in contracts:
             contract = (
                 raw_contract
@@ -155,7 +155,8 @@ class TurnExpectedOutcomeContract:
                 else cls.from_mapping(raw_contract)
             )
             merged_sources.extend(contract.sources)
-            merged_required_tools.extend(contract.required_tools)
+            if not merged_required_tools and contract.required_tools:
+                merged_required_tools = contract.required_tools
             if contract.is_empty():
                 continue
             for field_name in TURN_EXPECTED_OUTCOME_CONTRACT_FIELDS:
@@ -173,7 +174,7 @@ class TurnExpectedOutcomeContract:
             selector_guidance=merged_fields.get("selector_guidance"),
             answering_guidance=merged_fields.get("answering_guidance"),
             reasoning=merged_fields.get("reasoning"),
-            required_tools=_dedupe_strings(merged_required_tools),
+            required_tools=merged_required_tools,
             sources=_dedupe_sources(merged_sources),
         )
 

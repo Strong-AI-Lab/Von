@@ -102,10 +102,10 @@ The most important surviving issues are now more concentrated.
 
 #### 3.3.1 The contract-text tool-inference seam has now been removed
 
-The April 21, 2026 bounded `JVNAUTOSCI-1913` landing moved turn-contract tool
-requirements onto the explicit `required_tools` field of the shared
-`TurnExpectedOutcomeContract` support surface and removed the remaining
-contract-text tool-inference helpers from the orchestrator.
+The April 21, 2026 bounded `JVNAUTOSCI-1913` / `JVNAUTOSCI-1972` cleanups moved
+turn-contract tool requirements onto the explicit `required_tools` field of the
+shared `TurnExpectedOutcomeContract` support surface and removed the remaining
+contract-text tool-inference and prose-backfill helpers from the orchestrator.
 
 That means the live path no longer decides Jira, KB, predicate/relation,
 relation-argument, or web retrieval requirements by scanning English contract

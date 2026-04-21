@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This note records the current state of the `JVNAUTOSCI-1913` / `JVNAUTOSCI-1116` anti-hack and de-bloating programme after the April 21, 2026 landings through `JVNAUTOSCI-1956`.
+This note records the current state of the `JVNAUTOSCI-1913` / `JVNAUTOSCI-1116` anti-hack and de-bloating programme after the April 21, 2026 landings through `JVNAUTOSCI-1972`.
 
 It replaces an earlier draft that had become materially stale. In particular:
 
@@ -140,7 +140,7 @@ As of April 21, 2026:
 | Task | Status | Note |
 |------|--------|------|
 | `JVNAUTOSCI-1116` | `To Do` | Epic remains open even though many child cleanups are complete |
-| `JVNAUTOSCI-1913` | `In Progress` | Still the right umbrella; bounded April 21 landing removed remaining contract-text tool inference from turn contracts |
+| `JVNAUTOSCI-1913` | `In Progress` | Still the right umbrella; April 21 follow-through through `JVNAUTOSCI-1972` removed contract-text tool inference and the final turn-contract prose backfill from the live path |
 | `JVNAUTOSCI-1929` | `Done` | Turn contract is now a first-class boundary object |
 | `JVNAUTOSCI-1930` | `Done` | Dispatch preflight is now contract-aware |
 | `JVNAUTOSCI-1953` | `Done` | Structured tool-family keyword/prefix heuristics removed |
@@ -151,6 +151,7 @@ As of April 21, 2026:
 | `JVNAUTOSCI-1120` | `To Do` | Frontend monolith cleanup remains open |
 | `JVNAUTOSCI-1825` | `Done` | `create_flask_app(...)` is now a materially smaller composition layer over extracted startup/admin support surfaces |
 | `JVNAUTOSCI-1971` | `Done` | Residual buttonify heuristic/prose-recovery helpers and stale compatibility surfaces removed; live path is structured-output-only |
+| `JVNAUTOSCI-1972` | `Done` | Residual turn-contract prose parsing removed; structured contract state is now the only live Python authority for `required_tools` |
 | `JVNAUTOSCI-768` | `To Do` | Vontology concept structure for tool heuristics still not landed |
 | `JVNAUTOSCI-770` | `To Do` | Rule-loader integration task still not landed |
 | `JVNAUTOSCI-1813` | `To Do` | Deferred structural exception-barrier task, not in the core `1116` line |
@@ -253,10 +254,10 @@ That authoritative producer has now been introduced on the canonical conversatio
 
 ### Follow-on Landing — April 21, 2026
 
-A bounded `JVNAUTOSCI-1913` landing has now removed the remaining orchestrator
-contract-text tool-inference seam.
+A bounded `JVNAUTOSCI-1913` follow-on landing in `JVNAUTOSCI-1972` has now
+removed the remaining orchestrator contract-text tool-inference seam.
 
-- `TurnExpectedOutcomeContract` now carries explicit `required_tools` state and preserves it across discovery-query fallback, stage-boundary rendering, dispatch preflight, and selector/tool/recovery context projection.
+- `TurnExpectedOutcomeContract` now carries explicit `required_tools` state and preserves it across stage-boundary rendering, dispatch preflight, and selector/tool/recovery context projection without reparsing support prose back into Python decision state.
 - the expected-outcome inference prompt now emits `required_tools` as part of the authoritative contract payload instead of forcing later Python recovery from prose wording
 - the old orchestrator helpers that inferred KB / relation / web retrieval surfaces by scanning contract text have been deleted
 

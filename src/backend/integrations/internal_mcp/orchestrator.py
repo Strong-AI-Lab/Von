@@ -12136,130 +12136,6 @@ class InternalMCPChatOrchestrator:
             missing_retry_reason=missing_retry_reason,
         )
 
-    @classmethod
-    def _extract_turn_expected_outcome_contract_from_context_messages(
-        cls,
-        context_messages: Sequence[Mapping[str, Any]] | None,
-    ) -> dict[str, Any]:
-        contract: dict[str, Any] = {}
-        field_by_label = {
-            "success target": "summary",
-            "grounding requirement": "grounding_requirement",
-            "precision policy": "precision_policy",
-            "selector guidance": "selector_guidance",
-            "answering guidance": "answering_guidance",
-            "why this matters": "reasoning",
-        }
-
-        for message in context_messages or ():
-            if not isinstance(message, Mapping):
-                continue
-            content = message.get("content")
-            if not isinstance(content, str) or not content.strip():
-                continue
-            if "Expected answer contract for this turn:" not in content:
-                continue
-            for raw_line in content.splitlines():
-                line = raw_line.strip()
-                if not line.startswith("-"):
-                    continue
-                body = line[1:].strip()
-                if ":" not in body:
-                    continue
-                label_text, value_text = body.split(":", 1)
-                label = label_text.strip().lower()
-                if label == "required tools":
-                    required_tools = cls._parse_turn_contract_required_tools_text(
-                        value_text
-                    )
-                    if required_tools:
-                        contract["required_tools"] = required_tools
-                    continue
-                field_name = field_by_label.get(label)
-                value = value_text.strip()
-                if field_name and value:
-                    contract[field_name] = value
-
-        return contract
-
-    @classmethod
-    def _extract_turn_expected_outcome_contract_from_discovery_query(
-        cls,
-        workflow_discovery_result: Mapping[str, Any] | None,
-    ) -> dict[str, Any]:
-        if not isinstance(workflow_discovery_result, Mapping):
-            return {}
-
-        direct_contract = TurnExpectedOutcomeContract.merge_preferred(
-            TurnExpectedOutcomeContract.from_mapping(
-                workflow_discovery_result.get("turn_expected_outcome_contract_state"),
-                source="workflow_discovery.turn_expected_outcome_contract_state",
-            ),
-            TurnExpectedOutcomeContract.from_mapping(
-                workflow_discovery_result.get("turn_expected_outcome_contract"),
-                source="workflow_discovery.turn_expected_outcome_contract",
-            ),
-        )
-        if not direct_contract.is_empty():
-            return cls._turn_expected_outcome_contract_payload(direct_contract)
-
-        discovery_query_text = workflow_discovery_result.get("discovery_query_input")
-        if not isinstance(discovery_query_text, str) or not discovery_query_text.strip():
-            discovery_query_text = workflow_discovery_result.get("query")
-        if (
-            not isinstance(discovery_query_text, str)
-            or "Turn-intent routing guidance:" not in discovery_query_text
-        ):
-            return {}
-
-        guidance_block = discovery_query_text.split(
-            "Turn-intent routing guidance:", 1
-        )[-1]
-        contract: dict[str, Any] = {}
-        field_by_label = {
-            "routing guidance": "selector_guidance",
-            "grounding requirement": "grounding_requirement",
-            "success target": "summary",
-        }
-        for raw_line in guidance_block.splitlines():
-            line = raw_line.strip()
-            if not line.startswith("-"):
-                continue
-            body = line[1:].strip()
-            if ":" not in body:
-                continue
-            label_text, value_text = body.split(":", 1)
-            label = label_text.strip().lower()
-            if label == "required tools":
-                required_tools = cls._parse_turn_contract_required_tools_text(
-                    value_text
-                )
-                if required_tools:
-                    contract["required_tools"] = required_tools
-                continue
-            field_name = field_by_label.get(label)
-            value = value_text.strip()
-            if field_name and value:
-                contract[field_name] = value
-        return contract
-
-    @staticmethod
-    def _parse_turn_contract_required_tools_text(value: Any) -> list[str]:
-        if not isinstance(value, str):
-            return []
-        tools: list[str] = []
-        seen: set[str] = set()
-        for raw_item in value.split(","):
-            cleaned = raw_item.strip().strip("`")
-            if not cleaned:
-                continue
-            lowered = cleaned.lower()
-            if lowered in seen:
-                continue
-            seen.add(lowered)
-            tools.append(cleaned)
-        return tools
-
     @staticmethod
     def _turn_expected_outcome_contract_payload(
         contract: TurnExpectedOutcomeContract | Mapping[str, Any] | None,
@@ -25948,24 +25824,10 @@ class InternalMCPChatOrchestrator:
         workflow_discovery_payload = (
             raw_workflow_discovery if isinstance(raw_workflow_discovery, Mapping) else {}
         )
-        raw_augmented_context = data.get("augmented_context")
-        augmented_context = (
-            cast(Sequence[Mapping[str, Any]], raw_augmented_context)
-            if isinstance(raw_augmented_context, Sequence)
-            and not isinstance(raw_augmented_context, (str, bytes, bytearray))
-            else ()
-        )
-        discovery_contract = cls._extract_turn_expected_outcome_contract_from_discovery_query(
-            workflow_discovery_payload
-        )
         return TurnExpectedOutcomeContract.merge_preferred(
             TurnExpectedOutcomeContract.from_mapping(
                 data,
                 source="turn_context",
-            ),
-            TurnExpectedOutcomeContract.from_mapping(
-                data.get("turn_expected_outcome_profile"),
-                source="turn_expected_outcome_profile",
             ),
             TurnExpectedOutcomeContract.from_mapping(
                 data.get("turn_expected_outcome_contract_state"),
@@ -25974,12 +25836,6 @@ class InternalMCPChatOrchestrator:
             TurnExpectedOutcomeContract.from_mapping(
                 data.get("turn_expected_outcome_contract"),
                 source="turn_expected_outcome_contract",
-            ),
-            TurnExpectedOutcomeContract.from_mapping(
-                cls._extract_turn_expected_outcome_contract_from_context_messages(
-                    augmented_context
-                ),
-                source="augmented_context.turn_expected_outcome_contract",
             ),
             TurnExpectedOutcomeContract.from_mapping(
                 selected_workflow_trace.get("expected_outcome_contract_state"),
@@ -25998,8 +25854,8 @@ class InternalMCPChatOrchestrator:
                 source="workflow_discovery.turn_expected_outcome_contract",
             ),
             TurnExpectedOutcomeContract.from_mapping(
-                discovery_contract,
-                source="workflow_discovery.query_contract",
+                data.get("turn_expected_outcome_profile"),
+                source="turn_expected_outcome_profile",
             ),
         )
 
@@ -29952,21 +29808,11 @@ class InternalMCPChatOrchestrator:
                 url_requirement=routing_url_requirement,
             ),
         )
-        routing_turn_expected_outcome_contract = (
-            self._extract_turn_expected_outcome_contract_from_context_messages(
-                augmented_context
-            )
-        )
-        if not routing_turn_expected_outcome_contract:
-            routing_turn_expected_outcome_contract = (
-                self._extract_turn_expected_outcome_contract_from_discovery_query(
-                    workflow_discovery_result
-                )
-                or {}
-            )
         routing_turn_expected_outcome_contract_object = (
-            TurnExpectedOutcomeContract.from_mapping(
-                routing_turn_expected_outcome_contract
+            self._build_turn_expected_outcome_contract_object(
+                {
+                    "workflow_discovery_result": workflow_discovery_result,
+                }
             )
         )
         routing_explicit_required_tools = tuple(routing_prompt_requirements.required_tools)

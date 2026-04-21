@@ -52,12 +52,46 @@ from src.backend.workflows.definitions import (
     TOOL_CALLING_WORKFLOW_ID,
     TODO_REFRESH_WORKFLOW_ID,
 )
+from src.backend.workflows.turn_expected_outcome_contract import (
+    build_turn_expected_outcome_boundary_payload,
+)
 from src.backend.workflows.vontology_loader import load_workflow_definition_from_vontology
 from src.backend.workflows.workflow_gap_workflow_contracts import (
     WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
 )
 from src.backend.workflows.workflow_selector import WorkflowSelector
 from orchestrator_test_harness import build_db_independent_orchestrator
+
+
+def _build_structured_turn_contract_payload(
+    *,
+    summary: str | None = None,
+    grounding_requirement: str | None = None,
+    precision_policy: str | None = None,
+    selector_guidance: str | None = None,
+    answering_guidance: str | None = None,
+    reasoning: str | None = None,
+    required_tools: Sequence[str] = (),
+) -> dict[str, Any]:
+    contract: dict[str, Any] = {}
+    for field_name, value in (
+        ("summary", summary),
+        ("grounding_requirement", grounding_requirement),
+        ("precision_policy", precision_policy),
+        ("selector_guidance", selector_guidance),
+        ("answering_guidance", answering_guidance),
+        ("reasoning", reasoning),
+    ):
+        if isinstance(value, str) and value.strip():
+            contract[field_name] = value.strip()
+    tools = [
+        str(item).strip()
+        for item in required_tools
+        if isinstance(item, str) and str(item).strip()
+    ]
+    if tools:
+        contract["required_tools"] = tools
+    return build_turn_expected_outcome_boundary_payload(contract)
 
 
 # ---------------------------------------------------------------------------
@@ -6247,6 +6281,22 @@ def test_multi_surface_turn_contract_overrides_selected_custom_workflow_to_tool_
 ):
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
     selected_workflow_id = "#V#concept_search_instance_retrieval_workflow"
+    structured_contract = _build_structured_turn_contract_payload(
+        summary=(
+            "A concise research briefing comprising represented papers, recent "
+            "relevant arXiv work, and linked Jira tasks."
+        ),
+        grounding_requirement=(
+            "Papers must be grounded via authorship or ownership relationships."
+        ),
+        selector_guidance="Use KB/concept retrieval, arXiv search, and Jira retrieval.",
+        required_tools=(
+            "search_knowledge_base",
+            "search_concepts",
+            "search_arxiv",
+            "jira_search",
+        ),
+    )
 
     _register_terminal_custom_workflow(
         orchestrator,
@@ -6299,14 +6349,9 @@ def test_multi_surface_turn_contract_overrides_selected_custom_workflow_to_tool_
                 "role": "system",
                 "content": (
                     "Expected answer contract for this turn:\n"
-                    "- Success target: A concise research briefing comprising "
-                    "represented papers, recent relevant arXiv work, and linked Jira tasks.\n"
-                    "- Grounding requirement: Papers must be grounded via authorship "
-                    "or ownership relationships.\n"
-                    "- Required tools: search_knowledge_base, search_concepts, "
-                    "search_arxiv, jira_search\n"
-                    "- Selector guidance: Use KB/concept retrieval, arXiv search, "
-                    "and Jira retrieval."
+                    "- Success target: Contradictory prose should not control dispatch.\n"
+                    "- Required tools: task_list\n"
+                    "- Selector guidance: This support string is intentionally wrong."
                 ),
             }
         ],
@@ -6354,6 +6399,7 @@ def test_multi_surface_turn_contract_overrides_selected_custom_workflow_to_tool_
                 }
             ],
             "match_count": 1,
+            **structured_contract,
         },
     )
 
@@ -6449,6 +6495,22 @@ def test_multi_surface_turn_contract_records_satisfied_tool_pipeline_dispatch_ch
     monkeypatch,
 ):
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    structured_contract = _build_structured_turn_contract_payload(
+        summary=(
+            "Three grounded research actions based on represented papers, relevant "
+            "recent arXiv work, and linked Jira tasks."
+        ),
+        grounding_requirement=(
+            "Papers and tasks must be grounded in represented or retrieved evidence."
+        ),
+        selector_guidance="Use KB/concept retrieval, arXiv search, and Jira retrieval.",
+        required_tools=(
+            "search_knowledge_base",
+            "search_concepts",
+            "search_arxiv",
+            "jira_search",
+        ),
+    )
 
     monkeypatch.setattr(
         orchestrator,
@@ -6550,6 +6612,7 @@ def test_multi_surface_turn_contract_records_satisfied_tool_pipeline_dispatch_ch
                 }
             ],
             "match_count": 1,
+            **structured_contract,
         },
     )
 
@@ -9057,6 +9120,12 @@ def test_custom_workflow_fallback_handoff_preserves_turn_expected_outcome_contra
         "grounding_requirement": expected_contract["grounding_requirement"],
         "selector_guidance": expected_contract["selector_guidance"],
     }
+    structured_contract = _build_structured_turn_contract_payload(
+        summary=expected_discovery_contract["summary"],
+        grounding_requirement=expected_discovery_contract["grounding_requirement"],
+        selector_guidance=expected_discovery_contract["selector_guidance"],
+    )
+
     class _ContractAwareSelectorLLM:
         def __init__(self) -> None:
             self.calls: list[dict[str, Any]] = []
@@ -9126,13 +9195,8 @@ def test_custom_workflow_fallback_handoff_preserves_turn_expected_outcome_contra
                     "executability_reason": "executable_now",
                 }
             ],
-            "query": (
-                "What predicates are salient to SAIL students?\n\n"
-                "Turn-intent routing guidance:\n"
-                f"- Routing guidance: {expected_contract['selector_guidance']}\n"
-                f"- Grounding requirement: {expected_contract['grounding_requirement']}\n"
-                f"- Success target: {expected_contract['summary']}"
-            ),
+            "query": "What predicates are salient to SAIL students?",
+            **structured_contract,
         },
     )
 
