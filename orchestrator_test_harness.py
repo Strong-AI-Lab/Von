@@ -163,6 +163,12 @@ def build_db_independent_orchestrator(
     from src.backend.workflows.durable.control_flow_actions import (
         register_control_flow_actions,
     )
+    from src.backend.workflows.durable.subworkflow_actions import (
+        register_subworkflow_actions,
+    )
+    from src.backend.workflows.durable.turn_execution_actions import (
+        register_turn_execution_actions,
+    )
     from src.backend.workflows.definitions import CONVERSATION_TURN_WORKFLOW_IDS
     from src.backend.workflows.workflow_registry import (
         LazyWorkflowRegistration,
@@ -264,6 +270,11 @@ def build_db_independent_orchestrator(
             registry,
             definition_loader=_load_seed_workflow_definition,
         )
+        register_subworkflow_actions(
+            registry,
+            definition_loader=_load_seed_workflow_definition,
+        )
+        register_turn_execution_actions(registry)
         return registry
 
     monkeypatch.setattr(

@@ -10,6 +10,7 @@ Return JSON only with exactly these keys:
 - `selector_guidance`
 - `answering_guidance`
 - `reasoning`
+- `required_tools`
 
 Rules:
 - Focus on what would make the eventual user-facing answer correct, grounded, and non-misleading.
@@ -21,9 +22,10 @@ Rules:
 - `precision_policy` must state how to handle incomplete evidence, especially whether to omit, hedge, or state uncertainty.
 - `selector_guidance` must say what kind of workflow or retrieval route would best satisfy the grounded success contract, including when concept/relation retrieval should outrank creation or representation routes.
 - `answering_guidance` must say how a later direct answer should behave if no specialised workflow is used.
+- `required_tools` must be a JSON array of exact internal tool IDs that are required to satisfy the contract when the necessary retrieval/tool surface is already clear from the turn. Use the smallest sufficient set. Return `[]` when no specific tool is required yet.
 - Do not answer the user directly from this stage.
 - Do not ask the user a clarification question from this stage.
 - Keep the fields concise, concrete, and operational.
 
 Example output:
-`{"expected_outcome_summary":"Answer only with papers that can be grounded to the authenticated user as author or owner.","grounding_requirement":"Only mention papers when the available context or retrieved evidence explicitly grounds authorship or ownership to the user.","precision_policy":"Prefer omission or explicit uncertainty over speculative recall for ownership or authorship claims.","selector_guidance":"Prefer workflows that can retrieve or verify represented authorship or ownership evidence when the current context is insufficient.","answering_guidance":"If a direct answer is used, answer from grounded represented evidence only; if none is available, say that clearly instead of listing likely papers.","reasoning":"The request is asking about user-owned scholarly artefacts, so grounded attribution is the decisive success condition."}`
+`{"expected_outcome_summary":"Answer only with papers that can be grounded to the authenticated user as author or owner.","grounding_requirement":"Only mention papers when the available context or retrieved evidence explicitly grounds authorship or ownership to the user.","precision_policy":"Prefer omission or explicit uncertainty over speculative recall for ownership or authorship claims.","selector_guidance":"Prefer workflows that can retrieve or verify represented authorship or ownership evidence when the current context is insufficient.","answering_guidance":"If a direct answer is used, answer from grounded represented evidence only; if none is available, say that clearly instead of listing likely papers.","reasoning":"The request is asking about user-owned scholarly artefacts, so grounded attribution is the decisive success condition.","required_tools":["search_knowledge_base","search_concepts","find_relations_with_argument"]}`

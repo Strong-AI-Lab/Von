@@ -189,8 +189,10 @@ class _IdentityLLM:
                 '"confidence":0.91,'
                 '"reasoning":"The authenticated identity request is a grounded direct-response turn."}'
             )
-        if isinstance(prompt, str) and "organisation" in prompt.lower():
+        if isinstance(prompt, str) and "which organisation am i in?" in prompt.lower():
             return "You are in Test Org (#V#test_org)."
+        if isinstance(prompt, str) and "who am i?" in prompt.lower():
+            return "You are Test User (#V#test_user)."
         return "You are Test User (#V#test_user)."
 
 
@@ -302,40 +304,56 @@ class _GroundedKbLookupGatewayStub:
 
     def invoke(self, tool_name: str, payload: dict[str, Any]):
         self.invocations.append({"tool": tool_name, "payload": dict(payload)})
-        if tool_name != "search_knowledge_base":
-            raise AssertionError(f"Unexpected tool call: {tool_name}")
-        return SimpleNamespace(
-            payload={
-                "success": True,
-                "query": payload.get("query"),
-                "count": 2,
-                "results": [
-                    {
-                        "id": "text_relation:1",
-                        "text": "Grounded represented record: Example Record.",
-                        "score": 0.93,
-                        "metadata": {
-                            "type": "text_relation",
-                            "predicate": "hasName",
+        if tool_name == "search_knowledge_base":
+            return SimpleNamespace(
+                payload={
+                    "success": True,
+                    "query": payload.get("query"),
+                    "count": 2,
+                    "results": [
+                        {
+                            "id": "text_relation:1",
+                            "text": "Grounded represented record: Example Record.",
+                            "score": 0.93,
+                            "metadata": {
+                                "type": "text_relation",
+                                "predicate": "hasName",
+                                "concept_id": "#V#example_record",
+                                "item_kind": "rag_chunk",
+                                "source_system": "mongo.text_relations",
+                            },
+                        },
+                        {
+                            "id": "chat_history:1",
+                            "text": "Previous conversational mention of an indexed record.",
+                            "score": 0.71,
+                            "metadata": {
+                                "type": "chat_message",
+                                "item_kind": "rag_chunk",
+                                "source_system": "mongo.chat_history",
+                            },
+                        },
+                    ],
+                },
+                duration_ms=5,
+            )
+        if tool_name == "search_concepts":
+            return SimpleNamespace(
+                payload={
+                    "success": True,
+                    "query": payload.get("query"),
+                    "count": 1,
+                    "results": [
+                        {
                             "concept_id": "#V#example_record",
-                            "item_kind": "rag_chunk",
-                            "source_system": "mongo.text_relations",
-                        },
-                    },
-                    {
-                        "id": "chat_history:1",
-                        "text": "Previous conversational mention of an indexed record.",
-                        "score": 0.71,
-                        "metadata": {
-                            "type": "chat_message",
-                            "item_kind": "rag_chunk",
-                            "source_system": "mongo.chat_history",
-                        },
-                    },
-                ],
-            },
-            duration_ms=5,
-        )
+                            "name": "Example Record",
+                            "score": 0.92,
+                        }
+                    ],
+                },
+                duration_ms=5,
+            )
+        raise AssertionError(f"Unexpected tool call: {tool_name}")
 
 
 class _MixedGroundedEvidenceGatewayStub:
@@ -474,7 +492,8 @@ class _EntityRelativeToolPipelineLLM:
                 '"precision_policy":"Prefer explicit uncertainty over unsupported attribution.",'
                 '"selector_guidance":"Prefer tool-based concept or relation retrieval when grounded user-linked facts are not already explicit in context.",'
                 '"answering_guidance":"Retrieve grounded user-linked facts before answering, and state clearly when no grounded facts are found.",'
-                '"reasoning":"Entity-relative KB lookup turns should retrieve represented relations instead of asking the user for identifiers when authenticated context exists."}'
+                '"reasoning":"Entity-relative KB lookup turns should retrieve represented relations instead of asking the user for identifiers when authenticated context exists.",'
+                '"required_tools":["test.lookup_current_user_papers"]}'
             )
         if isinstance(prompt, str) and prompt.strip().startswith("Select workflow"):
             return (
@@ -522,7 +541,8 @@ class _GroundedKbLookupLLM:
                 '"precision_policy":"Prefer explicit uncertainty over unsupported linkage.",'
                 '"selector_guidance":"Use search_concepts and represented-knowledge retrieval, and keep the authenticated actor context in scope.",'
                 '"answering_guidance":"Answer from the retrieved evidence rather than returning only counts.",'
-                '"reasoning":"Entity-relative represented lookup turns should preserve turn context into retrieval and response stages."}'
+                '"reasoning":"Entity-relative represented lookup turns should preserve turn context into retrieval and response stages.",'
+                '"required_tools":["search_knowledge_base","search_concepts"]}'
             )
         if isinstance(prompt, str) and prompt.strip().startswith("Select workflow"):
             return (
@@ -576,7 +596,8 @@ class _MixedGroundedEvidenceLLM:
                 '"precision_policy":"Prefer explicit uncertainty over unsupported linkage.",'
                 '"selector_guidance":"Use grounded retrieval surfaces and keep the authenticated actor context in scope.",'
                 '"answering_guidance":"Prefer concrete retrieved evidence over count-only or zero-result summaries.",'
-                '"reasoning":"Mixed retrieval turns should not let an early zero-result surface suppress later grounded evidence."}'
+                '"reasoning":"Mixed retrieval turns should not let an early zero-result surface suppress later grounded evidence.",'
+                '"required_tools":["search_knowledge_base","find_relations_with_argument"]}'
             )
         if isinstance(prompt, str) and prompt.strip().startswith("Select workflow"):
             return (
@@ -648,13 +669,38 @@ class _FalseNegativeGroundedEvidenceLLM:
                 '"precision_policy":"Prefer explicit uncertainty over unsupported linkage.",'
                 '"selector_guidance":"Use grounded retrieval surfaces and keep the authenticated actor context in scope.",'
                 '"answering_guidance":"Prefer concrete retrieved evidence over count-only or zero-result summaries.",'
-                '"reasoning":"Mixed retrieval turns should not let an early zero-result surface suppress later grounded evidence."}'
+                '"reasoning":"Mixed retrieval turns should not let an early zero-result surface suppress later grounded evidence.",'
+                '"required_tools":["search_knowledge_base","find_relations_with_argument"]}'
             )
         if isinstance(prompt, str) and prompt.strip().startswith("Select workflow"):
             return (
                 '{"workflow_id":"#V#tool_calling_workflow",'
                 '"confidence":0.95,'
                 '"reasoning":"This is a grounded represented-knowledge lookup that should execute retrieval before answering."}'
+            )
+        if (
+            isinstance(prompt, str)
+            and "You are the postcondition critic for one completed Von turn." in prompt
+        ):
+            return (
+                '{"verdict":"follow_up_required",'
+                '"confidence":0.98,'
+                '"assessment_summary":"The answer says no grounded links were found even though relation retrieval produced grounded evidence linking Example Record to the current user.",'
+                '"required_evidence_answer_consistency_blocker":{'
+                '"effect_id":"effect_prompt_required_evidence_answer_consistency",'
+                '"effect_type":"required_evidence_answer_consistency",'
+                '"status":"not_satisfied",'
+                '"decision":"partial",'
+                '"decision_reason":"The answer contradicts grounded positive relation evidence from the executed retrieval path.",'
+                '"status_reason":"Positive relation evidence was retrieved after the zero-result search, so the low-information answer is not safely supported.",'
+                '"failure_code":"prompt_required_evidence_positive_results_contradict_low_information_answer",'
+                '"failure_codes":["prompt_required_evidence_positive_results_contradict_low_information_answer"],'
+                '"repeat_eligible":true,'
+                '"blocker_source":"critic_verdict",'
+                '"response_surface_kind":"insufficiency_claim",'
+                '"observed_result_signals":["positive_relation_hits"]'
+                '},'
+                '"recommendations":["Revise the answer to reflect the grounded relation evidence instead of claiming no grounded links were found."]}'
             )
         if prompt == "List grounded represented records linked to the current user.":
             if (
@@ -702,7 +748,8 @@ class _ExplicitEntityRelationLookupLLM:
                 '"precision_policy":"Prefer explicit uncertainty over unsupported relationship claims.",'
                 '"selector_guidance":"Prefer concept, relation, or tool-based retrieval over generic chat when represented lookup is required.",'
                 '"answering_guidance":"Retrieve the grounded relationship before answering, and say clearly when no grounded relation is found.",'
-                '"reasoning":"Explicit entity-relation lookup turns should retrieve represented facts instead of answering from unsupported recall."}'
+                '"reasoning":"Explicit entity-relation lookup turns should retrieve represented facts instead of answering from unsupported recall.",'
+                '"required_tools":["test.lookup_entity_affiliation"]}'
             )
         if isinstance(prompt, str) and prompt.strip().startswith("Select workflow"):
             return (
@@ -895,7 +942,8 @@ class _PredicateExtentRoutingLLM:
                 '"precision_policy":"Prefer explicit insufficiency over unsupported relation claims.",'
                 '"selector_guidance":"Prefer ontology-native retrieval surfaces that narrow by predicate before broad relation-hit paging.",'
                 '"answering_guidance":"Use the predicate incidence evidence to choose the relevant predicate, then answer from grounded relation hits.",'
-                '"reasoning":"Explicit predicate-relative turns should not rely on broad unfiltered relation paging when authenticated actor context exists."}'
+                '"reasoning":"Explicit predicate-relative turns should not rely on broad unfiltered relation paging when authenticated actor context exists.",'
+                '"required_tools":["get_predicate_incidence","find_relations_with_argument"]}'
             )
         if isinstance(prompt, str) and prompt.strip().startswith("Select workflow"):
             return (

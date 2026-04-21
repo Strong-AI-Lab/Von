@@ -90,6 +90,8 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     )
     assert "`selector_guidance`" in expected_outcome_text
     assert "`answering_guidance`" in expected_outcome_text
+    assert "`required_tools`" in expected_outcome_text
+    assert "exact internal tool IDs" in expected_outcome_text
 
     selector_rows = get_texts_for_concept(
         SELECTOR_PROMPT_CONCEPT_ID,

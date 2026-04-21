@@ -2897,24 +2897,45 @@ def test_selector_receives_discovered_workflows(monkeypatch):
     """Discovered workflows should reach selector context after JIT registration."""
 
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
-
-    # Selector returns a discovered workflow ID — but since it won't be in the
-    # registry, the orchestrator should log a warning and fall through to
-    # tool-calling.
-    llm = _CapturingLLM(
-        [
-            "#v#custom_analysis_workflow",  # selector verdict (discovered WF)
-            "Falling back to tool calling.",  # plan handler
-        ]
+    custom_workflow_id = "#V#custom_analysis_workflow"
+    _register_terminal_custom_workflow(
+        orchestrator,
+        workflow_id=custom_workflow_id,
+        purpose="Runs a custom data analysis pipeline.",
     )
+
+    _stub_execute_workflow_result(
+        monkeypatch,
+        orchestrator,
+        expected_workflow_id=custom_workflow_id,
+        data={"final_response": "Custom analysis complete."},
+    )
+
+    llm = _CapturingLLM([custom_workflow_id.lower()])
 
     discovery_result = {
         "matches": [
             {
-                "concept_id": "#V#custom_analysis_workflow",
+                "concept_id": custom_workflow_id,
                 "name": "Custom Analysis",
                 "description": "Runs a custom data analysis pipeline.",
                 "relevance_score": 0.85,
+                "is_executable": True,
+                "executability_reason": "executable_now",
+                "routing_eligible": True,
+                "candidate_source": "workflow_discovery",
+            }
+        ],
+        "candidates": [
+            {
+                "concept_id": custom_workflow_id,
+                "name": "Custom Analysis",
+                "description": "Runs a custom data analysis pipeline.",
+                "relevance_score": 0.85,
+                "is_executable": True,
+                "executability_reason": "executable_now",
+                "routing_eligible": True,
+                "candidate_source": "workflow_discovery",
             }
         ],
         "match_count": 1,
@@ -2940,7 +2961,7 @@ def test_selector_receives_discovered_workflows(monkeypatch):
     )
     assert selector_entry is not None
     discovered_ids = set(selector_entry.get("discovered_workflow_ids", []))
-    assert "#V#custom_analysis_workflow" in discovered_ids
+    assert custom_workflow_id in discovered_ids
     assert {
         CHAT_ASSISTANT_WORKFLOW_ID,
         TOOL_CALLING_WORKFLOW_ID,
@@ -2949,10 +2970,9 @@ def test_selector_receives_discovered_workflows(monkeypatch):
     assert selector_entry.get("discovery_candidate_count") == 4
     assert selector_entry.get("discovery_excluded_count") == 0
 
-    # Since the workflow is not in the registry, execute_workflow returns None
-    # and we fall through to tool-calling.  The response should come from the
-    # plan handler (second LLM call).
-    assert "Falling back" in result.response_text or result.response_text
+    assert result.workflow_routing is not None
+    assert result.workflow_routing.workflow_id == custom_workflow_id
+    assert result.response_text == "Custom analysis complete."
 
 
 def test_selector_unmatched_non_default_candidate_uses_safe_general_tool_fallback(
@@ -5003,9 +5023,9 @@ def test_selector_disabled_skips_classifier(monkeypatch):
         user_namespace="#V#user",
     )
 
-    # Only one LLM call (the planner), no selector call.
-    assert len(llm.calls) == 1
-    assert llm.calls[0]["prompt"] != "Select workflow"
+    assert llm.calls
+    assert llm.calls[0]["prompt"] == "Hello"
+    assert all(call["prompt"] != "Select workflow" for call in llm.calls)
 
     aux_types = [
         entry.get("type") for entry in result.aux_llm_calls if isinstance(entry, dict)
@@ -5033,8 +5053,9 @@ def test_no_namespace_skips_selector(monkeypatch):
         # No user_namespace — selector should be skipped.
     )
 
-    assert len(llm.calls) == 1
-    assert llm.calls[0]["prompt"] != "Select workflow"
+    assert llm.calls
+    assert llm.calls[0]["prompt"] == "Hello"
+    assert all(call["prompt"] != "Select workflow" for call in llm.calls)
 
     aux_types = [
         entry.get("type") for entry in result.aux_llm_calls if isinstance(entry, dict)
@@ -6282,6 +6303,8 @@ def test_multi_surface_turn_contract_overrides_selected_custom_workflow_to_tool_
                     "represented papers, recent relevant arXiv work, and linked Jira tasks.\n"
                     "- Grounding requirement: Papers must be grounded via authorship "
                     "or ownership relationships.\n"
+                    "- Required tools: search_knowledge_base, search_concepts, "
+                    "search_arxiv, jira_search\n"
                     "- Selector guidance: Use KB/concept retrieval, arXiv search, "
                     "and Jira retrieval."
                 ),
@@ -6476,6 +6499,8 @@ def test_multi_surface_turn_contract_records_satisfied_tool_pipeline_dispatch_ch
                     "represented papers, relevant recent arXiv work, and linked Jira tasks.\n"
                     "- Grounding requirement: Papers and tasks must be grounded in "
                     "represented or retrieved evidence.\n"
+                    "- Required tools: search_knowledge_base, search_concepts, "
+                    "search_arxiv, jira_search\n"
                     "- Selector guidance: Use KB/concept retrieval, arXiv search, "
                     "and Jira retrieval."
                 ),

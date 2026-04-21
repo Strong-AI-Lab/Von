@@ -117,6 +117,7 @@ Now:
 - explicit predicate-relative ontology turns now have a first-class incidence lookup rather than broad unfiltered relation paging as the primary narrowing step
 - several domain interpretation surfaces have been moved behind prompt/Vontology-backed services
 - turn expected-outcome contract handling is explicit and stage-boundary-visible
+- turn-contract tool requirements now travel as explicit `required_tools` contract state rather than being re-inferred from prose inside the orchestrator
 - grounded false-negative answer paths no longer silently count as verified success in turn-execution correctness reporting
 - anti-drift reporting now guards multiple high-risk support surfaces
 
@@ -126,7 +127,7 @@ That is substantial progress even though the remaining monoliths are still too l
 
 Some honest current code-size facts:
 
-- `src/backend/integrations/internal_mcp/orchestrator.py` is still `34,741` lines
+- `src/backend/integrations/internal_mcp/orchestrator.py` is still `34,608` lines
 - `src/backend/integrations/internal_mcp/catalogue.py` is still `27,466` lines
 - `src/backend/server/routes/von_routes.py` is still `13,348` lines
 
@@ -139,7 +140,7 @@ As of April 21, 2026:
 | Task | Status | Note |
 |------|--------|------|
 | `JVNAUTOSCI-1116` | `To Do` | Epic remains open even though many child cleanups are complete |
-| `JVNAUTOSCI-1913` | `In Progress` | Still the right umbrella for the anti-hack line |
+| `JVNAUTOSCI-1913` | `In Progress` | Still the right umbrella; bounded April 21 landing removed remaining contract-text tool inference from turn contracts |
 | `JVNAUTOSCI-1929` | `Done` | Turn contract is now a first-class boundary object |
 | `JVNAUTOSCI-1930` | `Done` | Dispatch preflight is now contract-aware |
 | `JVNAUTOSCI-1953` | `Done` | Structured tool-family keyword/prefix heuristics removed |
@@ -249,3 +250,17 @@ That authoritative producer has now been introduced on the canonical conversatio
 - `#V#kb_mutation_postcondition_critic_workflow` is now a real multi-step authority surface: it first builds a bounded turn-execution evidence bundle, then runs `llm.action` against the new authoritative prompt concept `#V#prompt_turn_execution_postcondition_critic`, and only then finalises the canonical turn-execution record.
 - `turn_execution_runtime_support.py` now supports an evidence-building mode that suppresses the synthetic default `critic_verdict`, so the prompt-authored critic can become the primary producer instead of merely decorating a Python-owned judgement.
 - `turn_execution_record_service.py` no longer derives `required_evidence_answer_consistency_blocker` from response-surface heuristics. If the authoritative critic path cannot produce a blocker, the turn record now leaves that field empty rather than reviving the retired Python detector.
+
+### Follow-on Landing — April 21, 2026
+
+A bounded `JVNAUTOSCI-1913` landing has now removed the remaining orchestrator
+contract-text tool-inference seam.
+
+- `TurnExpectedOutcomeContract` now carries explicit `required_tools` state and preserves it across discovery-query fallback, stage-boundary rendering, dispatch preflight, and selector/tool/recovery context projection.
+- the expected-outcome inference prompt now emits `required_tools` as part of the authoritative contract payload instead of forcing later Python recovery from prose wording
+- the old orchestrator helpers that inferred KB / relation / web retrieval surfaces by scanning contract text have been deleted
+
+That means the next meaningful anti-egregious-path work is no longer more
+contract-prose parsing cleanup. It is continued orchestrator extraction where it
+reduces mixed-responsibility pressure, followed by the represented tool-metadata
+and rule-loader follow-through tasks.

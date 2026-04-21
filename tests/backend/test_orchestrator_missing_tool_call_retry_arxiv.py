@@ -508,6 +508,7 @@ def test_missing_tool_call_retry_does_not_force_guided_concept_search_when_contr
 def test_turn_contract_required_tools_include_explicit_task_create():
     required = InternalMCPChatOrchestrator._infer_turn_contract_required_tools(
         turn_expected_outcome_contract={
+            "required_tools": ["task_create"],
             "selector_guidance": (
                 "Use a task creation workflow (task_create) to represent the diary "
                 "entry as a persistent record in Vontology."
@@ -708,6 +709,12 @@ def test_missing_tool_call_retry_injects_retry_context_for_missing_jira_surface(
                     "Return a short research briefing grounded in represented papers, "
                     "recent arXiv work, and linked Jira tasks."
                 ),
+                "required_tools": [
+                    "search_knowledge_base",
+                    "search_concepts",
+                    "search_arxiv",
+                    "jira_search",
+                ],
                 "selector_guidance": (
                     "Use KB retrieval, arXiv search, and Jira retrieval."
                 ),
@@ -1184,7 +1191,9 @@ def test_tool_calling_backfill_chains_member_relation_follow_up_from_turn_contra
         "relationship instances or retrieved relation evidence linking the group or "
         "its members.\n"
         "- Success target: Identify predicates that demonstrate a verifiable "
-        "relationship usage pattern associated with the group or its members."
+        "relationship usage pattern associated with the group or its members.\n"
+        "- Required tools: search_concepts, get_text_relations_summary, "
+        "find_relations_with_argument"
     )
 
     request = SimpleNamespace(
@@ -1360,6 +1369,12 @@ def test_missing_tool_retry_uses_predicate_incidence_before_filtered_relation_hi
 def test_turn_contract_with_member_entity_guidance_requires_relation_argument_retrieval():
     required_tools = InternalMCPChatOrchestrator._infer_turn_contract_required_tools(
         turn_expected_outcome_contract={
+            "required_tools": [
+                "search_concepts",
+                "get_text_relations_summary",
+                "get_predicate_incidence",
+                "find_relations_with_argument",
+            ],
             "summary": (
                 "A list of predicates actively used in relationships or properties "
                 "associated with entities identified as SAIL students."
@@ -1386,6 +1401,7 @@ def test_turn_contract_with_member_entity_guidance_requires_relation_argument_re
 def test_turn_contract_preferring_kb_over_general_web_search_does_not_require_search_web():
     required_tools = InternalMCPChatOrchestrator._infer_turn_contract_required_tools(
         turn_expected_outcome_contract={
+            "required_tools": ["search_knowledge_base"],
             "summary": (
                 "A precise list of grounded represented records linked to the "
                 "authenticated user."
@@ -1409,6 +1425,11 @@ def test_turn_contract_preferring_kb_over_general_web_search_does_not_require_se
 def test_turn_contract_with_explicit_relation_grounding_language_requires_relation_tools():
     required_tools = InternalMCPChatOrchestrator._infer_turn_contract_required_tools(
         turn_expected_outcome_contract={
+            "required_tools": [
+                "search_knowledge_base",
+                "get_predicate_incidence",
+                "find_relations_with_argument",
+            ],
             "summary": (
                 "A list of represented artefacts explicitly linked to the "
                 "authenticated user."
@@ -1572,6 +1593,7 @@ def test_build_turn_expected_outcome_contract_falls_back_to_discovery_query_guid
         "- Grounding requirement: All identified predicates or relationships must be "
         "verifiable through Vontology schema inspection (predicates) or retrieved "
         "relation instances (text relations) in the KG.\n"
+        "- Required tools: search_concepts, get_text_relations_summary\n"
         "- Success target: A precise list of predicates and relationship types that "
         "explicitly connect 'SAIL students' to other entities or concepts within the "
         "ontology or knowledge base."
@@ -1650,6 +1672,7 @@ def test_tool_calling_backfill_recovers_search_concepts_from_discovery_query_con
         "- Grounding requirement: All identified predicates or relationships must be "
         "verifiable through Vontology schema inspection (predicates) or retrieved "
         "relation instances (text relations) in the KG.\n"
+        "- Required tools: search_concepts, get_text_relations_summary\n"
         "- Success target: A precise list of predicates and relationship types that "
         "explicitly connect 'SAIL students' to other entities or concepts within the "
         "ontology or knowledge base."

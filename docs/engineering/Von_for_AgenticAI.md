@@ -90,7 +90,7 @@ Despite the above progress, Von still has major oversized integration files.
 
 As of 21 April 2026:
 
-- `src/backend/integrations/internal_mcp/orchestrator.py` is still `34,741` lines
+- `src/backend/integrations/internal_mcp/orchestrator.py` is still `34,608` lines
 - `src/backend/integrations/internal_mcp/catalogue.py` is still `27,466` lines
 - `src/backend/server/routes/von_routes.py` is still `13,348` lines
 
@@ -100,25 +100,20 @@ So the direction is improving, but the largest files are still large enough to a
 
 The most important surviving issues are now more concentrated.
 
-#### 3.3.1 The orchestrator still interprets semantics from contract text
+#### 3.3.1 The contract-text tool-inference seam has now been removed
 
-Even after the structured tool-family cleanup, the orchestrator still contains English token-list logic for deciding which tool surfaces are needed based on `contract_text`, especially around:
+The April 21, 2026 bounded `JVNAUTOSCI-1913` landing moved turn-contract tool
+requirements onto the explicit `required_tools` field of the shared
+`TurnExpectedOutcomeContract` support surface and removed the remaining
+contract-text tool-inference helpers from the orchestrator.
 
-- Jira retrieval
-- arXiv retrieval
-- KB retrieval
-- predicate and relation retrieval
-- relation-argument retrieval
-- web retrieval
+That means the live path no longer decides Jira, KB, predicate/relation,
+relation-argument, or web retrieval requirements by scanning English contract
+prose inside Python.
 
-Current hotspots include:
-
-- `src/backend/integrations/internal_mcp/orchestrator.py`
-  - `_turn_contract_requests_relation_argument_retrieval(...)`
-  - `_turn_contract_requests_web_retrieval(...)`
-  - contract-text tool addition logic around the `required_tools` build path
-
-This is still semantic policy in Python. It is better than the earlier slab, but it is not the correct end state.
+The next risk is therefore no longer this semantic-policy seam. It is the
+structural pressure created by the remaining orchestrator monolith and the
+remaining represented-metadata follow-through tasks.
 
 #### 3.3.2 The earlier write-policy hotspot has already moved
 
@@ -336,10 +331,11 @@ The biggest gaps are now less about obvious hacky routing and more about missing
 
 ### 6.1 Remaining code-side semantic policy removal
 
-Von still needs to remove the remaining Python-owned semantic policy surfaces, especially:
+Von still needs to remove the remaining Python-owned semantic policy surfaces,
+especially:
 
-- contract-text tool inference in the orchestrator;
-- any remaining hard-coded tool and risk metadata that belongs in represented authority.
+- any remaining hard-coded tool and risk metadata that belongs in represented authority;
+- any further decision-policy remnants that are still living inside oversized orchestration helpers instead of represented authority surfaces or clearly bounded support code.
 
 This is still necessary groundwork. A system cannot become truly multilingual, general, and maintainable while core policy still depends on hidden English token lists.
 

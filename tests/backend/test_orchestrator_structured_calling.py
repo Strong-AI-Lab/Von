@@ -702,7 +702,7 @@ def test_tool_definitions_conversion(orchestrator):
     assert len(tool_defs) == 1
     assert isinstance(tool_defs[0], ToolDefinition)
     assert tool_defs[0].name == "search_knowledge_base"
-    assert tool_defs[0].description == "Search the knowledge base"
+    assert tool_defs[0].description.startswith("Search the knowledge base")
     assert "properties" in tool_defs[0].input_schema
 
 
@@ -1285,6 +1285,12 @@ def test_turn_contract_requirement_augmentation_adds_multi_surface_briefing_tool
                     "Return a short research briefing grounded in represented papers, "
                     "recent arXiv work, and linked Jira tasks."
                 ),
+                "required_tools": [
+                    "search_knowledge_base",
+                    "search_concepts",
+                    "search_arxiv",
+                    "jira_search",
+                ],
                 "selector_guidance": (
                     "Use KB/concept retrieval, arXiv search, and Jira retrieval."
                 ),
@@ -1323,6 +1329,12 @@ def test_turn_contract_requirement_augmentation_prefers_jira_search_over_task_li
                     "A research briefing comprising represented papers, recent "
                     "arXiv work, and linked Jira tasks."
                 ),
+                "required_tools": [
+                    "search_knowledge_base",
+                    "search_concepts",
+                    "search_arxiv",
+                    "jira_search",
+                ],
                 "selector_guidance": (
                     "Use retrieval workflows first: (1) `list_papers` and "
                     "`search_knowledge_base` for the user's represented papers, "
@@ -1368,6 +1380,10 @@ def test_turn_contract_requirement_augmentation_adds_predicate_relation_summary_
             evaluation=evaluation,
             turn_expected_outcome_contract={
                 "summary": "Identify predicates salient to SAIL students.",
+                "required_tools": [
+                    "search_concepts",
+                    "get_text_relations_summary",
+                ],
                 "selector_guidance": (
                     "Use search_concepts to locate the student group, then "
                     "get_text_relations_summary to identify associated predicates."

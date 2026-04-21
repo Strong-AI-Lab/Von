@@ -64,6 +64,25 @@ def _dedupe_sources(values: Any) -> tuple[str, ...]:
     return tuple(ordered)
 
 
+def _dedupe_strings(values: Any) -> tuple[str, ...]:
+    if not isinstance(values, Sequence) or isinstance(
+        values, (str, bytes, bytearray)
+    ):
+        return ()
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for item in values:
+        cleaned = _clean_text(item)
+        if not cleaned:
+            continue
+        lowered = cleaned.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        ordered.append(cleaned)
+    return tuple(ordered)
+
+
 @dataclass(frozen=True)
 class TurnExpectedOutcomeContract:
     summary: str | None = None
@@ -72,6 +91,7 @@ class TurnExpectedOutcomeContract:
     selector_guidance: str | None = None
     answering_guidance: str | None = None
     reasoning: str | None = None
+    required_tools: tuple[str, ...] = ()
     sources: tuple[str, ...] = ()
 
     @classmethod
@@ -104,6 +124,11 @@ class TurnExpectedOutcomeContract:
                     if candidate:
                         break
             field_values[field_name] = candidate
+        required_tools = _dedupe_strings(
+            payload.get("required_tools")
+            if "required_tools" in payload
+            else field_payload.get("required_tools")
+        )
         return cls(
             summary=field_values["summary"],
             grounding_requirement=field_values["grounding_requirement"],
@@ -111,6 +136,7 @@ class TurnExpectedOutcomeContract:
             selector_guidance=field_values["selector_guidance"],
             answering_guidance=field_values["answering_guidance"],
             reasoning=field_values["reasoning"],
+            required_tools=required_tools,
             sources=_dedupe_sources(list(source_values)),
         )
 
@@ -121,14 +147,16 @@ class TurnExpectedOutcomeContract:
     ) -> TurnExpectedOutcomeContract:
         merged_fields: dict[str, str] = {}
         merged_sources: list[str] = []
+        merged_required_tools: list[str] = []
         for raw_contract in contracts:
             contract = (
                 raw_contract
                 if isinstance(raw_contract, cls)
                 else cls.from_mapping(raw_contract)
             )
+            merged_sources.extend(contract.sources)
+            merged_required_tools.extend(contract.required_tools)
             if contract.is_empty():
-                merged_sources.extend(contract.sources)
                 continue
             for field_name in TURN_EXPECTED_OUTCOME_CONTRACT_FIELDS:
                 field_value = getattr(contract, field_name)
@@ -138,7 +166,6 @@ class TurnExpectedOutcomeContract:
                     and field_value.strip()
                 ):
                     merged_fields[field_name] = field_value.strip()
-            merged_sources.extend(contract.sources)
         return cls(
             summary=merged_fields.get("summary"),
             grounding_requirement=merged_fields.get("grounding_requirement"),
@@ -146,11 +173,12 @@ class TurnExpectedOutcomeContract:
             selector_guidance=merged_fields.get("selector_guidance"),
             answering_guidance=merged_fields.get("answering_guidance"),
             reasoning=merged_fields.get("reasoning"),
+            required_tools=_dedupe_strings(merged_required_tools),
             sources=_dedupe_sources(merged_sources),
         )
 
     def is_empty(self) -> bool:
-        return not any(
+        return not self.required_tools and not any(
             isinstance(getattr(self, field_name), str)
             and getattr(self, field_name).strip()
             for field_name in TURN_EXPECTED_OUTCOME_CONTRACT_FIELDS
@@ -166,12 +194,15 @@ class TurnExpectedOutcomeContract:
 
     def to_state_payload(self) -> dict[str, Any]:
         field_payload = self.to_dict()
-        return {
+        payload = {
             "schema_version": TURN_EXPECTED_OUTCOME_CONTRACT_SCHEMA_VERSION,
             "fields": field_payload,
             "field_count": len(field_payload),
             "sources": list(self.sources),
         }
+        if self.required_tools:
+            payload["required_tools"] = list(self.required_tools)
+        return payload
 
 
 def build_turn_expected_outcome_boundary_payload(
@@ -190,12 +221,16 @@ def build_turn_expected_outcome_boundary_payload(
         payload["turn_expected_outcome_profile"] = dict(profile_payload)
 
     contract_payload = contract_object.to_dict()
-    if not contract_payload:
+    if not contract_payload and not contract_object.required_tools:
         return payload
 
     if not profile_payload:
-        payload["turn_expected_outcome_profile"] = dict(contract_payload)
-    payload["turn_expected_outcome_contract"] = dict(contract_payload)
+        profile_from_contract: dict[str, Any] = dict(contract_payload)
+        if contract_object.required_tools:
+            profile_from_contract["required_tools"] = list(contract_object.required_tools)
+        payload["turn_expected_outcome_profile"] = profile_from_contract
+    if contract_payload:
+        payload["turn_expected_outcome_contract"] = dict(contract_payload)
     payload["turn_expected_outcome_contract_state"] = (
         contract_object.to_state_payload()
     )

@@ -4585,59 +4585,52 @@ class InternalMCPChatOrchestrator:
         if not retry_context:
             retry_context = list(augmented_context)
 
-        turn_expected_outcome_contract = self._build_turn_expected_outcome_contract(
-            data
+        turn_expected_outcome_contract_object = (
+            self._build_turn_expected_outcome_contract_object(data)
         )
+        turn_expected_outcome_contract = turn_expected_outcome_contract_object.to_dict()
         missing_surface_notes: list[str] = []
-        if isinstance(turn_expected_outcome_contract, Mapping):
-            contract_text = "\n".join(
-                str(field_value).strip()
-                for field_name in (
-                    "summary",
-                    "grounding_requirement",
-                    "precision_policy",
-                    "selector_guidance",
-                    "answering_guidance",
-                    "reasoning",
-                )
-                for field_value in (turn_expected_outcome_contract.get(field_name),)
-                if isinstance(field_value, str) and str(field_value).strip()
-            ).lower()
-            if contract_text:
-                if (
-                    "jira" in contract_text
-                    and "jira_search" not in successful_tool_names
-                    and "jira_get_issue" not in successful_tool_names
-                ):
-                    missing_surface_notes.append(
-                        "A Jira retrieval step required by the turn contract has not been completed yet."
-                    )
-                if (
-                    "arxiv" in contract_text
-                    and "search_arxiv" not in successful_tool_names
-                ):
-                    missing_surface_notes.append(
-                        "An arXiv retrieval step required by the turn contract has not been completed yet."
-                    )
-                if (
-                    (
-                        "knowledge base" in contract_text
-                        or " in my kb" in contract_text
-                        or "represented" in contract_text
-                    )
-                    and "search_knowledge_base" not in successful_tool_names
-                    and "search_concepts" not in successful_tool_names
-                ):
-                    missing_surface_notes.append(
-                        "A represented-knowledge retrieval step required by the turn contract has not been completed yet."
-                    )
-                if (
-                    "task_create" in contract_text
-                    and "task_create" not in successful_tool_names
-                ):
-                    missing_surface_notes.append(
-                        "A task creation step required by the turn contract has not been completed yet."
-                    )
+        turn_contract_required_tools = {
+            str(tool_name).strip().lower()
+            for tool_name in turn_expected_outcome_contract_object.required_tools
+            if isinstance(tool_name, str) and str(tool_name).strip()
+        }
+        turn_contract_required_surface_families = set(
+            self._infer_required_tool_surface_families(
+                required_tools=tuple(turn_contract_required_tools)
+            )
+        )
+        if (
+            "jira" in turn_contract_required_surface_families
+            and "jira_search" not in successful_tool_names
+            and "jira_get_issue" not in successful_tool_names
+        ):
+            missing_surface_notes.append(
+                "A Jira retrieval step required by the turn contract has not been completed yet."
+            )
+        if (
+            "arxiv" in turn_contract_required_surface_families
+            and "search_arxiv" not in successful_tool_names
+            and "download_paper" not in successful_tool_names
+        ):
+            missing_surface_notes.append(
+                "An arXiv retrieval step required by the turn contract has not been completed yet."
+            )
+        if (
+            "knowledge_base" in turn_contract_required_surface_families
+            and "search_knowledge_base" not in successful_tool_names
+            and "search_concepts" not in successful_tool_names
+        ):
+            missing_surface_notes.append(
+                "A represented-knowledge retrieval step required by the turn contract has not been completed yet."
+            )
+        if (
+            "task_create" in turn_contract_required_tools
+            and "task_create" not in successful_tool_names
+        ):
+            missing_surface_notes.append(
+                "A task creation step required by the turn contract has not been completed yet."
+            )
         if successful_tool_names or missing_required_tools or missing_surface_notes:
             retry_guidance_lines = ["Tool recovery context:"]
             if successful_tool_names:
@@ -6598,7 +6591,7 @@ class InternalMCPChatOrchestrator:
         explicit_required_tools = tuple(prompt_requirements.required_tools)
         prompt_requirements = self._augment_prompt_requirements_with_turn_contract(
             evaluation=prompt_requirements,
-            turn_expected_outcome_contract=self._build_turn_expected_outcome_contract(
+            turn_expected_outcome_contract=self._build_turn_expected_outcome_contract_object(
                 data
             ),
             method_catalogue=(
@@ -7009,7 +7002,7 @@ class InternalMCPChatOrchestrator:
         )
         prompt_requirements = self._augment_prompt_requirements_with_turn_contract(
             evaluation=prompt_requirements,
-            turn_expected_outcome_contract=self._build_turn_expected_outcome_contract(
+            turn_expected_outcome_contract=self._build_turn_expected_outcome_contract_object(
                 data
             ),
             method_catalogue=(
@@ -8575,7 +8568,7 @@ class InternalMCPChatOrchestrator:
             )
             prompt_requirements = self._augment_prompt_requirements_with_turn_contract(
                 evaluation=prompt_requirements,
-                turn_expected_outcome_contract=self._build_turn_expected_outcome_contract(
+                turn_expected_outcome_contract=self._build_turn_expected_outcome_contract_object(
                     data
                 ),
                 method_catalogue=(
@@ -12147,8 +12140,8 @@ class InternalMCPChatOrchestrator:
     def _extract_turn_expected_outcome_contract_from_context_messages(
         cls,
         context_messages: Sequence[Mapping[str, Any]] | None,
-    ) -> dict[str, str]:
-        contract: dict[str, str] = {}
+    ) -> dict[str, Any]:
+        contract: dict[str, Any] = {}
         field_by_label = {
             "success target": "summary",
             "grounding requirement": "grounding_requirement",
@@ -12174,7 +12167,15 @@ class InternalMCPChatOrchestrator:
                 if ":" not in body:
                     continue
                 label_text, value_text = body.split(":", 1)
-                field_name = field_by_label.get(label_text.strip().lower())
+                label = label_text.strip().lower()
+                if label == "required tools":
+                    required_tools = cls._parse_turn_contract_required_tools_text(
+                        value_text
+                    )
+                    if required_tools:
+                        contract["required_tools"] = required_tools
+                    continue
+                field_name = field_by_label.get(label)
                 value = value_text.strip()
                 if field_name and value:
                     contract[field_name] = value
@@ -12185,16 +12186,22 @@ class InternalMCPChatOrchestrator:
     def _extract_turn_expected_outcome_contract_from_discovery_query(
         cls,
         workflow_discovery_result: Mapping[str, Any] | None,
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
         if not isinstance(workflow_discovery_result, Mapping):
             return {}
 
-        direct_contract = cls._copy_string_key_mapping(
-            workflow_discovery_result.get("turn_expected_outcome_contract")
+        direct_contract = TurnExpectedOutcomeContract.merge_preferred(
+            TurnExpectedOutcomeContract.from_mapping(
+                workflow_discovery_result.get("turn_expected_outcome_contract_state"),
+                source="workflow_discovery.turn_expected_outcome_contract_state",
+            ),
+            TurnExpectedOutcomeContract.from_mapping(
+                workflow_discovery_result.get("turn_expected_outcome_contract"),
+                source="workflow_discovery.turn_expected_outcome_contract",
+            ),
         )
-        direct_contract = direct_contract or {}
-        if direct_contract:
-            return direct_contract
+        if not direct_contract.is_empty():
+            return cls._turn_expected_outcome_contract_payload(direct_contract)
 
         discovery_query_text = workflow_discovery_result.get("discovery_query_input")
         if not isinstance(discovery_query_text, str) or not discovery_query_text.strip():
@@ -12208,7 +12215,7 @@ class InternalMCPChatOrchestrator:
         guidance_block = discovery_query_text.split(
             "Turn-intent routing guidance:", 1
         )[-1]
-        contract: dict[str, str] = {}
+        contract: dict[str, Any] = {}
         field_by_label = {
             "routing guidance": "selector_guidance",
             "grounding requirement": "grounding_requirement",
@@ -12222,48 +12229,66 @@ class InternalMCPChatOrchestrator:
             if ":" not in body:
                 continue
             label_text, value_text = body.split(":", 1)
-            field_name = field_by_label.get(label_text.strip().lower())
+            label = label_text.strip().lower()
+            if label == "required tools":
+                required_tools = cls._parse_turn_contract_required_tools_text(
+                    value_text
+                )
+                if required_tools:
+                    contract["required_tools"] = required_tools
+                continue
+            field_name = field_by_label.get(label)
             value = value_text.strip()
             if field_name and value:
                 contract[field_name] = value
         return contract
 
-    @classmethod
-    def _turn_contract_text_fragments(
-        cls,
-        turn_expected_outcome_contract: Mapping[str, Any] | None,
-    ) -> list[str]:
-        if not isinstance(turn_expected_outcome_contract, Mapping):
+    @staticmethod
+    def _parse_turn_contract_required_tools_text(value: Any) -> list[str]:
+        if not isinstance(value, str):
             return []
-        fragments: list[str] = []
-        for field_name in (
-            "summary",
-            "grounding_requirement",
-            "precision_policy",
-            "selector_guidance",
-            "answering_guidance",
-            "reasoning",
-        ):
-            field_value = turn_expected_outcome_contract.get(field_name)
-            if isinstance(field_value, str) and field_value.strip():
-                fragments.append(field_value.strip())
-        return fragments
+        tools: list[str] = []
+        seen: set[str] = set()
+        for raw_item in value.split(","):
+            cleaned = raw_item.strip().strip("`")
+            if not cleaned:
+                continue
+            lowered = cleaned.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            tools.append(cleaned)
+        return tools
+
+    @staticmethod
+    def _turn_expected_outcome_contract_payload(
+        contract: TurnExpectedOutcomeContract | Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        contract_object = (
+            contract
+            if isinstance(contract, TurnExpectedOutcomeContract)
+            else TurnExpectedOutcomeContract.from_mapping(contract)
+        )
+        payload: dict[str, Any] = contract_object.to_dict()
+        if contract_object.required_tools:
+            payload["required_tools"] = list(contract_object.required_tools)
+        return payload
 
     @classmethod
     def _infer_turn_contract_required_tools(
         cls,
         *,
-        turn_expected_outcome_contract: Mapping[str, Any] | None,
+        turn_expected_outcome_contract: TurnExpectedOutcomeContract
+        | Mapping[str, Any]
+        | None,
         method_catalogue: Mapping[str, Any] | None = None,
     ) -> tuple[str, ...]:
-        contract_text = "\n".join(
-            fragment.lower()
-            for fragment in cls._turn_contract_text_fragments(
-                turn_expected_outcome_contract
-            )
-            if isinstance(fragment, str) and fragment.strip()
+        contract_object = (
+            turn_expected_outcome_contract
+            if isinstance(turn_expected_outcome_contract, TurnExpectedOutcomeContract)
+            else TurnExpectedOutcomeContract.from_mapping(turn_expected_outcome_contract)
         )
-        if not contract_text:
+        if not contract_object.required_tools:
             return ()
 
         available_tools = {
@@ -12285,209 +12310,10 @@ class InternalMCPChatOrchestrator:
             seen.add(lowered)
             required_tools.append(tool_name)
 
-        prefers_jira_issue_retrieval = (
-            "jira" in contract_text
-            and any(
-                token in contract_text
-                for token in (
-                    "linked jira task",
-                    "linked jira tasks",
-                    "jira retrieval",
-                    "jira search",
-                    "jira issue",
-                    "jira issues",
-                    "jira toolset",
-                    "jira/task tools",
-                )
-            )
-            and not any(
-                token in contract_text
-                for token in (
-                    "von task",
-                    "internal task",
-                    "my tasks",
-                    "task inbox",
-                    "to-do",
-                    "todo",
-                )
-            )
-        )
-
-        relation_grounding_requested = any(
-            token in contract_text
-            for token in (
-                "concept/relation retrieval",
-                "relation retrieval",
-                "represented relation evidence",
-                "represented relationship",
-                "represented relationships",
-                "retrieved relationship",
-                "retrieved relationships",
-                "predicate",
-                "predicates",
-                "associated predicate",
-                "associated predicates",
-                "text relation",
-                "text relations",
-                "schema predicate",
-                "schema predicates",
-                "authorship or ownership",
-                "author or owner",
-                "ownership relationship",
-                "grounded to the user",
-                "belongs to the user",
-                "belonging to the user",
-            )
-        )
-        text_relation_summary_requested = any(
-            token in contract_text
-            for token in (
-                "get_text_relations_summary",
-                "text relation",
-                "text relations",
-                "predicate",
-                "predicates",
-                "associated predicate",
-                "associated predicates",
-            )
-        )
-        kb_retrieval_requested = any(
-            token in contract_text
-            for token in (
-                "kb retrieval",
-                "kb/concept retrieval",
-                "knowledge base",
-                "represented knowledge",
-                "search_knowledge_base",
-            )
-        ) or (relation_grounding_requested and not text_relation_summary_requested)
-
-        if kb_retrieval_requested:
-            _add_tool("search_knowledge_base")
-        if relation_grounding_requested or any(
-            token in contract_text
-            for token in (
-                "concept retrieval",
-                "search_concepts",
-                "represented papers",
-            )
-        ):
-            _add_tool("search_concepts")
-        if any(
-            token in contract_text
-            for token in (
-                "get_related_concepts",
-                "related concepts",
-            )
-        ):
-            _add_tool("get_related_concepts")
-        if text_relation_summary_requested:
-            _add_tool("get_text_relations_summary")
-        if cls._turn_contract_requests_relation_argument_retrieval(contract_text):
-            _add_tool("get_predicate_incidence")
-            _add_tool("find_relations_with_argument")
-        if "arxiv" in contract_text:
-            _add_tool("search_arxiv")
-        if cls._turn_contract_requests_web_retrieval(contract_text):
-            _add_tool("search_web")
-        if "jira" in contract_text:
-            _add_tool("jira_search")
-        for tool_name in (
-            "task_create",
-            "task_create_subtask",
-            "task_search",
-            "task_list",
-            "list_my_tasks",
-            "task_update_status",
-            "task_assign",
-            "message_create",
-            "message_list",
-        ):
-            if tool_name in contract_text:
-                if prefers_jira_issue_retrieval and tool_name in {
-                    "task_search",
-                    "task_list",
-                    "list_my_tasks",
-                }:
-                    continue
-                _add_tool(tool_name)
+        for tool_name in contract_object.required_tools:
+            _add_tool(str(tool_name).strip())
 
         return tuple(required_tools)
-
-    @staticmethod
-    def _turn_contract_requests_relation_argument_retrieval(
-        contract_text: str,
-    ) -> bool:
-        lowered = str(contract_text or "").strip().lower()
-        if not lowered:
-            return False
-        return any(
-            token in lowered
-            for token in (
-                "find_relations_with_argument",
-                "vontology relations",
-                "via vontology relations",
-                "ontology relations",
-                "relation-bearing evidence",
-                "relation instance",
-                "relation instances",
-                "relationship instance",
-                "relationship instances",
-                "explicit relations",
-                "explicit ontology relations",
-                "ground the relationship",
-                "grounding the relationship",
-                "verifiable relationship",
-                "verifiable relationships",
-                "relationship-backed metadata",
-                "relationship between the",
-                "usage pattern",
-                "usage patterns",
-                "member-level relation",
-                "member-level relations",
-                "member relation",
-                "member relations",
-                "group or its members",
-                "or its members",
-                "their members",
-                "members of the",
-                "lab members",
-                "identified as members",
-                "entities identified as",
-                "relations of identified",
-            )
-        )
-
-    @classmethod
-    def _turn_contract_requests_web_retrieval(
-        cls,
-        contract_text: str,
-    ) -> bool:
-        lowered = str(contract_text or "").strip().lower()
-        if not lowered:
-            return False
-        if (
-            "search_web" in lowered
-            or "public web" in lowered
-            or "external web" in lowered
-        ):
-            return True
-        if "web search" not in lowered:
-            return False
-        return not any(
-            token in lowered
-            for token in (
-                "over general web search",
-                "over web search",
-                "rather than web search",
-                "instead of web search",
-                "before web search",
-                "before general web search",
-                "ahead of web search",
-                "avoid web search",
-                "without web search",
-            )
-        )
 
     @classmethod
     def _infer_required_tool_surface_families(
@@ -12550,7 +12376,9 @@ class InternalMCPChatOrchestrator:
         cls,
         *,
         evaluation: _PromptRequirementEvaluation,
-        turn_expected_outcome_contract: Mapping[str, Any] | None,
+        turn_expected_outcome_contract: TurnExpectedOutcomeContract
+        | Mapping[str, Any]
+        | None,
         method_catalogue: Mapping[str, Any] | None = None,
         tool_invocations: Sequence[Mapping[str, Any]] = (),
     ) -> _PromptRequirementEvaluation:
@@ -16644,7 +16472,9 @@ class InternalMCPChatOrchestrator:
 
         return self._build_contextualised_search_query_text(
             query_text=clean_query,
-            expected_outcome_contract=self._build_turn_expected_outcome_contract(data),
+            expected_outcome_contract=self._build_turn_expected_outcome_contract_object(
+                data
+            ),
             actor_context_lines=actor_lines,
         )
 
@@ -16653,7 +16483,9 @@ class InternalMCPChatOrchestrator:
         cls,
         *,
         query_text: str,
-        expected_outcome_contract: Mapping[str, Any] | None,
+        expected_outcome_contract: TurnExpectedOutcomeContract
+        | Mapping[str, Any]
+        | None,
         actor_context_lines: Sequence[str] | None = None,
     ) -> str:
         clean_query = str(query_text or "").strip()
@@ -16703,7 +16535,7 @@ class InternalMCPChatOrchestrator:
                 str(item).strip().lower()
                 for item in self._infer_turn_contract_required_tools(
                     turn_expected_outcome_contract=(
-                        self._build_turn_expected_outcome_contract(data)
+                        self._build_turn_expected_outcome_contract_object(data)
                     ),
                     method_catalogue=(
                         data.get("method_catalogue")
@@ -26116,6 +25948,13 @@ class InternalMCPChatOrchestrator:
         workflow_discovery_payload = (
             raw_workflow_discovery if isinstance(raw_workflow_discovery, Mapping) else {}
         )
+        raw_augmented_context = data.get("augmented_context")
+        augmented_context = (
+            cast(Sequence[Mapping[str, Any]], raw_augmented_context)
+            if isinstance(raw_augmented_context, Sequence)
+            and not isinstance(raw_augmented_context, (str, bytes, bytearray))
+            else ()
+        )
         discovery_contract = cls._extract_turn_expected_outcome_contract_from_discovery_query(
             workflow_discovery_payload
         )
@@ -26135,6 +25974,12 @@ class InternalMCPChatOrchestrator:
             TurnExpectedOutcomeContract.from_mapping(
                 data.get("turn_expected_outcome_contract"),
                 source="turn_expected_outcome_contract",
+            ),
+            TurnExpectedOutcomeContract.from_mapping(
+                cls._extract_turn_expected_outcome_contract_from_context_messages(
+                    augmented_context
+                ),
+                source="augmented_context.turn_expected_outcome_contract",
             ),
             TurnExpectedOutcomeContract.from_mapping(
                 selected_workflow_trace.get("expected_outcome_contract_state"),
@@ -26188,8 +26033,9 @@ class InternalMCPChatOrchestrator:
         data: Mapping[str, Any],
         stage: str,
     ) -> list[dict[str, str]]:
-        contract = cls._build_turn_expected_outcome_contract_object(data).to_dict()
-        if not contract:
+        contract_object = cls._build_turn_expected_outcome_contract_object(data)
+        contract = contract_object.to_dict()
+        if not contract and not contract_object.required_tools:
             return []
 
         lines = ["Expected answer contract for this turn:"]
@@ -26213,6 +26059,18 @@ class InternalMCPChatOrchestrator:
             selector_guidance = contract.get("selector_guidance")
             if selector_guidance:
                 lines.append(f"- Selector guidance: {selector_guidance}")
+        if contract_object.required_tools and stage in {
+            "selector_preparation",
+            "selector_decision",
+            "workflow_dispatch",
+            "tool_call",
+            "tool_plan",
+            "tool_follow_up",
+            "recovery_decision",
+        }:
+            lines.append(
+                "- Required tools: " + ", ".join(contract_object.required_tools)
+            )
 
         if stage in {
             "plain_response",
@@ -26834,17 +26692,18 @@ class InternalMCPChatOrchestrator:
     def _build_turn_discovery_query_text(
         *,
         turn_text: str,
-        expected_outcome_contract: Mapping[str, Any] | None,
+        expected_outcome_contract: TurnExpectedOutcomeContract | Mapping[str, Any] | None,
     ) -> str:
         clean_turn_text = turn_text.strip() if isinstance(turn_text, str) else ""
         if not clean_turn_text:
             return ""
 
-        contract = (
+        contract_object = (
             expected_outcome_contract
-            if isinstance(expected_outcome_contract, Mapping)
-            else {}
+            if isinstance(expected_outcome_contract, TurnExpectedOutcomeContract)
+            else TurnExpectedOutcomeContract.from_mapping(expected_outcome_contract)
         )
+        contract = contract_object.to_dict()
         guidance_lines: list[str] = []
 
         selector_guidance = contract.get("selector_guidance")
@@ -26860,6 +26719,10 @@ class InternalMCPChatOrchestrator:
         summary = contract.get("summary")
         if isinstance(summary, str) and summary.strip():
             guidance_lines.append(f"- Success target: {summary.strip()}")
+        if contract_object.required_tools:
+            guidance_lines.append(
+                "- Required tools: " + ", ".join(contract_object.required_tools)
+            )
 
         if not guidance_lines:
             return clean_turn_text
@@ -26938,7 +26801,9 @@ class InternalMCPChatOrchestrator:
         workflow_discovery_result: Mapping[str, Any] | None,
         requested_query: str,
         discovery_query_input: str,
-        expected_outcome_contract: Mapping[str, Any] | None = None,
+        expected_outcome_contract: TurnExpectedOutcomeContract
+        | Mapping[str, Any]
+        | None = None,
         refreshed: bool = False,
     ) -> dict[str, Any]:
         payload = cls._copy_string_key_mapping(workflow_discovery_result) or {}
@@ -27104,7 +26969,9 @@ class InternalMCPChatOrchestrator:
         if not isinstance(prompt_text, str) or not prompt_text.strip():
             prompt_text = data.get("prompt")
         prompt_text = str(prompt_text or "").strip()
-        expected_outcome_contract = self._build_turn_expected_outcome_contract(data)
+        expected_outcome_contract = self._build_turn_expected_outcome_contract_object(
+            data
+        )
         discovery_query_text = self._build_turn_discovery_query_text(
             turn_text=prompt_text,
             expected_outcome_contract=expected_outcome_contract,
@@ -30097,12 +29964,22 @@ class InternalMCPChatOrchestrator:
                 )
                 or {}
             )
+        routing_turn_expected_outcome_contract_object = (
+            TurnExpectedOutcomeContract.from_mapping(
+                routing_turn_expected_outcome_contract
+            )
+        )
         routing_explicit_required_tools = tuple(routing_prompt_requirements.required_tools)
         routing_prompt_requirements = self._augment_prompt_requirements_with_turn_contract(
             evaluation=routing_prompt_requirements,
-            turn_expected_outcome_contract=routing_turn_expected_outcome_contract,
+            turn_expected_outcome_contract=routing_turn_expected_outcome_contract_object,
             method_catalogue=method_catalogue_for_routing,
             tool_invocations=(),
+        )
+        routing_turn_expected_outcome_contract = (
+            self._turn_expected_outcome_contract_payload(
+                routing_turn_expected_outcome_contract_object
+            )
         )
         routing_contract_required_tools = tuple(
             tool_name
