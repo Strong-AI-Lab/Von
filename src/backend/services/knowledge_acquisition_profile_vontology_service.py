@@ -46,6 +46,48 @@ _DEFAULT_DECISION_POLICY: dict[str, bool] = {
     "fail_closed_on_missing_profile": True,
 }
 
+_RELATION_CANDIDATE_PRIORITY_POLICY_VERSION = (
+    "knowledge_acquisition_profile.relation_candidate_priority.v1"
+)
+_RELATION_AUTO_APPLY_POLICY_VERSION = "knowledge_acquisition_profile.v2"
+_DEFAULT_RELATION_CANDIDATE_PRIORITY_POLICY: dict[str, Any] = {
+    "policy_version": _RELATION_CANDIDATE_PRIORITY_POLICY_VERSION,
+    "default_priority": 0,
+    "predicate_priorities": {
+        "#V#has_affiliation": 80,
+        "#V#member_of_organisation": 78,
+        "#V#works_on_project": 76,
+        "#V#depends_on": 74,
+        "#V#supervised_by": 72,
+        "#V#authored_by": 70,
+        "#V#has_author": 70,
+        "#V#related_to": 10,
+    },
+}
+_DEFAULT_RELATION_AUTO_APPLY_POLICY: dict[str, Any] = {
+    "policy_version": _RELATION_AUTO_APPLY_POLICY_VERSION,
+    "default_threshold": 0.95,
+    "source_adjustments": {
+        "human_validated": 0.08,
+        "user_confirmed": 0.06,
+        "explicit_user_input": 0.05,
+        "llm_extraction": 0.0,
+        "heuristic_inference": -0.05,
+        "unknown": 0.0,
+    },
+    "min_evidence_count": 1,
+    "predicate_policies": {
+        "#V#has_affiliation": {"threshold": 0.96},
+        "#V#member_of_organisation": {"threshold": 0.96},
+        "#V#works_on_project": {"threshold": 0.96},
+        "#V#depends_on": {"threshold": 0.98},
+        "#V#supervised_by": {"threshold": 0.97},
+        "#V#authored_by": {"threshold": 0.95},
+        "#V#has_author": {"threshold": 0.95},
+        "#V#related_to": {"threshold": 0.95},
+    },
+}
+
 _CANONICAL_KNOWLEDGE_ACQUISITION_PROFILE_BLUEPRINTS: tuple[dict[str, Any], ...] = (
     {
         "profile_concept_id": DEFAULT_KNOWLEDGE_ACQUISITION_PROFILE_CONCEPT_ID,
@@ -60,31 +102,10 @@ _CANONICAL_KNOWLEDGE_ACQUISITION_PROFILE_BLUEPRINTS: tuple[dict[str, Any], ...] 
         "decision_policy": dict(_DEFAULT_DECISION_POLICY),
         "question_limit": 1,
         "detail_limit": 80,
-        "relation_auto_apply_policy": {
-            "policy_version": "knowledge_acquisition_profile.v1",
-            "default_threshold": 0.95,
-            "class_thresholds": {
-                "ownership": 0.98,
-                "affiliation": 0.96,
-                "project": 0.96,
-                "deadline": 0.97,
-                "paper_link": 0.95,
-                "supervision": 0.97,
-                "dependency": 0.98,
-                "membership": 0.96,
-                "generic": 0.95,
-            },
-            "source_adjustments": {
-                "human_validated": 0.08,
-                "user_confirmed": 0.06,
-                "explicit_user_input": 0.05,
-                "llm_extraction": 0.0,
-                "heuristic_inference": -0.05,
-                "unknown": 0.0,
-            },
-            "min_evidence_count": 1,
-            "min_evidence_by_predicate": {},
-        },
+        "relation_candidate_priority_policy": dict(
+            _DEFAULT_RELATION_CANDIDATE_PRIORITY_POLICY
+        ),
+        "relation_auto_apply_policy": dict(_DEFAULT_RELATION_AUTO_APPLY_POLICY),
     },
 )
 _CANONICAL_PROFILE_BY_CONCEPT_ID: dict[str, dict[str, Any]] = {
@@ -117,6 +138,20 @@ def _normalise_strings(values: Any) -> tuple[str, ...]:
         seen.add(lowered)
         output.append(text)
     return tuple(output)
+
+
+def _coerce_optional_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_optional_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _safe_get_concept(concept_id: str) -> Mapping[str, Any] | None:
@@ -152,6 +187,127 @@ def canonical_knowledge_acquisition_profile_blueprints() -> tuple[dict[str, Any]
     )
 
 
+def _normalise_source_adjustments(raw_value: Any) -> dict[str, float]:
+    if not isinstance(raw_value, Mapping):
+        return {}
+    normalised: dict[str, float] = {}
+    for raw_key, raw_score in raw_value.items():
+        key = _safe_str(raw_key)
+        score = _coerce_optional_float(raw_score)
+        if key is None or score is None:
+            continue
+        normalised[key] = score
+    return normalised
+
+
+def _normalise_relation_candidate_priority_policy(raw_policy: Any) -> dict[str, Any]:
+    if not isinstance(raw_policy, Mapping):
+        return {}
+    policy = dict(raw_policy)
+    raw_predicate_priorities = policy.get("predicate_priorities")
+    predicate_priorities: dict[str, int] = {}
+    if isinstance(raw_predicate_priorities, Mapping):
+        for raw_predicate, raw_priority in raw_predicate_priorities.items():
+            predicate_id = _safe_str(raw_predicate)
+            priority = _coerce_optional_int(raw_priority)
+            if predicate_id is None or priority is None:
+                continue
+            predicate_priorities[predicate_id] = priority
+    return {
+        "policy_version": _safe_str(policy.get("policy_version")),
+        "default_priority": _coerce_optional_int(policy.get("default_priority")),
+        "predicate_priorities": predicate_priorities,
+    }
+
+
+def _normalise_relation_auto_apply_policy(raw_policy: Any) -> dict[str, Any]:
+    if not isinstance(raw_policy, Mapping):
+        return {}
+    policy = dict(raw_policy)
+    raw_predicate_policies = policy.get("predicate_policies")
+    predicate_policies: dict[str, dict[str, Any]] = {}
+    if isinstance(raw_predicate_policies, Mapping):
+        for raw_predicate, raw_details in raw_predicate_policies.items():
+            predicate_id = _safe_str(raw_predicate)
+            if predicate_id is None or not isinstance(raw_details, Mapping):
+                continue
+            predicate_policy: dict[str, Any] = {}
+            threshold = _coerce_optional_float(raw_details.get("threshold"))
+            min_evidence_count = _coerce_optional_int(
+                raw_details.get("min_evidence_count")
+            )
+            if threshold is not None:
+                predicate_policy["threshold"] = threshold
+            if min_evidence_count is not None:
+                predicate_policy["min_evidence_count"] = min_evidence_count
+            source_adjustments = _normalise_source_adjustments(
+                raw_details.get("source_adjustments")
+            )
+            if source_adjustments:
+                predicate_policy["source_adjustments"] = source_adjustments
+            predicate_policies[predicate_id] = predicate_policy
+    return {
+        "policy_version": _safe_str(policy.get("policy_version")),
+        "default_threshold": _coerce_optional_float(policy.get("default_threshold")),
+        "source_adjustments": _normalise_source_adjustments(
+            policy.get("source_adjustments")
+        ),
+        "min_evidence_count": _coerce_optional_int(policy.get("min_evidence_count")),
+        "predicate_policies": predicate_policies,
+    }
+
+
+def _validate_relation_candidate_priority_policy(policy: Any) -> list[str]:
+    if not isinstance(policy, Mapping) or not policy:
+        return ["missing_relation_candidate_priority_policy"]
+    errors: list[str] = []
+    if _safe_str(policy.get("policy_version")) is None:
+        errors.append("missing_relation_candidate_priority_policy_version")
+    if policy.get("default_priority") is None:
+        errors.append("missing_relation_candidate_default_priority")
+    predicate_priorities = policy.get("predicate_priorities")
+    if not isinstance(predicate_priorities, Mapping) or not predicate_priorities:
+        errors.append("missing_relation_candidate_predicate_priorities")
+    return errors
+
+
+def _validate_relation_auto_apply_policy(policy: Any) -> list[str]:
+    if not isinstance(policy, Mapping) or not policy:
+        return ["missing_relation_auto_apply_policy"]
+    errors: list[str] = []
+    if _safe_str(policy.get("policy_version")) is None:
+        errors.append("missing_relation_auto_apply_policy_version")
+    if policy.get("default_threshold") is None:
+        errors.append("missing_relation_auto_apply_default_threshold")
+    if policy.get("min_evidence_count") is None:
+        errors.append("missing_relation_auto_apply_min_evidence_count")
+    source_adjustments = policy.get("source_adjustments")
+    if not isinstance(source_adjustments, Mapping) or not source_adjustments:
+        errors.append("missing_relation_auto_apply_source_adjustments")
+    predicate_policies = policy.get("predicate_policies")
+    if not isinstance(predicate_policies, Mapping) or not predicate_policies:
+        errors.append("missing_relation_auto_apply_predicate_policies")
+    return errors
+
+
+def _validate_profile(profile: Mapping[str, Any]) -> list[str]:
+    dispatch_mode = _safe_str(profile.get("dispatch_mode"))
+    if dispatch_mode != "relation_completion":
+        return []
+    errors: list[str] = []
+    errors.extend(
+        _validate_relation_candidate_priority_policy(
+            profile.get("relation_candidate_priority_policy")
+        )
+    )
+    errors.extend(
+        _validate_relation_auto_apply_policy(
+            profile.get("relation_auto_apply_policy")
+        )
+    )
+    return errors
+
+
 def _normalise_profile(
     raw_profile: Mapping[str, Any],
     *,
@@ -161,7 +317,10 @@ def _normalise_profile(
     decision_policy = dict(decision_policy) if isinstance(decision_policy, Mapping) else {}
 
     relation_policy = raw_profile.get("relation_auto_apply_policy")
-    relation_policy = dict(relation_policy) if isinstance(relation_policy, Mapping) else {}
+    relation_policy = _normalise_relation_auto_apply_policy(relation_policy)
+    priority_policy = _normalise_relation_candidate_priority_policy(
+        raw_profile.get("relation_candidate_priority_policy")
+    )
 
     return {
         "profile_concept_id": profile_concept_id,
@@ -180,6 +339,7 @@ def _normalise_profile(
             1,
             int(raw_profile.get("detail_limit", 80) or 80),
         ),
+        "relation_candidate_priority_policy": priority_policy,
         "relation_auto_apply_policy": relation_policy,
     }
 
@@ -231,14 +391,18 @@ def load_knowledge_acquisition_profile(
         "source_predicate": None,
         "missing_profile_concept_ids": [],
         "malformed_profile_concept_ids": [],
+        "validation_errors": [],
+        "error_code": None,
     }
     if not resolved_profile_id:
         diagnostics["missing_profile_concept_ids"] = [None]
+        diagnostics["error_code"] = "knowledge_acquisition_profile_unavailable"
         return None, diagnostics
 
     concept_doc = _safe_get_concept(resolved_profile_id)
     if not isinstance(concept_doc, Mapping):
         diagnostics["missing_profile_concept_ids"] = [resolved_profile_id]
+        diagnostics["error_code"] = "knowledge_acquisition_profile_unavailable"
         return None, diagnostics
 
     for predicate in _PROFILE_TEXT_PREDICATES:
@@ -257,17 +421,26 @@ def load_knowledge_acquisition_profile(
                 diagnostics["malformed_profile_concept_ids"].append(resolved_profile_id)
                 continue
             if isinstance(raw_profile, Mapping):
+                normalised_profile = _normalise_profile(
+                    raw_profile,
+                    profile_concept_id=resolved_profile_id,
+                )
+                validation_errors = _validate_profile(normalised_profile)
+                if validation_errors:
+                    diagnostics["loaded_profile_concept_id"] = resolved_profile_id
+                    diagnostics["source_predicate"] = predicate
+                    diagnostics["validation_errors"] = validation_errors
+                    diagnostics["error_code"] = "knowledge_acquisition_profile_invalid"
+                    return None, diagnostics
                 diagnostics["loaded_profile_concept_id"] = resolved_profile_id
                 diagnostics["source_predicate"] = predicate
                 return (
-                    _normalise_profile(
-                        raw_profile,
-                        profile_concept_id=resolved_profile_id,
-                    ),
+                    normalised_profile,
                     diagnostics,
                 )
 
     diagnostics["missing_profile_concept_ids"] = [resolved_profile_id]
+    diagnostics["error_code"] = "knowledge_acquisition_profile_unavailable"
     return None, diagnostics
 
 

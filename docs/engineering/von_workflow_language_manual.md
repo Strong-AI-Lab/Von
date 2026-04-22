@@ -1031,15 +1031,24 @@ Canonical Vontology surface:
 
 Current runtime anchor:
 
-- `#V#rumination_workflow` relation-completion dispatch reads its knowledge-acquisition policy from the linked profile concept.
+- `#V#rumination_workflow` relation-completion assess/dispatch reads its knowledge-acquisition policy from the linked profile concept.
+
+Current canonical profile payload shape:
+
+- `relation_candidate_priority_policy`
+  Defines explicit predicate-priority scores for relation-completion candidate ranking. Runtime ranking MUST resolve from this represented policy rather than lexical keyword matching in Python.
+- `relation_auto_apply_policy`
+  Defines default and per-predicate confidence/evidence/source-adjustment semantics for low-risk auto-apply behaviour.
 
 Normative policy semantics:
 
 - workflows MUST retrieve existing context/evidence first before asking the user for new input;
+- relation-completion candidate ranking MUST resolve from explicit represented predicate priorities in the linked profile, not English substring heuristics;
 - low-risk defaults MAY be auto-applied only when the linked profile policy allows it and confidence/evidence thresholds are met;
 - high-risk or ambiguous changes MUST require explicit user confirmation;
 - relation-completion runs SHOULD ask at most one focused clarification question per run when machine-side evidence is insufficient;
 - if the linked acquisition profile cannot be resolved, the workflow MUST fail closed with explicit `knowledge_acquisition_profile_unavailable` diagnostics rather than falling back to ad hoc prompting.
+- if the linked acquisition profile is present but incomplete/invalid for the workflow's dispatch mode, the workflow MUST fail closed with explicit `knowledge_acquisition_profile_invalid` diagnostics rather than synthesising fallback policy in Python.
 
 Minimal-imposition mutation semantics:
 

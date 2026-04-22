@@ -5,7 +5,7 @@
 This note records the current engineering status of the Von codebase against the
 design intent described in `docs/engineering/Von_for_AgenticAI.md`, using a
 bounded static review of the live code on 23 April 2026, refreshed later the
-same day after the landings through `JVNAUTOSCI-1973`.
+same day after the landings through `JVNAUTOSCI-1986`.
 
 It is not a replacement for `Von_for_AgenticAI.md`. That document remains the
 long-horizon design note. This document is the current engineering-status and
@@ -23,17 +23,16 @@ The sharpest remaining problems are no longer the older write-policy,
 buttonify, turn-contract prose, or broad tool-metadata seams. Those were
 materially reduced first by the April 21 landings through `JVNAUTOSCI-1972`,
 and then again by the 23 April landings of `JVNAUTOSCI-1974`,
-`JVNAUTOSCI-1975`, `JVNAUTOSCI-1985`, and `JVNAUTOSCI-1973`.
+`JVNAUTOSCI-1975`, `JVNAUTOSCI-1985`, `JVNAUTOSCI-1973`, and
+`JVNAUTOSCI-1986`.
 
-The current shortfall is now concentrated in four areas:
+The current shortfall is now concentrated in three areas:
 
-1. Rumination still decides relation priority and auto-apply behaviour through
-   code-side heuristics.
-2. Explicit memory strata exist, but are still mostly adjacent tooling rather
+1. Explicit memory strata exist, but are still mostly adjacent tooling rather
    than the default main-turn cognitive substrate.
-3. Self-improvement is still mostly remediation-routing rather than a closed
+2. Self-improvement is still mostly remediation-routing rather than a closed
    represented promotion loop.
-4. The next review still needs to be repeated after the remaining tranche
+3. The next review still needs to be repeated after the remaining tranche
    lands, because the highest-value gaps have already shifted materially once
    today.
 
@@ -76,23 +75,17 @@ now landed:
    checks reuse the live registry instead of rebuilding a separate read-only
    registry on the hot path.
 
+5. `JVNAUTOSCI-1986`
+   Rumination relation candidate ranking and auto-apply semantics now resolve
+   from the linked knowledge-acquisition profile, and invalid/missing profile
+   payloads fail closed instead of falling back to English keyword/class
+   heuristics in Python.
+
 ### P0 Remaining Architecture Work
 
-This is now the remaining highest-priority implementation tranche.
-
-1. `JVNAUTOSCI-1986`
-   Move rumination relation priority and auto-apply policy out of Python
-   keyword/threshold heuristics and onto represented authority.
-
-Why this is P0:
-
-- this is now the clearest remaining live code-side semantic-policy seam on a
-  long-horizon knowledge-growth path;
-- the tool-authority tranche and workflow-discovery fallback cleanup have
-  already landed, so this is now the sharpest remaining case where Python still
-  decides behaviour that should be represented and revisable; and
-- they are the highest-leverage cleanup before pushing main-turn memory and
-  self-improvement integration much further.
+The previously identified immediate P0 tranche is now landed. The next sharpest
+work is no longer another narrow live heuristic-removal seam; it is the
+integration of memory and self-improvement substrates into the main agent loop.
 
 ### P1 Next Tranche
 

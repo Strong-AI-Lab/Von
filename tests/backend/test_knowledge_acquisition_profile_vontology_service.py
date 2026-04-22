@@ -80,7 +80,20 @@ def test_load_knowledge_acquisition_profile_uses_workflow_link(monkeypatch) -> N
         "question_limit": 1,
         "detail_limit": 12,
         "decision_policy": {"ask_at_most_one_question_per_run": True},
-        "relation_auto_apply_policy": {"policy_version": "knowledge_acquisition_profile.v1"},
+        "relation_candidate_priority_policy": {
+            "policy_version": "knowledge_acquisition_profile.relation_candidate_priority.v1",
+            "default_priority": 0,
+            "predicate_priorities": {"#V#has_affiliation": 80},
+        },
+        "relation_auto_apply_policy": {
+            "policy_version": "knowledge_acquisition_profile.v2",
+            "default_threshold": 0.95,
+            "source_adjustments": {"human_validated": 0.08, "unknown": 0.0},
+            "min_evidence_count": 1,
+            "predicate_policies": {
+                "#V#has_affiliation": {"threshold": 0.96},
+            },
+        },
     }
 
     monkeypatch.setattr(
@@ -127,7 +140,80 @@ def test_load_knowledge_acquisition_profile_uses_workflow_link(monkeypatch) -> N
     )
     assert profile["question_limit"] == 1
     assert profile["detail_limit"] == 12
+    assert profile["relation_candidate_priority_policy"]["predicate_priorities"] == {
+        "#V#has_affiliation": 80
+    }
+    assert profile["relation_auto_apply_policy"]["predicate_policies"] == {
+        "#V#has_affiliation": {"threshold": 0.96}
+    }
     assert (
         diagnostics["loaded_profile_concept_id"]
         == "#V#knowledge_acquisition_profile_low_imposition_relation_completion"
+    )
+
+
+def test_load_knowledge_acquisition_profile_rejects_invalid_relation_completion_policy(
+    monkeypatch,
+) -> None:
+    payload = {
+        "profile_id": "low_imposition_relation_completion",
+        "dispatch_mode": "relation_completion",
+        "question_limit": 1,
+        "detail_limit": 12,
+        "decision_policy": {"ask_at_most_one_question_per_run": True},
+        "relation_auto_apply_policy": {
+            "policy_version": "knowledge_acquisition_profile.v2",
+            "default_threshold": 0.95,
+            "source_adjustments": {"human_validated": 0.08, "unknown": 0.0},
+            "min_evidence_count": 1,
+            "predicate_policies": {
+                "#V#has_affiliation": {"threshold": 0.96},
+            },
+        },
+    }
+
+    monkeypatch.setattr(
+        service,
+        "get_concept_by_concept_id",
+        lambda concept_id: {"concept_id": concept_id, "relationships": {}}
+        if concept_id
+        in (
+            "#V#knowledge_acquisition_profile_low_imposition_relation_completion",
+            "#V#rumination_workflow",
+        )
+        else None,
+    )
+
+    def _mock_get_texts_for_concept(concept_id: str, predicate: str, limit: int = 1):
+        if (
+            concept_id == "#V#rumination_workflow"
+            and predicate == "#V#has_knowledge_acquisition_profile"
+        ):
+            return [
+                {
+                    "text": "#V#knowledge_acquisition_profile_low_imposition_relation_completion"
+                }
+            ]
+        if (
+            concept_id == "#V#knowledge_acquisition_profile_low_imposition_relation_completion"
+            and predicate == "#V#has_knowledge_acquisition_profile_json"
+        ):
+            return [{"text": json.dumps(payload)}]
+        return []
+
+    monkeypatch.setattr(
+        service,
+        "get_texts_for_concept",
+        _mock_get_texts_for_concept,
+    )
+
+    profile, diagnostics = service.load_knowledge_acquisition_profile(
+        workflow_id="#V#rumination_workflow"
+    )
+
+    assert profile is None
+    assert diagnostics["error_code"] == "knowledge_acquisition_profile_invalid"
+    assert (
+        "missing_relation_candidate_priority_policy"
+        in diagnostics["validation_errors"]
     )

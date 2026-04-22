@@ -55,41 +55,8 @@ DEFAULT_BUDGET = 30
 RELATION_COMPLETION_PREDICATE = "__relation_completion__"
 DEFAULT_RELATION_SCAN_LIMIT = 120
 DEFAULT_RELATION_MAX_PREDICATES_PER_CONCEPT = 4
-DEFAULT_RELATION_AUTO_APPLY_CONFIDENCE_THRESHOLD = 0.95
 DEFAULT_RELATION_DETAIL_LIMIT = 80
 DEFAULT_RELATION_QUESTION_LIMIT = 1
-RELATION_AUTO_APPLY_POLICY_VERSION = "relation_auto_apply_policy.v1"
-RELATION_PRIORITY_KEYWORDS: tuple[str, ...] = (
-    "owner",
-    "affiliation",
-    "project",
-    "deadline",
-    "milestone",
-    "paper",
-    "supervis",
-    "depend",
-    "task",
-    "member",
-)
-DEFAULT_RELATION_CLASS_THRESHOLDS: dict[str, float] = {
-    "ownership": 0.98,
-    "affiliation": 0.96,
-    "project": 0.96,
-    "deadline": 0.97,
-    "paper_link": 0.95,
-    "supervision": 0.97,
-    "dependency": 0.98,
-    "membership": 0.96,
-    "generic": DEFAULT_RELATION_AUTO_APPLY_CONFIDENCE_THRESHOLD,
-}
-DEFAULT_RELATION_SOURCE_ADJUSTMENTS: dict[str, float] = {
-    "human_validated": 0.08,
-    "user_confirmed": 0.06,
-    "explicit_user_input": 0.05,
-    "llm_extraction": 0.0,
-    "heuristic_inference": -0.05,
-    "unknown": 0.0,
-}
 
 # Gap dimensions the orchestrator checks, in priority order.
 # Each entry: (gap_name, predicate_to_check, enrichment_predicate, prompt_concept_id_or_none)
@@ -101,7 +68,6 @@ DEFAULT_GAP_DIMENSIONS: List[Dict[str, Any]] = [
         "dispatch_mode": "relation_completion",
         "scan_limit": DEFAULT_RELATION_SCAN_LIMIT,
         "max_predicates_per_concept": DEFAULT_RELATION_MAX_PREDICATES_PER_CONCEPT,
-        "auto_apply_confidence_threshold": DEFAULT_RELATION_AUTO_APPLY_CONFIDENCE_THRESHOLD,
     },
     {
         "gap_name": "missing_descriptions",
@@ -130,6 +96,7 @@ def _resolve_relation_policy_input(
     """
 
     from ...services.knowledge_acquisition_profile_vontology_service import (
+        canonical_knowledge_acquisition_profile_concept_ids,
         ensure_canonical_knowledge_acquisition_profiles,
         load_knowledge_acquisition_profile,
     )
@@ -144,39 +111,54 @@ def _resolve_relation_policy_input(
         or RUMINATION_WORKFLOW_ID
     ).strip() or RUMINATION_WORKFLOW_ID
 
+    canonical_profile_concept_ids = set(
+        canonical_knowledge_acquisition_profile_concept_ids()
+    )
+    requested_profile_id = (
+        str(requested_profile_concept_id).strip()
+        if isinstance(requested_profile_concept_id, str)
+        and str(requested_profile_concept_id).strip()
+        else None
+    )
+
     profile, diagnostics = load_knowledge_acquisition_profile(
         workflow_id=workflow_id,
-        profile_concept_id=(
-            str(requested_profile_concept_id).strip()
-            if isinstance(requested_profile_concept_id, str)
-            and str(requested_profile_concept_id).strip()
-            else None
-        ),
+        profile_concept_id=requested_profile_id,
     )
     bootstrap_report: dict[str, Any] | None = None
-    if profile is None:
+    resolved_profile_id = str(
+        (diagnostics or {}).get("resolved_profile_concept_id") or ""
+    ).strip() or None
+    should_bootstrap_canonical_profile = (
+        requested_profile_id in canonical_profile_concept_ids
+        or (
+            requested_profile_id is None
+            and (
+                resolved_profile_id is None
+                or resolved_profile_id in canonical_profile_concept_ids
+            )
+        )
+    )
+    if profile is None and should_bootstrap_canonical_profile:
         bootstrap_report = ensure_canonical_knowledge_acquisition_profiles(
-            concept_ids=[requested_profile_concept_id]
-            if isinstance(requested_profile_concept_id, str)
-            and str(requested_profile_concept_id).strip()
+            concept_ids=[requested_profile_id]
+            if requested_profile_id in canonical_profile_concept_ids
+            else [resolved_profile_id]
+            if resolved_profile_id in canonical_profile_concept_ids
             else None,
             link_workflow_ids=[workflow_id],
             provenance={
                 "source": "rumination_workflow",
-                "reason": "knowledge_acquisition_profile_bootstrap",
+                "reason": "knowledge_acquisition_profile_bootstrap_or_repair",
             },
             context={"workflow_id": workflow_id},
         )
         profile, diagnostics = load_knowledge_acquisition_profile(
             workflow_id=workflow_id,
-            profile_concept_id=(
-                str(requested_profile_concept_id).strip()
-                if isinstance(requested_profile_concept_id, str)
-                and str(requested_profile_concept_id).strip()
-                else None
-            ),
+            profile_concept_id=requested_profile_id,
         )
 
+    relation_candidate_priority_policy = {}
     relation_auto_apply_policy = {}
     decision_policy = {}
     question_limit = DEFAULT_RELATION_QUESTION_LIMIT
@@ -184,6 +166,9 @@ def _resolve_relation_policy_input(
     profile_concept_id = None
     policy_error = None
     if isinstance(profile, dict):
+        relation_candidate_priority_policy = dict(
+            profile.get("relation_candidate_priority_policy") or {}
+        )
         relation_auto_apply_policy = dict(
             profile.get("relation_auto_apply_policy") or {}
         )
@@ -191,19 +176,17 @@ def _resolve_relation_policy_input(
         question_limit = int(profile.get("question_limit") or question_limit)
         detail_limit = int(profile.get("detail_limit") or detail_limit)
         profile_concept_id = str(profile.get("profile_concept_id") or "").strip() or None
-        if "policy_version" not in relation_auto_apply_policy:
-            relation_auto_apply_policy["policy_version"] = str(
-                relation_auto_apply_policy.get("policy_version")
-                or profile.get("profile_id")
-                or RELATION_AUTO_APPLY_POLICY_VERSION
-            ).strip() or RELATION_AUTO_APPLY_POLICY_VERSION
     else:
-        policy_error = "knowledge_acquisition_profile_unavailable"
+        policy_error = str(
+            (diagnostics or {}).get("error_code")
+            or "knowledge_acquisition_profile_unavailable"
+        )
 
     return {
         "workflow_id": workflow_id,
         "requested_profile_concept_id": requested_profile_concept_id,
         "profile_concept_id": profile_concept_id,
+        "relation_candidate_priority_policy": relation_candidate_priority_policy,
         "relation_auto_apply_policy": relation_auto_apply_policy,
         "decision_policy": decision_policy,
         "question_limit": max(1, question_limit),
@@ -418,18 +401,34 @@ def _coerce_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
-def _compute_relation_priority(predicate: str) -> tuple[int, list[str]]:
-    if not isinstance(predicate, str):
-        return 0, []
-    lowered = predicate.lower()
-    matched = [kw for kw in RELATION_PRIORITY_KEYWORDS if kw in lowered]
-    return len(matched), matched
+def _resolve_relation_candidate_priority(
+    *,
+    predicate: str,
+    priority_policy_input: dict[str, Any] | None,
+) -> tuple[int, bool]:
+    if not isinstance(predicate, str) or not predicate:
+        return 0, False
+    priority_policy = (
+        priority_policy_input if isinstance(priority_policy_input, dict) else {}
+    )
+    raw_predicate_priorities = priority_policy.get("predicate_priorities")
+    predicate_priorities = (
+        raw_predicate_priorities
+        if isinstance(raw_predicate_priorities, dict)
+        else {}
+    )
+    default_priority = _coerce_int(priority_policy.get("default_priority"), default=0)
+    explicit_priority = predicate_priorities.get(predicate)
+    if explicit_priority is None:
+        return default_priority, False
+    return _coerce_int(explicit_priority, default=default_priority), True
 
 
 def _list_relation_gap_candidates(
     *,
     scan_limit: int,
     max_predicates_per_concept: int,
+    priority_policy_input: dict[str, Any] | None = None,
     candidate_concept_ids: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Scan individual concepts and list missing relation opportunities.
@@ -478,18 +477,27 @@ def _list_relation_gap_candidates(
 
         scored: list[tuple[str, int, list[str]]] = []
         for predicate in missing_predicates:
-            score, matched = _compute_relation_priority(predicate)
-            scored.append((predicate, score, matched))
+            score, explicitly_prioritised = _resolve_relation_candidate_priority(
+                predicate=predicate,
+                priority_policy_input=priority_policy_input,
+            )
+            scored.append(
+                (
+                    predicate,
+                    score,
+                    [predicate] if explicitly_prioritised else [],
+                )
+            )
 
         scored.sort(key=lambda item: (-item[1], item[0]))
         selected = scored[: max(1, max_predicates_per_concept)]
         selected_predicates = [item[0] for item in selected]
 
-        matched_keywords: set[str] = set()
+        priority_policy_matches: set[str] = set()
         priority_score = 0
-        for _, score, matched in selected:
+        for _, score, matched_predicates in selected:
             priority_score += score
-            matched_keywords.update(matched)
+            priority_policy_matches.update(matched_predicates)
 
         try:
             concept_name = get_concept_display_name_with_names_fallback(concept_doc)
@@ -503,7 +511,7 @@ def _list_relation_gap_candidates(
                 "missing_predicates": selected_predicates,
                 "total_missing_predicates": len(missing_predicates),
                 "priority_score": priority_score,
-                "matched_priority_keywords": sorted(matched_keywords),
+                "priority_policy_matches": sorted(priority_policy_matches),
             }
         )
 
@@ -522,7 +530,7 @@ def _resolve_relation_auto_apply_candidate(
     *,
     instance_doc: dict[str, Any],
     predicate: str,
-    confidence_threshold: float,
+    confidence_threshold: float | None,
     policy_input: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Resolve an auto-apply candidate and return eligibility diagnostics."""
@@ -701,87 +709,59 @@ def _resolve_hypothesis_id(
     return f"hyp_{digest}"
 
 
-def _classify_relation_predicate(predicate: str) -> str:
-    lowered = str(predicate or "").lower()
-    if any(k in lowered for k in ("owner",)):
-        return "ownership"
-    if any(k in lowered for k in ("affiliation",)):
-        return "affiliation"
-    if any(k in lowered for k in ("project",)):
-        return "project"
-    if any(k in lowered for k in ("deadline", "milestone")):
-        return "deadline"
-    if any(k in lowered for k in ("paper", "author")):
-        return "paper_link"
-    if any(k in lowered for k in ("supervis",)):
-        return "supervision"
-    if any(k in lowered for k in ("depend",)):
-        return "dependency"
-    if any(k in lowered for k in ("member", "membership")):
-        return "membership"
-    return "generic"
-
-
 def _resolve_relation_auto_apply_policy(
     *,
     predicate: str,
-    confidence_threshold: float,
+    confidence_threshold: float | None,
     policy_input: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Resolve auto-apply policy from defaults plus optional context overrides."""
+    """Resolve auto-apply policy from represented predicate metadata."""
     policy_input = dict(policy_input or {})
-
-    predicate_class = _classify_relation_predicate(predicate)
-    class_thresholds = dict(DEFAULT_RELATION_CLASS_THRESHOLDS)
-    class_thresholds_raw = policy_input.get("class_thresholds")
-    if isinstance(class_thresholds_raw, dict):
-        class_thresholds.update(class_thresholds_raw)
-    predicate_thresholds_raw = policy_input.get("predicate_thresholds")
-    predicate_thresholds = (
-        predicate_thresholds_raw if isinstance(predicate_thresholds_raw, dict) else {}
+    raw_predicate_policies = policy_input.get("predicate_policies")
+    predicate_policies = (
+        raw_predicate_policies if isinstance(raw_predicate_policies, dict) else {}
     )
-    default_threshold = _coerce_float(
-        policy_input.get("default_threshold"),
-        default=confidence_threshold,
-    )
-    class_threshold = _coerce_float(
-        class_thresholds.get(predicate_class),
-        default=default_threshold,
-    )
-    predicate_threshold = _coerce_float(
-        predicate_thresholds.get(predicate),
-        default=class_threshold,
-    )
-
-    min_evidence_count_default = _coerce_int(
-        policy_input.get("min_evidence_count"),
-        default=1,
-    )
-    min_evidence_by_predicate_raw = policy_input.get("min_evidence_by_predicate")
-    min_evidence_by_predicate = (
-        min_evidence_by_predicate_raw
-        if isinstance(min_evidence_by_predicate_raw, dict)
+    predicate_policy_raw = predicate_policies.get(predicate)
+    predicate_policy = (
+        dict(predicate_policy_raw)
+        if isinstance(predicate_policy_raw, dict)
         else {}
     )
-    min_evidence_count = _coerce_int(
-        min_evidence_by_predicate.get(predicate),
-        default=min_evidence_count_default,
+
+    default_threshold = _coerce_float(
+        policy_input.get("default_threshold"),
+        default=1.0,
+    )
+    predicate_threshold = _coerce_float(
+        predicate_policy.get("threshold"),
+        default=default_threshold,
+    )
+    effective_threshold = (
+        confidence_threshold
+        if isinstance(confidence_threshold, (int, float))
+        else predicate_threshold
     )
 
-    source_adjustments = dict(DEFAULT_RELATION_SOURCE_ADJUSTMENTS)
-    source_adjustments_raw = policy_input.get("source_adjustments")
-    if isinstance(source_adjustments_raw, dict):
-        source_adjustments.update(source_adjustments_raw)
+    min_evidence_count = _coerce_int(
+        predicate_policy.get("min_evidence_count"),
+        default=_coerce_int(policy_input.get("min_evidence_count"), default=1),
+    )
 
-    policy_version = str(
-        policy_input.get("policy_version")
-        or RELATION_AUTO_APPLY_POLICY_VERSION
-    ).strip() or RELATION_AUTO_APPLY_POLICY_VERSION
+    source_adjustments_raw = policy_input.get("source_adjustments")
+    source_adjustments = (
+        dict(source_adjustments_raw)
+        if isinstance(source_adjustments_raw, dict)
+        else {}
+    )
+    predicate_source_adjustments_raw = predicate_policy.get("source_adjustments")
+    if isinstance(predicate_source_adjustments_raw, dict):
+        source_adjustments.update(predicate_source_adjustments_raw)
+
+    policy_version = str(policy_input.get("policy_version") or "").strip() or "unknown"
 
     return {
         "policy_version": policy_version,
-        "predicate_class": predicate_class,
-        "effective_threshold": predicate_threshold,
+        "effective_threshold": effective_threshold,
         "min_evidence_count": max(0, min_evidence_count),
         "source_adjustments": source_adjustments,
     }
@@ -867,15 +847,14 @@ def _dispatch_relation_completion_task(
 
     dry_run = bool(ctx.get("dry_run", False))
     allocation = max(0, int(task.get("allocation", 0)))
-    confidence_threshold = _coerce_float(
-        task.get(
-            "auto_apply_confidence_threshold",
-            ctx.get(
-                "relation_auto_apply_confidence_threshold",
-                DEFAULT_RELATION_AUTO_APPLY_CONFIDENCE_THRESHOLD,
-            ),
-        ),
-        default=DEFAULT_RELATION_AUTO_APPLY_CONFIDENCE_THRESHOLD,
+    confidence_threshold_raw = task.get(
+        "auto_apply_confidence_threshold",
+        ctx.get("relation_auto_apply_confidence_threshold"),
+    )
+    confidence_threshold = (
+        _coerce_float(confidence_threshold_raw)
+        if confidence_threshold_raw is not None
+        else None
     )
     relation_policy_context = _resolve_relation_policy_input(task=task, ctx=ctx)
     detail_limit = int(
@@ -891,6 +870,9 @@ def _dispatch_relation_completion_task(
                 "question_limit", DEFAULT_RELATION_QUESTION_LIMIT
             ),
         )
+    )
+    relation_candidate_priority_policy = dict(
+        relation_policy_context.get("relation_candidate_priority_policy") or {}
     )
     relation_auto_apply_policy = dict(
         relation_policy_context.get("relation_auto_apply_policy") or {}
@@ -1088,6 +1070,9 @@ def _dispatch_relation_completion_task(
         "proposal_details": proposal_details,
         "deferred_questions": deferred_questions,
         "policy_profile_concept_id": relation_policy_context.get("profile_concept_id"),
+        "priority_policy_version": relation_candidate_priority_policy.get(
+            "policy_version"
+        ),
         "policy_resolution": relation_policy_context,
     }
     return task_result
@@ -1112,6 +1097,20 @@ def _handle_assess_gaps(request: WorkflowActionRequest) -> WorkflowActionResult:
                 or predicate == RELATION_COMPLETION_PREDICATE
             ):
                 try:
+                    relation_policy_context = _resolve_relation_policy_input(
+                        task=dim,
+                        ctx=ctx,
+                    )
+                    if relation_policy_context.get("error"):
+                        gap_assessment[gap_name] = -1
+                        relation_gap_summary[gap_name] = {
+                            "error": relation_policy_context.get("error"),
+                            "policy_profile_concept_id": relation_policy_context.get(
+                                "profile_concept_id"
+                            ),
+                            "policy_resolution": relation_policy_context,
+                        }
+                        continue
                     scan_limit = int(
                         dim.get(
                             "scan_limit",
@@ -1135,6 +1134,9 @@ def _handle_assess_gaps(request: WorkflowActionRequest) -> WorkflowActionResult:
                     relation_gap_candidates = _list_relation_gap_candidates(
                         scan_limit=max(1, scan_limit),
                         max_predicates_per_concept=max(1, max_predicates_per_concept),
+                        priority_policy_input=relation_policy_context.get(
+                            "relation_candidate_priority_policy"
+                        ),
                         candidate_concept_ids=candidate_concept_ids,
                     )
                     gap_assessment[gap_name] = len(relation_gap_candidates)
@@ -1145,6 +1147,15 @@ def _handle_assess_gaps(request: WorkflowActionRequest) -> WorkflowActionResult:
                             len(item.get("missing_predicates") or [])
                             for item in relation_gap_candidates
                         ),
+                        "policy_profile_concept_id": relation_policy_context.get(
+                            "profile_concept_id"
+                        ),
+                        "priority_policy_version": (
+                            relation_policy_context.get(
+                                "relation_candidate_priority_policy"
+                            )
+                            or {}
+                        ).get("policy_version"),
                     }
                     logger.info(
                         "[rumination] Gap '%s' (relation_completion): %d concepts",
@@ -1249,9 +1260,14 @@ def _handle_plan_enrichment(request: WorkflowActionRequest) -> WorkflowActionRes
                     "allocation": allocation,
                     "scan_limit": dim.get("scan_limit"),
                     "max_predicates_per_concept": dim.get("max_predicates_per_concept"),
-                    "auto_apply_confidence_threshold": dim.get(
-                        "auto_apply_confidence_threshold",
-                        DEFAULT_RELATION_AUTO_APPLY_CONFIDENCE_THRESHOLD,
+                    **(
+                        {
+                            "auto_apply_confidence_threshold": dim.get(
+                                "auto_apply_confidence_threshold"
+                            )
+                        }
+                        if dim.get("auto_apply_confidence_threshold") is not None
+                        else {}
                     ),
                 }
             )
