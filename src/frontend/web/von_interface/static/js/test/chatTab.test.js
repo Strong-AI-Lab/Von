@@ -2921,8 +2921,7 @@ describe('thinking activity history normalisation', () => {
             workflowDiscovery: {
                 requested_query: 'Represent this uploaded paper',
                 query: 'Represent this uploaded paper\nArtefact typing context: route_hint=scholarly',
-                search_sources: ['semantic', 'vontology', 'name_fallback'],
-                keyword_fallback_queries: ['scholarly workflow', 'paper representation workflow'],
+                search_sources: ['semantic', 'vontology'],
                 threshold: 0.7,
                 search_time_ms: 44,
                 timeout_budget_seconds: 3,
@@ -2954,12 +2953,11 @@ describe('thinking activity history normalisation', () => {
         expect(html).toContain('Executed search');
         expect(html).toContain('Represent this uploaded paper');
         expect(html).toContain('route_hint=scholarly');
-        expect(html).toContain('semantic, vontology, name_fallback');
+        expect(html).toContain('semantic, vontology');
         expect(html).toContain('3.000 s');
         expect(html).toContain('Budget exhausted');
         expect(html).toContain('semantic_search');
         expect(html).toContain('Budget exhaustion detail');
-        expect(html).toContain('Fallback queries');
         expect(html).toContain('Workflow candidates');
         expect(html).toContain('Routing excluded: Graph incomplete');
         expect(html).toContain('Missing terminal node.');

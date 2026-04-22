@@ -30,7 +30,6 @@ from src.backend.services.workflow_discovery_service import (
     WorkflowDiscoveryResult,
     WorkflowMatch,
     _annotate_and_rank_candidates,
-    _build_keyword_fallback_queries,
     _classify_workflow_concept_executability,
     _deduplicate_and_rank,
     _enrich_workflow_matches,
@@ -140,7 +139,6 @@ class TestWorkflowDiscoveryResult:
             threshold=0.7,
             errors=["minor warning"],
             search_sources=["semantic", "vontology"],
-            keyword_fallback_queries=["workflow fallback"],
             allow_non_executable=True,
             match_absence_reason="capability_index_build_in_progress",
             timeout_budget_seconds=2.5,
@@ -158,7 +156,6 @@ class TestWorkflowDiscoveryResult:
         assert output["match_count"] == 2
         assert output["candidate_count"] == 2
         assert output["search_sources"] == ["semantic", "vontology"]
-        assert output["keyword_fallback_queries"] == ["workflow fallback"]
         assert output["allow_non_executable"] is True
         assert output["match_absence_reason"] == "capability_index_build_in_progress"
         assert output["timeout_budget_seconds"] == 2.5
@@ -292,44 +289,6 @@ class TestDeduplicateAndRank:
         assert result[0].concept_id == "#V#wf2"  # Highest score first
         assert result[1].concept_id == "#V#wf3"
         assert result[2].concept_id == "#V#wf1"
-
-
-class TestKeywordFallbackQueries:
-    """Unit tests for keyword fallback query generation."""
-
-    def test_adds_arxiv_specific_queries_for_bare_arxiv_url(self) -> None:
-        queries = _build_keyword_fallback_queries(
-            "https://arxiv.org/abs/2602.20478",
-            [],
-        )
-
-        assert "arxiv paper representation workflow" in queries
-        assert "scholarly paper representation workflow" in queries
-        assert "arxiv workflow" in queries
-        assert "arxiv 2602.20478" in queries
-
-    def test_adds_every_arxiv_id_to_fallback_queries_for_multi_target_prompt(self) -> None:
-        queries = _build_keyword_fallback_queries(
-            (
-                "Represent https://arxiv.org/abs/2602.20478 and "
-                "https://arxiv.org/abs/2501.00663."
-            ),
-            [],
-        )
-
-        assert "arxiv 2602.20478" in queries
-        assert "arxiv 2501.00663" in queries
-
-    def test_adds_talk_and_seminar_queries_for_presentation_prompt(self) -> None:
-        queries = _build_keyword_fallback_queries(
-            "Can you make the workflow for adding academic talks now?",
-            [],
-        )
-
-        assert "talk representation workflow" in queries
-        assert "technical scientific talk representation workflow" in queries
-        assert "academic presentation workflow" in queries
-        assert "seminar representation workflow" in queries
 
 
 def test_enrich_workflow_matches_prefers_authoritative_vontology_description() -> None:
@@ -518,10 +477,6 @@ class TestDiscoverWorkflows:
         "src.backend.services.workflow_discovery_service._search_workflows_vontology"
     )
     @patch(
-        "src.backend.services.workflow_discovery_service._search_workflows_name_fallback",
-        return_value=[],
-    )
-    @patch(
         "src.backend.services.workflow_discovery_service._has_authoritative_routing_text",
         return_value=True,
     )
@@ -532,7 +487,6 @@ class TestDiscoverWorkflows:
         self,
         mock_classify: MagicMock,
         mock_has_authoritative_text: MagicMock,
-        mock_name_fallback: MagicMock,
         mock_vontology: MagicMock,
         mock_semantic: MagicMock,
     ) -> None:
@@ -652,7 +606,6 @@ class TestDiscoverWorkflowsForTurn:
         assert mock_discover.call_args.kwargs["timeout_seconds"] == 2.25
 
     @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
-    @patch("src.backend.services.workflow_discovery_service._search_workflows_name_fallback")
     @patch("src.backend.services.workflow_discovery_service._search_workflows_vontology")
     @patch("src.backend.services.workflow_discovery_service._search_workflows_semantic")
     @patch("src.backend.services.workflow_discovery_service.build_file_copy_typing_context")
@@ -661,7 +614,6 @@ class TestDiscoverWorkflowsForTurn:
         mock_typing_context: MagicMock,
         mock_semantic: MagicMock,
         mock_vontology: MagicMock,
-        mock_name_fallback: MagicMock,
         mock_enrich: MagicMock,
     ) -> None:
         mock_typing_context.return_value = {
@@ -673,7 +625,6 @@ class TestDiscoverWorkflowsForTurn:
         }
         mock_semantic.return_value = []
         mock_vontology.return_value = []
-        mock_name_fallback.return_value = []
         mock_enrich.side_effect = lambda matches: matches
 
         result = discover_workflows(
@@ -685,24 +636,19 @@ class TestDiscoverWorkflowsForTurn:
         assert "Artefact typing context:" in semantic_query
         assert "route_hint=scholarly" in semantic_query
         assert "types=Scholarly paper file copy, PDF file copy" in semantic_query
-        fallback_queries = mock_name_fallback.call_args.args[0]
-        assert "scholarly workflow" in fallback_queries
-        assert "scholarly representation workflow" in fallback_queries
-        assert "Scholarly paper file copy" in fallback_queries
-        assert "PDF file copy" in fallback_queries
+        assert mock_vontology.call_args.args[0] == semantic_query
+        assert result.search_sources == ["capability_index", "semantic", "vontology"]
         assert "route_hint=scholarly" in result.query
 
     @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
     @patch("src.backend.services.workflow_discovery_service._has_authoritative_routing_text")
     @patch("src.backend.services.workflow_discovery_service._classify_workflow_concept_executability")
-    @patch("src.backend.services.workflow_discovery_service._search_workflows_name_fallback")
     @patch("src.backend.services.workflow_discovery_service._search_workflows_vontology")
     @patch("src.backend.services.workflow_discovery_service._search_workflows_semantic")
-    def test_textless_fallback_match_is_visible_but_not_routing_eligible(
+    def test_textless_semantic_match_is_visible_but_not_routing_eligible(
         self,
         mock_semantic: MagicMock,
         mock_vontology: MagicMock,
-        mock_name_fallback: MagicMock,
         mock_classify: MagicMock,
         mock_has_authoritative_text: MagicMock,
         mock_enrich: MagicMock,
@@ -711,7 +657,6 @@ class TestDiscoverWorkflowsForTurn:
             WorkflowMatch("#V#textless_candidate", "Textless candidate", relevance_score=0.86)
         ]
         mock_vontology.return_value = []
-        mock_name_fallback.return_value = []
         mock_classify.return_value = (True, EXECUTABILITY_EXECUTABLE_NOW, None)
         mock_has_authoritative_text.return_value = False
         mock_enrich.side_effect = lambda matches: matches
@@ -727,18 +672,16 @@ class TestDiscoverWorkflowsForTurn:
         assert result.routing_matches == []
 
     @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
-    @patch("src.backend.services.workflow_discovery_service._search_workflows_name_fallback")
     @patch("src.backend.services.workflow_discovery_service._search_workflows_vontology")
     @patch("src.backend.services.workflow_discovery_service._search_workflows_semantic")
     @patch(
         "src.backend.services.workflow_discovery_service.get_workflow_capability_index_runtime_state"
     )
-    def test_name_fallback_runs_even_when_semantic_search_returns_candidates(
+    def test_secondary_search_trace_excludes_name_fallback_when_semantic_search_returns_candidates(
         self,
         mock_capability_state: MagicMock,
         mock_semantic: MagicMock,
         mock_vontology: MagicMock,
-        mock_name_fallback: MagicMock,
         mock_enrich: MagicMock,
     ) -> None:
         mock_capability_state.return_value = {
@@ -750,15 +693,13 @@ class TestDiscoverWorkflowsForTurn:
             WorkflowMatch("#V#semantic_candidate", "Semantic candidate", relevance_score=0.81)
         ]
         mock_vontology.return_value = []
-        mock_name_fallback.return_value = []
         mock_enrich.side_effect = lambda matches: matches
 
-        discover_workflows("Represent the uploaded paper now", max_results=1)
+        result = discover_workflows("Represent the uploaded paper now", max_results=1)
 
-        assert mock_name_fallback.called is True
+        assert result.search_sources == ["capability_index", "semantic", "vontology"]
 
     @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
-    @patch("src.backend.services.workflow_discovery_service._search_workflows_name_fallback")
     @patch("src.backend.services.workflow_discovery_service._search_workflows_vontology")
     @patch("src.backend.services.workflow_discovery_service._search_workflows_semantic")
     @patch("src.backend.services.workflow_discovery_service._search_workflow_capabilities")
@@ -771,7 +712,6 @@ class TestDiscoverWorkflowsForTurn:
         mock_capability: MagicMock,
         mock_semantic: MagicMock,
         mock_vontology: MagicMock,
-        mock_name_fallback: MagicMock,
         mock_enrich: MagicMock,
     ) -> None:
         mock_capability.return_value = []
@@ -782,7 +722,6 @@ class TestDiscoverWorkflowsForTurn:
         }
         mock_semantic.return_value = []
         mock_vontology.return_value = []
-        mock_name_fallback.return_value = []
         mock_enrich.side_effect = lambda matches: matches
 
         result = discover_workflows(
@@ -803,20 +742,18 @@ class TestDiscoverWorkflowsForTurn:
         assert mock_semantic.called is True
 
     @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
-    @patch("src.backend.services.workflow_discovery_service._search_workflows_name_fallback")
     @patch("src.backend.services.workflow_discovery_service._search_workflows_vontology")
     @patch("src.backend.services.workflow_discovery_service._search_workflows_semantic")
     @patch("src.backend.services.workflow_discovery_service._search_workflow_capabilities")
     @patch(
         "src.backend.services.workflow_discovery_service.get_workflow_capability_index_runtime_state"
     )
-    def test_retired_registry_keyword_fallback_uses_secondary_searches_instead(
+    def test_registry_workflow_discovery_uses_secondary_authoritative_searches_only(
         self,
         mock_capability_state: MagicMock,
         mock_capability: MagicMock,
         mock_semantic: MagicMock,
         mock_vontology: MagicMock,
-        mock_name_fallback: MagicMock,
         mock_enrich: MagicMock,
     ) -> None:
         mock_capability.return_value = []
@@ -833,7 +770,6 @@ class TestDiscoverWorkflowsForTurn:
             )
         ]
         mock_vontology.return_value = []
-        mock_name_fallback.return_value = []
         mock_enrich.side_effect = lambda matches: matches
 
         result = discover_workflows(
@@ -846,7 +782,6 @@ class TestDiscoverWorkflowsForTurn:
             "capability_index",
             "semantic",
             "vontology",
-            "name_fallback",
         ]
         assert "registry_keyword_fallback" not in result.search_sources
         assert [match.concept_id for match in result.matches] == [
@@ -854,10 +789,8 @@ class TestDiscoverWorkflowsForTurn:
         ]
         assert mock_semantic.called is True
         assert mock_vontology.called is True
-        assert mock_name_fallback.called is True
 
     @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
-    @patch("src.backend.services.workflow_discovery_service._search_workflows_name_fallback")
     @patch("src.backend.services.workflow_discovery_service._search_workflows_vontology")
     @patch("src.backend.services.workflow_discovery_service._search_workflows_semantic")
     @patch("src.backend.services.workflow_discovery_service._search_workflow_capabilities")
@@ -866,7 +799,6 @@ class TestDiscoverWorkflowsForTurn:
         mock_capability: MagicMock,
         mock_semantic: MagicMock,
         mock_vontology: MagicMock,
-        mock_name_fallback: MagicMock,
         mock_enrich: MagicMock,
     ) -> None:
         mock_capability.return_value = [
@@ -876,7 +808,6 @@ class TestDiscoverWorkflowsForTurn:
         ]
         mock_semantic.return_value = []
         mock_vontology.return_value = []
-        mock_name_fallback.return_value = []
         mock_enrich.side_effect = lambda matches: matches
 
         with patch(
@@ -892,10 +823,8 @@ class TestDiscoverWorkflowsForTurn:
         assert result.search_sources == ["capability_index"]
         assert mock_semantic.called is False
         assert mock_vontology.called is False
-        assert mock_name_fallback.called is False
 
     @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
-    @patch("src.backend.services.workflow_discovery_service._search_workflows_name_fallback")
     @patch("src.backend.services.workflow_discovery_service._search_workflows_vontology")
     @patch("src.backend.services.workflow_discovery_service._search_workflows_semantic")
     @patch("src.backend.services.workflow_discovery_service._search_workflow_capabilities")
@@ -908,7 +837,6 @@ class TestDiscoverWorkflowsForTurn:
         mock_capability: MagicMock,
         mock_semantic: MagicMock,
         mock_vontology: MagicMock,
-        mock_name_fallback: MagicMock,
         mock_enrich: MagicMock,
     ) -> None:
         def _blocking_capability(*_args, **_kwargs):
@@ -923,7 +851,6 @@ class TestDiscoverWorkflowsForTurn:
         }
         mock_semantic.return_value = []
         mock_vontology.return_value = []
-        mock_name_fallback.return_value = []
         mock_enrich.side_effect = lambda matches: matches
 
         result = discover_workflows(
@@ -942,7 +869,6 @@ class TestDiscoverWorkflowsForTurn:
         assert mock_semantic.called is False
 
     @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
-    @patch("src.backend.services.workflow_discovery_service._search_workflows_name_fallback")
     @patch("src.backend.services.workflow_discovery_service._search_workflows_vontology")
     @patch("src.backend.services.workflow_discovery_service._search_workflows_semantic")
     @patch("src.backend.services.workflow_discovery_service._search_workflow_capabilities")
@@ -955,7 +881,6 @@ class TestDiscoverWorkflowsForTurn:
         mock_capability: MagicMock,
         mock_semantic: MagicMock,
         mock_vontology: MagicMock,
-        mock_name_fallback: MagicMock,
         mock_enrich: MagicMock,
     ) -> None:
         def _blocking_semantic(*_args, **_kwargs):
@@ -970,7 +895,6 @@ class TestDiscoverWorkflowsForTurn:
         }
         mock_semantic.side_effect = _blocking_semantic
         mock_vontology.return_value = []
-        mock_name_fallback.return_value = []
         mock_enrich.side_effect = lambda matches: matches
 
         result = discover_workflows(
@@ -1378,12 +1302,10 @@ def test_classify_workflow_uses_registry_fallback_for_built_in_workflow() -> Non
     )
 
     with patch(
-        "src.backend.workflows.vontology_loader.build_workflow_process_graph",
-        return_value=(None, ["workflow_concept_not_found"]),
-    ), patch(
-        "src.backend.workflows.vontology_loader.load_workflow_definition_from_vontology",
-        return_value=None,
-    ), patch(
+        "src.backend.workflows.vontology_loader.build_workflow_process_graph"
+    ) as mock_build_graph, patch(
+        "src.backend.workflows.vontology_loader.load_workflow_definition_from_vontology"
+    ) as mock_load_definition, patch(
         "src.backend.workflows.durable.registry_factory.build_durable_workflow_registry_read_only",
         return_value=fake_registry,
     ):
@@ -1394,6 +1316,51 @@ def test_classify_workflow_uses_registry_fallback_for_built_in_workflow() -> Non
     assert is_executable is True
     assert reason == EXECUTABILITY_EXECUTABLE_NOW
     assert detail is None
+    mock_build_graph.assert_not_called()
+    mock_load_definition.assert_not_called()
+
+
+def test_annotation_reuses_provided_registry_for_built_in_workflow() -> None:
+    fake_definition = SimpleNamespace(
+        initial_state="start",
+        states={"start": object()},
+    )
+    fake_registration = SimpleNamespace(
+        source="built_in",
+        definition=fake_definition,
+    )
+    fake_registry = SimpleNamespace(
+        get_registration=lambda workflow_id: fake_registration,
+        get=lambda workflow_id: None,
+    )
+    match = WorkflowMatch(
+        "#V#chat_assistant_workflow",
+        "Chat Assistant Workflow",
+        relevance_score=0.95,
+    )
+
+    with patch(
+        "src.backend.workflows.durable.registry_factory.build_durable_workflow_registry_read_only"
+    ) as mock_build_registry, patch(
+        "src.backend.services.workflow_discovery_service._has_authoritative_routing_text",
+        return_value=True,
+    ), patch(
+        "src.backend.services.workflow_discovery_service._resolve_workflow_routing_profile_data",
+        return_value=(None, None),
+    ), patch(
+        "src.backend.services.workflow_discovery_service._resolve_workflow_publication_lifecycle_data",
+        return_value=(None, None),
+    ):
+        annotated = _annotate_and_rank_candidates(
+            [match],
+            max_results=1,
+            workflow_registry=fake_registry,
+        )
+
+    assert len(annotated) == 1
+    assert annotated[0].is_executable is True
+    assert annotated[0].executability_reason == EXECUTABILITY_EXECUTABLE_NOW
+    mock_build_registry.assert_not_called()
 
 
 def test_classify_workflow_keeps_vontology_source_graph_authoritative() -> None:

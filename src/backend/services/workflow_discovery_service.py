@@ -34,7 +34,6 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, cast
 from ..vontology.utils_vontology import get_concept_description
 from .file_copy_reference_service import extract_file_copy_concept_ids_from_text
 from .file_copy_typing_service import build_file_copy_typing_context
-from .arxiv_paper_link_service import extract_arxiv_id_candidates
 from .workflow_capability_service import (
     get_workflow_capability_index_runtime_state,
     search_workflow_capabilities,
@@ -73,7 +72,8 @@ SEARCH_TIMEOUT_SECONDS = _coerce_discovery_timeout_seconds(
     default=10.0,
 )
 # Cold-start capability-index waits should be bounded and should not consume the
-# full discovery budget. Discovery still needs time to surface fallback causes.
+# full discovery budget. Discovery still needs time for semantic and Vontology
+# search when the authoritative primary substrate is not yet sufficient.
 DISCOVERY_CAPABILITY_INDEX_MAX_WAIT_SECONDS = 0.75
 DISCOVERY_CAPABILITY_INDEX_WAIT_TIMEOUT_FRACTION = 0.5
 
@@ -169,6 +169,8 @@ def _count_workflow_steps(graph: Optional[Dict[str, Any]]) -> int:
 
 def _classify_registry_workflow_executability(
     concept_id: str,
+    *,
+    workflow_registry: Any | None = None,
 ) -> Tuple[bool, str, Optional[str]] | None:
     """Classify executability from registry definitions when graph data is absent.
 
@@ -178,14 +180,13 @@ def _classify_registry_workflow_executability(
     """
 
     try:
-        from ..workflows.durable.registry_factory import (
-            build_durable_workflow_registry_read_only,
-        )
-    except Exception:
-        return None
+        registry = workflow_registry
+        if registry is None:
+            from ..workflows.durable.registry_factory import (
+                build_durable_workflow_registry_read_only,
+            )
 
-    try:
-        registry = build_durable_workflow_registry_read_only()
+            registry = build_durable_workflow_registry_read_only()
         registration = registry.get_registration(concept_id)
     except Exception:
         return None
@@ -230,6 +231,24 @@ def _classify_registry_workflow_executability(
         )
 
     return (True, EXECUTABILITY_EXECUTABLE_NOW, None)
+
+
+def _classify_workflow_candidate_executability(
+    concept_id: str,
+    *,
+    workflow_registry: Any | None = None,
+) -> Tuple[bool, str, Optional[str]]:
+    """Classify candidate executability, reusing a live registry when available."""
+
+    if workflow_registry is not None:
+        registry_fallback = _classify_registry_workflow_executability(
+            concept_id,
+            workflow_registry=workflow_registry,
+        )
+        if registry_fallback is not None:
+            return registry_fallback
+
+    return _classify_workflow_concept_executability(concept_id)
 
 
 @dataclass
@@ -285,7 +304,6 @@ class WorkflowDiscoveryResult:
     threshold: float = DEFAULT_RELEVANCE_THRESHOLD
     errors: List[str] = field(default_factory=list)
     search_sources: List[str] = field(default_factory=list)
-    keyword_fallback_queries: List[str] = field(default_factory=list)
     allow_non_executable: bool = False
     match_absence_reason: Optional[str] = None
     timeout_budget_seconds: float = SEARCH_TIMEOUT_SECONDS
@@ -316,7 +334,6 @@ class WorkflowDiscoveryResult:
             "match_count": len(routing_payload),
             "candidate_count": len(candidate_payload),
             "search_sources": list(self.search_sources),
-            "keyword_fallback_queries": list(self.keyword_fallback_queries),
             "allow_non_executable": self.allow_non_executable,
             "match_absence_reason": self.match_absence_reason,
             "timeout_budget_seconds": round(self.timeout_budget_seconds, 3),
@@ -583,142 +600,6 @@ def _augment_query_with_file_copy_context(
     return "\n".join(lines)
 
 
-def _build_keyword_fallback_queries(
-    query: str,
-    contexts: List[dict[str, Any]],
-) -> list[str]:
-    candidates: list[str] = [query]
-    for context in contexts:
-        route_hint = str(context.get("route_hint") or "").strip()
-        if route_hint:
-            candidates.append(f"{route_hint} workflow")
-            candidates.append(f"{route_hint} representation workflow")
-        for type_name in context.get("type_display_names") or []:
-            if isinstance(type_name, str) and type_name.strip():
-                candidates.append(type_name.strip())
-
-    query_lower = str(query or "").strip().lower()
-    talk_keywords = (
-        "talk",
-        "presentation",
-        "seminar",
-        "academic talk",
-        "scientific talk",
-        "technical talk",
-    )
-    if any(keyword in query_lower for keyword in talk_keywords):
-        candidates.extend(
-            [
-                "talk workflow",
-                "talk representation workflow",
-                "presentation workflow",
-                "presentation representation workflow",
-                "academic presentation workflow",
-                "technical scientific talk representation workflow",
-                "scientific presentation workflow",
-                "seminar workflow",
-                "seminar representation workflow",
-            ]
-        )
-
-    arxiv_ids = extract_arxiv_id_candidates(
-        query,
-        *[
-            context.get("original_filename")
-            for context in contexts
-            if isinstance(context, Mapping)
-        ],
-    )
-    if arxiv_ids:
-        candidates.extend(
-            [
-                "arxiv workflow",
-                "arxiv paper workflow",
-                "arxiv paper representation workflow",
-                "scholarly paper workflow",
-                "scholarly paper representation workflow",
-            ]
-        )
-        candidates.extend(f"arxiv {arxiv_id}" for arxiv_id in arxiv_ids)
-
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for item in candidates:
-        token = str(item or "").strip()
-        if not token or len(token) < 3:
-            continue
-        lowered = token.lower()
-        if lowered in seen:
-            continue
-        seen.add(lowered)
-        deduped.append(token)
-    return deduped
-
-
-def _search_workflows_name_fallback(
-    queries: List[str],
-    *,
-    limit: int = DEFAULT_MAX_RESULTS * 2,
-) -> List[WorkflowMatch]:
-    try:
-        from .concept_search_service import search_concepts
-    except Exception as exc:
-        logger.warning("Keyword workflow fallback unavailable: %s", exc)
-        return []
-
-    matches: list[WorkflowMatch] = []
-    seen_keys: set[tuple[str, str]] = set()
-    for search_query in queries:
-        for match_type, source_name, score_floor in (
-            ("exact", "exact_name", 0.99),
-            ("substring", "substring_name", 0.82),
-        ):
-            for workflow_type in WORKFLOW_TYPE_IDS:
-                try:
-                    result = search_concepts(
-                        query=search_query,
-                        match_type=match_type,
-                        instance_of=workflow_type,
-                        include_description=True,
-                        limit=limit,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "Workflow name fallback search failed for %s (%s): %s",
-                        search_query,
-                        match_type,
-                        exc,
-                    )
-                    continue
-
-                for concept in result.get("results", []):
-                    concept_id = str(concept.get("concept_id") or "").strip()
-                    if not concept_id:
-                        continue
-                    dedupe_key = (concept_id.lower(), source_name)
-                    if dedupe_key in seen_keys:
-                        continue
-                    seen_keys.add(dedupe_key)
-                    score = concept.get("similarity_score", 0.0)
-                    if score <= 0:
-                        score = concept.get("relevance_score", 0.0) / 100.0
-                    score = max(float(score or 0.0), score_floor)
-                    matches.append(
-                        WorkflowMatch(
-                            concept_id=concept_id,
-                            name=concept.get("name", "Unknown"),
-                            description=None,
-                            relevance_score=score,
-                            match_source=source_name,
-                        )
-                    )
-                if matches:
-                    break
-            if matches:
-                break
-    return matches
-
-
 def _enrich_workflow_matches(matches: List[WorkflowMatch]) -> List[WorkflowMatch]:
     """Enrich workflow matches with descriptions from Vontology."""
     if not matches:
@@ -830,6 +711,10 @@ def _classify_workflow_concept_executability(
             detail,
         )
 
+    registry_fallback = _classify_registry_workflow_executability(concept_id)
+    if registry_fallback is not None:
+        return registry_fallback
+
     try:
         from ..workflows.vontology_loader import (
             build_workflow_process_graph,
@@ -888,11 +773,6 @@ def _classify_workflow_concept_executability(
                     ),
                 )
             return (True, EXECUTABILITY_EXECUTABLE_NOW, None)
-
-        if not isinstance(graph, dict):
-            registry_fallback = _classify_registry_workflow_executability(concept_id)
-            if registry_fallback is not None:
-                return registry_fallback
 
         if isinstance(graph, dict):
             detail = warning_items[0] if warning_items else "workflow_graph_not_loadable"
@@ -1028,6 +908,7 @@ def _annotate_and_rank_candidates(
     matches: List[WorkflowMatch],
     *,
     max_results: int,
+    workflow_registry: Any | None = None,
 ) -> List[WorkflowMatch]:
     """Attach executability/confidence metadata and rank candidates for routing."""
     annotated: list[WorkflowMatch] = []
@@ -1035,8 +916,9 @@ def _annotate_and_rank_candidates(
     required_routing_candidates = max(1, int(max_results))
 
     for match in matches[:annotation_cap]:
-        is_executable, reason, detail = _classify_workflow_concept_executability(
-            match.concept_id
+        is_executable, reason, detail = _classify_workflow_candidate_executability(
+            match.concept_id,
+            workflow_registry=workflow_registry,
         )
         has_authoritative_text = _has_authoritative_routing_text(match.concept_id)
         routing_profile, _routing_profile_source = _resolve_workflow_routing_profile_data(
@@ -1263,7 +1145,6 @@ def discover_workflows(
     file_copy_contexts, context_errors = _resolve_query_file_copy_contexts(query)
     errors.extend(context_errors)
     search_query = _augment_query_with_file_copy_context(query, file_copy_contexts)
-    keyword_fallback_queries = _build_keyword_fallback_queries(query, file_copy_contexts)
     capability_index_wait_seconds = _compute_capability_index_wait_seconds(
         effective_timeout_seconds
     )
@@ -1321,7 +1202,7 @@ def discover_workflows(
             _record_budget_exhaustion("capability_index_search", str(e))
         logger.warning("Workflow capability index search failed: %s", e)
 
-    # Secondary: existing search sources fill gaps the capability index misses.
+    # Secondary authoritative search sources fill gaps the capability index misses.
     semantic_budget_remaining = _remaining_search_timeout_seconds(
         started_at=start_time,
         timeout_seconds=effective_timeout_seconds,
@@ -1386,44 +1267,6 @@ def discover_workflows(
                 _record_budget_exhaustion("vontology_search", str(e))
             logger.warning(f"Vontology workflow discovery failed: {e}")
 
-    name_fallback_budget_remaining = _remaining_search_timeout_seconds(
-        started_at=start_time,
-        timeout_seconds=effective_timeout_seconds,
-    )
-    if (
-        not capability_matches_sufficient
-        and keyword_fallback_queries
-        and name_fallback_budget_remaining <= 0.0
-    ):
-        _record_budget_exhaustion(
-            "workflow_name_fallback_search",
-            (
-                "Discovery timeout budget was exhausted before "
-                "workflow_name_fallback_search could start "
-                f"(budget={effective_timeout_seconds:.3f}s)."
-            ),
-        )
-    elif not capability_matches_sufficient and keyword_fallback_queries:
-        try:
-            search_sources.append("name_fallback")
-            fallback_matches = cast(
-                List[WorkflowMatch],
-                _run_with_search_timeout(
-                    label="workflow_name_fallback_search",
-                    timeout_seconds=name_fallback_budget_remaining,
-                    operation=lambda: _search_workflows_name_fallback(
-                        keyword_fallback_queries,
-                        limit=max_results * 2,
-                    ),
-                ),
-            )
-            all_matches.extend(fallback_matches)
-        except Exception as e:
-            errors.append(f"workflow_name_fallback_error: {e}")
-            if _is_discovery_budget_timeout(e):
-                _record_budget_exhaustion("workflow_name_fallback_search", str(e))
-            logger.warning("Workflow name fallback discovery failed: %s", e)
-
     # Deduplicate and rank (keep a larger pre-limit for executability-aware
     # ranking to avoid early relevance-only truncation).
     ranked_matches = _deduplicate_and_rank(
@@ -1437,6 +1280,7 @@ def discover_workflows(
     ranked_matches = _annotate_and_rank_candidates(
         ranked_matches,
         max_results=max_results,
+        workflow_registry=workflow_registry,
     )
     routing_matches = _filter_routing_candidates(
         ranked_matches,
@@ -1479,7 +1323,6 @@ def discover_workflows(
         threshold=relevance_threshold,
         errors=errors if errors else [],
         search_sources=search_sources,
-        keyword_fallback_queries=keyword_fallback_queries,
         allow_non_executable=allow_non_executable,
         match_absence_reason=match_absence_reason,
         timeout_budget_seconds=effective_timeout_seconds,

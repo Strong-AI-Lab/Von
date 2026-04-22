@@ -2100,12 +2100,8 @@ def test_generate_entity_relative_tool_pipeline_uses_live_workflow_retrieval_sur
             lambda *_args, **_kwargs: [],
         )
         monkeypatch.setattr(
-            "src.backend.services.workflow_discovery_service._search_workflows_name_fallback",
-            lambda *_args, **_kwargs: [],
-        )
-        monkeypatch.setattr(
             "src.backend.services.workflow_discovery_service.SEARCH_TIMEOUT_SECONDS",
-            2.0,
+            5.0,
         )
 
         app = _make_app(
@@ -2121,7 +2117,8 @@ def test_generate_entity_relative_tool_pipeline_uses_live_workflow_retrieval_sur
 
         client = app.test_client()
         response = client.post(
-            "/von/generate", json={"prompt": "What papers of mine do you know about?"}
+            "/von/generate",
+            json={"prompt": "What papers of mine do you know about?"},
         )
         assert response.status_code == 200
 

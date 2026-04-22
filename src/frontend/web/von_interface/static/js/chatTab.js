@@ -2285,9 +2285,6 @@ function createThinkingCardHistorySnapshot(request) {
                 : [],
             search_sources: Array.isArray(request.workflowDiscovery.search_sources)
                 ? request.workflowDiscovery.search_sources.slice()
-                : [],
-            keyword_fallback_queries: Array.isArray(request.workflowDiscovery.keyword_fallback_queries)
-                ? request.workflowDiscovery.keyword_fallback_queries.slice()
                 : []
         }
         : null;
@@ -4676,11 +4673,6 @@ function buildThinkingWorkflowStageDiagnosticData(stageId, stageLabel, request) 
                 .map((value) => normaliseThinkingActivityString(value))
                 .filter(Boolean)
             : [];
-        data.keyword_fallback_queries = Array.isArray(workflowDiscovery.keyword_fallback_queries)
-            ? workflowDiscovery.keyword_fallback_queries
-                .map((value) => normaliseThinkingActivityString(value))
-                .filter(Boolean)
-            : [];
         data.threshold = Number.isFinite(workflowDiscovery.threshold) ? Number(workflowDiscovery.threshold) : null;
         data.search_time_ms = Number.isFinite(workflowDiscovery.search_time_ms) ? Math.round(Number(workflowDiscovery.search_time_ms)) : null;
         data.timeout_budget_seconds = Number.isFinite(workflowDiscovery.timeout_budget_seconds)
@@ -5016,7 +5008,6 @@ function renderThinkingWorkflowStageDiagnosticDataHTML(data, workflowDiscovery =
                 html: data.workflow_selection_narrative_html
             }
         );
-        sections.push(buildThinkingDiagnosticListHTML('Fallback queries', data.keyword_fallback_queries, { code: true }));
         sections.push(buildThinkingDiagnosticListHTML('Errors', data.errors));
         if (data.budget_exhaustion_detail) {
             sections.push(buildThinkingDiagnosticTextSectionHTML(
