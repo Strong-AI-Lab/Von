@@ -4,6 +4,11 @@
 
 This note records the current state of the `JVNAUTOSCI-1913` / `JVNAUTOSCI-1116` anti-hack and de-bloating programme after the April 21, 2026 landings through `JVNAUTOSCI-1972`.
 
+For the broader current-code review of where Von still falls short of the
+agentic architecture described in `Von_for_AgenticAI.md`, and for the latest
+priority ordering after the 23 April 2026 scan, see
+`docs/engineering/agentic_architecture_status_2026-04-23.md`.
+
 It replaces an earlier draft that had become materially stale. In particular:
 
 - `JVNAUTOSCI-1929` is now `Done`
