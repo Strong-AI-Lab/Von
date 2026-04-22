@@ -2,8 +2,10 @@ import {
     __testOnly_applyStoredSelection,
     __testOnly_buildServerDefaultLlmPayload,
     __testOnly_buildStoredUserContextFromOption,
+    __testOnly_formatServerDefaultSummary,
     __testOnly_formatRagSummaryForSettings,
     __testOnly_getPreferredRagNamespace,
+    __testOnly_populateServerDefaultLlmForm,
     __testOnly_readRuntimeModelSettingFromForm,
     __testOnly_resolveActiveLlmFromSelections,
     __testOnly_resolveDisplayedProviderModels,
@@ -152,6 +154,49 @@ describe('settingsPage RAG status summary', () => {
             model: 'gemma4:26b',
             host: 'http://localhost:11434',
         });
+    });
+
+    test('server default form stays blank when there is no persisted server default', () => {
+        document.body.innerHTML = `
+            <select id="serverDefaultLlmProvider">
+                <option value="" selected>Use current chat model on save</option>
+                <option value="ollama">Ollama</option>
+            </select>
+            <input id="serverDefaultLlmModel" value="stale-model" />
+            <input id="serverDefaultLlmHost" value="http://stale-host:11434" />
+        `;
+
+        __testOnly_populateServerDefaultLlmForm(null);
+
+        expect(document.getElementById('serverDefaultLlmProvider').value).toBe('');
+        expect(document.getElementById('serverDefaultLlmModel').value).toBe('');
+        expect(document.getElementById('serverDefaultLlmHost').value).toBe('');
+    });
+
+    test('server default summary distinguishes unsaved fallback from persisted value', () => {
+        expect(
+            __testOnly_formatServerDefaultSummary({
+                persisted: null,
+                explicitFormEntry: null,
+                fallback: {
+                    provider: 'ollama',
+                    model: 'gemma4:26b',
+                    host: 'http://127.0.0.1:11434',
+                },
+            }),
+        ).toBe(
+            'Server default not saved. Save will snapshot current chat selection: ollama:gemma4:26b @ http://127.0.0.1:11434',
+        );
+
+        expect(
+            __testOnly_formatServerDefaultSummary({
+                persisted: {
+                    provider: 'ollama',
+                    model: 'gemma4:26b',
+                    host: 'http://127.0.0.1:11434',
+                },
+            }),
+        ).toBe('Server default: ollama:gemma4:26b @ http://127.0.0.1:11434');
     });
 
     test('runtime model form reader returns explicit payload for a configured embedder', () => {

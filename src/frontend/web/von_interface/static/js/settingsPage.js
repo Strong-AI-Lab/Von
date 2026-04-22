@@ -1026,6 +1026,19 @@ function formatLlmEntry(entry) {
     : `${canonical.provider}:${canonical.model}`;
 }
 
+function readExplicitServerDefaultLlmFormEntry() {
+  const provider = String(document.getElementById('serverDefaultLlmProvider')?.value || '').trim().toLowerCase();
+  const model = String(document.getElementById('serverDefaultLlmModel')?.value || '').trim();
+  const host = String(document.getElementById('serverDefaultLlmHost')?.value || '').trim();
+  if (!provider && !model && !host) {
+    return null;
+  }
+  if (!provider || !model) {
+    return null;
+  }
+  return host ? { provider, model, host } : { provider, model };
+}
+
 function humaniseSelectionSource(source) {
   const token = String(source || '').trim();
   if (!token) return 'unknown source';
@@ -1127,14 +1140,37 @@ function populateRuntimeModelSettingForm(prefix, setting, { allowDisabled = fals
   applyRuntimeModelModeUi(prefix, { allowDisabled });
 }
 
-function populateServerDefaultLlmForm(serverDefault, fallback = null) {
+function populateServerDefaultLlmForm(serverDefault) {
   const providerEl = document.getElementById('serverDefaultLlmProvider');
   const modelEl = document.getElementById('serverDefaultLlmModel');
   const hostEl = document.getElementById('serverDefaultLlmHost');
-  const chosen = buildCanonicalLlmEntry(serverDefault) || buildCanonicalLlmEntry(fallback);
+  const chosen = buildCanonicalLlmEntry(serverDefault);
   if (providerEl) providerEl.value = String(chosen?.provider || '').trim().toLowerCase();
   if (modelEl) modelEl.value = String(chosen?.model || '').trim();
   if (hostEl) hostEl.value = String(chosen?.host || '').trim();
+}
+
+function formatServerDefaultSummary({
+  persisted = null,
+  explicitFormEntry = null,
+  fallback = null,
+} = {}) {
+  const persistedEntry = buildCanonicalLlmEntry(persisted);
+  if (persistedEntry) {
+    return `Server default: ${formatLlmEntry(persistedEntry)}`;
+  }
+
+  const pendingEntry = buildCanonicalLlmEntry(explicitFormEntry);
+  if (pendingEntry) {
+    return `Pending server default: ${formatLlmEntry(pendingEntry)}`;
+  }
+
+  const fallbackEntry = buildCanonicalLlmEntry(fallback);
+  if (fallbackEntry) {
+    return `Server default not saved. Save will snapshot current chat selection: ${formatLlmEntry(fallbackEntry)}`;
+  }
+
+  return 'Server default not saved.';
 }
 
 function formatRuntimeModelResolutionSummary(label, resolution) {
@@ -1186,8 +1222,16 @@ function renderRuntimeModelSummaries({
 } = {}) {
   const serverSummaryEl = document.getElementById('serverDefaultLlmSummary');
   if (serverSummaryEl) {
-    const serverDefault = buildCanonicalLlmEntry(serverDefaultLlm) || buildServerDefaultLlmPayload();
-    serverSummaryEl.textContent = `Server default: ${formatLlmEntry(serverDefault)}`;
+    const localModelPreference = getEffectiveLocalModelPreference();
+    const fallbackEntry =
+      buildCanonicalLlmEntry(localModelPreference?.requestedLlm)
+      || buildCanonicalLlmEntry(currentResolvedLlm)
+      || null;
+    serverSummaryEl.textContent = formatServerDefaultSummary({
+      persisted: serverDefaultLlm,
+      explicitFormEntry: readExplicitServerDefaultLlmFormEntry(),
+      fallback: fallbackEntry,
+    });
   }
 
   const effectiveEmbedder = ragEmbedder || latestRagRuntimeConfiguration?.embedder_resolution || null;
@@ -2339,6 +2383,16 @@ export function __testOnly_buildServerDefaultLlmPayload(options = {}) {
 }
 
 // Export for testing
+export function __testOnly_populateServerDefaultLlmForm(serverDefault) {
+  return populateServerDefaultLlmForm(serverDefault);
+}
+
+// Export for testing
+export function __testOnly_formatServerDefaultSummary(options = {}) {
+  return formatServerDefaultSummary(options);
+}
+
+// Export for testing
 export function __testOnly_readRuntimeModelSettingFromForm(prefix, options = {}) {
   return readRuntimeModelSettingFromForm(prefix, options);
 }
@@ -3222,10 +3276,7 @@ async function loadAndDisplaySettings() {
     }
     latestOpenAiModelProbe = null;
     updateOpenAiModelStatusMessage();
-    populateServerDefaultLlmForm(
-      settings.server_default_llm,
-      buildCanonicalLlmEntry(localModelPreference?.requestedLlm) || effectiveLlm || null,
-    );
+    populateServerDefaultLlmForm(settings.server_default_llm);
     populateRuntimeModelSettingForm('ragEmbedder', settings.rag_embedder, { allowDisabled: false });
     populateRuntimeModelSettingForm('ragLlm', settings.rag_llm, { allowDisabled: true });
     latestCapabilityIndexStatus = settings.workflow_capability_index || null;
