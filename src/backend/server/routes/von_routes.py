@@ -211,6 +211,17 @@ def _safe_log_preview(value: object, *, limit: int = 100) -> str:
     return preview.encode("ascii", "backslashreplace").decode("ascii")
 
 
+def _safe_app_log(level: str, message: str, *args: object) -> None:
+    try:
+        logger = getattr(current_app, "logger", None)
+        method = getattr(logger, level, None) if logger is not None else None
+        if callable(method):
+            method(message, *args)
+    except Exception:
+        # Logging must never be load-bearing for request success on Windows.
+        pass
+
+
 _TOOL_PROGRESS_HEARTBEAT_INTERVAL_SEC = _env_int(
     "VON_TOOL_PROGRESS_HEARTBEAT_INTERVAL_SEC", 5, min_value=1
 )
@@ -12594,13 +12605,13 @@ def reset_context():
 
         # Clear the conversation context
         current_app.config["CONTEXT"] = []
-        print("Context reset successfully")  # Log server-side
+        _safe_app_log("info", "Context reset successfully")
         return (
             jsonify({"status": "reset", "message": "Context reset successfully"}),
             200,
         )
     except Exception as e:
-        print(f"Error resetting context: {e}")  # Log error server-side
+        _safe_app_log("exception", "Error resetting context: %s", e)
         return jsonify({"error": f"Failed to reset context: {str(e)}"}), 500
 
 
