@@ -128,59 +128,33 @@ def test_workflow_execution_routes_roundtrip(app_client):
 def test_workflow_definition_endpoint_uses_best_effort_text(monkeypatch, app_client):
     import src.backend.server.routes.workflows_routes as workflows_routes
 
-    def _fake_find_one(filter, projection=None):
-        if filter.get("concept_id") == "#V#demo_workflow":
-            return {
-                "concept_id": "#V#demo_workflow",
-                "name": "Demo workflow",
-                "relationships": {
-                    "hasInitialStep": ["#V#demo_step_1"],
-                    "hasStep": ["#V#demo_step_1", "#V#demo_step_2", "#V#demo_step_3"],
-                },
-            }
-        return None
-
-    def _fake_find(filter, projection=None, sort=None, skip=0, limit=0):
-        ids = filter.get("concept_id", {}).get("$in", [])
-        docs = []
-        for cid in ids:
-            if cid == "#V#demo_step_1":
-                docs.append(
+    monkeypatch.setattr(
+        workflows_routes,
+        "build_workflow_process_graph",
+        lambda workflow_id: (
+            {
+                "representation": "vontology_process_graph_v1",
+                "initial_step": "#V#demo_step_1",
+                "steps": [
                     {
-                        "concept_id": "#V#demo_step_1",
-                        "name": "Step 1",
-                        "relationships": {
-                            "invokesAction": ["#V#demo_action"],
-                            "hasPrecondition": ["#V#demo_condition_1"],
-                            "onTrueNextStep": ["#V#demo_step_2"],
-                            "onFalseNextStep": ["#V#demo_step_3"],
+                        "step_id": "#V#demo_step_1",
+                        "preconditions": ["#V#demo_condition_1"],
+                        "control_flow": {
+                            "on_true": "#V#demo_step_2",
+                            "on_false": "#V#demo_step_3",
                         },
-                    }
-                )
-            if cid == "#V#demo_step_2":
-                docs.append(
-                    {
-                        "concept_id": "#V#demo_step_2",
-                        "name": "Step 2",
-                        "relationships": {
-                            "invokesAction": ["#V#demo_action_2"],
-                        },
-                    }
-                )
-            if cid == "#V#demo_step_3":
-                docs.append(
-                    {
-                        "concept_id": "#V#demo_step_3",
-                        "name": "Step 3",
-                        "relationships": {
-                            "invokesAction": ["#V#demo_action_3"],
-                        },
-                    }
-                )
-        return docs
-
-    monkeypatch.setattr(workflows_routes.ConceptsRepository, "find_one", _fake_find_one)
-    monkeypatch.setattr(workflows_routes.ConceptsRepository, "find", _fake_find)
+                    },
+                    {"step_id": "#V#demo_step_2"},
+                    {"step_id": "#V#demo_step_3"},
+                ],
+                "edges": [
+                    {"predicate": "onTrueNextStep"},
+                    {"predicate": "onFalseNextStep"},
+                ],
+            },
+            [],
+        ),
+    )
     monkeypatch.setattr(
         workflows_routes,
         "resolve_workflow_narrative_text",
@@ -318,6 +292,18 @@ def test_workflow_definitions_list_endpoint_reads_registry(monkeypatch, app_clie
             "#V#beta_workflow": 0,
         },
     )
+    monkeypatch.setattr(
+        workflows_routes,
+        "get_workflow_capability_index_readiness_report",
+        lambda: {
+            "ready": False,
+            "status": "error",
+            "summary": "Workflow capability index not ready.",
+            "detail": "Last build failed: metadata too long",
+            "last_error": "metadata too long",
+            "size": 0,
+        },
+    )
     classification_map = {
         "#V#alpha_workflow": (
             True,
@@ -357,6 +343,8 @@ def test_workflow_definitions_list_endpoint_reads_registry(monkeypatch, app_clie
         "session_id": None,
         "turn_id": None,
     }
+    assert payload["capability_index"]["ready"] is False
+    assert payload["capability_index"]["status"] == "error"
     assert payload["parity_inventory"]["counts"]["registry"] == 2
     assert "#V#salient_predicate_governance_workflow" in payload["parity_inventory"]["vontology_only_workflow_ids"]
 
@@ -371,7 +359,7 @@ def test_workflow_definitions_list_endpoint_reads_registry(monkeypatch, app_clie
     assert items[0]["definition_identity"]["definition_hash"]
     assert items[0]["attempts"] == 8
     assert items[0]["completions"] == 6
-    assert items[0]["completion_rate"] == pytest.approx(0.75)
+    assert items[0]["completion_rate"] == 0.75
     assert items[0]["last_episode_at"] == "2026-02-13T10:22:00+00:00"
     assert items[0]["episodes_count"] == 3
     assert items[0]["is_executable"] is True
@@ -388,7 +376,7 @@ def test_workflow_definitions_list_endpoint_reads_registry(monkeypatch, app_clie
     assert items[1]["definition_identity"]["definition_hash"]
     assert items[1]["attempts"] == 2
     assert items[1]["completions"] == 1
-    assert items[1]["completion_rate"] == pytest.approx(0.5)
+    assert items[1]["completion_rate"] == 0.5
     assert items[1]["last_episode_at"] == "2026-02-13T11:00:00+00:00"
     assert items[1]["episodes_count"] == 0
     assert items[1]["is_executable"] is False
@@ -397,6 +385,33 @@ def test_workflow_definitions_list_endpoint_reads_registry(monkeypatch, app_clie
         items[1]["executability_detail"]
         == "workflow_step_contract_issue:count=2,total=3,first_step=#V#alpha_step"
     )
+
+
+def test_workflow_capability_index_status_endpoint_returns_readiness_report(
+    monkeypatch, app_client
+):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    monkeypatch.setattr(
+        workflows_routes,
+        "get_workflow_capability_index_readiness_report",
+        lambda: {
+            "ready": False,
+            "status": "timeout",
+            "summary": "Workflow capability index still not ready after startup check.",
+            "detail": "Workflow discovery is waiting on the authoritative capability index to finish building.",
+            "size": 0,
+            "build_in_progress": True,
+        },
+    )
+
+    resp = app_client.get("/api/workflows/capability-index/status")
+
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["ready"] is False
+    assert payload["status"] == "timeout"
+    assert payload["build_in_progress"] is True
 
 
 def test_workflow_definitions_list_includes_relation_description_source(monkeypatch, app_client):

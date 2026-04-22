@@ -322,6 +322,106 @@
             </div>
         </section>
 
+        <section id="rag-model-settings" data-settings-concern="models">
+            <h2>RAG &amp; Workflow Index Models</h2>
+            <p class="settings-note">These controls govern the embedding and optional LLM surfaces used by RAG and by
+                the authoritative workflow capability index. If a RAG setting is left on inherit, Von uses the active
+                chat model in scope when available, then the saved server default below.</p>
+
+            <div class="settings-runtime-model-panel">
+                <div class="settings-runtime-model-block">
+                    <h3>Server Default Chat Model</h3>
+                    <p class="settings-note">Used by server-side features when no scoped chat model is available. If
+                        you leave these blank, Save uses the current browser chat selection as the server default
+                        snapshot.</p>
+                    <div class="settings-runtime-model-grid">
+                        <label for="serverDefaultLlmProvider">Provider</label>
+                        <select id="serverDefaultLlmProvider">
+                            <option value="">Use current chat model on save</option>
+                            <option value="ollama">Ollama</option>
+                            <option value="openai">OpenAI</option>
+                            <option value="gemini">Gemini</option>
+                        </select>
+
+                        <label for="serverDefaultLlmModel">Model</label>
+                        <input type="text" id="serverDefaultLlmModel" placeholder="e.g. gemma4:26b or gpt-5.4-mini" />
+
+                        <label for="serverDefaultLlmHost">Host (optional)</label>
+                        <input type="text" id="serverDefaultLlmHost" placeholder="e.g. http://localhost:11434" />
+                    </div>
+                    <div id="serverDefaultLlmSummary" class="settings-runtime-model-summary">Server default: —</div>
+                </div>
+
+                <div class="settings-runtime-model-block">
+                    <h3>RAG Embedder</h3>
+                    <div class="settings-runtime-model-grid">
+                        <label for="ragEmbedderMode">Selection mode</label>
+                        <select id="ragEmbedderMode">
+                            <option value="inherit">Inherit chat default</option>
+                            <option value="explicit">Explicit model</option>
+                        </select>
+
+                        <label for="ragEmbedderProvider">Provider</label>
+                        <select id="ragEmbedderProvider">
+                            <option value="">Choose provider</option>
+                            <option value="ollama">Ollama</option>
+                            <option value="openai">OpenAI</option>
+                            <option value="gemini">Gemini</option>
+                        </select>
+
+                        <label for="ragEmbedderModel">Model</label>
+                        <input type="text" id="ragEmbedderModel" placeholder="e.g. nomic-embed-text or text-embedding-3-small" />
+
+                        <label for="ragEmbedderHost">Host (optional)</label>
+                        <input type="text" id="ragEmbedderHost" placeholder="e.g. http://localhost:11434" />
+                    </div>
+                    <small class="settings-note">Changing the embedder invalidates embedding-backed indices. Von will
+                        rebuild the authoritative workflow capability index and treat incompatible namespaces as
+                        untrusted until rebuilt.</small>
+                    <div id="ragEmbedderSummary" class="settings-runtime-model-summary">Effective embedder: —</div>
+                </div>
+
+                <div class="settings-runtime-model-block">
+                    <h3>RAG Backend LLM</h3>
+                    <div class="settings-runtime-model-grid">
+                        <label for="ragLlmMode">Selection mode</label>
+                        <select id="ragLlmMode">
+                            <option value="inherit">Inherit chat default</option>
+                            <option value="explicit">Explicit model</option>
+                            <option value="disabled">Disabled</option>
+                        </select>
+
+                        <label for="ragLlmProvider">Provider</label>
+                        <select id="ragLlmProvider">
+                            <option value="">Choose provider</option>
+                            <option value="ollama">Ollama</option>
+                            <option value="openai">OpenAI</option>
+                            <option value="gemini">Gemini</option>
+                        </select>
+
+                        <label for="ragLlmModel">Model</label>
+                        <input type="text" id="ragLlmModel" placeholder="Optional unless explicit mode is selected" />
+
+                        <label for="ragLlmHost">Host (optional)</label>
+                        <input type="text" id="ragLlmHost" placeholder="e.g. http://localhost:11434" />
+                    </div>
+                    <small class="settings-note">If disabled, the backend does not use a separate LLM for RAG support
+                        operations and avoids hidden provider defaults.</small>
+                    <div id="ragLlmSummary" class="settings-runtime-model-summary">Effective RAG LLM: —</div>
+                </div>
+            </div>
+
+            <div id="workflowCapabilityIndexStatusCard" class="settings-runtime-status-card">
+                <div class="settings-runtime-status-label">Workflow capability index</div>
+                <div id="workflowCapabilityIndexStatusSummary" class="settings-runtime-status-summary">Status: —</div>
+                <div id="workflowCapabilityIndexStatusDetail" class="settings-runtime-status-detail">
+                    The authoritative workflow capability index status will appear here.
+                </div>
+            </div>
+
+            <div id="ragModelSettingsStatusMessage" class="status-message" role="alert"></div>
+        </section>
+
         <section id="vontology-performance" data-settings-concern="vontology">
             <h2>Vontology UI & Performance</h2>
             <div class="inline-form inline-form-tight mb-2">

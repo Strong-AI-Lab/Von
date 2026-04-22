@@ -238,6 +238,110 @@ def test_settings_endpoint_updates_auto_proceed_minimal_imposition(monkeypatch):
         assert captured["enabled"] is False
 
 
+def test_settings_endpoint_invalidates_workflow_capability_index_when_embedder_changes(
+    monkeypatch,
+):
+    app = _make_settings_app()
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.set_server_default_llm_setting",
+        lambda payload: payload == {"provider": "ollama", "model": "gemma4:26b"},
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.set_rag_embedder_setting",
+        lambda payload: payload
+        == {"mode": "explicit", "provider": "openai", "model": "text-embedding-3-small"},
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.set_rag_llm_setting",
+        lambda payload: payload == {"mode": "disabled"},
+    )
+
+    embedder_resolutions = iter(
+        [
+            {
+                "status": "resolved",
+                "effective": {"provider": "ollama", "model": "nomic-embed-text"},
+                "selection_source": "server_default_llm",
+                "reason": None,
+            },
+            {
+                "status": "resolved",
+                "effective": {
+                    "provider": "openai",
+                    "model": "text-embedding-3-small",
+                },
+                "selection_source": "explicit_setting",
+                "reason": None,
+            },
+        ]
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.resolve_rag_embedder_setting",
+        lambda *args, **kwargs: next(embedder_resolutions),
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.resolve_rag_llm_setting",
+        lambda *args, **kwargs: {
+            "status": "disabled",
+            "effective": None,
+            "selection_source": "configured_disabled",
+            "reason": "disabled_by_setting",
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.get_server_default_llm_setting",
+        lambda: {"provider": "ollama", "model": "gemma4:26b"},
+    )
+
+    invalidation_calls: list[dict[str, Any]] = []
+    prewarm_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.invalidate_workflow_capability_index",
+        lambda **kwargs: invalidation_calls.append(dict(kwargs))
+        or {"success": True, "backend_namespace_reset": True, "reason": kwargs.get("reason")},
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.prewarm_workflow_capability_index",
+        lambda **kwargs: prewarm_calls.append(dict(kwargs)) or True,
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.get_workflow_capability_index_readiness_report",
+        lambda: {
+            "status": "building",
+            "warning_level": "warning",
+            "summary": "Workflow capability index still building.",
+            "detail": "Workflow discovery is waiting on the authoritative capability index to finish building.",
+        },
+    )
+
+    with app.test_client() as client:
+        resp = client.post(
+            "/api/settings/",
+            json={
+                "server_default_llm": {"provider": "ollama", "model": "gemma4:26b"},
+                "rag_embedder": {
+                    "mode": "explicit",
+                    "provider": "openai",
+                    "model": "text-embedding-3-small",
+                },
+                "rag_llm": {"mode": "disabled"},
+            },
+        )
+
+    assert resp.status_code == 200
+    payload = resp.get_json() or {}
+    assert payload["workflow_capability_rebuild"]["required"] is True
+    assert invalidation_calls == [
+        {
+            "reason": payload["workflow_capability_rebuild"]["detail"],
+            "reset_backend_namespace": True,
+        }
+    ]
+    assert prewarm_calls == [{"force_refresh": True}]
+    assert payload["workflow_capability_index"]["status"] == "building"
+
+
 def test_settings_endpoint_rejects_active_llm_without_scope(monkeypatch):
     app = _make_settings_app()
 

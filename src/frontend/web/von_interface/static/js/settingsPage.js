@@ -102,6 +102,8 @@ let gmailProfileStatusInFlight = false;
 let currentResolvedLlm = null;
 let latestOpenAiModelProbe = null;
 let latestSettingsAuthStatus = null;
+let latestCapabilityIndexStatus = null;
+let latestRagRuntimeConfiguration = null;
 
 let __vonIsAdminOrOwner = false;
 let __canPersistWriteConservatism = false;
@@ -141,10 +143,12 @@ const SETTINGS_CONCERN_CONFIG = Object.freeze({
     sectionIds: Object.freeze([
       'premium-model-settings',
       'ollima-settings',
+      'rag-model-settings',
     ]),
     anchorIds: Object.freeze([
       'premium-model-settings',
       'ollima-settings',
+      'rag-model-settings',
     ]),
   }),
   vontology: Object.freeze({
@@ -188,6 +192,7 @@ const SETTINGS_ANCHOR_LABELS = Object.freeze({
   'speech-settings': 'Speech',
   'premium-model-settings': 'OpenAI',
   'ollima-settings': 'Ollama',
+  'rag-model-settings': 'RAG & index',
   'vontology-performance': 'Vontology UI',
   'server-runtime-overview': 'Server runtime',
   'agent-configuration': 'Agent tools',
@@ -1000,6 +1005,248 @@ function resolveActiveLlmFromSelections(
   if (matchesCurrent) return { ...matchesCurrent };
 
   return { ...enabledLlms[0] };
+}
+
+function buildCanonicalLlmEntry(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const provider = String(raw.provider || '').trim().toLowerCase();
+  const model = String(raw.model || '').trim();
+  if (!provider || !model) return null;
+  const host = String(raw.host || '').trim();
+  return host
+    ? { provider, model, host }
+    : { provider, model };
+}
+
+function formatLlmEntry(entry) {
+  const canonical = buildCanonicalLlmEntry(entry);
+  if (!canonical) return '—';
+  return canonical.host
+    ? `${canonical.provider}:${canonical.model} @ ${canonical.host}`
+    : `${canonical.provider}:${canonical.model}`;
+}
+
+function humaniseSelectionSource(source) {
+  const token = String(source || '').trim();
+  if (!token) return 'unknown source';
+  return token.replace(/_/g, ' ');
+}
+
+function buildServerDefaultLlmPayload({
+  strictFromUi = false,
+  currentResolved = currentResolvedLlm,
+  localModelPreference = getEffectiveLocalModelPreference(),
+} = {}) {
+  const provider = String(document.getElementById('serverDefaultLlmProvider')?.value || '').trim().toLowerCase();
+  const model = String(document.getElementById('serverDefaultLlmModel')?.value || '').trim();
+  const host = String(document.getElementById('serverDefaultLlmHost')?.value || '').trim();
+  const hasUiValue = Boolean(provider || model || host);
+
+  if (hasUiValue) {
+    if (!provider || !model) {
+      if (strictFromUi) {
+        throw new Error('Server default chat model requires both provider and model when set explicitly.');
+      }
+      return null;
+    }
+    return host ? { provider, model, host } : { provider, model };
+  }
+
+  const requested = buildCanonicalLlmEntry(localModelPreference?.requestedLlm);
+  if (requested) return requested;
+
+  return buildCanonicalLlmEntry(currentResolved);
+}
+
+function readRuntimeModelSettingFromForm(prefix, { allowDisabled = false } = {}) {
+  const mode = String(document.getElementById(`${prefix}Mode`)?.value || 'inherit').trim().toLowerCase();
+  if (allowDisabled && mode === 'disabled') {
+    return { mode: 'disabled' };
+  }
+  if (mode !== 'explicit') {
+    return { mode: 'inherit' };
+  }
+
+  const provider = String(document.getElementById(`${prefix}Provider`)?.value || '').trim().toLowerCase();
+  const model = String(document.getElementById(`${prefix}Model`)?.value || '').trim();
+  const host = String(document.getElementById(`${prefix}Host`)?.value || '').trim();
+  if (!provider || !model) {
+    throw new Error(`${prefix === 'ragEmbedder' ? 'RAG embedder' : 'RAG backend LLM'} explicit mode requires both provider and model.`);
+  }
+  return host
+    ? { mode: 'explicit', provider, model, host }
+    : { mode: 'explicit', provider, model };
+}
+
+function applyRuntimeModelModeUi(prefix, { allowDisabled = false } = {}) {
+  const mode = String(document.getElementById(`${prefix}Mode`)?.value || 'inherit').trim().toLowerCase();
+  const explicitEnabled = mode === 'explicit';
+  const disabled = allowDisabled && mode === 'disabled';
+  ['Provider', 'Model', 'Host'].forEach((suffix) => {
+    const el = document.getElementById(`${prefix}${suffix}`);
+    if (!el) return;
+    el.disabled = !explicitEnabled;
+    el.setAttribute('aria-disabled', (!explicitEnabled).toString());
+    el.classList.toggle('is-disabled', !explicitEnabled);
+  });
+  const summaryEl = document.getElementById(`${prefix}Summary`);
+  if (summaryEl) {
+    summaryEl.dataset.mode = disabled ? 'disabled' : mode;
+  }
+}
+
+function bindRuntimeModelModeControl(prefix, { allowDisabled = false } = {}) {
+  const modeEl = document.getElementById(`${prefix}Mode`);
+  if (!modeEl || modeEl.dataset.bound === '1') return;
+  modeEl.dataset.bound = '1';
+  modeEl.addEventListener('change', () => {
+    applyRuntimeModelModeUi(prefix, { allowDisabled });
+    renderRuntimeModelSummaries();
+  });
+}
+
+function populateRuntimeModelSettingForm(prefix, setting, { allowDisabled = false } = {}) {
+  const modeEl = document.getElementById(`${prefix}Mode`);
+  const providerEl = document.getElementById(`${prefix}Provider`);
+  const modelEl = document.getElementById(`${prefix}Model`);
+  const hostEl = document.getElementById(`${prefix}Host`);
+  const mode = String(setting?.mode || 'inherit').trim().toLowerCase();
+
+  if (modeEl) {
+    if (allowDisabled && mode === 'disabled') {
+      modeEl.value = 'disabled';
+    } else if (mode === 'explicit') {
+      modeEl.value = 'explicit';
+    } else {
+      modeEl.value = 'inherit';
+    }
+  }
+  if (providerEl) providerEl.value = String(setting?.provider || '').trim().toLowerCase();
+  if (modelEl) modelEl.value = String(setting?.model || '').trim();
+  if (hostEl) hostEl.value = String(setting?.host || '').trim();
+  applyRuntimeModelModeUi(prefix, { allowDisabled });
+}
+
+function populateServerDefaultLlmForm(serverDefault, fallback = null) {
+  const providerEl = document.getElementById('serverDefaultLlmProvider');
+  const modelEl = document.getElementById('serverDefaultLlmModel');
+  const hostEl = document.getElementById('serverDefaultLlmHost');
+  const chosen = buildCanonicalLlmEntry(serverDefault) || buildCanonicalLlmEntry(fallback);
+  if (providerEl) providerEl.value = String(chosen?.provider || '').trim().toLowerCase();
+  if (modelEl) modelEl.value = String(chosen?.model || '').trim();
+  if (hostEl) hostEl.value = String(chosen?.host || '').trim();
+}
+
+function formatRuntimeModelResolutionSummary(label, resolution) {
+  if (!resolution || typeof resolution !== 'object') {
+    return `${label}: unavailable`;
+  }
+  if (resolution.status === 'disabled') {
+    return `${label}: disabled`;
+  }
+  const effective = buildCanonicalLlmEntry(resolution.effective);
+  if (effective) {
+    return `${label}: ${formatLlmEntry(effective)} (${humaniseSelectionSource(resolution.selection_source)})`;
+  }
+  const reason = String(resolution.reason || '').trim();
+  return reason
+    ? `${label}: unresolved (${reason.replace(/_/g, ' ')})`
+    : `${label}: unresolved`;
+}
+
+function applyCapabilityIndexStatusCard(report) {
+  const cardEl = document.getElementById('workflowCapabilityIndexStatusCard');
+  const summaryEl = document.getElementById('workflowCapabilityIndexStatusSummary');
+  const detailEl = document.getElementById('workflowCapabilityIndexStatusDetail');
+  if (!cardEl || !summaryEl || !detailEl) return;
+
+  const status = String(report?.status || 'unknown').trim().toLowerCase();
+  const warningLevel = String(report?.warning_level || '').trim().toLowerCase();
+  const summary = String(report?.summary || 'Workflow capability index status unavailable.').trim();
+  let detail = String(report?.detail || '').trim();
+  const namespaceDetail = String(report?.namespace_state?.detail || '').trim();
+  if (namespaceDetail && !detail.includes(namespaceDetail)) {
+    detail = detail ? `${detail} ${namespaceDetail}` : namespaceDetail;
+  }
+  if (!detail) {
+    detail = 'No authoritative workflow capability status is currently available.';
+  }
+
+  cardEl.dataset.status = status || 'unknown';
+  cardEl.dataset.warningLevel = warningLevel || 'warning';
+  summaryEl.textContent = summary;
+  detailEl.textContent = detail;
+}
+
+function renderRuntimeModelSummaries({
+  serverDefaultLlm = null,
+  ragEmbedder = null,
+  ragLlm = null,
+  capabilityIndex = null,
+} = {}) {
+  const serverSummaryEl = document.getElementById('serverDefaultLlmSummary');
+  if (serverSummaryEl) {
+    const serverDefault = buildCanonicalLlmEntry(serverDefaultLlm) || buildServerDefaultLlmPayload();
+    serverSummaryEl.textContent = `Server default: ${formatLlmEntry(serverDefault)}`;
+  }
+
+  const effectiveEmbedder = ragEmbedder || latestRagRuntimeConfiguration?.embedder_resolution || null;
+  const effectiveLlm = ragLlm || latestRagRuntimeConfiguration?.llm_resolution || null;
+  const embedderSummaryEl = document.getElementById('ragEmbedderSummary');
+  const llmSummaryEl = document.getElementById('ragLlmSummary');
+  if (embedderSummaryEl) {
+    embedderSummaryEl.textContent = formatRuntimeModelResolutionSummary(
+      'Effective embedder',
+      effectiveEmbedder,
+    );
+  }
+  if (llmSummaryEl) {
+    llmSummaryEl.textContent = formatRuntimeModelResolutionSummary(
+      'Effective RAG LLM',
+      effectiveLlm,
+    );
+  }
+
+  applyCapabilityIndexStatusCard(capabilityIndex || latestCapabilityIndexStatus);
+}
+
+async function refreshRuntimeModelStatus() {
+  try {
+    const [runtimeResponse, capabilityResponse] = await Promise.all([
+      fetch('/admin/rag_runtime?namespace=workflow_capabilities', { cache: 'no-store' }),
+      fetch('/api/workflows/capability-index/status', { cache: 'no-store' }),
+    ]);
+
+    if (runtimeResponse.ok) {
+      const runtimePayload = await runtimeResponse.json();
+      if (runtimePayload?.success && runtimePayload?.runtime_configuration) {
+        latestRagRuntimeConfiguration = runtimePayload.runtime_configuration;
+      }
+    }
+
+    if (capabilityResponse.ok) {
+      latestCapabilityIndexStatus = await capabilityResponse.json();
+    }
+
+    renderRuntimeModelSummaries();
+  } catch (error) {
+    console.warn('Failed to refresh runtime model status', error);
+  }
+}
+
+function setupRuntimeModelSettingsSection() {
+  bindRuntimeModelModeControl('ragEmbedder', { allowDisabled: false });
+  bindRuntimeModelModeControl('ragLlm', { allowDisabled: true });
+  ['serverDefaultLlmProvider', 'serverDefaultLlmModel', 'serverDefaultLlmHost',
+    'ragEmbedderProvider', 'ragEmbedderModel', 'ragEmbedderHost',
+    'ragLlmProvider', 'ragLlmModel', 'ragLlmHost'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el || el.dataset.runtimeModelBound === '1') return;
+    el.dataset.runtimeModelBound = '1';
+    el.addEventListener('change', () => renderRuntimeModelSummaries());
+    el.addEventListener('input', () => renderRuntimeModelSummaries());
+  });
+  renderRuntimeModelSummaries();
 }
 
 async function _fetchSessionContextForRole() {
@@ -2087,6 +2334,16 @@ export function __testOnly_resolveActiveLlmFromSelections(
 }
 
 // Export for testing
+export function __testOnly_buildServerDefaultLlmPayload(options = {}) {
+  return buildServerDefaultLlmPayload(options);
+}
+
+// Export for testing
+export function __testOnly_readRuntimeModelSettingFromForm(prefix, options = {}) {
+  return readRuntimeModelSettingFromForm(prefix, options);
+}
+
+// Export for testing
 export function __testOnly_buildStoredUserContextFromOption(option) {
   return buildStoredUserContextFromOption(option);
 }
@@ -2192,6 +2449,7 @@ async function loadRuntimeStatus(manualRefresh = false) {
 
     renderActiveNamespace();
     await loadRagStatus(ragPending);
+    await refreshRuntimeModelStatus();
   } catch (err) {
     if (err && err.name === 'AbortError') {
       // Expected when a newer poll supersedes an older one or the page is unloading.
@@ -2203,6 +2461,7 @@ async function loadRuntimeStatus(manualRefresh = false) {
     if (pidEl) pidEl.textContent = '—';
     if (uptimeEl) uptimeEl.textContent = '—';
     renderRagSummary(null, null);
+    renderRuntimeModelSummaries();
   } finally {
     runtimeStatusInFlight = false;
     if (refreshBtn && manualRefresh) {
@@ -2963,6 +3222,25 @@ async function loadAndDisplaySettings() {
     }
     latestOpenAiModelProbe = null;
     updateOpenAiModelStatusMessage();
+    populateServerDefaultLlmForm(
+      settings.server_default_llm,
+      buildCanonicalLlmEntry(localModelPreference?.requestedLlm) || effectiveLlm || null,
+    );
+    populateRuntimeModelSettingForm('ragEmbedder', settings.rag_embedder, { allowDisabled: false });
+    populateRuntimeModelSettingForm('ragLlm', settings.rag_llm, { allowDisabled: true });
+    latestCapabilityIndexStatus = settings.workflow_capability_index || null;
+    latestRagRuntimeConfiguration = {
+      embedder_resolution: settings.effective_rag_embedder || null,
+      llm_resolution: settings.effective_rag_llm || null,
+    };
+    setupRuntimeModelSettingsSection();
+    renderRuntimeModelSummaries({
+      serverDefaultLlm: settings.server_default_llm,
+      ragEmbedder: settings.effective_rag_embedder,
+      ragLlm: settings.effective_rag_llm,
+      capabilityIndex: settings.workflow_capability_index,
+    });
+    void refreshRuntimeModelStatus();
     refreshActiveSettingsConcernGuidance();
 
     // Populate Gmail profile selector
@@ -3293,6 +3571,17 @@ async function saveAllSettings() {
   }
 
   try {
+    const serverDefaultLlm = buildServerDefaultLlmPayload({ strictFromUi: true });
+    const ragEmbedderSetting = readRuntimeModelSettingFromForm('ragEmbedder', {
+      allowDisabled: false,
+    });
+    const ragLlmSetting = readRuntimeModelSettingFromForm('ragLlm', {
+      allowDisabled: true,
+    });
+    settings.server_default_llm = serverDefaultLlm;
+    settings.rag_embedder = ragEmbedderSetting;
+    settings.rag_llm = ragLlmSetting;
+
     const response = await fetch('/api/settings/', {
       method: 'POST',
       headers: buildSettingsFetchHeaders({ 'Content-Type': 'application/json' }),
@@ -3319,8 +3608,36 @@ async function saveAllSettings() {
     if (payload?.resolved_llm) {
       currentResolvedLlm = payload.resolved_llm;
     }
+    if (payload?.server_default_llm || serverDefaultLlm) {
+      populateServerDefaultLlmForm(payload?.server_default_llm || serverDefaultLlm);
+    }
+    if (payload?.resolved_rag_embedder || payload?.resolved_rag_llm) {
+      latestRagRuntimeConfiguration = {
+        embedder_resolution: payload?.resolved_rag_embedder || null,
+        llm_resolution: payload?.resolved_rag_llm || null,
+      };
+    }
+    if (payload?.workflow_capability_index) {
+      latestCapabilityIndexStatus = payload.workflow_capability_index;
+    }
+    renderRuntimeModelSummaries({
+      serverDefaultLlm: payload?.server_default_llm || serverDefaultLlm,
+      ragEmbedder: payload?.resolved_rag_embedder || null,
+      ragLlm: payload?.resolved_rag_llm || null,
+      capabilityIndex: payload?.workflow_capability_index || null,
+    });
 
     showStatusMessage('settingsStatusMessage', payload.message || 'Settings saved successfully!');
+    if (payload?.workflow_capability_rebuild?.required) {
+      showStatusMessage(
+        'ragModelSettingsStatusMessage',
+        payload.workflow_capability_rebuild.detail
+          || 'Workflow capability index rebuild required after RAG embedder change.',
+      );
+    } else {
+      showStatusMessage('ragModelSettingsStatusMessage', 'RAG model settings saved.');
+    }
+    void refreshRuntimeModelStatus();
 
     // Update parent window footer
     if (window.parent?.updateModelInfoFooterDisplay) {
@@ -3337,6 +3654,11 @@ async function saveAllSettings() {
     showStatusMessage(
       'settingsStatusMessage',
       error?.message || 'Failed to save settings.',
+      true,
+    );
+    showStatusMessage(
+      'ragModelSettingsStatusMessage',
+      error?.message || 'Failed to save RAG model settings.',
       true,
     );
     return false;

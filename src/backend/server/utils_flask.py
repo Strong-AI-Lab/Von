@@ -443,6 +443,9 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         from ..services.talk_representation_workflow_vontology_service import (
             bootstrap_canonical_talk_representation_workflows,
         )
+        from ..services.workflow_capability_service import (
+            run_workflow_capability_index_startup_check,
+        )
 
         def _run_workflow_family_bootstrap(
             *,
@@ -516,6 +519,12 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         if _durable_action_registry is None:
             _durable_action_registry = _build_durable_action_registry()
 
+        workflow_capability_index_startup_report = (
+            run_workflow_capability_index_startup_check(
+                workflow_registry=_durable_workflow_registry
+            )
+        )
+
         # Recover any orphaned instances from previous crashes
         recovered = recover_orphaned_instances()
         if recovered > 0:
@@ -556,6 +565,9 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             turn_pipeline_monitoring_workflow_bootstrap_report
         )
         result["workflow_authority_bootstrap"] = workflow_authority_bootstrap_report
+        result["workflow_capability_index_startup_check"] = (
+            workflow_capability_index_startup_report
+        )
         if not bool(entity_workflow_bootstrap_report.get("success", False)):
             app_logger.warning(
                 "[durable_workflows] entity workflow bootstrap failed: %s",
@@ -625,6 +637,11 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             app_logger.warning(
                 "[durable_workflows] workflow authority bootstrap failed: %s",
                 workflow_authority_bootstrap_report,
+            )
+        if not bool(workflow_capability_index_startup_report.get("ready", False)):
+            app_logger.warning(
+                "[durable_workflows] workflow capability index not ready after startup check: %s",
+                workflow_capability_index_startup_report,
             )
 
         # Ensure long-running identity-resolution maintenance keeps running
@@ -2337,6 +2354,13 @@ def _describe_runtime_component(obj):
                     info[attr] = value.strip()
             except Exception:
                 pass
+        for attr in ("provider", "host", "selection_source"):
+            try:
+                value = getattr(obj, attr, None)
+                if isinstance(value, str) and value.strip():
+                    info[attr] = value.strip()
+            except Exception:
+                pass
         return info
     except Exception:
         return None
@@ -2405,6 +2429,8 @@ def _handle_rag_runtime_request():
 
         embedder = None
         llm = None
+        runtime_configuration = None
+        namespace_state = None
         try:
             get_embedder = getattr(service, "get_runtime_embed_model", None)
             if callable(get_embedder):
@@ -2413,6 +2439,26 @@ def _handle_rag_runtime_request():
             get_llm = getattr(service, "get_runtime_llm", None)
             if callable(get_llm):
                 llm = _describe_runtime_component(get_llm())
+
+            get_runtime_configuration = getattr(
+                service,
+                "get_runtime_configuration_summary",
+                None,
+            )
+            if callable(get_runtime_configuration):
+                config = get_runtime_configuration()
+                if isinstance(config, dict):
+                    runtime_configuration = config
+
+            get_namespace_runtime_state = getattr(
+                service,
+                "get_namespace_runtime_state",
+                None,
+            )
+            if callable(get_namespace_runtime_state):
+                state = get_namespace_runtime_state(effective_namespace)
+                if isinstance(state, dict):
+                    namespace_state = state
 
             if embedder is None or llm is None:
                 service_context = getattr(service, "service_context", None)
@@ -2448,6 +2494,8 @@ def _handle_rag_runtime_request():
                 "index_cached": index_cached,
                 "embedder": embedder,
                 "llm": llm,
+                "runtime_configuration": runtime_configuration,
+                "namespace_state": namespace_state,
                 "openai_key_present": bool(os.getenv("OPENAI_API_KEY")),
                 "last_query": last_query,
             }

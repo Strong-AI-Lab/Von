@@ -21,6 +21,9 @@ logger = logging.getLogger(__name__)
 ACTIVE_LLM_SETTING_NAME = "active_llm"
 ENABLED_LLMS_SETTING_NAME = "enabled_llms"
 OPENAI_ENV_VAR_SETTING_NAME = "openai_api_key_env_var"
+SERVER_DEFAULT_LLM_SETTING_NAME = "server_default_llm"
+RAG_EMBEDDER_SETTING_NAME = "rag_embedder"
+RAG_LLM_SETTING_NAME = "rag_llm"
 # Setting has been removed as it's a flawed concept for multi-user applications.
 # The user's identity is managed via the session.
 # CURRENT_USER_PERSON_SETTING_NAME = "current_user_person_id"
@@ -70,6 +73,7 @@ _ENABLED_LLMS_ORG_PREFIX = f"{ENABLED_LLMS_SETTING_NAME}:org:"
 _MUTATION_AUTHORITY_LEVEL_USER_PREFIX = (
     f"{MUTATION_AUTHORITY_LEVEL_SETTING_NAME}:user:"
 )
+_RUNTIME_MODEL_SETTING_MODES = {"inherit", "explicit", "disabled"}
 
 
 def _normalise_llm_setting_entry(raw: Any) -> dict[str, str] | None:
@@ -120,6 +124,63 @@ def _normalise_llm_setting_list(raw: Any) -> list[dict[str, str]]:
         if entry is not None:
             entries.append(entry)
     return _dedupe_llm_setting_entries(entries)
+
+
+def _normalise_runtime_model_setting(
+    raw: Any,
+    *,
+    allow_disabled: bool = False,
+) -> dict[str, Any]:
+    if raw is None:
+        return {"mode": "inherit"}
+
+    if isinstance(raw, str):
+        token = raw.strip().lower()
+        if token in {"", "inherit", "none", "default"}:
+            return {"mode": "inherit"}
+        if allow_disabled and token in {"disabled", "off"}:
+            return {"mode": "disabled"}
+        return {"mode": "inherit"}
+
+    if not isinstance(raw, dict):
+        return {"mode": "inherit"}
+
+    mode = str(raw.get("mode") or "").strip().lower()
+    if mode and mode not in _RUNTIME_MODEL_SETTING_MODES:
+        return {"mode": "inherit"}
+
+    if mode == "disabled":
+        return {"mode": "disabled"} if allow_disabled else {"mode": "inherit"}
+    if mode == "inherit":
+        return {"mode": "inherit"}
+
+    explicit = _normalise_llm_setting_entry(raw)
+    if explicit is None:
+        return {"mode": "inherit"}
+    return {"mode": "explicit", **explicit}
+
+
+def _normalise_runtime_model_setting_for_storage(
+    raw: Any,
+    *,
+    allow_disabled: bool = False,
+) -> dict[str, Any]:
+    normalised = _normalise_runtime_model_setting(raw, allow_disabled=allow_disabled)
+    mode = str(normalised.get("mode") or "inherit").strip().lower()
+    if mode == "disabled":
+        return {"mode": "disabled"} if allow_disabled else {"mode": "inherit"}
+    if mode != "explicit":
+        return {"mode": "inherit"}
+
+    payload = {
+        "mode": "explicit",
+        "provider": str(normalised.get("provider") or "").strip().lower(),
+        "model": str(normalised.get("model") or "").strip(),
+    }
+    host = str(normalised.get("host") or "").strip()
+    if host:
+        payload["host"] = host
+    return payload
 
 
 def get_setting(setting_name: str) -> Any:
@@ -234,6 +295,9 @@ def get_all_settings_batch() -> Dict[str, Any]:
     # List of all setting names we need from the DB
     setting_names = [
         OPENAI_ENV_VAR_SETTING_NAME,
+        SERVER_DEFAULT_LLM_SETTING_NAME,
+        RAG_EMBEDDER_SETTING_NAME,
+        RAG_LLM_SETTING_NAME,
         FETCH_COUNTS_ON_LOAD_SETTING_NAME,
         PRELOAD_VONTOLOGY_TREE_SETTING_NAME,
         DISABLE_REMOTE_OLLAMA_SCAN_SETTING_NAME,
@@ -252,6 +316,17 @@ def get_all_settings_batch() -> Dict[str, Any]:
         # NOTE: active_llm is intentionally NOT included here.
         # Use resolve_llm_setting() with user_concept_id instead.
         "openai_api_key_env_var": raw.get(OPENAI_ENV_VAR_SETTING_NAME),
+        "server_default_llm": _normalise_llm_setting_entry(
+            raw.get(SERVER_DEFAULT_LLM_SETTING_NAME)
+        ),
+        "rag_embedder": _normalise_runtime_model_setting(
+            raw.get(RAG_EMBEDDER_SETTING_NAME),
+            allow_disabled=False,
+        ),
+        "rag_llm": _normalise_runtime_model_setting(
+            raw.get(RAG_LLM_SETTING_NAME),
+            allow_disabled=True,
+        ),
         "fetch_counts_on_load": _coerce_bool(
             raw.get(FETCH_COUNTS_ON_LOAD_SETTING_NAME), default=True
         ),
@@ -356,6 +431,150 @@ def update_setting(setting_name: str, setting_value: Any) -> bool:
             f"An unexpected error occurred while updating setting '{setting_name}': {e}"
         )
         return False
+
+
+def get_server_default_llm_setting() -> Optional[dict[str, str]]:
+    raw = get_setting(SERVER_DEFAULT_LLM_SETTING_NAME)
+    return _normalise_llm_setting_entry(raw)
+
+
+def set_server_default_llm_setting(entry: Mapping[str, Any] | None) -> bool:
+    if entry is None:
+        return update_setting(SERVER_DEFAULT_LLM_SETTING_NAME, None)
+    normalised = _normalise_llm_setting_entry(entry)
+    if normalised is None:
+        logger.error("set_server_default_llm_setting requires provider/model payload")
+        return False
+    return update_setting(SERVER_DEFAULT_LLM_SETTING_NAME, normalised)
+
+
+def get_rag_embedder_setting() -> dict[str, Any]:
+    raw = get_setting(RAG_EMBEDDER_SETTING_NAME)
+    return _normalise_runtime_model_setting(raw, allow_disabled=False)
+
+
+def set_rag_embedder_setting(raw: Any) -> bool:
+    normalised = _normalise_runtime_model_setting_for_storage(
+        raw,
+        allow_disabled=False,
+    )
+    return update_setting(RAG_EMBEDDER_SETTING_NAME, normalised)
+
+
+def get_rag_llm_setting() -> dict[str, Any]:
+    raw = get_setting(RAG_LLM_SETTING_NAME)
+    return _normalise_runtime_model_setting(raw, allow_disabled=True)
+
+
+def set_rag_llm_setting(raw: Any) -> bool:
+    normalised = _normalise_runtime_model_setting_for_storage(
+        raw,
+        allow_disabled=True,
+    )
+    return update_setting(RAG_LLM_SETTING_NAME, normalised)
+
+
+def _resolve_runtime_model_setting(
+    *,
+    configured: Mapping[str, Any] | None,
+    allow_disabled: bool,
+    user_concept_id: str | None = None,
+    org_concept_id: str | None = None,
+) -> dict[str, Any]:
+    normalised = _normalise_runtime_model_setting(
+        configured,
+        allow_disabled=allow_disabled,
+    )
+    mode = str(normalised.get("mode") or "inherit").strip().lower()
+    if mode == "disabled":
+        return {
+            "configured": normalised,
+            "effective": None,
+            "status": "disabled",
+            "selection_source": "configured_disabled",
+            "reason": "disabled_by_setting",
+        }
+
+    if mode == "explicit":
+        effective = _normalise_llm_setting_entry(normalised)
+        if effective is None:
+            return {
+                "configured": {"mode": "inherit"},
+                "effective": None,
+                "status": "unresolved",
+                "selection_source": "invalid_explicit_setting",
+                "reason": "invalid_explicit_setting",
+            }
+        return {
+            "configured": normalised,
+            "effective": {
+                **effective,
+                "scope": "global_setting",
+            },
+            "status": "resolved",
+            "selection_source": "explicit_setting",
+            "reason": None,
+        }
+
+    inherited = resolve_llm_setting(
+        user_concept_id=user_concept_id,
+        org_concept_id=org_concept_id,
+    )
+    if inherited:
+        return {
+            "configured": {"mode": "inherit"},
+            "effective": dict(inherited),
+            "status": "resolved",
+            "selection_source": "active_llm_scope",
+            "reason": None,
+        }
+
+    server_default = get_server_default_llm_setting()
+    if server_default:
+        return {
+            "configured": {"mode": "inherit"},
+            "effective": {
+                **server_default,
+                "scope": "server_default",
+            },
+            "status": "resolved",
+            "selection_source": "server_default_llm",
+            "reason": None,
+        }
+
+    return {
+        "configured": {"mode": "inherit"},
+        "effective": None,
+        "status": "unresolved",
+        "selection_source": "inherit_without_source",
+        "reason": "inherits_chat_default_but_no_chat_default_is_available",
+    }
+
+
+def resolve_rag_embedder_setting(
+    *,
+    user_concept_id: str | None = None,
+    org_concept_id: str | None = None,
+) -> dict[str, Any]:
+    return _resolve_runtime_model_setting(
+        configured=get_rag_embedder_setting(),
+        allow_disabled=False,
+        user_concept_id=user_concept_id,
+        org_concept_id=org_concept_id,
+    )
+
+
+def resolve_rag_llm_setting(
+    *,
+    user_concept_id: str | None = None,
+    org_concept_id: str | None = None,
+) -> dict[str, Any]:
+    return _resolve_runtime_model_setting(
+        configured=get_rag_llm_setting(),
+        allow_disabled=True,
+        user_concept_id=user_concept_id,
+        org_concept_id=org_concept_id,
+    )
 
 
 def get_active_llm_setting() -> Optional[Dict[str, str]]:

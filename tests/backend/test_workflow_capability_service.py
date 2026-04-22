@@ -17,12 +17,14 @@ import pytest
 from src.backend.services.workflow_capability_service import (
     BUILTIN_WORKFLOW_CAPABILITIES,
     WorkflowCapabilityIndex,
+    get_workflow_capability_index_readiness_report,
     _workflow_id_to_name,
     build_workflow_capability_text,
     get_workflow_capability_index,
     invalidate_workflow_capability_index,
     prewarm_workflow_capability_index,
     reset_workflow_capability_index,
+    run_workflow_capability_index_startup_check,
     search_workflow_capabilities,
 )
 from workflow_test_support import build_test_conversation_turn_registry
@@ -669,6 +671,58 @@ def test_prewarm_workflow_capability_index_starts_background_build(
     assert observed == [(True, sentinel_registry)]
 
 
+def test_index_sync_trims_backend_document_metadata(
+    _fake_retrieval_backend: _FakeWorkflowRetrievalBackend,
+) -> None:
+    index = WorkflowCapabilityIndex()
+
+    index.index_workflow(
+        "#V#test_workflow",
+        "Capability text for metadata trimming.",
+        metadata={
+            "name": "Test Workflow",
+            "source": "vontology",
+            "description_source": "text_relation:#V#hasDescription",
+            "purpose": "This field should stay in memory only and not reach the backend metadata payload.",
+            "summary_text": "This should also stay out of backend metadata.",
+        },
+    )
+
+    stored = _fake_retrieval_backend.docs_by_namespace["workflow_capabilities"][
+        "workflow_capability:#V#test_workflow"
+    ]
+    assert stored["metadata"] == {
+        "workflow_id": "#V#test_workflow",
+        "name": "Test Workflow",
+        "type": "workflow_capability",
+        "source": "vontology",
+        "description_source": "text_relation:#V#hasDescription",
+    }
+
+
+def test_startup_check_records_not_ready_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.backend.services.workflow_capability_service as capability_service
+
+    reset_workflow_capability_index()
+
+    monkeypatch.setattr(
+        capability_service,
+        "ensure_workflow_capability_index_populated",
+        lambda **_kwargs: capability_service.get_workflow_capability_index(),
+    )
+
+    report = run_workflow_capability_index_startup_check(timeout_seconds=0.01)
+
+    assert report["success"] is False
+    assert report["ready"] is False
+    assert report["status"] == "not_ready"
+    readiness = get_workflow_capability_index_readiness_report()
+    assert readiness["status"] == "not_ready"
+    assert readiness["startup_check"]["status"] == "not_ready"
+
+
 def test_invalidate_workflow_capability_index_clears_cached_entries() -> None:
     reset_workflow_capability_index()
     index = get_workflow_capability_index()
@@ -679,3 +733,37 @@ def test_invalidate_workflow_capability_index_clears_cached_entries() -> None:
     assert result["success"] is True
     assert result["had_cached_entries"] is True
     assert get_workflow_capability_index().size == 0
+
+
+def test_invalidate_workflow_capability_index_records_reason_and_backend_reset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.backend.services.workflow_capability_service as capability_service
+
+    reset_workflow_capability_index()
+    index = get_workflow_capability_index()
+    index.index_workflow("#V#test_workflow", "Capability text for invalidation test")
+
+    reset_calls: list[str] = []
+
+    class _FakeRagService:
+        def reset_namespace(self, namespace: str) -> None:
+            reset_calls.append(str(namespace))
+
+    monkeypatch.setattr(
+        capability_service,
+        "_get_workflow_capability_rag_service",
+        lambda: _FakeRagService(),
+    )
+
+    result = invalidate_workflow_capability_index(
+        reason="RAG embedder changed; rebuild required.",
+        reset_backend_namespace=True,
+    )
+    readiness = get_workflow_capability_index_readiness_report()
+
+    assert result["success"] is True
+    assert result["backend_namespace_reset"] is True
+    assert reset_calls == ["workflow_capabilities"]
+    assert readiness["status"] == "rebuild_required"
+    assert readiness["detail"] == "RAG embedder changed; rebuild required."

@@ -14,6 +14,7 @@ lists.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import logging
 import math
 import os
@@ -44,6 +45,7 @@ WORKFLOW_CAPABILITY_NAMESPACE = "workflow_capabilities"
 BUILTIN_WORKFLOW_CAPABILITIES: Dict[str, str] = {}
 
 _CAPABILITY_INDEX_REBUILD_MIN_INTERVAL_SECONDS = 30.0
+_WORKFLOW_CAPABILITY_INDEX_STARTUP_TIMEOUT_SECONDS = 8.0
 
 _INDEX_REBUILD_LOCK = Lock()
 _INDEX_STATE_LOCK = Lock()
@@ -54,6 +56,9 @@ _INDEX_REBUILD_STATE: Dict[str, Any] = {
     "build_in_progress": False,
     "last_error": None,
     "last_mode": None,
+    "startup_last_report": None,
+    "last_invalidation_reason": None,
+    "last_invalidated_at_utc": None,
 }
 _INDEX_REBUILD_COMPLETED = threading.Event()
 _INDEX_REBUILD_COMPLETED.set()
@@ -94,6 +99,10 @@ def _build_workflow_capability_result_description(entry: "_CapabilityEntry") -> 
     if first_block:
         return first_block[:300]
     return text[:300]
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _get_workflow_capability_rag_service() -> Any:
@@ -190,12 +199,19 @@ class WorkflowCapabilityIndex:
 
     @staticmethod
     def _entry_to_document(entry: _CapabilityEntry) -> Dict[str, Any]:
-        metadata = dict(entry.metadata)
-        metadata["workflow_id"] = entry.workflow_id
-        metadata["name"] = str(
-            metadata.get("name") or _workflow_id_to_name(entry.workflow_id)
-        ).strip()
-        metadata["type"] = "workflow_capability"
+        metadata: Dict[str, Any] = {
+            "workflow_id": entry.workflow_id,
+            "name": str(
+                entry.metadata.get("name") or _workflow_id_to_name(entry.workflow_id)
+            ).strip(),
+            "type": "workflow_capability",
+        }
+        source = str(entry.metadata.get("source") or "").strip()
+        if source:
+            metadata["source"] = source[:120]
+        description_source = str(entry.metadata.get("description_source") or "").strip()
+        if description_source:
+            metadata["description_source"] = description_source[:240]
         return {
             "id": entry.doc_id,
             "text": entry.text,
@@ -659,6 +675,7 @@ def _set_workflow_capability_rebuild_state(
     error: str | None = None,
     attempt_monotonic: float | None = None,
     success_monotonic: float | None = None,
+    clear_invalidation: bool = False,
 ) -> None:
     with _INDEX_STATE_LOCK:
         _INDEX_REBUILD_STATE["build_in_progress"] = bool(build_in_progress)
@@ -671,19 +688,42 @@ def _set_workflow_capability_rebuild_state(
             _INDEX_REBUILD_STATE["last_attempt_monotonic"] = float(attempt_monotonic)
         if success_monotonic is not None:
             _INDEX_REBUILD_STATE["last_success_monotonic"] = float(success_monotonic)
+        if clear_invalidation:
+            _INDEX_REBUILD_STATE["last_invalidation_reason"] = None
+            _INDEX_REBUILD_STATE["last_invalidated_at_utc"] = None
 
 
 def get_workflow_capability_index_runtime_state() -> Dict[str, Any]:
     """Return lightweight runtime state for capability-index diagnostics."""
 
     index = get_workflow_capability_index()
+    namespace_state = None
+    try:
+        rag_service = _get_workflow_capability_rag_service()
+        get_namespace_runtime_state = getattr(
+            rag_service,
+            "get_namespace_runtime_state",
+            None,
+        )
+        if callable(get_namespace_runtime_state):
+            state = get_namespace_runtime_state(WORKFLOW_CAPABILITY_NAMESPACE)
+            if isinstance(state, dict):
+                namespace_state = state
+    except Exception:
+        namespace_state = None
+
+    namespace_compatible = (
+        bool(namespace_state.get("compatible", False))
+        if isinstance(namespace_state, dict)
+        else True
+    )
     with _INDEX_STATE_LOCK:
         return {
             "surface": "workflow_retrieval",
             "backend": "llamaindex",
             "namespace": WORKFLOW_CAPABILITY_NAMESPACE,
             "size": int(index.size),
-            "ready": bool(index.size > 0),
+            "ready": bool(index.size > 0 and namespace_compatible),
             "build_in_progress": bool(_INDEX_REBUILD_STATE.get("build_in_progress", False)),
             "last_error": _INDEX_REBUILD_STATE.get("last_error"),
             "last_mode": _INDEX_REBUILD_STATE.get("last_mode"),
@@ -694,7 +734,162 @@ def get_workflow_capability_index_runtime_state() -> Dict[str, Any]:
                 _INDEX_REBUILD_STATE.get("last_success_monotonic", 0.0)
             ),
             "last_built_size": int(_INDEX_REBUILD_STATE.get("last_built_size", 0)),
+            "last_invalidation_reason": _INDEX_REBUILD_STATE.get(
+                "last_invalidation_reason"
+            ),
+            "last_invalidated_at_utc": _INDEX_REBUILD_STATE.get(
+                "last_invalidated_at_utc"
+            ),
+            "namespace_state": namespace_state,
         }
+
+
+def get_workflow_capability_index_readiness_report() -> Dict[str, Any]:
+    """Return a user-facing readiness report for the capability index."""
+
+    runtime_state = get_workflow_capability_index_runtime_state()
+    ready = bool(runtime_state.get("ready", False))
+    build_in_progress = bool(runtime_state.get("build_in_progress", False))
+    last_error = str(runtime_state.get("last_error") or "").strip()
+    last_invalidation_reason = str(
+        runtime_state.get("last_invalidation_reason") or ""
+    ).strip()
+    size = int(runtime_state.get("size") or 0)
+    namespace_state = (
+        runtime_state.get("namespace_state")
+        if isinstance(runtime_state.get("namespace_state"), dict)
+        else None
+    )
+    namespace_compatible = (
+        bool(namespace_state.get("compatible", False))
+        if isinstance(namespace_state, dict)
+        else True
+    )
+    namespace_detail = (
+        str(namespace_state.get("detail") or "").strip()
+        if isinstance(namespace_state, dict)
+        else ""
+    )
+    namespace_status = (
+        str(namespace_state.get("status") or "").strip()
+        if isinstance(namespace_state, dict)
+        else ""
+    )
+
+    if ready:
+        status = "ready"
+        warning_level = "ok"
+        summary = "Workflow capability index ready."
+        detail = (
+            f"The authoritative workflow capability index is available with "
+            f"{size} indexed workflow entries."
+        )
+    elif build_in_progress:
+        status = "building"
+        warning_level = "warning"
+        summary = "Workflow capability index still building."
+        detail = (
+            "Workflow discovery is waiting on the authoritative capability "
+            "index to finish building."
+        )
+    elif not namespace_compatible and namespace_status:
+        status = "error"
+        warning_level = "error"
+        summary = "Workflow capability index requires rebuild."
+        detail = namespace_detail or (
+            "The persisted workflow capability index is incompatible with the "
+            "current embedding configuration."
+        )
+    elif last_error:
+        status = "error"
+        warning_level = "error"
+        summary = "Workflow capability index not ready."
+        detail = f"Last build failed: {last_error}"
+    elif last_invalidation_reason:
+        status = "rebuild_required"
+        warning_level = "warning"
+        summary = "Workflow capability index rebuild required."
+        detail = last_invalidation_reason
+    else:
+        status = "not_ready"
+        warning_level = "warning"
+        summary = "Workflow capability index not ready."
+        detail = (
+            "No authoritative workflow capability snapshot has been built yet."
+        )
+
+    with _INDEX_STATE_LOCK:
+        startup_report = _INDEX_REBUILD_STATE.get("startup_last_report")
+
+    report: Dict[str, Any] = {
+        **runtime_state,
+        "status": status,
+        "warning_level": warning_level,
+        "summary": summary,
+        "detail": detail,
+        "checked_at_utc": _utc_now_iso(),
+    }
+    if isinstance(startup_report, dict):
+        report["startup_check"] = dict(startup_report)
+    else:
+        report["startup_check"] = None
+    return report
+
+
+def run_workflow_capability_index_startup_check(
+    *,
+    timeout_seconds: float = _WORKFLOW_CAPABILITY_INDEX_STARTUP_TIMEOUT_SECONDS,
+    workflow_registry: Any | None = None,
+) -> Dict[str, Any]:
+    """Perform a bounded startup readiness check for the capability index."""
+
+    try:
+        effective_timeout = max(0.0, float(timeout_seconds))
+    except (TypeError, ValueError):
+        effective_timeout = _WORKFLOW_CAPABILITY_INDEX_STARTUP_TIMEOUT_SECONDS
+
+    started_at = time.perf_counter()
+    checked_at_utc = _utc_now_iso()
+
+    ensure_workflow_capability_index_populated(
+        block=True,
+        max_wait_seconds=effective_timeout,
+        workflow_registry=workflow_registry,
+    )
+
+    readiness_report = get_workflow_capability_index_readiness_report()
+    ready = bool(readiness_report.get("ready", False))
+    build_in_progress = bool(readiness_report.get("build_in_progress", False))
+    last_error = str(readiness_report.get("last_error") or "").strip()
+
+    if ready:
+        status = "ready"
+        summary = "Workflow capability index ready after startup check."
+    elif build_in_progress:
+        status = "timeout"
+        summary = "Workflow capability index still not ready after startup check."
+    elif last_error:
+        status = "error"
+        summary = "Workflow capability index failed startup readiness check."
+    else:
+        status = "not_ready"
+        summary = "Workflow capability index not ready after startup check."
+
+    startup_report: Dict[str, Any] = {
+        "success": ready,
+        "ready": ready,
+        "status": status,
+        "summary": summary,
+        "detail": readiness_report.get("detail"),
+        "timeout_seconds": effective_timeout,
+        "duration_ms": round((time.perf_counter() - started_at) * 1000.0, 3),
+        "checked_at_utc": checked_at_utc,
+    }
+
+    with _INDEX_STATE_LOCK:
+        _INDEX_REBUILD_STATE["startup_last_report"] = dict(startup_report)
+
+    return startup_report
 
 
 def _perform_workflow_capability_index_build(
@@ -730,6 +925,7 @@ def _perform_workflow_capability_index_build(
             count=count,
             error=None,
             success_monotonic=success_monotonic,
+            clear_invalidation=True,
         )
         logger.info(
             "[workflow_capability_index] %s build completed with %d entries.",
@@ -817,7 +1013,8 @@ def ensure_workflow_capability_index_populated(
     """
 
     index = get_workflow_capability_index()
-    if index.size > 0 and not force_refresh:
+    runtime_state = get_workflow_capability_index_runtime_state()
+    if index.size > 0 and bool(runtime_state.get("ready", False)) and not force_refresh:
         return index
 
     if not block:
@@ -834,7 +1031,8 @@ def ensure_workflow_capability_index_populated(
         wait_seconds = None if max_wait_seconds is None else max(0.0, float(max_wait_seconds))
         _INDEX_REBUILD_COMPLETED.wait(wait_seconds)
         index = get_workflow_capability_index()
-        if index.size > 0 and not force_refresh:
+        runtime_state = get_workflow_capability_index_runtime_state()
+        if index.size > 0 and bool(runtime_state.get("ready", False)) and not force_refresh:
             return index
 
     now = time.monotonic()
@@ -846,7 +1044,8 @@ def ensure_workflow_capability_index_populated(
 
     with _INDEX_REBUILD_LOCK:
         index = get_workflow_capability_index()
-        if index.size > 0 and not force_refresh:
+        runtime_state = get_workflow_capability_index_runtime_state()
+        if index.size > 0 and bool(runtime_state.get("ready", False)) and not force_refresh:
             return index
         try:
             return _perform_workflow_capability_index_build(
@@ -923,16 +1122,40 @@ def reset_workflow_capability_index() -> None:
         _INDEX_REBUILD_STATE["build_in_progress"] = False
         _INDEX_REBUILD_STATE["last_error"] = None
         _INDEX_REBUILD_STATE["last_mode"] = None
+        _INDEX_REBUILD_STATE["startup_last_report"] = None
+        _INDEX_REBUILD_STATE["last_invalidation_reason"] = None
+        _INDEX_REBUILD_STATE["last_invalidated_at_utc"] = None
     _INDEX_REBUILD_COMPLETED.set()
 
 
-def invalidate_workflow_capability_index() -> dict[str, Any]:
+def invalidate_workflow_capability_index(
+    *,
+    reason: str | None = None,
+    reset_backend_namespace: bool = False,
+) -> dict[str, Any]:
     """Drop the cached capability index so the next lookup rebuilds it."""
 
     previous_state = get_workflow_capability_index_runtime_state()
+    backend_namespace_reset = False
+    backend_reset_error = None
+    if reset_backend_namespace:
+        try:
+            rag_service = _get_workflow_capability_rag_service()
+            _reset_workflow_capability_backend_namespace(rag_service)
+            backend_namespace_reset = True
+        except Exception as exc:
+            backend_reset_error = str(exc)
     reset_workflow_capability_index()
+    with _INDEX_STATE_LOCK:
+        _INDEX_REBUILD_STATE["last_invalidation_reason"] = (
+            str(reason).strip() if reason else None
+        )
+        _INDEX_REBUILD_STATE["last_invalidated_at_utc"] = _utc_now_iso()
     return {
         "success": True,
         "cache": "workflow_capability_index",
         "had_cached_entries": bool(previous_state.get("size", 0)),
+        "backend_namespace_reset": backend_namespace_reset,
+        "backend_reset_error": backend_reset_error,
+        "reason": str(reason).strip() if reason else None,
     }

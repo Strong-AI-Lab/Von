@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from unittest.mock import MagicMock, patch
 from src.backend.services.rag_service import get_rag_service
@@ -85,12 +87,29 @@ def test_delete_documents(mock_llamaindex):
 
 def test_llamaindex_servicecontext_deprecation_falls_back_to_settings(
     workspace_tmp_path,
+    monkeypatch,
 ):
-    fake_embed_model = MagicMock()
-    fake_embed_model.get_text_embedding.return_value = [0.1, 0.2, 0.3]
     fake_settings = MagicMock()
-    fake_settings.embed_model = fake_embed_model
+    fake_settings.embed_model = None
     fake_settings.llm = MagicMock()
+    monkeypatch.setattr(
+        "src.backend.services.settings_service.resolve_rag_embedder_setting",
+        lambda *args, **kwargs: {
+            "status": "resolved",
+            "effective": {"provider": "openai", "model": "text-embedding-3-small"},
+            "selection_source": "explicit_setting",
+            "reason": None,
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.settings_service.resolve_rag_llm_setting",
+        lambda *args, **kwargs: {
+            "status": "disabled",
+            "effective": None,
+            "selection_source": "configured_disabled",
+            "reason": "disabled_by_setting",
+        },
+    )
 
     with (
         patch(
@@ -113,5 +132,88 @@ def test_llamaindex_servicecontext_deprecation_falls_back_to_settings(
         )
 
         assert rag.service_context is None
-        assert rag.get_runtime_embed_model() is fake_embed_model
-        assert rag.embed(["hello"]) == [[0.1, 0.2, 0.3]]
+        assert rag.llamaindex_settings is fake_settings
+        assert rag.get_runtime_embed_model() is fake_settings.embed_model
+        assert rag.get_runtime_configuration_summary()["embedding_signature"]["model"] == (
+            "text-embedding-3-small"
+        )
+
+
+def test_llamaindex_runtime_configuration_tracks_embedding_signature_and_mismatch(
+    mock_llamaindex,
+    monkeypatch,
+    workspace_tmp_path,
+):
+    monkeypatch.setattr(
+        "src.backend.services.settings_service.resolve_rag_embedder_setting",
+        lambda *args, **kwargs: {
+            "status": "resolved",
+            "effective": {
+                "provider": "openai",
+                "model": "text-embedding-3-small",
+            },
+            "selection_source": "explicit_setting",
+            "reason": None,
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.settings_service.resolve_rag_llm_setting",
+        lambda *args, **kwargs: {
+            "status": "disabled",
+            "effective": None,
+            "selection_source": "configured_disabled",
+            "reason": "disabled_by_setting",
+        },
+    )
+
+    from src.backend.services.rag_backends.llamaindex_backend import (
+        LlamaIndexRAGService,
+    )
+
+    rag = LlamaIndexRAGService(
+        persistence_dir=str(workspace_tmp_path / "rag_storage")
+    )
+    summary = rag.get_runtime_configuration_summary()
+
+    assert summary["embedding_signature"] == {
+        "schema_version": "rag_component_signature.v1",
+        "kind": "embedder",
+        "provider": "openai",
+        "model": "text-embedding-3-small",
+        "host": None,
+    }
+    assert summary["llm_resolution"]["status"] == "disabled"
+
+    success, failed = rag.upsert_documents(
+        [{"id": "doc1", "text": "content", "metadata": {"meta": "data"}}],
+        namespace="workflow_capabilities",
+    )
+
+    assert success == 1
+    assert failed == 0
+
+    metadata_path = workspace_tmp_path / "rag_storage" / "namespaces"
+    metadata_files = list(metadata_path.rglob("index_metadata.json"))
+    assert metadata_files
+    metadata = json.loads(metadata_files[0].read_text(encoding="utf-8"))
+    assert metadata["embedding_signature"]["model"] == "text-embedding-3-small"
+
+    monkeypatch.setattr(
+        "src.backend.services.settings_service.resolve_rag_embedder_setting",
+        lambda *args, **kwargs: {
+            "status": "resolved",
+            "effective": {
+                "provider": "ollama",
+                "model": "nomic-embed-text",
+                "host": "http://localhost:11434",
+            },
+            "selection_source": "explicit_setting",
+            "reason": None,
+        },
+    )
+
+    state = rag.get_namespace_runtime_state("workflow_capabilities")
+
+    assert state["compatible"] is False
+    assert state["status"] == "embedding_signature_mismatch"
+    assert state["current_embedding_signature"]["model"] == "nomic-embed-text"

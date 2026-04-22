@@ -6510,6 +6510,48 @@ footer {
     font-size: 13px;
 }
 
+.workflow-status-warning-cartouche {
+    display: grid;
+    gap: 4px;
+    padding: 11px 12px;
+    border-radius: 12px;
+    border: 1px solid rgba(217, 119, 6, 0.35);
+    background: linear-gradient(135deg, rgba(255, 247, 237, 0.96) 0%, rgba(254, 243, 199, 0.92) 100%);
+    color: #7c2d12;
+    box-shadow: 0 10px 20px rgba(217, 119, 6, 0.1);
+}
+
+.workflow-status-warning-cartouche.status-info {
+    border-color: rgba(59, 130, 246, 0.22);
+    background: linear-gradient(135deg, rgba(239, 246, 255, 0.96) 0%, rgba(219, 234, 254, 0.92) 100%);
+    color: #1d4ed8;
+    box-shadow: 0 10px 20px rgba(59, 130, 246, 0.08);
+}
+
+.workflow-status-warning-cartouche.status-error {
+    border-color: rgba(185, 28, 28, 0.3);
+    background: linear-gradient(135deg, rgba(254, 242, 242, 0.96) 0%, rgba(254, 226, 226, 0.92) 100%);
+    color: #991b1b;
+    box-shadow: 0 10px 20px rgba(185, 28, 28, 0.08);
+}
+
+.workflow-status-warning-title {
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+}
+
+.workflow-status-warning-detail {
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+.workflow-status-warning-meta {
+    font-size: 11px;
+    line-height: 1.4;
+    opacity: 0.9;
+}
+
 .workflow-status-item {
     border-radius: 12px;
     padding: 10px 12px 12px;
@@ -11268,6 +11310,91 @@ body.settings-body {
     opacity: 0.75;
 }
 
+.settings-runtime-model-panel {
+    display: grid;
+    gap: 16px;
+}
+
+.settings-runtime-model-block {
+    border: 1px solid #e5e7eb;
+    border-radius: 10px;
+    padding: 14px 16px;
+    background: linear-gradient(180deg, #f9fafb 0%, #fff 100%);
+}
+
+.settings-runtime-model-block h3 {
+    margin: 0 0 8px;
+}
+
+.settings-runtime-model-grid {
+    display: grid;
+    grid-template-columns: minmax(140px, 180px) minmax(0, 1fr);
+    gap: 10px 14px;
+    align-items: center;
+}
+
+.settings-runtime-model-grid label {
+    margin: 0;
+}
+
+.settings-runtime-model-grid input,
+.settings-runtime-model-grid select {
+    margin: 0;
+}
+
+.settings-runtime-model-summary {
+    margin-top: 10px;
+    font-size: 0.92rem;
+    color: #334155;
+}
+
+.settings-runtime-status-card {
+    margin-top: 16px;
+    border-radius: 10px;
+    padding: 14px 16px;
+    border: 1px solid #f59e0b;
+    background: linear-gradient(180deg, #fff7ed 0%, #fff 100%);
+}
+
+.settings-runtime-status-card[data-warning-level="ok"] {
+    border-color: #22c55e;
+    background: linear-gradient(180deg, #f0fdf4 0%, #fff 100%);
+}
+
+.settings-runtime-status-card[data-warning-level="error"] {
+    border-color: #ef4444;
+    background: linear-gradient(180deg, #fef2f2 0%, #fff 100%);
+}
+
+.settings-runtime-status-label {
+    font-size: 0.82rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: #92400e;
+}
+
+.settings-runtime-status-card[data-warning-level="ok"] .settings-runtime-status-label {
+    color: #166534;
+}
+
+.settings-runtime-status-card[data-warning-level="error"] .settings-runtime-status-label {
+    color: #991b1b;
+}
+
+.settings-runtime-status-summary {
+    margin-top: 6px;
+    font-size: 1rem;
+    font-weight: 700;
+    color: #111827;
+}
+
+.settings-runtime-status-detail {
+    margin-top: 6px;
+    font-size: 0.92rem;
+    color: #475569;
+}
+
 .settings-note {
     font-size: 0.85em;
     color: #666;
@@ -11311,6 +11438,10 @@ body.settings-body {
     .settings-section-link {
         flex: 1 1 calc(50% - 0.5rem);
         justify-content: center;
+    }
+
+    .settings-runtime-model-grid {
+        grid-template-columns: 1fr;
     }
 }
 

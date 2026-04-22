@@ -213,11 +213,18 @@ const workflowDefinitionsState = {
     retryTimeoutId: null,
     retryAttempt: 0
 };
+const workflowCapabilityIndexState = {
+    loading: false,
+    error: '',
+    payload: null,
+    lastFetchedAt: 0
+};
 const workflowStatusGroupUiState = {
     collapsedByWorkflowId: new Map()
 };
 const WORKFLOW_DEFINITIONS_SILENT_REFRESH_COOLDOWN_MS = 15_000;
 const WORKFLOW_DEFINITIONS_FETCH_TIMEOUT_MS = 20_000;
+const WORKFLOW_CAPABILITY_INDEX_FETCH_TIMEOUT_MS = 8_000;
 const WORKFLOW_DEFINITIONS_CONTENTION_RETRY_BASE_MS = 750;
 const WORKFLOW_DEFINITIONS_CONTENTION_RETRY_MAX_MS = 5000;
 const WORKFLOW_DEFINITIONS_CONTENTION_RETRY_MAX_ATTEMPTS = 3;
@@ -20659,6 +20666,135 @@ function buildWorkflowStatusStreamQuery() {
     return params;
 }
 
+function applyWorkflowCapabilityIndexPayload(payload) {
+    if (!payload || typeof payload !== 'object') {
+        return;
+    }
+    workflowCapabilityIndexState.payload = { ...payload };
+    workflowCapabilityIndexState.error = '';
+    workflowCapabilityIndexState.lastFetchedAt = Date.now();
+}
+
+function getWorkflowCapabilityIndexPayload() {
+    if (workflowCapabilityIndexState.payload && typeof workflowCapabilityIndexState.payload === 'object') {
+        return workflowCapabilityIndexState.payload;
+    }
+    const definitionsPayload = (
+        workflowDefinitionsState.lastPayload && typeof workflowDefinitionsState.lastPayload === 'object'
+    ) ? workflowDefinitionsState.lastPayload : null;
+    const capabilityPayload = definitionsPayload?.capability_index;
+    if (capabilityPayload && typeof capabilityPayload === 'object') {
+        return capabilityPayload;
+    }
+    return null;
+}
+
+function buildWorkflowCapabilityIndexWarningHtml() {
+    const payload = getWorkflowCapabilityIndexPayload();
+    const loadError = String(workflowCapabilityIndexState.error || '').trim();
+    if (loadError) {
+        return `
+            <div class="workflow-status-warning-cartouche status-error" role="status" aria-live="polite">
+              <div class="workflow-status-warning-title">Capability index status unavailable</div>
+              <div class="workflow-status-warning-detail">${escapeHtml(loadError)}</div>
+            </div>
+        `;
+    }
+
+    if (!payload || typeof payload !== 'object') {
+        if (!workflowCapabilityIndexState.loading) {
+            return '';
+        }
+        return `
+            <div class="workflow-status-warning-cartouche status-info" role="status" aria-live="polite">
+              <div class="workflow-status-warning-title">Checking workflow capability index</div>
+              <div class="workflow-status-warning-detail">Waiting for the authoritative workflow capability index status.</div>
+            </div>
+        `;
+    }
+
+    if (payload.ready === true) {
+        return '';
+    }
+
+    const status = (typeof payload.status === 'string' && payload.status.trim())
+        ? payload.status.trim()
+        : 'not_ready';
+    const severityClass = status === 'error' ? 'status-error' : 'status-warning';
+    const summary = (typeof payload.summary === 'string' && payload.summary.trim())
+        ? payload.summary.trim()
+        : 'Workflow capability index not ready.';
+    const detail = (typeof payload.detail === 'string' && payload.detail.trim())
+        ? payload.detail.trim()
+        : 'Workflow discovery is waiting on the authoritative capability index.';
+    const metaBits = [];
+    const startupCheck = payload.startup_check && typeof payload.startup_check === 'object'
+        ? payload.startup_check
+        : null;
+    if (startupCheck?.checked_at_utc) {
+        metaBits.push(`Startup check: ${formatWorkflowEpisodeTimestamp(startupCheck.checked_at_utc)}`);
+    }
+    if (typeof payload.size === 'number') {
+        metaBits.push(`Indexed: ${payload.size}`);
+    }
+    if (typeof payload.last_mode === 'string' && payload.last_mode.trim()) {
+        metaBits.push(`Mode: ${payload.last_mode.trim()}`);
+    }
+    if (typeof payload.last_error === 'string' && payload.last_error.trim()) {
+        metaBits.push(`Reason: ${payload.last_error.trim()}`);
+    }
+    const metaHtml = metaBits.length
+        ? `<div class="workflow-status-warning-meta">${escapeHtml(metaBits.join(' · '))}</div>`
+        : '';
+
+    return `
+        <div class="workflow-status-warning-cartouche ${severityClass}" role="status" aria-live="polite">
+          <div class="workflow-status-warning-title">${escapeHtml(summary)}</div>
+          <div class="workflow-status-warning-detail">${escapeHtml(detail)}</div>
+          ${metaHtml}
+        </div>
+    `;
+}
+
+async function refreshWorkflowCapabilityIndexStatus({ silent = false } = {}) {
+    const { panel } = getWorkflowStatusElements();
+    if (!panel) return;
+    if (workflowCapabilityIndexState.loading) return;
+
+    workflowCapabilityIndexState.loading = true;
+    if (!silent) {
+        renderWorkflowStatusBody();
+    }
+
+    try {
+        const resp = await fetchWithTimeout(
+            '/api/workflows/capability-index/status',
+            {
+                method: 'GET',
+                headers: buildChatFetchHeaders(),
+                timeoutMs: WORKFLOW_CAPABILITY_INDEX_FETCH_TIMEOUT_MS
+            }
+        );
+        const responsePayload = await resp.json().catch(() => null);
+        if (!resp.ok) {
+            const detail = (typeof responsePayload?.detail === 'string' && responsePayload.detail.trim())
+                ? responsePayload.detail.trim()
+                : '';
+            throw new Error(detail || `HTTP ${resp.status}`);
+        }
+        applyWorkflowCapabilityIndexPayload(responsePayload);
+    } catch (err) {
+        const message = err instanceof Error ? err.message : String(err || 'unknown_error');
+        workflowCapabilityIndexState.error = `Could not load capability index status: ${message}`;
+        if (!silent) {
+            console.warn('[workflowStatus] Capability index status fetch failed', err);
+        }
+    } finally {
+        workflowCapabilityIndexState.loading = false;
+        renderWorkflowStatusBody();
+    }
+}
+
 function buildWorkflowMonitorExportPayload() {
     const namespace = getSessionScopedNamespace();
     const orgContext = getSessionScopedOrgContext();
@@ -20679,6 +20815,7 @@ function buildWorkflowMonitorExportPayload() {
         .filter((workflowId) => workflowId && !renderedWorkflowIds.includes(workflowId));
     const activeItems = Array.from(workflowStatusStreamState.items.values());
     const activeGroups = buildWorkflowStatusGroups(activeItems);
+    const capabilityIndexPayload = getWorkflowCapabilityIndexPayload();
 
     return {
         schema_version: 1,
@@ -20701,10 +20838,16 @@ function buildWorkflowMonitorExportPayload() {
                 : null,
             available_error: workflowDefinitionsState.error || null,
             available_notice: workflowDefinitionsState.notice || null,
+            capability_index_loading: Boolean(workflowCapabilityIndexState.loading),
+            capability_index_error: workflowCapabilityIndexState.error || null,
+            capability_index_last_fetched_at: workflowCapabilityIndexState.lastFetchedAt
+                ? new Date(workflowCapabilityIndexState.lastFetchedAt).toISOString()
+                : null,
             available_last_fetched_at: workflowDefinitionsState.lastFetchedAt
                 ? new Date(workflowDefinitionsState.lastFetchedAt).toISOString()
                 : null
         },
+        capability_index: capabilityIndexPayload,
         definitions_snapshot: {
             request_query: workflowDefinitionsState.lastRequestQuery || null,
             rendered_count: renderedWorkflowIds.length,
@@ -20767,6 +20910,10 @@ function renderWorkflowStatusList(items) {
     if (!body) return;
 
     const bannerParts = [];
+    const capabilityIndexWarning = buildWorkflowCapabilityIndexWarningHtml();
+    if (capabilityIndexWarning) {
+        bannerParts.push(capabilityIndexWarning);
+    }
     if (workflowStatusStreamState.snapshotError) {
         bannerParts.push(`<div class="workflow-status-empty workflow-status-error">${escapeHtml(workflowStatusStreamState.snapshotError)}</div>`);
     } else if (workflowStatusStreamState.snapshotNotice) {
@@ -20775,7 +20922,7 @@ function renderWorkflowStatusList(items) {
     const bannerHtml = bannerParts.join('');
 
     if (!items.length) {
-        body.innerHTML = bannerHtml || '<div class="workflow-status-empty">No active workflows</div>';
+        body.innerHTML = `${bannerHtml}<div class="workflow-status-empty">No active workflows</div>`;
         return;
     }
 
@@ -20835,11 +20982,16 @@ function renderWorkflowDefinitionsList(items) {
     if (!body) return;
 
     if (workflowDefinitionsState.loading && !items.length) {
-        body.innerHTML = '<div class="workflow-status-empty">Loading available workflows…</div>';
+        const capabilityIndexWarning = buildWorkflowCapabilityIndexWarningHtml();
+        body.innerHTML = `${capabilityIndexWarning}<div class="workflow-status-empty">Loading available workflows…</div>`;
         return;
     }
 
     const bannerParts = [];
+    const capabilityIndexWarning = buildWorkflowCapabilityIndexWarningHtml();
+    if (capabilityIndexWarning) {
+        bannerParts.push(capabilityIndexWarning);
+    }
     if (workflowDefinitionsState.loading && items.length) {
         bannerParts.push('<div class="workflow-status-empty">Refreshing available workflows…</div>');
     }
@@ -20851,13 +21003,13 @@ function renderWorkflowDefinitionsList(items) {
     const bannerHtml = bannerParts.join('');
 
     if (!items.length) {
-        body.innerHTML = bannerHtml || '<div class="workflow-status-empty">No available workflows</div>';
+        body.innerHTML = `${bannerHtml}<div class="workflow-status-empty">No available workflows</div>`;
         return;
     }
 
     const filteredItems = filterWorkflowDefinitionsForDisplay(items);
     if (!filteredItems.length) {
-        body.innerHTML = bannerHtml || '<div class="workflow-status-empty">No available workflows (design artefacts hidden)</div>';
+        body.innerHTML = `${bannerHtml}<div class="workflow-status-empty">No available workflows (design artefacts hidden)</div>`;
         return;
     }
 
@@ -21448,6 +21600,9 @@ async function refreshAvailableWorkflowDefinitions({ silent = false } = {}) {
         workflowDefinitionsState.lastFetchedAt = Date.now();
         workflowDefinitionsState.error = '';
         workflowDefinitionsState.notice = '';
+        if (data?.capability_index && typeof data.capability_index === 'object') {
+            applyWorkflowCapabilityIndexPayload(data.capability_index);
+        }
         workflowDefinitionsState.cacheState = (
             typeof data?.cache?.state === 'string' && data.cache.state.trim() === 'stale'
         ) ? 'stale' : 'fresh';
@@ -21654,6 +21809,7 @@ function initializeWorkflowStatusPanel() {
 
     if (refreshButton && refreshButton.dataset.bound !== 'true') {
         refreshButton.addEventListener('click', () => {
+            void refreshWorkflowCapabilityIndexStatus({ silent: true });
             if (workflowDefinitionsState.visible) {
                 void refreshAvailableWorkflowDefinitions();
                 return;
@@ -21677,6 +21833,7 @@ function initializeWorkflowStatusPanel() {
         toggleAvailableButton.addEventListener('click', () => {
             workflowDefinitionsState.visible = !workflowDefinitionsState.visible;
             updateWorkflowStatusActionButtons();
+            void refreshWorkflowCapabilityIndexStatus({ silent: true });
 
             if (workflowDefinitionsState.visible) {
                 clearWorkflowStatusSnapshotRetryTimer();
@@ -21691,6 +21848,7 @@ function initializeWorkflowStatusPanel() {
     }
 
     startWorkflowStatusStream();
+    void refreshWorkflowCapabilityIndexStatus({ silent: true });
     void refreshWorkflowStatusSnapshot({ silent: true });
 }
 
@@ -25795,6 +25953,25 @@ export function __testOnly_resetWorkflowStatusState() {
     workflowStatusStreamState.snapshotNotice = '';
     workflowStatusStreamState.lastSnapshotPayload = null;
     workflowStatusGroupUiState.collapsedByWorkflowId.clear();
+}
+export async function __testOnly_refreshWorkflowCapabilityIndexStatus(options = {}) {
+    return refreshWorkflowCapabilityIndexStatus(options);
+}
+export function __testOnly_resetWorkflowCapabilityIndexState() {
+    workflowCapabilityIndexState.loading = false;
+    workflowCapabilityIndexState.error = '';
+    workflowCapabilityIndexState.payload = null;
+    workflowCapabilityIndexState.lastFetchedAt = 0;
+}
+export function __testOnly_setWorkflowCapabilityIndexPayload(payload = null) {
+    if (payload && typeof payload === 'object') {
+        workflowCapabilityIndexState.payload = { ...payload };
+        workflowCapabilityIndexState.lastFetchedAt = Date.now();
+    } else {
+        workflowCapabilityIndexState.payload = null;
+        workflowCapabilityIndexState.lastFetchedAt = 0;
+    }
+    workflowCapabilityIndexState.error = '';
 }
 export function __testOnly_applyWorkflowStatusUpdate(payload) {
     applyWorkflowStatusUpdate(payload);

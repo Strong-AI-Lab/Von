@@ -1,8 +1,10 @@
 import {
     __testOnly_applyStoredSelection,
+    __testOnly_buildServerDefaultLlmPayload,
     __testOnly_buildStoredUserContextFromOption,
     __testOnly_formatRagSummaryForSettings,
     __testOnly_getPreferredRagNamespace,
+    __testOnly_readRuntimeModelSettingFromForm,
     __testOnly_resolveActiveLlmFromSelections,
     __testOnly_resolveDisplayedProviderModels,
     __testOnly_syncInitialScopedSelections,
@@ -123,6 +125,73 @@ describe('settingsPage RAG status summary', () => {
         );
 
         expect(result).toEqual({ provider: 'openai', model: 'gpt-5.4-mini' });
+    });
+
+    test('server default payload falls back to the current browser chat selection when the form is blank', () => {
+        document.body.innerHTML = `
+            <select id="serverDefaultLlmProvider">
+                <option value="" selected>Use current chat model on save</option>
+            </select>
+            <input id="serverDefaultLlmModel" value="" />
+            <input id="serverDefaultLlmHost" value="" />
+        `;
+
+        const payload = __testOnly_buildServerDefaultLlmPayload({
+            localModelPreference: {
+                requestedLlm: {
+                    provider: 'ollama',
+                    model: 'gemma4:26b',
+                    host: 'http://localhost:11434',
+                },
+            },
+            currentResolved: null,
+        });
+
+        expect(payload).toEqual({
+            provider: 'ollama',
+            model: 'gemma4:26b',
+            host: 'http://localhost:11434',
+        });
+    });
+
+    test('runtime model form reader returns explicit payload for a configured embedder', () => {
+        document.body.innerHTML = `
+            <select id="ragEmbedderMode">
+                <option value="inherit">Inherit</option>
+                <option value="explicit" selected>Explicit</option>
+            </select>
+            <select id="ragEmbedderProvider">
+                <option value="">Choose provider</option>
+                <option value="openai" selected>OpenAI</option>
+            </select>
+            <input id="ragEmbedderModel" value="text-embedding-3-small" />
+            <input id="ragEmbedderHost" value="" />
+        `;
+
+        expect(__testOnly_readRuntimeModelSettingFromForm('ragEmbedder')).toEqual({
+            mode: 'explicit',
+            provider: 'openai',
+            model: 'text-embedding-3-small',
+        });
+    });
+
+    test('runtime model form reader allows disabled RAG llm mode', () => {
+        document.body.innerHTML = `
+            <select id="ragLlmMode">
+                <option value="inherit">Inherit</option>
+                <option value="explicit">Explicit</option>
+                <option value="disabled" selected>Disabled</option>
+            </select>
+            <select id="ragLlmProvider">
+                <option value="">Choose provider</option>
+            </select>
+            <input id="ragLlmModel" value="" />
+            <input id="ragLlmHost" value="" />
+        `;
+
+        expect(__testOnly_readRuntimeModelSettingFromForm('ragLlm', { allowDisabled: true })).toEqual({
+            mode: 'disabled',
+        });
     });
 
     test('initial scoped selection sync backfills storage and composite namespace from selected user and org', async () => {

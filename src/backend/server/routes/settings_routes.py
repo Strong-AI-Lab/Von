@@ -9,7 +9,7 @@ from ...vontology.utils_vontology import (
     get_concept_notes,
     EXAMPLE_USER_CONCEPT_ID,
 )  # relative import
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, Mapping
 from werkzeug.datastructures import FileStorage
 from ...services.settings_service import (
     get_openai_env_var,
@@ -40,6 +40,12 @@ from ...services.settings_service import (
     set_buttonify_model_enabled,
     set_auto_proceed_minimal_imposition_enabled,
     get_all_settings_batch,
+    get_server_default_llm_setting,
+    resolve_rag_embedder_setting,
+    resolve_rag_llm_setting,
+    set_rag_embedder_setting,
+    set_rag_llm_setting,
+    set_server_default_llm_setting,
 )
 from ...services.feature_flags import (
     get_expert_footer_enabled,
@@ -57,6 +63,11 @@ from ...services.paper_recommendation_workflow_vontology_service import (
 )
 from ...services.window_session_context_service import get_effective_context
 from ...services.buttonify_service import BUTTONIFY_PROMPT_IDS
+from ...services.workflow_capability_service import (
+    get_workflow_capability_index_readiness_report,
+    invalidate_workflow_capability_index,
+    prewarm_workflow_capability_index,
+)
 from ...integrations.google.gmail_service import list_profile_ids_from_env
 from ...services.concept_service import list_concepts, get_concept_by_id
 from ...services.concept_service import ConceptNotFoundError
@@ -83,6 +94,29 @@ import re
 
 # REFACTORING_NOTE: This blueprint is part of the backend model selection refactoring.
 # It provides API endpoints for managing global application settings.
+
+
+def _build_runtime_component_signature_from_resolution(
+    kind: str,
+    resolution: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(resolution, Mapping):
+        return None
+    effective = resolution.get("effective")
+    if not isinstance(effective, Mapping):
+        return None
+    provider = str(effective.get("provider") or "").strip().lower()
+    model = str(effective.get("model") or "").strip()
+    if not provider or not model:
+        return None
+    host = str(effective.get("host") or "").strip()
+    return {
+        "schema_version": "rag_component_signature.v1",
+        "kind": str(kind or "").strip() or "unknown",
+        "provider": provider,
+        "model": model,
+        "host": host or None,
+    }
 
 
 def _validate_unified_concept_schema(concept, index):
@@ -722,9 +756,21 @@ def get_all_settings():
             user_concept_id=user_concept_id, org_concept_id=org_concept_id
         )
         settings["resolved_llm"] = resolved
+        settings["server_default_llm"] = get_server_default_llm_setting()
         settings["enabled_llms"] = resolve_enabled_llm_settings(
             user_concept_id=user_concept_id,
             org_concept_id=org_concept_id,
+        )
+        settings["effective_rag_embedder"] = resolve_rag_embedder_setting(
+            user_concept_id=user_concept_id,
+            org_concept_id=org_concept_id,
+        )
+        settings["effective_rag_llm"] = resolve_rag_llm_setting(
+            user_concept_id=user_concept_id,
+            org_concept_id=org_concept_id,
+        )
+        settings["workflow_capability_index"] = (
+            get_workflow_capability_index_readiness_report()
         )
         settings["available_mutation_authority_levels"] = [
             MUTATION_AUTHORITY_LEVEL_READ_ONLY,
@@ -767,6 +813,14 @@ def save_all_settings():
         resolved_llm = None
         resolved_enabled_llms = None
         resolved_mutation_authority = None
+        resolved_rag_embedder = None
+        resolved_rag_llm = None
+        prior_global_rag_embedder = resolve_rag_embedder_setting()
+        prior_embedder_signature = _build_runtime_component_signature_from_resolution(
+            "embedder",
+            prior_global_rag_embedder,
+        )
+        workflow_capability_rebuild = None
         llm_scope = None
         llm_scope_concept_id = None
         if "disable_write_tool_conservatism" in data:
@@ -963,6 +1017,42 @@ def save_all_settings():
                 f"OpenAI API key environment variable set to: {env_var}"
             )
 
+        if "server_default_llm" in data:
+            if not set_server_default_llm_setting(data.get("server_default_llm")):
+                return (
+                    jsonify(
+                        {
+                            "status": "error",
+                            "message": "Failed to persist server_default_llm.",
+                        }
+                    ),
+                    500,
+                )
+
+        if "rag_embedder" in data:
+            if not set_rag_embedder_setting(data.get("rag_embedder")):
+                return (
+                    jsonify(
+                        {
+                            "status": "error",
+                            "message": "Failed to persist rag_embedder.",
+                        }
+                    ),
+                    500,
+                )
+
+        if "rag_llm" in data:
+            if not set_rag_llm_setting(data.get("rag_llm")):
+                return (
+                    jsonify(
+                        {
+                            "status": "error",
+                            "message": "Failed to persist rag_llm.",
+                        }
+                    ),
+                    500,
+                )
+
         if "fetch_counts_on_load" in data:
             try:
                 enabled = bool(data.get("fetch_counts_on_load"))
@@ -1028,6 +1118,50 @@ def save_all_settings():
             )
 
         # user/org/language fields intentionally ignored (browser-local)
+        resolved_rag_embedder = resolve_rag_embedder_setting()
+        resolved_rag_llm = resolve_rag_llm_setting()
+        current_embedder_signature = _build_runtime_component_signature_from_resolution(
+            "embedder",
+            resolved_rag_embedder,
+        )
+        if current_embedder_signature != prior_embedder_signature:
+            if current_embedder_signature is None:
+                rebuild_detail = (
+                    "The RAG embedder changed to an unresolved state, so the "
+                    "authoritative workflow capability index was invalidated "
+                    "and cannot rebuild until a working embedder is configured."
+                )
+            else:
+                rebuild_detail = (
+                    "The RAG embedder changed, so the authoritative workflow "
+                    "capability index was invalidated and will rebuild with the "
+                    "new embedding configuration. Existing embedding-backed "
+                    "namespaces built with the previous embedder are treated as "
+                    "incompatible until rebuilt."
+                )
+            invalidation_result = invalidate_workflow_capability_index(
+                reason=rebuild_detail,
+                reset_backend_namespace=True,
+            )
+            prewarm_started = False
+            if current_embedder_signature is not None:
+                prewarm_started = prewarm_workflow_capability_index(force_refresh=True)
+            workflow_capability_rebuild = {
+                "required": True,
+                "started": bool(prewarm_started),
+                "reason": "rag_embedder_signature_changed",
+                "detail": rebuild_detail,
+                "invalidation": invalidation_result,
+            }
+        else:
+            workflow_capability_rebuild = {
+                "required": False,
+                "started": False,
+                "reason": None,
+                "detail": None,
+                "invalidation": None,
+            }
+        workflow_capability_index = get_workflow_capability_index_readiness_report()
 
         return (
             jsonify(
@@ -1037,6 +1171,11 @@ def save_all_settings():
                     "resolved_llm": resolved_llm,
                     "enabled_llms": resolved_enabled_llms,
                     "resolved_mutation_authority": resolved_mutation_authority,
+                    "server_default_llm": get_server_default_llm_setting(),
+                    "resolved_rag_embedder": resolved_rag_embedder,
+                    "resolved_rag_llm": resolved_rag_llm,
+                    "workflow_capability_index": workflow_capability_index,
+                    "workflow_capability_rebuild": workflow_capability_rebuild,
                 }
             ),
             200,

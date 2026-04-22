@@ -89,6 +89,7 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
         talk_representation_workflow_vontology_service as talk_workflow_bootstrap,
         turn_pipeline_monitoring_schedule_bootstrap_service as turn_pipeline_monitoring_schedule_bootstrap,
         turn_pipeline_monitoring_workflow_vontology_service as turn_pipeline_monitoring_workflow_bootstrap,
+        workflow_capability_service as workflow_capability_service,
         workflow_description_vontology_service as workflow_description_prompt_bootstrap,
         workflow_gap_vontology_service as workflow_gap_prompt_bootstrap,
     )
@@ -102,6 +103,18 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     monkeypatch.setattr(utils_flask, "_build_durable_workflow_registry", lambda: object())
     monkeypatch.setattr(utils_flask, "_build_durable_action_registry", lambda: object())
     monkeypatch.setattr(utils_flask, "_get_durable_definition_loader", lambda: lambda _workflow_id: None)
+    monkeypatch.setattr(
+        workflow_capability_service,
+        "run_workflow_capability_index_startup_check",
+        lambda *, workflow_registry=None, timeout_seconds=8.0: {
+            "success": True,
+            "ready": True,
+            "status": "ready",
+            "summary": "Workflow capability index ready after startup check.",
+            "detail": "Indexed 31 workflows.",
+            "timeout_seconds": timeout_seconds,
+        },
+    )
     monkeypatch.setattr(
         utils_flask,
         "_bootstrap_workflow_authority_for_startup",
@@ -326,6 +339,11 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     assert isinstance(workflow_authority_bootstrap_report, dict)
     assert workflow_authority_bootstrap_report.get("success") is True
     assert workflow_authority_bootstrap_report.get("counts", {}).get("updated") == 10
+    workflow_capability_index_startup_report = result.get(
+        "workflow_capability_index_startup_check"
+    )
+    assert isinstance(workflow_capability_index_startup_report, dict)
+    assert workflow_capability_index_startup_report.get("ready") is True
     turn_pipeline_monitoring_schedule_report = result.get(
         "turn_pipeline_monitoring_schedule_bootstrap"
     )

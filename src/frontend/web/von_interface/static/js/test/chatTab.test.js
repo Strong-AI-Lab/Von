@@ -20,6 +20,8 @@ import {
     __testOnly_buildWorkflowStatusQuery,
     __testOnly_buildWorkflowStatusStreamQuery,
     __testOnly_applyWorkflowStatusUpdate,
+    __testOnly_resetWorkflowCapabilityIndexState,
+    __testOnly_setWorkflowCapabilityIndexPayload,
     __testOnly_buildLlmDebugMetadata,
     __testOnly_extractImageFilesFromClipboardEvent,
     __testOnly_convertInlineQuotedStrongSegmentsToButtons,
@@ -578,6 +580,74 @@ describe('workflow monitor concept links', () => {
         ]);
 
         expect(document.body.textContent).toContain('Episodes: 8 scoped (12 total)');
+    });
+});
+
+describe('workflow monitor capability-index warning cartouche', () => {
+    beforeEach(() => {
+        document.body.innerHTML = `
+            <div id="workflowStatusPanel"></div>
+            <div id="workflowStatusBody"></div>
+            <button id="workflowStatusRefresh"></button>
+            <button id="workflowStatusToggleAvailable"></button>
+            <input id="workflowStatusShowDesigns" type="checkbox" />
+        `;
+        __testOnly_resetWorkflowDefinitionsState();
+        __testOnly_resetWorkflowStatusState();
+        __testOnly_resetWorkflowCapabilityIndexState();
+    });
+
+    afterEach(() => {
+        __testOnly_resetWorkflowDefinitionsState();
+        __testOnly_resetWorkflowStatusState();
+        __testOnly_resetWorkflowCapabilityIndexState();
+    });
+
+    test('renders a warning cartouche in available-workflows mode when the capability index is not ready', () => {
+        __testOnly_setWorkflowCapabilityIndexPayload({
+            ready: false,
+            status: 'error',
+            summary: 'Workflow capability index not ready.',
+            detail: 'Last build failed: OpenAI quota exhausted (insufficient_quota).',
+            last_error: 'OpenAI quota exhausted (insufficient_quota)',
+            startup_check: {
+                checked_at_utc: '2026-04-22T01:02:03Z'
+            },
+            size: 0
+        });
+
+        __testOnly_renderWorkflowDefinitionsBody([]);
+
+        const bodyText = document.getElementById('workflowStatusBody').textContent;
+        expect(bodyText).toContain('Workflow capability index not ready');
+        expect(bodyText).toContain('insufficient_quota');
+        const exportPayload = __testOnly_buildWorkflowMonitorExportPayload();
+        expect(exportPayload.capability_index.ready).toBe(false);
+        expect(exportPayload.monitor_state.capability_index_error).toBeNull();
+    });
+
+    test('renders the same warning cartouche in active-workflows mode', () => {
+        __testOnly_setWorkflowCapabilityIndexPayload({
+            ready: false,
+            status: 'building',
+            summary: 'Workflow capability index still building.',
+            detail: 'Workflow discovery is waiting on the authoritative capability index to finish building.',
+            size: 0
+        });
+
+        __testOnly_applyWorkflowStatusUpdate({
+            instance_id: 'wf-capability-warning',
+            workflow_id: '#V#turn_pipeline_monitoring_workflow',
+            status: 'running',
+            current_state: 'check_capability_index',
+            progress: { current: 1, total: 3 }
+        });
+
+        const bodyText = document.getElementById('workflowStatusBody').textContent;
+        expect(bodyText).toContain('Workflow capability index still building');
+        expect(bodyText).toContain('turn pipeline monitoring workflow');
+        const exportPayload = __testOnly_buildWorkflowMonitorExportPayload();
+        expect(exportPayload.capability_index.status).toBe('building');
     });
 });
 

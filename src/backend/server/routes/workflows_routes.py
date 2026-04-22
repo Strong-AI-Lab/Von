@@ -18,6 +18,9 @@ from ...services.workflow_episode_service import (
     get_workflow_usage_aggregates_for_workflows,
     list_workflow_use_episodes,
 )
+from ...services.workflow_capability_service import (
+    get_workflow_capability_index_readiness_report,
+)
 from ...services.namespace_service import (
     coerce_namespace,
     resolve_canonical_namespace,
@@ -415,6 +418,7 @@ def _build_workflow_definitions_payload(
             "turn_id": turn_id or None,
         },
         "parity_inventory": inventory_snapshot,
+        "capability_index": get_workflow_capability_index_readiness_report(),
     }
 
 
@@ -645,6 +649,25 @@ def api_list_workflow_definitions():
     finally:
         if refresh_lock is not None and refresh_lock_acquired:
             refresh_lock.release()
+
+
+@workflows_bp.get("/api/workflows/capability-index/status")
+def api_get_workflow_capability_index_status():
+    """Return the authoritative workflow capability-index readiness state."""
+
+    try:
+        return jsonify(get_workflow_capability_index_readiness_report())
+    except Exception as exc:
+        logger.exception("Failed to read workflow capability index status")
+        return (
+            jsonify(
+                {
+                    "error": "workflow_capability_index_status_failed",
+                    "detail": str(exc),
+                }
+            ),
+            500,
+        )
 
 
 @workflows_bp.get("/api/workflow-studio/catalogue")

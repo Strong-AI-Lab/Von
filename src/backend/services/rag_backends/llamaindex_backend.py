@@ -15,12 +15,13 @@ Namespace behaviour:
 
 import hashlib
 import importlib
+import json
 import os
 import re
 import shutil
 import time
 from datetime import datetime, timezone
-from typing import Iterable, Dict, Any, Optional, List, Tuple
+from typing import Iterable, Dict, Any, Optional, List, Tuple, Mapping
 
 from ..rag_service import RAGService
 from ...utils.concept_id_utils import normalise_concept_id_for_compare
@@ -32,6 +33,7 @@ _LLAMAINDEX_MISSING_MESSAGE = (
 )
 _QUERY_EMBED_TIMEOUT_SECONDS = 8.0
 _QUERY_EMBED_MAX_RETRIES = 0
+_INDEX_METADATA_FILENAME = "index_metadata.json"
 
 
 class _MissingVectorStoreIndex:
@@ -75,6 +77,26 @@ class _FallbackSettings:
     llm = None
 
 
+class _FallbackBaseEmbedding:
+    def __init__(self, *args, **kwargs):  # pragma: no cover
+        raise ImportError(_LLAMAINDEX_MISSING_MESSAGE)
+
+
+class _FallbackCustomLLM:
+    def __init__(self, *args, **kwargs):  # pragma: no cover
+        raise ImportError(_LLAMAINDEX_MISSING_MESSAGE)
+
+
+class _FallbackCompletionResponse:
+    def __init__(self, *args, **kwargs):  # pragma: no cover
+        raise ImportError(_LLAMAINDEX_MISSING_MESSAGE)
+
+
+class _FallbackLLMMetadata:
+    def __init__(self, *args, **kwargs):  # pragma: no cover
+        raise ImportError(_LLAMAINDEX_MISSING_MESSAGE)
+
+
 # These are intentionally `Any` so Pylance doesn't complain when we swap in
 # the real LlamaIndex implementations at runtime.
 VectorStoreIndex: Any = _MissingVectorStoreIndex
@@ -83,6 +105,10 @@ StorageContext: Any = _MissingStorageContext
 load_index_from_storage: Any = _missing_load_index_from_storage
 ServiceContext: Any = _FallbackServiceContext
 Settings: Any = _FallbackSettings
+BaseEmbedding: Any = _FallbackBaseEmbedding
+CustomLLM: Any = _FallbackCustomLLM
+CompletionResponse: Any = _FallbackCompletionResponse
+LLMMetadata: Any = _FallbackLLMMetadata
 
 
 # Attempt imports in a version-tolerant way.
@@ -95,6 +121,18 @@ try:  # pragma: no cover
     StorageContext = getattr(core, "StorageContext")
     load_index_from_storage = getattr(core, "load_index_from_storage")
     Settings = getattr(core, "Settings", Settings)
+    try:
+        embeddings_mod = importlib.import_module("llama_index.core.base.embeddings.base")
+        BaseEmbedding = getattr(embeddings_mod, "BaseEmbedding", BaseEmbedding)
+    except Exception:
+        pass
+    try:
+        llms_mod = importlib.import_module("llama_index.core.llms")
+        CustomLLM = getattr(llms_mod, "CustomLLM", CustomLLM)
+        CompletionResponse = getattr(llms_mod, "CompletionResponse", CompletionResponse)
+        LLMMetadata = getattr(llms_mod, "LLMMetadata", LLMMetadata)
+    except Exception:
+        pass
 
     try:
         service_context_mod = importlib.import_module(
@@ -113,9 +151,93 @@ except Exception:  # pragma: no cover
         load_index_from_storage = getattr(llama_index, "load_index_from_storage")
         ServiceContext = getattr(llama_index, "ServiceContext", ServiceContext)
         Settings = getattr(llama_index, "Settings", Settings)
+        try:
+            embeddings_mod = importlib.import_module("llama_index.base.embeddings.base")
+            BaseEmbedding = getattr(embeddings_mod, "BaseEmbedding", BaseEmbedding)
+        except Exception:
+            pass
+        try:
+            llms_mod = importlib.import_module("llama_index.llms")
+            CustomLLM = getattr(llms_mod, "CustomLLM", CustomLLM)
+            CompletionResponse = getattr(llms_mod, "CompletionResponse", CompletionResponse)
+            LLMMetadata = getattr(llms_mod, "LLMMetadata", LLMMetadata)
+        except Exception:
+            pass
     except Exception:
         # Leave stubs in place so the module remains importable.
         pass
+
+
+def _build_llm_interface_client(provider: str, *, host: str | None = None) -> Any:
+    from ...languagemodels.llm_interface import GeminiClient, OllamaClient, OpenAIClient
+
+    token = str(provider or "").strip().lower()
+    if token == "openai":
+        return OpenAIClient()
+    if token == "ollama":
+        return OllamaClient(host=host)
+    if token == "gemini":
+        return GeminiClient()
+    raise RuntimeError(f"Unsupported RAG model provider '{provider}'.")
+
+
+class _ConfiguredEmbeddingModel(BaseEmbedding):
+    provider: str
+    model_name: str
+    host: Optional[str] = None
+    selection_source: str = "explicit_setting"
+
+    @classmethod
+    def class_name(cls) -> str:
+        return "configured_embedding_model"
+
+    def _build_client(self) -> Any:
+        return _build_llm_interface_client(self.provider, host=self.host)
+
+    def _get_query_embedding(self, query: str) -> List[float]:
+        return self._build_client().get_embedding(query, model=self.model_name)
+
+    async def _aget_query_embedding(self, query: str) -> List[float]:
+        return self._get_query_embedding(query)
+
+    def _get_text_embedding(self, text: str) -> List[float]:
+        return self._build_client().get_embedding(text, model=self.model_name)
+
+    async def _aget_text_embedding(self, text: str) -> List[float]:
+        return self._get_text_embedding(text)
+
+
+class _ConfiguredRuntimeLLM(CustomLLM):
+    provider: str
+    model_name: str
+    host: Optional[str] = None
+    selection_source: str = "explicit_setting"
+
+    @property
+    def metadata(self) -> Any:
+        return LLMMetadata(
+            model_name=self.model_name,
+            is_chat_model=True,
+        )
+
+    @classmethod
+    def class_name(cls) -> str:
+        return "configured_runtime_llm"
+
+    def _build_client(self) -> Any:
+        return _build_llm_interface_client(self.provider, host=self.host)
+
+    def complete(self, prompt: str, formatted: bool = False, **kwargs: Any) -> Any:
+        text = self._build_client().generate(prompt, model=self.model_name)
+        return CompletionResponse(text=text)
+
+    def stream_complete(
+        self,
+        prompt: str,
+        formatted: bool = False,
+        **kwargs: Any,
+    ) -> Any:
+        yield self.complete(prompt, formatted=formatted, **kwargs)
 
 
 class LlamaIndexRAGService(RAGService):
@@ -124,6 +246,9 @@ class LlamaIndexRAGService(RAGService):
 
         # Cache of namespace -> index instance
         self._indices: Dict[str, Any] = {}
+        self._namespace_runtime_state: Dict[str, Dict[str, Any]] = {}
+        self._runtime_configuration: Dict[str, Any] | None = None
+        self._runtime_configuration_serialized: str | None = None
 
         # Ensure base persistence directory exists
         os.makedirs(self.persistence_dir, exist_ok=True)
@@ -132,10 +257,11 @@ class LlamaIndexRAGService(RAGService):
         # ServiceContext. Keep a reference to whichever runtime surface the
         # installed version exposes.
         self.llamaindex_settings = Settings
-        self.service_context = self._build_service_context()
+        self.service_context = None
 
         # Best-effort diagnostics for UI/debugging.
         self._last_query_info: Dict[str, Any] | None = None
+        self._refresh_runtime_configuration()
 
     @staticmethod
     def _is_service_context_deprecation_error(exc: Exception) -> bool:
@@ -146,13 +272,25 @@ class LlamaIndexRAGService(RAGService):
             and "Settings" in message
         )
 
-    def _build_service_context(self) -> Any:
+    def _build_service_context(self, *, embed_model: Any = None, llm: Any = None) -> Any:
         from_defaults = getattr(ServiceContext, "from_defaults", None)
         if not callable(from_defaults):
             return None
 
         try:
-            return from_defaults()
+            return from_defaults(embed_model=embed_model, llm=llm)
+        except TypeError:
+            context = from_defaults()
+            if context is not None:
+                try:
+                    setattr(context, "embed_model", embed_model)
+                except Exception:
+                    pass
+                try:
+                    setattr(context, "llm", llm)
+                except Exception:
+                    pass
+            return context
         except Exception as exc:
             # LlamaIndex 0.14+ keeps the symbol but raises on use. Treat that as
             # the signal to switch to Settings-based behaviour.
@@ -160,12 +298,140 @@ class LlamaIndexRAGService(RAGService):
                 return None
             raise
 
+    def _apply_runtime_components(self, *, embed_model: Any, llm: Any) -> None:
+        settings_obj = getattr(self, "llamaindex_settings", None)
+        if settings_obj is None:
+            return
+        try:
+            setattr(settings_obj, "embed_model", embed_model)
+        except Exception:
+            pass
+        try:
+            setattr(settings_obj, "llm", llm)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _normalise_runtime_entry(entry: Mapping[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(entry, Mapping):
+            return None
+        provider = str(entry.get("provider") or "").strip().lower()
+        model = str(entry.get("model") or "").strip()
+        if not provider or not model:
+            return None
+        payload: dict[str, Any] = {
+            "provider": provider,
+            "model": model,
+        }
+        host = str(entry.get("host") or "").strip()
+        if host:
+            payload["host"] = host
+        scope = str(entry.get("scope") or "").strip()
+        if scope:
+            payload["scope"] = scope
+        return payload
+
+    @staticmethod
+    def _build_component_signature(
+        kind: str,
+        entry: Mapping[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        normalised = LlamaIndexRAGService._normalise_runtime_entry(entry)
+        if normalised is None:
+            return None
+        return {
+            "schema_version": "rag_component_signature.v1",
+            "kind": str(kind or "").strip() or "unknown",
+            "provider": normalised["provider"],
+            "model": normalised["model"],
+            "host": normalised.get("host"),
+        }
+
+    @staticmethod
+    def _build_runtime_component_from_resolution(
+        resolution: Mapping[str, Any] | None,
+        *,
+        kind: str,
+    ) -> Any:
+        if not isinstance(resolution, Mapping):
+            return None
+        effective = LlamaIndexRAGService._normalise_runtime_entry(
+            resolution.get("effective") if isinstance(resolution, Mapping) else None
+        )
+        if effective is None:
+            return None
+        selection_source = str(resolution.get("selection_source") or "").strip() or "unknown"
+        if kind == "embedder":
+            return _ConfiguredEmbeddingModel(
+                provider=effective["provider"],
+                model_name=effective["model"],
+                host=effective.get("host"),
+                selection_source=selection_source,
+            )
+        if kind == "llm":
+            return _ConfiguredRuntimeLLM(
+                provider=effective["provider"],
+                model_name=effective["model"],
+                host=effective.get("host"),
+                selection_source=selection_source,
+            )
+        return None
+
+    def _refresh_runtime_configuration(self) -> None:
+        from ..settings_service import resolve_rag_embedder_setting, resolve_rag_llm_setting
+
+        embedder_resolution = resolve_rag_embedder_setting()
+        llm_resolution = resolve_rag_llm_setting()
+        embed_model = self._build_runtime_component_from_resolution(
+            embedder_resolution,
+            kind="embedder",
+        )
+        runtime_llm = self._build_runtime_component_from_resolution(
+            llm_resolution,
+            kind="llm",
+        )
+        runtime_configuration: dict[str, Any] = {
+            "schema_version": "rag_runtime_configuration.v1",
+            "embedder_resolution": dict(embedder_resolution),
+            "llm_resolution": dict(llm_resolution),
+            "embedding_signature": self._build_component_signature(
+                "embedder",
+                embedder_resolution.get("effective")
+                if isinstance(embedder_resolution, Mapping)
+                else None,
+            ),
+            "llm_signature": self._build_component_signature(
+                "llm",
+                llm_resolution.get("effective")
+                if isinstance(llm_resolution, Mapping)
+                else None,
+            ),
+        }
+        serialised = json.dumps(
+            runtime_configuration,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if serialised == self._runtime_configuration_serialized:
+            return
+
+        self._indices.clear()
+        self.service_context = self._build_service_context(
+            embed_model=embed_model,
+            llm=runtime_llm,
+        )
+        self._apply_runtime_components(embed_model=embed_model, llm=runtime_llm)
+        self._runtime_configuration = runtime_configuration
+        self._runtime_configuration_serialized = serialised
+
     def _index_runtime_kwargs(self) -> Dict[str, Any]:
+        self._refresh_runtime_configuration()
         if self.service_context is not None:
             return {"service_context": self.service_context}
         return {}
 
     def _get_runtime_component(self, component_name: str) -> Any:
+        self._refresh_runtime_configuration()
         if self.service_context is not None:
             component = getattr(self.service_context, component_name, None)
             if component is not None:
@@ -185,6 +451,10 @@ class LlamaIndexRAGService(RAGService):
 
     def get_runtime_llm(self) -> Any:
         return self._get_runtime_component("llm")
+
+    def get_runtime_configuration_summary(self) -> dict[str, Any]:
+        self._refresh_runtime_configuration()
+        return dict(self._runtime_configuration or {})
 
     def _temporarily_bound_query_embed_model(self) -> tuple[Any, Dict[str, Any]]:
         """Keep semantic-query embedding failures bounded so callers can fall back."""
@@ -237,7 +507,119 @@ class LlamaIndexRAGService(RAGService):
             self.persistence_dir, "namespaces", self._namespace_dirname(namespace)
         )
 
+    def _namespace_metadata_path(self, namespace: str) -> str:
+        return os.path.join(
+            self._namespace_persist_dir(namespace),
+            _INDEX_METADATA_FILENAME,
+        )
+
+    def _read_namespace_metadata(self, namespace: str) -> dict[str, Any] | None:
+        metadata_path = self._namespace_metadata_path(namespace)
+        if not os.path.isfile(metadata_path):
+            return None
+        try:
+            with open(metadata_path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except Exception:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _write_namespace_metadata(self, namespace: str) -> None:
+        runtime_summary = self.get_runtime_configuration_summary()
+        payload = {
+            "schema_version": "rag_index_metadata.v1",
+            "namespace": namespace,
+            "written_at_utc": datetime.now(timezone.utc).isoformat(),
+            "embedding_signature": runtime_summary.get("embedding_signature"),
+            "llm_signature": runtime_summary.get("llm_signature"),
+        }
+        os.makedirs(self._namespace_persist_dir(namespace), exist_ok=True)
+        with open(self._namespace_metadata_path(namespace), "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True, indent=2)
+
+    def _get_current_embedding_signature(self) -> dict[str, Any] | None:
+        runtime_summary = self.get_runtime_configuration_summary()
+        signature = runtime_summary.get("embedding_signature")
+        return dict(signature) if isinstance(signature, dict) else None
+
+    def _build_namespace_runtime_state(self, namespace: str) -> dict[str, Any]:
+        persist_dir = self._namespace_persist_dir(namespace)
+        metadata_path = self._namespace_metadata_path(namespace)
+        has_persisted_index = False
+        try:
+            has_persisted_index = os.path.isdir(persist_dir) and bool(os.listdir(persist_dir))
+        except Exception:
+            has_persisted_index = os.path.isdir(persist_dir)
+
+        metadata = self._read_namespace_metadata(namespace)
+        current_signature = self._get_current_embedding_signature()
+        stored_signature_raw = (
+            metadata.get("embedding_signature")
+            if isinstance(metadata, dict)
+            else None
+        )
+        stored_signature = (
+            dict(stored_signature_raw)
+            if isinstance(stored_signature_raw, Mapping)
+            else None
+        )
+        runtime_summary = self.get_runtime_configuration_summary()
+        embedder_resolution = runtime_summary.get("embedder_resolution")
+        unresolved_reason = (
+            str(embedder_resolution.get("reason") or "").strip()
+            if isinstance(embedder_resolution, Mapping)
+            else ""
+        )
+
+        status = "compatible"
+        compatible = True
+        detail = "Namespace embedding signature matches the current runtime configuration."
+        if current_signature is None:
+            status = "embedder_unconfigured"
+            compatible = False
+            detail = unresolved_reason or "No effective RAG embedder is configured."
+        elif not has_persisted_index:
+            status = "missing_index"
+            detail = "No persisted index exists for this namespace yet."
+        elif metadata is None:
+            status = "signature_missing"
+            compatible = False
+            detail = (
+                "Persisted index metadata is missing, so embedding compatibility "
+                "cannot be verified. Rebuild is required."
+            )
+        elif stored_signature != current_signature:
+            status = "embedding_signature_mismatch"
+            compatible = False
+            detail = (
+                "Persisted index embeddings were built with a different embedding "
+                "signature. Rebuild is required before this namespace is trustworthy."
+            )
+
+        return {
+            "namespace": namespace,
+            "persist_dir": persist_dir,
+            "metadata_path": metadata_path,
+            "has_persisted_index": has_persisted_index,
+            "compatible": compatible,
+            "status": status,
+            "detail": detail,
+            "current_embedding_signature": current_signature,
+            "stored_embedding_signature": stored_signature,
+            "metadata": metadata,
+        }
+
+    def get_namespace_runtime_state(self, namespace: Optional[str] = None) -> dict[str, Any]:
+        effective_namespace = self._resolve_effective_namespace(namespace)
+        state = self._build_namespace_runtime_state(effective_namespace)
+        self._namespace_runtime_state[effective_namespace] = dict(state)
+        return state
+
     def _maybe_load_index(self, namespace: str) -> Any:
+        state = self.get_namespace_runtime_state(namespace)
+        if not bool(state.get("compatible", False)):
+            return None
+
         if namespace in self._indices:
             return self._indices[namespace]
 
@@ -264,6 +646,9 @@ class LlamaIndexRAGService(RAGService):
         return index
 
     def _get_or_create_index(self, namespace: str, documents: List[Any]) -> Any:
+        state = self.get_namespace_runtime_state(namespace)
+        if state.get("status") in {"signature_missing", "embedding_signature_mismatch"}:
+            self.reset_namespace(namespace)
         index = self._maybe_load_index(namespace)
         if index is not None:
             return index
@@ -274,6 +659,7 @@ class LlamaIndexRAGService(RAGService):
             documents, **self._index_runtime_kwargs()
         )
         index.storage_context.persist(persist_dir=persist_dir)
+        self._write_namespace_metadata(namespace)
         self._indices[namespace] = index
         return index
 
@@ -290,6 +676,12 @@ class LlamaIndexRAGService(RAGService):
         For this implementation, we will convert dicts to Documents and insert them.
         """
         effective_namespace = self._resolve_effective_namespace(namespace)
+        if self.get_runtime_embed_model() is None:
+            state = self.get_namespace_runtime_state(effective_namespace)
+            raise RuntimeError(
+                state.get("detail")
+                or "Embeddings unavailable: LlamaIndex embed_model is not configured."
+            )
 
         llama_docs: List[Any] = []
         for doc in docs:
@@ -329,6 +721,7 @@ class LlamaIndexRAGService(RAGService):
             index.storage_context.persist(
                 persist_dir=self._namespace_persist_dir(effective_namespace)
             )
+            self._write_namespace_metadata(effective_namespace)
 
         # Prefer bulk insertion when supported (significantly faster for embedding-backed indices).
         try:
@@ -397,6 +790,7 @@ class LlamaIndexRAGService(RAGService):
     ) -> None:
         effective_namespace = self._resolve_effective_namespace(namespace)
         self._indices.pop(effective_namespace, None)
+        self._namespace_runtime_state.pop(effective_namespace, None)
 
         persist_dir = os.path.abspath(self._namespace_persist_dir(effective_namespace))
         namespaces_root = os.path.abspath(
@@ -432,6 +826,22 @@ class LlamaIndexRAGService(RAGService):
         permissions_context: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         effective_namespace = self._resolve_effective_namespace(namespace)
+        namespace_state = self.get_namespace_runtime_state(effective_namespace)
+        if not bool(namespace_state.get("compatible", False)):
+            try:
+                self._last_query_info = {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "effective_namespace": effective_namespace,
+                    "query_length": len(query_text or ""),
+                    "top_k": int(top_k),
+                    "returned": 0,
+                    "compatibility_status": namespace_state.get("status"),
+                    "compatibility_detail": namespace_state.get("detail"),
+                }
+            except Exception:
+                pass
+            return []
+
         index = self._maybe_load_index(effective_namespace)
         if not index:
             return []

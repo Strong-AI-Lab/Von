@@ -510,6 +510,10 @@ class TestDiscoverWorkflows:
         "src.backend.services.workflow_discovery_service._search_workflows_vontology"
     )
     @patch(
+        "src.backend.services.workflow_discovery_service._search_workflows_name_fallback",
+        return_value=[],
+    )
+    @patch(
         "src.backend.services.workflow_discovery_service._has_authoritative_routing_text",
         return_value=True,
     )
@@ -520,6 +524,7 @@ class TestDiscoverWorkflows:
         self,
         mock_classify: MagicMock,
         mock_has_authoritative_text: MagicMock,
+        mock_name_fallback: MagicMock,
         mock_vontology: MagicMock,
         mock_semantic: MagicMock,
     ) -> None:
