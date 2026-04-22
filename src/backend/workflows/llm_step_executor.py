@@ -19,6 +19,7 @@ from ..services.buttonify_service import (
     sanitise_buttonify_options,
 )
 from ..services.prompt_template_service import PromptTemplateService
+from .turn_expected_outcome_contract import TurnExpectedOutcomeContract
 from .conversation_turn_llm_timeout import (
     coerce_conversation_turn_llm_timeout_sec,
     default_conversation_turn_llm_timeout_sec,
@@ -39,6 +40,7 @@ _CONVERSATION_TURN_LLM_TELEMETRY_STATES = frozenset(
 _CONVERSATION_TURN_LLM_TIMEOUT_CONTEXT_KEY = (
     "conversation_turn_llm_timeout_override_sec"
 )
+_DEFAULT_WORKFLOW_TOOL_INVOCATION_CAP = 4
 
 
 def _context_string(value: Any) -> str:
@@ -74,6 +76,125 @@ def _coerce_prompt_id_list(value: Any) -> list[str]:
         if cleaned:
             items.append(cleaned)
     return items
+
+
+def _coerce_tool_name_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        cleaned = value.strip()
+        return [cleaned] if cleaned else []
+    if not isinstance(value, Sequence) or isinstance(value, (bytes, bytearray)):
+        return []
+    items: list[str] = []
+    for raw in value:
+        if not isinstance(raw, str):
+            continue
+        cleaned = raw.strip()
+        if cleaned:
+            items.append(cleaned)
+    return items
+
+
+def _filter_tool_names_to_allowed_set(
+    tool_names: Sequence[str],
+    allowed_tools: Sequence[str] | None,
+) -> list[str]:
+    if allowed_tools is None:
+        return [
+            str(tool_name).strip()
+            for tool_name in tool_names
+            if isinstance(tool_name, str) and str(tool_name).strip()
+        ]
+    allowed = {
+        str(tool_name).strip().lower()
+        for tool_name in allowed_tools
+        if isinstance(tool_name, str) and str(tool_name).strip()
+    }
+    filtered: list[str] = []
+    seen: set[str] = set()
+    for raw_tool_name in tool_names:
+        if not isinstance(raw_tool_name, str):
+            continue
+        tool_name = raw_tool_name.strip()
+        lowered = tool_name.lower()
+        if not tool_name or lowered in seen or lowered not in allowed:
+            continue
+        seen.add(lowered)
+        filtered.append(tool_name)
+    return filtered
+
+
+def _merge_required_prompt_tools(
+    *tool_sets: Any,
+) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for tool_set in tool_sets:
+        for tool_name in _coerce_tool_name_list(tool_set):
+            lowered = tool_name.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            merged.append(tool_name)
+    return merged
+
+
+def _normalise_tool_argument_defaults(value: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(value, Mapping):
+        return {}
+    normalised: dict[str, dict[str, Any]] = {}
+    for raw_tool_name, raw_defaults in value.items():
+        tool_name = _context_string(raw_tool_name)
+        if not tool_name or not isinstance(raw_defaults, Mapping):
+            continue
+        clean_defaults: dict[str, Any] = {}
+        for raw_key, raw_item in raw_defaults.items():
+            key = _context_string(raw_key)
+            if not key:
+                continue
+            clean_defaults[key] = raw_item
+        if clean_defaults:
+            normalised[tool_name] = clean_defaults
+    return normalised
+
+
+def _resolve_turn_expected_outcome_contract(
+    context: Mapping[str, Any],
+) -> TurnExpectedOutcomeContract:
+    return TurnExpectedOutcomeContract.merge_preferred(
+        context.get("turn_expected_outcome_contract_state"),
+        context.get("turn_expected_outcome_contract"),
+        context.get("expected_outcome_contract_state"),
+        context.get("expected_outcome_contract"),
+    )
+
+
+def _resolve_llm_step_max_tool_invocations(
+    *,
+    request: WorkflowActionRequest,
+    llm_policy: Mapping[str, Any],
+    required_prompt_tools: Sequence[str],
+) -> int:
+    env_max_tool_invocations = request.environment.max_tool_invocations
+    if env_max_tool_invocations is not None:
+        return int(env_max_tool_invocations)
+
+    raw_policy_limit = llm_policy.get("max_tool_invocations")
+    if isinstance(raw_policy_limit, bool):
+        policy_limit = int(raw_policy_limit)
+    elif isinstance(raw_policy_limit, (int, float, str)):
+        try:
+            policy_limit = int(raw_policy_limit)
+        except ValueError:
+            policy_limit = 0
+    else:
+        policy_limit = 0
+    if policy_limit > 0:
+        return policy_limit
+
+    if required_prompt_tools:
+        return max(_DEFAULT_WORKFLOW_TOOL_INVOCATION_CAP, len(required_prompt_tools))
+
+    return 1
 
 
 def _coerce_context_messages(value: Any) -> list[dict[str, str]]:
@@ -990,16 +1111,40 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
             validation_policy_map=validation_policy_map,
         )
 
+    allowed_tools_raw = llm_policy_map.get("allowed_tools")
+    allowed_tools = (
+        [
+            str(tool_name).strip()
+            for tool_name in allowed_tools_raw
+            if str(tool_name).strip()
+        ]
+        if isinstance(allowed_tools_raw, Sequence)
+        and not isinstance(allowed_tools_raw, (str, bytes, bytearray))
+        else None
+    )
+    turn_expected_outcome_contract = _resolve_turn_expected_outcome_contract(
+        request.data
+    )
+    required_prompt_tools = _filter_tool_names_to_allowed_set(
+        _merge_required_prompt_tools(
+            request.data.get("required_prompt_tools"),
+            llm_policy_map.get("required_tools"),
+            turn_expected_outcome_contract.required_tools,
+        ),
+        allowed_tools,
+    )
+    max_tool_invocations = _resolve_llm_step_max_tool_invocations(
+        request=request,
+        llm_policy=llm_policy_map,
+        required_prompt_tools=required_prompt_tools,
+    )
+
     from ..integrations.internal_mcp.orchestrator import InternalMCPChatOrchestrator
     from ..services.model_registry_service import get_model_registry_snapshot
 
     orchestrator = InternalMCPChatOrchestrator(
         gateway=request.environment.gateway,
-        max_tool_invocations=(
-            int(request.environment.max_tool_invocations)
-            if request.environment.max_tool_invocations is not None
-            else 1
-        ),
+        max_tool_invocations=max_tool_invocations,
         max_tool_result_chars=request.environment.max_tool_result_chars,
         max_tool_result_field_chars=request.environment.max_tool_result_field_chars,
         tool_batch_cap=(
@@ -1102,131 +1247,128 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
         }
 
     method_catalogue = request.environment.gateway.describe_methods()
-    allowed_tools_raw = llm_policy_map.get("allowed_tools")
-    allowed_tools = (
-        [
-            str(tool_name).strip()
-            for tool_name in allowed_tools_raw
-            if str(tool_name).strip()
-        ]
-        if isinstance(allowed_tools_raw, Sequence)
-        and not isinstance(allowed_tools_raw, (str, bytes, bytearray))
-        else None
-    )
-
     shared_data: dict[str, Any] = {
-        "prompt": rendered_prompt,
-        "prompt_for_requirements": request.data.get("prompt_for_requirements")
-        or rendered_prompt,
-        "prompt_requirement_url_policy": request.data.get(
-            "prompt_requirement_url_policy"
-        ),
-        "required_prompt_tools": request.data.get("required_prompt_tools") or [],
-        "required_prompt_url_extraction_tool": request.data.get(
-            "required_prompt_url_extraction_tool"
-        ),
-        "required_prompt_url_extraction_url": request.data.get(
-            "required_prompt_url_extraction_url"
-        ),
-        "required_prompt_fetch_concept_ids": (
-            request.data.get("required_prompt_fetch_concept_ids") or []
-        ),
-        "required_prompt_read_file_copy_ids": (
-            request.data.get("required_prompt_read_file_copy_ids") or []
-        ),
-        "required_prompt_scholarly_representation_for_file_copy_ids": (
-            request.data.get(
-                "required_prompt_scholarly_representation_for_file_copy_ids"
-            )
-            or []
-        ),
-        "required_prompt_create_type_name": request.data.get(
-            "required_prompt_create_type_name"
-        ),
-        "missing_prompt_tools": request.data.get("missing_prompt_tools") or [],
-        "missing_prompt_fetch_concept_ids": (
-            request.data.get("missing_prompt_fetch_concept_ids") or []
-        ),
-        "missing_prompt_read_file_copy_ids": (
-            request.data.get("missing_prompt_read_file_copy_ids") or []
-        ),
-        "missing_prompt_scholarly_representation_for_file_copy_ids": (
-            request.data.get(
-                "missing_prompt_scholarly_representation_for_file_copy_ids"
-            )
-            or []
-        ),
-        "missing_tool_call_retry_reason_override": request.data.get(
-            "missing_tool_call_retry_reason_override"
-        ),
-        "response": request.data.get("response")
-        or request.data.get("current_response")
-        or "",
-        "current_response": request.data.get("current_response") or "",
-        "augmented_context": _coerce_context_messages(
-            request.data.get("augmented_context")
-        ),
-        "policy_state": policy_state,
-        "registry_snapshot": registry_snapshot,
-        "user_concept_id": user_concept_id,
-        "org_concept_id": org_concept_id,
-        "conversation_session_id": request.data.get("conversation_session_id"),
-        "turn_id": request.data.get("turn_id"),
-        "recent_user_prompts": request.data.get("recent_user_prompts") or [],
-        "gmail_profile": request.data.get("gmail_profile")
-        or request.environment.default_gmail_profile,
-        "workflow_episode_source": request.data.get("workflow_episode_source")
-        or "workflow_step",
-        "workflow_episode_stage": request.data.get("workflow_episode_stage") or stage,
-        "model_for_stage": _model_for_stage,
-        "prefer_default_model": prefer_default_model,
-        "record_llm_call": _record_llm_call,
-        "emit_progress": (
-            request.data.get("emit_progress")
-            if callable(request.data.get("emit_progress"))
-            else None
-        ),
-        "emit_phase_transition": (
-            request.data.get("emit_phase_transition")
-            if callable(request.data.get("emit_phase_transition"))
-            else None
-        ),
-        "check_cancellation": (
-            request.data.get("check_cancellation")
-            if callable(request.data.get("check_cancellation"))
-            else None
-        ),
-        "build_parse_error_result": lambda error: _build_simple_error_result(
-            "tool_call_parse_error",
-            {
-                "error": getattr(error, "message", None) or str(error),
-                "raw_response": getattr(error, "raw_response", None),
-            },
-        ),
-        "build_validation_error_result": lambda errors, warnings, unavailable, **kwargs: _build_simple_error_result(
-            "tool_call_validation_error",
-            {
-                "message": "; ".join([*list(errors or []), *list(warnings or [])])
-                or "tool validation failed",
-                "errors": list(errors or []),
-                "warnings": list(warnings or []),
-                "unavailable": list(unavailable or []),
-                **kwargs,
-            },
-        ),
-        "aux_llm_calls": aux_llm_calls,
-        "llm_calls": llm_calls,
-        "invocations": invocations,
-        "tool_messages": tool_messages,
-        "iteration_count": 0,
-        "allowed_write_tools": set(),
-        "missing_tool_call_retry_attempts": 0,
-        "missing_tool_call_retry_budget": int(
-            getattr(orchestrator, "_max_missing_tool_call_retries_per_turn", 1)
-        ),
-        "llm_allowed_tools": allowed_tools,
-        "method_catalogue": method_catalogue,
+        str(key): value for key, value in request.data.items() if isinstance(key, str)
     }
+    shared_data.update(
+        {
+            "prompt": rendered_prompt,
+            "prompt_for_requirements": request.data.get("prompt_for_requirements")
+            or rendered_prompt,
+            "prompt_requirement_url_policy": request.data.get(
+                "prompt_requirement_url_policy"
+            ),
+            "required_prompt_tools": required_prompt_tools,
+            "tool_argument_defaults": _normalise_tool_argument_defaults(
+                llm_policy_map.get("tool_argument_defaults")
+            ),
+            "required_prompt_url_extraction_tool": request.data.get(
+                "required_prompt_url_extraction_tool"
+            ),
+            "required_prompt_url_extraction_url": request.data.get(
+                "required_prompt_url_extraction_url"
+            ),
+            "required_prompt_fetch_concept_ids": (
+                request.data.get("required_prompt_fetch_concept_ids") or []
+            ),
+            "required_prompt_read_file_copy_ids": (
+                request.data.get("required_prompt_read_file_copy_ids") or []
+            ),
+            "required_prompt_scholarly_representation_for_file_copy_ids": (
+                request.data.get(
+                    "required_prompt_scholarly_representation_for_file_copy_ids"
+                )
+                or []
+            ),
+            "required_prompt_create_type_name": request.data.get(
+                "required_prompt_create_type_name"
+            ),
+            "missing_prompt_tools": request.data.get("missing_prompt_tools") or [],
+            "missing_prompt_fetch_concept_ids": (
+                request.data.get("missing_prompt_fetch_concept_ids") or []
+            ),
+            "missing_prompt_read_file_copy_ids": (
+                request.data.get("missing_prompt_read_file_copy_ids") or []
+            ),
+            "missing_prompt_scholarly_representation_for_file_copy_ids": (
+                request.data.get(
+                    "missing_prompt_scholarly_representation_for_file_copy_ids"
+                )
+                or []
+            ),
+            "missing_tool_call_retry_reason_override": request.data.get(
+                "missing_tool_call_retry_reason_override"
+            ),
+            "response": request.data.get("response")
+            or request.data.get("current_response")
+            or "",
+            "current_response": request.data.get("current_response") or "",
+            "augmented_context": _coerce_context_messages(
+                request.data.get("augmented_context")
+            ),
+            "policy_state": policy_state,
+            "registry_snapshot": registry_snapshot,
+            "user_concept_id": user_concept_id,
+            "org_concept_id": org_concept_id,
+            "conversation_session_id": request.data.get("conversation_session_id"),
+            "turn_id": request.data.get("turn_id"),
+            "recent_user_prompts": request.data.get("recent_user_prompts") or [],
+            "gmail_profile": request.data.get("gmail_profile")
+            or request.environment.default_gmail_profile,
+            "workflow_episode_source": request.data.get("workflow_episode_source")
+            or "workflow_step",
+            "workflow_episode_stage": request.data.get("workflow_episode_stage")
+            or stage,
+            "model_for_stage": _model_for_stage,
+            "prefer_default_model": prefer_default_model,
+            "record_llm_call": _record_llm_call,
+            "emit_progress": (
+                request.data.get("emit_progress")
+                if callable(request.data.get("emit_progress"))
+                else None
+            ),
+            "emit_phase_transition": (
+                request.data.get("emit_phase_transition")
+                if callable(request.data.get("emit_phase_transition"))
+                else None
+            ),
+            "check_cancellation": (
+                request.data.get("check_cancellation")
+                if callable(request.data.get("check_cancellation"))
+                else None
+            ),
+            "build_parse_error_result": lambda error: _build_simple_error_result(
+                "tool_call_parse_error",
+                {
+                    "error": getattr(error, "message", None) or str(error),
+                    "raw_response": getattr(error, "raw_response", None),
+                },
+            ),
+            "build_validation_error_result": lambda errors, warnings, unavailable, **kwargs: _build_simple_error_result(
+                "tool_call_validation_error",
+                {
+                    "message": "; ".join([*list(errors or []), *list(warnings or [])])
+                    or "tool validation failed",
+                    "errors": list(errors or []),
+                    "warnings": list(warnings or []),
+                    "unavailable": list(unavailable or []),
+                    **kwargs,
+                },
+            ),
+            "aux_llm_calls": aux_llm_calls,
+            "llm_calls": llm_calls,
+            "invocations": invocations,
+            "tool_messages": tool_messages,
+            "iteration_count": 0,
+            "allowed_write_tools": set(),
+            "missing_tool_call_retry_attempts": 0,
+            "missing_tool_call_retry_budget": int(
+                getattr(orchestrator, "_max_missing_tool_call_retries_per_turn", 1)
+            ),
+            "llm_allowed_tools": allowed_tools,
+            "method_catalogue": method_catalogue,
+        }
+    )
 
     plan_request = WorkflowActionRequest(
         action_id=request.action_id,

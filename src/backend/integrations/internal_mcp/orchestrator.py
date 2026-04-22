@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -7010,6 +7011,12 @@ class InternalMCPChatOrchestrator:
                 if isinstance(method_catalogue_for_requirements, Mapping)
                 else None
             ),
+            allowed_tools=(
+                tuple(data.get("llm_allowed_tools"))
+                if isinstance(data.get("llm_allowed_tools"), Sequence)
+                and not isinstance(data.get("llm_allowed_tools"), (str, bytes, bytearray))
+                else None
+            ),
             tool_invocations=(),
         )
         self._store_prompt_requirement_evaluation(data, prompt_requirements)
@@ -8103,6 +8110,7 @@ class InternalMCPChatOrchestrator:
                     tool_name=tool_name,
                     payload=payload,
                     data=data,
+                    tool_invocations=tuple(invocations),
                 )
 
                 result = self._gateway.invoke(tool_name, payload)
@@ -8574,6 +8582,14 @@ class InternalMCPChatOrchestrator:
                 method_catalogue=(
                     method_catalogue_for_requirements
                     if isinstance(method_catalogue_for_requirements, Mapping)
+                    else None
+                ),
+                allowed_tools=(
+                    tuple(data.get("llm_allowed_tools"))
+                    if isinstance(data.get("llm_allowed_tools"), Sequence)
+                    and not isinstance(
+                        data.get("llm_allowed_tools"), (str, bytes, bytearray)
+                    )
                     else None
                 ),
                 tool_invocations=invocations_for_requirements,
@@ -12161,6 +12177,7 @@ class InternalMCPChatOrchestrator:
         | Mapping[str, Any]
         | None,
         method_catalogue: Mapping[str, Any] | None = None,
+        allowed_tools: Sequence[str] | None = None,
     ) -> tuple[str, ...]:
         contract_object = (
             turn_expected_outcome_contract
@@ -12177,6 +12194,15 @@ class InternalMCPChatOrchestrator:
             )
             if isinstance(tool_name, str) and str(tool_name).strip()
         }
+        allowed_tool_names = (
+            {
+                str(tool_name).strip().lower()
+                for tool_name in allowed_tools
+                if isinstance(tool_name, str) and str(tool_name).strip()
+            }
+            if allowed_tools is not None
+            else None
+        )
         required_tools: list[str] = []
         seen: set[str] = set()
 
@@ -12185,6 +12211,8 @@ class InternalMCPChatOrchestrator:
             if not lowered or lowered in seen:
                 return
             if available_tools and lowered not in available_tools:
+                return
+            if allowed_tool_names is not None and lowered not in allowed_tool_names:
                 return
             seen.add(lowered)
             required_tools.append(tool_name)
@@ -12259,6 +12287,7 @@ class InternalMCPChatOrchestrator:
         | Mapping[str, Any]
         | None,
         method_catalogue: Mapping[str, Any] | None = None,
+        allowed_tools: Sequence[str] | None = None,
         tool_invocations: Sequence[Mapping[str, Any]] = (),
     ) -> _PromptRequirementEvaluation:
         if not isinstance(evaluation, _PromptRequirementEvaluation):
@@ -12374,6 +12403,7 @@ class InternalMCPChatOrchestrator:
         contract_required_tools = cls._infer_turn_contract_required_tools(
             turn_expected_outcome_contract=turn_expected_outcome_contract,
             method_catalogue=method_catalogue,
+            allowed_tools=allowed_tools,
         )
         if not contract_required_tools:
             return evaluation
@@ -16396,8 +16426,74 @@ class InternalMCPChatOrchestrator:
         tool_name: str,
         payload: MutableMapping[str, Any],
         data: Mapping[str, Any],
+        tool_invocations: Sequence[Mapping[str, Any]] | None = None,
     ) -> None:
-        if str(tool_name or "").strip().lower() != "search_knowledge_base":
+        lowered_tool_name = str(tool_name or "").strip().lower()
+        if not lowered_tool_name:
+            return
+
+        tool_argument_defaults = data.get("tool_argument_defaults")
+        matched_tool_defaults: Mapping[str, Any] | None = None
+        if isinstance(tool_argument_defaults, Mapping):
+            for raw_default_tool_name, raw_defaults in tool_argument_defaults.items():
+                default_tool_name = str(raw_default_tool_name or "").strip().lower()
+                if default_tool_name != lowered_tool_name:
+                    continue
+                if not isinstance(raw_defaults, Mapping):
+                    continue
+                matched_tool_defaults = raw_defaults
+                for raw_key, raw_value in raw_defaults.items():
+                    key = str(raw_key or "").strip()
+                    if not key or key in payload or key.startswith("__"):
+                        continue
+                    payload[key] = copy.deepcopy(raw_value)
+                break
+
+        if (
+            lowered_tool_name == "find_relations_with_argument"
+            and "predicate_filter" not in payload
+            and isinstance(matched_tool_defaults, Mapping)
+        ):
+            derivation_spec = matched_tool_defaults.get(
+                "__derive_predicate_filter_from_recent_incidence"
+            )
+            if isinstance(derivation_spec, Mapping) and bool(
+                derivation_spec.get("enabled", True)
+            ):
+                max_predicates_value = derivation_spec.get("max_predicates")
+                try:
+                    max_predicates_int = int(
+                        max_predicates_value
+                        if isinstance(max_predicates_value, (int, float, str))
+                        else 3
+                    )
+                except (TypeError, ValueError):
+                    max_predicates_int = 3
+                combined_invocations: list[Mapping[str, Any]] = []
+                historical_invocations = data.get("invocations")
+                if isinstance(historical_invocations, list):
+                    combined_invocations.extend(
+                        item
+                        for item in historical_invocations
+                        if isinstance(item, Mapping)
+                    )
+                if tool_invocations:
+                    combined_invocations.extend(
+                        item for item in tool_invocations if isinstance(item, Mapping)
+                    )
+                derived_predicate_ids = (
+                    self._extract_get_predicate_incidence_follow_up_predicate_ids(
+                        combined_invocations,
+                        user_text=self._coerce_non_empty_text(
+                            data.get("user_prompt") or data.get("prompt")
+                        ),
+                        max_predicates=max(1, max_predicates_int),
+                    )
+                )
+                if derived_predicate_ids:
+                    payload["predicate_filter"] = derived_predicate_ids
+
+        if lowered_tool_name != "search_knowledge_base":
             return
 
         query_text = self._coerce_non_empty_text(payload.get("query"))
@@ -17643,24 +17739,46 @@ class InternalMCPChatOrchestrator:
                 return raw_concept_id.strip()
             return None
 
-        for hit in hits[:max_hits]:
-            compact_hit: dict[str, Any] = {}
-            source_concept_id = hit.get("source_concept_id")
-            if isinstance(source_concept_id, str) and source_concept_id.strip():
-                compact_hit["source_concept_id"] = source_concept_id.strip()
-            source_name = _preview_name(hit.get("source_concept_preview"))
-            if source_name:
-                compact_hit["source_name"] = source_name
+        def _preview_type_ids(preview: Any) -> list[str]:
+            if not isinstance(preview, Mapping):
+                return []
+            raw_type_ids = preview.get("type_ids")
+            if not isinstance(raw_type_ids, list):
+                return []
+            return [
+                str(type_id).strip()
+                for type_id in raw_type_ids[:6]
+                if isinstance(type_id, str) and str(type_id).strip()
+            ]
 
+        for hit in hits:
+            if not isinstance(hit, Mapping):
+                continue
             predicate_concept_id = hit.get("predicate_concept_id")
             if (
                 isinstance(predicate_concept_id, str)
                 and predicate_concept_id.strip()
             ):
                 predicate_value = predicate_concept_id.strip()
-                compact_hit["predicate_concept_id"] = predicate_value
                 if predicate_value not in predicate_values:
                     predicate_values.append(predicate_value)
+
+        for hit in hits[:max_hits]:
+            compact_hit: dict[str, Any] = {}
+            source_concept_id = hit.get("source_concept_id")
+            if isinstance(source_concept_id, str) and source_concept_id.strip():
+                compact_hit["source_concept_id"] = source_concept_id.strip()
+            source_preview = hit.get("source_concept_preview")
+            source_name = _preview_name(source_preview)
+            if source_name:
+                compact_hit["source_name"] = source_name
+            source_type_ids = _preview_type_ids(source_preview)
+            if source_type_ids:
+                compact_hit["source_type_ids"] = source_type_ids
+
+            predicate_concept_id = hit.get("predicate_concept_id")
+            if isinstance(predicate_concept_id, str) and predicate_concept_id.strip():
+                compact_hit["predicate_concept_id"] = predicate_concept_id.strip()
 
             relation_kind = hit.get("relation_kind")
             if isinstance(relation_kind, str) and relation_kind.strip():
@@ -17682,8 +17800,9 @@ class InternalMCPChatOrchestrator:
             if isinstance(score, (int, float)):
                 compact_hit["score"] = round(float(score), 3)
 
-            target_concept_id = _preview_concept_id(hit.get("target_concept_preview"))
-            target_name = _preview_name(hit.get("target_concept_preview"))
+            target_preview = hit.get("target_concept_preview")
+            target_concept_id = _preview_concept_id(target_preview)
+            target_name = _preview_name(target_preview)
             target_value = hit.get("target_value")
             if target_concept_id:
                 compact_hit["target_concept_id"] = target_concept_id
@@ -17693,6 +17812,9 @@ class InternalMCPChatOrchestrator:
                 compact_hit["target_name"] = target_name
             elif isinstance(target_value, str) and target_value.strip():
                 compact_hit["target_value_preview"] = target_value.strip()[:max_text_chars]
+            target_type_ids = _preview_type_ids(target_preview)
+            if target_type_ids:
+                compact_hit["target_type_ids"] = target_type_ids
 
             text_snippet = hit.get("text_snippet")
             if isinstance(text_snippet, str) and text_snippet.strip():
@@ -17807,6 +17929,15 @@ class InternalMCPChatOrchestrator:
                     name = grounding.get("name")
                     if isinstance(name, str) and name.strip():
                         compact_grounding["name"] = name.strip()
+                    type_ids = grounding.get("type_ids")
+                    if isinstance(type_ids, list):
+                        clean_type_ids = [
+                            str(type_id).strip()
+                            for type_id in type_ids[:6]
+                            if isinstance(type_id, str) and str(type_id).strip()
+                        ]
+                        if clean_type_ids:
+                            compact_grounding["type_ids"] = clean_type_ids
                     text_preview = grounding.get("text_preview")
                     if isinstance(text_preview, str) and text_preview.strip():
                         compact_grounding["text_preview"] = text_preview.strip()[
@@ -17830,6 +17961,15 @@ class InternalMCPChatOrchestrator:
                     name = instance.get("name")
                     if isinstance(name, str) and name.strip():
                         compact_instance["name"] = name.strip()
+                    type_ids = instance.get("type_ids")
+                    if isinstance(type_ids, list):
+                        clean_type_ids = [
+                            str(type_id).strip()
+                            for type_id in type_ids[:6]
+                            if isinstance(type_id, str) and str(type_id).strip()
+                        ]
+                        if clean_type_ids:
+                            compact_instance["type_ids"] = clean_type_ids
                     if compact_instance:
                         compact_instances.append(compact_instance)
                 if compact_instances:
@@ -22692,6 +22832,25 @@ class InternalMCPChatOrchestrator:
             if pure_ontology_follow_up
             else []
         )
+        predicate_incidence_follow_up_concept_ids = (
+            self._extract_get_predicate_incidence_follow_up_concept_ids(
+                tool_invocations,
+                max_concept_ids=2,
+            )
+            if pure_ontology_follow_up
+            else []
+        )
+        predicate_incidence_follow_up_predicate_ids = (
+            self._extract_get_predicate_incidence_follow_up_predicate_ids(
+                tool_invocations,
+                user_text=user_text,
+                max_predicates=2,
+            )
+            if pure_ontology_follow_up
+            else []
+        )
+        if user_anchor_concept_id is None and predicate_incidence_follow_up_concept_ids:
+            user_anchor_concept_id = predicate_incidence_follow_up_concept_ids[0]
 
         forced_calls: list[_ToolCallRequest] = []
         for tool_name in missing_required_tools:
@@ -22809,6 +22968,22 @@ class InternalMCPChatOrchestrator:
                             "payload": {
                                 "concept_id": user_anchor_concept_id,
                                 "predicate_filter": ontology_follow_up_predicate_ids,
+                                "limit": 20,
+                            },
+                        }
+                    )
+                    continue
+                if (
+                    user_anchor_concept_id
+                    and predicate_incidence_follow_up_predicate_ids
+                ):
+                    forced_calls.append(
+                        {
+                            "action": "call_tool",
+                            "tool": name,
+                            "payload": {
+                                "concept_id": user_anchor_concept_id,
+                                "predicate_filter": predicate_incidence_follow_up_predicate_ids,
                                 "limit": 20,
                             },
                         }
@@ -23053,6 +23228,207 @@ class InternalMCPChatOrchestrator:
                 if len(predicate_ids) >= max_predicates:
                     return predicate_ids
         return predicate_ids
+
+    @staticmethod
+    def _user_text_targets_paper_like_extent(user_text: str | None) -> bool:
+        if not isinstance(user_text, str) or not user_text.strip():
+            return False
+        lowered = user_text.strip().lower()
+        return bool(
+            re.search(
+                r"\b(?:paper|papers|scholarly|article|articles)\b",
+                lowered,
+                flags=re.IGNORECASE,
+            )
+        )
+
+    @classmethod
+    def _predicate_incidence_row_has_paper_like_grounding(
+        cls,
+        row: Mapping[str, Any],
+    ) -> bool:
+        paper_like_type_ids = {
+            "#v#scholarly_article",
+            "#v#scholarly_work",
+            "#v#paper_on_arxiv",
+        }
+        raw_sample_groundings = row.get("sample_groundings")
+        if not isinstance(raw_sample_groundings, list):
+            return False
+
+        for grounding in raw_sample_groundings:
+            if not isinstance(grounding, Mapping):
+                continue
+            concept_id = cls._normalise_concept_id_candidate(
+                grounding.get("concept_id")
+            )
+            if concept_id and any(
+                token in concept_id.lower()
+                for token in (
+                    "paper_on_arxiv",
+                    "scholarly_paper",
+                    "scholarly_article",
+                    "scholarly_work",
+                )
+            ):
+                return True
+
+            raw_type_ids = grounding.get("type_ids")
+            if not isinstance(raw_type_ids, list):
+                continue
+            lowered_type_ids = {
+                str(type_id).strip().lower()
+                for type_id in raw_type_ids
+                if isinstance(type_id, str) and str(type_id).strip()
+            }
+            if lowered_type_ids & paper_like_type_ids:
+                return True
+        return False
+
+    @classmethod
+    def _extract_get_predicate_incidence_follow_up_concept_ids(
+        cls,
+        tool_invocations: Sequence[Mapping[str, Any]] | None,
+        *,
+        max_concept_ids: int = 2,
+    ) -> list[str]:
+        if not tool_invocations or max_concept_ids <= 0:
+            return []
+
+        concept_ids: list[str] = []
+        seen: set[str] = set()
+        for invocation in tool_invocations:
+            if not isinstance(invocation, Mapping):
+                continue
+            raw_tool = invocation.get("tool")
+            if (
+                not isinstance(raw_tool, str)
+                or raw_tool.strip().lower() != "get_predicate_incidence"
+            ):
+                continue
+            if not cls._tool_invocation_completed_successfully(invocation):
+                continue
+
+            for source in (
+                invocation.get("effective_arguments"),
+                invocation.get("arguments"),
+                invocation.get("payload"),
+                invocation.get("effective_payload"),
+            ):
+                if not isinstance(source, Mapping):
+                    continue
+                concept_id = cls._normalise_concept_id_candidate(
+                    source.get("concept_id")
+                )
+                if not concept_id:
+                    continue
+                lowered = concept_id.lower()
+                if lowered in seen:
+                    continue
+                seen.add(lowered)
+                concept_ids.append(concept_id)
+                if len(concept_ids) >= max_concept_ids:
+                    return concept_ids
+        return concept_ids
+
+    @classmethod
+    def _extract_get_predicate_incidence_follow_up_predicate_ids(
+        cls,
+        tool_invocations: Sequence[Mapping[str, Any]] | None,
+        *,
+        user_text: str | None = None,
+        max_predicates: int = 3,
+    ) -> list[str]:
+        if not tool_invocations or max_predicates <= 0:
+            return []
+
+        explicit_predicate_ids: list[str] = []
+        matched_predicate_ids: list[str] = []
+        fallback_predicate_ids: list[str] = []
+        seen: set[str] = set()
+        user_targets_paper_like_extent = cls._user_text_targets_paper_like_extent(
+            user_text
+        )
+        preferred_paper_predicates = {
+            "#v#author_of",
+            "#v#is_author_of",
+            "#v#owner_of",
+            "#v#is_owner_of",
+        }
+
+        def _append_once(target: list[str], predicate_id: str) -> bool:
+            lowered = predicate_id.lower()
+            if lowered in seen:
+                return False
+            seen.add(lowered)
+            target.append(predicate_id)
+            return len(target) >= max_predicates
+
+        for invocation in tool_invocations:
+            if not isinstance(invocation, Mapping):
+                continue
+            raw_tool = invocation.get("tool")
+            if (
+                not isinstance(raw_tool, str)
+                or raw_tool.strip().lower() != "get_predicate_incidence"
+            ):
+                continue
+            if not cls._tool_invocation_completed_successfully(invocation):
+                continue
+
+            for source in (
+                invocation.get("effective_arguments"),
+                invocation.get("arguments"),
+                invocation.get("payload"),
+            ):
+                if not isinstance(source, Mapping):
+                    continue
+                raw_predicate_filter = source.get("predicate_filter")
+                if not isinstance(raw_predicate_filter, list):
+                    continue
+                for raw_predicate_id in raw_predicate_filter:
+                    predicate_id = cls._normalise_concept_id_candidate(
+                        raw_predicate_id
+                    )
+                    if not predicate_id:
+                        continue
+                    if _append_once(explicit_predicate_ids, predicate_id):
+                        return explicit_predicate_ids
+
+            payload = invocation.get("effective_payload")
+            if not isinstance(payload, Mapping):
+                continue
+            raw_predicates = payload.get("predicates")
+            if not isinstance(raw_predicates, list):
+                continue
+
+            for row in raw_predicates:
+                if not isinstance(row, Mapping):
+                    continue
+                predicate_id = cls._normalise_concept_id_candidate(
+                    row.get("predicate_concept_id")
+                )
+                if not predicate_id:
+                    continue
+                lowered = predicate_id.lower()
+                if lowered in seen:
+                    continue
+                if user_targets_paper_like_extent and (
+                    lowered in preferred_paper_predicates
+                    or cls._predicate_incidence_row_has_paper_like_grounding(row)
+                ):
+                    if _append_once(matched_predicate_ids, predicate_id):
+                        return matched_predicate_ids
+                    continue
+                fallback_predicate_ids.append(predicate_id)
+
+        if explicit_predicate_ids:
+            return explicit_predicate_ids[:max_predicates]
+        if matched_predicate_ids:
+            return matched_predicate_ids[:max_predicates]
+        if len(fallback_predicate_ids) == 1:
+            return fallback_predicate_ids[:max_predicates]
+        return []
 
     @classmethod
     def _is_preferred_ontology_follow_up_search_result(
@@ -26214,7 +26590,7 @@ class InternalMCPChatOrchestrator:
     ) -> list[str]:
         shaped_payload = cls._shape_find_relations_with_argument_payload_for_llm(
             payload,
-            max_hits=4,
+            max_hits=8,
             max_text_chars=140,
         )
         lines: list[str] = []
@@ -26245,7 +26621,7 @@ class InternalMCPChatOrchestrator:
             return lines
 
         fragments: list[str] = []
-        for hit in hits[:4]:
+        for hit in hits[:8]:
             if not isinstance(hit, Mapping):
                 continue
             source_label = hit.get("source_name") or hit.get("source_concept_id")
@@ -26264,8 +26640,16 @@ class InternalMCPChatOrchestrator:
                 and isinstance(target_label, str)
                 and target_label.strip()
             ):
+                target_types = [
+                    str(type_id).strip()
+                    for type_id in (hit.get("target_type_ids") or [])[:3]
+                    if isinstance(type_id, str) and str(type_id).strip()
+                ]
+                type_suffix = (
+                    f" [types: {', '.join(target_types)}]" if target_types else ""
+                )
                 fragments.append(
-                    f"{source_label.strip()} via {predicate.strip()} -> {target_label.strip()}"
+                    f"{source_label.strip()} via {predicate.strip()} -> {target_label.strip()}{type_suffix}"
                 )
                 continue
             if (
@@ -26292,7 +26676,7 @@ class InternalMCPChatOrchestrator:
         shaped_payload = cls._shape_get_predicate_incidence_payload_for_llm(
             payload,
             max_predicates=4,
-            max_groundings=2,
+            max_groundings=6,
             max_text_chars=140,
         )
         lines: list[str] = []
@@ -26330,6 +26714,30 @@ class InternalMCPChatOrchestrator:
             grounded_instance_count = row.get("grounded_instance_count")
             if isinstance(grounded_instance_count, int):
                 fragment += f" (instances={grounded_instance_count})"
+            sample_groundings = row.get("sample_groundings")
+            if isinstance(sample_groundings, list):
+                sample_fragments: list[str] = []
+                for grounding in sample_groundings[:6]:
+                    if not isinstance(grounding, Mapping):
+                        continue
+                    label = (
+                        grounding.get("name")
+                        or grounding.get("concept_id")
+                        or grounding.get("text_preview")
+                    )
+                    if not isinstance(label, str) or not label.strip():
+                        continue
+                    sample_fragment = label.strip()
+                    type_ids = [
+                        str(type_id).strip()
+                        for type_id in (grounding.get("type_ids") or [])[:2]
+                        if isinstance(type_id, str) and str(type_id).strip()
+                    ]
+                    if type_ids:
+                        sample_fragment += f" [{', '.join(type_ids)}]"
+                    sample_fragments.append(sample_fragment)
+                if sample_fragments:
+                    fragment += f" (examples={'; '.join(sample_fragments)})"
             fragments.append(fragment)
         if fragments:
             lines.append(f"- Predicate incidence summary: {'; '.join(fragments)}.")
@@ -26869,9 +27277,18 @@ class InternalMCPChatOrchestrator:
                     "Refresh workflow discovery",
                     "Refreshing workflow discovery from the turn text and expected-outcome contract.",
                 )
+            raw_discovery_timeout_seconds = data.get(
+                "workflow_discovery_timeout_seconds"
+            )
+            discovery_timeout_seconds = (
+                raw_discovery_timeout_seconds
+                if isinstance(raw_discovery_timeout_seconds, (int, float, str))
+                else None
+            )
             discovered = discover_workflows_for_turn(
                 discovery_query_input,
                 namespace=env.user_namespace,
+                timeout_seconds=discovery_timeout_seconds,
                 workflow_registry=self._workflow_registry,
             )
             workflow_discovery_result = self._annotate_turn_workflow_discovery_result(
@@ -28542,11 +28959,23 @@ class InternalMCPChatOrchestrator:
             "completion_gate_decision" in workflow_data
             or "completion_gate_evidence_payload" in workflow_data
         )
+        gate_requires_follow_up = bool(
+            workflow_data.get("completion_gate_requires_follow_up", False)
+        )
+        gate_safe_to_claim_completion = bool(
+            workflow_data.get(
+                "completion_gate_safe_to_claim_completion",
+                not gate_requires_follow_up,
+            )
+        )
         if isinstance(final_response, str) and final_response.strip():
-            if (
-                gate_reported_outcome
-                and wf_result is not None
-                and not _workflow_result_effective_completed(wf_result)
+            if gate_reported_outcome and (
+                gate_requires_follow_up
+                or not gate_safe_to_claim_completion
+                or (
+                    wf_result is not None
+                    and not _workflow_result_effective_completed(wf_result)
+                )
             ):
                 response_text = final_response
             elif not isinstance(response_text, str) or not response_text.strip():
@@ -35317,6 +35746,8 @@ class InternalMCPChatOrchestrator:
             )
             workflow_dispatch_data = {
                 "prompt": prompt,
+                "user_prompt": prompt,
+                "prompt_for_requirements": prompt,
                 "augmented_context": augmented_context,
                 "continuation_context": (
                     dict(workflow_continuation_payload)
@@ -35353,6 +35784,7 @@ class InternalMCPChatOrchestrator:
                 "registry_snapshot": registry_snapshot,
                 "conversation_session_id": conversation_session_id,
                 "turn_id": turn_id,
+                "recent_user_prompts": recent_user_prompts,
                 "workflow_episode_source": "chat_turn_workflow",
                 "workflow_episode_stage": "workflow_dispatch",
             }

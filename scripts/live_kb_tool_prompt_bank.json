@@ -126,6 +126,19 @@
       ]
     },
     {
+      "id": "tell_me_who_i_am_and_list_my_papers",
+      "category": "entity_relative_kb_lookup",
+      "complexity_class": "vontology_grounded",
+      "prompt": "Tell me who I am and list my papers.",
+      "knowledge_surfaces": [
+        "turn_context",
+        "kb"
+      ],
+      "likely_tools": [
+        "search_knowledge_base"
+      ]
+    },
+    {
       "id": "research_interests_and_collaborators",
       "category": "profile_and_network_summary",
       "complexity_class": "vontology_grounded",

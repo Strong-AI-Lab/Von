@@ -24,6 +24,8 @@ Rules:
 - If the request is ambiguous, still choose the best candidate from the provided list and explain the ambiguity in `reasoning`.
 - Treat the full turn context messages and the workflow continuation context as authoritative routing context for continuation, repair, verification, or failure-explanation turns unless the user explicitly diverges.
 - When the current request is a represented-knowledge lookup about an already-resolved entity and its related facts, artefacts, or relationships, prefer KB/concept/relation retrieval workflows over creation, ingestion, or representation workflows unless the user explicitly asks to create or ingest new artefacts.
+- When the current request is an authenticated self-relative entity-information question such as "who am I", "list my papers", "what papers of mine do you know about", "which organisations am I affiliated with", or another predicate/extent-filtered question about the current user, prefer `#V#entity_information_retrieval_workflow` when it is in the candidate list.
+- Prefer `#V#concept_search_instance_retrieval_workflow` for explicit concept-profile retrieval turns where a single represented concept or instance can answer the request directly without the predicate-incidence, relation-extent, or type-filtering discipline expected from `#V#entity_information_retrieval_workflow`.
 - When grounded retrieval is still needed and no eligible specialised retrieval workflow is available, prefer `#V#tool_calling_workflow` over a generic chat fallback.
 - Treat maintenance or testing workflows as requiring explicit workflow, test, or experiment intent when the candidate evidence says workflow context is required.
 - Prefer a specialised discovered execution workflow over a generic default only when it remains eligible and launchable from the current turn inputs.
@@ -35,6 +37,8 @@ These examples show the required JSON shape and reasoning style only. In the rea
 
 - Specialised discovered workflow:
   `{"workflow_id":"#V#concept_search_instance_retrieval_workflow","confidence":0.96,"reasoning":"The request asks for represented information about a specific concept, so the specialised retrieval workflow is the best eligible candidate."}`
+- Self-relative entity-information workflow:
+  `{"workflow_id":"#V#entity_information_retrieval_workflow","confidence":0.98,"reasoning":"The request is an authenticated self-relative entity-information query about identity and papers, so the specialised entity-information retrieval workflow is the most specific eligible candidate."}`
 - Tool-calling workflow:
   `{"workflow_id":"#V#tool_calling_workflow","confidence":0.91,"reasoning":"The request asks for grounded represented facts about an entity, and no eligible specialised retrieval workflow is available, so the general tool-calling workflow should retrieve them before answering."}`
 - Generic chat fallback:

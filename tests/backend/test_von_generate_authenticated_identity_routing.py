@@ -941,6 +941,163 @@ class _PredicateExtentRoutingGatewayStub:
         raise AssertionError(f"Unexpected tool call: {tool_name}")
 
 
+class _NoisyPredicateExtentRoutingGatewayStub:
+    enabled = True
+
+    def __init__(self) -> None:
+        self.invocations: list[dict[str, Any]] = []
+
+    def describe_methods(self) -> dict[str, Any]:
+        return _PredicateExtentRoutingGatewayStub().describe_methods()
+
+    def invoke(self, tool_name: str, payload: dict[str, Any]):
+        self.invocations.append({"tool": tool_name, "payload": dict(payload)})
+        if tool_name == "get_predicate_incidence":
+            return SimpleNamespace(
+                payload={
+                    "mode": "entity",
+                    "concept_id": "#V#test_user",
+                    "total_predicates": 3,
+                    "predicates": [
+                        {
+                            "predicate_concept_id": "#V#has_paper_recommendation_assertion",
+                            "predicate_preview": {
+                                "name": "has paper recommendation assertion",
+                                "kind": "predicate",
+                            },
+                            "relation_hit_count": 5,
+                            "grounding_count": 5,
+                            "subject_argument_hit_count": 5,
+                            "object_argument_hit_count": 0,
+                            "argument_indexes": [1],
+                            "sample_groundings": [
+                                {
+                                    "grounding_kind": "concept",
+                                    "concept_id": "#V#paper_recommendation_assertion_one",
+                                    "name": "Paper Recommendation Assertion One",
+                                    "type_ids": ["#V#paper_recommendation_assertion"],
+                                }
+                            ],
+                        },
+                        {
+                            "predicate_concept_id": "is_an_instance_of",
+                            "relation_hit_count": 2,
+                            "grounding_count": 2,
+                            "subject_argument_hit_count": 2,
+                            "object_argument_hit_count": 0,
+                            "argument_indexes": [1],
+                            "sample_groundings": [
+                                {
+                                    "grounding_kind": "concept",
+                                    "concept_id": "#V#von_user",
+                                    "name": "Von User",
+                                    "type_ids": ["#V#type"],
+                                }
+                            ],
+                        },
+                        {
+                            "predicate_concept_id": "#V#author_of",
+                            "predicate_preview": {
+                                "name": "author of",
+                                "kind": "predicate",
+                            },
+                            "relation_hit_count": 2,
+                            "grounding_count": 2,
+                            "subject_argument_hit_count": 2,
+                            "object_argument_hit_count": 0,
+                            "argument_indexes": [1],
+                            "sample_groundings": [
+                                {
+                                    "grounding_kind": "concept",
+                                    "concept_id": "#V#test_paper_one",
+                                    "name": "Test Paper One",
+                                    "type_ids": ["#V#scholarly_article"],
+                                },
+                                {
+                                    "grounding_kind": "concept",
+                                    "concept_id": "#V#test_paper_two",
+                                    "name": "Test Paper Two",
+                                    "type_ids": ["#V#scholarly_work"],
+                                },
+                            ],
+                        },
+                    ],
+                    "paging": {
+                        "limit": 50,
+                        "offset": 0,
+                        "returned": 3,
+                        "total_available": 3,
+                    },
+                },
+                duration_ms=5,
+            )
+        if tool_name == "find_relations_with_argument":
+            return SimpleNamespace(
+                payload={
+                    "concept_id": payload.get("concept_id"),
+                    "total_hits": 2,
+                    "hits": [
+                        {
+                            "source_concept_id": "#V#test_user",
+                            "predicate_concept_id": "#V#author_of",
+                            "relation_kind": "binary",
+                            "argument_indexes": [1],
+                            "target_value": "#V#test_paper_one",
+                            "source_concept_preview": {
+                                "concept_id": "#V#test_user",
+                                "name": "Test User",
+                                "kind": "individual",
+                            },
+                            "target_concept_preview": {
+                                "concept_id": "#V#test_paper_one",
+                                "name": "Test Paper One",
+                                "kind": "individual",
+                            },
+                            "relation_metadata": {
+                                "relation_id": "struct::test_user::author_of::paper_one",
+                                "match_type": "exact",
+                            },
+                            "score": 1.0,
+                            "is_asserted": True,
+                            "relation_state": "asserted",
+                        },
+                        {
+                            "source_concept_id": "#V#test_user",
+                            "predicate_concept_id": "#V#author_of",
+                            "relation_kind": "binary",
+                            "argument_indexes": [1],
+                            "target_value": "#V#test_paper_two",
+                            "source_concept_preview": {
+                                "concept_id": "#V#test_user",
+                                "name": "Test User",
+                                "kind": "individual",
+                            },
+                            "target_concept_preview": {
+                                "concept_id": "#V#test_paper_two",
+                                "name": "Test Paper Two",
+                                "kind": "individual",
+                            },
+                            "relation_metadata": {
+                                "relation_id": "struct::test_user::author_of::paper_two",
+                                "match_type": "exact",
+                            },
+                            "score": 1.0,
+                            "is_asserted": True,
+                            "relation_state": "asserted",
+                        },
+                    ],
+                    "paging": {
+                        "limit": 20,
+                        "offset": 0,
+                        "returned": 2,
+                        "total_available": 2,
+                    },
+                },
+                duration_ms=5,
+            )
+        raise AssertionError(f"Unexpected tool call: {tool_name}")
+
+
 class _PredicateExtentRoutingLLM:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
@@ -1082,6 +1239,172 @@ class _EntityInformationRetrievalWorkflowLLM:
         )
 
 
+class _EntityInformationFalseNegativeAfterIncidenceLLM:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def generate(self, prompt, context=None, model=None):
+        context_messages = list(context or [])
+        self.calls.append(
+            {"prompt": prompt, "context": context_messages, "model": model}
+        )
+        context_text = "\n".join(
+            str(message.get("content") or "")
+            for message in context_messages
+            if isinstance(message, dict)
+        )
+        if isinstance(prompt, str) and "expected-success inference policy" in prompt:
+            return (
+                '{"expected_outcome_summary":"Identify the authenticated user and list only papers that are explicitly grounded to that user.",'
+                '"grounding_requirement":"Use represented predicate or relation evidence before naming papers as the user\\u0027s.",'
+                '"precision_policy":"Prefer explicit insufficiency over speculative paper attribution.",'
+                '"selector_guidance":"Prefer the specialised entity-information retrieval workflow or equivalent grounded relation-retrieval route.",'
+                '"answering_guidance":"Answer from grounded represented evidence only; if no grounded papers are found, say that clearly.",'
+                '"reasoning":"The request combines authenticated self-identity with grounded entity-relative paper attribution, so the workflow should retrieve represented relations before answering.",'
+                '"required_tools":["get_predicate_incidence","find_relations_with_argument"]}'
+            )
+        if isinstance(prompt, str) and prompt.strip().startswith("Select workflow"):
+            return (
+                '{"workflow_id":"#V#entity_information_retrieval_workflow",'
+                '"confidence":0.97,'
+                '"reasoning":"This is a grounded entity-information retrieval request and the specialised workflow is available."}'
+            )
+        if (
+            isinstance(prompt, str)
+            and prompt.startswith(
+                "You execute the canonical entity-information retrieval workflow for Von."
+            )
+            and "Tell me who I am and list my papers." in prompt
+        ):
+            if (
+                "CURRENT USER CONTEXT: Test User (#V#test_user)" in context_text
+                or "Authenticated user concept:\n#V#test_user" in prompt
+            ):
+                return (
+                    '{"action":"call_tool","tool":"get_predicate_incidence",'
+                    '"payload":{"concept_id":"#V#test_user"}}'
+                )
+            return "I need grounded authenticated user context first."
+        if isinstance(prompt, str) and prompt.startswith(
+            "Provide a final answer to the user now that the tool result is available."
+        ):
+            if (
+                "Predicate incidence summary" in context_text
+                and "Relation-bearing evidence excerpts" not in context_text
+            ):
+                return (
+                    "You are Test User (#V#test_user). "
+                    "No papers with verified authorship or ownership were located for you."
+                )
+            if (
+                "Predicate incidence summary" in context_text
+                and "Relation-bearing evidence excerpts" in context_text
+                and "Test Paper One" in context_text
+                and "Test Paper Two" in context_text
+            ):
+                return (
+                    "You are Test User (#V#test_user). Your grounded papers are "
+                    "Test Paper One and Test Paper Two."
+                )
+            return "I couldn't find any grounded papers explicitly attributed to you."
+        if isinstance(prompt, str) and prompt.startswith(
+            "# prompt_turn_execution_narrate_completion_report"
+        ):
+            if (
+                "You are Test User (#V#test_user). Your grounded papers are Test Paper One and Test Paper Two."
+                in prompt
+            ):
+                return (
+                    "You are Test User (#V#test_user). Your grounded papers are "
+                    "Test Paper One and Test Paper Two."
+                )
+            return "I couldn't find any grounded papers explicitly attributed to you."
+        return "I couldn't find any grounded papers explicitly attributed to you."
+
+
+class _EntityInformationUnfilteredRelationLLM:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def generate(self, prompt, context=None, model=None):
+        context_messages = list(context or [])
+        self.calls.append(
+            {"prompt": prompt, "context": context_messages, "model": model}
+        )
+        context_text = "\n".join(
+            str(message.get("content") or "")
+            for message in context_messages
+            if isinstance(message, dict)
+        )
+        if isinstance(prompt, str) and "expected-success inference policy" in prompt:
+            return (
+                '{"expected_outcome_summary":"Identify the authenticated user and list only papers that are explicitly grounded to that user.",'
+                '"grounding_requirement":"Use represented predicate or relation evidence before naming papers as the user\\u0027s.",'
+                '"precision_policy":"Prefer explicit insufficiency over speculative paper attribution.",'
+                '"selector_guidance":"Prefer the specialised entity-information retrieval workflow or equivalent grounded relation-retrieval route.",'
+                '"answering_guidance":"Answer from grounded represented evidence only; if no grounded papers are found, say that clearly.",'
+                '"reasoning":"The request combines authenticated self-identity with grounded entity-relative paper attribution, so the workflow should retrieve represented relations before answering.",'
+                '"required_tools":["get_predicate_incidence","find_relations_with_argument"]}'
+            )
+        if isinstance(prompt, str) and prompt.strip().startswith("Select workflow"):
+            return (
+                '{"workflow_id":"#V#entity_information_retrieval_workflow",'
+                '"confidence":0.97,'
+                '"reasoning":"This is a grounded entity-information retrieval request and the specialised workflow is available."}'
+            )
+        if (
+            isinstance(prompt, str)
+            and prompt.startswith(
+                "You execute the canonical entity-information retrieval workflow for Von."
+            )
+            and "Tell me who I am and list my papers." in prompt
+        ):
+            if (
+                "CURRENT USER CONTEXT: Test User (#V#test_user)" in context_text
+                or "Authenticated user concept:\n#V#test_user" in prompt
+            ):
+                return (
+                    '{"action":"call_tool","tool":"get_predicate_incidence",'
+                    '"payload":{"concept_id":"#V#test_user"}}'
+                )
+            return "I need grounded authenticated user context first."
+        if isinstance(prompt, str) and prompt.startswith(
+            "Provide a final answer to the user now that the tool result is available."
+        ):
+            if (
+                "Predicate incidence summary" in context_text
+                and "Relation-bearing evidence excerpts" not in context_text
+            ):
+                return (
+                    '{"action":"call_tool","tool":"find_relations_with_argument",'
+                    '"payload":{"concept_id":"#V#test_user","limit":20}}'
+                )
+            if (
+                "Predicate incidence summary" in context_text
+                and "Relation-bearing evidence excerpts" in context_text
+                and "Test Paper One" in context_text
+                and "Test Paper Two" in context_text
+            ):
+                return (
+                    "You are Test User (#V#test_user). Your grounded papers are "
+                    "Test Paper One and Test Paper Two."
+                )
+            return "I couldn't find any grounded papers explicitly attributed to you."
+        if isinstance(prompt, str) and prompt.startswith(
+            "# prompt_turn_execution_narrate_completion_report"
+        ):
+            if (
+                "You are Test User (#V#test_user). Your grounded papers are Test Paper One and Test Paper Two."
+                in prompt
+            ):
+                return (
+                    "You are Test User (#V#test_user). Your grounded papers are "
+                    "Test Paper One and Test Paper Two."
+                )
+            return "I couldn't find any grounded papers explicitly attributed to you."
+        return "I couldn't find any grounded papers explicitly attributed to you."
+
+
 def _make_app(
     monkeypatch,
     *,
@@ -1095,6 +1418,8 @@ def _make_app(
         | _ExplicitEntityRelationLookupLLM
         | _PredicateExtentRoutingLLM
         | _EntityInformationRetrievalWorkflowLLM
+        | _EntityInformationFalseNegativeAfterIncidenceLLM
+        | _EntityInformationUnfilteredRelationLLM
     ),
     gateway_override: Any | None = None,
     discovery_override: Any | None = None,
@@ -1807,9 +2132,9 @@ def test_generate_entity_relative_tool_pipeline_uses_live_workflow_retrieval_sur
         assert retrieval_backend.reset_calls == ["workflow_capabilities"]
         assert retrieval_backend.queries
         assert retrieval_backend.queries[-1]["namespace"] == "workflow_capabilities"
-        assert retrieval_backend.queries[-1]["permissions_context"] == {
-            "type": "workflow_capability"
-        }
+        permissions_context = retrieval_backend.queries[-1]["permissions_context"]
+        assert permissions_context["type"] == "workflow_capability"
+        assert permissions_context["retrieval_candidate_limit"] >= 6
 
         llm_debug = body.get("llm_debug") or {}
         workflow_routing = llm_debug.get("workflow_routing") or {}
@@ -2071,6 +2396,81 @@ def test_generate_authenticated_entity_information_turn_routes_to_specialised_wo
     execution = turn_record.get("execution") or {}
     selected_workflow_trace = execution.get("selected_workflow_trace") or {}
     assert selected_workflow_trace.get("selected_execution_mode") == "custom_workflow"
+
+
+def test_generate_authenticated_entity_information_turn_forces_relation_follow_up_when_model_stops_after_predicate_incidence(
+    monkeypatch,
+) -> None:
+    llm = _EntityInformationFalseNegativeAfterIncidenceLLM()
+    gateway = _NoisyPredicateExtentRoutingGatewayStub()
+    app = _make_app(
+        monkeypatch,
+        llm=llm,
+        gateway_override=gateway,
+        discovery_override=_entity_information_retrieval_discovery,
+        max_tool_invocations=3,
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/von/generate", json={"prompt": "Tell me who I am and list my papers."}
+    )
+    assert response.status_code == 200
+
+    body = response.get_json()
+    assert isinstance(body, dict)
+    assert body.get("response") == (
+        "You are Test User (#V#test_user). Your grounded papers are Test Paper One and Test Paper Two."
+    )
+
+    assert gateway.invocations
+    assert gateway.invocations[0]["tool"] == "get_predicate_incidence"
+    assert gateway.invocations[0]["payload"]["concept_id"] == "#V#test_user"
+    assert gateway.invocations[1]["tool"] == "find_relations_with_argument"
+    assert gateway.invocations[1]["payload"]["concept_id"] == "#V#test_user"
+    assert gateway.invocations[1]["payload"]["predicate_filter"] == ["#V#author_of"]
+
+    llm_debug = body.get("llm_debug") or {}
+    tool_invocations = llm_debug.get("tool_invocations") or []
+    recorded_tools = [
+        (record.get("tool") or record.get("method"))
+        for record in tool_invocations
+        if isinstance(record, dict)
+    ]
+    assert recorded_tools.count("get_predicate_incidence") == 1
+    assert recorded_tools.count("find_relations_with_argument") == 1
+
+
+def test_generate_authenticated_entity_information_turn_enriches_unfiltered_relation_lookup_from_recent_predicate_incidence(
+    monkeypatch,
+) -> None:
+    llm = _EntityInformationUnfilteredRelationLLM()
+    gateway = _NoisyPredicateExtentRoutingGatewayStub()
+    app = _make_app(
+        monkeypatch,
+        llm=llm,
+        gateway_override=gateway,
+        discovery_override=_entity_information_retrieval_discovery,
+        max_tool_invocations=3,
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/von/generate", json={"prompt": "Tell me who I am and list my papers."}
+    )
+    assert response.status_code == 200
+
+    body = response.get_json()
+    assert isinstance(body, dict)
+    assert body.get("response") == (
+        "You are Test User (#V#test_user). Your grounded papers are Test Paper One and Test Paper Two."
+    )
+
+    assert gateway.invocations
+    assert gateway.invocations[0]["tool"] == "get_predicate_incidence"
+    assert gateway.invocations[1]["tool"] == "find_relations_with_argument"
+    assert gateway.invocations[1]["payload"]["concept_id"] == "#V#test_user"
+    assert gateway.invocations[1]["payload"]["predicate_filter"] == ["#V#author_of"]
 
 
 def test_generate_threads_window_session_header_into_conversation_session_resolution(

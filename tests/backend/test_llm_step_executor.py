@@ -131,7 +131,7 @@ def test_execute_llm_step_tool_mode_marks_user_model_preference(
 
     class _StubOrchestrator:
         def __init__(self, **_kwargs):
-            pass
+            captured["max_tool_invocations"] = _kwargs.get("max_tool_invocations")
 
         def _load_workflow_model_policy(self, _preferred_language):
             return object(), {}
@@ -188,6 +188,131 @@ def test_execute_llm_step_tool_mode_marks_user_model_preference(
     assert result.status == "success"
     assert captured["shared_prefer_default_model"] is True
     assert captured["prefer_default_model"] is True
+
+
+def test_execute_llm_step_tool_mode_filters_turn_contract_tools_to_allowed_workflow_tools(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _StubGateway:
+        def describe_methods(self) -> dict[str, object]:
+            return {}
+
+    class _StubOrchestrator:
+        def __init__(self, **_kwargs):
+            captured["max_tool_invocations"] = _kwargs.get("max_tool_invocations")
+
+        def _load_workflow_model_policy(self, _preferred_language):
+            return object(), {}
+
+        def _select_model_for_stage(self, **kwargs):
+            return kwargs.get("default_model")
+
+        def _action_tool_calling_plan(self, request):
+            captured["required_prompt_tools"] = request.data.get(
+                "required_prompt_tools"
+            )
+            captured["tool_argument_defaults"] = request.data.get(
+                "tool_argument_defaults"
+            )
+            captured["turn_expected_outcome_contract_state"] = request.data.get(
+                "turn_expected_outcome_contract_state"
+            )
+            captured["workflow_discovery_timeout_seconds"] = request.data.get(
+                "workflow_discovery_timeout_seconds"
+            )
+            return type(
+                "_Result",
+                (),
+                {
+                    "status": "success",
+                    "outputs": {
+                        "tool_calls_present": False,
+                        "orchestrator_result": {"response_text": '{"ok": true}'},
+                    },
+                },
+            )()
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.orchestrator.InternalMCPChatOrchestrator",
+        _StubOrchestrator,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.model_registry_service.get_model_registry_snapshot",
+        lambda: {},
+    )
+
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=MagicMock(),
+            gateway=_StubGateway(),
+            model="gemma4:26b",
+        ),
+        data={
+            "required_prompt_tools": ["search_knowledge_base"],
+            "turn_expected_outcome_contract_state": {
+                "schema_version": "turn_expected_outcome_contract.v1",
+                "fields": {
+                    "summary": "Identify the user and list grounded papers only.",
+                },
+                "required_tools": [
+                    "fetch_concept",
+                    "find_relations_with_argument",
+                ],
+            },
+            "workflow_discovery_timeout_seconds": 5.0,
+        },
+        prompt_contract={"prompt_text": "Return JSON only."},
+        llm_policy={
+            "tool_mode": "allowed",
+            "allowed_tools": [
+                "get_predicate_incidence",
+                "find_relations_with_argument",
+            ],
+            "required_tools": [
+                "get_predicate_incidence",
+                "find_relations_with_argument",
+            ],
+            "tool_argument_defaults": {
+                "get_predicate_incidence": {
+                    "argument_index": "subject",
+                    "relation_kind": "binary",
+                    "limit": 12,
+                }
+            },
+        },
+        validation_policy={"output_format": "json_value"},
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "success"
+    assert captured["required_prompt_tools"] == [
+        "get_predicate_incidence",
+        "find_relations_with_argument",
+    ]
+    assert captured["tool_argument_defaults"] == {
+        "get_predicate_incidence": {
+            "argument_index": "subject",
+            "relation_kind": "binary",
+            "limit": 12,
+        }
+    }
+    assert captured["max_tool_invocations"] == 4
+    assert captured["turn_expected_outcome_contract_state"] == {
+        "schema_version": "turn_expected_outcome_contract.v1",
+        "fields": {
+            "summary": "Identify the user and list grounded papers only.",
+        },
+        "required_tools": [
+            "fetch_concept",
+            "find_relations_with_argument",
+        ],
+    }
+    assert captured["workflow_discovery_timeout_seconds"] == 5.0
 
 
 def test_execute_llm_step_emits_phase_transition_for_conversation_turn_stage(

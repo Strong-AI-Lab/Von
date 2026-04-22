@@ -143,6 +143,10 @@ class TestWorkflowDiscoveryResult:
             keyword_fallback_queries=["workflow fallback"],
             allow_non_executable=True,
             match_absence_reason="capability_index_build_in_progress",
+            timeout_budget_seconds=2.5,
+            budget_exhausted=True,
+            budget_exhaustion_stage="semantic_search",
+            budget_exhaustion_detail="semantic_search timed out after 2.500s",
         )
         output = result.to_dict()
 
@@ -157,6 +161,10 @@ class TestWorkflowDiscoveryResult:
         assert output["keyword_fallback_queries"] == ["workflow fallback"]
         assert output["allow_non_executable"] is True
         assert output["match_absence_reason"] == "capability_index_build_in_progress"
+        assert output["timeout_budget_seconds"] == 2.5
+        assert output["budget_exhausted"] is True
+        assert output["budget_exhaustion_stage"] == "semantic_search"
+        assert output["budget_exhaustion_detail"] == "semantic_search timed out after 2.500s"
         assert output["errors"] == ["minor warning"]
 
     def test_to_dict_errors_none_when_empty(self) -> None:
@@ -575,6 +583,7 @@ class TestDiscoverWorkflowsForTurn:
         mock_discover.return_value = WorkflowDiscoveryResult(
             matches=[],
             match_absence_reason="capability_index_build_in_progress",
+            timeout_budget_seconds=2.0,
         )
         result = discover_workflows_for_turn("test query input")
         assert result is not None
@@ -583,6 +592,7 @@ class TestDiscoverWorkflowsForTurn:
         assert result["matches"] == []
         assert result["candidates"] == []
         assert result["match_absence_reason"] == "capability_index_build_in_progress"
+        assert result["timeout_budget_seconds"] == 2.0
 
     @patch("src.backend.services.workflow_discovery_service.discover_workflows")
     def test_returns_candidate_payload_when_only_non_routing_candidates_exist(
@@ -616,6 +626,7 @@ class TestDiscoverWorkflowsForTurn:
             matches=[WorkflowMatch("#V#wf1", "Workflow 1", relevance_score=0.9)],
             search_time_ms=50.0,
             query="test query input",
+            timeout_budget_seconds=1.75,
         )
         result = discover_workflows_for_turn("test query input")
 
@@ -623,6 +634,22 @@ class TestDiscoverWorkflowsForTurn:
         assert result["match_count"] == 1
         assert len(result["matches"]) == 1
         assert result["requested_query"] == "test query input"
+        assert result["timeout_budget_seconds"] == 1.75
+
+    @patch("src.backend.services.workflow_discovery_service.discover_workflows")
+    def test_passes_timeout_override_through_to_discovery(
+        self,
+        mock_discover: MagicMock,
+    ) -> None:
+        mock_discover.return_value = WorkflowDiscoveryResult()
+
+        discover_workflows_for_turn(
+            "test query input",
+            timeout_seconds=2.25,
+        )
+
+        assert mock_discover.call_args is not None
+        assert mock_discover.call_args.kwargs["timeout_seconds"] == 2.25
 
     @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
     @patch("src.backend.services.workflow_discovery_service._search_workflows_name_fallback")
@@ -909,6 +936,9 @@ class TestDiscoverWorkflowsForTurn:
             "capability_index_search timed out" in error for error in result.errors
         )
         assert result.search_time_ms < 200.0
+        assert result.timeout_budget_seconds == 0.05
+        assert result.budget_exhausted is True
+        assert result.budget_exhaustion_stage == "capability_index_search"
         assert mock_semantic.called is False
 
     @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
@@ -949,8 +979,14 @@ class TestDiscoverWorkflowsForTurn:
             timeout_seconds=0.06,
         )
 
-        assert any("semantic_search timed out" in error for error in result.errors)
+        assert result.budget_exhausted is True
+        assert result.budget_exhaustion_stage == "semantic_search"
+        assert (
+            any("semantic_search timed out" in error for error in result.errors)
+            or "semantic_search" in str(result.budget_exhaustion_detail)
+        )
         assert result.search_time_ms < 200.0
+        assert result.timeout_budget_seconds == 0.06
         assert mock_vontology.called is False
 
     @patch(
@@ -1032,6 +1068,7 @@ class TestDiscoverWorkflowsForTurn:
         assert result["matches"] == []
         assert "workflow_discovery_for_turn_error: Unexpected error" in result["errors"]
         assert result["match_absence_reason"] == "workflow_discovery_for_turn_error"
+        assert result["budget_exhausted"] is False
 
     @patch("src.backend.services.workflow_discovery_service.discover_workflows")
     def test_turn_wrapper_hard_timeboxes_blocking_discovery(
@@ -1044,15 +1081,21 @@ class TestDiscoverWorkflowsForTurn:
 
         mock_discover.side_effect = _blocking_discovery
 
-        result = discover_workflows_for_turn("test query input")
+        result = discover_workflows_for_turn(
+            "test query input",
+            timeout_seconds=0.1,
+        )
 
         assert isinstance(result, dict)
         assert result["matches"] == []
         assert any(
-            "workflow_discovery_for_turn timed out" in error
+            "workflow_discovery_budget_exhausted:" in error
             for error in (result.get("errors") or [])
         )
-        assert result["match_absence_reason"] == "workflow_discovery_for_turn_error"
+        assert result["match_absence_reason"] == "workflow_discovery_budget_exhausted"
+        assert result["budget_exhausted"] is True
+        assert result["budget_exhaustion_stage"] == "workflow_discovery_for_turn"
+        assert "timed out after 0.100s" in str(result["budget_exhaustion_detail"])
 
 
 class TestWorkflowTypeIds:

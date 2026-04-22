@@ -86,6 +86,16 @@ def test_bootstrap_materialises_entity_information_retrieval_workflow(
     required_effects = required_effects_contract.get("required_effects") or []
     assert isinstance(required_effects, list)
     assert required_effects[0]["effect_id"] == "grounded_entity_information_evidence"
+    assert required_effects[0]["effect_type"] == "grounded_evidence"
+    assert required_effects[0]["required_tools"] == [
+        "get_predicate_incidence",
+        "find_relations_with_argument",
+    ]
+    assert required_effects[0]["required_tools_match"] == "all"
+    assert (
+        required_effects[0]["not_executed_reason"]
+        == "Required grounded entity-information evidence was not retrieved."
+    )
 
     states = definition.states
     assert definition.initial_state in states
@@ -99,10 +109,29 @@ def test_bootstrap_materialises_entity_information_retrieval_workflow(
         "get_predicate_incidence",
         "find_relations_with_argument",
         "search_concepts",
-        "search_knowledge_base",
         "fetch_concept",
-        "get_related_concepts",
     ]
+    assert llm_policy.get("required_tools") == [
+        "get_predicate_incidence",
+        "find_relations_with_argument",
+    ]
+    assert llm_policy.get("max_tool_invocations") == 5
+    assert llm_policy.get("tool_argument_defaults") == {
+        "get_predicate_incidence": {
+            "argument_index": "subject",
+            "relation_kind": "binary",
+            "limit": 12,
+        },
+        "find_relations_with_argument": {
+            "argument_index": "subject",
+            "relation_kind": "binary",
+            "limit": 20,
+            "__derive_predicate_filter_from_recent_incidence": {
+                "enabled": True,
+                "max_predicates": 2,
+            },
+        },
+    }
     assert any(
         transition.to_state in states and transition.reason == "next_step"
         for transition in retrieval_step.transitions
@@ -146,5 +175,19 @@ def test_entity_information_retrieval_prompt_support_seeds_content_from_repo_ass
     )
 
     assert isinstance(prompt_text, str)
+    prompt_text_lower = prompt_text.lower()
     assert "Do not use `list_papers`" in prompt_text
     assert "Use `get_predicate_incidence`" in prompt_text
+    assert "you must call a represented-knowledge" in prompt_text_lower
+    assert "retrieval tool in this turn before answering" in prompt_text_lower
+    assert "do not conclude that no papers" in prompt_text_lower
+    assert "first ontology-native" in prompt_text_lower
+    assert "anchor entity always goes in `concept_id`" in prompt_text_lower
+    assert "payload keys named `subject` or `object`" in prompt_text_lower
+    assert "preserve the full `#v#" in prompt_text_lower
+    assert "must include a `predicate_filter`" in prompt_text_lower
+    assert "before any broader relation paging" in prompt_text_lower
+    assert "do not use an unfiltered `find_relations_with_argument` call" in prompt_text_lower
+    assert "do not stop at incidence alone" in prompt_text_lower
+    assert "do not assume missing tool results" in prompt_text_lower
+    assert "filter the grounded targets by type" in prompt_text_lower
