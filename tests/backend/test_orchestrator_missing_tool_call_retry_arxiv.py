@@ -569,16 +569,33 @@ def test_missing_tool_call_retry_forces_task_create_from_required_tool():
         missing_required_tools=["task_create"],
     )
 
-    assert forced == [
-        {
-            "action": "call_tool",
-            "tool": "task_create",
-            "payload": {
-                "title": "Diary entry for today",
-                "description": prompt,
-            },
-        }
-    ]
+    assert forced is None
+
+
+def test_missing_tool_call_retry_does_not_force_jira_search_from_context_prose():
+    orchestrator = _build_orchestrator_stub()
+
+    forced = orchestrator._infer_missing_tool_call_retry_tool_calls(
+        [
+            {
+                "role": "system",
+                "content": "CURRENT USER CONTEXT: Michael Witbrock (#V#michael_witbrock)",
+            }
+        ],
+        user_prompt=(
+            "Prepare a short research briefing for me: my represented papers, "
+            "relevant recent arXiv work, and any linked Jira tasks."
+        ),
+        missing_required_tools=["jira_search"],
+        user_concept_id="#V#michael_witbrock",
+        tool_invocations=[
+            {"tool": "search_knowledge_base", "status": "ok"},
+            {"tool": "search_concepts", "status": "ok"},
+            {"tool": "search_arxiv", "status": "ok"},
+        ],
+    )
+
+    assert forced is None
 
 
 def test_missing_tool_call_retry_skips_guided_tools_already_invoked():
@@ -1022,18 +1039,8 @@ def test_tool_calling_backfill_applies_parent_guided_retry_fallback_when_require
                 "concept_id": "#V#michael_witbrock",
                 "limit": 20,
             },
-        },
-        {
-            "action": "call_tool",
-            "tool": "jira_search",
-            "payload": {
-                "jql": tool_calls[1]["payload"]["jql"],
-                "max_results": 10,
-            },
-        },
+        }
     ]
-    assert '#V#michael_witbrock' in tool_calls[1]["payload"]["jql"]
-    assert "Michael Witbrock" in tool_calls[1]["payload"]["jql"]
 
 
 def test_tool_calling_backfill_chains_ontology_follow_up_after_search_concepts():
@@ -1317,14 +1324,10 @@ def test_missing_tool_retry_prefers_search_anchor_over_user_anchor_for_ontology_
     orchestrator = _build_orchestrator_stub()
 
     forced = orchestrator._infer_missing_tool_call_retry_tool_calls(
-        [
-            {
-                "role": "system",
-                "content": "CURRENT USER CONTEXT: Michael Witbrock (#V#michael_witbrock)",
-            }
-        ],
+        [],
         user_prompt="What predicates are salient to SAIL students?",
         missing_required_tools=["find_relations_with_argument"],
+        user_concept_id="#V#michael_witbrock",
         tool_invocations=[
             {
                 "tool": "search_concepts",
@@ -1359,17 +1362,13 @@ def test_missing_tool_retry_uses_predicate_incidence_before_filtered_relation_hi
     orchestrator = _build_orchestrator_stub()
 
     forced = orchestrator._infer_missing_tool_call_retry_tool_calls(
-        [
-            {
-                "role": "system",
-                "content": "CURRENT USER CONTEXT: Michael Witbrock (#V#michael_witbrock)",
-            }
-        ],
+        [],
         user_prompt="What concepts am I in in a #V#author_of relation with?",
         missing_required_tools=[
             "get_predicate_incidence",
             "find_relations_with_argument",
         ],
+        user_concept_id="#V#michael_witbrock",
         tool_invocations=[
             {
                 "tool": "search_concepts",
@@ -1877,31 +1876,10 @@ def test_missing_tool_call_retry_recovers_search_knowledge_base_from_turn_contra
     orchestrator = _build_orchestrator_stub()
 
     forced = orchestrator._infer_missing_tool_call_retry_tool_calls(
-        [
-            {
-                "role": "system",
-                "content": (
-                    "Expected answer contract for this turn:\n"
-                    "- Success target: List grounded represented records linked "
-                    "to the current user.\n"
-                    "- Grounding requirement: Only surface represented records "
-                    "supported by retrieved evidence.\n"
-                    "- Selector guidance: Use represented-knowledge retrieval and "
-                    "keep the authenticated actor context in scope.\n"
-                    "- Answering guidance: Answer from the retrieved evidence "
-                    "rather than returning only counts."
-                ),
-            },
-            {
-                "role": "system",
-                "content": (
-                    "CURRENT USER CONTEXT: Test User (#V#test_user)\n"
-                    "CURRENT ORGANISATION CONTEXT: Test Org (#V#test_org)"
-                ),
-            },
-        ],
+        [],
         user_prompt="List grounded represented records linked to the current user.",
         missing_required_tools=["search_knowledge_base"],
+        user_concept_id="#V#test_user",
         tool_invocations=[
             {
                 "tool": "search_concepts",

@@ -4664,13 +4664,14 @@ class InternalMCPChatOrchestrator:
             required_create_type_name=required_create_type_name,
             required_url_extraction_url=required_url_extraction_url,
             invoked_tool_names=successful_tool_names,
+            user_concept_id=(
+                data.get("user_concept_id")
+                if isinstance(data.get("user_concept_id"), str)
+                else getattr(request.environment, "user_concept_id", None)
+            ),
         )
         if forced:
             import json
-
-            forced_mechanism = (
-                "required_tools" if missing_required_tools else "heuristic"
-            )
 
             try:
                 aux_log.append(
@@ -4678,7 +4679,7 @@ class InternalMCPChatOrchestrator:
                         {
                             "type": "missing_tool_call_retry",
                             "path": calling_path,
-                            "mechanism": forced_mechanism,
+                            "mechanism": "structured_replay",
                             "stage": "response",
                             "retry_reason": data.get("missing_tool_call_retry_reason")
                             or "",
@@ -4691,9 +4692,9 @@ class InternalMCPChatOrchestrator:
                         component="internal_mcp_orchestrator",
                         function="_action_missing_tool_call_retry",
                         decision_class="missing_tool_call_retry",
-                        decision_source="explicit_identifier_parse",
+                        decision_source="structured_retry_replay",
                         changed_outcome=True,
-                        reason_code="forced_tool_call_injected",
+                        reason_code="structured_tool_call_replayed",
                         possible_inappropriate_python_code_use=False,
                     )
                 )
@@ -7267,6 +7268,12 @@ class InternalMCPChatOrchestrator:
                             and str(data.get("required_prompt_url_extraction_url")).strip()
                             else None
                         ),
+                        user_concept_id=(
+                            str(data.get("user_concept_id")).strip()
+                            if isinstance(data.get("user_concept_id"), str)
+                            and str(data.get("user_concept_id")).strip()
+                            else None
+                        ),
                     )
                 )
                 if parent_forced_tool_calls:
@@ -7296,7 +7303,7 @@ class InternalMCPChatOrchestrator:
                                             if use_structured
                                             else "legacy"
                                         ),
-                                        "mechanism": "parent_retry_fallback",
+                                        "mechanism": "structured_parent_fallback",
                                         "stage": "response",
                                         "retry_reason": (
                                             data.get("missing_tool_call_retry_reason")
@@ -7312,9 +7319,9 @@ class InternalMCPChatOrchestrator:
                                     component="internal_mcp_orchestrator",
                                     function="_action_tool_calling_plan",
                                     decision_class="missing_tool_call_retry",
-                                    decision_source="workflow_retry_parent_fallback",
+                                    decision_source="structured_retry_parent_fallback",
                                     changed_outcome=True,
-                                    reason_code="forced_tool_call_injected",
+                                    reason_code="structured_tool_call_replayed",
                                     possible_inappropriate_python_code_use=False,
                                 )
                             )
@@ -8850,6 +8857,12 @@ class InternalMCPChatOrchestrator:
                     invoked_tool_names=(
                         self._extract_successful_tool_names(invocations_for_requirements)
                     ),
+                    user_concept_id=(
+                        str(data.get("user_concept_id")).strip()
+                        if isinstance(data.get("user_concept_id"), str)
+                        and str(data.get("user_concept_id")).strip()
+                        else None
+                    ),
                 )
                 if parent_forced_tool_calls:
                     import json
@@ -8871,7 +8884,7 @@ class InternalMCPChatOrchestrator:
                                     {
                                         "type": "missing_tool_call_retry",
                                         "path": "legacy",
-                                        "mechanism": "parent_retry_fallback",
+                                        "mechanism": "structured_parent_fallback",
                                         "stage": "backfill",
                                         "retry_reason": (
                                             data.get("missing_tool_call_retry_reason")
@@ -8883,9 +8896,9 @@ class InternalMCPChatOrchestrator:
                                     component="internal_mcp_orchestrator",
                                     function="_action_tool_calling_backfill",
                                     decision_class="missing_tool_call_retry",
-                                    decision_source="workflow_retry_parent_fallback",
+                                    decision_source="structured_retry_parent_fallback",
                                     changed_outcome=True,
-                                    reason_code="forced_tool_call_injected",
+                                    reason_code="structured_tool_call_replayed",
                                     possible_inappropriate_python_code_use=False,
                                 )
                             )
@@ -22751,6 +22764,7 @@ class InternalMCPChatOrchestrator:
         user_text: str,
         context_messages: Sequence[Mapping[str, Any]] | None = None,
         missing_required_tools: Sequence[str],
+        user_concept_id: str | None = None,
         tool_invocations: Sequence[Mapping[str, Any]] | None = None,
         missing_required_fetch_concept_ids: Sequence[str] | None = None,
         missing_required_read_file_copy_ids: Sequence[str] | None = None,
@@ -22760,7 +22774,7 @@ class InternalMCPChatOrchestrator:
         required_create_type_name: str | None = None,
         required_url_extraction_url: str | None = None,
     ) -> list[_ToolCallRequest] | None:
-        """Build deterministic tool calls for still-missing explicit requirements."""
+        """Replay only structured retry payloads for explicit required tools."""
 
         if not missing_required_tools:
             return None
@@ -22781,38 +22795,12 @@ class InternalMCPChatOrchestrator:
             if isinstance(item, str) and str(item).strip()
         ]
 
-        context_fragments: list[str] = []
-        for message in context_messages or ():
-            if not isinstance(message, Mapping):
-                continue
-            content = message.get("content")
-            if isinstance(content, str) and content.strip():
-                context_fragments.append(content.strip())
-
-        combined_text = "\n".join([user_text, *context_fragments]).strip()
-        concept_ids = self._extract_concept_ids_from_text(combined_text or user_text)
+        concept_ids = self._extract_concept_ids_from_text(user_text)
         workflow_ids = [
             concept_id for concept_id in concept_ids if "workflow" in concept_id.lower()
         ]
         primary_workflow_id = workflow_ids[0] if workflow_ids else None
-        user_anchor_name: str | None = None
-        user_anchor_concept_id: str | None = None
-        user_anchor_match = re.search(
-            r"(?:current user context|current user)\s*:\s*([^\n(]+?)\s*\((#V#[^)]+)\)",
-            combined_text,
-            flags=re.IGNORECASE,
-        )
-        if user_anchor_match is not None:
-            user_anchor_name = user_anchor_match.group(1).strip() or None
-            user_anchor_concept_id = user_anchor_match.group(2).strip() or None
-        if user_anchor_concept_id is None:
-            candidate_concept_ids = [
-                concept_id
-                for concept_id in concept_ids
-                if "workflow" not in concept_id.lower()
-            ]
-            if candidate_concept_ids:
-                user_anchor_concept_id = candidate_concept_ids[0]
+        retry_actor_concept_id = self._normalise_concept_id_candidate(user_concept_id)
         pure_ontology_follow_up = self._missing_tools_are_pure_ontology_follow_up(
             missing_required_tools
         )
@@ -22849,8 +22837,11 @@ class InternalMCPChatOrchestrator:
             if pure_ontology_follow_up
             else []
         )
-        if user_anchor_concept_id is None and predicate_incidence_follow_up_concept_ids:
-            user_anchor_concept_id = predicate_incidence_follow_up_concept_ids[0]
+        if (
+            retry_actor_concept_id is None
+            and predicate_incidence_follow_up_concept_ids
+        ):
+            retry_actor_concept_id = predicate_incidence_follow_up_concept_ids[0]
 
         forced_calls: list[_ToolCallRequest] = []
         for tool_name in missing_required_tools:
@@ -22865,9 +22856,6 @@ class InternalMCPChatOrchestrator:
                     and str(required_url_extraction_url).strip()
                     else None
                 )
-                if not target_url:
-                    prompt_urls = self._extract_prompt_urls(user_text)
-                    target_url = prompt_urls[0] if prompt_urls else None
                 if not target_url:
                     continue
                 forced_calls.append(
@@ -22907,7 +22895,6 @@ class InternalMCPChatOrchestrator:
             if name == "search_knowledge_base":
                 search_query = self._extract_structural_retry_search_query(
                     tool_invocations,
-                    user_text=user_text,
                 )
                 if not search_query:
                     continue
@@ -22924,13 +22911,13 @@ class InternalMCPChatOrchestrator:
                 continue
 
             if name == "get_predicate_incidence":
-                if user_anchor_concept_id and ontology_follow_up_predicate_ids:
+                if retry_actor_concept_id and ontology_follow_up_predicate_ids:
                     forced_calls.append(
                         {
                             "action": "call_tool",
                             "tool": name,
                             "payload": {
-                                "concept_id": user_anchor_concept_id,
+                                "concept_id": retry_actor_concept_id,
                                 "predicate_filter": ontology_follow_up_predicate_ids,
                             },
                         }
@@ -22948,25 +22935,25 @@ class InternalMCPChatOrchestrator:
                     continue
                 if pure_ontology_follow_up:
                     continue
-                if not user_anchor_concept_id:
+                if not retry_actor_concept_id:
                     continue
                 forced_calls.append(
                     {
                         "action": "call_tool",
                         "tool": name,
-                        "payload": {"concept_id": user_anchor_concept_id},
+                        "payload": {"concept_id": retry_actor_concept_id},
                     }
                 )
                 continue
 
             if name == "find_relations_with_argument":
-                if user_anchor_concept_id and ontology_follow_up_predicate_ids:
+                if retry_actor_concept_id and ontology_follow_up_predicate_ids:
                     forced_calls.append(
                         {
                             "action": "call_tool",
                             "tool": name,
                             "payload": {
-                                "concept_id": user_anchor_concept_id,
+                                "concept_id": retry_actor_concept_id,
                                 "predicate_filter": ontology_follow_up_predicate_ids,
                                 "limit": 20,
                             },
@@ -22974,7 +22961,7 @@ class InternalMCPChatOrchestrator:
                     )
                     continue
                 if (
-                    user_anchor_concept_id
+                    retry_actor_concept_id
                     and predicate_incidence_follow_up_predicate_ids
                 ):
                     forced_calls.append(
@@ -22982,7 +22969,7 @@ class InternalMCPChatOrchestrator:
                             "action": "call_tool",
                             "tool": name,
                             "payload": {
-                                "concept_id": user_anchor_concept_id,
+                                "concept_id": retry_actor_concept_id,
                                 "predicate_filter": predicate_incidence_follow_up_predicate_ids,
                                 "limit": 20,
                             },
@@ -22999,19 +22986,19 @@ class InternalMCPChatOrchestrator:
                                     "concept_id": concept_id,
                                     "limit": 20,
                                 },
-                            }
-                        )
+                        }
+                    )
                     continue
                 if pure_ontology_follow_up:
                     continue
-                if not user_anchor_concept_id:
+                if not retry_actor_concept_id:
                     continue
                 forced_calls.append(
                     {
                         "action": "call_tool",
                         "tool": name,
                         "payload": {
-                            "concept_id": user_anchor_concept_id,
+                            "concept_id": retry_actor_concept_id,
                             "limit": 20,
                         },
                     }
@@ -23019,68 +23006,9 @@ class InternalMCPChatOrchestrator:
                 continue
 
             if name == "jira_search":
-                jql_clauses: list[str] = []
-                if user_anchor_concept_id:
-                    jql_clauses.append(f'text ~ "\\"{user_anchor_concept_id}\\""')
-                if user_anchor_name:
-                    jql_clauses.append(f'text ~ "\\"{user_anchor_name}\\""')
-                if not jql_clauses:
-                    continue
-                forced_calls.append(
-                    {
-                        "action": "call_tool",
-                        "tool": name,
-                        "payload": {
-                            "jql": " OR ".join(jql_clauses) + " ORDER BY updated DESC",
-                            "max_results": 10,
-                        },
-                    }
-                )
                 continue
 
             if name == "task_create":
-                task_payload = self._build_task_create_retry_payload(
-                    user_text=user_text,
-                    assignee_concept_id=user_anchor_concept_id,
-                )
-                if not task_payload:
-                    continue
-                forced_calls.append(
-                    {
-                        "action": "call_tool",
-                        "tool": name,
-                        "payload": task_payload,
-                    }
-                )
-                continue
-
-            if name == "create_concepts":
-                requested_name = (
-                    str(required_create_type_name).strip()
-                    if isinstance(required_create_type_name, str)
-                    and str(required_create_type_name).strip()
-                    else None
-                )
-                if not requested_name:
-                    continue
-                forced_calls.append(
-                    {
-                        "action": "call_tool",
-                        "tool": name,
-                        "payload": {
-                            "parent_id": "#V#event",
-                            "concepts": [
-                                {
-                                    "name": requested_name,
-                                    "kind": "type",
-                                    "description": (
-                                        "Fresh test type for workflow runtime verification."
-                                    ),
-                                }
-                            ],
-                        },
-                    }
-                )
                 continue
 
             if name == "fetch_concept":
@@ -23518,10 +23446,8 @@ class InternalMCPChatOrchestrator:
     def _extract_structural_retry_search_query(
         cls,
         tool_invocations: Sequence[Mapping[str, Any]] | None,
-        *,
-        user_text: str | None = None,
     ) -> str | None:
-        """Reuse an earlier tool query before falling back to the raw turn text."""
+        """Reuse an earlier structured query without rebuilding one from prose."""
 
         for invocation in tool_invocations or ():
             if not isinstance(invocation, Mapping):
@@ -23540,9 +23466,6 @@ class InternalMCPChatOrchestrator:
             query = payload.get("query")
             if isinstance(query, str) and query.strip():
                 return query.strip()
-
-        if isinstance(user_text, str) and user_text.strip():
-            return user_text.strip()
         return None
 
     @classmethod
@@ -23583,10 +23506,7 @@ class InternalMCPChatOrchestrator:
             return None
 
         if "search_concepts" in missing_tools:
-            search_query = cls._extract_structural_retry_search_query(
-                tool_invocations,
-                user_text=user_text,
-            )
+            search_query = cls._extract_structural_retry_search_query(tool_invocations)
             if search_query:
                 return [
                     {
@@ -23708,50 +23628,6 @@ class InternalMCPChatOrchestrator:
             "find_relations_with_argument",
         }
 
-    @staticmethod
-    def _build_task_create_retry_payload(
-        *,
-        user_text: str,
-        assignee_concept_id: str | None = None,
-    ) -> dict[str, Any] | None:
-        prompt_text = str(user_text or "").strip()
-        if not prompt_text:
-            return None
-
-        extracted_title: str | None = None
-        for pattern in (
-            r"\bcreate(?:\s+me)?\s+(?:a|an)\s+([^.?!]+)",
-            r"\bmake(?:\s+me)?\s+(?:a|an)\s+([^.?!]+)",
-            r"\bbuild(?:\s+me)?\s+(?:a|an)\s+([^.?!]+)",
-        ):
-            match = re.search(pattern, prompt_text, flags=re.IGNORECASE)
-            if match is None:
-                continue
-            candidate = re.sub(r"\s+", " ", match.group(1)).strip(" \t\r\n.,:;\"'")
-            if candidate:
-                extracted_title = candidate
-                break
-
-        if not extracted_title:
-            first_sentence = re.split(r"(?<=[.?!])\s+", prompt_text, maxsplit=1)[0]
-            candidate = re.sub(r"\s+", " ", first_sentence).strip(" \t\r\n")
-            extracted_title = candidate or None
-
-        if not extracted_title:
-            return None
-
-        title = extracted_title[:120].rstrip()
-        if title and title[0].islower():
-            title = title[0].upper() + title[1:]
-
-        payload: dict[str, Any] = {
-            "title": title,
-            "description": prompt_text[:4000],
-        }
-        if isinstance(assignee_concept_id, str) and assignee_concept_id.strip():
-            payload["assignee_concept_id"] = assignee_concept_id.strip()
-        return payload
-
     def _infer_missing_tool_call_retry_tool_calls(
         self,
         augmented_context: Sequence[Mapping[str, Any]],
@@ -23767,12 +23643,13 @@ class InternalMCPChatOrchestrator:
         required_url_extraction_url: str | None = None,
         tool_invocations: Sequence[Mapping[str, Any]] | None = None,
         invoked_tool_names: Sequence[str] | None = None,
+        user_concept_id: str | None = None,
     ) -> list[_ToolCallRequest] | None:
-        """Best-effort deterministic recovery for common missing-tool-call cases.
+        """Replay only structurally explicit retry calls.
 
-        This is intentionally narrow: we force write tools only when the prompt
-        itself establishes a deterministic required-effect path, such as
-        explicit file-copy concept materialisation from a canonical local identifier.
+        This path is intentionally narrow: it may reuse exact identifiers,
+        prior structured queries, or prior authoritative ontology results, but
+        it must not fabricate new semantic payloads from prompt or context prose.
         """
 
         last_user_text: str | None = None
@@ -23801,6 +23678,11 @@ class InternalMCPChatOrchestrator:
             context_messages=augmented_context,
             missing_required_tools=(
                 list(missing_required_tools) if missing_required_tools else []
+            ),
+            user_concept_id=(
+                str(user_concept_id).strip()
+                if isinstance(user_concept_id, str) and str(user_concept_id).strip()
+                else None
             ),
             tool_invocations=tool_invocations,
             missing_required_fetch_concept_ids=(
