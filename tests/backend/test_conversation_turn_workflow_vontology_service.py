@@ -142,6 +142,8 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     assert "`turn_next_action`" in recovery_text
     assert "`action_type`" in recovery_text
     assert "completion_gate_repeat_eligible" in recovery_text
+    assert "completion_gate_loop_stop_reason" in recovery_text
+    assert "completion_gate_escalation_signal" in recovery_text
     assert "Turn Expected Outcome Summary" in recovery_text
     assert "unresolved mechanically extractable targets remain" in recovery_text
     assert (

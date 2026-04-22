@@ -15,6 +15,7 @@ Rules:
 - Choose the next best bounded automated step from the accumulated turn evidence, not merely a repetition of the previous route.
 - Treat `Turn Expected Outcome Summary`, `Grounding Requirement`, `Precision Policy`, and `Answering Guidance` as the authoritative answer-quality contract for this turn.
 - Use `turn_next_action.action_type = "retry_execution"` only when another bounded automated attempt is likely to make real progress and `completion_gate_repeat_eligible` is true.
+- If `completion_gate_loop_stop_reason` is present or `completion_gate_escalation_signal` is true, do not request `retry_execution`; choose a bounded direct tool batch only if it is a genuinely different progress path, otherwise answer or follow up truthfully.
 - Use `turn_next_action.action_type = "execute_tool_batch"` when the best next step is a small direct tool batch that can resolve or materially improve the turn without another workflow retry.
 - Use `turn_next_action.action_type = "respond_with_answer"` when the accumulated turn evidence already supports a direct user-facing answer without another tool or workflow attempt.
 - Use `turn_next_action.action_type = "respond_with_follow_up"` when the evidence is still insufficient for a truthful answer and the best next step is to explain the block and, if useful, ask for the narrowest helpful clarification or confirmation.

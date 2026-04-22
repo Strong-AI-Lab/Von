@@ -9602,6 +9602,9 @@ class InternalMCPChatOrchestrator:
             and (terminal_non_repeatable or repeat_stop_reason)
         )
         escalation_reason = repeat_stop_reason if escalation_signal else None
+        recovery_repeat_eligible = bool(
+            repeat_eligible and not terminal_non_repeatable and repeat_stop_reason is None
+        )
 
         completion_gate_evidence_payload: dict[str, Any] = dict(record_evidence_payload)
         completion_gate_evidence_payload.update(
@@ -9610,7 +9613,7 @@ class InternalMCPChatOrchestrator:
                 "decision_reason": decision_reason,
                 "safe_to_claim_completion": safe_to_claim_completion,
                 "requires_follow_up": requires_follow_up,
-                "repeat_eligible": repeat_eligible,
+                "repeat_eligible": recovery_repeat_eligible,
                 "blocking_effect_ids": list(blocking_effect_ids),
                 "blocking_failure_codes": list(blocking_failure_codes),
                 "unresolved_preconditions": unresolved_preconditions,
@@ -9899,7 +9902,7 @@ class InternalMCPChatOrchestrator:
                 "completion_gate_blocking_failure_codes": list(blocking_failure_codes),
                 "completion_gate_safe_to_claim_completion": safe_to_claim_completion,
                 "completion_gate_requires_follow_up": requires_follow_up,
-                "completion_gate_repeat_eligible": repeat_eligible,
+                "completion_gate_repeat_eligible": recovery_repeat_eligible,
                 "completion_gate_unresolved_preconditions": unresolved_preconditions,
                 "completion_gate_evidence_payload": completion_gate_evidence_payload,
                 "completion_gate_terminal_outcome": terminal_outcome,

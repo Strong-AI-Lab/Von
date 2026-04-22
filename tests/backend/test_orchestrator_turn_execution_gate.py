@@ -1353,6 +1353,7 @@ def test_turn_completion_gate_requests_repeat_when_budget_available() -> None:
     result = orchestrator._action_turn_execution_completion_gate(request)
     assert result.ok
     assert result.outputs.get("completion_gate_repeat_iteration") is True
+    assert result.outputs.get("completion_gate_repeat_eligible") is True
     assert result.outputs.get("completion_gate_loop_attempts") == 1
     assert result.outputs.get("completion_gate_loop_stop_reason") is None
     assert result.outputs.get("completion_gate_requires_follow_up") is True
@@ -1495,6 +1496,7 @@ def test_turn_completion_gate_stops_repeat_when_attempt_budget_exhausted() -> No
     result = orchestrator._action_turn_execution_completion_gate(request)
     assert result.ok
     assert result.outputs.get("completion_gate_repeat_iteration") is False
+    assert result.outputs.get("completion_gate_repeat_eligible") is False
     assert (
         result.outputs.get("completion_gate_loop_stop_reason")
         == "attempt_budget_exhausted"
@@ -1537,6 +1539,7 @@ def test_turn_completion_gate_stops_repeat_when_no_progress_guard_triggers() -> 
     result = orchestrator._action_turn_execution_completion_gate(request)
     assert result.ok
     assert result.outputs.get("completion_gate_repeat_iteration") is False
+    assert result.outputs.get("completion_gate_repeat_eligible") is False
     assert (
         result.outputs.get("completion_gate_loop_stop_reason")
         == "no_progress_guard_triggered"
@@ -1585,6 +1588,7 @@ def test_turn_completion_gate_stops_repeat_when_stall_latency_budget_exhausted()
     result = orchestrator._action_turn_execution_completion_gate(request)
     assert result.ok
     assert result.outputs.get("completion_gate_repeat_iteration") is False
+    assert result.outputs.get("completion_gate_repeat_eligible") is False
     assert (
         result.outputs.get("completion_gate_loop_stop_reason")
         == "stall_latency_budget_exhausted"
