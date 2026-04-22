@@ -25,6 +25,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import src.backend.integrations.internal_mcp.orchestrator as orchestrator_module
 from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
     ProgressTracker,
@@ -36,6 +37,7 @@ from src.backend.services.paper_representation_workflow_vontology_service import
     ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
     bootstrap_canonical_paper_representation_workflows,
 )
+from src.backend.services.tool_metadata_service import ToolDispatchSurfaceMetadata
 from src.backend.services.workflow_discovery_service import (
     invalidate_workflow_discovery_executability_caches,
 )
@@ -92,6 +94,18 @@ def _build_structured_turn_contract_payload(
     if tools:
         contract["required_tools"] = tools
     return build_turn_expected_outcome_boundary_payload(contract)
+
+
+def _dispatch_surface(
+    surface_family: str,
+    *,
+    external_surface: bool = False,
+) -> ToolDispatchSurfaceMetadata:
+    return ToolDispatchSurfaceMetadata(
+        surface_family=surface_family,
+        evidence_surface_family=surface_family,
+        external_surface=external_surface,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -6319,6 +6333,17 @@ def test_multi_surface_turn_contract_overrides_selected_custom_workflow_to_tool_
             "jira_search": {"category": "read"},
         },
     )
+    dispatch_metadata = {
+        "search_knowledge_base": _dispatch_surface("knowledge_base"),
+        "search_concepts": _dispatch_surface("knowledge_base"),
+        "search_arxiv": _dispatch_surface("arxiv", external_surface=True),
+        "jira_search": _dispatch_surface("jira", external_surface=True),
+    }
+    monkeypatch.setattr(
+        orchestrator_module,
+        "get_tool_dispatch_surface_metadata",
+        lambda tool_name: dispatch_metadata.get(str(tool_name).strip().lower()),
+    )
 
     execute_calls: list[str] = []
 
@@ -6527,6 +6552,17 @@ def test_multi_surface_turn_contract_records_satisfied_tool_pipeline_dispatch_ch
             "jira_search": {"category": "read"},
         },
     )
+    dispatch_metadata = {
+        "search_knowledge_base": _dispatch_surface("knowledge_base"),
+        "search_concepts": _dispatch_surface("knowledge_base"),
+        "search_arxiv": _dispatch_surface("arxiv", external_surface=True),
+        "jira_search": _dispatch_surface("jira", external_surface=True),
+    }
+    monkeypatch.setattr(
+        orchestrator_module,
+        "get_tool_dispatch_surface_metadata",
+        lambda tool_name: dispatch_metadata.get(str(tool_name).strip().lower()),
+    )
 
     execute_calls: list[str] = []
 
@@ -6660,6 +6696,145 @@ def test_multi_surface_turn_contract_records_satisfied_tool_pipeline_dispatch_ch
     assert "satisfied the multi-surface turn contract" in str(
         prepare_step_entry.get("result_summary") or ""
     ).lower()
+
+
+def test_turn_contract_dispatch_preflight_outcome_tracks_dispatch_surface_metadata(
+    monkeypatch,
+):
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    selected_workflow_id = "#V#concept_search_instance_retrieval_workflow"
+    structured_contract = _build_structured_turn_contract_payload(
+        summary="Retrieve represented concept evidence and linked Jira issues.",
+        grounding_requirement="Ground the answer in represented concepts and Jira data.",
+        selector_guidance="Use KB retrieval and Jira retrieval.",
+        required_tools=(
+            "search_knowledge_base",
+            "jira_search",
+        ),
+    )
+
+    _register_terminal_custom_workflow(
+        orchestrator,
+        workflow_id=selected_workflow_id,
+        purpose="Inspect represented concepts and linked work items.",
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_load_base_system_prompt_from_vontology",
+        lambda **_kwargs: ("You are Von.", "#V#test_base_system_prompt"),
+    )
+    monkeypatch.setattr(
+        orchestrator._gateway,
+        "describe_methods",
+        lambda: {
+            "search_knowledge_base": {"category": "read"},
+            "jira_search": {"category": "read"},
+        },
+    )
+    dispatch_metadata = {
+        "search_knowledge_base": _dispatch_surface("knowledge_base"),
+        "jira_search": _dispatch_surface("jira", external_surface=False),
+    }
+    monkeypatch.setattr(
+        orchestrator_module,
+        "get_tool_dispatch_surface_metadata",
+        lambda tool_name: dispatch_metadata.get(str(tool_name).strip().lower()),
+    )
+
+    execute_calls: list[str] = []
+
+    def _execute_workflow(workflow_id: str, **_kwargs: Any):
+        execute_calls.append(workflow_id)
+        if workflow_id != selected_workflow_id:
+            raise AssertionError(f"Unexpected workflow execution: {workflow_id}")
+        return SimpleNamespace(
+            data={
+                "final_response": "Custom workflow stayed selected.",
+                "tool_messages": [],
+                "invocations": [],
+                "iteration_count": 1,
+            },
+            final_state="complete",
+            completed=True,
+        )
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
+
+    result = orchestrator.run(
+        prompt="Summarise my represented concept notes and linked Jira issues.",
+        context=[],
+        llm_client=_CapturingLLM(
+            [
+                json.dumps(
+                    {
+                        "workflow_id": selected_workflow_id,
+                        "confidence": 0.95,
+                        "reasoning": "The specialised represented-retrieval workflow fits best.",
+                    }
+                )
+            ]
+        ),
+        model=None,
+        user_namespace="#V#user",
+        workflow_discovery_result={
+            "matches": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Concept Search Instance Retrieval Workflow",
+                    "description": "Retrieve represented concepts and linked work items.",
+                    "routing_eligible": True,
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "candidate_source": "workflow_discovery",
+                    "relevance_score": 0.99,
+                    "confidence_score": 0.99,
+                }
+            ],
+            "candidates": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Concept Search Instance Retrieval Workflow",
+                    "description": "Retrieve represented concepts and linked work items.",
+                    "routing_eligible": True,
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "candidate_source": "workflow_discovery",
+                    "relevance_score": 0.99,
+                    "confidence_score": 0.99,
+                }
+            ],
+            "match_count": 1,
+            **structured_contract,
+        },
+    )
+
+    assert execute_calls == [selected_workflow_id]
+    assert result.workflow_routing is not None
+    assert result.workflow_routing.workflow_id == selected_workflow_id
+    assert result.workflow_routing.verdict == "rag_selected"
+    contract_check_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "workflow_dispatch_turn_contract_check"
+        ),
+        None,
+    )
+    assert contract_check_entry is not None
+    assert contract_check_entry.get("status") == "no_external_surface_requirement"
+    assert contract_check_entry.get("required_surface_families") == [
+        "knowledge_base",
+        "jira",
+    ]
+    assert contract_check_entry.get("external_surface_families") == []
+    assert not any(
+        isinstance(entry, dict)
+        and entry.get("type") == "workflow_selector_override"
+        and entry.get("reason")
+        == "selected_custom_workflow_cannot_satisfy_multi_surface_turn_contract"
+        for entry in result.aux_llm_calls
+    )
 
 
 def test_url_read_prompt_stays_selector_owned_without_python_url_preselection(

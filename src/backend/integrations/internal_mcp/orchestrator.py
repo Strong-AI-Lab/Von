@@ -145,6 +145,7 @@ from src.backend.services.namespace_service import derive_actor_context_from_nam
 
 # Tool metadata service for Vontology-driven tool display (JVNAUTOSCI-1073)
 from src.backend.services.tool_metadata_service import (
+    get_tool_dispatch_surface_metadata,
     get_tool_family,
     get_tool_metadata,
     get_tool_planner_hint,
@@ -12241,54 +12242,43 @@ class InternalMCPChatOrchestrator:
         *,
         required_tools: Sequence[str],
     ) -> tuple[str, ...]:
-        family_membership = {
-            "knowledge_base": {
-                "search_knowledge_base",
-                "search_concepts",
-                "find_relations_with_argument",
-                "get_related_concepts",
-                "get_text_relations_summary",
-                "fetch_concept",
-                "list_papers",
-                "resolve_concept_by_name",
-            },
-            "web": {
-                "search_web",
-                "extract_url",
-                "resilient_extract_url",
-            },
-            "arxiv": {
-                "search_arxiv",
-                "download_paper",
-            },
-            "jira": {
-                "jira_search",
-                "jira_get_issue",
-            },
-            "task": {
-                "task_create",
-                "task_create_subtask",
-                "task_search",
-                "task_list",
-                "list_my_tasks",
-                "task_update_status",
-                "task_assign",
-            },
-            "message": {
-                "message_create",
-                "message_list",
-            },
-        }
         ordered_families: list[str] = []
         seen: set[str] = set()
         for tool_name in required_tools:
             lowered = str(tool_name or "").strip().lower()
             if not lowered:
                 continue
-            for family_name, members in family_membership.items():
-                if lowered in members and family_name not in seen:
-                    seen.add(family_name)
-                    ordered_families.append(family_name)
+            surface_metadata = get_tool_dispatch_surface_metadata(lowered)
+            if (
+                surface_metadata is None
+                or surface_metadata.surface_family in seen
+            ):
+                continue
+            seen.add(surface_metadata.surface_family)
+            ordered_families.append(surface_metadata.surface_family)
+        return tuple(ordered_families)
+
+    @classmethod
+    def _infer_required_external_surface_families(
+        cls,
+        *,
+        required_tools: Sequence[str],
+    ) -> tuple[str, ...]:
+        ordered_families: list[str] = []
+        seen: set[str] = set()
+        for tool_name in required_tools:
+            lowered = str(tool_name or "").strip().lower()
+            if not lowered:
+                continue
+            surface_metadata = get_tool_dispatch_surface_metadata(lowered)
+            if (
+                surface_metadata is None
+                or not surface_metadata.external_surface
+                or surface_metadata.surface_family in seen
+            ):
+                continue
+            seen.add(surface_metadata.surface_family)
+            ordered_families.append(surface_metadata.surface_family)
         return tuple(ordered_families)
 
     @classmethod
@@ -30152,10 +30142,10 @@ class InternalMCPChatOrchestrator:
                 required_tools=routing_contract_required_tools
             )
         )
-        routing_contract_external_surface_families = tuple(
-            family_name
-            for family_name in routing_contract_required_tool_surface_families
-            if family_name in {"web", "arxiv", "jira"}
+        routing_contract_external_surface_families = (
+            self._infer_required_external_surface_families(
+                required_tools=routing_contract_required_tools
+            )
         )
         if isinstance(aux_llm_calls, list):
             try:

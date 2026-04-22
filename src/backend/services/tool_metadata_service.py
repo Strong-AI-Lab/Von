@@ -47,6 +47,9 @@ class ToolMetadata:
     description: str | None = None
     category: str | None = None  # vontology, arxiv, gmail, jira, task, search, etc.
     planner_hint: str | None = None
+    dispatch_surface_family: str | None = None
+    evidence_surface_family: str | None = None
+    external_surface: bool | None = None
 
     @property
     def is_high_salience(self) -> bool:
@@ -55,6 +58,59 @@ class ToolMetadata:
     @property
     def is_visible(self) -> bool:
         return self.salience != "none"
+
+
+@dataclass(frozen=True)
+class ToolDispatchSurfaceMetadata:
+    """Dispatch-preflight surface metadata derived from authoritative tool metadata."""
+
+    surface_family: str
+    evidence_surface_family: str
+    external_surface: bool = False
+
+
+_DEFAULT_DISPATCH_SURFACE_METADATA: dict[str, ToolDispatchSurfaceMetadata] = {
+    "vontology": ToolDispatchSurfaceMetadata(
+        surface_family="knowledge_base",
+        evidence_surface_family="knowledge_base",
+        external_surface=False,
+    ),
+    "rag": ToolDispatchSurfaceMetadata(
+        surface_family="knowledge_base",
+        evidence_surface_family="knowledge_base",
+        external_surface=False,
+    ),
+    "search": ToolDispatchSurfaceMetadata(
+        surface_family="web",
+        evidence_surface_family="web",
+        external_surface=True,
+    ),
+    "arxiv": ToolDispatchSurfaceMetadata(
+        surface_family="arxiv",
+        evidence_surface_family="arxiv",
+        external_surface=True,
+    ),
+    "jira": ToolDispatchSurfaceMetadata(
+        surface_family="jira",
+        evidence_surface_family="jira",
+        external_surface=True,
+    ),
+    "task": ToolDispatchSurfaceMetadata(
+        surface_family="task",
+        evidence_surface_family="task",
+        external_surface=False,
+    ),
+    "conversation": ToolDispatchSurfaceMetadata(
+        surface_family="message",
+        evidence_surface_family="message",
+        external_surface=False,
+    ),
+    "message": ToolDispatchSurfaceMetadata(
+        surface_family="message",
+        evidence_surface_family="message",
+        external_surface=False,
+    ),
+}
 
 
 # Default metadata for tools not yet in Vontology (backward compatibility)
@@ -69,6 +125,9 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "salience": "high",
         "category": "vontology",
         "display_template": "Found {count} concepts for {query}",
+        "dispatch_surface_family": "knowledge_base",
+        "evidence_surface_family": "knowledge_base",
+        "external_surface": False,
     },
     "add_relationship": {
         "salience": "high",
@@ -120,21 +179,33 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "salience": "high",
         "category": "task",
         "display_template": "Created task: {title}",
+        "dispatch_surface_family": "task",
+        "evidence_surface_family": "task",
+        "external_surface": False,
     },
     "task_update_status": {
         "salience": "high",
         "category": "task",
         "display_template": "Status → {status}",
+        "dispatch_surface_family": "task",
+        "evidence_surface_family": "task",
+        "external_surface": False,
     },
     "task_assign": {
         "salience": "high",
         "category": "task",
         "display_template": "Assigned to: {assignee}",
+        "dispatch_surface_family": "task",
+        "evidence_surface_family": "task",
+        "external_surface": False,
     },
     "task_delete": {
         "salience": "high",
         "category": "task",
         "display_template": "Deleted task: {task_id}",
+        "dispatch_surface_family": "task",
+        "evidence_surface_family": "task",
+        "external_surface": False,
     },
     "shared_conversation_create_session": {
         "salience": "high",
@@ -202,6 +273,9 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "salience": "high",
         "category": "arxiv",
         "display_template": "Found {count} papers",
+        "dispatch_surface_family": "arxiv",
+        "evidence_surface_family": "arxiv",
+        "external_surface": True,
         "planner_hint": (
             "Use for recent or current arXiv literature retrieval. Query with the "
             "topic, person, or research thread rather than a generic placeholder."
@@ -211,6 +285,9 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "salience": "high",
         "category": "arxiv",
         "display_template": "Downloaded: {arxiv_id}",
+        "dispatch_surface_family": "arxiv",
+        "evidence_surface_family": "arxiv",
+        "external_surface": True,
     },
     "finalise_cached_paper": {
         "salience": "high",
@@ -258,6 +335,9 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "salience": "high",
         "category": "search",
         "display_template": "{count} web results",
+        "dispatch_surface_family": "web",
+        "evidence_surface_family": "web",
+        "external_surface": True,
         "planner_hint": (
             "Use for current public-web information or recent external developments. "
             "Query with the concrete topic or entity, not a vague placeholder."
@@ -267,17 +347,26 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "salience": "high",
         "category": "search",
         "display_template": "Extracted: {url}",
+        "dispatch_surface_family": "web",
+        "evidence_surface_family": "web",
+        "external_surface": True,
     },
     "resilient_extract_url": {
         "salience": "high",
         "category": "search",
         "display_template": "Extracted: {url}",
+        "dispatch_surface_family": "web",
+        "evidence_surface_family": "web",
+        "external_surface": True,
     },
     # MEDIUM salience - show tool name with brief info
     "jira_search": {
         "salience": "medium",
         "category": "jira",
         "display_template": "Found {count} issues",
+        "dispatch_surface_family": "jira",
+        "evidence_surface_family": "jira",
+        "external_surface": True,
         "planner_hint": (
             "Use for Jira issue retrieval. Prefer this over general task tools when "
             "the user asks about Jira issues or linked Jira tasks."
@@ -287,6 +376,9 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "salience": "medium",
         "category": "jira",
         "display_template": "Issue: {key}",
+        "dispatch_surface_family": "jira",
+        "evidence_surface_family": "jira",
+        "external_surface": True,
     },
     "jira_get_project_issue_types": {
         "salience": "medium",
@@ -367,6 +459,9 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "salience": "medium",
         "category": "vontology",
         "display_template": "Concept: {concept_id}",
+        "dispatch_surface_family": "knowledge_base",
+        "evidence_surface_family": "knowledge_base",
+        "external_surface": False,
         "planner_hint": (
             "Use when you already know the concept ID and need grounded represented "
             "facts, predicates, or relationships for that specific concept."
@@ -376,6 +471,9 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "salience": "medium",
         "category": "vontology",
         "display_template": "{count} relations",
+        "dispatch_surface_family": "knowledge_base",
+        "evidence_surface_family": "knowledge_base",
+        "external_surface": False,
         "planner_hint": (
             "Use for entity-relative relationship lookup after resolving the anchor "
             "concept. This is relation-bearing evidence, not mere inventory."
@@ -390,6 +488,9 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "salience": "medium",
         "category": "vontology",
         "display_template": "Resolved: {name}",
+        "dispatch_surface_family": "knowledge_base",
+        "evidence_surface_family": "knowledge_base",
+        "external_surface": False,
         "planner_hint": (
             "Use to resolve a named person, project, organisation, or other entity "
             "to a represented concept before relation lookup."
@@ -414,6 +515,9 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "salience": "medium",
         "category": "arxiv",
         "display_template": "{count} papers",
+        "dispatch_surface_family": "knowledge_base",
+        "evidence_surface_family": "knowledge_base",
+        "external_surface": False,
         "planner_hint": (
             "Inventory only. Use for cached/stored paper listings, not as evidence "
             "of authorship, ownership, provenance, affiliation, or any entity "
@@ -439,6 +543,9 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "salience": "medium",
         "category": "search",
         "display_template": "{count} KB matches",
+        "dispatch_surface_family": "knowledge_base",
+        "evidence_surface_family": "knowledge_base",
+        "external_surface": False,
         "planner_hint": (
             "Use for represented-knowledge lookup over indexed content in the user's "
             "namespace, especially when answering questions about an entity and its "
@@ -449,15 +556,45 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "salience": "medium",
         "category": "task",
         "display_template": "Task: {title}",
+        "dispatch_surface_family": "task",
+        "evidence_surface_family": "task",
+        "external_surface": False,
     },
     "task_list": {
         "salience": "medium",
         "category": "task",
         "display_template": "{count} tasks",
+        "dispatch_surface_family": "task",
+        "evidence_surface_family": "task",
+        "external_surface": False,
         "planner_hint": (
             "Use for Von internal tasks and to-dos. This is not Jira issue search "
             "and should not be used for Jira issues or linked Jira tasks."
         ),
+    },
+    "task_search": {
+        "salience": "medium",
+        "category": "task",
+        "display_template": "{count} tasks",
+        "dispatch_surface_family": "task",
+        "evidence_surface_family": "task",
+        "external_surface": False,
+    },
+    "task_create_subtask": {
+        "salience": "medium",
+        "category": "task",
+        "display_template": "Created subtask: {title}",
+        "dispatch_surface_family": "task",
+        "evidence_surface_family": "task",
+        "external_surface": False,
+    },
+    "list_my_tasks": {
+        "salience": "medium",
+        "category": "task",
+        "display_template": "{count} tasks",
+        "dispatch_surface_family": "task",
+        "evidence_surface_family": "task",
+        "external_surface": False,
     },
     "extract_annotations": {
         "salience": "medium",
@@ -652,6 +789,9 @@ def _load_from_vontology() -> dict[str, ToolMetadata]:
                 description=description,
                 category=category,
                 planner_hint=attrs.get("planner_hint"),
+                dispatch_surface_family=attrs.get("dispatch_surface_family"),
+                evidence_surface_family=attrs.get("evidence_surface_family"),
+                external_surface=attrs.get("external_surface"),
             )
 
         logger.debug(f"Loaded {len(result)} tool metadata entries from Vontology")
@@ -689,6 +829,9 @@ def _refresh_cache_if_needed() -> None:
                 display_template=defaults.get("display_template"),
                 category=defaults.get("category"),
                 planner_hint=defaults.get("planner_hint"),
+                dispatch_surface_family=defaults.get("dispatch_surface_family"),
+                evidence_surface_family=defaults.get("evidence_surface_family"),
+                external_surface=defaults.get("external_surface"),
             )
 
         # Override with Vontology data while preserving useful default hints when
@@ -706,6 +849,19 @@ def _refresh_cache_if_needed() -> None:
                     description=metadata.description or default_metadata.description,
                     category=metadata.category or default_metadata.category,
                     planner_hint=metadata.planner_hint or default_metadata.planner_hint,
+                    dispatch_surface_family=(
+                        metadata.dispatch_surface_family
+                        or default_metadata.dispatch_surface_family
+                    ),
+                    evidence_surface_family=(
+                        metadata.evidence_surface_family
+                        or default_metadata.evidence_surface_family
+                    ),
+                    external_surface=(
+                        metadata.external_surface
+                        if metadata.external_surface is not None
+                        else default_metadata.external_surface
+                    ),
                 )
             else:
                 new_cache[tool_name] = metadata
@@ -788,6 +944,95 @@ def get_tool_family(tool_name: str) -> str:
         return family
 
     return "unknown"
+
+
+def _normalise_dispatch_surface_family(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    family = value.strip().lower()
+    return family or None
+
+
+def _coerce_optional_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes"}:
+            return True
+        if lowered in {"false", "0", "no"}:
+            return False
+    return None
+
+
+def _resolve_registry_contract(tool_name: str) -> Any | None:
+    try:
+        from src.backend.integrations.internal_mcp.tool_contract_registry import (
+            get_canonical_tool_registry,
+        )
+
+        return get_canonical_tool_registry().get(tool_name)
+    except Exception:
+        return None
+
+
+def get_tool_dispatch_surface_metadata(
+    tool_name: str,
+) -> ToolDispatchSurfaceMetadata | None:
+    """Resolve dispatch-preflight surface metadata for a tool.
+
+    Authority order:
+    1. Explicit Vontology/default tool metadata fields on the tool entry
+    2. Canonical contract registry family
+    3. Tool metadata category / contract category aliases
+    """
+
+    metadata = get_tool_metadata(tool_name)
+    explicit_surface = _normalise_dispatch_surface_family(
+        metadata.dispatch_surface_family
+    )
+    explicit_evidence = _normalise_dispatch_surface_family(
+        metadata.evidence_surface_family
+    )
+    explicit_external = _coerce_optional_bool(metadata.external_surface)
+
+    if explicit_surface:
+        default_surface_metadata = _DEFAULT_DISPATCH_SURFACE_METADATA.get(explicit_surface)
+        return ToolDispatchSurfaceMetadata(
+            surface_family=explicit_surface,
+            evidence_surface_family=(
+                explicit_evidence
+                or (
+                    default_surface_metadata.evidence_surface_family
+                    if isinstance(default_surface_metadata, ToolDispatchSurfaceMetadata)
+                    else explicit_surface
+                )
+            ),
+            external_surface=(
+                explicit_external
+                if explicit_external is not None
+                else (
+                    default_surface_metadata.external_surface
+                    if isinstance(default_surface_metadata, ToolDispatchSurfaceMetadata)
+                    else False
+                )
+            ),
+        )
+
+    contract = _resolve_registry_contract(tool_name)
+    candidate_labels = (
+        _normalise_dispatch_surface_family(getattr(contract, "family", None)),
+        _normalise_dispatch_surface_family(metadata.category),
+        _normalise_dispatch_surface_family(getattr(contract, "category", None)),
+    )
+    for label in candidate_labels:
+        if label is None or label in _NON_FAMILY_TOOL_CATEGORIES:
+            continue
+        surface_metadata = _DEFAULT_DISPATCH_SURFACE_METADATA.get(label)
+        if isinstance(surface_metadata, ToolDispatchSurfaceMetadata):
+            return surface_metadata
+
+    return None
 
 
 def invalidate_cache() -> None:

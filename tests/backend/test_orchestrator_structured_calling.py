@@ -16,6 +16,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import src.backend.integrations.internal_mcp.orchestrator as orchestrator_module
 from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
     _MissingToolCallDetectorSpec,
@@ -27,6 +28,7 @@ from src.backend.languagemodels.structured_tool_calling.types import (
     ToolCall,
     ToolDefinition,
 )
+from src.backend.services.tool_metadata_service import ToolDispatchSurfaceMetadata
 from src.backend.workflows.action_registry import WorkflowEnvironment
 from src.backend.workflows.definitions import TOOL_CALLING_WORKFLOW_ID
 from src.backend.workflows.workflow_selector import (
@@ -77,6 +79,18 @@ class MockLLMClientWithTools:
                 )
             ],
         )
+
+
+def _dispatch_surface(
+    surface_family: str,
+    *,
+    external_surface: bool = False,
+) -> ToolDispatchSurfaceMetadata:
+    return ToolDispatchSurfaceMetadata(
+        surface_family=surface_family,
+        evidence_surface_family=surface_family,
+        external_surface=external_surface,
+    )
 
 
 class MockLLMClientLegacyOnly:
@@ -1448,7 +1462,20 @@ def test_turn_contract_requirement_augmentation_respects_allowed_workflow_tools(
     assert augmented.missing_tools == augmented.required_tools
 
 
-def test_turn_contract_required_relation_summary_tools_count_as_knowledge_base_surface():
+def test_turn_contract_required_relation_summary_tools_count_as_metadata_driven_knowledge_base_surface(
+    monkeypatch,
+):
+    dispatch_metadata = {
+        "search_concepts": _dispatch_surface("knowledge_base"),
+        "get_related_concepts": _dispatch_surface("knowledge_base"),
+        "get_text_relations_summary": _dispatch_surface("knowledge_base"),
+    }
+    monkeypatch.setattr(
+        orchestrator_module,
+        "get_tool_dispatch_surface_metadata",
+        lambda tool_name: dispatch_metadata.get(str(tool_name).strip().lower()),
+    )
+
     families = InternalMCPChatOrchestrator._infer_required_tool_surface_families(
         required_tools=(
             "search_concepts",
@@ -1458,6 +1485,38 @@ def test_turn_contract_required_relation_summary_tools_count_as_knowledge_base_s
     )
 
     assert families == ("knowledge_base",)
+
+
+def test_turn_contract_required_surface_families_accept_new_metadata_driven_external_surface(
+    monkeypatch,
+):
+    dispatch_metadata = {
+        "search_knowledge_base": _dispatch_surface("knowledge_base"),
+        "search_patents": _dispatch_surface("patents", external_surface=True),
+    }
+    monkeypatch.setattr(
+        orchestrator_module,
+        "get_tool_dispatch_surface_metadata",
+        lambda tool_name: dispatch_metadata.get(str(tool_name).strip().lower()),
+    )
+
+    families = InternalMCPChatOrchestrator._infer_required_tool_surface_families(
+        required_tools=(
+            "search_knowledge_base",
+            "search_patents",
+        )
+    )
+    external_families = (
+        InternalMCPChatOrchestrator._infer_required_external_surface_families(
+            required_tools=(
+                "search_knowledge_base",
+                "search_patents",
+            )
+        )
+    )
+
+    assert families == ("knowledge_base", "patents")
+    assert external_families == ("patents",)
 
 
 def test_structured_candidate_resolver_suppresses_general_task_family_for_jira_task_prompt():
