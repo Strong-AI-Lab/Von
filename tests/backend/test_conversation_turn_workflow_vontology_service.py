@@ -92,6 +92,10 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     assert "`answering_guidance`" in expected_outcome_text
     assert "`required_tools`" in expected_outcome_text
     assert "exact internal tool IDs" in expected_outcome_text
+    assert "prefer ontology-native predicate narrowing" in expected_outcome_text
+    assert "`get_predicate_incidence` and then `find_relations_with_argument`" in (
+        expected_outcome_text
+    )
 
     selector_rows = get_texts_for_concept(
         SELECTOR_PROMPT_CONCEPT_ID,
@@ -107,6 +111,8 @@ def test_conversation_turn_prompt_support_seeds_content_from_repo_asset(
     assert "Do not assume the current request is standalone" in selector_text
     assert "Canonical valid output examples" in selector_text
     assert "Invalid outputs. Never do any of these" in selector_text
+    assert "authenticated self-relative entity-information question" in selector_text
+    assert "#V#entity_information_retrieval_workflow" in selector_text
     assert '"workflow_id":"#V#tool_calling_workflow"' in selector_text
     assert '"tool_name":"vontology_concept_search"' in selector_text
 

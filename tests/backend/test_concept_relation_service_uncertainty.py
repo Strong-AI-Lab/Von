@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from flask import Flask, session
 
 
 @pytest.fixture(autouse=True)
@@ -189,6 +190,75 @@ def test_get_predicate_incidence_entity_mode_groups_distinct_predicates() -> Non
     assert rows["#V#task_assigned_to"]["grounding_count"] == 3
 
 
+def test_relation_previews_and_predicate_incidence_groundings_include_type_ids() -> None:
+    from src.backend.db.repositories.concepts_repository import ConceptsRepository
+    from src.backend.services.concept_relation_service import (
+        find_relations_with_argument,
+        get_predicate_incidence,
+    )
+
+    ConceptsRepository.insert_one(
+        {
+            "concept_id": "#V#michael_witbrock",
+            "relationships": {
+                "#V#author_of": ["#V#paper_one", "#V#diary_one"],
+            },
+        }
+    )
+    ConceptsRepository.insert_one(
+        {
+            "concept_id": "#V#paper_one",
+            "relationships": {"is_an_instance_of": ["#V#scholarly_article"]},
+        }
+    )
+    ConceptsRepository.insert_one(
+        {
+            "concept_id": "#V#diary_one",
+            "relationships": {
+                "is_an_instance_of": ["#V#diary_entry_about_michael_witbrocks_work"]
+            },
+        }
+    )
+
+    relation_payload = find_relations_with_argument(
+        "#V#michael_witbrock",
+        predicate_filter=["#V#author_of"],
+        argument_index="subject",
+        relation_kind="binary",
+    )
+    hits = relation_payload.get("hits") or []
+    paper_hit = next(
+        hit for hit in hits if (hit.get("target_value") or "").strip() == "#V#paper_one"
+    )
+    diary_hit = next(
+        hit for hit in hits if (hit.get("target_value") or "").strip() == "#V#diary_one"
+    )
+    assert paper_hit["target_concept_preview"]["type_ids"] == ["#V#scholarly_article"]
+    assert diary_hit["target_concept_preview"]["type_ids"] == [
+        "#V#diary_entry_about_michael_witbrocks_work"
+    ]
+
+    incidence_payload = get_predicate_incidence(
+        concept_id="#V#michael_witbrock",
+        argument_index="subject",
+        relation_kind="binary",
+    )
+    rows = incidence_payload.get("predicates") or []
+    author_row = next(
+        row for row in rows if row.get("predicate_concept_id") == "#V#author_of"
+    )
+    sample_groundings = author_row.get("sample_groundings") or []
+    grounded_type_ids = {
+        grounding.get("concept_id"): grounding.get("type_ids")
+        for grounding in sample_groundings
+        if isinstance(grounding, dict)
+    }
+    assert grounded_type_ids["#V#paper_one"] == ["#V#scholarly_article"]
+    assert grounded_type_ids["#V#diary_one"] == [
+        "#V#diary_entry_about_michael_witbrocks_work"
+    ]
+
+
 def test_get_predicate_incidence_type_mode_counts_instances_and_groundings() -> None:
     from src.backend.db.repositories.concepts_repository import ConceptsRepository
     from src.backend.services.concept_relation_service import get_predicate_incidence
@@ -238,4 +308,72 @@ def test_get_predicate_incidence_type_mode_counts_instances_and_groundings() -> 
     assert rows["#V#has_phd_supervisor"]["relation_hit_count"] == 2
     assert rows["#V#has_phd_supervisor"]["grounding_count"] == 1
     assert rows["#V#has_phd_supervisor"]["grounded_instance_count"] == 2
+
+
+def test_subject_relation_retrieval_filters_hidden_targets_under_access_control() -> None:
+    from src.backend.db.repositories.concepts_repository import ConceptsRepository
+    from src.backend.services.concept_relation_service import (
+        find_relations_with_argument,
+        get_predicate_incidence,
+    )
+
+    ConceptsRepository.insert_one(
+        {
+            "concept_id": "#V#alice",
+            "relationships": {
+                "#V#author_of": ["#V#paper_public", "#V#paper_hidden"],
+            },
+        }
+    )
+    ConceptsRepository.insert_one(
+        {
+            "concept_id": "#V#paper_public",
+            "relationships": {
+                "is_an_instance_of": ["#V#scholarly_article", "#V#secret_type"]
+            },
+        }
+    )
+    ConceptsRepository.insert_one(
+        {
+            "concept_id": "#V#paper_hidden",
+            "relationships": {"specific_to_user": ["#V#other_user"]},
+        }
+    )
+    ConceptsRepository.insert_one({"concept_id": "#V#scholarly_article", "relationships": {}})
+    ConceptsRepository.insert_one(
+        {
+            "concept_id": "#V#secret_type",
+            "relationships": {"specific_to_user": ["#V#other_user"]},
+        }
+    )
+
+    app = Flask(__name__)
+    app.secret_key = "test"
+
+    with app.test_request_context("/"):
+        session["user_concept_id"] = "#V#alice"
+        session["user_email"] = "alice@example.test"
+
+        relation_payload = find_relations_with_argument(
+            "#V#alice",
+            predicate_filter=["#V#author_of"],
+            argument_index="subject",
+            relation_kind="binary",
+        )
+        hits = relation_payload.get("hits") or []
+
+        assert [hit.get("target_value") for hit in hits] == ["#V#paper_public"]
+        assert hits[0]["target_concept_preview"]["type_ids"] == ["#V#scholarly_article"]
+
+        incidence_payload = get_predicate_incidence(
+            concept_id="#V#alice",
+            argument_index="subject",
+            relation_kind="binary",
+        )
+        predicates = incidence_payload.get("predicates") or []
+        author_row = next(
+            row for row in predicates if row.get("predicate_concept_id") == "#V#author_of"
+        )
+        groundings = author_row.get("sample_groundings") or []
+        assert [grounding.get("concept_id") for grounding in groundings] == ["#V#paper_public"]
 

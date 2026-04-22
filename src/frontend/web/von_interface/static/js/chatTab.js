@@ -4683,6 +4683,12 @@ function buildThinkingWorkflowStageDiagnosticData(stageId, stageLabel, request) 
             : [];
         data.threshold = Number.isFinite(workflowDiscovery.threshold) ? Number(workflowDiscovery.threshold) : null;
         data.search_time_ms = Number.isFinite(workflowDiscovery.search_time_ms) ? Math.round(Number(workflowDiscovery.search_time_ms)) : null;
+        data.timeout_budget_seconds = Number.isFinite(workflowDiscovery.timeout_budget_seconds)
+            ? Number(workflowDiscovery.timeout_budget_seconds)
+            : null;
+        data.budget_exhausted = workflowDiscovery.budget_exhausted === true;
+        data.budget_exhaustion_stage = normaliseThinkingActivityString(workflowDiscovery.budget_exhaustion_stage) || null;
+        data.budget_exhaustion_detail = normaliseThinkingActivityString(workflowDiscovery.budget_exhaustion_detail) || null;
         data.namespace = normaliseThinkingActivityString(workflowDiscovery.namespace) || null;
         data.allow_non_executable = workflowDiscovery.allow_non_executable === true;
         data.match_count = getWorkflowDiscoveryMatchCount(workflowDiscovery);
@@ -4990,6 +4996,17 @@ function renderThinkingWorkflowStageDiagnosticDataHTML(data, workflowDiscovery =
             { label: 'Namespace', value: data.namespace },
             { label: 'Threshold', value: data.threshold },
             { label: 'Search time', value: Number.isFinite(data.search_time_ms) ? `${data.search_time_ms} ms` : '' },
+            {
+                label: 'Budget',
+                value: Number.isFinite(data.timeout_budget_seconds)
+                    ? `${data.timeout_budget_seconds.toFixed(3)} s`
+                    : ''
+            },
+            {
+                label: 'Budget exhausted',
+                value: data.budget_exhausted ? 'Yes' : 'No'
+            },
+            { label: 'Budget exhaustion stage', value: data.budget_exhaustion_stage },
             { label: 'Routing matches', value: data.match_count },
             { label: 'Candidates considered', value: data.candidate_count },
             { label: 'Allow non-executable', value: data.allow_non_executable },
@@ -5001,6 +5018,13 @@ function renderThinkingWorkflowStageDiagnosticDataHTML(data, workflowDiscovery =
         );
         sections.push(buildThinkingDiagnosticListHTML('Fallback queries', data.keyword_fallback_queries, { code: true }));
         sections.push(buildThinkingDiagnosticListHTML('Errors', data.errors));
+        if (data.budget_exhaustion_detail) {
+            sections.push(buildThinkingDiagnosticTextSectionHTML(
+                'Budget exhaustion detail',
+                data.budget_exhaustion_detail,
+                { preserveWhitespace: false }
+            ));
+        }
         sections.push(renderThinkingDiagnosticWorkflowCandidatesHTML(data.candidates, workflowDiscovery));
     } else if (data.stage_id === 'expected_outcome_inference') {
         const inferredContractSummary = buildThinkingCaptureSummaryText(

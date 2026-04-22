@@ -9,6 +9,11 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from .text_value_service import get_texts_for_concept
 from ..db.repositories.concepts_repository import ConceptsRepository
+from ..security.access_control import (
+    bypass_access_control,
+    can_access_concept,
+    should_enforce_access_control,
+)
 from .concept_predicate_metadata_service import get_relationship_kinds_set
 from ..db.repositories.text_value_repository import (
     TextRelationsRepository,
@@ -31,6 +36,17 @@ _MAX_LIMIT = 500
 _UNCERTAINTY_MODE_ASSERTED_ONLY = "asserted_only"
 _UNCERTAINTY_MODE_UNCERTAIN_ONLY = "uncertain_only"
 _UNCERTAINTY_MODE_INCLUDE_UNCERTAIN = "include_uncertain"
+_PREVIEW_DOC_PROJECTION = {
+    "concept_id": 1,
+    "name": 1,
+    "names": 1,
+    "kind": 1,
+    "updated_at": 1,
+    "relationships.is_a_type_of": 1,
+    "relationships.#V#is_a_type_of": 1,
+    "relationships.is_an_instance_of": 1,
+    "relationships.#V#is_an_instance_of": 1,
+}
 
 _UNCERTAINTY_RETRIEVAL_STATS: Dict[str, int] = {
     "payload_calls_total": 0,
@@ -266,10 +282,7 @@ def find_relations_with_argument(
     preview_cache: Dict[str, Optional[Dict[str, Any]]] = {}
     hits: List[Dict[str, Any]] = []
 
-    subject_doc = ConceptsRepository.find_one(
-        {"concept_id": resolved_concept_id},
-        {"concept_id": 1, "name": 1, "relationships": 1, "updated_at": 1},
-    )
+    subject_doc = _load_accessible_relation_subject_document(resolved_concept_id)
 
     if include_asserted_rows and include_structural and subject_doc:
         relationships = (subject_doc.get("relationships") or {}) if subject_doc else {}
@@ -953,14 +966,23 @@ def _accumulate_predicate_incidence_rows(
                     include_concept_preview,
                     preview_cache,
                 )
-                sample = {"concept_id": contributing_instance_id}
+                sample: Dict[str, Any] = {"concept_id": contributing_instance_id}
                 if isinstance(preview, Mapping):
                     name = preview.get("name")
                     kind = preview.get("kind")
+                    type_ids = preview.get("type_ids")
                     if isinstance(name, str) and name.strip():
                         sample["name"] = name.strip()
                     if isinstance(kind, str) and kind.strip():
                         sample["kind"] = kind.strip()
+                    if isinstance(type_ids, list):
+                        clean_type_ids = [
+                            str(type_id).strip()
+                            for type_id in type_ids[:6]
+                            if isinstance(type_id, str) and str(type_id).strip()
+                        ]
+                        if clean_type_ids:
+                            sample["type_ids"] = clean_type_ids
                 if sample not in row["sample_instances"]:
                     row["sample_instances"].append(sample)
 
@@ -1040,14 +1062,26 @@ def _extract_predicate_incidence_groundings(
                 include_concept_preview,
                 preview_cache,
             )
-        grounding = {"grounding_kind": "concept", "concept_id": resolved_source_id}
+        grounding: Dict[str, Any] = {
+            "grounding_kind": "concept",
+            "concept_id": resolved_source_id,
+        }
         if isinstance(source_preview, Mapping):
             name = source_preview.get("name")
             kind = source_preview.get("kind")
+            type_ids = source_preview.get("type_ids")
             if isinstance(name, str) and name.strip():
                 grounding["name"] = name.strip()
             if isinstance(kind, str) and kind.strip():
                 grounding["kind"] = kind.strip()
+            if isinstance(type_ids, list):
+                clean_type_ids = [
+                    str(type_id).strip()
+                    for type_id in type_ids[:6]
+                    if isinstance(type_id, str) and str(type_id).strip()
+                ]
+                if clean_type_ids:
+                    grounding["type_ids"] = clean_type_ids
         candidates.append((f"concept::{resolved_source_id}", grounding))
 
     target_preview = hit.get("target_concept_preview")
@@ -1063,14 +1097,26 @@ def _extract_predicate_incidence_groundings(
                 include_concept_preview,
                 preview_cache,
             )
-        grounding = {"grounding_kind": "concept", "concept_id": target_concept_id}
+        grounding: Dict[str, Any] = {
+            "grounding_kind": "concept",
+            "concept_id": target_concept_id,
+        }
         if isinstance(resolved_target_preview, Mapping):
             name = resolved_target_preview.get("name")
             kind = resolved_target_preview.get("kind")
+            type_ids = resolved_target_preview.get("type_ids")
             if isinstance(name, str) and name.strip():
                 grounding["name"] = name.strip()
             if isinstance(kind, str) and kind.strip():
                 grounding["kind"] = kind.strip()
+            if isinstance(type_ids, list):
+                clean_type_ids = [
+                    str(type_id).strip()
+                    for type_id in type_ids[:6]
+                    if isinstance(type_id, str) and str(type_id).strip()
+                ]
+                if clean_type_ids:
+                    grounding["type_ids"] = clean_type_ids
         candidates.append((f"concept::{target_concept_id}", grounding))
         return candidates
 
@@ -1402,45 +1448,125 @@ def _resolve_concept_preview(
         return None
     if concept_id in preview_cache:
         return preview_cache[concept_id]
-    doc = ConceptsRepository.find_one(
-        {"concept_id": concept_id},
-        {
-            "concept_id": 1,
-            "name": 1,
-            "relationships": 1,
-            "updated_at": 1,
-        },
-    )
+    doc = _load_accessible_preview_document(concept_id)
     if not doc:
         preview_cache[concept_id] = None
         return None
+    preview = _build_concept_preview_from_document(doc)
+    preview_cache[concept_id] = preview
+    return preview
+
+
+def _load_accessible_preview_document(concept_id: str) -> Optional[Dict[str, Any]]:
+    if should_enforce_access_control() and not can_access_concept(concept_id):
+        return None
+    with bypass_access_control():
+        doc = ConceptsRepository.find_one({"concept_id": concept_id}, _PREVIEW_DOC_PROJECTION)
+    return dict(doc) if isinstance(doc, Mapping) else None
+
+
+def _build_concept_preview_from_document(doc: Mapping[str, Any]) -> Dict[str, Any]:
     name = doc.get("name")
     if not name:
         try:
-            name = get_concept_display_name_with_names_fallback(doc)
+            name = get_concept_display_name_with_names_fallback(dict(doc))
         except Exception:  # pragma: no cover - best effort fallback
             name = doc.get("concept_id")
+
     kind = doc.get("kind")
     if not kind:
         try:
-            # Check predicate FIRST: predicates can have is_a_type_of relationships
-            if is_predicate(doc):
+            # Check predicate FIRST: predicates can have is_a_type_of relationships.
+            if is_predicate(dict(doc)):
                 kind = "predicate"
-            elif is_type(doc):
+            elif is_type(dict(doc)):
                 kind = "type"
             else:
                 kind = "individual"
         except Exception:  # pragma: no cover
             kind = "unknown"
-    updated = doc.get("updated_at")
+
+    relationships = doc.get("relationships") or {}
+    type_ids = _normalise_relationship_targets(
+        relationships.get("is_an_instance_of")
+        if isinstance(relationships, Mapping)
+        else None
+    )
+    if should_enforce_access_control():
+        type_ids = _filter_accessible_concept_ids(type_ids)
+
     preview = {
         "concept_id": doc.get("concept_id"),
         "name": name,
         "kind": kind,
-        "last_updated": _isoformat(updated),
+        "last_updated": _isoformat(doc.get("updated_at")),
     }
-    preview_cache[concept_id] = preview
+    if type_ids:
+        preview["type_ids"] = type_ids[:6]
     return preview
+
+
+def _load_accessible_relation_subject_document(
+    concept_id: str,
+) -> Optional[Dict[str, Any]]:
+    if should_enforce_access_control() and not can_access_concept(concept_id):
+        return None
+    with bypass_access_control():
+        doc = ConceptsRepository.find_one(
+            {"concept_id": concept_id},
+            {
+                "concept_id": 1,
+                "name": 1,
+                "names": 1,
+                "updated_at": 1,
+                "relationships": 1,
+            },
+        )
+    if not isinstance(doc, Mapping):
+        return None
+    materialised = dict(doc)
+    relationships = materialised.get("relationships")
+    if isinstance(relationships, Mapping) and should_enforce_access_control():
+        materialised["relationships"] = _filter_accessible_relationships(relationships)
+    return materialised
+
+
+def _filter_accessible_relationships(
+    relationships: Mapping[str, Any],
+) -> Dict[str, Any]:
+    filtered: Dict[str, Any] = {}
+    for predicate_id, raw_targets in relationships.items():
+        filtered[predicate_id] = _filter_accessible_relationship_value(raw_targets)
+    return filtered
+
+
+def _filter_accessible_relationship_value(raw_targets: Any) -> Any:
+    if not should_enforce_access_control():
+        return raw_targets
+    if isinstance(raw_targets, str):
+        if raw_targets.startswith("#") and not can_access_concept(raw_targets):
+            return []
+        return raw_targets
+    if not isinstance(raw_targets, Iterable) or isinstance(raw_targets, Mapping):
+        return raw_targets
+    filtered: List[Any] = []
+    for entry in raw_targets:
+        if isinstance(entry, str) and entry.startswith("#") and not can_access_concept(entry):
+            continue
+        filtered.append(entry)
+    return filtered
+
+
+def _filter_accessible_concept_ids(concept_ids: Sequence[str]) -> List[str]:
+    if not should_enforce_access_control():
+        return [str(concept_id).strip() for concept_id in concept_ids if isinstance(concept_id, str) and str(concept_id).strip()]
+    return [
+        str(concept_id).strip()
+        for concept_id in concept_ids
+        if isinstance(concept_id, str)
+        and str(concept_id).strip()
+        and can_access_concept(str(concept_id).strip())
+    ]
 
 
 def _isoformat(value: Any) -> Optional[str]:

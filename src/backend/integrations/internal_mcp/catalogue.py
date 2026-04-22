@@ -7038,12 +7038,16 @@ def _find_relations_with_argument_input_schema() -> Schema:
         },
         allow_unknown=True,
         description=(
-            "find_relations_with_argument input: concept_id (required), argument_index "
-            "(int or 'any'), predicate_filter (list of predicate IDs or substrings), "
-            "relation_kind ('any'|'binary'|'text'), scope (optional), include_text_snippets "
-            "(bool), include_concept_preview (bool), paging (limit/offset), sort_by, "
-            "uncertainty retrieval controls (include_uncertain, uncertainty_mode,"
-            " uncertainty_statuses), and optional namespace passthrough."
+            "find_relations_with_argument input: concept_id (required anchor entity "
+            "concept ID, for example '#V#michael_witbrock'), argument_index "
+            "(int or 'any'; use 'subject' or 1 to inspect subject-side relations), "
+            "predicate_filter (list of predicate IDs or substrings), relation_kind "
+            "('any'|'binary'|'text'), scope (optional), include_text_snippets (bool), "
+            "include_concept_preview (bool), paging (limit/offset), sort_by, "
+            "uncertainty retrieval controls (include_uncertain, uncertainty_mode, "
+            "uncertainty_statuses), and optional namespace passthrough. Do not use "
+            "top-level payload keys named subject or object; the anchor entity always "
+            "goes in concept_id."
         ),
     )
 
@@ -7090,12 +7094,16 @@ def _predicate_incidence_input_schema() -> Schema:
         },
         allow_unknown=True,
         description=(
-            "get_predicate_incidence input: exactly one of concept_id (entity mode) or "
-            "instance_of (type mode). Optional direct_instances_only, argument_index, "
-            "predicate_filter, relation_kind ('any'|'binary'|'text'), include_text_snippets, "
+            "get_predicate_incidence input: exactly one of concept_id (entity mode; "
+            "anchor entity concept ID such as '#V#michael_witbrock') or instance_of "
+            "(type mode). Optional direct_instances_only, argument_index "
+            "('subject' inspects outgoing subject-side relations), predicate_filter, "
+            "relation_kind ('any'|'binary'|'text'), include_text_snippets, "
             "include_concept_preview, paging (limit/offset), sort_by "
             "('relation_hit_count'|'grounding_count'|'grounded_instance_count'|'predicate'), "
-            "uncertainty retrieval controls, and optional namespace passthrough."
+            "uncertainty retrieval controls, and optional namespace passthrough. "
+            "Do not use top-level payload keys named subject or object; the anchor "
+            "entity always goes in concept_id."
         ),
     )
 
@@ -25930,8 +25938,11 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             category="read",
             description=(
                 "Find relation assertions where a concept appears in one or more argument "
-                "positions. Supports exact graph matching and full-text text-relation matching "
-                "with optional predicate/kind filters and pagination."
+                "positions. The anchor entity must be supplied in concept_id; use "
+                "argument_index to choose the relation slot instead of inventing "
+                "subject/object payload fields. Supports exact graph matching and "
+                "full-text text-relation matching with optional predicate/kind filters "
+                "and pagination."
             ),
         ),
         MethodDefinition(
@@ -25979,8 +25990,11 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             category="read",
             description=(
                 "Summarise which predicates are actually observed around a concept or across "
-                "instances of a type. Use when you need distinct predicates plus counts before "
-                "choosing a predicate-specific extent or filtered relation lookup."
+                "instances of a type. The anchor entity goes in concept_id; "
+                "argument_index='subject' means inspect outgoing subject-side relations, "
+                "not that the payload should contain a subject field. Use when you need "
+                "distinct predicates plus counts before choosing a predicate-specific "
+                "extent or filtered relation lookup."
             ),
         ),
         MethodDefinition(

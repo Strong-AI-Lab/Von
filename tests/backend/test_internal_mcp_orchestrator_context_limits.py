@@ -641,6 +641,7 @@ def test_format_tool_result_shapes_get_predicate_incidence_payload_for_live_foll
                             "grounding_kind": "concept",
                             "concept_id": "#V#paper_one",
                             "name": "Paper One",
+                            "type_ids": ["#V#scholarly_article"],
                         },
                         {
                             "grounding_kind": "text",
@@ -672,7 +673,126 @@ def test_format_tool_result_shapes_get_predicate_incidence_payload_for_live_foll
     assert payload["predicates"][0]["relation_hit_count"] == 12
     assert payload["predicates"][0]["grounding_count"] == 7
     assert payload["predicates"][0]["sample_groundings"][0]["concept_id"] == "#V#paper_one"
+    assert payload["predicates"][0]["sample_groundings"][0]["type_ids"] == [
+        "#V#scholarly_article"
+    ]
     assert "predicate row" in payload["retrieval_diagnostics"]["note"]
+
+
+def test_format_tool_result_shapes_find_relations_payload_with_target_type_ids():
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=cast(Any, _StubGateway()),
+        max_tool_invocations=1,
+        max_tool_result_chars=5_000,
+        max_tool_result_field_chars=1_500,
+        max_context_chars=80_000,
+    )
+
+    encoded = orchestrator._format_tool_result(
+        "find_relations_with_argument",
+        {
+            "concept_id": "#V#michael_witbrock",
+            "total_hits": 2,
+            "hits": [
+                {
+                    "source_concept_id": "#V#michael_witbrock",
+                    "predicate_concept_id": "#V#author_of",
+                    "relation_kind": "binary",
+                    "argument_indexes": [1],
+                    "target_value": "#V#paper_one",
+                    "source_concept_preview": {
+                        "concept_id": "#V#michael_witbrock",
+                        "name": "Michael Witbrock",
+                        "kind": "individual",
+                    },
+                    "target_concept_preview": {
+                        "concept_id": "#V#paper_one",
+                        "name": "Paper One",
+                        "kind": "individual",
+                        "type_ids": ["#V#scholarly_article"],
+                    },
+                },
+                {
+                    "source_concept_id": "#V#michael_witbrock",
+                    "predicate_concept_id": "#V#author_of",
+                    "relation_kind": "binary",
+                    "argument_indexes": [1],
+                    "target_value": "#V#diary_one",
+                    "source_concept_preview": {
+                        "concept_id": "#V#michael_witbrock",
+                        "name": "Michael Witbrock",
+                        "kind": "individual",
+                    },
+                    "target_concept_preview": {
+                        "concept_id": "#V#diary_one",
+                        "name": "Diary One",
+                        "kind": "individual",
+                        "type_ids": ["#V#diary_entry_about_michael_witbrocks_work"],
+                    },
+                },
+            ],
+        },
+        1.0,
+        "ok",
+    )
+
+    parsed = json.loads(encoded)
+    payload = parsed["payload"]
+    assert payload["_llm_view"] == "find_relations_with_argument_results.v1"
+    assert payload["predicates"] == ["#V#author_of"]
+    assert payload["hits"][0]["target_type_ids"] == ["#V#scholarly_article"]
+    assert payload["hits"][1]["target_type_ids"] == [
+        "#V#diary_entry_about_michael_witbrocks_work"
+    ]
+
+
+def test_turn_scoped_tool_payload_support_applies_workflow_tool_argument_defaults():
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=cast(Any, _StubGateway()),
+        max_tool_invocations=1,
+        max_context_chars=80_000,
+    )
+
+    payload = {"concept_id": "#V#michael_witbrock"}
+    orchestrator._apply_turn_scoped_tool_payload_support(
+        tool_name="get_predicate_incidence",
+        payload=payload,
+        data={
+            "tool_argument_defaults": {
+                "get_predicate_incidence": {
+                    "argument_index": "subject",
+                    "relation_kind": "binary",
+                    "limit": 12,
+                }
+            }
+        },
+    )
+
+    assert payload["argument_index"] == "subject"
+    assert payload["relation_kind"] == "binary"
+    assert payload["limit"] == 12
+
+    payload_with_explicit_values = {
+        "concept_id": "#V#michael_witbrock",
+        "limit": 3,
+    }
+    orchestrator._apply_turn_scoped_tool_payload_support(
+        tool_name="get_predicate_incidence",
+        payload=payload_with_explicit_values,
+        data={
+            "tool_argument_defaults": {
+                "get_predicate_incidence": {
+                    "argument_index": "subject",
+                    "relation_kind": "binary",
+                    "limit": 12,
+                }
+            }
+        },
+    )
+
+    assert payload_with_explicit_values["argument_index"] == "subject"
+    assert payload_with_explicit_values["relation_kind"] == "binary"
+    assert payload_with_explicit_values["limit"] == 3
 
 
 def test_format_tool_result_shapes_related_concepts_payload_for_live_follow_up():

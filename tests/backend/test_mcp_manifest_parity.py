@@ -103,3 +103,25 @@ def test_manifest_regeneration_script_runs_from_repo_root_without_pythonpath() -
         regenerated_manifest = manifest_path.read_text(encoding="utf-8")
         if regenerated_manifest != original_manifest:
             manifest_path.write_text(original_manifest, encoding="utf-8")
+
+
+def test_predicate_relation_tools_explain_concept_id_anchor_contract() -> None:
+    canonical_payload = {
+        item["name"]: item for item in get_surface_tool_payloads(SURFACE_MANIFEST)
+    }
+
+    predicate_incidence = canonical_payload["get_predicate_incidence"]
+    predicate_incidence_schema = predicate_incidence["inputSchema"]
+    assert "anchor entity goes in concept_id" in predicate_incidence["description"]
+    assert "Do not use top-level payload keys named subject or object" in (
+        predicate_incidence_schema["description"]
+    )
+
+    relation_lookup = canonical_payload["find_relations_with_argument"]
+    relation_lookup_schema = relation_lookup["inputSchema"]
+    assert "anchor entity must be supplied in concept_id" in relation_lookup[
+        "description"
+    ]
+    assert "Do not use top-level payload keys named subject or object" in (
+        relation_lookup_schema["description"]
+    )

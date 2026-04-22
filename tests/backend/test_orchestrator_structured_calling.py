@@ -1410,6 +1410,44 @@ def test_turn_contract_requirement_augmentation_adds_predicate_relation_summary_
     assert augmented.missing_tools == augmented.required_tools
 
 
+def test_turn_contract_requirement_augmentation_respects_allowed_workflow_tools():
+    evaluation = _PromptRequirementEvaluation()
+
+    augmented = (
+        InternalMCPChatOrchestrator._augment_prompt_requirements_with_turn_contract(
+            evaluation=evaluation,
+            turn_expected_outcome_contract={
+                "summary": "Identify the authenticated user and list grounded papers only.",
+                "required_tools": [
+                    "search_knowledge_base",
+                    "get_predicate_incidence",
+                    "find_relations_with_argument",
+                ],
+                "selector_guidance": (
+                    "Use predicate incidence first and then relation retrieval."
+                ),
+            },
+            method_catalogue={
+                "search_knowledge_base": {},
+                "get_predicate_incidence": {},
+                "find_relations_with_argument": {},
+            },
+            allowed_tools=(
+                "get_predicate_incidence",
+                "find_relations_with_argument",
+            ),
+            tool_invocations=(),
+        )
+    )
+
+    assert augmented.required_tools == (
+        "get_predicate_incidence",
+        "find_relations_with_argument",
+    )
+    assert "search_knowledge_base" not in augmented.required_tools
+    assert augmented.missing_tools == augmented.required_tools
+
+
 def test_turn_contract_required_relation_summary_tools_count_as_knowledge_base_surface():
     families = InternalMCPChatOrchestrator._infer_required_tool_surface_families(
         required_tools=(
@@ -1744,6 +1782,146 @@ def test_structured_candidate_resolver_caps_unhinted_planner_shortlists():
         warning == "planner_shortlist_cap_applied:16"
         for warning in resolution.warnings
     )
+
+
+def test_follow_up_summaries_keep_all_paper_like_relation_evidence() -> None:
+    relation_payload = {
+        "concept_id": "#V#michael_witbrock",
+        "total_hits": 7,
+        "hits": [
+            {
+                "source_concept_id": "#V#michael_witbrock",
+                "source_concept_preview": {"name": "Michael Witbrock"},
+                "predicate_concept_id": "#V#author_of",
+                "target_value": "#V#verified_entity_representation_agentic_workflow_design",
+                "target_concept_preview": {
+                    "concept_id": "#V#verified_entity_representation_agentic_workflow_design",
+                    "name": "Verified Entity Representation Agentic Workflow Design",
+                    "type_ids": ["#V#von_agentic_component_design_document"],
+                },
+            },
+            {
+                "source_concept_id": "#V#michael_witbrock",
+                "source_concept_preview": {"name": "Michael Witbrock"},
+                "predicate_concept_id": "#V#author_of",
+                "target_value": "#V#scholarly_paper_for_file_copy_v_arxiv_pdf_file_60060b3f7365457eb4b0c5b286db3034_e37302f2",
+                "target_concept_preview": {
+                    "concept_id": "#V#scholarly_paper_for_file_copy_v_arxiv_pdf_file_60060b3f7365457eb4b0c5b286db3034_e37302f2",
+                    "name": "Scholarly Paper For File Copy V Arxiv Pdf File 60060B3F7365457Eb4B0C5B286Db3034 E37302F2",
+                    "type_ids": ["#V#scholarly_article"],
+                },
+            },
+            {
+                "source_concept_id": "#V#michael_witbrock",
+                "source_concept_preview": {"name": "Michael Witbrock"},
+                "predicate_concept_id": "#V#author_of",
+                "target_value": "#V#mjw_work_diary_2026-01-02",
+                "target_concept_preview": {
+                    "concept_id": "#V#mjw_work_diary_2026-01-02",
+                    "name": "Mjw Work Diary 2026-01-02",
+                    "type_ids": ["#V#diary_entry_about_michael_witbrocks_work"],
+                },
+            },
+            {
+                "source_concept_id": "#V#michael_witbrock",
+                "source_concept_preview": {"name": "Michael Witbrock"},
+                "predicate_concept_id": "#V#author_of",
+                "target_value": "#V#mjw_todo_list_—_2026-01-02",
+                "target_concept_preview": {
+                    "concept_id": "#V#mjw_todo_list_—_2026-01-02",
+                    "name": "Mjw Todo List — 2026-01-02",
+                    "type_ids": ["#V#todo_list"],
+                },
+            },
+            {
+                "source_concept_id": "#V#michael_witbrock",
+                "source_concept_preview": {"name": "Michael Witbrock"},
+                "predicate_concept_id": "#V#author_of",
+                "target_value": "#V#michael_witbrock_—_diary_—_2026-01-01",
+                "target_concept_preview": {
+                    "concept_id": "#V#michael_witbrock_—_diary_—_2026-01-01",
+                    "name": "Michael Witbrock — Diary — 2026-01-01",
+                    "type_ids": ["#V#diary_entry_about_michael_witbrocks_work"],
+                },
+            },
+            {
+                "source_concept_id": "#V#michael_witbrock",
+                "source_concept_preview": {"name": "Michael Witbrock"},
+                "predicate_concept_id": "#V#author_of",
+                "target_value": "#V#learning_to_tell_two_spirals_apart",
+                "target_concept_preview": {
+                    "concept_id": "#V#learning_to_tell_two_spirals_apart",
+                    "name": "Learning To Tell Two Spirals Apart",
+                    "type_ids": ["#V#scholarly_work"],
+                },
+            },
+            {
+                "source_concept_id": "#V#michael_witbrock",
+                "source_concept_preview": {"name": "Michael Witbrock"},
+                "predicate_concept_id": "#V#author_of",
+                "target_value": "#V#concept_creation_agentic_workflow_design",
+                "target_concept_preview": {
+                    "concept_id": "#V#concept_creation_agentic_workflow_design",
+                    "name": "Concept Creation Agentic Workflow Design",
+                    "type_ids": ["#V#ontology_design_note"],
+                },
+            },
+        ],
+    }
+    predicate_payload = {
+        "concept_id": "#V#michael_witbrock",
+        "total_predicates": 1,
+        "predicates": [
+            {
+                "predicate_concept_id": "#V#author_of",
+                "predicate_preview": {"name": "Author Of", "kind": "predicate"},
+                "relation_hit_count": 7,
+                "grounding_count": 7,
+                "argument_indexes": [1],
+                "sample_groundings": [
+                    {
+                        "concept_id": "#V#verified_entity_representation_agentic_workflow_design",
+                        "name": "Verified Entity Representation Agentic Workflow Design",
+                        "type_ids": ["#V#von_agentic_component_design_document"],
+                    },
+                    {
+                        "concept_id": "#V#scholarly_paper_for_file_copy_v_arxiv_pdf_file_60060b3f7365457eb4b0c5b286db3034_e37302f2",
+                        "name": "Scholarly Paper For File Copy V Arxiv Pdf File 60060B3F7365457Eb4B0C5B286Db3034 E37302F2",
+                        "type_ids": ["#V#scholarly_article"],
+                    },
+                    {
+                        "concept_id": "#V#mjw_work_diary_2026-01-02",
+                        "name": "Mjw Work Diary 2026-01-02",
+                        "type_ids": ["#V#diary_entry_about_michael_witbrocks_work"],
+                    },
+                    {
+                        "concept_id": "#V#mjw_todo_list_—_2026-01-02",
+                        "name": "Mjw Todo List — 2026-01-02",
+                        "type_ids": ["#V#todo_list"],
+                    },
+                    {
+                        "concept_id": "#V#learning_to_tell_two_spirals_apart",
+                        "name": "Learning To Tell Two Spirals Apart",
+                        "type_ids": ["#V#scholarly_work"],
+                    },
+                ],
+            }
+        ],
+    }
+
+    relation_lines = InternalMCPChatOrchestrator._build_find_relations_with_argument_follow_up_lines(
+        relation_payload
+    )
+    predicate_lines = InternalMCPChatOrchestrator._build_predicate_incidence_follow_up_lines(
+        predicate_payload
+    )
+    relation_text = "\n".join(relation_lines)
+    predicate_text = "\n".join(predicate_lines)
+
+    assert "Scholarly Paper For File Copy" in relation_text
+    assert "Learning To Tell Two Spirals Apart" in relation_text
+    assert "Scholarly Paper For File Copy" in predicate_text
+    assert "Learning To Tell Two Spirals Apart" in predicate_text
 
 
 if __name__ == "__main__":

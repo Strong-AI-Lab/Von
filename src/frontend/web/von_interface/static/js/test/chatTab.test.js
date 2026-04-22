@@ -2925,6 +2925,10 @@ describe('thinking activity history normalisation', () => {
                 keyword_fallback_queries: ['scholarly workflow', 'paper representation workflow'],
                 threshold: 0.7,
                 search_time_ms: 44,
+                timeout_budget_seconds: 3,
+                budget_exhausted: true,
+                budget_exhaustion_stage: 'semantic_search',
+                budget_exhaustion_detail: 'semantic_search timed out after 3.000s during workflow discovery',
                 match_count: 0,
                 candidate_count: 1,
                 candidates: [
@@ -2951,6 +2955,10 @@ describe('thinking activity history normalisation', () => {
         expect(html).toContain('Represent this uploaded paper');
         expect(html).toContain('route_hint=scholarly');
         expect(html).toContain('semantic, vontology, name_fallback');
+        expect(html).toContain('3.000 s');
+        expect(html).toContain('Budget exhausted');
+        expect(html).toContain('semantic_search');
+        expect(html).toContain('Budget exhaustion detail');
         expect(html).toContain('Fallback queries');
         expect(html).toContain('Workflow candidates');
         expect(html).toContain('Routing excluded: Graph incomplete');
