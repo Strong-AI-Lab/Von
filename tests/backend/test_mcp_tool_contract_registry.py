@@ -1,17 +1,19 @@
 import asyncio
 from typing import Any, cast
 
+from src.backend.integrations.internal_mcp import tool_contract_registry as registry_module
 from src.backend.integrations.internal_mcp.tool_contract_registry import (
-    JIRA_FAMILY_SERVER_EXPOSED_TOOL_NAMES,
     SURFACE_JIRA_FAMILY_SERVER,
     SURFACE_VONTOLOGY_STDIO,
     SURFACE_VONRAG_STDIO,
     get_canonical_tool_registry,
     get_surface_tool_payloads,
+    invalidate_canonical_tool_registry,
 )
 from src.backend.integrations.internal_mcp.schemas import Schema, schema_to_json_schema
 from src.backend.mcp_server import mcp_stdio_server
 from src.backend.mcp_server import rag_mcp_stdio_server
+from src.backend.services.tool_metadata_service import ToolSurfaceExposureMetadata
 
 
 def _assert_array_schemas_define_items(node: Any, *, path: str) -> None:
@@ -94,12 +96,47 @@ def test_surface_only_exceptions_are_explicit() -> None:
 def test_jira_family_surface_is_sourced_from_canonical_registry() -> None:
     payloads = get_surface_tool_payloads(SURFACE_JIRA_FAMILY_SERVER)
     names = {item["name"] for item in payloads}
-    assert names == set(JIRA_FAMILY_SERVER_EXPOSED_TOOL_NAMES)
+    assert names == {
+        "jira_add_comment",
+        "jira_get_issue",
+        "jira_get_transitions",
+        "jira_search",
+        "jira_transition",
+    }
 
     registry = get_canonical_tool_registry()
     for name in names:
         assert name in registry
         assert registry[name].internal_method_name == name
+
+
+def test_jira_family_surface_tracks_tool_metadata_exposure(monkeypatch) -> None:
+    invalidate_canonical_tool_registry()
+    original = registry_module.get_tool_surface_exposure_metadata
+
+    def _patched(tool_name: str, *, allow_registry_fallback: bool = True):
+        if tool_name == "search_web":
+            return ToolSurfaceExposureMetadata(
+                expose_in_jira_family_server=True,
+            )
+        return original(
+            tool_name,
+            allow_registry_fallback=allow_registry_fallback,
+        )
+
+    monkeypatch.setattr(
+        registry_module,
+        "get_tool_surface_exposure_metadata",
+        _patched,
+    )
+    try:
+        names = {
+            item["name"]
+            for item in get_surface_tool_payloads(SURFACE_JIRA_FAMILY_SERVER)
+        }
+        assert "search_web" in names
+    finally:
+        invalidate_canonical_tool_registry()
 
 
 def test_testing_and_turn_execution_tools_are_exposed_on_vontology_stdio_surface() -> None:

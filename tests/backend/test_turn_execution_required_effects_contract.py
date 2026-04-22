@@ -88,10 +88,14 @@ def _patch_workflow_required_effects_contract(monkeypatch) -> None:
         },
     )
 
+    class _Registration:
+        def __init__(self, definition: WorkflowDefinition):
+            self.definition = definition
+
     class _Registry:
-        def get(self, workflow_id: str):
+        def get_registration(self, workflow_id: str):
             if workflow_id == "#V#tool_calling_workflow":
-                return definition
+                return _Registration(definition)
             return None
 
     monkeypatch.setattr(
@@ -566,6 +570,34 @@ def test_prompt_required_evidence_contract_blocks_missing_surface() -> None:
     )
 
 
+def test_prompt_required_evidence_contract_uses_metadata_authority_for_unknown_tool(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "src.backend.services.turn_execution_record_service.is_tool_prompt_required_evidence",
+        lambda tool_name: tool_name == "custom_source_query",
+    )
+
+    record = _build_record(
+        prompt_text="Check the custom external source before answering.",
+        response_text="I could not verify the custom source result.",
+        required_prompt_tools=["custom_source_query"],
+        tool_invocations=[],
+    )
+
+    required_effects = record.get("required_effects")
+    assert isinstance(required_effects, list)
+    custom_effect = next(
+        effect
+        for effect in required_effects
+        if effect.get("required_tools") == ["custom_source_query"]
+    )
+    assert custom_effect.get("status") == "not_executed"
+    assert custom_effect.get("failure_code") == (
+        "prompt_required_evidence_custom_source_query_missing"
+    )
+
+
 def test_prompt_required_evidence_contract_does_not_block_false_empty_jira_answer_without_authoritative_critic_verdict() -> None:
     record = _build_record(
         prompt_text=(
@@ -868,6 +900,34 @@ def test_prompt_required_mutation_contract_is_satisfied_by_task_create_execution
     assert completion_gate.get("decision") != "escalation_required"
     assert "prompt_required_mutation_task_create_missing" not in (
         completion_gate.get("blocking_failure_codes") or []
+    )
+
+
+def test_prompt_required_mutation_contract_uses_metadata_authority_for_unknown_tool(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "src.backend.services.turn_execution_record_service.is_tool_prompt_required_mutation",
+        lambda tool_name: tool_name == "custom_write_tool",
+    )
+
+    record = _build_record(
+        prompt_text="Use the custom write tool to persist the prepared note.",
+        response_text="The custom write action was not confirmed.",
+        required_prompt_tools=["custom_write_tool"],
+        tool_invocations=[],
+    )
+
+    required_effects = record.get("required_effects")
+    assert isinstance(required_effects, list)
+    custom_effect = next(
+        effect
+        for effect in required_effects
+        if effect.get("required_tools") == ["custom_write_tool"]
+    )
+    assert custom_effect.get("status") == "not_executed"
+    assert custom_effect.get("failure_code") == (
+        "prompt_required_mutation_custom_write_tool_missing"
     )
 
 

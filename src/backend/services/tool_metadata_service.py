@@ -50,6 +50,12 @@ class ToolMetadata:
     dispatch_surface_family: str | None = None
     evidence_surface_family: str | None = None
     external_surface: bool | None = None
+    operation_category: str | None = None
+    evidence_role: str | None = None
+    expose_in_vontology_stdio: bool | None = None
+    expose_in_vonrag_stdio: bool | None = None
+    expose_in_manifest: bool | None = None
+    expose_in_jira_family_server: bool | None = None
 
     @property
     def is_high_salience(self) -> bool:
@@ -67,6 +73,16 @@ class ToolDispatchSurfaceMetadata:
     surface_family: str
     evidence_surface_family: str
     external_surface: bool = False
+
+
+@dataclass(frozen=True)
+class ToolSurfaceExposureMetadata:
+    """Per-surface exposure metadata derived from authoritative tool metadata."""
+
+    expose_in_vontology_stdio: bool = False
+    expose_in_vonrag_stdio: bool = False
+    expose_in_manifest: bool = False
+    expose_in_jira_family_server: bool = False
 
 
 _DEFAULT_DISPATCH_SURFACE_METADATA: dict[str, ToolDispatchSurfaceMetadata] = {
@@ -734,6 +750,363 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
     },
 }
 
+_DEFAULT_VONTOLOGY_STDIO_EXPOSED_TOOL_NAMES = {
+    "add_names",
+    "add_relationship",
+    "assign_task",
+    "audit_concept_text_relations",
+    "coding_agent_mcp_access_profile",
+    "concept_exists",
+    "context_search",
+    "create_concepts",
+    "create_task",
+    "delete_concept",
+    "delete_text_relation",
+    "download_paper",
+    "build_paper_recommendations",
+    "record_paper_recommendation_feedback",
+    "extract_annotations",
+    "extract_url",
+    "fetch_concept",
+    "fetch_concept_content",
+    "finalise_cached_paper",
+    "materialise_scholarly_representation_for_file_copy",
+    "find_relations_with_argument",
+    "get_predicate_incidence",
+    "find_concepts_by_name",
+    "find_subconcepts",
+    "get_concept_index_status",
+    "get_context",
+    "get_paper_metadata",
+    "get_task",
+    "get_text_relations",
+    "get_text_relations_summary",
+    "get_tree",
+    "gmail_get_attachment",
+    "gmail_get_message",
+    "gmail_list_labels",
+    "gmail_list_messages",
+    "gmail_modify_labels",
+    "jira_add_comment",
+    "jira_add_attachment",
+    "jira_create_issue",
+    "jira_delete_issue_link",
+    "jira_get_auth_config",
+    "jira_get_bulk_operation_progress",
+    "jira_get_issue",
+    "jira_get_project_issue_types",
+    "jira_get_myself",
+    "jira_get_transitions",
+    "jira_link_issue",
+    "jira_search",
+    "jira_transition",
+    "jira_move_issue",
+    "jira_update_issue",
+    "list_recent_screenshots",
+    "list_my_tasks",
+    "merge_concepts",
+    "qna_search",
+    "renderer_resolve_applicability",
+    "upsert_renderer_profile",
+    "remove_relationship",
+    "preview_remove_relationship",
+    "remove_relationships_bulk",
+    "undo_relationship_removal",
+    "resolve_concept_by_name",
+    "search_arxiv",
+    "search_concepts",
+    "search_knowledge_base",
+    "search_web",
+    "skill_catalogue_list",
+    "skill_catalogue_sync",
+    "testing_theory_create_slice",
+    "testing_theory_import_canonical_context",
+    "testing_theory_assert_local_claims",
+    "testing_theory_compute_diff",
+    "testing_theory_rollback_local_writes",
+    "testing_theory_promote_validated_claims",
+    "testing_theory_gc_expired",
+    "experiment_create_spec",
+    "experiment_start_run",
+    "experiment_record_observation",
+    "experiment_compute_verdict",
+    "experiment_emit_learning_signal",
+    "experiment_execute_target_workflow",
+    "experiment_execute_regression_suite",
+    "experiment_run_list",
+    "experiment_run_get",
+    "episode_critique_build_benchmark",
+    "episode_critique_memory_list",
+    "episode_critique_memory_get",
+    "context_bundle_resolve_effective_context",
+    "context_bundle_assemble_context_dossier",
+    "context_bundle_update_report_revision",
+    "context_bundle_build_reconstructed_workspace",
+    "context_bundle_build_benchmark",
+    "repo_dossier_file_snapshot",
+    "repo_dossier_search",
+    "repo_dossier_workflow_definition_get",
+    "repo_dossier_prompt_definition_get",
+    "repo_dossier_git_metadata",
+    "chat_history_get_segments",
+    "chat_history_get_debug_entry",
+    "conversation_telemetry_get_locator",
+    "testing_prepare_experiment_spec",
+    "testing_prepare_meeting_invitation_spec",
+    "testing_prepare_arxiv_paper_ingestion_fixture",
+    "testing_verify_arxiv_paper_ingestion_result",
+    "testing_cleanup_arxiv_paper_ingestion_artifacts",
+    "turn_execution_list",
+    "turn_execution_get",
+    "turn_execution_get_diagnostics",
+    "turn_execution_get_critic_bundle",
+    "turn_execution_get_live_progress",
+    "turn_execution_search_failures",
+    "turn_execution_build_benchmark",
+    "turn_execution_build_context_answering_benchmark",
+    "turn_execution_build_selector_benchmark",
+    "turn_execution_build_dashboard",
+    "turn_execution_backfill_from_chat_history",
+    "turn_execution_namespace_coverage_report",
+    "update_concept",
+    "update_task_status",
+    "update_text_relation",
+    "upsert_singleton_text_relation",
+    "upsert_text_relation",
+    "von_chat_run",
+    "vontology_concept_search",
+    "workflow_bind_event",
+    "workflow_cancel_instance",
+    "workflow_create_instance",
+    "workflow_execute",
+    "workflow_create_schedule",
+    "workflow_delete_event_binding",
+    "workflow_delete_schedule",
+    "workflow_get_execution_trace",
+    "workflow_get_instance",
+    "workflow_get_schedule",
+    "workflow_list_definitions",
+    "workflow_list_use_episodes",
+    "workflow_validate_candidate",
+    "workflow_list_event_bindings",
+    "workflow_list_execution_traces",
+    "workflow_build_prediction_envelope",
+    "workflow_list_instances",
+    "workflow_list_schedules",
+    "workflow_mcp_health_check",
+    "workflow_concept_parity_audit",
+    "workflow_materialisation_diagnostics",
+    "workflow_retry_instance",
+    "workflow_set_event_binding_enabled",
+    "workflow_set_schedule_enabled",
+    "workflow_trigger_schedule",
+}
+
+_DEFAULT_VONRAG_STDIO_EXPOSED_TOOL_NAMES = {
+    "get_related_concepts",
+    "index_concept_text",
+    "rag_get_item",
+    "rag_get_status",
+    "rag_list_collections",
+    "rag_list_indexed",
+    "rag_sync_text_relations",
+    "search_concept_descriptions",
+    "search_knowledge_base",
+}
+
+_DEFAULT_JIRA_FAMILY_SERVER_EXPOSED_TOOL_NAMES = {
+    "jira_add_comment",
+    "jira_get_issue",
+    "jira_get_transitions",
+    "jira_search",
+    "jira_transition",
+}
+
+_DEFAULT_WRITE_TOOL_NAMES = {
+    "add_issue_comment",
+    "add_names",
+    "add_relationship",
+    "assign_copilot_to_issue",
+    "assign_task",
+    "create_branch",
+    "create_concepts",
+    "create_or_update_file",
+    "create_pull_request",
+    "create_repository",
+    "create_task",
+    "delete_concept",
+    "delete_file",
+    "delete_text_relation",
+    "download_paper",
+    "finalise_cached_paper",
+    "materialise_scholarly_representation_for_file_copy",
+    "import_url_file_copy",
+    "gmail_modify_labels",
+    "issue_write",
+    "jira_add_attachment",
+    "jira_add_comment",
+    "jira_create_issue",
+    "jira_move_issue",
+    "jira_link_issue",
+    "jira_transition",
+    "jira_update_issue",
+    "merge_concepts",
+    "merge_pull_request",
+    "mcp__github__add_issue_comment",
+    "mcp__github__create_pull_request",
+    "mcp__github__update_pull_request",
+    "pull_request_review_write",
+    "push_files",
+    "remove_relationship",
+    "remove_relationships_bulk",
+    "undo_relationship_removal",
+    "sub_issue_write",
+    "task_add_attachment",
+    "task_add_comment",
+    "task_add_worklog",
+    "task_assign",
+    "task_bulk_update",
+    "task_create",
+    "task_create_subtask",
+    "task_delete",
+    "task_import_jira_issues",
+    "task_link",
+    "task_set_parent",
+    "task_transition",
+    "task_unassign",
+    "task_unlink",
+    "task_update_fields",
+    "task_update_status",
+    "upsert_renderer_profile",
+    "upsert_singleton_text_relation",
+    "upsert_text_relation",
+    "update_concept",
+    "update_pull_request",
+    "update_pull_request_branch",
+    "update_task_status",
+    "update_text_relation",
+    "workflow_bind_event",
+    "workflow_create_instance",
+    "workflow_create_schedule",
+    "workflow_delete_event_binding",
+    "workflow_delete_schedule",
+    "workflow_set_event_binding_enabled",
+    "workflow_set_schedule_enabled",
+}
+
+_DEFAULT_VERIFICATION_READ_TOOL_NAMES = {
+    "count",
+    "fetch_concept",
+    "fetch_concept_content",
+    "find_concepts_by_name",
+    "find_relations_with_argument",
+    "find_subconcepts",
+    "get_context",
+    "get_file_contents",
+    "get_paper_metadata",
+    "get_task",
+    "get_team_members",
+    "get_teams",
+    "get_text_relations",
+    "get_text_relations_summary",
+    "get_tree",
+    "issue_read",
+    "jira_get_issue",
+    "jira_get_bulk_operation_progress",
+    "jira_get_project_issue_types",
+    "jira_get_myself",
+    "jira_get_transitions",
+    "jira_search",
+    "list_my_tasks",
+    "list_pull_requests",
+    "resolve_concept_by_name",
+    "search_code",
+    "search_concepts",
+    "search_issues",
+    "search_pull_requests",
+    "search_repositories",
+    "search_users",
+    "search_knowledge_base",
+    "task_get",
+    "task_get_history",
+    "task_get_transitions",
+    "task_list",
+    "task_list_attachments",
+    "task_list_comments",
+    "task_list_worklog",
+    "task_search",
+    "vontology_concept_search",
+    "workflow_get_instance",
+    "workflow_get_schedule",
+    "workflow_list_definitions",
+    "workflow_list_event_bindings",
+    "workflow_list_instances",
+    "workflow_list_schedules",
+}
+
+_DEFAULT_SEARCH_EVIDENCE_TOOL_NAMES = {
+    "context_search",
+    "find_concepts_by_name",
+    "find_relations_with_argument",
+    "get_predicate_incidence",
+    "get_related_concepts",
+    "get_text_relations_summary",
+    "jira_search",
+    "qna_search",
+    "search_arxiv",
+    "search_concept_descriptions",
+    "search_concepts",
+    "search_knowledge_base",
+    "search_web",
+    "vontology_concept_search",
+}
+
+
+def _set_default_tool_metadata_fields(tool_name: str, **fields: Any) -> None:
+    entry = _DEFAULT_TOOL_METADATA.setdefault(tool_name, {})
+    for key, value in fields.items():
+        entry.setdefault(key, value)
+
+
+for _tool_name in _DEFAULT_VONTOLOGY_STDIO_EXPOSED_TOOL_NAMES:
+    _set_default_tool_metadata_fields(
+        _tool_name,
+        expose_in_vontology_stdio=True,
+        expose_in_manifest=True,
+    )
+
+for _tool_name in _DEFAULT_VONRAG_STDIO_EXPOSED_TOOL_NAMES:
+    _set_default_tool_metadata_fields(
+        _tool_name,
+        expose_in_vonrag_stdio=True,
+    )
+
+for _tool_name in _DEFAULT_JIRA_FAMILY_SERVER_EXPOSED_TOOL_NAMES:
+    _set_default_tool_metadata_fields(
+        _tool_name,
+        expose_in_jira_family_server=True,
+    )
+
+for _tool_name in _DEFAULT_WRITE_TOOL_NAMES:
+    _set_default_tool_metadata_fields(
+        _tool_name,
+        operation_category="write",
+    )
+
+for _tool_name in _DEFAULT_VERIFICATION_READ_TOOL_NAMES:
+    _set_default_tool_metadata_fields(
+        _tool_name,
+        operation_category="read",
+        evidence_role="verification",
+    )
+
+for _tool_name in _DEFAULT_SEARCH_EVIDENCE_TOOL_NAMES:
+    _set_default_tool_metadata_fields(
+        _tool_name,
+        operation_category="read",
+        evidence_role="search",
+    )
+
 
 def _load_from_vontology() -> dict[str, ToolMetadata]:
     """Load tool metadata from Vontology #V#mcp_tool instances.
@@ -792,6 +1165,12 @@ def _load_from_vontology() -> dict[str, ToolMetadata]:
                 dispatch_surface_family=attrs.get("dispatch_surface_family"),
                 evidence_surface_family=attrs.get("evidence_surface_family"),
                 external_surface=attrs.get("external_surface"),
+                operation_category=attrs.get("operation_category"),
+                evidence_role=attrs.get("evidence_role"),
+                expose_in_vontology_stdio=attrs.get("expose_in_vontology_stdio"),
+                expose_in_vonrag_stdio=attrs.get("expose_in_vonrag_stdio"),
+                expose_in_manifest=attrs.get("expose_in_manifest"),
+                expose_in_jira_family_server=attrs.get("expose_in_jira_family_server"),
             )
 
         logger.debug(f"Loaded {len(result)} tool metadata entries from Vontology")
@@ -832,6 +1211,14 @@ def _refresh_cache_if_needed() -> None:
                 dispatch_surface_family=defaults.get("dispatch_surface_family"),
                 evidence_surface_family=defaults.get("evidence_surface_family"),
                 external_surface=defaults.get("external_surface"),
+                operation_category=defaults.get("operation_category"),
+                evidence_role=defaults.get("evidence_role"),
+                expose_in_vontology_stdio=defaults.get("expose_in_vontology_stdio"),
+                expose_in_vonrag_stdio=defaults.get("expose_in_vonrag_stdio"),
+                expose_in_manifest=defaults.get("expose_in_manifest"),
+                expose_in_jira_family_server=defaults.get(
+                    "expose_in_jira_family_server"
+                ),
             )
 
         # Override with Vontology data while preserving useful default hints when
@@ -861,6 +1248,31 @@ def _refresh_cache_if_needed() -> None:
                         metadata.external_surface
                         if metadata.external_surface is not None
                         else default_metadata.external_surface
+                    ),
+                    operation_category=(
+                        metadata.operation_category
+                        or default_metadata.operation_category
+                    ),
+                    evidence_role=metadata.evidence_role or default_metadata.evidence_role,
+                    expose_in_vontology_stdio=(
+                        metadata.expose_in_vontology_stdio
+                        if metadata.expose_in_vontology_stdio is not None
+                        else default_metadata.expose_in_vontology_stdio
+                    ),
+                    expose_in_vonrag_stdio=(
+                        metadata.expose_in_vonrag_stdio
+                        if metadata.expose_in_vonrag_stdio is not None
+                        else default_metadata.expose_in_vonrag_stdio
+                    ),
+                    expose_in_manifest=(
+                        metadata.expose_in_manifest
+                        if metadata.expose_in_manifest is not None
+                        else default_metadata.expose_in_manifest
+                    ),
+                    expose_in_jira_family_server=(
+                        metadata.expose_in_jira_family_server
+                        if metadata.expose_in_jira_family_server is not None
+                        else default_metadata.expose_in_jira_family_server
                     ),
                 )
             else:
@@ -911,18 +1323,52 @@ def get_display_template(tool_name: str) -> str | None:
     return get_tool_metadata(tool_name).display_template
 
 
+def get_tool_description(tool_name: str, *, fallback_description: str | None = None) -> str | None:
+    """Get the authoritative tool description when available."""
+    metadata = get_tool_metadata(tool_name)
+    description = str(metadata.description or "").strip()
+    if description:
+        return description
+    cleaned_fallback = str(fallback_description or "").strip()
+    return cleaned_fallback or None
+
+
 def get_tool_planner_hint(tool_name: str) -> str | None:
     """Get a short planner-facing hint for tool selection."""
     return get_tool_metadata(tool_name).planner_hint
 
 
-def get_tool_family(tool_name: str) -> str:
+def _normalise_operation_category(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    lowered = value.strip().lower()
+    if lowered in {"read", "write"}:
+        return lowered
+    return None
+
+
+def _normalise_evidence_role(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    lowered = value.strip().lower()
+    if lowered in {"search", "verification"}:
+        return lowered
+    return None
+
+
+def get_tool_family(
+    tool_name: str,
+    *,
+    fallback_family: str | None = None,
+    allow_registry_fallback: bool = True,
+) -> str:
     """Resolve the canonical tool family for planner/listing support.
 
     Authority order:
     1. Vontology-backed tool metadata category when it names an actual family
-    2. Canonical tool-contract registry family
-    3. ``unknown`` when neither surface can classify the tool
+    2. Explicit caller-provided fallback family
+    3. Canonical tool-contract registry family
+    4. ``unknown`` when neither surface can classify the tool
     """
 
     metadata = get_tool_metadata(tool_name)
@@ -930,14 +1376,11 @@ def get_tool_family(tool_name: str) -> str:
     if category and category not in _NON_FAMILY_TOOL_CATEGORIES:
         return category
 
-    try:
-        from src.backend.integrations.internal_mcp.tool_contract_registry import (
-            get_canonical_tool_registry,
-        )
+    fallback = str(fallback_family or "").strip().lower()
+    if fallback and fallback not in _NON_FAMILY_TOOL_CATEGORIES:
+        return fallback
 
-        contract = get_canonical_tool_registry().get(tool_name)
-    except Exception:
-        contract = None
+    contract = _resolve_registry_contract(tool_name) if allow_registry_fallback else None
 
     family = str(getattr(contract, "family", "") or "").strip().lower()
     if family:
@@ -965,6 +1408,124 @@ def _coerce_optional_bool(value: Any) -> bool | None:
     return None
 
 
+def get_tool_operation_category(
+    tool_name: str,
+    *,
+    fallback_operation_category: str | None = None,
+    allow_registry_fallback: bool = True,
+) -> str | None:
+    """Resolve the canonical read/write category for a tool."""
+
+    metadata = get_tool_metadata(tool_name)
+    explicit_category = _normalise_operation_category(metadata.operation_category)
+    if explicit_category is not None:
+        return explicit_category
+
+    fallback = _normalise_operation_category(fallback_operation_category)
+    if fallback is not None:
+        return fallback
+
+    contract = _resolve_registry_contract(tool_name) if allow_registry_fallback else None
+    return _normalise_operation_category(getattr(contract, "category", None))
+
+
+def get_tool_evidence_role(
+    tool_name: str,
+    *,
+    fallback_operation_category: str | None = None,
+    allow_registry_fallback: bool = True,
+) -> str | None:
+    """Resolve whether a tool is an evidence/search or verification surface."""
+
+    metadata = get_tool_metadata(tool_name)
+    explicit_role = _normalise_evidence_role(metadata.evidence_role)
+    if explicit_role is not None:
+        return explicit_role
+
+    operation_category = get_tool_operation_category(
+        tool_name,
+        fallback_operation_category=fallback_operation_category,
+        allow_registry_fallback=allow_registry_fallback,
+    )
+    if operation_category == "write":
+        return None
+    return None
+
+
+def is_tool_write(
+    tool_name: str,
+    *,
+    fallback_operation_category: str | None = None,
+    allow_registry_fallback: bool = True,
+) -> bool:
+    return (
+        get_tool_operation_category(
+            tool_name,
+            fallback_operation_category=fallback_operation_category,
+            allow_registry_fallback=allow_registry_fallback,
+        )
+        == "write"
+    )
+
+
+def is_tool_verification_read(
+    tool_name: str,
+    *,
+    fallback_operation_category: str | None = None,
+    allow_registry_fallback: bool = True,
+) -> bool:
+    return (
+        get_tool_evidence_role(
+            tool_name,
+            fallback_operation_category=fallback_operation_category,
+            allow_registry_fallback=allow_registry_fallback,
+        )
+        == "verification"
+    )
+
+
+def is_tool_search_evidence(
+    tool_name: str,
+    *,
+    fallback_operation_category: str | None = None,
+    allow_registry_fallback: bool = True,
+) -> bool:
+    return (
+        get_tool_evidence_role(
+            tool_name,
+            fallback_operation_category=fallback_operation_category,
+            allow_registry_fallback=allow_registry_fallback,
+        )
+        == "search"
+    )
+
+
+def is_tool_prompt_required_evidence(
+    tool_name: str,
+    *,
+    fallback_operation_category: str | None = None,
+    allow_registry_fallback: bool = True,
+) -> bool:
+    return get_tool_evidence_role(
+        tool_name,
+        fallback_operation_category=fallback_operation_category,
+        allow_registry_fallback=allow_registry_fallback,
+    ) in {"search", "verification"}
+
+
+def is_tool_prompt_required_mutation(
+    tool_name: str,
+    *,
+    fallback_operation_category: str | None = None,
+    allow_registry_fallback: bool = True,
+) -> bool:
+    return is_tool_write(
+        tool_name,
+        fallback_operation_category=fallback_operation_category,
+        allow_registry_fallback=allow_registry_fallback,
+    )
+
+
 def _resolve_registry_contract(tool_name: str) -> Any | None:
     try:
         from src.backend.integrations.internal_mcp.tool_contract_registry import (
@@ -974,6 +1535,47 @@ def _resolve_registry_contract(tool_name: str) -> Any | None:
         return get_canonical_tool_registry().get(tool_name)
     except Exception:
         return None
+
+
+def get_tool_surface_exposure_metadata(
+    tool_name: str,
+    *,
+    allow_registry_fallback: bool = True,
+) -> ToolSurfaceExposureMetadata:
+    """Resolve the canonical per-surface exposure metadata for a tool."""
+
+    metadata = get_tool_metadata(tool_name)
+    explicit_values = (
+        _coerce_optional_bool(metadata.expose_in_vontology_stdio),
+        _coerce_optional_bool(metadata.expose_in_vonrag_stdio),
+        _coerce_optional_bool(metadata.expose_in_manifest),
+        _coerce_optional_bool(metadata.expose_in_jira_family_server),
+    )
+    if any(value is not None for value in explicit_values):
+        return ToolSurfaceExposureMetadata(
+            expose_in_vontology_stdio=bool(explicit_values[0]),
+            expose_in_vonrag_stdio=bool(explicit_values[1]),
+            expose_in_manifest=bool(explicit_values[2]),
+            expose_in_jira_family_server=bool(explicit_values[3]),
+        )
+
+    contract = _resolve_registry_contract(tool_name) if allow_registry_fallback else None
+    exposure = getattr(contract, "exposure", None)
+    if exposure is not None:
+        return ToolSurfaceExposureMetadata(
+            expose_in_vontology_stdio=bool(
+                getattr(exposure, "expose_in_vontology_stdio", False)
+            ),
+            expose_in_vonrag_stdio=bool(
+                getattr(exposure, "expose_in_vonrag_stdio", False)
+            ),
+            expose_in_manifest=bool(getattr(exposure, "expose_in_manifest", False)),
+            expose_in_jira_family_server=bool(
+                getattr(exposure, "expose_in_jira_family_server", False)
+            ),
+        )
+
+    return ToolSurfaceExposureMetadata()
 
 
 def get_tool_dispatch_surface_metadata(
@@ -1041,6 +1643,14 @@ def invalidate_cache() -> None:
     with _cache_lock:
         _cache_loaded = False
         _cache_timestamp = 0.0
+    try:
+        from src.backend.integrations.internal_mcp.tool_contract_registry import (
+            invalidate_canonical_tool_registry,
+        )
+
+        invalidate_canonical_tool_registry()
+    except Exception:
+        pass
 
 
 def get_all_tool_metadata() -> dict[str, ToolMetadata]:

@@ -16,11 +16,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable
 
 from .catalogue import build_default_catalogue
 from .gateway import MethodDefinition
 from .schemas import Schema, schema_to_json_schema
+from ...services.tool_metadata_service import (
+    get_tool_description,
+    get_tool_family,
+    get_tool_operation_category,
+    get_tool_surface_exposure_metadata,
+)
 
 SURFACE_INTERNAL_CATALOGUE = "internal_catalogue"
 SURFACE_VONTOLOGY_STDIO = "vontology_stdio"
@@ -34,186 +40,6 @@ KNOWN_SURFACES: tuple[str, ...] = (
     SURFACE_VONRAG_STDIO,
     SURFACE_MANIFEST,
     SURFACE_JIRA_FAMILY_SERVER,
-)
-
-# NOTE: Keep these names aligned with the stdio tool-call handlers in
-# src/backend/mcp_server/mcp_stdio_server.py. This set defines what the
-# Vontology stdio surface intentionally exposes.
-VONTOLOGY_STDIO_EXPOSED_TOOL_NAMES: tuple[str, ...] = (
-    "add_names",
-    "add_relationship",
-    "assign_task",
-    "audit_concept_text_relations",
-    "coding_agent_mcp_access_profile",
-    "concept_exists",
-    "context_search",
-    "create_concepts",
-    "create_task",
-    "delete_concept",
-    "delete_text_relation",
-    "download_paper",
-    "build_paper_recommendations",
-    "record_paper_recommendation_feedback",
-    "extract_annotations",
-    "extract_url",
-    "fetch_concept",
-    "fetch_concept_content",
-    "finalise_cached_paper",
-    "materialise_scholarly_representation_for_file_copy",
-    "find_relations_with_argument",
-    "get_predicate_incidence",
-    "find_concepts_by_name",
-    "find_subconcepts",
-    "get_concept_index_status",
-    "get_context",
-    "get_paper_metadata",
-    "get_task",
-    "get_text_relations",
-    "get_text_relations_summary",
-    "get_tree",
-    "gmail_get_attachment",
-    "gmail_get_message",
-    "gmail_list_labels",
-    "gmail_list_messages",
-    "gmail_modify_labels",
-    "jira_add_comment",
-    "jira_add_attachment",
-    "jira_create_issue",
-    "jira_delete_issue_link",
-    "jira_get_auth_config",
-    "jira_get_bulk_operation_progress",
-    "jira_get_issue",
-    "jira_get_project_issue_types",
-    "jira_get_myself",
-    "jira_get_transitions",
-    "jira_link_issue",
-    "jira_search",
-    "jira_transition",
-    "jira_move_issue",
-    "jira_update_issue",
-    "list_recent_screenshots",
-    "list_my_tasks",
-    "merge_concepts",
-    "qna_search",
-    "renderer_resolve_applicability",
-    "upsert_renderer_profile",
-    "remove_relationship",
-    "preview_remove_relationship",
-    "remove_relationships_bulk",
-    "undo_relationship_removal",
-    "resolve_concept_by_name",
-    "search_arxiv",
-    "search_concepts",
-    "search_knowledge_base",
-    "search_web",
-    "skill_catalogue_list",
-    "skill_catalogue_sync",
-    "testing_theory_create_slice",
-    "testing_theory_import_canonical_context",
-    "testing_theory_assert_local_claims",
-    "testing_theory_compute_diff",
-    "testing_theory_rollback_local_writes",
-    "testing_theory_promote_validated_claims",
-    "testing_theory_gc_expired",
-    "experiment_create_spec",
-    "experiment_start_run",
-    "experiment_record_observation",
-    "experiment_compute_verdict",
-    "experiment_emit_learning_signal",
-    "experiment_execute_target_workflow",
-    "experiment_execute_regression_suite",
-    "experiment_run_list",
-    "experiment_run_get",
-    "episode_critique_build_benchmark",
-    "episode_critique_memory_list",
-    "episode_critique_memory_get",
-    "context_bundle_resolve_effective_context",
-    "context_bundle_assemble_context_dossier",
-    "context_bundle_update_report_revision",
-    "context_bundle_build_reconstructed_workspace",
-    "context_bundle_build_benchmark",
-    "repo_dossier_file_snapshot",
-    "repo_dossier_search",
-    "repo_dossier_workflow_definition_get",
-    "repo_dossier_prompt_definition_get",
-    "repo_dossier_git_metadata",
-    "chat_history_get_segments",
-    "chat_history_get_debug_entry",
-    "conversation_telemetry_get_locator",
-    "testing_prepare_experiment_spec",
-    "testing_prepare_meeting_invitation_spec",
-    "testing_prepare_arxiv_paper_ingestion_fixture",
-    "testing_verify_arxiv_paper_ingestion_result",
-    "testing_cleanup_arxiv_paper_ingestion_artifacts",
-    "turn_execution_list",
-    "turn_execution_get",
-    "turn_execution_get_diagnostics",
-    "turn_execution_get_critic_bundle",
-    "turn_execution_get_live_progress",
-    "turn_execution_search_failures",
-    "turn_execution_build_benchmark",
-    "turn_execution_build_context_answering_benchmark",
-    "turn_execution_build_selector_benchmark",
-    "turn_execution_build_dashboard",
-    "turn_execution_backfill_from_chat_history",
-    "turn_execution_namespace_coverage_report",
-    "update_concept",
-    "update_task_status",
-    "update_text_relation",
-    "upsert_singleton_text_relation",
-    "upsert_text_relation",
-    "von_chat_run",
-    "vontology_concept_search",
-    "workflow_bind_event",
-    "workflow_cancel_instance",
-    "workflow_create_instance",
-    "workflow_execute",
-    "workflow_create_schedule",
-    "workflow_delete_event_binding",
-    "workflow_delete_schedule",
-    "workflow_get_execution_trace",
-    "workflow_get_instance",
-    "workflow_get_schedule",
-    "workflow_list_definitions",
-    "workflow_list_use_episodes",
-    "workflow_validate_candidate",
-    "workflow_list_event_bindings",
-    "workflow_list_execution_traces",
-    "workflow_build_prediction_envelope",
-    "workflow_list_instances",
-    "workflow_list_schedules",
-    "workflow_mcp_health_check",
-    "workflow_concept_parity_audit",
-    "workflow_materialisation_diagnostics",
-    "workflow_retry_instance",
-    "workflow_set_event_binding_enabled",
-    "workflow_set_schedule_enabled",
-    "workflow_trigger_schedule",
-)
-
-# Vontology MCP manifest intentionally mirrors the Vontology stdio surface.
-MANIFEST_EXPOSED_TOOL_NAMES: tuple[str, ...] = VONTOLOGY_STDIO_EXPOSED_TOOL_NAMES
-
-# Focused read-oriented RAG surface.
-VONRAG_STDIO_EXPOSED_TOOL_NAMES: tuple[str, ...] = (
-    "get_related_concepts",
-    "index_concept_text",
-    "rag_get_item",
-    "rag_get_status",
-    "rag_list_collections",
-    "rag_list_indexed",
-    "rag_sync_text_relations",
-    "search_concept_descriptions",
-    "search_knowledge_base",
-)
-
-# Legacy external Jira MCP server surface currently supports this subset.
-JIRA_FAMILY_SERVER_EXPOSED_TOOL_NAMES: tuple[str, ...] = (
-    "jira_add_comment",
-    "jira_get_issue",
-    "jira_get_transitions",
-    "jira_search",
-    "jira_transition",
 )
 
 
@@ -327,12 +153,16 @@ def _requires_namespace(schema: Schema) -> bool:
 
 
 def _build_exposure(name: str, *, internal: bool) -> ToolSurfaceExposure:
+    metadata = get_tool_surface_exposure_metadata(
+        name,
+        allow_registry_fallback=False,
+    )
     return ToolSurfaceExposure(
         expose_in_internal_catalogue=internal,
-        expose_in_vontology_stdio=name in VONTOLOGY_STDIO_EXPOSED_TOOL_NAMES,
-        expose_in_vonrag_stdio=name in VONRAG_STDIO_EXPOSED_TOOL_NAMES,
-        expose_in_manifest=name in MANIFEST_EXPOSED_TOOL_NAMES,
-        expose_in_jira_family_server=name in JIRA_FAMILY_SERVER_EXPOSED_TOOL_NAMES,
+        expose_in_vontology_stdio=metadata.expose_in_vontology_stdio,
+        expose_in_vonrag_stdio=metadata.expose_in_vonrag_stdio,
+        expose_in_manifest=metadata.expose_in_manifest,
+        expose_in_jira_family_server=metadata.expose_in_jira_family_server,
     )
 
 
@@ -342,9 +172,27 @@ def _contract_from_method_definition(
     exposure = _build_exposure(definition.name, internal=True)
     return CanonicalMCPToolContract(
         name=definition.name,
-        family=_infer_tool_family(definition.name),
-        category=definition.category,
-        description=definition.description or f"Execute {definition.name}.",
+        family=get_tool_family(
+            definition.name,
+            fallback_family=_infer_tool_family(definition.name),
+            allow_registry_fallback=False,
+        ),
+        category=(
+            get_tool_operation_category(
+                definition.name,
+                fallback_operation_category=definition.category,
+                allow_registry_fallback=False,
+            )
+            or definition.category
+        ),
+        description=(
+            get_tool_description(
+                definition.name,
+                fallback_description=definition.description
+                or f"Execute {definition.name}.",
+            )
+            or f"Execute {definition.name}."
+        ),
         input_schema=schema_to_json_schema(definition.input_schema),
         output_schema=(
             schema_to_json_schema(definition.output_schema)
@@ -679,9 +527,26 @@ def _supplemental_surface_only_contracts() -> dict[str, CanonicalMCPToolContract
         exposure = _build_exposure(name, internal=False)
         contracts[name] = CanonicalMCPToolContract(
             name=name,
-            family=str(spec["family"]),
-            category=str(spec["category"]),
-            description=str(spec["description"]),
+            family=get_tool_family(
+                name,
+                fallback_family=str(spec["family"]),
+                allow_registry_fallback=False,
+            ),
+            category=(
+                get_tool_operation_category(
+                    name,
+                    fallback_operation_category=str(spec["category"]),
+                    allow_registry_fallback=False,
+                )
+                or str(spec["category"])
+            ),
+            description=(
+                get_tool_description(
+                    name,
+                    fallback_description=str(spec["description"]),
+                )
+                or str(spec["description"])
+            ),
             input_schema=dict(spec["input_schema"]),
             output_schema=None,
             exposure=exposure,
@@ -700,25 +565,6 @@ def _supplemental_surface_only_contracts() -> dict[str, CanonicalMCPToolContract
     return contracts
 
 
-def _validate_surface_coverage(
-    contracts: Mapping[str, CanonicalMCPToolContract],
-) -> None:
-    contract_names = set(contracts.keys())
-    declared: dict[str, set[str]] = {
-        SURFACE_VONTOLOGY_STDIO: set(VONTOLOGY_STDIO_EXPOSED_TOOL_NAMES),
-        SURFACE_MANIFEST: set(MANIFEST_EXPOSED_TOOL_NAMES),
-        SURFACE_VONRAG_STDIO: set(VONRAG_STDIO_EXPOSED_TOOL_NAMES),
-        SURFACE_JIRA_FAMILY_SERVER: set(JIRA_FAMILY_SERVER_EXPOSED_TOOL_NAMES),
-    }
-
-    for surface, names in declared.items():
-        missing = sorted(names - contract_names)
-        if missing:
-            raise RuntimeError(
-                f"Canonical MCP registry missing tools required for surface '{surface}': {missing}"
-            )
-
-
 @lru_cache(maxsize=1)
 def get_canonical_tool_registry() -> dict[str, CanonicalMCPToolContract]:
     catalogue = build_default_catalogue()
@@ -735,8 +581,11 @@ def get_canonical_tool_registry() -> dict[str, CanonicalMCPToolContract]:
             )
         contracts[supplemental_name] = contract
 
-    _validate_surface_coverage(contracts)
     return contracts
+
+
+def invalidate_canonical_tool_registry() -> None:
+    get_canonical_tool_registry.cache_clear()
 
 
 def get_surface_contracts(surface: str) -> list[CanonicalMCPToolContract]:

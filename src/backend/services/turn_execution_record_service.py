@@ -26,6 +26,13 @@ from .representation_contract_vontology_service import (
     ensure_canonical_representation_contract_profiles,
     load_representation_contract_profiles_from_concept_ids,
 )
+from .tool_metadata_service import (
+    is_tool_prompt_required_evidence,
+    is_tool_prompt_required_mutation,
+    is_tool_search_evidence,
+    is_tool_verification_read,
+    is_tool_write,
+)
 from .turn_execution_diagnostic_event_service import (
     derive_tool_observations_from_diagnostic_events,
 )
@@ -47,167 +54,6 @@ TURN_EXECUTION_RECORDS_COLLECTION = "turn_execution_records"
 
 _TURN_EXECUTION_INDEXES_READY = False
 _TURN_EXECUTION_INDEXES_LOCK = threading.Lock()
-
-_WRITE_TOOL_NAMES = {
-    "add_issue_comment",
-    "add_names",
-    "add_relationship",
-    "assign_copilot_to_issue",
-    "assign_task",
-    "create_branch",
-    "create_concepts",
-    "create_or_update_file",
-    "create_pull_request",
-    "create_repository",
-    "create_task",
-    "delete_concept",
-    "delete_file",
-    "delete_text_relation",
-    "download_paper",
-    "finalise_cached_paper",
-    "materialise_scholarly_representation_for_file_copy",
-    "import_url_file_copy",
-    "gmail_modify_labels",
-    "issue_write",
-    "jira_add_attachment",
-    "jira_add_comment",
-    "jira_create_issue",
-    "jira_move_issue",
-    "jira_link_issue",
-    "jira_transition",
-    "jira_update_issue",
-    "merge_concepts",
-    "merge_pull_request",
-    "mcp__github__add_issue_comment",
-    "mcp__github__create_pull_request",
-    "mcp__github__update_pull_request",
-    "pull_request_review_write",
-    "push_files",
-    "remove_relationship",
-    "remove_relationships_bulk",
-    "undo_relationship_removal",
-    "sub_issue_write",
-    "task_add_attachment",
-    "task_add_comment",
-    "task_add_worklog",
-    "task_assign",
-    "task_bulk_update",
-    "task_create",
-    "task_create_subtask",
-    "task_delete",
-    "task_import_jira_issues",
-    "task_link",
-    "task_set_parent",
-    "task_transition",
-    "task_unassign",
-    "task_unlink",
-    "task_update_fields",
-    "task_update_status",
-    "upsert_renderer_profile",
-    "upsert_singleton_text_relation",
-    "upsert_text_relation",
-    "update_concept",
-    "update_pull_request",
-    "update_pull_request_branch",
-    "update_task_status",
-    "update_text_relation",
-    "workflow_bind_event",
-    "workflow_create_instance",
-    "workflow_create_schedule",
-    "workflow_delete_event_binding",
-    "workflow_delete_schedule",
-    "workflow_set_event_binding_enabled",
-    "workflow_set_schedule_enabled",
-}
-
-_READ_ONLY_JIRA_TOOLS = {
-    "jira_get_auth_config",
-    "jira_get_bulk_operation_progress",
-    "jira_get_issue",
-    "jira_get_project_issue_types",
-    "jira_get_myself",
-    "jira_get_transitions",
-    "jira_search",
-}
-
-_VERIFICATION_READ_TOOL_NAMES = {
-    "count",
-    "fetch_concept",
-    "fetch_concept_content",
-    "find_concepts_by_name",
-    "find_relations_with_argument",
-    "find_subconcepts",
-    "get_context",
-    "get_file_contents",
-    "get_paper_metadata",
-    "get_task",
-    "get_team_members",
-    "get_teams",
-    "get_text_relations",
-    "get_text_relations_summary",
-    "get_tree",
-    "issue_read",
-    "jira_get_issue",
-    "jira_get_bulk_operation_progress",
-    "jira_get_project_issue_types",
-    "jira_get_myself",
-    "jira_get_transitions",
-    "jira_search",
-    "list_my_tasks",
-    "list_pull_requests",
-    "resolve_concept_by_name",
-    "search_code",
-    "search_concepts",
-    "search_issues",
-    "search_pull_requests",
-    "search_repositories",
-    "search_users",
-    "search_knowledge_base",
-    "task_get",
-    "task_get_history",
-    "task_get_transitions",
-    "task_list",
-    "task_list_attachments",
-    "task_list_comments",
-    "task_list_worklog",
-    "task_search",
-    "vontology_concept_search",
-    "workflow_get_instance",
-    "workflow_get_schedule",
-    "workflow_list_definitions",
-    "workflow_list_event_bindings",
-    "workflow_list_instances",
-    "workflow_list_schedules",
-}
-
-_VERIFICATION_READ_TOOL_PREFIXES = (
-    "count_",
-    "fetch_",
-    "find_",
-    "get_",
-    "list_",
-    "read_",
-    "resolve_",
-    "search_",
-)
-
-_SEARCH_EVIDENCE_TOOL_NAMES = {
-    "context_search",
-    "find_concepts_by_name",
-    "find_relations_with_argument",
-    "get_predicate_incidence",
-    "get_related_concepts",
-    "get_text_relations_summary",
-    "jira_search",
-    "qna_search",
-    "search_arxiv",
-    "search_concept_descriptions",
-    "search_concepts",
-    "search_knowledge_base",
-    "search_web",
-    "vontology_concept_search",
-}
-_SEARCH_EVIDENCE_TOOL_PREFIXES = ("search_",)
 _SEARCH_EVIDENCE_MAX_ARGUMENT_CHARS = 50_000
 _SEARCH_EVIDENCE_MAX_RESULT_CHARS = 500_000
 _SEARCH_EVIDENCE_PREVIEW_CHARS = 8_000
@@ -1336,10 +1182,7 @@ def _is_search_evidence_tool(tool_name: str | None) -> bool:
     cleaned = tool_name.strip()
     if not cleaned:
         return False
-    lowered = cleaned.lower()
-    if lowered in _SEARCH_EVIDENCE_TOOL_NAMES:
-        return True
-    return any(lowered.startswith(prefix) for prefix in _SEARCH_EVIDENCE_TOOL_PREFIXES)
+    return is_tool_search_evidence(cleaned)
 
 
 def _capture_search_evidence_value(
@@ -1610,25 +1453,9 @@ def _is_write_tool(tool_name: str | None) -> bool:
     cleaned = tool_name.strip()
     if not cleaned:
         return False
-    lowered = cleaned.lower()
-    if lowered.startswith("__"):
+    if cleaned.lower().startswith("__"):
         return False
-    if lowered in _WRITE_TOOL_NAMES:
-        return True
-    if lowered.startswith("jira_"):
-        return lowered not in _READ_ONLY_JIRA_TOOLS
-    if lowered.startswith("workflow_"):
-        return lowered not in {
-            "workflow_get_instance",
-            "workflow_get_schedule",
-            "workflow_list_definitions",
-            "workflow_list_event_bindings",
-            "workflow_list_instances",
-            "workflow_list_schedules",
-            "workflow_mcp_health_check",
-            "workflow_trigger_schedule",
-        }
-    return False
+    return is_tool_write(cleaned)
 
 
 def _is_verification_read_tool(tool_name: str | None) -> bool:
@@ -1637,16 +1464,9 @@ def _is_verification_read_tool(tool_name: str | None) -> bool:
     cleaned = tool_name.strip()
     if not cleaned:
         return False
-    lowered = cleaned.lower()
-    if lowered.startswith("__"):
+    if cleaned.lower().startswith("__"):
         return False
-    if _is_write_tool(cleaned):
-        return False
-    if lowered in _VERIFICATION_READ_TOOL_NAMES:
-        return True
-    return any(
-        lowered.startswith(prefix) for prefix in _VERIFICATION_READ_TOOL_PREFIXES
-    )
+    return is_tool_verification_read(cleaned)
 
 
 def _extract_workflow_ids(raw_items: Any) -> list[str]:
@@ -4809,25 +4629,14 @@ def _is_prompt_required_evidence_tool(tool_name: Any) -> bool:
     cleaned = _safe_str(tool_name)
     if not cleaned:
         return False
-    lowered = cleaned.lower()
-    if lowered in _WRITE_TOOL_NAMES:
-        return False
-    if (
-        lowered in _SEARCH_EVIDENCE_TOOL_NAMES
-        or lowered in _VERIFICATION_READ_TOOL_NAMES
-        or lowered in _READ_ONLY_JIRA_TOOLS
-    ):
-        return True
-    return lowered.startswith(_VERIFICATION_READ_TOOL_PREFIXES) or lowered.startswith(
-        _SEARCH_EVIDENCE_TOOL_PREFIXES
-    )
+    return is_tool_prompt_required_evidence(cleaned)
 
 
 def _is_prompt_required_mutation_tool(tool_name: Any) -> bool:
     cleaned = _safe_str(tool_name)
     if not cleaned:
         return False
-    return cleaned.lower() in _WRITE_TOOL_NAMES
+    return is_tool_prompt_required_mutation(cleaned)
 
 
 def _build_prompt_required_evidence_contract(
