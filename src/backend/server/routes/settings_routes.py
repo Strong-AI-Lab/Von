@@ -68,6 +68,7 @@ from ...services.workflow_capability_service import (
     invalidate_workflow_capability_index,
     prewarm_workflow_capability_index,
 )
+from ...services.rag_service import peek_rag_service
 from ...integrations.google.gmail_service import list_profile_ids_from_env
 from ...services.concept_service import list_concepts, get_concept_by_id
 from ...services.concept_service import ConceptNotFoundError
@@ -117,6 +118,17 @@ def _build_runtime_component_signature_from_resolution(
         "model": model,
         "host": host or None,
     }
+
+
+def _invalidate_cached_rag_runtime_configuration() -> None:
+    service = peek_rag_service("llamaindex")
+    invalidate = (
+        getattr(service, "invalidate_runtime_configuration_cache", None)
+        if service is not None
+        else None
+    )
+    if callable(invalidate):
+        invalidate()
 
 
 def _validate_unified_concept_schema(concept, index):
@@ -1052,6 +1064,11 @@ def save_all_settings():
                     ),
                     500,
                 )
+
+        if any(
+            key in data for key in ("server_default_llm", "rag_embedder", "rag_llm")
+        ):
+            _invalidate_cached_rag_runtime_configuration()
 
         if "fetch_counts_on_load" in data:
             try:

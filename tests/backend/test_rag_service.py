@@ -1,4 +1,6 @@
 import json
+import os
+import shutil
 
 import pytest
 from unittest.mock import MagicMock, patch
@@ -47,6 +49,49 @@ def mock_llamaindex():
         }
 
 
+def _configure_rag_runtime_settings(
+    monkeypatch,
+    *,
+    provider: str = "openai",
+    model: str = "text-embedding-3-small",
+    host: str | None = None,
+) -> None:
+    effective = {
+        "provider": provider,
+        "model": model,
+    }
+    if host:
+        effective["host"] = host
+    monkeypatch.setattr(
+        "src.backend.services.settings_service.resolve_rag_embedder_setting",
+        lambda *args, **kwargs: {
+            "status": "resolved",
+            "effective": effective,
+            "selection_source": "explicit_setting",
+            "reason": None,
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.settings_service.resolve_rag_llm_setting",
+        lambda *args, **kwargs: {
+            "status": "disabled",
+            "effective": None,
+            "selection_source": "configured_disabled",
+            "reason": "disabled_by_setting",
+        },
+    )
+
+
+class _FakeSharingViolation(PermissionError):
+    def __init__(self, path: str) -> None:
+        super().__init__(
+            13,
+            "The process cannot access the file because it is being used by another process",
+            path,
+        )
+        self.winerror = 32
+
+
 def test_get_rag_service_llamaindex(mock_llamaindex):
     service = get_rag_service("llamaindex")
     assert service is not None
@@ -75,6 +120,47 @@ def test_query(mock_llamaindex):
         assert "id" in results[0]
         assert "text" in results[0]
         assert "score" in results[0]
+
+
+def test_query_honours_workflow_capability_retrieval_candidate_limit(
+    mock_llamaindex,
+    monkeypatch,
+    workspace_tmp_path,
+):
+    _configure_rag_runtime_settings(monkeypatch)
+
+    from src.backend.services.rag_backends.llamaindex_backend import (
+        LlamaIndexRAGService,
+    )
+
+    rag = LlamaIndexRAGService(
+        persistence_dir=str(workspace_tmp_path / "rag_storage")
+    )
+    rag.upsert_documents(
+        [
+            {
+                "id": "workflow_capability:#V#test_workflow",
+                "text": "Capability text for retrieval candidate testing",
+                "metadata": {
+                    "workflow_id": "#V#test_workflow",
+                    "type": "workflow_capability",
+                },
+            }
+        ],
+        namespace="workflow_capabilities",
+    )
+
+    rag.query(
+        "test workflow capability",
+        top_k=3,
+        namespace="workflow_capabilities",
+        permissions_context={
+            "type": "workflow_capability",
+            "retrieval_candidate_limit": 7,
+        },
+    )
+
+    mock_llamaindex["index"].as_retriever.assert_called_with(similarity_top_k=7)
 
 
 def test_delete_documents(mock_llamaindex):
@@ -144,27 +230,7 @@ def test_llamaindex_runtime_configuration_tracks_embedding_signature_and_mismatc
     monkeypatch,
     workspace_tmp_path,
 ):
-    monkeypatch.setattr(
-        "src.backend.services.settings_service.resolve_rag_embedder_setting",
-        lambda *args, **kwargs: {
-            "status": "resolved",
-            "effective": {
-                "provider": "openai",
-                "model": "text-embedding-3-small",
-            },
-            "selection_source": "explicit_setting",
-            "reason": None,
-        },
-    )
-    monkeypatch.setattr(
-        "src.backend.services.settings_service.resolve_rag_llm_setting",
-        lambda *args, **kwargs: {
-            "status": "disabled",
-            "effective": None,
-            "selection_source": "configured_disabled",
-            "reason": "disabled_by_setting",
-        },
-    )
+    _configure_rag_runtime_settings(monkeypatch)
 
     from src.backend.services.rag_backends.llamaindex_backend import (
         LlamaIndexRAGService,
@@ -211,9 +277,88 @@ def test_llamaindex_runtime_configuration_tracks_embedding_signature_and_mismatc
             "reason": None,
         },
     )
+    rag.invalidate_runtime_configuration_cache()
 
     state = rag.get_namespace_runtime_state("workflow_capabilities")
 
     assert state["compatible"] is False
     assert state["status"] == "embedding_signature_mismatch"
     assert state["current_embedding_signature"]["model"] == "nomic-embed-text"
+
+
+def test_llamaindex_metadata_write_retries_transient_sharing_violation(
+    monkeypatch,
+    workspace_tmp_path,
+) -> None:
+    _configure_rag_runtime_settings(monkeypatch)
+
+    from src.backend.services.rag_backends.llamaindex_backend import (
+        LlamaIndexRAGService,
+    )
+
+    rag = LlamaIndexRAGService(
+        persistence_dir=str(workspace_tmp_path / "rag_storage")
+    )
+    namespace = "workflow_capabilities"
+    metadata_path = workspace_tmp_path / "rag_storage" / "namespaces"
+
+    replace_calls: list[tuple[str, str]] = []
+    real_replace = os.replace
+
+    def flaky_replace(src: str, dst: str) -> None:
+        replace_calls.append((src, dst))
+        if len(replace_calls) == 1:
+            raise _FakeSharingViolation(dst)
+        real_replace(src, dst)
+
+    monkeypatch.setattr(
+        "src.backend.services.rag_backends.llamaindex_backend.os.replace",
+        flaky_replace,
+    )
+
+    rag._write_namespace_metadata(namespace)
+
+    metadata_files = list(metadata_path.rglob("index_metadata.json"))
+    assert len(replace_calls) == 2
+    assert metadata_files
+    payload = json.loads(metadata_files[0].read_text(encoding="utf-8"))
+    assert payload["namespace"] == namespace
+    assert payload["embedding_signature"]["model"] == "text-embedding-3-small"
+
+
+def test_llamaindex_reset_namespace_retries_transient_sharing_violation(
+    monkeypatch,
+    workspace_tmp_path,
+) -> None:
+    _configure_rag_runtime_settings(monkeypatch)
+
+    from src.backend.services.rag_backends.llamaindex_backend import (
+        LlamaIndexRAGService,
+    )
+
+    rag = LlamaIndexRAGService(
+        persistence_dir=str(workspace_tmp_path / "rag_storage")
+    )
+    namespace = "workflow_capabilities"
+    persist_dir = workspace_tmp_path / "rag_storage" / "namespaces" / rag._namespace_dirname(namespace)
+    persist_dir.mkdir(parents=True, exist_ok=True)
+    (persist_dir / "index_metadata.json").write_text("{}", encoding="utf-8")
+
+    rmtree_calls: list[str] = []
+    real_rmtree = shutil.rmtree
+
+    def flaky_rmtree(path: str, *args, **kwargs) -> None:
+        rmtree_calls.append(str(path))
+        if len(rmtree_calls) == 1 and not kwargs.get("ignore_errors"):
+            raise _FakeSharingViolation(str(path))
+        real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        "src.backend.services.rag_backends.llamaindex_backend.shutil.rmtree",
+        flaky_rmtree,
+    )
+
+    rag.reset_namespace(namespace)
+
+    assert len(rmtree_calls) == 2
+    assert not persist_dir.exists()

@@ -16,10 +16,13 @@ Namespace behaviour:
 import hashlib
 import importlib
 import json
+import logging
 import os
 import re
 import shutil
+import tempfile
 import time
+import threading
 from datetime import datetime, timezone
 from typing import Iterable, Dict, Any, Optional, List, Tuple, Mapping
 
@@ -34,6 +37,9 @@ _LLAMAINDEX_MISSING_MESSAGE = (
 _QUERY_EMBED_TIMEOUT_SECONDS = 8.0
 _QUERY_EMBED_MAX_RETRIES = 0
 _INDEX_METADATA_FILENAME = "index_metadata.json"
+_RUNTIME_CONFIGURATION_CACHE_TTL_SECONDS = 2.0
+_WINDOWS_NAMESPACE_IO_MAX_RETRIES = 6
+_WINDOWS_NAMESPACE_IO_RETRY_DELAY_SECONDS = 0.05
 
 
 class _MissingVectorStoreIndex:
@@ -109,6 +115,8 @@ BaseEmbedding: Any = _FallbackBaseEmbedding
 CustomLLM: Any = _FallbackCustomLLM
 CompletionResponse: Any = _FallbackCompletionResponse
 LLMMetadata: Any = _FallbackLLMMetadata
+
+logger = logging.getLogger(__name__)
 
 
 # Attempt imports in a version-tolerant way.
@@ -247,8 +255,12 @@ class LlamaIndexRAGService(RAGService):
         # Cache of namespace -> index instance
         self._indices: Dict[str, Any] = {}
         self._namespace_runtime_state: Dict[str, Dict[str, Any]] = {}
+        self._namespace_locks: Dict[str, threading.RLock] = {}
+        self._namespace_locks_guard = threading.Lock()
+        self._runtime_configuration_lock = threading.RLock()
         self._runtime_configuration: Dict[str, Any] | None = None
         self._runtime_configuration_serialized: str | None = None
+        self._runtime_configuration_refreshed_monotonic: float = 0.0
 
         # Ensure base persistence directory exists
         os.makedirs(self.persistence_dir, exist_ok=True)
@@ -377,52 +389,71 @@ class LlamaIndexRAGService(RAGService):
             )
         return None
 
-    def _refresh_runtime_configuration(self) -> None:
+    def invalidate_runtime_configuration_cache(self) -> None:
+        with self._runtime_configuration_lock:
+            self._runtime_configuration_refreshed_monotonic = 0.0
+
+    def _refresh_runtime_configuration(self, *, force: bool = False) -> None:
         from ..settings_service import resolve_rag_embedder_setting, resolve_rag_llm_setting
 
-        embedder_resolution = resolve_rag_embedder_setting()
-        llm_resolution = resolve_rag_llm_setting()
-        embed_model = self._build_runtime_component_from_resolution(
-            embedder_resolution,
-            kind="embedder",
-        )
-        runtime_llm = self._build_runtime_component_from_resolution(
-            llm_resolution,
-            kind="llm",
-        )
-        runtime_configuration: dict[str, Any] = {
-            "schema_version": "rag_runtime_configuration.v1",
-            "embedder_resolution": dict(embedder_resolution),
-            "llm_resolution": dict(llm_resolution),
-            "embedding_signature": self._build_component_signature(
-                "embedder",
-                embedder_resolution.get("effective")
-                if isinstance(embedder_resolution, Mapping)
-                else None,
-            ),
-            "llm_signature": self._build_component_signature(
-                "llm",
-                llm_resolution.get("effective")
-                if isinstance(llm_resolution, Mapping)
-                else None,
-            ),
-        }
-        serialised = json.dumps(
-            runtime_configuration,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        if serialised == self._runtime_configuration_serialized:
-            return
+        with self._runtime_configuration_lock:
+            now = time.monotonic()
+            if (
+                not force
+                and self._runtime_configuration is not None
+                and self._runtime_configuration_serialized is not None
+                and self._runtime_configuration_refreshed_monotonic > 0.0
+                and (
+                    now - self._runtime_configuration_refreshed_monotonic
+                ) < _RUNTIME_CONFIGURATION_CACHE_TTL_SECONDS
+            ):
+                return
 
-        self._indices.clear()
-        self.service_context = self._build_service_context(
-            embed_model=embed_model,
-            llm=runtime_llm,
-        )
-        self._apply_runtime_components(embed_model=embed_model, llm=runtime_llm)
-        self._runtime_configuration = runtime_configuration
-        self._runtime_configuration_serialized = serialised
+            embedder_resolution = resolve_rag_embedder_setting()
+            llm_resolution = resolve_rag_llm_setting()
+            embed_model = self._build_runtime_component_from_resolution(
+                embedder_resolution,
+                kind="embedder",
+            )
+            runtime_llm = self._build_runtime_component_from_resolution(
+                llm_resolution,
+                kind="llm",
+            )
+            runtime_configuration: dict[str, Any] = {
+                "schema_version": "rag_runtime_configuration.v1",
+                "embedder_resolution": dict(embedder_resolution),
+                "llm_resolution": dict(llm_resolution),
+                "embedding_signature": self._build_component_signature(
+                    "embedder",
+                    embedder_resolution.get("effective")
+                    if isinstance(embedder_resolution, Mapping)
+                    else None,
+                ),
+                "llm_signature": self._build_component_signature(
+                    "llm",
+                    llm_resolution.get("effective")
+                    if isinstance(llm_resolution, Mapping)
+                    else None,
+                ),
+            }
+            serialised = json.dumps(
+                runtime_configuration,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if serialised == self._runtime_configuration_serialized:
+                self._runtime_configuration_refreshed_monotonic = now
+                return
+
+            self._indices.clear()
+            self.service_context = self._build_service_context(
+                embed_model=embed_model,
+                llm=runtime_llm,
+            )
+            self._apply_runtime_components(embed_model=embed_model, llm=runtime_llm)
+            self._runtime_configuration = runtime_configuration
+            self._runtime_configuration_serialized = serialised
+            self._runtime_configuration_refreshed_monotonic = now
 
     def _index_runtime_kwargs(self) -> Dict[str, Any]:
         self._refresh_runtime_configuration()
@@ -513,13 +544,66 @@ class LlamaIndexRAGService(RAGService):
             _INDEX_METADATA_FILENAME,
         )
 
+    @staticmethod
+    def _is_windows_sharing_violation(exc: BaseException) -> bool:
+        if not isinstance(exc, OSError):
+            return False
+        if getattr(exc, "winerror", None) == 32:
+            return True
+        message = str(exc).strip().lower()
+        return "used by another process" in message or "cannot access the file" in message
+
+    def _get_namespace_lock(self, namespace: str) -> threading.RLock:
+        with self._namespace_locks_guard:
+            lock = self._namespace_locks.get(namespace)
+            if lock is None:
+                lock = threading.RLock()
+                self._namespace_locks[namespace] = lock
+            return lock
+
+    def _run_namespace_io(
+        self,
+        namespace: str,
+        operation: Any,
+        *,
+        action_label: str,
+    ) -> Any:
+        attempt = 0
+        while True:
+            try:
+                return operation()
+            except OSError as exc:
+                if (
+                    not self._is_windows_sharing_violation(exc)
+                    or attempt >= _WINDOWS_NAMESPACE_IO_MAX_RETRIES
+                ):
+                    raise
+                attempt += 1
+                logger.warning(
+                    "Transient namespace I/O sharing violation during %s for '%s' "
+                    "(attempt %d/%d): %s",
+                    action_label,
+                    namespace,
+                    attempt,
+                    _WINDOWS_NAMESPACE_IO_MAX_RETRIES,
+                    exc,
+                )
+                time.sleep(_WINDOWS_NAMESPACE_IO_RETRY_DELAY_SECONDS * attempt)
+
     def _read_namespace_metadata(self, namespace: str) -> dict[str, Any] | None:
         metadata_path = self._namespace_metadata_path(namespace)
         if not os.path.isfile(metadata_path):
             return None
-        try:
+        def _read_payload() -> Any:
             with open(metadata_path, "r", encoding="utf-8") as handle:
-                payload = json.load(handle)
+                return json.load(handle)
+        try:
+            with self._get_namespace_lock(namespace):
+                payload = self._run_namespace_io(
+                    namespace,
+                    _read_payload,
+                    action_label="read namespace metadata",
+                )
         except Exception:
             return None
         return payload if isinstance(payload, dict) else None
@@ -533,9 +617,34 @@ class LlamaIndexRAGService(RAGService):
             "embedding_signature": runtime_summary.get("embedding_signature"),
             "llm_signature": runtime_summary.get("llm_signature"),
         }
-        os.makedirs(self._namespace_persist_dir(namespace), exist_ok=True)
-        with open(self._namespace_metadata_path(namespace), "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, sort_keys=True, indent=2)
+        persist_dir = self._namespace_persist_dir(namespace)
+        metadata_path = self._namespace_metadata_path(namespace)
+        with self._get_namespace_lock(namespace):
+            os.makedirs(persist_dir, exist_ok=True)
+            fd, temp_path = tempfile.mkstemp(
+                prefix="index_metadata.",
+                suffix=".tmp",
+                dir=persist_dir,
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    json.dump(payload, handle, sort_keys=True, indent=2)
+                    handle.flush()
+                    try:
+                        os.fsync(handle.fileno())
+                    except OSError:
+                        pass
+                self._run_namespace_io(
+                    namespace,
+                    lambda: os.replace(temp_path, metadata_path),
+                    action_label="replace namespace metadata",
+                )
+            finally:
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except OSError:
+                        pass
 
     def _get_current_embedding_signature(self) -> dict[str, Any] | None:
         runtime_summary = self.get_runtime_configuration_summary()
@@ -545,56 +654,59 @@ class LlamaIndexRAGService(RAGService):
     def _build_namespace_runtime_state(self, namespace: str) -> dict[str, Any]:
         persist_dir = self._namespace_persist_dir(namespace)
         metadata_path = self._namespace_metadata_path(namespace)
-        has_persisted_index = False
-        try:
-            has_persisted_index = os.path.isdir(persist_dir) and bool(os.listdir(persist_dir))
-        except Exception:
-            has_persisted_index = os.path.isdir(persist_dir)
+        with self._get_namespace_lock(namespace):
+            has_persisted_index = False
+            try:
+                has_persisted_index = os.path.isdir(persist_dir) and bool(
+                    os.listdir(persist_dir)
+                )
+            except Exception:
+                has_persisted_index = os.path.isdir(persist_dir)
 
-        metadata = self._read_namespace_metadata(namespace)
-        current_signature = self._get_current_embedding_signature()
-        stored_signature_raw = (
-            metadata.get("embedding_signature")
-            if isinstance(metadata, dict)
-            else None
-        )
-        stored_signature = (
-            dict(stored_signature_raw)
-            if isinstance(stored_signature_raw, Mapping)
-            else None
-        )
-        runtime_summary = self.get_runtime_configuration_summary()
-        embedder_resolution = runtime_summary.get("embedder_resolution")
-        unresolved_reason = (
-            str(embedder_resolution.get("reason") or "").strip()
-            if isinstance(embedder_resolution, Mapping)
-            else ""
-        )
+            metadata = self._read_namespace_metadata(namespace)
+            current_signature = self._get_current_embedding_signature()
+            stored_signature_raw = (
+                metadata.get("embedding_signature")
+                if isinstance(metadata, dict)
+                else None
+            )
+            stored_signature = (
+                dict(stored_signature_raw)
+                if isinstance(stored_signature_raw, Mapping)
+                else None
+            )
+            runtime_summary = self.get_runtime_configuration_summary()
+            embedder_resolution = runtime_summary.get("embedder_resolution")
+            unresolved_reason = (
+                str(embedder_resolution.get("reason") or "").strip()
+                if isinstance(embedder_resolution, Mapping)
+                else ""
+            )
 
-        status = "compatible"
-        compatible = True
-        detail = "Namespace embedding signature matches the current runtime configuration."
-        if current_signature is None:
-            status = "embedder_unconfigured"
-            compatible = False
-            detail = unresolved_reason or "No effective RAG embedder is configured."
-        elif not has_persisted_index:
-            status = "missing_index"
-            detail = "No persisted index exists for this namespace yet."
-        elif metadata is None:
-            status = "signature_missing"
-            compatible = False
-            detail = (
-                "Persisted index metadata is missing, so embedding compatibility "
-                "cannot be verified. Rebuild is required."
-            )
-        elif stored_signature != current_signature:
-            status = "embedding_signature_mismatch"
-            compatible = False
-            detail = (
-                "Persisted index embeddings were built with a different embedding "
-                "signature. Rebuild is required before this namespace is trustworthy."
-            )
+            status = "compatible"
+            compatible = True
+            detail = "Namespace embedding signature matches the current runtime configuration."
+            if current_signature is None:
+                status = "embedder_unconfigured"
+                compatible = False
+                detail = unresolved_reason or "No effective RAG embedder is configured."
+            elif not has_persisted_index:
+                status = "missing_index"
+                detail = "No persisted index exists for this namespace yet."
+            elif metadata is None:
+                status = "signature_missing"
+                compatible = False
+                detail = (
+                    "Persisted index metadata is missing, so embedding compatibility "
+                    "cannot be verified. Rebuild is required."
+                )
+            elif stored_signature != current_signature:
+                status = "embedding_signature_mismatch"
+                compatible = False
+                detail = (
+                    "Persisted index embeddings were built with a different embedding "
+                    "signature. Rebuild is required before this namespace is trustworthy."
+                )
 
         return {
             "namespace": namespace,
@@ -616,52 +728,54 @@ class LlamaIndexRAGService(RAGService):
         return state
 
     def _maybe_load_index(self, namespace: str) -> Any:
-        state = self.get_namespace_runtime_state(namespace)
-        if not bool(state.get("compatible", False)):
-            return None
-
-        if namespace in self._indices:
-            return self._indices[namespace]
-
-        persist_dir = self._namespace_persist_dir(namespace)
-        if not os.path.isdir(persist_dir):
-            return None
-
-        # Avoid calling LlamaIndex load on an empty directory.
-        try:
-            if not os.listdir(persist_dir):
+        with self._get_namespace_lock(namespace):
+            state = self.get_namespace_runtime_state(namespace)
+            if not bool(state.get("compatible", False)):
                 return None
-        except Exception:
-            return None
 
-        try:
-            storage_context = StorageContext.from_defaults(persist_dir=persist_dir)
-            index = load_index_from_storage(
-                storage_context, **self._index_runtime_kwargs()
-            )
-        except Exception:
-            return None
+            if namespace in self._indices:
+                return self._indices[namespace]
 
-        self._indices[namespace] = index
-        return index
+            persist_dir = self._namespace_persist_dir(namespace)
+            if not os.path.isdir(persist_dir):
+                return None
 
-    def _get_or_create_index(self, namespace: str, documents: List[Any]) -> Any:
-        state = self.get_namespace_runtime_state(namespace)
-        if state.get("status") in {"signature_missing", "embedding_signature_mismatch"}:
-            self.reset_namespace(namespace)
-        index = self._maybe_load_index(namespace)
-        if index is not None:
+            # Avoid calling LlamaIndex load on an empty directory.
+            try:
+                if not os.listdir(persist_dir):
+                    return None
+            except Exception:
+                return None
+
+            try:
+                storage_context = StorageContext.from_defaults(persist_dir=persist_dir)
+                index = load_index_from_storage(
+                    storage_context, **self._index_runtime_kwargs()
+                )
+            except Exception:
+                return None
+
+            self._indices[namespace] = index
             return index
 
-        persist_dir = self._namespace_persist_dir(namespace)
-        os.makedirs(persist_dir, exist_ok=True)
-        index = VectorStoreIndex.from_documents(
-            documents, **self._index_runtime_kwargs()
-        )
-        index.storage_context.persist(persist_dir=persist_dir)
-        self._write_namespace_metadata(namespace)
-        self._indices[namespace] = index
-        return index
+    def _get_or_create_index(self, namespace: str, documents: List[Any]) -> Any:
+        with self._get_namespace_lock(namespace):
+            state = self.get_namespace_runtime_state(namespace)
+            if state.get("status") in {"signature_missing", "embedding_signature_mismatch"}:
+                self.reset_namespace(namespace)
+            index = self._maybe_load_index(namespace)
+            if index is not None:
+                return index
+
+            persist_dir = self._namespace_persist_dir(namespace)
+            os.makedirs(persist_dir, exist_ok=True)
+            index = VectorStoreIndex.from_documents(
+                documents, **self._index_runtime_kwargs()
+            )
+            index.storage_context.persist(persist_dir=persist_dir)
+            self._write_namespace_metadata(namespace)
+            self._indices[namespace] = index
+            return index
 
     def upsert_documents(
         self,
@@ -718,10 +832,11 @@ class LlamaIndexRAGService(RAGService):
         failed = 0
 
         def _persist() -> None:
-            index.storage_context.persist(
-                persist_dir=self._namespace_persist_dir(effective_namespace)
-            )
-            self._write_namespace_metadata(effective_namespace)
+            with self._get_namespace_lock(effective_namespace):
+                index.storage_context.persist(
+                    persist_dir=self._namespace_persist_dir(effective_namespace)
+                )
+                self._write_namespace_metadata(effective_namespace)
 
         # Prefer bulk insertion when supported (significantly faster for embedding-backed indices).
         try:
@@ -778,9 +893,10 @@ class LlamaIndexRAGService(RAGService):
                 pass
 
         if count > 0:
-            index.storage_context.persist(
-                persist_dir=self._namespace_persist_dir(effective_namespace)
-            )
+            with self._get_namespace_lock(effective_namespace):
+                index.storage_context.persist(
+                    persist_dir=self._namespace_persist_dir(effective_namespace)
+                )
 
         return count
 
@@ -789,32 +905,37 @@ class LlamaIndexRAGService(RAGService):
         namespace: Optional[str] = None,
     ) -> None:
         effective_namespace = self._resolve_effective_namespace(namespace)
-        self._indices.pop(effective_namespace, None)
-        self._namespace_runtime_state.pop(effective_namespace, None)
+        with self._get_namespace_lock(effective_namespace):
+            self._indices.pop(effective_namespace, None)
+            self._namespace_runtime_state.pop(effective_namespace, None)
 
-        persist_dir = os.path.abspath(self._namespace_persist_dir(effective_namespace))
-        namespaces_root = os.path.abspath(
-            os.path.join(self.persistence_dir, "namespaces")
-        )
-
-        try:
-            common_root = os.path.commonpath([persist_dir, namespaces_root])
-        except ValueError as exc:
-            raise RuntimeError(
-                f"RAG namespace reset path mismatch for '{effective_namespace}': {exc}"
-            ) from exc
-
-        if common_root != namespaces_root:
-            raise RuntimeError(
-                f"Refusing to reset namespace outside persistence root: {effective_namespace}"
+            persist_dir = os.path.abspath(self._namespace_persist_dir(effective_namespace))
+            namespaces_root = os.path.abspath(
+                os.path.join(self.persistence_dir, "namespaces")
             )
 
-        if os.path.isdir(persist_dir):
-            shutil.rmtree(persist_dir)
-        elif os.path.exists(persist_dir):
-            raise RuntimeError(
-                f"Namespace persistence path is not a directory: {persist_dir}"
-            )
+            try:
+                common_root = os.path.commonpath([persist_dir, namespaces_root])
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"RAG namespace reset path mismatch for '{effective_namespace}': {exc}"
+                ) from exc
+
+            if common_root != namespaces_root:
+                raise RuntimeError(
+                    f"Refusing to reset namespace outside persistence root: {effective_namespace}"
+                )
+
+            if os.path.isdir(persist_dir):
+                self._run_namespace_io(
+                    effective_namespace,
+                    lambda: shutil.rmtree(persist_dir),
+                    action_label="reset namespace persistence",
+                )
+            elif os.path.exists(persist_dir):
+                raise RuntimeError(
+                    f"Namespace persistence path is not a directory: {persist_dir}"
+                )
 
     def query(
         self,
@@ -849,7 +970,24 @@ class LlamaIndexRAGService(RAGService):
         # Note: Metadata filtering support varies by vector store implementation.
         # To ensure correctness, we do coarse retrieval first then apply filtering
         # locally.
-        similarity_top_k = max(top_k * 10, top_k)
+        retrieval_candidate_limit = None
+        if isinstance(permissions_context, dict):
+            raw_candidate_limit = permissions_context.get("retrieval_candidate_limit")
+            if raw_candidate_limit is None:
+                parsed_candidate_limit = 0
+            else:
+                try:
+                    parsed_candidate_limit = int(raw_candidate_limit)
+                except (TypeError, ValueError):
+                    parsed_candidate_limit = 0
+            if parsed_candidate_limit >= max(1, int(top_k)):
+                retrieval_candidate_limit = parsed_candidate_limit
+
+        similarity_top_k = (
+            retrieval_candidate_limit
+            if retrieval_candidate_limit is not None
+            else max(top_k * 10, top_k)
+        )
         start = time.perf_counter()
         embed_model, previous_embed_settings = self._temporarily_bound_query_embed_model()
         try:
@@ -961,6 +1099,11 @@ class LlamaIndexRAGService(RAGService):
                 "query_length": len(query_text or ""),
                 "top_k": int(top_k),
                 "similarity_top_k": int(similarity_top_k),
+                "retrieval_candidate_limit": (
+                    int(retrieval_candidate_limit)
+                    if retrieval_candidate_limit is not None
+                    else None
+                ),
                 "retrieved": len(nodes) if isinstance(nodes, list) else None,
                 "returned": len(results),
                 "elapsed_ms": elapsed_ms,

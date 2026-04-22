@@ -17,6 +17,7 @@ import pytest
 from src.backend.services.workflow_capability_service import (
     BUILTIN_WORKFLOW_CAPABILITIES,
     WorkflowCapabilityIndex,
+    _WORKFLOW_CAPABILITY_RETRIEVAL_WARM_QUERIES,
     get_workflow_capability_index_readiness_report,
     _workflow_id_to_name,
     build_workflow_capability_text,
@@ -235,9 +236,9 @@ class TestWorkflowCapabilityIndex:
         assert _fake_retrieval_backend.queries
         assert _fake_retrieval_backend.queries[-1]["query_text"] == query_text
         assert _fake_retrieval_backend.queries[-1]["namespace"] == "workflow_capabilities"
-        assert _fake_retrieval_backend.queries[-1]["permissions_context"] == {
-            "type": "workflow_capability"
-        }
+        permissions_context = _fake_retrieval_backend.queries[-1]["permissions_context"]
+        assert permissions_context["type"] == "workflow_capability"
+        assert permissions_context["retrieval_candidate_limit"] >= 10
 
     def test_index_sync_resets_backend_namespace(
         self,
@@ -671,6 +672,47 @@ def test_prewarm_workflow_capability_index_starts_background_build(
     assert observed == [(True, sentinel_registry)]
 
 
+def test_blocking_build_runs_all_warm_queries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.backend.services.workflow_capability_service as capability_service
+
+    class _FakeIndex:
+        def __init__(self) -> None:
+            self.search_queries: list[str] = []
+
+        def index_from_registry(self, registry: object) -> int:
+            assert registry is sentinel_registry
+            return 2
+
+        def search(self, query: str, max_results: int = 1) -> list[object]:
+            assert max_results == 1
+            self.search_queries.append(query)
+            return []
+
+    sentinel_registry = object()
+    fake_index = _FakeIndex()
+
+    monkeypatch.setattr(
+        capability_service,
+        "get_workflow_capability_index",
+        lambda: fake_index,
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.registry_factory.get_shared_workflow_registry_read_only",
+        lambda defer_parity_work=False: sentinel_registry,
+    )
+
+    result = capability_service._perform_workflow_capability_index_build(
+        mode="blocking"
+    )
+
+    assert result is fake_index
+    assert fake_index.search_queries == list(
+        _WORKFLOW_CAPABILITY_RETRIEVAL_WARM_QUERIES
+    )
+
+
 def test_index_sync_trims_backend_document_metadata(
     _fake_retrieval_backend: _FakeWorkflowRetrievalBackend,
 ) -> None:
@@ -721,6 +763,59 @@ def test_startup_check_records_not_ready_report(
     readiness = get_workflow_capability_index_readiness_report()
     assert readiness["status"] == "not_ready"
     assert readiness["startup_check"]["status"] == "not_ready"
+
+
+def test_readiness_report_requires_query_surface_warmth() -> None:
+    reset_workflow_capability_index()
+    index = get_workflow_capability_index()
+    index.index_workflow("#V#test_workflow", "Capability text for warm readiness test")
+
+    readiness = get_workflow_capability_index_readiness_report()
+
+    assert readiness["ready"] is False
+    assert readiness["status"] == "warming"
+    assert readiness["summary"] == "Workflow capability index query surface warming."
+
+
+def test_startup_check_warms_query_surface_for_ready_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.backend.services.workflow_capability_service as capability_service
+
+    reset_workflow_capability_index()
+    index = get_workflow_capability_index()
+    index.index_workflow("#V#test_workflow", "Capability text for startup warm test")
+
+    warm_calls: list[float | None] = []
+
+    monkeypatch.setattr(
+        capability_service,
+        "ensure_workflow_capability_index_populated",
+        lambda **_kwargs: capability_service.get_workflow_capability_index(),
+    )
+
+    def _fake_warm(index_arg: Any, *, timeout_seconds: float | None = None, mode: str = "warm") -> None:
+        assert index_arg is index
+        assert mode == "startup"
+        warm_calls.append(timeout_seconds)
+        capability_service._set_workflow_capability_query_surface_state(
+            ready=True,
+            error=None,
+            warmed_monotonic=123.0,
+        )
+
+    monkeypatch.setattr(
+        capability_service,
+        "_warm_workflow_capability_query_surface",
+        _fake_warm,
+    )
+
+    report = run_workflow_capability_index_startup_check(timeout_seconds=1.5)
+
+    assert warm_calls
+    assert report["success"] is True
+    assert report["ready"] is True
+    assert report["status"] == "ready"
 
 
 def test_invalidate_workflow_capability_index_clears_cached_entries() -> None:

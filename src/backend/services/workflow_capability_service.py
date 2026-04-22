@@ -34,6 +34,17 @@ logger = logging.getLogger(__name__)
 
 WORKFLOW_CAPABILITY_NAMESPACE = "workflow_capabilities"
 
+
+def _get_positive_float_env(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return float(default)
+    try:
+        parsed = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return float(default)
+    return parsed if parsed > 0.0 else float(default)
+
 # -------------------------------------------------------------------------
 # Retired Python capability overrides.
 #
@@ -45,7 +56,26 @@ WORKFLOW_CAPABILITY_NAMESPACE = "workflow_capabilities"
 BUILTIN_WORKFLOW_CAPABILITIES: Dict[str, str] = {}
 
 _CAPABILITY_INDEX_REBUILD_MIN_INTERVAL_SECONDS = 30.0
-_WORKFLOW_CAPABILITY_INDEX_STARTUP_TIMEOUT_SECONDS = 8.0
+_WORKFLOW_CAPABILITY_INDEX_STARTUP_TIMEOUT_SECONDS = _get_positive_float_env(
+    "VON_WORKFLOW_CAPABILITY_INDEX_STARTUP_TIMEOUT_SECONDS",
+    45.0,
+)
+_WORKFLOW_CAPABILITY_RETRIEVAL_CANDIDATE_MULTIPLIER = 2
+_WORKFLOW_CAPABILITY_RETRIEVAL_WARM_QUERIES: tuple[str, ...] = (
+    "workflow discovery capability",
+    (
+        "workflow capability warmup\n\n"
+        "Turn-intent routing guidance:\n"
+        "- Routing guidance: prioritise grounded relationship retrieval "
+        "workflows over generic inventory listing.\n"
+        "- Grounding requirement: use relation-bearing evidence and explicit "
+        "required tools when answering entity-relative questions.\n"
+        "- Success target: select the authoritative workflow that can identify "
+        "an entity and retrieve predicate-filtered extents such as papers, "
+        "affiliations, or roles.\n"
+        "- Required tools: fetch_concept, find_relations_with_argument"
+    ),
+)
 
 _INDEX_REBUILD_LOCK = Lock()
 _INDEX_STATE_LOCK = Lock()
@@ -59,6 +89,9 @@ _INDEX_REBUILD_STATE: Dict[str, Any] = {
     "startup_last_report": None,
     "last_invalidation_reason": None,
     "last_invalidated_at_utc": None,
+    "query_surface_ready": False,
+    "query_surface_last_error": None,
+    "query_surface_last_warm_monotonic": 0.0,
 }
 _INDEX_REBUILD_COMPLETED = threading.Event()
 _INDEX_REBUILD_COMPLETED.set()
@@ -103,6 +136,14 @@ def _build_workflow_capability_result_description(entry: "_CapabilityEntry") -> 
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _compute_workflow_capability_retrieval_candidate_limit(max_results: int) -> int:
+    requested = max(1, int(max_results or 1))
+    return max(
+        requested,
+        requested * _WORKFLOW_CAPABILITY_RETRIEVAL_CANDIDATE_MULTIPLIER,
+    )
 
 
 def _get_workflow_capability_rag_service() -> Any:
@@ -423,12 +464,18 @@ class WorkflowCapabilityIndex:
 
         entry_lookup = {entry.workflow_id: entry for entry in entries}
         rag_service = _get_workflow_capability_rag_service()
+        retrieval_candidate_limit = _compute_workflow_capability_retrieval_candidate_limit(
+            max_results
+        )
         rag_results = rag_service.query(
             query_text=clean_query,
-            top_k=max(max_results * 4, max_results),
+            top_k=max(1, max_results),
             namespace=WORKFLOW_CAPABILITY_NAMESPACE,
             hybrid=True,
-            permissions_context={"type": "workflow_capability"},
+            permissions_context={
+                "type": "workflow_capability",
+                "retrieval_candidate_limit": retrieval_candidate_limit,
+            },
         )
 
         scored_rows: List[Tuple[float, _CapabilityEntry]] = []
@@ -693,6 +740,61 @@ def _set_workflow_capability_rebuild_state(
             _INDEX_REBUILD_STATE["last_invalidated_at_utc"] = None
 
 
+def _set_workflow_capability_query_surface_state(
+    *,
+    ready: bool,
+    error: str | None = None,
+    warmed_monotonic: float | None = None,
+) -> None:
+    with _INDEX_STATE_LOCK:
+        _INDEX_REBUILD_STATE["query_surface_ready"] = bool(ready)
+        _INDEX_REBUILD_STATE["query_surface_last_error"] = error
+        if warmed_monotonic is not None:
+            _INDEX_REBUILD_STATE["query_surface_last_warm_monotonic"] = float(
+                warmed_monotonic
+            )
+
+
+def _warm_workflow_capability_query_surface(
+    index: "WorkflowCapabilityIndex",
+    *,
+    timeout_seconds: float | None = None,
+    mode: str = "warm",
+) -> None:
+    warm_started_at = time.perf_counter()
+    warm_failures: list[str] = []
+    for warm_query in _WORKFLOW_CAPABILITY_RETRIEVAL_WARM_QUERIES:
+        if (
+            timeout_seconds is not None
+            and timeout_seconds > 0.0
+            and (time.perf_counter() - warm_started_at) >= timeout_seconds
+        ):
+            raise TimeoutError(
+                "workflow capability query surface warm-up timed out after "
+                f"{timeout_seconds:.3f}s"
+            )
+        try:
+            index.search(warm_query, max_results=1)
+        except Exception as warm_exc:
+            warm_failures.append(str(warm_exc))
+    if warm_failures:
+        joined = "; ".join(warm_failures)
+        _set_workflow_capability_query_surface_state(ready=False, error=joined)
+        logger.warning("workflow_capability_index_warm_query_failed: %s", joined)
+        raise RuntimeError(joined)
+
+    _set_workflow_capability_query_surface_state(
+        ready=True,
+        error=None,
+        warmed_monotonic=time.monotonic(),
+    )
+    logger.info(
+        "[workflow_capability_index] %s query surface warmed in %.1fms.",
+        mode,
+        (time.perf_counter() - warm_started_at) * 1000.0,
+    )
+
+
 def get_workflow_capability_index_runtime_state() -> Dict[str, Any]:
     """Return lightweight runtime state for capability-index diagnostics."""
 
@@ -718,12 +820,15 @@ def get_workflow_capability_index_runtime_state() -> Dict[str, Any]:
         else True
     )
     with _INDEX_STATE_LOCK:
+        query_surface_ready = bool(
+            _INDEX_REBUILD_STATE.get("query_surface_ready", False)
+        )
         return {
             "surface": "workflow_retrieval",
             "backend": "llamaindex",
             "namespace": WORKFLOW_CAPABILITY_NAMESPACE,
             "size": int(index.size),
-            "ready": bool(index.size > 0 and namespace_compatible),
+            "ready": bool(index.size > 0 and namespace_compatible and query_surface_ready),
             "build_in_progress": bool(_INDEX_REBUILD_STATE.get("build_in_progress", False)),
             "last_error": _INDEX_REBUILD_STATE.get("last_error"),
             "last_mode": _INDEX_REBUILD_STATE.get("last_mode"),
@@ -739,6 +844,13 @@ def get_workflow_capability_index_runtime_state() -> Dict[str, Any]:
             ),
             "last_invalidated_at_utc": _INDEX_REBUILD_STATE.get(
                 "last_invalidated_at_utc"
+            ),
+            "query_surface_ready": query_surface_ready,
+            "query_surface_last_error": _INDEX_REBUILD_STATE.get(
+                "query_surface_last_error"
+            ),
+            "query_surface_last_warm_monotonic": float(
+                _INDEX_REBUILD_STATE.get("query_surface_last_warm_monotonic", 0.0)
             ),
             "namespace_state": namespace_state,
         }
@@ -775,6 +887,10 @@ def get_workflow_capability_index_readiness_report() -> Dict[str, Any]:
         if isinstance(namespace_state, dict)
         else ""
     )
+    query_surface_ready = bool(runtime_state.get("query_surface_ready", False))
+    query_surface_last_error = str(
+        runtime_state.get("query_surface_last_error") or ""
+    ).strip()
 
     if ready:
         status = "ready"
@@ -791,6 +907,18 @@ def get_workflow_capability_index_readiness_report() -> Dict[str, Any]:
         detail = (
             "Workflow discovery is waiting on the authoritative capability "
             "index to finish building."
+        )
+    elif size > 0 and namespace_compatible and not query_surface_ready:
+        status = "warming"
+        warning_level = "warning"
+        summary = "Workflow capability index query surface warming."
+        detail = (
+            f"Last warm-up failed: {query_surface_last_error}"
+            if query_surface_last_error
+            else (
+                "The authoritative workflow capability index is built, but this "
+                "process has not finished warming the query surface yet."
+            )
         )
     elif not namespace_compatible and namespace_status:
         status = "error"
@@ -857,6 +985,26 @@ def run_workflow_capability_index_startup_check(
         workflow_registry=workflow_registry,
     )
 
+    runtime_state = get_workflow_capability_index_runtime_state()
+    namespace_state_raw = runtime_state.get("namespace_state")
+    namespace_state: Mapping[str, Any] = (
+        namespace_state_raw if isinstance(namespace_state_raw, dict) else {}
+    )
+    if (
+        int(runtime_state.get("size") or 0) > 0
+        and bool(namespace_state.get("compatible", True))
+        and not bool(runtime_state.get("query_surface_ready", False))
+    ):
+        remaining_timeout = max(
+            0.0,
+            effective_timeout - (time.perf_counter() - started_at),
+        )
+        _warm_workflow_capability_query_surface(
+            get_workflow_capability_index(),
+            timeout_seconds=remaining_timeout if remaining_timeout > 0.0 else None,
+            mode="startup",
+        )
+
     readiness_report = get_workflow_capability_index_readiness_report()
     ready = bool(readiness_report.get("ready", False))
     build_in_progress = bool(readiness_report.get("build_in_progress", False))
@@ -906,6 +1054,7 @@ def _perform_workflow_capability_index_build(
         error=None,
         attempt_monotonic=attempt_monotonic,
     )
+    _set_workflow_capability_query_surface_state(ready=False, error=None)
     try:
         from ..workflows.durable.registry_factory import (
             get_shared_workflow_registry_read_only,
@@ -918,6 +1067,8 @@ def _perform_workflow_capability_index_build(
 
         index = get_workflow_capability_index()
         count = index.index_from_registry(registry)
+        if count > 0:
+            _warm_workflow_capability_query_surface(index, mode=mode)
         success_monotonic = time.monotonic()
         _set_workflow_capability_rebuild_state(
             build_in_progress=False,
@@ -1076,6 +1227,11 @@ def search_workflow_capabilities(
     )
     try:
         results = index.search(query, max_results=max_results, min_score=min_score)
+        _set_workflow_capability_query_surface_state(
+            ready=True,
+            error=None,
+            warmed_monotonic=time.monotonic(),
+        )
     except Exception as exc:
         _set_workflow_capability_rebuild_state(
             build_in_progress=False,
@@ -1125,6 +1281,9 @@ def reset_workflow_capability_index() -> None:
         _INDEX_REBUILD_STATE["startup_last_report"] = None
         _INDEX_REBUILD_STATE["last_invalidation_reason"] = None
         _INDEX_REBUILD_STATE["last_invalidated_at_utc"] = None
+        _INDEX_REBUILD_STATE["query_surface_ready"] = False
+        _INDEX_REBUILD_STATE["query_surface_last_error"] = None
+        _INDEX_REBUILD_STATE["query_surface_last_warm_monotonic"] = 0.0
     _INDEX_REBUILD_COMPLETED.set()
 
 
@@ -1151,6 +1310,9 @@ def invalidate_workflow_capability_index(
             str(reason).strip() if reason else None
         )
         _INDEX_REBUILD_STATE["last_invalidated_at_utc"] = _utc_now_iso()
+        _INDEX_REBUILD_STATE["query_surface_ready"] = False
+        _INDEX_REBUILD_STATE["query_surface_last_error"] = None
+        _INDEX_REBUILD_STATE["query_surface_last_warm_monotonic"] = 0.0
     return {
         "success": True,
         "cache": "workflow_capability_index",

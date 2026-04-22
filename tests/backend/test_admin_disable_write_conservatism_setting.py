@@ -296,6 +296,7 @@ def test_settings_endpoint_invalidates_workflow_capability_index_when_embedder_c
 
     invalidation_calls: list[dict[str, Any]] = []
     prewarm_calls: list[dict[str, Any]] = []
+    runtime_cache_invalidations: list[str] = []
     monkeypatch.setattr(
         "src.backend.server.routes.settings_routes.invalidate_workflow_capability_index",
         lambda **kwargs: invalidation_calls.append(dict(kwargs))
@@ -313,6 +314,10 @@ def test_settings_endpoint_invalidates_workflow_capability_index_when_embedder_c
             "summary": "Workflow capability index still building.",
             "detail": "Workflow discovery is waiting on the authoritative capability index to finish building.",
         },
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes._invalidate_cached_rag_runtime_configuration",
+        lambda: runtime_cache_invalidations.append("called"),
     )
 
     with app.test_client() as client:
@@ -332,6 +337,7 @@ def test_settings_endpoint_invalidates_workflow_capability_index_when_embedder_c
     assert resp.status_code == 200
     payload = resp.get_json() or {}
     assert payload["workflow_capability_rebuild"]["required"] is True
+    assert runtime_cache_invalidations == ["called"]
     assert invalidation_calls == [
         {
             "reason": payload["workflow_capability_rebuild"]["detail"],
