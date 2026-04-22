@@ -250,6 +250,69 @@ def test_custom_workflow_summary_uses_selected_workflow_trace_when_dispatch_even
     )
 
 
+def test_custom_workflow_summary_uses_trace_execution_summary_when_aux_entry_missing() -> (
+    None
+):
+    summary = _summarise_tool_execution_context(
+        workflow_routing={
+            "workflow_id": "#V#entity_information_retrieval_workflow",
+            "verdict": "rag_selected",
+        },
+        turn_execution_diagnostics={
+            "latest_progress": {
+                "counters": {"tools_started": 0, "tools_completed": 0},
+                "diagnostic_events": [],
+            }
+        },
+        aux_llm_calls=[
+            {
+                "type": "workflow_selector",
+                "workflow_id": "#V#entity_information_retrieval_workflow",
+                "verdict": "rag_selected",
+            }
+        ],
+        serialised_invocations=[],
+        selected_workflow_trace={
+            "selected_workflow_id": "#V#entity_information_retrieval_workflow",
+            "child_workflow_completed": True,
+            "child_workflow_final_state": (
+                "#V#workflow_step_entity_information_retrieval_workflow_completed"
+            ),
+            "completion_report_source": "child_completion_report",
+            "workflow_execution_summary": {
+                "schema_version": "workflow_execution_summary.v1",
+                "workflow_id": "#V#entity_information_retrieval_workflow",
+                "completed": True,
+                "terminal_status": "completed",
+                "final_state": (
+                    "#V#workflow_step_entity_information_retrieval_workflow_completed"
+                ),
+                "step_result_envelope_count": 5,
+                "action_started_count": 5,
+                "action_completed_count": 5,
+                "action_success_count": 4,
+                "action_failure_count": 1,
+                "action_unknown_count": 0,
+                "runtime_event_count": 0,
+                "terminal_effect_count": 1,
+                "terminal_effects": [],
+                "durable_side_effect_count": 0,
+                "durable_side_effects": [],
+            },
+        },
+    )
+
+    custom_execution = summary["custom_workflow_execution"]
+    assert custom_execution["observed"] is True
+    assert custom_execution["workflow_id"] == "#V#entity_information_retrieval_workflow"
+    assert custom_execution["action_started_count"] == 5
+    assert custom_execution["action_completed_count"] == 5
+    assert custom_execution["action_failure_count"] == 1
+    assert custom_execution["completion_report_source"] == "child_completion_report"
+    assert summary["zero_tool_reason_code"] == "custom_workflow_actions_handled_turn"
+    assert summary["zero_tool_execution_expected"] is True
+
+
 def test_tool_execution_summary_preserves_local_handoff_failure_reason() -> None:
     summary = _summarise_tool_execution_context(
         workflow_routing={

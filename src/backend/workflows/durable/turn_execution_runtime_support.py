@@ -52,6 +52,20 @@ def _coerce_non_negative_int(
     return coerced
 
 
+def _is_evidence_effect_type(effect_type: str | None) -> bool:
+    if not isinstance(effect_type, str):
+        return False
+    lowered = effect_type.strip().lower()
+    return (
+        lowered == "required_evidence"
+        or lowered == "grounded_evidence"
+        or lowered == "grounded_retrieval"
+        or lowered.endswith("_retrieval")
+        or lowered.endswith("_evidence")
+        or ("evidence" in lowered)
+    )
+
+
 def _coerce_bool(value: Any, *, default: bool) -> bool:
     if isinstance(value, bool):
         return value
@@ -312,6 +326,49 @@ def _bounded_snapshot(
 
     text = repr(value)
     return text[:max_string_length] + "..." if len(text) > max_string_length else text
+
+
+_WORKFLOW_EXECUTION_TRACE_SUMMARY_KEYS: tuple[str, ...] = (
+    "schema_version",
+    "workflow_id",
+    "completed",
+    "effective_completed",
+    "terminal_status",
+    "final_state",
+    "error",
+    "response_text",
+    "completion_gate_safe_to_claim_completion",
+    "completion_gate_blocking_reason_codes",
+    "terminal_success_contract",
+    "terminal_success_evaluation",
+    "step_result_envelope_count",
+    "action_started_count",
+    "action_completed_count",
+    "action_success_count",
+    "action_failure_count",
+    "action_unknown_count",
+    "first_failing_state_id",
+    "first_failing_action_id",
+    "runtime_event_count",
+    "terminal_effect_count",
+    "terminal_effects",
+    "durable_side_effect_count",
+    "durable_side_effects",
+)
+
+
+def _build_selected_workflow_trace_execution_summary(
+    *payloads: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    summary: dict[str, Any] = {}
+    for payload in payloads:
+        if not isinstance(payload, Mapping):
+            continue
+        for key in _WORKFLOW_EXECUTION_TRACE_SUMMARY_KEYS:
+            if key in summary or key not in payload:
+                continue
+            summary[key] = payload.get(key)
+    return summary or None
 
 
 def _resolve_turn_expected_outcome_contract(*sources: Any) -> TurnExpectedOutcomeContract:
@@ -737,6 +794,18 @@ def build_turn_execution_selected_workflow_outputs(
         )
         selected_workflow_trace_payload["expected_outcome_contract_state"] = (
             resolved_turn_expected_outcome_contract.to_state_payload()
+        )
+    trace_execution_summary = _build_selected_workflow_trace_execution_summary(
+        (
+            child_outputs_map.get("workflow_execution_summary")
+            if isinstance(child_outputs_map.get("workflow_execution_summary"), Mapping)
+            else None
+        ),
+        completion_report_map,
+    )
+    if trace_execution_summary:
+        selected_workflow_trace_payload["workflow_execution_summary"] = (
+            trace_execution_summary
         )
 
     outputs: dict[str, Any] = {
@@ -1464,6 +1533,13 @@ def run_turn_execution_completion_gate(
             status_line = (
                 "Execution status: selected workflow execution did not complete successfully."
             )
+        elif unresolved_effect_types and all(
+            _is_evidence_effect_type(effect_type)
+            for effect_type in unresolved_effect_types
+        ):
+            status_line = (
+                "Execution status: required grounded evidence was not retrieved."
+            )
         elif decision == "failed":
             status_line = "Execution status: requested mutation failed or was blocked."
         elif decision == "escalation_required":
@@ -1509,11 +1585,21 @@ def run_turn_execution_completion_gate(
             and isinstance(final_response, str)
             and final_response.strip()
         )
+        replace_existing_user_response = bool(
+            unresolved_effect_types
+            and not preserve_existing_user_response
+            and all(
+                _is_evidence_effect_type(effect_type)
+                for effect_type in unresolved_effect_types
+            )
+        )
         ledger_replaced_empty = not (
             isinstance(final_response, str) and final_response.strip()
         )
         if preserve_existing_user_response:
             pass
+        elif replace_existing_user_response:
+            final_response = status_line
         elif isinstance(final_response, str) and final_response.strip():
             if "Execution status:" not in final_response:
                 final_response = f"{final_response.rstrip()}\n\n{status_line}"

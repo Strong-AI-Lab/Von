@@ -81,6 +81,49 @@ def test_supervised_turn_preserves_gate_reported_response_when_follow_up_is_requ
     assert result.completion_gate_verdict.get("requires_follow_up") is True
 
 
+def test_supervised_turn_prefers_gate_reported_response_when_completed_workflow_requires_follow_up(
+    monkeypatch,
+) -> None:
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _DummyGateway()))
+    _stub_base_system_prompt(monkeypatch, orchestrator)
+    expected_response = (
+        "Execution status: required grounded evidence was not retrieved."
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "execute_workflow",
+        lambda *args, **kwargs: SimpleNamespace(
+            completed=True,
+            final_state="completed",
+            error=None,
+            data={
+                "response_text": (
+                    "You are Michael Witbrock. I could not find any papers explicitly linked to you."
+                ),
+                "final_response": expected_response,
+                "completion_gate_decision": "escalation_required",
+                "completion_gate_requires_follow_up": True,
+                "completion_gate_safe_to_claim_completion": False,
+                "completion_gate_evidence_payload": {
+                    "terminal_outcome": "follow_up_required"
+                },
+            },
+        ),
+    )
+
+    result = orchestrator.execute_conversation_turn_supervised(
+        prompt="Tell me who I am and list my papers.",
+        context=None,
+        llm_client=_DummyLLM(),
+        model="test-model",
+    )
+
+    assert result.response_text == expected_response
+    assert result.completion_gate_verdict is not None
+    assert result.completion_gate_verdict.get("decision") == "escalation_required"
+    assert result.completion_gate_verdict.get("requires_follow_up") is True
+
+
 def test_sanitise_user_visible_action_output_strips_internal_status_suffix() -> None:
     orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _DummyGateway()))
     aux_log: list[dict[str, Any]] = []

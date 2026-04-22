@@ -236,11 +236,20 @@ def _build_turn_execution_route_handler() -> Any:
         if not isinstance(prompt, str) or not prompt.strip():
             prompt = request.data.get("prompt")
         prompt = prompt.strip() if isinstance(prompt, str) else ""
+        raw_discovery_timeout_seconds = request.data.get(
+            "workflow_discovery_timeout_seconds"
+        )
+        discovery_timeout_seconds = (
+            raw_discovery_timeout_seconds
+            if isinstance(raw_discovery_timeout_seconds, (int, float, str))
+            else None
+        )
 
         if not discovery or not discovery.get("selected_workflow_id"):
             discovery_result = discover_workflows_for_turn(
                 prompt,
                 namespace=request.environment.user_namespace,
+                timeout_seconds=discovery_timeout_seconds,
             )
             discovery = discovery_result or {}
 

@@ -1868,6 +1868,11 @@ def _build_custom_workflow_execution_summary(
     trace_completion_report_source = (
         _safe_str(trace_payload.get("completion_report_source")) or ""
     )
+    trace_execution_summary = (
+        dict(cast(Mapping[str, Any], trace_payload.get("workflow_execution_summary")))
+        if isinstance(trace_payload.get("workflow_execution_summary"), Mapping)
+        else {}
+    )
     trace_result_snapshot = (
         dict(cast(Mapping[str, Any], trace_payload.get("child_result_snapshot")))
         if isinstance(trace_payload.get("child_result_snapshot"), Mapping)
@@ -1890,49 +1895,53 @@ def _build_custom_workflow_execution_summary(
             "completed" if trace_final_state.lower() == "completed" else "failed"
         )
 
+    summary_source = summary_payload if isinstance(summary_payload, Mapping) else {}
+    if not summary_source and trace_execution_summary:
+        summary_source = trace_execution_summary
+
     terminal_effects = _normalise_workflow_execution_terminal_effects(
-        summary_payload.get("terminal_effects")
+        summary_source.get("terminal_effects")
     )
     durable_side_effects = _normalise_workflow_execution_side_effects(
-        summary_payload.get("durable_side_effects")
+        summary_source.get("durable_side_effects")
     )
 
     step_result_envelope_count = _safe_non_negative_int(
-        summary_payload.get("step_result_envelope_count")
+        summary_source.get("step_result_envelope_count")
     )
     action_started_count = _safe_non_negative_int(
-        summary_payload.get("action_started_count"),
+        summary_source.get("action_started_count"),
         default=step_result_envelope_count,
     )
     action_completed_count = _safe_non_negative_int(
-        summary_payload.get("action_completed_count"),
+        summary_source.get("action_completed_count"),
         default=step_result_envelope_count,
     )
     action_success_count = _safe_non_negative_int(
-        summary_payload.get("action_success_count")
+        summary_source.get("action_success_count")
     )
     action_failure_count = _safe_non_negative_int(
-        summary_payload.get("action_failure_count")
+        summary_source.get("action_failure_count")
     )
     action_unknown_count = _safe_non_negative_int(
-        summary_payload.get("action_unknown_count")
+        summary_source.get("action_unknown_count")
     )
     runtime_event_count = _safe_non_negative_int(
-        summary_payload.get("runtime_event_count")
+        summary_source.get("runtime_event_count")
     )
     terminal_effect_count = _safe_non_negative_int(
-        summary_payload.get("terminal_effect_count"),
+        summary_source.get("terminal_effect_count"),
         default=len(terminal_effects),
     )
     durable_side_effect_count = _safe_non_negative_int(
-        summary_payload.get("durable_side_effect_count"),
+        summary_source.get("durable_side_effect_count"),
         default=sum(
             _safe_non_negative_int(item.get("artefact_count"))
             for item in durable_side_effects
         ),
     )
 
-    completed_value = summary_payload.get("completed")
+    completed_value = summary_source.get("completed")
     if not isinstance(completed_value, bool) and isinstance(selected_entry, Mapping):
         entry_completed = selected_entry.get("completed")
         if isinstance(entry_completed, bool):
@@ -1946,7 +1955,7 @@ def _build_custom_workflow_execution_summary(
             else None
         )
 
-    final_state = _safe_str(summary_payload.get("final_state"))
+    final_state = _safe_str(summary_source.get("final_state"))
     if not final_state and isinstance(selected_entry, Mapping):
         final_state = _safe_str(selected_entry.get("final_state"))
     if not final_state:
@@ -1954,15 +1963,15 @@ def _build_custom_workflow_execution_summary(
     if not final_state:
         final_state = _safe_str(dispatch_terminal_final_state)
 
-    first_failing_state_id = _safe_str(summary_payload.get("first_failing_state_id"))
+    first_failing_state_id = _safe_str(summary_source.get("first_failing_state_id"))
     if not first_failing_state_id:
         first_failing_state_id = _safe_str(dispatch_terminal_failing_state_id)
-    first_failing_action_id = _safe_str(summary_payload.get("first_failing_action_id"))
+    first_failing_action_id = _safe_str(summary_source.get("first_failing_action_id"))
     if not first_failing_action_id:
         first_failing_action_id = _safe_str(dispatch_terminal_failing_action_id)
 
     observed = selected_entry is not None or trace_observed
-    workflow_id = _safe_str(summary_payload.get("workflow_id"))
+    workflow_id = _safe_str(summary_source.get("workflow_id"))
     if not workflow_id and isinstance(selected_entry, Mapping):
         workflow_id = _safe_str(selected_entry.get("workflow_id"))
     if not workflow_id:
@@ -1972,16 +1981,16 @@ def _build_custom_workflow_execution_summary(
 
     return {
         "observed": observed,
-        "schema_version": _safe_str(summary_payload.get("schema_version"))
+        "schema_version": _safe_str(summary_source.get("schema_version"))
         or "workflow_execution_summary.v1",
         "workflow_id": workflow_id,
         "completed": completed_value if isinstance(completed_value, bool) else None,
         "effective_completed": (
-            summary_payload.get("effective_completed")
-            if isinstance(summary_payload.get("effective_completed"), bool)
+            summary_source.get("effective_completed")
+            if isinstance(summary_source.get("effective_completed"), bool)
             else None
         ),
-        "terminal_status": _safe_str(summary_payload.get("terminal_status"))
+        "terminal_status": _safe_str(summary_source.get("terminal_status"))
         or trace_terminal_status
         or None,
         "final_state": final_state,
@@ -1989,33 +1998,33 @@ def _build_custom_workflow_execution_summary(
         "completion_report_source": trace_completion_report_source or None,
         "result_snapshot": trace_result_snapshot,
         "completion_gate_safe_to_claim_completion": (
-            summary_payload.get("completion_gate_safe_to_claim_completion")
+            summary_source.get("completion_gate_safe_to_claim_completion")
             if isinstance(
-                summary_payload.get("completion_gate_safe_to_claim_completion"), bool
+                summary_source.get("completion_gate_safe_to_claim_completion"), bool
             )
             else None
         ),
         "completion_gate_blocking_reason_codes": _dedupe_string_sequence(
-            summary_payload.get("completion_gate_blocking_reason_codes") or []
+            summary_source.get("completion_gate_blocking_reason_codes") or []
         ),
         "terminal_success_contract": (
             dict(
                 cast(
                     Mapping[str, Any],
-                    summary_payload.get("terminal_success_contract"),
+                    summary_source.get("terminal_success_contract"),
                 )
             )
-            if isinstance(summary_payload.get("terminal_success_contract"), Mapping)
+            if isinstance(summary_source.get("terminal_success_contract"), Mapping)
             else None
         ),
         "terminal_success_evaluation": (
             dict(
                 cast(
                     Mapping[str, Any],
-                    summary_payload.get("terminal_success_evaluation"),
+                    summary_source.get("terminal_success_evaluation"),
                 )
             )
-            if isinstance(summary_payload.get("terminal_success_evaluation"), Mapping)
+            if isinstance(summary_source.get("terminal_success_evaluation"), Mapping)
             else None
         ),
         "step_result_envelope_count": step_result_envelope_count,
@@ -4996,12 +5005,26 @@ def _load_workflow_required_effects_contract(
         )
 
         registry = get_shared_workflow_registry_read_only(defer_parity_work=True)
-        definition = registry.get(workflow_id_value) if registry is not None else None
+        if registry is not None:
+            registration = registry.get_registration(workflow_id_value)
+            if registration is not None:
+                definition = registration.definition
     except Exception:
         logger.debug(
             "workflow required-effects contract load via registry failed",
             exc_info=True,
         )
+
+    if definition is None:
+        try:
+            from ..workflows.vontology_loader import load_workflow_definition_from_vontology
+
+            definition = load_workflow_definition_from_vontology(workflow_id_value)
+        except Exception:
+            logger.debug(
+                "workflow required-effects contract load via authoritative definition failed",
+                exc_info=True,
+            )
 
     if definition is None:
         return None, None
@@ -5030,6 +5053,9 @@ def _is_evidence_effect_type(effect_type: str | None) -> bool:
     lowered = effect_type.strip().lower()
     return (
         lowered == "required_evidence"
+        or lowered == "grounded_evidence"
+        or lowered == "grounded_retrieval"
+        or lowered.endswith("_retrieval")
         or lowered.endswith("_evidence")
         or ("evidence" in lowered)
     )

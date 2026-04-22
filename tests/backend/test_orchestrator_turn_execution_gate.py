@@ -430,6 +430,56 @@ def test_turn_completion_gate_backfills_failure_codes_for_unresolved_preconditio
     ]
 
 
+def test_turn_completion_gate_replaces_unsafe_answer_for_missing_grounded_evidence() -> None:
+    orchestrator = _build_orchestrator()
+    request = _build_request(
+        action_id="turn_execution.completion_gate",
+        data={
+            "final_response": (
+                "You are Test User. I could not find any papers explicitly linked to you."
+            ),
+            "turn_execution_record": {
+                "completion_gate": {
+                    "decision": "escalation_required",
+                    "decision_reason": (
+                        "Required grounded entity-information evidence was not retrieved."
+                    ),
+                    "safe_to_claim_completion": False,
+                    "requires_follow_up": True,
+                    "blocking_effect_ids": ["grounded_entity_information_evidence"],
+                    "blocking_failure_codes": ["entity_information_evidence_missing"],
+                    "evidence_payload": {
+                        "unresolved_preconditions": [
+                            {
+                                "effect_id": "grounded_entity_information_evidence",
+                                "effect_type": "grounded_evidence",
+                                "status": "not_executed",
+                                "status_reason": (
+                                    "Required grounded entity-information evidence was not retrieved."
+                                ),
+                                "failure_codes": [
+                                    "entity_information_evidence_missing"
+                                ],
+                            }
+                        ]
+                    },
+                }
+            },
+        },
+    )
+
+    result = orchestrator._action_turn_execution_completion_gate(request)
+
+    assert result.ok
+    final_response = result.outputs.get("final_response")
+    assert isinstance(final_response, str)
+    assert final_response.startswith(
+        "Execution status: required grounded evidence was not retrieved."
+    )
+    assert "You are Test User." not in final_response
+    assert "entity_information_evidence_missing" in final_response
+
+
 def test_turn_execution_critic_flags_missing_non_kb_mutation_execution() -> None:
     orchestrator = _build_orchestrator()
     request = _build_request(
