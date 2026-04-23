@@ -7,7 +7,7 @@ Rules of thumb:
 - Prefer pointers over prose.
 - When something is no longer relevant, delete it (or move it to the archive).
 
-Last updated: 2026-04-20
+Last updated: 2026-04-23
 
 ---
 
@@ -76,6 +76,12 @@ Push the feature branch before merging so the remote tracking ref exists; otherw
 		- `jira_get_myself`: returns user profile.
 		- `jira_get_issue` (`JVNAUTOSCI-1086`): returns issue payload (`status=Done`).
 	- If this regresses: rotate token -> update `.env` -> restart Von -> re-run `jira_get_myself`.
+- 2026-04-23: repo-shell Jira/Vontology MCP invocation
+	- `jira_proxy_mcp.py` now applies repo-root `.env` overrides itself before spawning the Jira MCP subprocess, and `jira_get_auth_config` reports the same effective env view.
+	- For shell-side verification from the repo root, use:
+		- `pdm run python utilities/invoke_internal_mcp_tool.py jira_get_auth_config`
+		- `pdm run python utilities/invoke_internal_mcp_tool.py jira_get_myself`
+	- This avoids depending on whether the parent PowerShell session happened to inherit `.env`.
 - 2026-02-08: WS2 workflow safety envelope (JVNAUTOSCI-1087)
 	- `ActionRegistry.execute()` now stamps canonical action outcome keys in context (`last_action_failed`, `last_step_ok`, `last_action_error`, etc.) on both success and failure.
 	- `WorkflowExecutor` and `DurableWorkflowExecutor` now honour explicit `on_failure` transitions instead of always failing fast on action errors.

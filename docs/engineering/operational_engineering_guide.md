@@ -227,6 +227,10 @@ abandoning cleanup. The common reasons are:
 - When code depends on a credential or service-critical environment variable,
   register the key in `_apply_dotenv_overrides()` in
   `src/workflows/von/main.py`.
+- For repo-local shell diagnostics of internal MCP tools, prefer a canonical
+  helper that runs through `InternalMCPGateway` from the repo root rather than
+  assuming the parent shell inherited `.env`. Use
+  `pdm run python utilities/invoke_internal_mcp_tool.py <tool_name>`.
 - Do not rely on inherited parent-shell values for well-known keys such as
   `GITHUB_TOKEN`; IDEs, CI, and host tooling often override them.
 - Assume `.env` edits do not affect already-running Von processes.

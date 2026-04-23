@@ -13,16 +13,65 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, cast
+from typing import Any, Dict, Mapping, Optional, cast
 
 from .mcp_proxy_base import MCPServerConfig, MCPStdIOClient, MCPToolClientError
+from ...utils.runtime_env import apply_repo_dotenv_overrides, clean_env_value
 
 logger = logging.getLogger(__name__)
 _LOG_TAG = "[jira_proxy]"
+JIRA_PROXY_ENV_OVERRIDE_KEYS: tuple[str, ...] = (
+    "ATLASSIAN_BASE_URL",
+    "ATLASSIAN_SITE_BASE",
+    "ATLASSIAN_EMAIL",
+    "ATLASSIAN_API_EMAIL",
+    "ATLASSIAN_API_TOKEN",
+)
 
 
 class JiraProxyError(Exception):
     """Raised when Jira proxy operations fail."""
+
+
+def _resolve_jira_auth(
+    env: Mapping[str, str],
+) -> tuple[str | None, str | None, str | None, dict[str, str | None]]:
+    base_url_key = (
+        "ATLASSIAN_BASE_URL"
+        if clean_env_value(env.get("ATLASSIAN_BASE_URL"))
+        else (
+            "ATLASSIAN_SITE_BASE"
+            if clean_env_value(env.get("ATLASSIAN_SITE_BASE"))
+            else None
+        )
+    )
+    email_key = (
+        "ATLASSIAN_EMAIL"
+        if clean_env_value(env.get("ATLASSIAN_EMAIL"))
+        else (
+            "ATLASSIAN_API_EMAIL"
+            if clean_env_value(env.get("ATLASSIAN_API_EMAIL"))
+            else None
+        )
+    )
+    token_key = (
+        "ATLASSIAN_API_TOKEN"
+        if clean_env_value(env.get("ATLASSIAN_API_TOKEN"))
+        else None
+    )
+
+    base_url = clean_env_value(env.get(base_url_key)) if base_url_key else None
+    email = clean_env_value(env.get(email_key)) if email_key else None
+    token = clean_env_value(env.get(token_key)) if token_key else None
+
+    if base_url:
+        base_url = base_url.rstrip("/")
+
+    return base_url, email, token, {
+        "base_url": base_url_key,
+        "email": email_key,
+        "token": token_key,
+    }
 
 
 @dataclass
@@ -179,21 +228,18 @@ class JiraMCPProxy:
 
 def _build_jira_env() -> Dict[str, str]:
     env = os.environ.copy()
+    applied_overrides = apply_repo_dotenv_overrides(
+        JIRA_PROXY_ENV_OVERRIDE_KEYS,
+        environ=env,
+    )
+    if applied_overrides:
+        logger.info(
+            "%s Applied repo-root .env overrides for %s Jira key(s).",
+            _LOG_TAG,
+            len(applied_overrides),
+        )
 
-    def _clean(value: str | None) -> str | None:
-        if value is None:
-            return None
-        cleaned = value.strip()
-        if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in ('"', "'"):
-            cleaned = cleaned[1:-1].strip()
-        return cleaned or None
-
-    base_url = _clean(env.get("ATLASSIAN_BASE_URL") or env.get("ATLASSIAN_SITE_BASE"))
-    email = _clean(env.get("ATLASSIAN_EMAIL") or env.get("ATLASSIAN_API_EMAIL"))
-    token = _clean(env.get("ATLASSIAN_API_TOKEN"))
-
-    if base_url:
-        base_url = base_url.rstrip("/")
+    base_url, email, token, env_keys_used = _resolve_jira_auth(env)
 
     missing = [
         name
@@ -214,6 +260,15 @@ def _build_jira_env() -> Dict[str, str]:
             "$env:ATLASSIAN_API_TOKEN='token'"
         )
 
+    logger.info(
+        "%s Jira auth resolved from keys base_url=%s email=%s token_present=%s token_length=%d",
+        _LOG_TAG,
+        env_keys_used.get("base_url"),
+        env_keys_used.get("email"),
+        bool(token),
+        len(token or ""),
+    )
+
     env["ATLASSIAN_BASE_URL"] = cast(str, base_url)  # Normalise base key used by server
     env["ATLASSIAN_EMAIL"] = cast(str, email)
     env["ATLASSIAN_API_TOKEN"] = cast(str, token)
@@ -228,34 +283,11 @@ def inspect_jira_auth_config() -> Dict[str, Any]:
     """
 
     env = os.environ.copy()
-
-    def _clean(value: str | None) -> str | None:
-        if value is None:
-            return None
-        cleaned = value.strip()
-        if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in ('"', "'"):
-            cleaned = cleaned[1:-1].strip()
-        return cleaned or None
-
-    base_url_key = (
-        "ATLASSIAN_BASE_URL"
-        if env.get("ATLASSIAN_BASE_URL")
-        else ("ATLASSIAN_SITE_BASE" if env.get("ATLASSIAN_SITE_BASE") else None)
+    apply_repo_dotenv_overrides(
+        JIRA_PROXY_ENV_OVERRIDE_KEYS,
+        environ=env,
     )
-    email_key = (
-        "ATLASSIAN_EMAIL"
-        if env.get("ATLASSIAN_EMAIL")
-        else ("ATLASSIAN_API_EMAIL" if env.get("ATLASSIAN_API_EMAIL") else None)
-    )
-    token_key = "ATLASSIAN_API_TOKEN" if env.get("ATLASSIAN_API_TOKEN") else None
-
-    base_url = _clean(env.get(base_url_key)) if base_url_key else None
-    email = _clean(env.get(email_key)) if email_key else None
-    token_raw = env.get(token_key) if token_key else None
-    token = _clean(token_raw)
-
-    if base_url:
-        base_url = base_url.rstrip("/")
+    base_url, email, token, env_keys_used = _resolve_jira_auth(env)
 
     return {
         "success": True,
@@ -263,13 +295,10 @@ def inspect_jira_auth_config() -> Dict[str, Any]:
         "email": email,
         "token_present": bool(token),
         "token_length": len(token) if token else 0,
-        "env_keys_used": {
-            "base_url": base_url_key,
-            "email": email_key,
-            "token": token_key,
-        },
+        "env_keys_used": env_keys_used,
         "notes": (
-            "This output reflects environment variables read by the Von process. "
+            "This output reflects the effective Jira environment seen by the "
+            "Von process after repo-root .env overrides are applied. "
             "It does not prove Jira authentication is valid."
         ),
     }

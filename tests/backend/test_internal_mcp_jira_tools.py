@@ -23,6 +23,87 @@ from src.backend.integrations.internal_mcp.catalogue import (
 )
 
 
+def test_build_jira_env_applies_repo_dotenv_overrides(monkeypatch):
+    from src.backend.integrations.internal_mcp.jira_proxy_mcp import _build_jira_env
+
+    for key in (
+        "ATLASSIAN_BASE_URL",
+        "ATLASSIAN_SITE_BASE",
+        "ATLASSIAN_EMAIL",
+        "ATLASSIAN_API_EMAIL",
+        "ATLASSIAN_API_TOKEN",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    def _fake_apply_repo_dotenv_overrides(keys, *, environ=None):
+        assert "ATLASSIAN_API_TOKEN" in tuple(keys)
+        assert environ is not None
+        environ["ATLASSIAN_BASE_URL"] = "https://example.atlassian.net/"
+        environ["ATLASSIAN_EMAIL"] = "agent@example.com"
+        environ["ATLASSIAN_API_TOKEN"] = "token-123"
+        return {
+            "ATLASSIAN_BASE_URL": "https://example.atlassian.net/",
+            "ATLASSIAN_EMAIL": "agent@example.com",
+            "ATLASSIAN_API_TOKEN": "token-123",
+        }
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.jira_proxy_mcp.apply_repo_dotenv_overrides",
+        _fake_apply_repo_dotenv_overrides,
+    )
+
+    env = _build_jira_env()
+
+    assert env["ATLASSIAN_BASE_URL"] == "https://example.atlassian.net"
+    assert env["ATLASSIAN_EMAIL"] == "agent@example.com"
+    assert env["ATLASSIAN_API_TOKEN"] == "token-123"
+
+
+def test_jira_auth_config_reports_repo_dotenv_override_view(monkeypatch):
+    from src.backend.integrations.internal_mcp.jira_proxy_mcp import (
+        inspect_jira_auth_config,
+    )
+
+    for key in (
+        "ATLASSIAN_BASE_URL",
+        "ATLASSIAN_SITE_BASE",
+        "ATLASSIAN_EMAIL",
+        "ATLASSIAN_API_EMAIL",
+        "ATLASSIAN_API_TOKEN",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    def _fake_apply_repo_dotenv_overrides(keys, *, environ=None):
+        assert environ is not None
+        environ["ATLASSIAN_SITE_BASE"] = "https://example.atlassian.net/"
+        environ["ATLASSIAN_API_EMAIL"] = "agent@example.com"
+        environ["ATLASSIAN_API_TOKEN"] = "token-123"
+        return {
+            "ATLASSIAN_SITE_BASE": "https://example.atlassian.net/",
+            "ATLASSIAN_API_EMAIL": "agent@example.com",
+            "ATLASSIAN_API_TOKEN": "token-123",
+        }
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.jira_proxy_mcp.apply_repo_dotenv_overrides",
+        _fake_apply_repo_dotenv_overrides,
+    )
+
+    result = inspect_jira_auth_config()
+
+    assert result["success"] is True
+    assert result["base_url"] == "https://example.atlassian.net"
+    assert result["email"] == "agent@example.com"
+    assert result["token_present"] is True
+    assert result["token_length"] == len("token-123")
+    assert result["env_keys_used"] == {
+        "base_url": "ATLASSIAN_SITE_BASE",
+        "email": "ATLASSIAN_API_EMAIL",
+        "token": "ATLASSIAN_API_TOKEN",
+    }
+    assert "repo-root .env overrides" in result["notes"]
+
+
 def test_jira_methods_registered_in_catalogue():
     catalogue = build_default_catalogue()
     names = set(catalogue.list_methods())
