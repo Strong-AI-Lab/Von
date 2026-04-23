@@ -1,8 +1,56 @@
-# Security Considerations for Von (Research Prototype)
+# Security Considerations for Von
 
 ## Critical Security Context
 
-**Von is currently a RESEARCH PROTOTYPE designed for single-user or trusted-user scenarios.** It is NOT production-ready for multi-tenant or adversarial environments.
+**Von is currently a research prototype. As far as we know on 2026-04-24, the
+live repository and operational instances are being used only by the Strong AI
+Lab (SAIL) at the University of Auckland.**
+
+That SAIL-only context matters: the current near-term threat model is mostly
+trusted operators, local development, and a small research group rather than a
+public multi-tenant SaaS. It does **not** mean Von should be designed as if it
+will remain a trusted single-user tool. The public repository, external
+contributors, future partner pilots, and Von's agentic-AI programme all create
+legitimate security and safety risks that should be handled deliberately.
+
+The correct posture is therefore **profiled security**:
+
+- keep local SAIL research work fast enough to make progress;
+- allow useful public/read-only demo and contributor workflows where data is
+  intentionally public;
+- fail closed for private user/org data, secrets, destructive actions, and
+  authority-bearing workflow/Vontology mutations;
+- make the stricter partner/production path visible and actionable rather than
+  burying it as generic "production TODOs".
+
+Von is still **not production-ready for multi-tenant or adversarial
+environments** without the hardening work listed below.
+
+## Operating Profiles
+
+Security requirements should be interpreted by deployment profile, not as one
+undifferentiated rule set.
+
+| Profile | Intended use | Acceptable loosenings | Required tightenings |
+| --- | --- | --- | --- |
+| Local SAIL development | Trusted SAIL researchers on local machines | Local diagnostics, trusted automation headers, public/sample corpora, experimental namespace warnings | Never commit secrets/runtime data; private RAG remains namespace-scoped; destructive mutations still require explicit confirmation |
+| Shared SAIL service | Small trusted SAIL group using a shared backend | Read-only operational diagnostics may remain visible to authenticated SAIL users | Admin actions require admin auth; audit sensitive mutations; avoid raw client identity trust |
+| Public open-repo contributor | External users cloning/running their own instance | Public repo docs/sample knowledge can be searchable without login | Root `SECURITY.md`, secret/dependency/code scanning, safe defaults, no expectation that contributors have SAIL credentials |
+| Partner pilot | Partner or Living Lab deployment with real organisational data | Limited public/onboarding help can remain unauthenticated | Strict auth, admin endpoint protection, audit logs, backup encryption, namespace strict mode for high-risk paths |
+| Production/multi-tenant | Adversarial or internet-facing service | No private-data loosening by default | Full authN/authZ, rate limits, RLS/ACL defence in depth, security monitoring, incident response, penetration testing |
+
+## Data and Capability Classes
+
+Use different controls for different data and capability classes.
+
+| Class | Examples | Default access posture |
+| --- | --- | --- |
+| Public project knowledge | README, public docs, sample knowledge, public papers | May be exposed through unauthenticated read-only search with provenance |
+| SAIL internal operational data | Jira tasks, SAIL project notes, internal telemetry | SAIL-authenticated or trusted local operator only |
+| User/org private data | chat history, uploaded files, private RAG chunks, partner data | Authenticated, namespace-scoped, fail closed on missing or conflicting scope |
+| Secrets and credentials | `.env`, API keys, OAuth tokens, DB URIs, device secrets | Never printed, never committed, redacted in diagnostics |
+| Authority-bearing artefacts | Vontology prompts/workflows/policies, publication gates, MCP write tools | Mutations require authenticated authority, provenance, and explicit write policy |
+| Admin/operator actions | sync, reindex, DB reconnect, shutdown, imports, backups | Admin auth or local trusted operator profile only |
 
 ## Known Security Limitations
 
@@ -12,9 +60,12 @@
 
 **Status**: ✅ **SECURE** - Client-provided user IDs are now **rejected**
 
-**Implementation**: The system requires proper authentication via:
+**Implementation**: The system requires proper authentication for private
+user/org-scoped operations via:
+
 1. **Server-side session** (populated during login flow via `/api/auth/google/login`)
 2. **Validated headers** (`X-User-Concept-ID`) with person concept verification
+   for trusted automation/local integration paths only
 
 **Behaviour**:
 ```python
@@ -32,6 +83,21 @@ if not user_concept_id:
 - ✅ No access to user-scoped data (RAG, sessions, history)
 - ✅ Clear error messages guide user to log in
 
+**Important limitation**:
+
+`X-User-Concept-ID` validation proves only that the header names an existing
+person/von_user concept. It is not equivalent to authentication of the caller.
+It is acceptable in local SAIL development and trusted automation profiles, but
+partner/production deployments should either remove it, accept it only from a
+trusted reverse proxy, or bind it to a signed service token.
+
+**Useful loosening**:
+
+Unauthenticated users should be allowed to query explicitly public/read-only
+knowledge surfaces, such as repo documentation or sample corpora, once those
+surfaces are separated from user/org private RAG. Do not use private namespace
+fallbacks to achieve this; create a distinct public scope with provenance.
+
 **Agent Transparency**:
 The agent receives authentication status in system prompt:
 - **Authenticated**: "🔐 AUTHENTICATION STATUS: Authenticated (namespace: #V#user)"
@@ -42,7 +108,7 @@ The agent receives authentication status in system prompt:
 **Approach**: User data isolation implemented via `namespace` field filtering in database queries.
 
 **Current Protection**:
-- All RAG tools (`rag_list_indexed`, `rag_get_item`, `search_knowledge_base`) **require** namespace parameter
+- Private/user-scoped RAG tools (`rag_list_indexed`, `rag_get_item`, `search_knowledge_base`) **require** namespace parameter
 - Namespace derived from authenticated user context
 - Queries filtered by namespace at database level
 - **Fail closed**: If no namespace can be determined, return error (not empty results)
@@ -83,6 +149,15 @@ Authoritative contract:
 - Keep one authoritative effective-namespace resolver and one validation pathway so stricter enforcement can be enabled later with minimal refactoring.
 - Design new handlers so switching from “diagnose mismatch” to “reject mismatch” is a policy change, not a codebase-wide rewrite.
 
+**Profile guidance**:
+
+- Local SAIL development may keep experimental diagnose/warn behaviour where it
+  preserves progress and emits telemetry.
+- Partner pilots and production should use strict mismatch rejection for
+  user/org-private operations.
+- Public/read-only corpora should use a clearly named public scope and must not
+  silently reuse a user's namespace.
+
 ### 3. Session Management
 
 **Current**: Flask server-side sessions with secret key.
@@ -97,7 +172,7 @@ Authoritative contract:
 - Implement explicit session rotation on privilege escalation
 - Add session timeout and idle timeout
 
-### 4. MCP Tool Access Control
+### 4. MCP Tool Access Control and Agentic-AI Threats
 
 **Current**: Internal MCP tools injectable with user namespace via orchestrator.
 
@@ -110,11 +185,24 @@ Authoritative contract:
 - External MCP servers (arXiv, future integrations) may not respect namespace
 - No rate limiting on tool invocations
 - No audit trail of tool access by user
+- Untrusted content from web pages, PDFs, Jira, email, chat, or RAG can contain
+  prompt-injection instructions
+- LLM-driven tool use can turn prompt injection into excessive agency if tools
+  are over-privileged
 
 **Recommendations**:
 - Add rate limiting per user/namespace
 - Implement audit logging for sensitive tool calls (RAG access, concept mutations)
 - Clearly document which MCP tools are namespace-aware vs global
+- Treat external content as data from the least-privileged party that supplied
+  it. Processing an untrusted PDF, web page, or email must not grant the LLM
+  access to tools that the content's author should not have.
+- Keep deterministic write and side-effect guardrails outside the LLM. Prompts
+  can reduce risk, but they cannot be the security boundary for tool authority.
+- Add represented tool-risk metadata for external, read-only, additive write,
+  mutative, destructive, credential-bearing, and admin tools.
+- Log enough tool input/output metadata to investigate suspicious tool use while
+  redacting secrets and private content where required.
 
 ### 5. Jira (Atlassian) Authentication Diagnostics
 
@@ -153,22 +241,51 @@ jira_get_myself
 
 If `jira_get_myself` returns `401 Unauthorised`, confirm the configured email/base URL with `jira_get_auth_config`, then rotate the API token (Atlassian API tokens are per-account) and restart Von.
 
-### 6. Admin Endpoints
+### 6. Admin, Diagnostics, and Operator Endpoints
 
-**Endpoints**: `/admin/rag_status`, `/admin/rag_integrity`, `/admin/rag_sync`
+**Examples**:
 
-**Current**: Accept `?namespace=` query parameter but no authentication required.
+- `/admin/rag_status`
+- `/admin/rag_runtime`
+- `/admin/rag_integrity`
+- `/admin/rag_sync`
+- `/admin/chat_history_backfill`
+- `/admin/chat_history_reindex`
+- `/admin/db/health`
+- `/admin/db/reconnect`
+- `/admin/policy_comparison`
+- `/admin/workflow_materialisation_diagnostics`
+- `/diag`
 
-**Risk**: Any client can query admin endpoints to discover system state.
+**Current**: Several diagnostics/admin endpoints are unauthenticated or only
+partly gated, depending on route. Some are read-only diagnostics; some are
+side-effecting operator actions.
 
-**Mitigation**:
-- These are read-only status endpoints (limited risk)
-- Should add admin authentication before production deployment
+**Risk**:
+
+- Any client can discover system state from unauthenticated diagnostics.
+- Some endpoints can trigger sync/reindex/reconnect work.
+- Diagnostics can expose user/org identifiers, namespace shapes, model/cache
+  state, helper-process state, or other information useful for attack planning.
+
+**Mitigation (current SAIL/local profile)**:
+
+- Local development can keep lightweight diagnostics available when bound to
+  localhost or a trusted SAIL network.
+- Side-effecting admin actions should still require authentication or an
+  explicit local/admin token where practical.
 
 **Recommendations**:
-- Add `@require_admin` decorator to admin endpoints
+- Classify admin/diagnostic endpoints as:
+  - public health (`/health`, minimal no-secret status only)
+  - authenticated user diagnostics
+  - authenticated SAIL/operator diagnostics
+  - admin-only side effects
+- Add `@require_admin` or equivalent policy decorators to admin-only endpoints
 - Implement admin role checks via `access_control.py`
 - Consider moving to dedicated admin API with separate authentication
+- Keep `/diag` and diagnostic exports redacted, bounded, and disabled or
+  authenticated outside local/dev.
 
 ### 7. Room Device Identity (Meeting-Room Voice)
 
@@ -209,21 +326,90 @@ If `jira_get_myself` returns `401 Unauthorised`, confirm the configured email/ba
 
 See `docs/engineering/backup_tooling_security.md` for detailed threat model and operational policy.
 
+**Profile guidance**:
+
+- `VON_ALLOW_BACKUP_IN_REPO=1` is local-dev-only and should never be used in a
+  shared SAIL, partner, staging, or production environment.
+- Partner/staging/production backups should be encrypted at rest, stored outside
+  the repository, retained according to an explicit retention policy, and
+  covered by restore drills.
+
+### 9. Open Repository and Contributor Security
+
+Von is public enough that repository-level security matters even while live use
+is SAIL-only.
+
+**Current protection**:
+
+- `.env`, `data/`, `logs/`, `backups/`, local RAG stores, and Terraform state
+  are ignored by git.
+- PR template includes a "No secrets or runtime data committed" checklist item.
+- GitHub secret scanning workflow exists via Gitleaks.
+
+**Limitations**:
+
+- No root `SECURITY.md` with a private vulnerability reporting path is currently
+  visible in the repository.
+- Security contact information in this document is still a placeholder.
+- The open-source contribution guide still uses some Bash-first examples even
+  though Von's agent/developer default is PowerShell.
+- CodeQL, Dependabot, dependency review, OpenSSF Scorecard, and branch
+  protection expectations are not documented here.
+
+**Recommendations**:
+
+- Add root `SECURITY.md` covering supported versions, private reporting, safe
+  harbour expectations for good-faith testing, and what not to post publicly.
+- Enable or document GitHub private vulnerability reporting.
+- Add CodeQL/static analysis, Dependabot/dependency review, and OpenSSF
+  Scorecard-style checks where available.
+- Keep secrets out of issues, PRs, logs, screenshots, telemetry exports, and
+  generated artefacts.
+- Treat external PRs as untrusted code until reviewed; do not run arbitrary
+  contributor code with SAIL secrets.
+
+### 10. AI/Agent-Specific Security References
+
+Von's security model should track mainstream LLM/agent security risks rather
+than treating them as ordinary web-app bugs only.
+
+Useful reference baselines:
+
+- OWASP Top 10 for Large Language Model Applications:
+  https://owasp.org/www-project-top-10-for-large-language-model-applications/
+- OWASP GenAI Security Project:
+  https://genai.owasp.org/
+- NCSC, "Prompt injection is not SQL injection":
+  https://www.ncsc.gov.uk/blog-post/prompt-injection-is-not-sql-injection
+- NCSC Guidelines for Secure AI System Development:
+  https://www.ncsc.gov.uk/collection/guidelines-secure-ai-system-development/introduction
+- GitHub security policy guidance:
+  https://docs.github.com/en/code-security/how-tos/report-and-fix-vulnerabilities/configure-vulnerability-reporting/adding-a-security-policy-to-your-repository
+- OpenSSF Scorecard:
+  https://scorecard.dev/
+
 ## Security Checklist for Production Deployment
 
 - [x] **Remove client-provided user_id fallback** in `von_routes.py` ✅ (Dec 2024)
 - [x] **Require authentication** for all user-scoped endpoints ✅ (Dec 2024)
 - [x] **Inform agent about authentication status** ✅ (Dec 2024)
 - [x] **Publish authoritative effective namespace contract** (`docs/engineering/effective_namespace_contract.md`) ✅ (Feb 2026)
+- [ ] **Publish root `SECURITY.md`** with supported versions, private reporting channel, and safe disclosure guidance
+- [ ] **Define operating-profile policy switches** for local SAIL, shared SAIL, public contributor, partner pilot, and production modes
+- [ ] **Create explicit public/read-only knowledge scope** for repo docs/sample corpora without granting private RAG access
 - [ ] **Use one authoritative effective namespace resolver** (namespace + user/org components) across generate, MCP, persistence, and sync paths
 - [ ] **Emit namespace-component provenance consistently** (`namespace_source`, user component, org component) for auditing and migration to stricter policy
-- [ ] **Add admin authentication** to `/admin/*` endpoints
+- [ ] **Classify and protect admin/diagnostic endpoints** by public health, user diagnostics, operator diagnostics, and admin-only side effects
+- [ ] **Restrict or replace trusted identity headers** (`X-User-Concept-ID`, `X-User-Client-ID`) outside local/trusted automation profiles
 - [ ] **Implement audit logging** for RAG access and concept mutations
 - [ ] **Add rate limiting** per user/namespace
 - [ ] **Configure session timeouts** and rotation
 - [ ] **Enable HTTPS** and secure cookie flags
 - [ ] **Add database-level RLS** as defense in depth
 - [ ] **Keep backup roots outside repository paths** in all production/staging environments
+- [ ] **Require encrypted backups** with explicit retention and restore-drill policy for shared SAIL, partner, staging, and production deployments
+- [ ] **Add AI/agentic security controls** for prompt injection, untrusted content privilege drop, tool-risk metadata, external MCP boundaries, and excessive agency
+- [ ] **Add repository security automation** (CodeQL/static analysis, dependency review/Dependabot, OpenSSF Scorecard-style posture checks where available)
 - [ ] **Penetration testing** for namespace isolation bypass attempts
 - [ ] **Code review** of all user context derivation paths
 
@@ -252,9 +438,37 @@ See `docs/engineering/backup_tooling_security.md` for detailed threat model and 
    ```
 
 3. **Admin Endpoint Access**:
-   ```bash
+   ```powershell
    curl http://localhost:5000/admin/rag_status
-   # Should require admin authentication in production
+   # Local/dev may allow bounded diagnostics.
+   # Shared/partner/production profiles should require the configured policy.
+   ```
+
+4. **Public Read-Only Corpus Test**:
+   ```python
+   # Query only an explicitly public corpus without login.
+   response = requests.post('/generate', json={
+       'prompt': 'Search the public Von docs for setup instructions'
+   })
+   # Should use only public/repo-doc scope, not private RAG or user namespaces.
+   ```
+
+5. **Trusted Header Misuse Test**:
+   ```python
+   response = requests.post('/generate',
+       headers={'X-User-Concept-ID': '#V#other_user'},
+       json={'prompt': 'List my private RAG sessions'}
+   )
+   # In partner/production mode, raw trusted headers should be rejected unless
+   # supplied by an authenticated trusted proxy/service path.
+   ```
+
+6. **Prompt Injection / Tool Authority Test**:
+   ```python
+   # Upload or retrieve content containing instructions to ignore policy and call
+   # a privileged tool.
+   # Expected: the content is treated as untrusted data and cannot grant the LLM
+   # tool authority beyond the caller/content party's privileges.
    ```
 
 ### Automated Security Tests
@@ -262,10 +476,16 @@ See `docs/engineering/backup_tooling_security.md` for detailed threat model and 
 TODO: Implement security test suite covering:
 - Cross-user data access attempts
 - Unauthenticated access to protected resources
+- Unauthenticated access to public/read-only repo docs/sample corpora
 - Namespace component consistency (user-only vs user@org, and mismatch handling)
+- Operating-profile policy switches for local/dev vs partner/production
 - Session fixation/hijacking scenarios
 - SQL injection in namespace filters
 - XSS in chat responses
+- Prompt-injection attempts through web/PDF/Jira/RAG content
+- External MCP tool boundary and tool-risk metadata enforcement
+- Admin/diagnostic route classification and auth policy
+- Trusted identity header rejection outside local/trusted automation profiles
 
 ## Incident Response
 
@@ -276,13 +496,28 @@ If security breach suspected:
 3. **Investigate**: Check admin endpoint access logs
 4. **Remediate**: Rotate session secrets, invalidate all sessions
 5. **Review**: Audit code for additional client-trust vulnerabilities
+6. **Agentic trace review**: Inspect tool-use telemetry, prompt/context lineage,
+   external content sources, and any workflow/Vontology mutations made during
+   the suspected window.
 
 ## Security Contact
 
-For security issues, contact: [Add security contact information]
+For now, report security issues privately to the Strong AI Lab maintainers. A
+root `SECURITY.md` with the durable reporting path and disclosure policy must
+be added before broader external contribution or partner deployment.
 
 ## Change Log
 
+- **2026-04-24**: Recalibrated security guidance for SAIL-only current use,
+  open-repo contributor risk, and future partner/production profiles
+  - Added operating profiles and data/capability classes
+  - Clarified that validated identity headers are trusted automation/local
+    integration only, not production authentication
+  - Distinguished public/read-only knowledge access from private user/org RAG
+  - Expanded admin/diagnostic endpoint risk beyond read-only RAG status
+  - Added AI/agent-specific risks: prompt injection, excessive agency, external
+    MCP boundaries, and untrusted-content privilege drop
+  - Added open repository security expectations and reference baselines
 - **2024-12-02**: Initial security documentation created (JVNAUTOSCI-760)
   - Documented client-provided user_id risk
   - Added namespace requirement to RAG tools
