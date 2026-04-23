@@ -111,6 +111,43 @@ export async function postJson(url, data) {
   return res.json();
 }
 
+export async function postJsonDetailed(url, data, options = {}) {
+  const {
+    headers: extraHeaders = {},
+    method = 'POST',
+    ...fetchOptions
+  } = options || {};
+
+  const res = await fetch(url, {
+    method,
+    headers: buildHeaders(extraHeaders),
+    body: JSON.stringify(data || {}),
+    ...fetchOptions
+  });
+
+  let payload;
+  try {
+    payload = await res.json();
+  } catch (_) {
+    payload = null;
+  }
+
+  if (!res.ok) {
+    const err = new Error(
+      (payload && (payload.error || payload.message)) || `HTTP ${res.status}`
+    );
+    err.status = res.status;
+    err.payload = payload;
+    throw err;
+  }
+
+  return {
+    data: payload,
+    status: res.status,
+    headers: res.headers
+  };
+}
+
 export async function fetchWithTimeout(url, options = {}) {
   const { timeoutMs = 0, signal: parentSignal = null, ...fetchOptions } = options || {};
 

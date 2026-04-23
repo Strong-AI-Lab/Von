@@ -3,6 +3,7 @@
 jest.mock('../../src/frontend/web/von_interface/static/js/apiService.js', () => ({
     getJson: jest.fn(),
     postJson: jest.fn(),
+    postJsonDetailed: jest.fn(),
 }));
 
 jest.mock('../../src/frontend/web/von_interface/static/js/utils/toast.js', () => ({

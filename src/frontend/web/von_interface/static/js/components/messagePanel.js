@@ -5,7 +5,7 @@
  * Messages are stored as Vontology concepts and accessed via REST API.
  */
 
-import { getJson, postJson } from '../apiService.js';
+import { getJson, postJson, postJsonDetailed } from '../apiService.js';
 import { hydrateConceptCartouchesInRoot } from '../utils/selectConceptByIdHandler.js';
 import { cartouchifyElementText } from '../utils/textDecorator.js';
 import { showToast } from '../utils/toast.js';
@@ -22,6 +22,11 @@ let _currentMessages = [];
 let _currentConversationUserId = null;
 let _isLoading = false;
 let _unreadCount = 0;
+let _replySendFailureState = null;
+let _newMessageSendFailureState = null;
+
+const COMPOSE_SCOPE_REPLY = 'reply';
+const COMPOSE_SCOPE_NEW_MESSAGE = 'newMessage';
 
 /**
  * Initialize the messages panel.
@@ -89,8 +94,16 @@ function renderMessagesTabContent() {
                     </div>
                 </div>
                 <div id="messageComposeArea" class="message-compose-area hidden">
-                    <textarea id="messageInput" class="message-input" placeholder="Type your message..." rows="3"></textarea>
-                    <button id="sendMessageBtn" class="send-message-btn">Send</button>
+                    <div id="messageComposeFailure" class="message-send-error hidden" role="alert"></div>
+                    <div id="messageComposeRecovery" class="message-send-recovery hidden">
+                        <label id="messageComposeRecoveryLabel" for="messageComposeRecoverySelect">Send as member of:</label>
+                        <select id="messageComposeRecoverySelect" class="message-send-recovery-select"></select>
+                        <div id="messageComposeRecoveryNote" class="message-send-recovery-note"></div>
+                    </div>
+                    <div class="message-compose-row">
+                        <textarea id="messageInput" class="message-input" placeholder="Type your message..." rows="3"></textarea>
+                        <button id="sendMessageBtn" class="send-message-btn">Send</button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -109,6 +122,12 @@ function renderMessagesTabContent() {
                     <label for="newMessageContent">Message:</label>
                     <textarea id="newMessageContent" class="message-content-input"
                               placeholder="Type your message..." rows="4"></textarea>
+                    <div id="newMessageFailure" class="message-send-error hidden" role="alert"></div>
+                    <div id="newMessageRecovery" class="message-send-recovery hidden">
+                        <label id="newMessageRecoveryLabel" for="newMessageRecoverySelect">Send as member of:</label>
+                        <select id="newMessageRecoverySelect" class="message-send-recovery-select"></select>
+                        <div id="newMessageRecoveryNote" class="message-send-recovery-note"></div>
+                    </div>
                 </div>
                 <div class="message-modal-footer">
                     <button id="cancelNewMessage" class="modal-cancel-btn">Cancel</button>
@@ -117,6 +136,9 @@ function renderMessagesTabContent() {
             </div>
         </div>
     `;
+
+    _replySendFailureState = null;
+    _newMessageSendFailureState = null;
 
     // Attach event listeners
     attachMessagesEventListeners();
@@ -161,6 +183,13 @@ function attachMessagesEventListeners() {
         });
     }
 
+    const replyRecoverySelect = _messagesContainer.querySelector('#messageComposeRecoverySelect');
+    if (replyRecoverySelect) {
+        replyRecoverySelect.addEventListener('change', (event) => {
+            updateComposeRecoverySelection(COMPOSE_SCOPE_REPLY, event.target?.value || '');
+        });
+    }
+
     // New message modal
     const closeModalBtn = _messagesContainer.querySelector('#closeNewMessageModal');
     if (closeModalBtn) {
@@ -175,6 +204,20 @@ function attachMessagesEventListeners() {
     const sendNewBtn = _messagesContainer.querySelector('#sendNewMessage');
     if (sendNewBtn) {
         sendNewBtn.addEventListener('click', handleSendNewMessage);
+    }
+
+    const newMessageRecoverySelect = _messagesContainer.querySelector('#newMessageRecoverySelect');
+    if (newMessageRecoverySelect) {
+        newMessageRecoverySelect.addEventListener('change', (event) => {
+            updateComposeRecoverySelection(COMPOSE_SCOPE_NEW_MESSAGE, event.target?.value || '');
+        });
+    }
+
+    const recipientInput = _messagesContainer.querySelector('#newMessageRecipient');
+    if (recipientInput) {
+        recipientInput.addEventListener('input', () => {
+            resetComposeFailureUi(COMPOSE_SCOPE_NEW_MESSAGE);
+        });
     }
 }
 
@@ -314,6 +357,7 @@ function renderThreadList() {
  */
 async function selectConversation(userId) {
     _currentConversationUserId = userId;
+    resetComposeFailureUi(COMPOSE_SCOPE_REPLY);
 
     // Update thread list selection
     const threadListEl = _messagesContainer?.querySelector('#messageThreadList');
@@ -685,6 +729,222 @@ async function renderMessages() {
     contentEl.scrollTop = contentEl.scrollHeight;
 }
 
+function getComposeFailureState(scope) {
+    if (scope === COMPOSE_SCOPE_REPLY) {
+        return _replySendFailureState;
+    }
+    if (scope === COMPOSE_SCOPE_NEW_MESSAGE) {
+        return _newMessageSendFailureState;
+    }
+    return null;
+}
+
+function getComposeUiElements(scope) {
+    if (!_messagesContainer) return {};
+
+    if (scope === COMPOSE_SCOPE_REPLY) {
+        return {
+            errorEl: _messagesContainer.querySelector('#messageComposeFailure'),
+            recoveryEl: _messagesContainer.querySelector('#messageComposeRecovery'),
+            recoveryLabelEl: _messagesContainer.querySelector('#messageComposeRecoveryLabel'),
+            recoverySelectEl: _messagesContainer.querySelector('#messageComposeRecoverySelect'),
+            recoveryNoteEl: _messagesContainer.querySelector('#messageComposeRecoveryNote'),
+        };
+    }
+
+    if (scope === COMPOSE_SCOPE_NEW_MESSAGE) {
+        return {
+            errorEl: _messagesContainer.querySelector('#newMessageFailure'),
+            recoveryEl: _messagesContainer.querySelector('#newMessageRecovery'),
+            recoveryLabelEl: _messagesContainer.querySelector('#newMessageRecoveryLabel'),
+            recoverySelectEl: _messagesContainer.querySelector('#newMessageRecoverySelect'),
+            recoveryNoteEl: _messagesContainer.querySelector('#newMessageRecoveryNote'),
+        };
+    }
+
+    return {};
+}
+
+function normaliseRecoveryOrganisationOption(option) {
+    if (!option || typeof option !== 'object') {
+        return null;
+    }
+
+    const conceptId = String(option.concept_id || option.conceptId || '').trim();
+    if (!conceptId) {
+        return null;
+    }
+
+    const rawName = String(option.name || '').trim();
+    const role = String(option.role || '').trim();
+    return {
+        conceptId,
+        name: rawName || formatUserName(conceptId),
+        role,
+    };
+}
+
+function buildMessageSendFailureState(err) {
+    const payload = (err && typeof err === 'object' && err.payload && typeof err.payload === 'object')
+        ? err.payload
+        : null;
+    const explicitError = String(payload?.error || '').trim();
+    const errMessage = String(err?.message || '').trim();
+    const organisationOptions = Array.isArray(payload?.common_organisation_options)
+        ? payload.common_organisation_options
+            .map(normaliseRecoveryOrganisationOption)
+            .filter(Boolean)
+        : [];
+
+    return {
+        errorMessage: explicitError || (/^HTTP \d+$/u.test(errMessage) ? 'Failed to send message' : errMessage) || 'Failed to send message',
+        organisationOptions,
+        selectedOrganisationConceptId: organisationOptions.length === 1
+            ? organisationOptions[0].conceptId
+            : '',
+    };
+}
+
+function renderComposeFailureUi(scope) {
+    const failureState = getComposeFailureState(scope);
+    const {
+        errorEl,
+        recoveryEl,
+        recoveryLabelEl,
+        recoverySelectEl,
+        recoveryNoteEl,
+    } = getComposeUiElements(scope);
+
+    if (!errorEl || !recoveryEl || !recoverySelectEl || !recoveryNoteEl) {
+        return;
+    }
+
+    if (!failureState) {
+        errorEl.textContent = '';
+        errorEl.classList.add('hidden');
+        recoveryEl.classList.add('hidden');
+        recoverySelectEl.innerHTML = '';
+        recoverySelectEl.removeAttribute('aria-invalid');
+        recoveryNoteEl.textContent = '';
+        return;
+    }
+
+    errorEl.textContent = failureState.errorMessage;
+    errorEl.classList.remove('hidden');
+
+    const organisationOptions = Array.isArray(failureState.organisationOptions)
+        ? failureState.organisationOptions
+        : [];
+    if (organisationOptions.length === 0) {
+        recoveryEl.classList.add('hidden');
+        recoverySelectEl.innerHTML = '';
+        recoverySelectEl.removeAttribute('aria-invalid');
+        recoveryNoteEl.textContent = '';
+        return;
+    }
+
+    recoveryEl.classList.remove('hidden');
+    if (recoveryLabelEl) {
+        recoveryLabelEl.textContent = 'Send as member of:';
+    }
+
+    recoverySelectEl.innerHTML = '';
+    if (organisationOptions.length > 1) {
+        const placeholderOption = document.createElement('option');
+        placeholderOption.value = '';
+        placeholderOption.textContent = 'Choose an organisation';
+        recoverySelectEl.appendChild(placeholderOption);
+    }
+
+    organisationOptions.forEach((option) => {
+        const optionEl = document.createElement('option');
+        optionEl.value = option.conceptId;
+        optionEl.textContent = option.role
+            ? `${option.name} (${option.role})`
+            : option.name;
+        recoverySelectEl.appendChild(optionEl);
+    });
+
+    recoverySelectEl.value = failureState.selectedOrganisationConceptId || '';
+    recoverySelectEl.removeAttribute('aria-invalid');
+    recoveryNoteEl.textContent = organisationOptions.length > 1
+        ? 'Choose a shared organisation and send again. This will not change the window organisation.'
+        : 'Retry in this shared organisation. This will not change the window organisation.';
+}
+
+function setComposeFailureState(scope, nextState) {
+    let normalisedState = null;
+
+    if (nextState && typeof nextState === 'object') {
+        const organisationOptions = Array.isArray(nextState.organisationOptions)
+            ? nextState.organisationOptions.filter(Boolean)
+            : [];
+        const selectedOrganisationConceptId = String(nextState.selectedOrganisationConceptId || '').trim();
+        const knownOrganisationIds = new Set(
+            organisationOptions.map((option) => String(option.conceptId || '').trim()).filter(Boolean),
+        );
+
+        normalisedState = {
+            errorMessage: String(nextState.errorMessage || '').trim() || 'Failed to send message',
+            organisationOptions,
+            selectedOrganisationConceptId: organisationOptions.length === 1
+                ? organisationOptions[0].conceptId
+                : (knownOrganisationIds.has(selectedOrganisationConceptId) ? selectedOrganisationConceptId : ''),
+        };
+    }
+
+    if (scope === COMPOSE_SCOPE_REPLY) {
+        _replySendFailureState = normalisedState;
+    } else if (scope === COMPOSE_SCOPE_NEW_MESSAGE) {
+        _newMessageSendFailureState = normalisedState;
+    }
+
+    renderComposeFailureUi(scope);
+}
+
+function resetComposeFailureUi(scope) {
+    setComposeFailureState(scope, null);
+}
+
+function updateComposeRecoverySelection(scope, organisationConceptId) {
+    const failureState = getComposeFailureState(scope);
+    if (!failureState) {
+        return;
+    }
+
+    setComposeFailureState(scope, {
+        ...failureState,
+        selectedOrganisationConceptId: organisationConceptId,
+    });
+}
+
+function buildSendPayload({ scope, recipientIds, content }) {
+    const failureState = getComposeFailureState(scope);
+    const organisationOptions = Array.isArray(failureState?.organisationOptions)
+        ? failureState.organisationOptions
+        : [];
+    const selectedOrganisationConceptId = String(
+        failureState?.selectedOrganisationConceptId || '',
+    ).trim();
+
+    if (organisationOptions.length > 0 && !selectedOrganisationConceptId) {
+        const { recoverySelectEl } = getComposeUiElements(scope);
+        if (recoverySelectEl) {
+            recoverySelectEl.setAttribute('aria-invalid', 'true');
+            recoverySelectEl.focus();
+        }
+        return null;
+    }
+
+    return {
+        recipient_ids: recipientIds,
+        content,
+        ...(selectedOrganisationConceptId
+            ? { organisation_concept_id: selectedOrganisationConceptId }
+            : {}),
+    };
+}
+
 /**
  * Handle sending a reply in the current conversation.
  */
@@ -703,12 +963,19 @@ async function handleSendReply() {
         return;
     }
 
-    try {
-        await postJson('/api/messages/', {
-            recipient_ids: [_currentConversationUserId],
-            content: content,
-        });
+    const payload = buildSendPayload({
+        scope: COMPOSE_SCOPE_REPLY,
+        recipientIds: [_currentConversationUserId],
+        content,
+    });
+    if (!payload) {
+        return;
+    }
 
+    try {
+        await postJsonDetailed('/api/messages/', payload);
+
+        resetComposeFailureUi(COMPOSE_SCOPE_REPLY);
         msgInput.value = '';
         showToast('Message sent', 'success');
 
@@ -717,7 +984,7 @@ async function handleSendReply() {
 
     } catch (err) {
         console.error('[messagePanel] Failed to send message:', err);
-        showToast('Failed to send message', 'error');
+        setComposeFailureState(COMPOSE_SCOPE_REPLY, buildMessageSendFailureState(err));
     }
 }
 
@@ -727,6 +994,7 @@ async function handleSendReply() {
 function showNewMessageModal() {
     const modal = _messagesContainer?.querySelector('#newMessageModal');
     if (modal) {
+        resetComposeFailureUi(COMPOSE_SCOPE_NEW_MESSAGE);
         modal.classList.remove('hidden');
         const recipientInput = modal.querySelector('#newMessageRecipient');
         if (recipientInput) {
@@ -742,6 +1010,7 @@ function hideNewMessageModal() {
     const modal = _messagesContainer?.querySelector('#newMessageModal');
     if (modal) {
         modal.classList.add('hidden');
+        resetComposeFailureUi(COMPOSE_SCOPE_NEW_MESSAGE);
         // Clear inputs
         const recipientInput = modal.querySelector('#newMessageRecipient');
         const contentInput = modal.querySelector('#newMessageContent');
@@ -776,23 +1045,29 @@ async function handleSendNewMessage() {
 
     // Ensure recipient has #V# prefix
     const recipientId = recipient.startsWith('#V#') ? recipient : `#V#${recipient}`;
+    const payload = buildSendPayload({
+        scope: COMPOSE_SCOPE_NEW_MESSAGE,
+        recipientIds: [recipientId],
+        content,
+    });
+    if (!payload) {
+        return;
+    }
 
     try {
-        await postJson('/api/messages/', {
-            recipient_ids: [recipientId],
-            content: content,
-        });
+        await postJsonDetailed('/api/messages/', payload);
 
+        resetComposeFailureUi(COMPOSE_SCOPE_NEW_MESSAGE);
         showToast('Message sent', 'success');
         hideNewMessageModal();
 
         // Reload threads and select the new conversation
         await loadMessageThreads();
-        selectConversation(recipientId);
+        await selectConversation(recipientId);
 
     } catch (err) {
         console.error('[messagePanel] Failed to send new message:', err);
-        showToast('Failed to send message', 'error');
+        setComposeFailureState(COMPOSE_SCOPE_NEW_MESSAGE, buildMessageSendFailureState(err));
     }
 }
 

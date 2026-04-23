@@ -185,6 +185,110 @@ def _authorise_sender_and_recipients_for_org(
     return (len(invalid_ids) == 0, invalid_ids)
 
 
+def _prettify_concept_id(concept_id: str) -> str:
+    return concept_id.replace("#V#", "").replace("_", " ").title()
+
+
+def _build_organisation_option(
+    organisation_concept_id: str,
+    *,
+    role: str | None = None,
+) -> dict[str, Any]:
+    name = _prettify_concept_id(organisation_concept_id)
+    try:
+        from ...services.concept_service import (
+            enrich_concept_with_text_relations,
+            get_concept_by_concept_id,
+        )
+        from ...vontology.utils_vontology import (
+            get_concept_display_name_with_names_fallback,
+        )
+
+        concept = get_concept_by_concept_id(concept_id=organisation_concept_id)
+        if isinstance(concept, dict):
+            enriched = enrich_concept_with_text_relations(concept)
+            display_name = get_concept_display_name_with_names_fallback(enriched)
+            if isinstance(display_name, str) and display_name.strip():
+                name = display_name.strip()
+    except Exception:
+        pass
+
+    payload: dict[str, Any] = {
+        "concept_id": organisation_concept_id,
+        "name": name,
+    }
+    if isinstance(role, str) and role.strip():
+        payload["role"] = role.strip()
+    return payload
+
+
+def _build_common_organisation_options(
+    *,
+    sender_id: str,
+    recipient_ids: list[str],
+    exclude_organisation_concept_id: str | None = None,
+) -> list[dict[str, Any]]:
+    from ...services.organisation_membership_service import get_user_memberships
+
+    membership_maps: list[dict[str, str]] = []
+    user_ids = [sender_id, *recipient_ids]
+
+    for user_concept_id in user_ids:
+        try:
+            memberships = get_user_memberships(user_concept_id)
+        except Exception:
+            return []
+
+        membership_map: dict[str, str] = {}
+        membership_entries = (
+            memberships.get("memberships", [])
+            if isinstance(memberships, dict)
+            else []
+        )
+        for membership in membership_entries:
+            if not isinstance(membership, dict):
+                continue
+            organisation_concept_id = _normalise_concept_id(
+                membership.get("organisation_concept_id")
+            )
+            if not organisation_concept_id:
+                continue
+            role = membership.get("role")
+            membership_map[organisation_concept_id] = (
+                role.strip()
+                if isinstance(role, str) and role.strip()
+                else "member"
+            )
+        membership_maps.append(membership_map)
+
+    if not membership_maps:
+        return []
+
+    common_organisation_ids = set(membership_maps[0].keys())
+    for membership_map in membership_maps[1:]:
+        common_organisation_ids &= set(membership_map.keys())
+
+    excluded_id = _normalise_concept_id(exclude_organisation_concept_id)
+    if excluded_id:
+        common_organisation_ids.discard(excluded_id)
+
+    sender_roles = membership_maps[0]
+    options = [
+        _build_organisation_option(
+            organisation_concept_id,
+            role=sender_roles.get(organisation_concept_id),
+        )
+        for organisation_concept_id in common_organisation_ids
+    ]
+    options.sort(
+        key=lambda item: (
+            str(item.get("name") or "").casefold(),
+            str(item.get("concept_id") or "").casefold(),
+        )
+    )
+    return options
+
+
 @message_bp.route("/", methods=["POST"])
 def send_message() -> ResponseReturnValue:
     """Send a new message.
@@ -196,6 +300,7 @@ def send_message() -> ResponseReturnValue:
         "subject": "Optional subject",
         "thread_id": "Optional thread concept ID",
         "reply_to_id": "Optional message ID being replied to",
+        "organisation_concept_id": "Optional explicit send scope",
         "metadata": {}
     }
     """
@@ -204,13 +309,16 @@ def send_message() -> ResponseReturnValue:
         return jsonify({"error": "Authentication required"}), 401
 
     sender_id = sender_id.strip()
-    org_id = _get_current_org_concept_id(sender_id)
-    if not isinstance(org_id, str) or not org_id:
-        return jsonify({"error": "No organisation context"}), 400
-
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
         return jsonify({"error": "Request body required"}), 400
+
+    explicit_org_id = _normalise_concept_id(
+        data.get("organisation_concept_id") or data.get("org_id")
+    )
+    org_id = explicit_org_id or _get_current_org_concept_id(sender_id)
+    if not isinstance(org_id, str) or not org_id:
+        return jsonify({"error": "No organisation context"}), 400
 
     recipient_ids = _normalise_recipient_ids(data.get("recipient_ids"))
     content = data.get("content", "").strip()
@@ -227,11 +335,22 @@ def send_message() -> ResponseReturnValue:
             organisation_concept_id=org_id,
         )
         if not is_authorised:
+            authorisation_error = (
+                "Sender/recipient must share the selected organisation"
+                if explicit_org_id
+                else "Sender/recipient must share the current organisation"
+            )
             return (
                 jsonify(
                     {
-                        "error": "Sender/recipient must share the current organisation",
+                        "error": authorisation_error,
                         "invalid_concept_ids": invalid_ids,
+                        "organisation_concept_id": org_id,
+                        "common_organisation_options": _build_common_organisation_options(
+                            sender_id=sender_id,
+                            recipient_ids=recipient_ids,
+                            exclude_organisation_concept_id=org_id,
+                        ),
                     }
                 ),
                 403,
