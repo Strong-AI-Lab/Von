@@ -341,6 +341,9 @@ _WORKFLOW_EXECUTION_TRACE_SUMMARY_KEYS: tuple[str, ...] = (
     "completion_gate_blocking_reason_codes",
     "terminal_success_contract",
     "terminal_success_evaluation",
+    "workflow_required_effects_contract_id",
+    "workflow_required_effects_contract_source",
+    "workflow_required_effects_declared_count",
     "step_result_envelope_count",
     "action_started_count",
     "action_completed_count",
@@ -808,6 +811,50 @@ def build_turn_execution_selected_workflow_outputs(
             trace_execution_summary
         )
 
+    workflow_required_effects_contract = child_outputs_map.get(
+        "workflow_required_effects_contract"
+    )
+    workflow_required_effects_contract_payload = (
+        {
+            str(key): value
+            for key, value in workflow_required_effects_contract.items()
+            if isinstance(key, str)
+        }
+        if isinstance(workflow_required_effects_contract, Mapping)
+        else None
+    )
+    workflow_required_effects_contract_source = _safe_str(
+        child_outputs_map.get("workflow_required_effects_contract_source")
+    )
+    workflow_required_effects_contract_id = _safe_str(
+        child_outputs_map.get("workflow_required_effects_contract_id")
+    ) or (
+        _safe_str(workflow_required_effects_contract_payload.get("contract_id"))
+        if isinstance(workflow_required_effects_contract_payload, Mapping)
+        else None
+    )
+    if workflow_required_effects_contract_payload:
+        completion_report_map["workflow_required_effects_contract"] = dict(
+            workflow_required_effects_contract_payload
+        )
+        selected_workflow_trace_payload["workflow_required_effects_contract"] = dict(
+            workflow_required_effects_contract_payload
+        )
+        if workflow_required_effects_contract_id:
+            completion_report_map["workflow_required_effects_contract_id"] = (
+                workflow_required_effects_contract_id
+            )
+            selected_workflow_trace_payload["workflow_required_effects_contract_id"] = (
+                workflow_required_effects_contract_id
+            )
+        if workflow_required_effects_contract_source:
+            completion_report_map["workflow_required_effects_contract_source"] = (
+                workflow_required_effects_contract_source
+            )
+            selected_workflow_trace_payload[
+                "workflow_required_effects_contract_source"
+            ] = workflow_required_effects_contract_source
+
     outputs: dict[str, Any] = {
         "completion_report": completion_report_map,
         "selected_workflow_trace": {
@@ -918,6 +965,18 @@ def build_turn_execution_selected_workflow_outputs(
         outputs["current_response"] = current_response
     if response_text:
         outputs["response_text"] = response_text
+    if workflow_required_effects_contract_payload:
+        outputs["workflow_required_effects_contract"] = dict(
+            workflow_required_effects_contract_payload
+        )
+    if workflow_required_effects_contract_source:
+        outputs["workflow_required_effects_contract_source"] = (
+            workflow_required_effects_contract_source
+        )
+    if workflow_required_effects_contract_id:
+        outputs["workflow_required_effects_contract_id"] = (
+            workflow_required_effects_contract_id
+        )
     outputs.update(
         build_turn_expected_outcome_boundary_payload(
             resolved_turn_expected_outcome_contract

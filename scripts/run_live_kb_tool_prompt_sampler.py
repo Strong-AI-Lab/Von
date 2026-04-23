@@ -79,6 +79,12 @@ HARD_FAILURE_RESPONSE_MARKERS = (
     "authoritative conversation-turn workflow failed",
     "workflow_llm_step_timeout",
     "llm call timed out",
+    "i am unable to retrieve",
+    "i am unable to provide",
+    "unable to retrieve the information",
+    "unable to access the necessary data",
+    "necessary tool was not permitted",
+    "execution status: required grounded evidence was not retrieved",
 )
 SOFT_FAILURE_RESPONSE_MARKERS = (
     "i don't currently have",
@@ -1086,6 +1092,38 @@ def _collect_tool_names(
     return tool_names
 
 
+def _required_workflow_tool_groups(
+    llm_debug_data: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    turn_record = _as_mapping(llm_debug_data.get("turn_execution_record"))
+    execution = _as_mapping(turn_record.get("execution"))
+    workflow_contract = _as_mapping(
+        execution.get("workflow_required_effects_contract")
+    )
+    required_effects = _as_list(workflow_contract.get("required_effects"))
+    groups: list[dict[str, Any]] = []
+    for effect in required_effects:
+        if not isinstance(effect, Mapping):
+            continue
+        required_tools = [
+            _safe_text(tool_name)
+            for tool_name in _as_list(effect.get("required_tools"))
+            if _safe_text(tool_name)
+        ]
+        if not required_tools:
+            continue
+        groups.append(
+            {
+                "effect_id": _safe_text(effect.get("effect_id")),
+                "required_tools": required_tools,
+                "match": (_safe_text(effect.get("required_tools_match")) or "any")
+                .strip()
+                .lower(),
+            }
+        )
+    return groups
+
+
 def _evaluate_user_happiness(
     *,
     prompt_entry: Mapping[str, Any],
@@ -1126,7 +1164,15 @@ def _evaluate_user_happiness(
         or completion_gate.get("verdict")
         or completion_gate.get("decision")
     ).lower()
-    if completion_gate_status in {"fail", "failed", "blocked", "deny", "denied"}:
+    if completion_gate_status in {
+        "fail",
+        "failed",
+        "blocked",
+        "deny",
+        "denied",
+        "escalation_required",
+        "follow_up_required",
+    }:
         reasons.append(f"Completion gate reported {completion_gate_status}.")
 
     critic_verdict = _as_mapping(llm_debug_data.get("critic_verdict"))
@@ -1174,6 +1220,31 @@ def _evaluate_user_happiness(
     if requires_tool_use and not tool_names:
         reasons.append(
             "Prompt required operational tool use but no tool usage was recorded."
+        )
+    observed_tool_lookup = {tool_name.lower() for tool_name in tool_names}
+    for group in _required_workflow_tool_groups(llm_debug_data):
+        required_tools = [
+            tool_name
+            for tool_name in _as_list(group.get("required_tools"))
+            if isinstance(tool_name, str) and tool_name.strip()
+        ]
+        missing_tools = [
+            tool_name
+            for tool_name in required_tools
+            if tool_name.lower() not in observed_tool_lookup
+        ]
+        match_mode = _safe_text(group.get("match")).lower() or "any"
+        requirement_satisfied = (
+            not missing_tools
+            if match_mode == "all"
+            else len(missing_tools) < len(required_tools)
+        )
+        if requirement_satisfied:
+            continue
+        effect_id = _safe_text(group.get("effect_id")) or "workflow required effect"
+        reasons.append(
+            "Workflow-authored required evidence was not retrieved for "
+            f"{effect_id}; missing tools: {', '.join(missing_tools)}."
         )
 
     minimum_response_length = (

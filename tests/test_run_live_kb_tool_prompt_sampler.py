@@ -199,6 +199,109 @@ def test_evaluate_user_happiness_requires_tool_use_for_operational_prompt() -> N
     )
 
 
+def test_evaluate_user_happiness_flags_entity_retrieval_inability_marker() -> None:
+    evaluation = sampler._evaluate_user_happiness(
+        prompt_entry={
+            "id": "students_or_collaborators_and_relationships",
+            "category": "relation_lookup",
+            "complexity_class": "vontology_grounded",
+            "prompt": (
+                "What students or collaborators of mine are represented in the KB, "
+                "and what is my relationship to each?"
+            ),
+            "knowledge_surfaces": ["kb"],
+            "likely_tools": ["search_knowledge_base"],
+        },
+        generate_payload={
+            "response": (
+                "I am unable to retrieve the information about your students or "
+                "collaborators because the necessary tool was not permitted for "
+                "this operation."
+            )
+        },
+        llm_debug_data={
+            "turn_execution_diagnostics": {
+                "workflow_routing_diagnostics": {
+                    "dispatch": {
+                        "selected_execution_mode": "custom_workflow",
+                        "dispatch_workflow_id": "#V#entity_information_retrieval_workflow",
+                    }
+                },
+                "tool_history": [],
+            }
+        },
+    )
+
+    assert evaluation["should_user_be_happy"] is False
+    assert evaluation["verdict"] == "unhappy"
+    assert any(
+        "concrete failure or access marker" in reason.lower()
+        for reason in evaluation["reasons"]
+    )
+
+
+def test_evaluate_user_happiness_flags_missing_workflow_required_evidence_tools() -> (
+    None
+):
+    evaluation = sampler._evaluate_user_happiness(
+        prompt_entry={
+            "id": "represented_self_facts_vs_inferences",
+            "category": "epistemic_summary",
+            "complexity_class": "vontology_grounded",
+            "prompt": (
+                "Tell me about myself as represented here, but separate "
+                "established facts from likely inferences."
+            ),
+            "knowledge_surfaces": ["kb"],
+            "likely_tools": ["search_knowledge_base"],
+        },
+        generate_payload={
+            "response": (
+                "The represented facts show your research network and projects."
+            )
+        },
+        llm_debug_data={
+            "tool_invocations": [{"tool": "find_relations_with_argument"}],
+            "turn_execution_record": {
+                "execution": {
+                    "workflow_required_effects_contract": {
+                        "schema_version": "workflow_required_effects_contract.v1",
+                        "contract_id": "grounded_entity_information_retrieval_evidence",
+                        "required_effects": [
+                            {
+                                "effect_id": "grounded_entity_information_evidence",
+                                "effect_type": "grounded_evidence",
+                                "required_tools": [
+                                    "get_predicate_incidence",
+                                    "find_relations_with_argument",
+                                ],
+                                "required_tools_match": "all",
+                            }
+                        ],
+                    }
+                }
+            },
+            "turn_execution_diagnostics": {
+                "workflow_routing_diagnostics": {
+                    "dispatch": {
+                        "selected_execution_mode": "custom_workflow",
+                        "dispatch_workflow_id": "#V#entity_information_retrieval_workflow",
+                    }
+                },
+                "tool_history": [],
+            },
+        },
+    )
+
+    assert evaluation["should_user_be_happy"] is False
+    assert evaluation["verdict"] == "unhappy"
+    assert any(
+        "workflow-authored required evidence" in reason.lower()
+        and "get_predicate_incidence" in reason
+        for reason in evaluation["reasons"]
+    )
+
+
 def test_evaluate_user_happiness_accepts_grounded_empty_operational_result() -> None:
     evaluation = sampler._evaluate_user_happiness(
         prompt_entry={

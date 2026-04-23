@@ -1549,6 +1549,30 @@ def _workflow_terminal_success_contract_from_result(
     return None
 
 
+def _workflow_required_effects_contract_from_result(
+    workflow_result: Any,
+) -> Mapping[str, Any] | None:
+    result_data = getattr(workflow_result, "data", None)
+    if not isinstance(result_data, Mapping):
+        return None
+    contract = result_data.get("workflow_required_effects_contract")
+    if isinstance(contract, Mapping):
+        return contract
+    return None
+
+
+def _workflow_required_effects_contract_source_from_result(
+    workflow_result: Any,
+) -> str | None:
+    result_data = getattr(workflow_result, "data", None)
+    if not isinstance(result_data, Mapping):
+        return None
+    source = result_data.get("workflow_required_effects_contract_source")
+    if isinstance(source, str) and source.strip():
+        return source.strip()
+    return None
+
+
 def _workflow_terminal_success_evaluation_from_result(
     workflow_result: Any,
 ) -> Mapping[str, Any] | None:
@@ -2101,6 +2125,12 @@ def _build_workflow_execution_summary(
     terminal_success_evaluation = _workflow_terminal_success_evaluation_from_result(
         workflow_result
     )
+    workflow_required_effects_contract = (
+        _workflow_required_effects_contract_from_result(workflow_result)
+    )
+    workflow_required_effects_contract_source = (
+        _workflow_required_effects_contract_source_from_result(workflow_result)
+    )
 
     summary: dict[str, Any] = {
         "schema_version": _WORKFLOW_EXECUTION_SUMMARY_SCHEMA_VERSION,
@@ -2138,6 +2168,19 @@ def _build_workflow_execution_summary(
         summary["terminal_success_contract"] = dict(terminal_success_contract)
     if isinstance(terminal_success_evaluation, Mapping):
         summary["terminal_success_evaluation"] = dict(terminal_success_evaluation)
+    if isinstance(workflow_required_effects_contract, Mapping):
+        summary["workflow_required_effects_contract_id"] = (
+            _workflow_execution_summary_text(
+                workflow_required_effects_contract.get("contract_id")
+            )
+        )
+        summary["workflow_required_effects_declared_count"] = len(
+            workflow_required_effects_contract.get("required_effects") or []
+        )
+        if workflow_required_effects_contract_source:
+            summary["workflow_required_effects_contract_source"] = (
+                workflow_required_effects_contract_source
+            )
     return summary
 
 
@@ -24577,6 +24620,46 @@ class InternalMCPChatOrchestrator:
                 return dict(contract), dict(evaluation)
             return dict(contract), None
 
+        def _attach_required_effects_contract(
+            workflow_result: Any,
+        ) -> tuple[dict[str, Any] | None, str | None]:
+            result_data = getattr(workflow_result, "data", None)
+            if not isinstance(result_data, dict):
+                return None, None
+
+            definition_metadata = (
+                dict(getattr(workflow_def, "metadata", {}) or {})
+                if workflow_def is not None
+                and isinstance(getattr(workflow_def, "metadata", None), Mapping)
+                else {}
+            )
+            contract_payload = result_data.get("workflow_required_effects_contract")
+            if not isinstance(contract_payload, Mapping):
+                contract_payload = definition_metadata.get("required_effects_contract")
+            contract = (
+                dict(contract_payload)
+                if isinstance(contract_payload, Mapping)
+                else None
+            )
+            if not isinstance(contract, dict):
+                return None, None
+
+            source = _safe_scalar_text(
+                result_data.get("workflow_required_effects_contract_source")
+            ) or _safe_scalar_text(
+                definition_metadata.get("required_effects_contract_source")
+            )
+            result_data["workflow_required_effects_contract"] = dict(contract)
+            if source:
+                result_data["workflow_required_effects_contract_source"] = source
+            contract_id = _safe_scalar_text(contract.get("contract_id"))
+            if contract_id:
+                result_data["workflow_required_effects_contract_id"] = contract_id
+            result_data["workflow_required_effects_declared_count"] = len(
+                contract.get("required_effects") or []
+            )
+            return dict(contract), source
+
         def _build_turn_execution_selection_snapshot(
             *,
             workflow_data: Any,
@@ -25409,6 +25492,7 @@ class InternalMCPChatOrchestrator:
                     ),
                 )
                 _attach_terminal_success_contract(launch_failure_result)
+                _attach_required_effects_contract(launch_failure_result)
                 launch_failure_result.data["workflow_execution_summary"] = (
                     _build_workflow_execution_summary(
                         workflow_id=workflow_id,
@@ -25979,6 +26063,7 @@ class InternalMCPChatOrchestrator:
             )
             if isinstance(getattr(result, "data", None), dict):
                 _attach_terminal_success_contract(result)
+                _attach_required_effects_contract(result)
                 result.data["workflow_execution_summary"] = (
                     _build_workflow_execution_summary(
                         workflow_id=workflow_id,

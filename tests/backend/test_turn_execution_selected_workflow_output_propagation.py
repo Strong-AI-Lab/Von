@@ -132,6 +132,21 @@ def test_store_prompt_requirement_evaluation_sets_effective_allowed_tools() -> N
 def test_selected_workflow_outputs_preserve_child_telemetry_and_required_tools() -> (
     None
 ):
+    workflow_required_effects_contract = {
+        "schema_version": "workflow_required_effects_contract.v1",
+        "contract_id": "grounded_entity_information_retrieval_evidence",
+        "required_effects": [
+            {
+                "effect_id": "grounded_entity_information_evidence",
+                "effect_type": "grounded_evidence",
+                "required_tools": [
+                    "get_predicate_incidence",
+                    "find_relations_with_argument",
+                ],
+                "required_tools_match": "all",
+            }
+        ],
+    }
     outputs = build_turn_execution_selected_workflow_outputs(
         selected_workflow_id="#V#tool_calling_workflow",
         child_completed=True,
@@ -154,6 +169,8 @@ def test_selected_workflow_outputs_preserve_child_telemetry_and_required_tools()
                 "get_predicate_incidence",
                 "find_relations_with_argument",
             ],
+            "workflow_required_effects_contract": workflow_required_effects_contract,
+            "workflow_required_effects_contract_source": "definition_metadata",
             "prompt_requirements_preflight_completed": True,
             "tool_follow_up_context_lineage": {"stage": "summariser"},
         },
@@ -177,3 +194,15 @@ def test_selected_workflow_outputs_preserve_child_telemetry_and_required_tools()
     ]
     assert outputs["prompt_requirements_preflight_completed"] is True
     assert outputs["tool_follow_up_context_lineage"] == {"stage": "summariser"}
+    assert (
+        outputs["completion_report"]["workflow_required_effects_contract"]
+        == workflow_required_effects_contract
+    )
+    assert (
+        outputs["selected_workflow_trace"]["workflow_required_effects_contract"]
+        == workflow_required_effects_contract
+    )
+    assert (
+        outputs["selected_workflow_trace"]["workflow_required_effects_contract_source"]
+        == "definition_metadata"
+    )

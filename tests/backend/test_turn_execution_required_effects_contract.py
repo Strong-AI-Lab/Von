@@ -74,6 +74,29 @@ def _workflow_required_effects_contract() -> dict[str, object]:
     }
 
 
+def _entity_information_workflow_required_effects_contract() -> dict[str, object]:
+    return {
+        "schema_version": "workflow_required_effects_contract.v1",
+        "contract_id": "grounded_entity_information_retrieval_evidence",
+        "required_effects": [
+            {
+                "effect_id": "grounded_entity_information_evidence",
+                "effect_type": "grounded_evidence",
+                "required_tools": [
+                    "get_predicate_incidence",
+                    "find_relations_with_argument",
+                ],
+                "required_tools_match": "all",
+                "missing_failure_code": "entity_information_evidence_missing",
+                "failed_failure_code": "entity_information_evidence_failed",
+                "not_executed_reason": (
+                    "Required grounded entity-information evidence was not retrieved."
+                ),
+            }
+        ],
+    }
+
+
 def _patch_workflow_required_effects_contract(monkeypatch) -> None:
     contract = _workflow_required_effects_contract()
     definition = WorkflowDefinition(
@@ -524,6 +547,55 @@ def test_workflow_authored_required_evidence_contract_blocks_missing_locator(
     assert completion_gate.get("safe_to_claim_completion") is False
     assert completion_gate.get("requires_follow_up") is True
     assert "conversation_locator_missing" in (
+        completion_gate.get("blocking_failure_codes") or []
+    )
+
+
+def test_runtime_selected_workflow_trace_required_evidence_contract_blocks_missing_tools() -> (
+    None
+):
+    contract = _entity_information_workflow_required_effects_contract()
+
+    record = _build_record(
+        prompt_text="What collaborators of mine are explicitly represented here?",
+        response_text="No explicit collaborators are found in the current representation.",
+        workflow_routing={
+            "workflow_id": "#V#entity_information_retrieval_workflow",
+            "verdict": "rag_selected",
+            "source": "selector",
+        },
+        selected_workflow_trace={
+            "selected_workflow_id": "#V#entity_information_retrieval_workflow",
+            "selected_execution_mode": "custom_workflow",
+            "workflow_required_effects_contract": contract,
+            "workflow_required_effects_contract_source": "definition_metadata",
+        },
+        tool_invocations=[],
+    )
+
+    execution = record.get("execution")
+    assert isinstance(execution, dict)
+    assert execution.get("workflow_required_effects_contract") == contract
+    assert (
+        execution.get("summary", {}).get("workflow_required_effects_contract_source")
+        == "definition_metadata"
+    )
+
+    required_effects = record.get("required_effects")
+    assert isinstance(required_effects, list)
+    effect = next(
+        item
+        for item in required_effects
+        if item.get("effect_id") == "grounded_entity_information_evidence"
+    )
+    assert effect.get("intent_origin") == "workflow_authored"
+    assert effect.get("status") == "not_executed"
+    assert effect.get("failure_code") == "entity_information_evidence_missing"
+
+    completion_gate = record.get("completion_gate") or {}
+    assert completion_gate.get("decision") == "escalation_required"
+    assert completion_gate.get("safe_to_claim_completion") is False
+    assert "entity_information_evidence_missing" in (
         completion_gate.get("blocking_failure_codes") or []
     )
 

@@ -4552,6 +4552,61 @@ def _load_workflow_required_effects_contract(
     return dict(contract), contract_source
 
 
+def _workflow_required_effects_contract_from_runtime_surface(
+    surface: Mapping[str, Any] | None,
+    *,
+    source_label: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    if not isinstance(surface, Mapping):
+        return None, None
+
+    contract = surface.get("workflow_required_effects_contract")
+    if isinstance(contract, Mapping):
+        contract_source = _safe_str(
+            surface.get("workflow_required_effects_contract_source")
+        )
+        return dict(contract), contract_source or source_label
+
+    for nested_key in (
+        "workflow_execution_summary",
+        "completion_report",
+        "child_result_snapshot",
+        "result_snapshot",
+    ):
+        nested = surface.get(nested_key)
+        if not isinstance(nested, Mapping):
+            continue
+        nested_contract, nested_source = (
+            _workflow_required_effects_contract_from_runtime_surface(
+                nested,
+                source_label=f"{source_label}.{nested_key}",
+            )
+        )
+        if isinstance(nested_contract, dict):
+            return nested_contract, nested_source
+
+    return None, None
+
+
+def _resolve_workflow_required_effects_contract(
+    *,
+    workflow_id: str | None,
+    selected_workflow_trace: Mapping[str, Any] | None,
+    completion_report: Mapping[str, Any] | None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    for surface, source_label in (
+        (selected_workflow_trace, "selected_workflow_trace"),
+        (completion_report, "completion_report"),
+    ):
+        contract, source = _workflow_required_effects_contract_from_runtime_surface(
+            surface,
+            source_label=source_label,
+        )
+        if isinstance(contract, dict):
+            return contract, source
+    return _load_workflow_required_effects_contract(workflow_id=workflow_id)
+
+
 def _is_representation_effect_type(effect_type: str | None) -> bool:
     if not isinstance(effect_type, str):
         return False
@@ -5798,8 +5853,10 @@ def build_turn_execution_record(
         required_prompt_tools=required_prompt_tools,
     )
     workflow_required_effects_contract, workflow_required_effects_contract_source = (
-        _load_workflow_required_effects_contract(
+        _resolve_workflow_required_effects_contract(
             workflow_id=selected_workflow_id,
+            selected_workflow_trace=selected_workflow_trace_payload,
+            completion_report=completion_report,
         )
     )
     representation_effects = _materialise_required_effects_from_contract(
