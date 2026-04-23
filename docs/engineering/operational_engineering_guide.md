@@ -230,7 +230,14 @@ abandoning cleanup. The common reasons are:
 - For repo-local shell diagnostics of internal MCP tools, prefer a canonical
   helper that runs through `InternalMCPGateway` from the repo root rather than
   assuming the parent shell inherited `.env`. Use
-  `pdm run python utilities/invoke_internal_mcp_tool.py <tool_name>`.
+  `python utilities/invoke_internal_mcp_tool.py <tool_name>` or
+  `pdm run python utilities/invoke_internal_mcp_tool.py <tool_name>`. The helper
+  delegates through PDM when launched by a system Python, so it avoids missing
+  repo dependencies and centralises the gateway initialisation boilerplate.
+- For multi-step Jira or MCP writes, use the same helper with a JSON payload
+  file rather than hand-writing inline Python. This keeps `InternalMCPGateway`,
+  `InternalMCPTransport`, catalogue construction, output-schema validation, and
+  write guardrails on the canonical path.
 - Do not rely on inherited parent-shell values for well-known keys such as
   `GITHUB_TOKEN`; IDEs, CI, and host tooling often override them.
 - Assume `.env` edits do not affect already-running Von processes.
