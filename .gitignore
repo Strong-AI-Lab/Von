@@ -35,8 +35,8 @@ replaced_or_deprecated_code/
 # Copilot chat histories
 docs/copilot_histories/
 
-# Temporary paper draft workspace
-docs/papers/von_systems_paper/
+# Temporary/private paper draft workspaces
+docs/papers/
 
 # Ignore directories and sensitive files
 ignore/
