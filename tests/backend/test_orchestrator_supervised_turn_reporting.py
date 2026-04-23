@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any, cast
 
+import src.backend.integrations.internal_mcp.orchestrator as orchestrator_module
 from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
 )
@@ -1701,6 +1702,209 @@ def test_execute_selected_routes_chat_assistant_via_direct_response(
     assert workflow_routing["dispatch"]["dispatch_workflow_id"] == (
         "#V#chat_assistant_workflow"
     )
+
+
+def test_execute_selected_direct_response_surfaces_selected_workflow_policy_memory(
+    monkeypatch,
+) -> None:
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _DummyGateway()))
+    _stub_base_system_prompt(monkeypatch, orchestrator)
+
+    class _DirectAnswerLLM:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def generate(self, prompt, context=None, model=None):
+            self.calls.append(
+                {"prompt": prompt, "context": list(context or []), "model": model}
+            )
+            return "Here is the grounded answer."
+
+    llm = _DirectAnswerLLM()
+    monkeypatch.setattr(
+        orchestrator_module,
+        "build_selected_workflow_policy_memory_state",
+        lambda **_kwargs: {
+            "schema_version": "selected_workflow_policy_memory.v1",
+            "status": "available",
+            "selected_workflow_id": "#V#chat_assistant_workflow",
+            "suggestion_count": 1,
+            "suggestions": [
+                {
+                    "memory_id": "#V#policy_memory_1",
+                    "suggestion_id": "#V#workflow_suggestion_1",
+                    "priority": "high",
+                    "category": "grounding",
+                    "title": "Prefer grounded identity evidence before answering",
+                    "rationale": "Recent evaluated turns regressed into stale identity claims.",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_turn_current_request_stage_message",
+        lambda _turn_text: {
+            "role": "system",
+            "content": "CURRENT REQUEST: Who am I?",
+        },
+    )
+
+    aux_llm_calls: list[dict[str, Any]] = []
+    result = orchestrator._action_turn_execution_execute_selected(
+        SimpleNamespace(
+            data={
+                "selected_workflow_id": "#V#chat_assistant_workflow",
+                "selected_workflow_trace": {},
+                "workflow_routing": {
+                    "workflow_id": "#V#chat_assistant_workflow",
+                    "verdict": "rag_selected",
+                    "source": "selector",
+                },
+                "conversation_session_id": "session-1",
+                "turn_id": "turn-1",
+                "user_prompt": "Who am I?",
+                "turn_memory_context_state": {
+                    "status": "available",
+                    "fail_closed": False,
+                    "subject_contexts": [
+                        {
+                            "status": "available",
+                            "subject_role": "user",
+                            "context_dossier_id": "#V#user_turn_dossier",
+                            "workspace_fingerprint": "workspace-fp-1",
+                        }
+                    ],
+                },
+                "augmented_context": [
+                    {
+                        "role": "system",
+                        "content": "AUTHORITATIVE TURN MEMORY CONTEXT (User):\n- Subject: concept #V#test_user",
+                    },
+                    {"role": "user", "content": "Who am I?"},
+                ],
+                "aux_llm_calls": aux_llm_calls,
+                "llm_calls": [],
+                "policy_state": SimpleNamespace(
+                    enabled=False,
+                    policy=None,
+                    policy_id=None,
+                    predicate_id=None,
+                    errors=(),
+                ),
+            },
+            environment=SimpleNamespace(
+                llm_client=llm,
+                model="test-model",
+                user_namespace="#V#user",
+                auxiliary_system_prompt=None,
+            ),
+            trace=None,
+        )
+    )
+
+    assert result.status == "success"
+    assert llm.calls
+    direct_context = llm.calls[0]["context"]
+    assert any(
+        isinstance(message, dict)
+        and "RECENT POLICY MEMORY FOR #V#chat_assistant_workflow:"
+        in str(message.get("content") or "")
+        for message in direct_context
+    )
+    context_lineage = result.outputs["selected_workflow_trace"][
+        "direct_response_context_lineage"
+    ]
+    assert context_lineage["selected_workflow_policy_memory"] == {
+        "status": "available",
+        "selected_workflow_id": "#V#chat_assistant_workflow",
+        "suggestion_count": 1,
+        "memory_ids": ["#V#policy_memory_1"],
+        "suggestion_ids": ["#V#workflow_suggestion_1"],
+    }
+    assert context_lineage["turn_memory_context"] == {
+        "status": "available",
+        "fail_closed": False,
+        "subject_count": 1,
+        "available_subject_count": 1,
+        "context_dossier_ids": ["#V#user_turn_dossier"],
+        "workspace_fingerprints": ["workspace-fp-1"],
+    }
+    assert any(
+        entry.get("type") == "selected_workflow_policy_memory"
+        for entry in aux_llm_calls
+    )
+
+
+def test_supervised_turn_seeds_turn_memory_context_into_workflow_inputs(
+    monkeypatch,
+) -> None:
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _DummyGateway()))
+    _stub_base_system_prompt(monkeypatch, orchestrator)
+
+    monkeypatch.setattr(
+        orchestrator_module,
+        "build_turn_memory_context_state",
+        lambda **_kwargs: {
+            "schema_version": "conversation_turn_memory_context.v1",
+            "status": "available",
+            "fail_closed": False,
+            "subject_contexts": [
+                {
+                    "status": "available",
+                    "subject_role": "user",
+                    "context_dossier_id": "#V#user_turn_dossier",
+                    "workspace_fingerprint": "workspace-fp-1",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        orchestrator_module,
+        "render_turn_memory_context_messages",
+        lambda _state: [
+            {
+                "role": "system",
+                "content": "AUTHORITATIVE TURN MEMORY CONTEXT (User):\n- Subject: concept #V#test_user",
+            }
+        ],
+    )
+
+    captured: dict[str, Any] = {}
+
+    def _execute_workflow(*args, **kwargs):
+        captured["data"] = kwargs.get("data")
+        return SimpleNamespace(
+            completed=True,
+            final_state="completed",
+            error=None,
+            data={"response_text": "Done.", "completion_report": {"completed": True}},
+        )
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
+
+    result = orchestrator.execute_conversation_turn_supervised(
+        prompt="Who am I?",
+        context=[{"role": "user", "content": "Earlier identity question"}],
+        llm_client=_DummyLLM(),
+        model="test-model",
+        user_namespace="#V#user",
+        user_concept_id="#V#test_user",
+        turn_memory_context={"subject_id": "#V#test_user", "subject_kind": "concept"},
+    )
+
+    workflow_data = captured["data"]
+    assert workflow_data["turn_memory_context_state"]["status"] == "available"
+    assert any(
+        isinstance(message, dict)
+        and "AUTHORITATIVE TURN MEMORY CONTEXT (User):"
+        in str(message.get("content") or "")
+        for message in workflow_data["augmented_context"]
+    )
+    assert any(
+        entry.get("type") == "turn_memory_context" for entry in result.aux_llm_calls
+    )
+    assert result.response_text == "Done."
 
 
 def test_execute_selected_surfaces_missing_selected_workflow_as_recoverable_context() -> (

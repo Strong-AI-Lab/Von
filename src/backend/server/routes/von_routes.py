@@ -7713,6 +7713,21 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 400,
             )
 
+    request_turn_memory_context = None
+    request_turn_memory_context_raw = data.get("turn_memory_context")
+    if isinstance(request_turn_memory_context_raw, Mapping):
+        request_turn_memory_context = dict(request_turn_memory_context_raw)
+    elif request_turn_memory_context_raw is not None:
+        return (
+            jsonify(
+                {
+                    "error": "invalid_turn_memory_context",
+                    "detail": "turn_memory_context must be an object.",
+                }
+            ),
+            400,
+        )
+
     user_concept_id = session.get("user_concept_id")
     context = current_app.config.get("CONTEXT", [])
 
@@ -9186,6 +9201,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     workflow_continuation_context=workflow_continuation_context,
                     user_concept_id=user_concept_id,
                     org_concept_id=org_concept_id,
+                    turn_memory_context=request_turn_memory_context,
                 )
                 llm_interaction["duration_ms"] = (
                     time.perf_counter() - orchestrator_start_perf

@@ -5187,6 +5187,139 @@ def test_plain_response_has_routing_info(monkeypatch):
     assert dispatch_boundaries[-1].get("selected_execution_mode") == "direct_response"
 
 
+def test_plain_response_includes_turn_memory_and_policy_memory_context(monkeypatch):
+    import src.backend.services.workflow_selection_policy_service as policy_module
+
+    monkeypatch.setattr(policy_module, "get_live_selection_policy", lambda: None)
+    monkeypatch.setattr(
+        orchestrator_module,
+        "build_turn_memory_context_state",
+        lambda **_kwargs: {
+            "schema_version": "conversation_turn_memory_context.v1",
+            "status": "available",
+            "fail_closed": False,
+            "subject_contexts": [
+                {
+                    "status": "available",
+                    "subject_role": "user",
+                    "context_dossier_id": "#V#user_turn_dossier",
+                    "workspace_fingerprint": "workspace-fp-1",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        orchestrator_module,
+        "render_turn_memory_context_messages",
+        lambda _state: [
+            {"role": "system", "content": "TURN MEMORY MESSAGE: identity bundle ready"}
+        ],
+    )
+    monkeypatch.setattr(
+        orchestrator_module,
+        "build_selected_workflow_policy_memory_state",
+        lambda **_kwargs: {
+            "schema_version": "selected_workflow_policy_memory.v1",
+            "status": "available",
+            "selected_workflow_id": CHAT_ASSISTANT_WORKFLOW_ID,
+            "suggestion_count": 1,
+            "suggestions": [
+                {
+                    "memory_id": "#V#policy_memory_1",
+                    "suggestion_id": "#V#workflow_suggestion_1",
+                    "priority": "high",
+                    "category": "grounding",
+                    "title": "Prefer grounded identity evidence before answering",
+                    "rationale": "Recent evaluated turns regressed into stale identity claims.",
+                }
+            ],
+        },
+    )
+
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    llm = _CapturingLLM(
+        [
+            CHAT_ASSISTANT_WORKFLOW_ID,
+            "Grounded direct response.",
+        ]
+    )
+
+    result = orchestrator.run(
+        prompt="Who am I?",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+        user_concept_id="#V#test_user",
+    )
+
+    assert result.response_text == "Grounded direct response."
+    assert len(llm.calls) == 2
+    direct_response_context = llm.calls[1]["context"]
+    assert any(
+        isinstance(message, dict)
+        and "TURN MEMORY MESSAGE: identity bundle ready"
+        in str(message.get("content") or "")
+        for message in direct_response_context
+    )
+    assert any(
+        isinstance(message, dict)
+        and "RECENT POLICY MEMORY FOR #V#chat_assistant_workflow:"
+        in str(message.get("content") or "")
+        for message in direct_response_context
+    )
+    assert any(
+        entry.get("type") == "turn_memory_context" for entry in result.aux_llm_calls
+    )
+    assert any(
+        entry.get("type") == "selected_workflow_policy_memory"
+        for entry in result.aux_llm_calls
+    )
+
+
+def test_run_fails_closed_when_requested_turn_memory_context_is_unavailable(
+    monkeypatch,
+):
+    import src.backend.services.workflow_selection_policy_service as policy_module
+
+    monkeypatch.setattr(policy_module, "get_live_selection_policy", lambda: None)
+    monkeypatch.setattr(
+        orchestrator_module,
+        "build_turn_memory_context_state",
+        lambda **_kwargs: {
+            "schema_version": "conversation_turn_memory_context.v1",
+            "status": "unavailable",
+            "fail_closed": True,
+            "failure_reason": "requested_context_dossier_missing",
+            "subject_contexts": [],
+            "requested_memory_context": {
+                "context_dossier_id": "#V#missing_dossier",
+            },
+        },
+    )
+
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    llm = _CapturingLLM([])
+
+    result = orchestrator.run(
+        prompt="Answer using the requested dossier only.",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+        turn_memory_context={"context_dossier_id": "#V#missing_dossier"},
+    )
+
+    assert llm.calls == []
+    assert (
+        result.response_text
+        == "I couldn't use the authoritative memory context requested for this turn because the requested context dossier was not available."
+    )
+    assert any(
+        entry.get("type") == "turn_memory_context" for entry in result.aux_llm_calls
+    )
+
+
 def test_workflow_selector_uses_provider_aware_classifier_fallback(monkeypatch):
     """Selector classification should honour provider-aware stage candidates.
 

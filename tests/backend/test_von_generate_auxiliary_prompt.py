@@ -313,3 +313,55 @@ def test_generate_recovers_header_only_identity_without_session(app, monkeypatch
     assert call.get("user_concept_id") == "#V#header_user"
     assert call.get("org_concept_id") == "#V#header_org"
     assert call.get("user_namespace") == "#V#header_user@header_org"
+
+
+def test_generate_passes_turn_memory_context_to_orchestrator(app):
+    orchestrator = _CapturingOrchestrator()
+    app.config["INTERNAL_MCP_ORCHESTRATOR"] = orchestrator
+    app.config["INTERNAL_MCP_GATEWAY"] = object()
+
+    client = app.test_client()
+    resp = client.post(
+        "/von/generate",
+        json={
+            "prompt": "Who am I?",
+            "turn_memory_context": {
+                "subject_id": "#V#test_user",
+                "subject_kind": "concept",
+                "context_dossier_id": "#V#user_turn_dossier",
+            },
+        },
+    )
+    if resp.status_code != 200:
+        raise AssertionError(
+            f"Unexpected status {resp.status_code}: {resp.get_json() or resp.get_data(as_text=True)}"
+        )
+
+    assert orchestrator.calls, "expected orchestrator.run() to be called"
+    assert orchestrator.calls[0]["turn_memory_context"] == {
+        "subject_id": "#V#test_user",
+        "subject_kind": "concept",
+        "context_dossier_id": "#V#user_turn_dossier",
+    }
+
+
+def test_generate_rejects_non_object_turn_memory_context(app):
+    orchestrator = _CapturingOrchestrator()
+    app.config["INTERNAL_MCP_ORCHESTRATOR"] = orchestrator
+    app.config["INTERNAL_MCP_GATEWAY"] = object()
+
+    client = app.test_client()
+    resp = client.post(
+        "/von/generate",
+        json={
+            "prompt": "Who am I?",
+            "turn_memory_context": ["not", "an", "object"],
+        },
+    )
+
+    assert resp.status_code == 400
+    assert resp.get_json() == {
+        "error": "invalid_turn_memory_context",
+        "detail": "turn_memory_context must be an object.",
+    }
+    assert orchestrator.calls == []

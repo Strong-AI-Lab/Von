@@ -627,6 +627,16 @@ def load_context_dossier_state(dossier_id: str) -> dict[str, Any] | None:
     return dict(state) if isinstance(state, Mapping) else None
 
 
+def list_attached_context_dossier_ids(subject_id: str) -> list[str]:
+    resolved_subject_id = _safe_str(subject_id)
+    if not resolved_subject_id:
+        return []
+    subject = _get_concept_or_none(resolved_subject_id)
+    return _normalise_strings(
+        _list_relationship_targets(subject, HAS_CONTEXT_DOSSIER_PREDICATE_ID)
+    )
+
+
 def load_workflow_report_revision_state(revision_id: str) -> dict[str, Any] | None:
     concept = _get_concept_or_none(revision_id)
     if not isinstance(concept, Mapping):
@@ -1743,6 +1753,7 @@ __all__ = [
     "context_bundle_ontology_blueprints",
     "create_or_update_context_bundle",
     "ensure_canonical_context_bundle_ontology",
+    "list_attached_context_dossier_ids",
     "load_context_bundle_state",
     "load_context_dossier_state",
     "load_workflow_report_revision_state",

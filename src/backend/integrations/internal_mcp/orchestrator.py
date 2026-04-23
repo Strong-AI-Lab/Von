@@ -57,6 +57,14 @@ from src.backend.services.minimal_imposition_runtime_profile_vontology_service i
 from src.backend.services.write_tool_request_evidence_vontology_service import (
     infer_write_tool_request_evidence,
 )
+from src.backend.services.conversation_turn_memory_context_service import (
+    build_selected_workflow_policy_memory_state,
+    build_turn_memory_context_state,
+    render_selected_workflow_policy_memory_messages,
+    render_turn_memory_context_messages,
+    summarise_selected_workflow_policy_memory_for_lineage,
+    summarise_turn_memory_context_for_lineage,
+)
 from src.backend.services.python_decision_authority_service import (
     annotate_python_decision_event,
 )
@@ -6967,11 +6975,23 @@ class InternalMCPChatOrchestrator:
             data=data,
             stage="tool_call",
         )
+        tool_plan_stage_messages.extend(
+            self._build_selected_workflow_policy_memory_stage_messages(data=data)
+        )
         tool_plan_context, tool_plan_context_telemetry = self._build_stage_llm_context(
             base_context=augmented_context,
             stage="tool_call",
             base_context_source="augmented_context",
             stage_messages=tool_plan_stage_messages,
+        )
+        self._attach_memory_context_lineage(
+            tool_plan_context_telemetry,
+            turn_memory_context_state=self._copy_string_key_mapping(
+                data.get("turn_memory_context_state")
+            ),
+            selected_workflow_policy_memory_state=self._copy_string_key_mapping(
+                data.get("selected_workflow_policy_memory_state")
+            ),
         )
 
         allowed_tool_names = {
@@ -8494,12 +8514,22 @@ class InternalMCPChatOrchestrator:
                 stage="summariser",
             ),
             *self._build_tool_follow_up_stage_messages(data=data),
+            *self._build_selected_workflow_policy_memory_stage_messages(data=data),
         ]
         follow_up_context, follow_up_context_telemetry = self._build_stage_llm_context(
             base_context=follow_up_context,
             stage="summariser",
             base_context_source="follow_up_context",
             stage_messages=follow_up_stage_messages,
+        )
+        self._attach_memory_context_lineage(
+            follow_up_context_telemetry,
+            turn_memory_context_state=self._copy_string_key_mapping(
+                data.get("turn_memory_context_state")
+            ),
+            selected_workflow_policy_memory_state=self._copy_string_key_mapping(
+                data.get("selected_workflow_policy_memory_state")
+            ),
         )
         data["tool_follow_up_context_lineage"] = dict(follow_up_context_telemetry)
         summariser_model = model_for_stage("summariser")
@@ -10895,6 +10925,133 @@ class InternalMCPChatOrchestrator:
             for key, value in context_lineage.items()
             if value not in (None, [], {})
         }
+
+    def _inject_turn_memory_context_messages(
+        self,
+        base_context: Sequence[Mapping[str, Any]] | None,
+        *,
+        turn_memory_messages: Sequence[Mapping[str, Any]] | None,
+    ) -> list[Mapping[str, Any]]:
+        base_messages: list[Mapping[str, Any]] = [
+            dict(message)
+            for message in (base_context or ())
+            if isinstance(message, Mapping)
+        ]
+        memory_messages: list[Mapping[str, Any]] = [
+            dict(message)
+            for message in (turn_memory_messages or ())
+            if isinstance(message, Mapping)
+        ]
+        if not memory_messages:
+            return self._limit_context_for_llm(base_messages)
+        leading_system, remainder = self._split_leading_system_messages(base_messages)
+        combined = [
+            *leading_system,
+            *memory_messages,
+            *remainder,
+        ]
+        return self._limit_context_for_llm(combined)
+
+    @staticmethod
+    def _attach_memory_context_lineage(
+        context_lineage: MutableMapping[str, Any] | None,
+        *,
+        turn_memory_context_state: Mapping[str, Any] | None = None,
+        selected_workflow_policy_memory_state: Mapping[str, Any] | None = None,
+    ) -> None:
+        if not isinstance(context_lineage, MutableMapping):
+            return
+        turn_memory_summary = summarise_turn_memory_context_for_lineage(
+            turn_memory_context_state
+        )
+        if isinstance(turn_memory_summary, Mapping) and turn_memory_summary:
+            context_lineage["turn_memory_context"] = dict(turn_memory_summary)
+        policy_memory_summary = summarise_selected_workflow_policy_memory_for_lineage(
+            selected_workflow_policy_memory_state
+        )
+        if isinstance(policy_memory_summary, Mapping) and policy_memory_summary:
+            context_lineage["selected_workflow_policy_memory"] = dict(
+                policy_memory_summary
+            )
+
+    @staticmethod
+    def _append_turn_memory_context_aux_entry(
+        aux_log: Any,
+        turn_memory_context_state: Mapping[str, Any] | None,
+    ) -> None:
+        if not isinstance(aux_log, list) or not isinstance(
+            turn_memory_context_state, Mapping
+        ):
+            return
+        payload: dict[str, Any] = {
+            "type": "turn_memory_context",
+            "stage": "turn_context",
+        }
+        payload.update(
+            dict(
+                summarise_turn_memory_context_for_lineage(turn_memory_context_state)
+                or {}
+            )
+        )
+        requested_memory_context = turn_memory_context_state.get(
+            "requested_memory_context"
+        )
+        if isinstance(requested_memory_context, Mapping) and requested_memory_context:
+            payload["requested_memory_context"] = dict(requested_memory_context)
+        aux_log.append(payload)
+
+    @staticmethod
+    def _append_selected_workflow_policy_memory_aux_entry(
+        aux_log: Any,
+        selected_workflow_policy_memory_state: Mapping[str, Any] | None,
+    ) -> None:
+        if not isinstance(aux_log, list) or not isinstance(
+            selected_workflow_policy_memory_state, Mapping
+        ):
+            return
+        payload: dict[str, Any] = {
+            "type": "selected_workflow_policy_memory",
+            "stage": "workflow_policy_memory",
+        }
+        payload.update(
+            dict(
+                summarise_selected_workflow_policy_memory_for_lineage(
+                    selected_workflow_policy_memory_state
+                )
+                or {}
+            )
+        )
+        aux_log.append(payload)
+
+    @staticmethod
+    def _build_turn_memory_unavailable_response(
+        failure_reason: str | None,
+    ) -> str:
+        reason_text = (failure_reason or "").strip().lower()
+        if reason_text == "requested_context_dossier_missing":
+            detail = "the requested context dossier was not available"
+        elif reason_text == "requested_context_dossier_subject_missing":
+            detail = "the requested context dossier did not resolve to a valid subject"
+        elif reason_text == "requested_report_revision_missing":
+            detail = "the requested report revision was not available"
+        elif reason_text == "requested_report_revision_subject_missing":
+            detail = "the requested report revision did not resolve to a valid subject"
+        elif reason_text == "requested_context_bundle_missing":
+            detail = "one or more requested context bundles were not available"
+        elif reason_text == "context_dossier_materialisation_failed":
+            detail = "the requested context dossier could not be materialised safely"
+        elif reason_text == "reconstructed_workspace_unavailable":
+            detail = "the requested reconstructed workspace could not be built safely"
+        elif reason_text == "invalid_subject_kind":
+            detail = "the requested memory subject kind was invalid"
+        elif reason_text == "subject_kind_and_subject_id_required":
+            detail = "the requested memory subject was incomplete"
+        else:
+            detail = "the requested authoritative memory context could not be resolved"
+        return (
+            "I couldn't use the authoritative memory context requested for this turn "
+            f"because {detail}."
+        )
 
     def _truncate_nested_for_llm(
         self, value: Any, *, max_string_chars: int, max_list_items: int = 50
@@ -26199,6 +26356,17 @@ class InternalMCPChatOrchestrator:
 
         return [{"role": "system", "content": "\n".join(lines)}]
 
+    @classmethod
+    def _build_selected_workflow_policy_memory_stage_messages(
+        cls,
+        *,
+        data: Mapping[str, Any],
+    ) -> list[dict[str, str]]:
+        policy_memory_state = cls._copy_string_key_mapping(
+            data.get("selected_workflow_policy_memory_state")
+        )
+        return render_selected_workflow_policy_memory_messages(policy_memory_state)
+
     @staticmethod
     def _tool_invocation_completed_successfully(
         invocation: Mapping[str, Any],
@@ -27297,6 +27465,12 @@ class InternalMCPChatOrchestrator:
             base_context_source="augmented_context",
             stage_messages=selector_stage_messages,
         )
+        self._attach_memory_context_lineage(
+            selector_context_lineage,
+            turn_memory_context_state=self._copy_string_key_mapping(
+                data.get("turn_memory_context_state")
+            ),
+        )
 
         selector_candidate_entries = [
             {str(key): value for key, value in item.items() if isinstance(key, str)}
@@ -27994,7 +28168,21 @@ class InternalMCPChatOrchestrator:
         failure_detail: str | None = None
         child_result_snapshot: Mapping[str, Any] | None = None
         child_workflow_data = dict(data)
+        selected_workflow_policy_memory_state = build_selected_workflow_policy_memory_state(
+            selected_workflow_id=selected_workflow_id,
+            namespace=getattr(env, "user_namespace", None),
+        )
+        child_workflow_data["selected_workflow_policy_memory_state"] = dict(
+            selected_workflow_policy_memory_state
+        )
+        data["selected_workflow_policy_memory_state"] = dict(
+            selected_workflow_policy_memory_state
+        )
         aux_llm_calls = data.get("aux_llm_calls")
+        self._append_selected_workflow_policy_memory_aux_entry(
+            aux_llm_calls,
+            selected_workflow_policy_memory_state,
+        )
         emit_phase_transition_raw = data.get("emit_phase_transition")
         emit_phase_transition = (
             cast(Callable[..., Any], emit_phase_transition_raw)
@@ -28095,6 +28283,11 @@ class InternalMCPChatOrchestrator:
                     stage="plain_response",
                 )
             )
+            plain_response_stage_messages.extend(
+                self._build_selected_workflow_policy_memory_stage_messages(
+                    data=child_workflow_data,
+                )
+            )
             plain_response_context, context_telemetry = self._build_stage_llm_context(
                 base_context=augmented_context,
                 stage="plain_response",
@@ -28102,6 +28295,15 @@ class InternalMCPChatOrchestrator:
                 stage_messages=plain_response_stage_messages,
             )
             context_telemetry["selected_execution_mode"] = "direct_response"
+            self._attach_memory_context_lineage(
+                context_telemetry,
+                turn_memory_context_state=self._copy_string_key_mapping(
+                    data.get("turn_memory_context_state")
+                ),
+                selected_workflow_policy_memory_state=self._copy_string_key_mapping(
+                    child_workflow_data.get("selected_workflow_policy_memory_state")
+                ),
+            )
             try:
                 if callable(emit_phase_transition):
                     emit_phase_transition(
@@ -28450,6 +28652,7 @@ class InternalMCPChatOrchestrator:
         workflow_gap_recovery_enabled: bool = True,
         user_concept_id: Optional[str] = None,
         org_concept_id: Optional[str] = None,
+        turn_memory_context: Mapping[str, Any] | None = None,
     ) -> OrchestratorResult:
         """Execute the current turn via the durable Master Turn Workflow.
 
@@ -28641,6 +28844,39 @@ class InternalMCPChatOrchestrator:
             user_namespace=user_namespace,
         )
         prefer_default_model = bool(model)
+        turn_memory_context_state = build_turn_memory_context_state(
+            prompt=prompt,
+            recent_user_prompts=recent_user_prompts,
+            conversation_session_id=conversation_session_id,
+            user_namespace=user_namespace,
+            user_concept_id=user_concept_id,
+            org_concept_id=org_concept_id,
+            turn_memory_context=turn_memory_context,
+        )
+        self._append_turn_memory_context_aux_entry(
+            aux_llm_calls,
+            turn_memory_context_state,
+        )
+        if bool(turn_memory_context_state.get("fail_closed")):
+            return OrchestratorResult(
+                response_text=self._build_turn_memory_unavailable_response(
+                    (
+                        str(turn_memory_context_state.get("failure_reason")).strip()
+                        if isinstance(
+                            turn_memory_context_state.get("failure_reason"),
+                            str,
+                        )
+                        else None
+                    )
+                ),
+                extra_messages=(),
+                tool_invocations=(),
+                aux_llm_calls=tuple(aux_llm_calls),
+                llm_calls=tuple(llm_calls),
+                llm_usage=_aggregate_usage_total(),
+                orchestrator_duration_ms=(time.perf_counter() - orchestrator_start)
+                * 1000.0,
+            )
         augmented_context = self._build_augmented_context(
             context,
             user_namespace=user_namespace,
@@ -28648,6 +28884,12 @@ class InternalMCPChatOrchestrator:
             preferred_language=preferred_language,
             user_concept_id=user_concept_id,
             org_concept_id=org_concept_id,
+        )
+        augmented_context = self._inject_turn_memory_context_messages(
+            augmented_context,
+            turn_memory_messages=render_turn_memory_context_messages(
+                turn_memory_context_state
+            ),
         )
 
         def _model_for_stage(stage: str) -> Optional[str]:
@@ -28708,6 +28950,7 @@ class InternalMCPChatOrchestrator:
             "conversation_session_id": conversation_session_id,
             "turn_id": turn_id,
             "recent_user_prompts": recent_user_prompts,
+            "turn_memory_context_state": dict(turn_memory_context_state),
             "write_intent_context_reused": False,
             "gmail_profile": gmail_profile or self._default_gmail_profile,
             "workflow_episode_source": "conversation_turn_supervised",
@@ -29036,6 +29279,7 @@ class InternalMCPChatOrchestrator:
         workflow_gap_recovery_enabled: bool = True,
         user_concept_id: Optional[str] = None,
         org_concept_id: Optional[str] = None,
+        turn_memory_context: Mapping[str, Any] | None = None,
     ) -> OrchestratorResult:
         aux_llm_calls: List[Mapping[str, Any]] = []
         llm_calls: list[dict[str, Any]] = []
@@ -29593,6 +29837,19 @@ class InternalMCPChatOrchestrator:
             user_namespace=user_namespace,
         )
         prefer_default_model = bool(model)
+        turn_memory_context_state = build_turn_memory_context_state(
+            prompt=prompt,
+            recent_user_prompts=recent_user_prompts,
+            conversation_session_id=conversation_session_id,
+            user_namespace=user_namespace,
+            user_concept_id=user_concept_id,
+            org_concept_id=org_concept_id,
+            turn_memory_context=turn_memory_context,
+        )
+        self._append_turn_memory_context_aux_entry(
+            aux_llm_calls,
+            turn_memory_context_state,
+        )
 
         def _model_for_stage(stage: str) -> Optional[str]:
             return self._select_model_for_stage(
@@ -29877,6 +30134,28 @@ class InternalMCPChatOrchestrator:
             if trace_enabled and trace is not None:
                 trace.metadata["ontology_preflight"] = dict(preflight.telemetry)
 
+        if bool(turn_memory_context_state.get("fail_closed")):
+            result = OrchestratorResult(
+                response_text=self._build_turn_memory_unavailable_response(
+                    (
+                        str(turn_memory_context_state.get("failure_reason")).strip()
+                        if isinstance(
+                            turn_memory_context_state.get("failure_reason"),
+                            str,
+                        )
+                        else None
+                    )
+                ),
+                extra_messages=(),
+                tool_invocations=(),
+                aux_llm_calls=tuple(aux_llm_calls),
+                llm_calls=tuple(llm_calls),
+                llm_usage=_aggregate_usage_total(),
+                orchestrator_duration_ms=_orchestrator_duration_ms(),
+            )
+            _persist_trace(status="completed")
+            return result
+
         augmented_context = _run_dispatch_prepare_step(
             "augmented_context",
             "Build augmented context",
@@ -29888,6 +30167,12 @@ class InternalMCPChatOrchestrator:
                 preferred_language=preferred_language,
                 user_concept_id=user_concept_id,
                 org_concept_id=org_concept_id,
+            ),
+        )
+        augmented_context = self._inject_turn_memory_context_messages(
+            augmented_context,
+            turn_memory_messages=render_turn_memory_context_messages(
+                turn_memory_context_state
             ),
         )
 
@@ -30559,6 +30844,10 @@ class InternalMCPChatOrchestrator:
                                 ]
                             ),
                         )
+                    )
+                    self._attach_memory_context_lineage(
+                        selector_context_telemetry,
+                        turn_memory_context_state=turn_memory_context_state,
                     )
                     selector_prompt_payload["context_lineage"] = (
                         dict(selector_context_telemetry)
@@ -35605,6 +35894,7 @@ class InternalMCPChatOrchestrator:
             external_surface_families=routing_contract_external_surface_families,
         )
         _sync_selected_workflow_locals_from_state()
+        selected_workflow_policy_memory_state: dict[str, Any] = {}
 
         def _build_custom_workflow_dispatch_data(
             workflow_id_override: str | None = None,
@@ -35630,6 +35920,10 @@ class InternalMCPChatOrchestrator:
                     asdict(effective_routing_info)
                     if isinstance(effective_routing_info, WorkflowRoutingInfo)
                     else None
+                ),
+                "turn_memory_context_state": dict(turn_memory_context_state),
+                "selected_workflow_policy_memory_state": dict(
+                    selected_workflow_policy_memory_state
                 ),
                 "workflow_discovery_result": (
                     dict(workflow_discovery_result)
@@ -36174,6 +36468,17 @@ class InternalMCPChatOrchestrator:
                 render_plan=base_result.render_plan,
             )
 
+        selected_workflow_policy_memory_state = (
+            build_selected_workflow_policy_memory_state(
+                selected_workflow_id=selected_workflow_id_text,
+                namespace=user_namespace,
+            )
+        )
+        self._append_selected_workflow_policy_memory_aux_entry(
+            aux_llm_calls,
+            selected_workflow_policy_memory_state,
+        )
+
         # Tier 1: Direct response — skip tool-calling overhead entirely.
         # This is reserved for the chat assistant workflow and workflows that
         # explicitly request narration over a direct screen response.
@@ -36192,6 +36497,40 @@ class InternalMCPChatOrchestrator:
                 self.PHASE_PLAIN_RESPONSE,
                 extra=workflow_dispatch_progress,
             )
+            plain_response_stage_messages: list[dict[str, str]] = []
+            current_turn_message = self._build_turn_current_request_stage_message(prompt)
+            if isinstance(current_turn_message, dict):
+                plain_response_stage_messages.append(current_turn_message)
+            plain_response_stage_messages.extend(
+                self._build_turn_expected_outcome_stage_messages(
+                    data={
+                        "turn_expected_outcome_contract": (
+                            routing_turn_expected_outcome_contract
+                        )
+                    },
+                    stage="plain_response",
+                )
+            )
+            plain_response_stage_messages.extend(
+                render_selected_workflow_policy_memory_messages(
+                    selected_workflow_policy_memory_state
+                )
+            )
+            plain_response_context, plain_response_context_telemetry = (
+                self._build_stage_llm_context(
+                    base_context=augmented_context,
+                    stage="plain_response",
+                    base_context_source="augmented_context",
+                    stage_messages=plain_response_stage_messages,
+                )
+            )
+            self._attach_memory_context_lineage(
+                plain_response_context_telemetry,
+                turn_memory_context_state=turn_memory_context_state,
+                selected_workflow_policy_memory_state=(
+                    selected_workflow_policy_memory_state
+                ),
+            )
             planner_model = _model_for_stage("planner")
             if trace_enabled and trace is not None:
                 llm_step = trace.start_step(
@@ -36205,7 +36544,7 @@ class InternalMCPChatOrchestrator:
             response, planner_model, _ = self._run_llm_with_fallbacks(
                 stage="planner",
                 prompt=prompt,
-                context=augmented_context,
+                context=plain_response_context,
                 default_client=llm_client,
                 default_model=planner_model,
                 policy_state=policy_state,
@@ -36216,6 +36555,7 @@ class InternalMCPChatOrchestrator:
                 aux_log=aux_llm_calls,
                 record_llm_call=_record_llm_call,
                 emit_progress=_emit_progress_local,
+                context_telemetry=plain_response_context_telemetry,
                 prefer_default_model=prefer_default_model,
             )
             if trace_enabled and trace is not None:
@@ -36577,6 +36917,10 @@ class InternalMCPChatOrchestrator:
                 "gmail_profile": gmail_profile or self._default_gmail_profile,
                 "workflow_discovery_result": workflow_discovery_result,
                 "workflow_routing": routing_info_payload,
+                "turn_memory_context_state": dict(turn_memory_context_state),
+                "selected_workflow_policy_memory_state": dict(
+                    selected_workflow_policy_memory_state
+                ),
                 "workflow_episode_source": "chat_turn_workflow",
                 "workflow_episode_stage": "tool_calling",
                 # Closures from run().
