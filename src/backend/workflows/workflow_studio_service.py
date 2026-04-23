@@ -14,7 +14,9 @@ from ..services.episode_critique_memory_service import (
     list_recent_workflow_improvement_suggestions,
 )
 from ..services.text_value_service import (
+    delete_text_relation,
     get_texts_for_concept,
+    upsert_text_for_concept,
     upsert_singleton_text_relation,
 )
 from ..services.workflow_authoring_vontology_service import (
@@ -86,10 +88,14 @@ _WORKFLOW_CANDIDATE_VALIDATION_PROFILE_CONTRACT_ONLY = "contract_only"
 _WORKFLOW_CANDIDATE_VALIDATION_PROFILE_GENERATION_SAFE = "generation_safe"
 _WORKFLOW_AUTHORING_PROPOSAL_SCHEMA_VERSION = "workflow_authoring_proposal.v1"
 _WORKFLOW_AUTHORING_PROPOSAL_TEXT_PREDICATE = "#V#hasWorkflowAuthoringProposalJson"
+_WORKFLOW_ACTIVE_AUTHORING_PROPOSAL_ID_TEXT_PREDICATE = (
+    "#V#hasActiveWorkflowAuthoringProposalId"
+)
 _WORKFLOW_AUTHORING_PROPOSAL_STATUS_PENDING_REVIEW = "pending_review"
 _WORKFLOW_AUTHORING_PROPOSAL_STATUS_APPROVED = "approved"
 _WORKFLOW_AUTHORING_PROPOSAL_STATUS_REJECTED = "rejected"
 _WORKFLOW_AUTHORING_PROPOSAL_STATUS_ROLLED_BACK = "rolled_back"
+_WORKFLOW_AUTHORING_PROPOSAL_STATUS_SUPERSEDED = "superseded"
 _WORKFLOW_ROUTING_ROLE_VALUES = {"execution", "authoring", "maintenance"}
 
 
@@ -616,14 +622,46 @@ def _build_authoring_spec_with_policy_metadata(
 
 
 def _load_workflow_authoring_proposal(workflow_id: str) -> dict[str, Any] | None:
-    rows = get_texts_for_concept(
-        subject_concept_id=workflow_id,
-        predicate=_WORKFLOW_AUTHORING_PROPOSAL_TEXT_PREDICATE,
-        limit=1,
-    )
-    if not isinstance(rows, list) or not rows:
+    workflow_id_clean = _clean_text(workflow_id)
+    if not workflow_id_clean:
         return None
-    text = _clean_text((rows[0] or {}).get("text"))
+    active_proposal_id = _load_active_workflow_authoring_proposal_id(workflow_id_clean)
+    if active_proposal_id:
+        proposal = _load_workflow_authoring_proposal_by_id(
+            workflow_id_clean,
+            active_proposal_id,
+        )
+        if proposal:
+            return proposal
+
+    rows = _list_workflow_authoring_proposal_rows(workflow_id_clean)
+    if not rows:
+        return None
+
+    for row in rows:
+        proposal = _as_mapping(row.get("proposal_payload"))
+        if _clean_text(proposal.get("status")) == _WORKFLOW_AUTHORING_PROPOSAL_STATUS_PENDING_REVIEW:
+            return proposal
+    return _as_mapping(rows[0].get("proposal_payload")) or None
+
+
+def _proposal_row_sort_key(row: Mapping[str, Any]) -> tuple[str, str, str]:
+    proposal = _as_mapping(row.get("proposal_payload"))
+    return (
+        _clean_text(proposal.get("updated_at_utc"))
+        or _clean_text(row.get("relation_updated_at")),
+        _clean_text(proposal.get("created_at_utc"))
+        or _clean_text(row.get("relation_created_at")),
+        _clean_text(row.get("relation_id")),
+    )
+
+
+def _parse_workflow_authoring_proposal_row(
+    row: Mapping[str, Any],
+    *,
+    workflow_id: str,
+) -> dict[str, Any] | None:
+    text = _clean_text(row.get("text"))
     if not text:
         return None
     try:
@@ -632,22 +670,155 @@ def _load_workflow_authoring_proposal(workflow_id: str) -> dict[str, Any] | None
         return None
     if not isinstance(payload, Mapping):
         return None
-    return {str(key): value for key, value in payload.items() if str(key).strip()}
+    proposal_payload = {
+        str(key): value for key, value in payload.items() if str(key).strip()
+    }
+    payload_workflow_id = _clean_text(proposal_payload.get("workflow_id"))
+    if payload_workflow_id and payload_workflow_id != workflow_id:
+        return None
+    proposal_id = (
+        _clean_text(_as_mapping(row.get("context")).get("proposal_id"))
+        or _clean_text(proposal_payload.get("proposal_id"))
+    )
+    if not proposal_id:
+        return None
+    proposal_payload["proposal_id"] = proposal_id
+    if not payload_workflow_id:
+        proposal_payload["workflow_id"] = workflow_id
+    return {
+        **dict(row),
+        "proposal_id": proposal_id,
+        "proposal_payload": proposal_payload,
+    }
+
+
+def _list_workflow_authoring_proposal_rows(workflow_id: str) -> list[dict[str, Any]]:
+    rows = get_texts_for_concept(
+        subject_concept_id=workflow_id,
+        predicate=_WORKFLOW_AUTHORING_PROPOSAL_TEXT_PREDICATE,
+        limit=200,
+    )
+    if not isinstance(rows, list) or not rows:
+        return []
+    parsed_rows: list[dict[str, Any]] = []
+    for row in rows:
+        parsed = _parse_workflow_authoring_proposal_row(
+            _as_mapping(row),
+            workflow_id=workflow_id,
+        )
+        if parsed:
+            parsed_rows.append(parsed)
+    parsed_rows.sort(key=_proposal_row_sort_key, reverse=True)
+    return parsed_rows
+
+
+def _load_active_workflow_authoring_proposal_id(workflow_id: str) -> str | None:
+    rows = get_texts_for_concept(
+        subject_concept_id=workflow_id,
+        predicate=_WORKFLOW_ACTIVE_AUTHORING_PROPOSAL_ID_TEXT_PREDICATE,
+        limit=5,
+    )
+    if not isinstance(rows, list) or not rows:
+        return None
+    rows_sorted = sorted(
+        (_as_mapping(row) for row in rows),
+        key=lambda row: (
+            _clean_text(row.get("relation_updated_at"))
+            or _clean_text(row.get("relation_created_at")),
+            _clean_text(row.get("relation_id")),
+        ),
+        reverse=True,
+    )
+    for row in rows_sorted:
+        proposal_id = _clean_text(row.get("text"))
+        if proposal_id:
+            return proposal_id
+    return None
+
+
+def _load_workflow_authoring_proposal_by_id(
+    workflow_id: str,
+    proposal_id: str,
+) -> dict[str, Any] | None:
+    workflow_id_clean = _clean_text(workflow_id)
+    proposal_id_clean = _clean_text(proposal_id)
+    if not workflow_id_clean or not proposal_id_clean:
+        return None
+    for row in _list_workflow_authoring_proposal_rows(workflow_id_clean):
+        if _clean_text(row.get("proposal_id")) != proposal_id_clean:
+            continue
+        return _as_mapping(row.get("proposal_payload")) or None
+    return None
+
+
+def _store_active_workflow_authoring_proposal_id(
+    workflow_id: str,
+    proposal_id: str,
+) -> None:
+    workflow_id_clean = _clean_text(workflow_id)
+    proposal_id_clean = _clean_text(proposal_id)
+    if not workflow_id_clean or not proposal_id_clean:
+        return None
+    upsert_singleton_text_relation(
+        subject_concept_id=workflow_id_clean,
+        predicate=_WORKFLOW_ACTIVE_AUTHORING_PROPOSAL_ID_TEXT_PREDICATE,
+        text=proposal_id_clean,
+        lang="en-NZ",
+        context={"source": "workflow_studio_service"},
+        garbage_collect=True,
+    )
 
 
 def _store_workflow_authoring_proposal(
     workflow_id: str,
     proposal_payload: Mapping[str, Any],
+    *,
+    update_active_pointer: bool | None = None,
 ) -> dict[str, Any]:
     payload = _json_roundtrip(dict(proposal_payload))
-    upsert_singleton_text_relation(
-        subject_concept_id=workflow_id,
+    workflow_id_clean = _clean_text(workflow_id)
+    proposal_id = _clean_text(payload.get("proposal_id"))
+    if not workflow_id_clean:
+        raise ValueError("workflow_id_required")
+    if not proposal_id:
+        raise ValueError("workflow_authoring_proposal_id_required")
+    payload["workflow_id"] = _clean_text(payload.get("workflow_id")) or workflow_id_clean
+    stored = upsert_text_for_concept(
+        subject_concept_id=workflow_id_clean,
         predicate=_WORKFLOW_AUTHORING_PROPOSAL_TEXT_PREDICATE,
         text=json.dumps(payload, ensure_ascii=True, sort_keys=True),
         lang="en-NZ",
-        context={"source": "workflow_studio_service"},
-        garbage_collect=True,
+        context={
+            "source": "workflow_studio_service",
+            "proposal_id": proposal_id,
+        },
     )
+    kept_relation_id = _clean_text(stored.get("relation_id"))
+
+    for row in _list_workflow_authoring_proposal_rows(workflow_id_clean):
+        relation_id = _clean_text(row.get("relation_id"))
+        if (
+            _clean_text(row.get("proposal_id")) != proposal_id
+            or not relation_id
+            or relation_id == kept_relation_id
+        ):
+            continue
+        delete_text_relation(
+            workflow_id_clean,
+            relation_id,
+            garbage_collect=True,
+        )
+
+    if update_active_pointer is None:
+        current_active_proposal_id = _load_active_workflow_authoring_proposal_id(
+            workflow_id_clean
+        )
+        update_active_pointer = (
+            not current_active_proposal_id or current_active_proposal_id == proposal_id
+        )
+    if update_active_pointer:
+        _store_active_workflow_authoring_proposal_id(workflow_id_clean, proposal_id)
+
     return payload if isinstance(payload, dict) else dict(proposal_payload)
 
 
@@ -692,6 +863,23 @@ def get_workflow_authoring_proposal(workflow_id: str) -> dict[str, Any] | None:
     if not workflow_id_clean:
         return None
     proposal = _load_workflow_authoring_proposal(workflow_id_clean)
+    return _as_mapping(proposal) or None
+
+
+def get_workflow_authoring_proposal_by_id(
+    workflow_id: str,
+    proposal_id: str,
+) -> dict[str, Any] | None:
+    """Return an exact stored workflow-authoring proposal payload when present."""
+
+    workflow_id_clean = _clean_text(workflow_id)
+    proposal_id_clean = _clean_text(proposal_id)
+    if not workflow_id_clean or not proposal_id_clean:
+        return None
+    proposal = _load_workflow_authoring_proposal_by_id(
+        workflow_id_clean,
+        proposal_id_clean,
+    )
     return _as_mapping(proposal) or None
 
 
@@ -1703,14 +1891,21 @@ def submit_workflow_authoring_proposal(
         else None
     )
     existing_proposal = _load_workflow_authoring_proposal(workflow_id_clean)
-    proposal_id = (
-        _clean_text((existing_proposal or {}).get("proposal_id"))
-        if _clean_text((existing_proposal or {}).get("status"))
+    existing_proposal_id = _clean_text((existing_proposal or {}).get("proposal_id"))
+    proposal_id = str(uuid.uuid4())
+    if (
+        existing_proposal_id
+        and _clean_text((existing_proposal or {}).get("status"))
         == _WORKFLOW_AUTHORING_PROPOSAL_STATUS_PENDING_REVIEW
-        else ""
-    )
-    if not proposal_id:
-        proposal_id = str(uuid.uuid4())
+    ):
+        superseded_payload = _as_mapping(existing_proposal)
+        superseded_payload["status"] = _WORKFLOW_AUTHORING_PROPOSAL_STATUS_SUPERSEDED
+        superseded_payload["updated_at_utc"] = _utc_now_iso()
+        _store_workflow_authoring_proposal(
+            workflow_id_clean,
+            superseded_payload,
+            update_active_pointer=False,
+        )
     proposal_payload = {
         "schema_version": _WORKFLOW_AUTHORING_PROPOSAL_SCHEMA_VERSION,
         "proposal_id": proposal_id,
@@ -1758,6 +1953,7 @@ def submit_workflow_authoring_proposal(
     stored_proposal = _store_workflow_authoring_proposal(
         workflow_id_clean,
         proposal_payload,
+        update_active_pointer=True,
     )
     current_lifecycle, _current_lifecycle_source = resolve_workflow_publication_lifecycle(
         workflow_id_clean
@@ -1811,12 +2007,16 @@ def record_workflow_authoring_promotion_evaluation(
     if not workflow_id_clean:
         raise ValueError("workflow_id_required")
 
-    proposal = _load_workflow_authoring_proposal(workflow_id_clean)
+    expected_proposal_id = _clean_text(proposal_id)
+    proposal = (
+        _load_workflow_authoring_proposal_by_id(workflow_id_clean, expected_proposal_id)
+        if expected_proposal_id
+        else _load_workflow_authoring_proposal(workflow_id_clean)
+    )
     if not isinstance(proposal, Mapping):
         raise ValueError("workflow_authoring_proposal_missing")
     proposal_payload = _as_mapping(proposal)
 
-    expected_proposal_id = _clean_text(proposal_id)
     stored_proposal_id = _clean_text(proposal_payload.get("proposal_id"))
     if expected_proposal_id and stored_proposal_id and expected_proposal_id != stored_proposal_id:
         raise ValueError("workflow_authoring_proposal_id_mismatch")
@@ -1830,6 +2030,7 @@ def record_workflow_authoring_promotion_evaluation(
     stored_proposal = _store_workflow_authoring_proposal(
         workflow_id_clean,
         proposal_payload,
+        update_active_pointer=None,
     )
 
     current_lifecycle, _current_lifecycle_source = resolve_workflow_publication_lifecycle(
@@ -1854,7 +2055,9 @@ def record_workflow_authoring_promotion_evaluation(
         review_reason=_clean_text(lifecycle.get("review_reason")) or None,
         reviewed_at=_clean_text(lifecycle.get("reviewed_at")) or None,
         reviewed_by=_clean_text(lifecycle.get("reviewed_by")) or None,
-        proposal_id=stored_proposal_id or expected_proposal_id,
+        proposal_id=_clean_text(stored_proposal.get("proposal_id"))
+        or stored_proposal_id
+        or expected_proposal_id,
         proposal_source_session_id=_clean_text(
             stored_proposal.get("proposal_source_session_id")
         )
@@ -2336,6 +2539,7 @@ __all__ = [
     "build_workflow_studio_detail_payload",
     "demote_workflow_routing",
     "get_workflow_authoring_proposal",
+    "get_workflow_authoring_proposal_by_id",
     "preview_workflow_authoring_spec",
     "record_workflow_authoring_promotion_evaluation",
     "review_workflow_authoring_proposal",

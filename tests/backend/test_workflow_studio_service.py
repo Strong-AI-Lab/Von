@@ -527,7 +527,7 @@ def test_submit_workflow_authoring_proposal_sets_pending_review_lifecycle(
     monkeypatch.setattr(
         mod,
         "_store_workflow_authoring_proposal",
-        lambda workflow_id, proposal_payload: (
+        lambda workflow_id, proposal_payload, **_kwargs: (
             stored_payloads.append(dict(proposal_payload)) or dict(proposal_payload)
         ),
     )
@@ -565,6 +565,108 @@ def test_submit_workflow_authoring_proposal_sets_pending_review_lifecycle(
     assert lifecycle_calls[0]["proposal_source_session_id"] == "session-1"
 
 
+def test_submit_workflow_authoring_proposal_supersedes_previous_pending_review_proposal(
+    monkeypatch,
+) -> None:
+    stored_payloads: list[tuple[dict[str, Any], bool | None]] = []
+
+    monkeypatch.setattr(
+        mod,
+        "preview_workflow_authoring_spec",
+        lambda workflow_id, **_kwargs: {
+            "success": True,
+            "workflow_id": workflow_id,
+            "preview": {
+                "definition_identity": {"definition_hash": "candidate-hash"},
+                "diff_summary": {"changed_state_count": 1},
+                "contract_validation": {"valid": True, "errors": []},
+            },
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "validate_workflow_candidate",
+        lambda workflow_id, **_kwargs: {
+            "success": True,
+            "candidate_validation": {
+                "workflow_id": workflow_id,
+                "valid": True,
+                "repair_hints": [],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "_load_runtime_definition",
+        lambda workflow_id: (SimpleNamespace(), "vontology", object()),
+    )
+    monkeypatch.setattr(
+        mod,
+        "serialise_workflow_definition_to_authoring_spec",
+        lambda _definition: {"workflow_id": "#V#alpha_workflow", "steps": [{"state_id": "old"}]},
+    )
+    monkeypatch.setattr(
+        mod,
+        "_load_workflow_authoring_proposal",
+        lambda _workflow_id: {
+            "proposal_id": "proposal-1",
+            "status": "pending_review",
+            "created_at_utc": "2026-04-23T00:00:00+00:00",
+            "authoring_spec": {"workflow_id": "#V#alpha_workflow", "steps": [{"state_id": "old"}]},
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "build_workflow_definition_from_authoring_spec",
+        lambda spec: SimpleNamespace(workflow_id=spec.get("workflow_id")),
+    )
+    monkeypatch.setattr(
+        mod,
+        "build_workflow_authoring_prompt_contract",
+        lambda: {"schema_version": "workflow_authoring_prompt_contract.v1"},
+    )
+    monkeypatch.setattr(
+        mod,
+        "get_workflow_authoring_prompt_health_status",
+        lambda: {"healthy": True},
+    )
+    monkeypatch.setattr(
+        mod,
+        "_store_workflow_authoring_proposal",
+        lambda workflow_id, proposal_payload, **kwargs: (
+            stored_payloads.append((dict(proposal_payload), kwargs.get("update_active_pointer")))
+            or dict(proposal_payload)
+        ),
+    )
+    monkeypatch.setattr(
+        mod,
+        "resolve_workflow_publication_lifecycle",
+        lambda _workflow_id: (
+            {"phase": "published", "published": True, "routing_eligible": True},
+            "vontology",
+        ),
+    )
+    monkeypatch.setattr(
+        mod,
+        "upsert_workflow_publication_lifecycle",
+        lambda **kwargs: dict(kwargs),
+    )
+
+    result = mod.submit_workflow_authoring_proposal(
+        "#V#alpha_workflow",
+        authoring_spec={"workflow_id": "#V#alpha_workflow", "steps": [{"state_id": "start"}]},
+    )
+
+    assert result["success"] is True
+    assert len(stored_payloads) == 2
+    assert stored_payloads[0][0]["proposal_id"] == "proposal-1"
+    assert stored_payloads[0][0]["status"] == "superseded"
+    assert stored_payloads[0][1] is False
+    assert stored_payloads[1][0]["status"] == "pending_review"
+    assert stored_payloads[1][0]["proposal_id"] != "proposal-1"
+    assert stored_payloads[1][1] is True
+
+
 def test_record_workflow_authoring_promotion_evaluation_updates_proposal_and_lifecycle(
     monkeypatch,
 ) -> None:
@@ -572,8 +674,8 @@ def test_record_workflow_authoring_promotion_evaluation_updates_proposal_and_lif
 
     monkeypatch.setattr(
         mod,
-        "_load_workflow_authoring_proposal",
-        lambda _workflow_id: {
+        "_load_workflow_authoring_proposal_by_id",
+        lambda _workflow_id, _proposal_id: {
             "proposal_id": "proposal-1",
             "status": "pending_review",
             "proposal_source_session_id": "session-1",
@@ -583,7 +685,7 @@ def test_record_workflow_authoring_promotion_evaluation_updates_proposal_and_lif
     monkeypatch.setattr(
         mod,
         "_store_workflow_authoring_proposal",
-        lambda _workflow_id, proposal_payload: dict(proposal_payload),
+        lambda _workflow_id, proposal_payload, **_kwargs: dict(proposal_payload),
     )
     monkeypatch.setattr(
         mod,
@@ -691,7 +793,7 @@ def test_review_workflow_authoring_proposal_approve_publishes_and_updates_lifecy
     monkeypatch.setattr(
         mod,
         "_store_workflow_authoring_proposal",
-        lambda _workflow_id, proposal_payload: dict(proposal_payload),
+        lambda _workflow_id, proposal_payload, **_kwargs: dict(proposal_payload),
     )
     monkeypatch.setattr(
         mod,
@@ -716,3 +818,62 @@ def test_review_workflow_authoring_proposal_approve_publishes_and_updates_lifecy
     assert lifecycle_calls[0]["phase"] == "published"
     assert lifecycle_calls[0]["review_state"] == "approved"
     assert lifecycle_calls[0]["schedule_ids"] == ["schedule-1"]
+
+
+def test_get_workflow_authoring_proposal_by_id_preserves_exact_candidate(
+    monkeypatch,
+) -> None:
+    proposal_one = {
+        "proposal_id": "proposal-1",
+        "workflow_id": "#V#alpha_workflow",
+        "status": "superseded",
+        "updated_at_utc": "2026-04-23T00:00:00+00:00",
+    }
+    proposal_two = {
+        "proposal_id": "proposal-2",
+        "workflow_id": "#V#alpha_workflow",
+        "status": "pending_review",
+        "updated_at_utc": "2026-04-23T01:00:00+00:00",
+    }
+
+    def _fake_get_texts_for_concept(subject_concept_id, predicate=None, **_kwargs):
+        if predicate == "#V#hasActiveWorkflowAuthoringProposalId":
+            return [
+                {
+                    "text": "proposal-2",
+                    "relation_id": "pointer-1",
+                    "relation_updated_at": "2026-04-23T01:00:00+00:00",
+                }
+            ]
+        if predicate == "#V#hasWorkflowAuthoringProposalJson":
+            return [
+                {
+                    "text": mod.json.dumps(proposal_one, sort_keys=True),
+                    "predicate": predicate,
+                    "relation_id": "relation-1",
+                    "relation_updated_at": "2026-04-23T00:00:00+00:00",
+                    "context": {"proposal_id": "proposal-1"},
+                },
+                {
+                    "text": mod.json.dumps(proposal_two, sort_keys=True),
+                    "predicate": predicate,
+                    "relation_id": "relation-2",
+                    "relation_updated_at": "2026-04-23T01:00:00+00:00",
+                    "context": {"proposal_id": "proposal-2"},
+                },
+            ]
+        return []
+
+    monkeypatch.setattr(mod, "get_texts_for_concept", _fake_get_texts_for_concept)
+
+    active = mod.get_workflow_authoring_proposal("#V#alpha_workflow")
+    exact = mod.get_workflow_authoring_proposal_by_id(
+        "#V#alpha_workflow",
+        "proposal-1",
+    )
+
+    assert active is not None
+    assert active["proposal_id"] == "proposal-2"
+    assert exact is not None
+    assert exact["proposal_id"] == "proposal-1"
+    assert exact["status"] == "superseded"

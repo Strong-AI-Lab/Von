@@ -188,3 +188,59 @@ def test_record_workflow_promotion_evaluation_updates_memory_and_proposal(
         recorded["promotion_evaluations"][0]["promotion_recommendation"]
         == "ready_for_review"
     )
+
+
+def test_build_workflow_promotion_context_uses_exact_proposal_id(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        svc,
+        "get_episode_critique_memory_state",
+        lambda _memory_id: {
+            "memory_id": "#V#episode_critique_memory_abc",
+            "namespace": "#V#user@org",
+            "improvement_suggestions": [
+                {
+                    "suggestion_id": "workflow_change_alpha",
+                    "target_surface": "workflow",
+                    "target_workflow_id": "#V#alpha_workflow",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        svc,
+        "get_workflow_authoring_proposal",
+        lambda _workflow_id: {"proposal_id": "proposal-2", "status": "pending_review"},
+    )
+    monkeypatch.setattr(
+        svc,
+        "get_workflow_authoring_proposal_by_id",
+        lambda _workflow_id, proposal_id: {
+            "proposal_id": proposal_id,
+            "status": "superseded",
+        },
+    )
+    monkeypatch.setattr(
+        svc,
+        "resolve_workflow_publication_lifecycle",
+        lambda _workflow_id: ({"phase": "published"}, "vontology"),
+    )
+    monkeypatch.setattr(
+        svc,
+        "build_episode_critique_benchmark_report",
+        lambda **_kwargs: {"benchmark_fingerprint": "bench-1"},
+    )
+
+    result = svc.build_workflow_promotion_context(
+        episode_critique_memory_id="#V#episode_critique_memory_abc",
+        target_workflow_id="#V#alpha_workflow",
+        proposal_id="proposal-1",
+        suggestion_id="workflow_change_alpha",
+        namespace="#V#user@org",
+    )
+
+    assert result["success"] is True
+    assert result["proposal_id"] == "proposal-1"
+    assert result["workflow_authoring_proposal"]["proposal_id"] == "proposal-1"
+    assert result["workflow_authoring_proposal"]["status"] == "superseded"

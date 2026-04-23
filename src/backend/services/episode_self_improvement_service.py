@@ -38,6 +38,7 @@ from ..workflows.workflow_definition_identity_service import (
 )
 from ..workflows.workflow_studio_service import (
     get_workflow_authoring_proposal,
+    get_workflow_authoring_proposal_by_id,
     record_workflow_authoring_promotion_evaluation,
     submit_workflow_authoring_proposal,
 )
@@ -512,7 +513,15 @@ def build_workflow_promotion_context(
     if not suggestion:
         return {"success": False, "error": "workflow_target_improvement_suggestion_missing"}
 
-    proposal = _mapping_or_empty(get_workflow_authoring_proposal(target_workflow_id))
+    resolved_proposal_id = _safe_str(proposal_id)
+    proposal = _mapping_or_empty(
+        get_workflow_authoring_proposal_by_id(
+            target_workflow_id,
+            resolved_proposal_id,
+        )
+        if resolved_proposal_id
+        else get_workflow_authoring_proposal(target_workflow_id)
+    )
     if not proposal:
         return {"success": False, "error": "workflow_authoring_proposal_missing"}
     expected_proposal_id = _safe_str(proposal_id)
