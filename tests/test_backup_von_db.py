@@ -192,6 +192,66 @@ def test_apply_backup_failure_does_not_write_receipts(
     assert not legacy_sentinel.exists()
 
 
+def test_apply_compressed_backup_writes_receipts_and_removes_dump_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    out_root = tmp_path / "backups"
+    launcher_receipt = tmp_path / ".run" / "last_successful_backup_receipt.json"
+    legacy_sentinel = tmp_path / ".run" / "last_backup_utc.txt"
+
+    monkeypatch.setenv("VON_DB_NAME", "test_von_db")
+    monkeypatch.setenv("VON_BACKUP_COMPRESSION_ENABLED", "1")
+    monkeypatch.setattr(
+        backup_von_db, "_utc_timestamp_compact", lambda: "20260406_070809Z"
+    )
+    monkeypatch.setattr(
+        backup_von_db, "_utc_timestamp_iso", lambda: "2026-04-06T07:08:09Z"
+    )
+
+    def _fake_mongodump(*, mongo_uri: str, db_name: str, out_path: Path) -> None:
+        db_path = out_path / db_name
+        db_path.mkdir(parents=True, exist_ok=True)
+        (db_path / "collection.bson").write_bytes(b"demo")
+
+    monkeypatch.setattr(backup_von_db, "_run_mongodump", _fake_mongodump)
+
+    exit_code = backup_von_db.main(
+        [
+            "--apply",
+            "--out-dir",
+            str(out_root),
+            "--tag",
+            "auto-daily",
+            "--launcher-receipt-path",
+            str(launcher_receipt),
+            "--legacy-sentinel-path",
+            str(legacy_sentinel),
+        ]
+    )
+
+    dump_dir = out_root / "test_von_db_20260406_070809Z_auto-daily"
+    artifact = out_root / "test_von_db_20260406_070809Z_auto-daily.zip"
+    sidecar = backup_von_db._backup_receipt_sidecar_path(artifact)
+
+    assert exit_code == 0
+    assert not dump_dir.exists()
+    assert artifact.exists()
+    assert sidecar.exists()
+    assert launcher_receipt.exists()
+    assert legacy_sentinel.read_text(encoding="utf-8").strip() == "2026-04-06T07:08:09Z"
+
+    launcher_payload = json.loads(launcher_receipt.read_text(encoding="utf-8"))
+    sidecar_payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert launcher_payload == sidecar_payload
+    assert launcher_payload["backup_root"] == str(dump_dir.resolve())
+    assert launcher_payload["final_artifact_path"] == str(artifact.resolve())
+    assert launcher_payload["artifact_kind"] == "zip"
+    assert launcher_payload["compressed"] is True
+    assert launcher_payload["encrypted"] is False
+    assert launcher_payload["collection_count"] == 1
+    assert launcher_payload["artifact_size_bytes"] > 0
+
+
 @pytest.mark.parametrize(
     "retention_days,max_storage_mb",
     [(-1, -1), (30, -1), (-1, 100)],

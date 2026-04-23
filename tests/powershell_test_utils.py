@@ -23,14 +23,26 @@ def ps_quote(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def _resolve_powershell_executable(executable: str | None) -> str | None:
+    if executable:
+        resolved = shutil.which(executable)
+        if resolved:
+            return resolved
+        explicit_path = Path(executable)
+        return str(explicit_path) if explicit_path.exists() else None
+    return POWERSHELL_EXE
+
+
 def run_powershell_result(
     *,
     repo_root: Path,
     script: str,
     result_variable: str = "result",
     timeout_seconds: float = DEFAULT_POWERSHELL_PROBE_TIMEOUT_SECONDS,
+    executable: str | None = None,
 ) -> tuple[dict[str, Any], subprocess.CompletedProcess[str]]:
-    if not POWERSHELL_EXE:
+    powershell_exe = _resolve_powershell_executable(executable)
+    if not powershell_exe:
         pytest.skip("PowerShell is required for run.ps1 launcher-path tests")
 
     temp_root = Path(mkdtemp(prefix="run_ps1_probe_"))
@@ -217,7 +229,7 @@ Write-TestStage 'probe-complete'
     try:
         completed = subprocess.run(
             [
-                POWERSHELL_EXE,
+                powershell_exe,
                 "-NoProfile",
                 "-ExecutionPolicy",
                 "Bypass",

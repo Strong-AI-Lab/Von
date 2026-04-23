@@ -1014,6 +1014,40 @@ function Get-DailyBackupLauncherReceiptPath {
     return Join-Path $RunDir $script:DailyBackupLauncherReceiptFileName
 }
 
+function Resolve-BackupReceiptCompletedAtUtc {
+    param(
+        [AllowNull()][object]$Value
+    )
+
+    if ($null -eq $Value) { return $null }
+
+    if ($Value -is [datetimeoffset]) {
+        $completedAtUtc = $Value.UtcDateTime
+        $completedAtText = $completedAtUtc.ToString('o')
+    }
+    elseif ($Value -is [datetime]) {
+        $completedAtUtc = $Value.ToUniversalTime()
+        $completedAtText = $completedAtUtc.ToString('o')
+    }
+    else {
+        $completedAtText = [string]$Value
+        if (-not $completedAtText) { return $null }
+        $dateStyles = [System.Globalization.DateTimeStyles]::AllowWhiteSpaces `
+            -bor [System.Globalization.DateTimeStyles]::AssumeUniversal `
+            -bor [System.Globalization.DateTimeStyles]::AdjustToUniversal
+        $completedAtUtc = [DateTime]::Parse(
+            $completedAtText,
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            $dateStyles
+        )
+    }
+
+    return [pscustomobject]@{
+        CompletedAtText = $completedAtText
+        CompletedAtUtc = $completedAtUtc
+    }
+}
+
 function Read-BackupSuccessReceipt {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -1031,19 +1065,22 @@ function Read-BackupSuccessReceipt {
         return $null
     }
 
-    $completedAtText = [string]$raw.completed_at_utc
-    if (-not $completedAtText) {
+    try {
+        $completedAtInfo = Resolve-BackupReceiptCompletedAtUtc -Value $raw.completed_at_utc
+    }
+    catch {
+        $completedAtText = if ($null -ne $raw.completed_at_utc) { [string]$raw.completed_at_utc } else { '' }
+        Write-LauncherLog "[$Context] WARN: backup receipt '$Path' has invalid completed_at_utc '$completedAtText'."
+        return $null
+    }
+
+    if ($null -eq $completedAtInfo) {
         Write-LauncherLog "[$Context] WARN: backup receipt '$Path' is missing completed_at_utc."
         return $null
     }
 
-    try {
-        $completedAtUtc = [DateTime]::Parse($completedAtText).ToUniversalTime()
-    }
-    catch {
-        Write-LauncherLog "[$Context] WARN: backup receipt '$Path' has invalid completed_at_utc '$completedAtText'."
-        return $null
-    }
+    $completedAtText = [string]$completedAtInfo.CompletedAtText
+    $completedAtUtc = [datetime]$completedAtInfo.CompletedAtUtc
 
     $artifactPath = [string]$raw.final_artifact_path
     if (-not $artifactPath) {

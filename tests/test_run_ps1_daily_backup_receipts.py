@@ -37,7 +37,9 @@ def _write_receipt(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
-def _run_daily_backup_probe(tmp_path: Path, setup_script: str) -> dict[str, Any]:
+def _run_daily_backup_probe(
+    tmp_path: Path, setup_script: str, *, executable: str | None = None
+) -> dict[str, Any]:
     run_dir = tmp_path / ".run"
     backup_root = tmp_path / "backups"
     receipt_path = run_dir / "last_successful_backup_receipt.json"
@@ -84,7 +86,11 @@ $result = [ordered]@{{
 }}
 """.strip()
 
-    payload, _ = run_powershell_result(repo_root=REPO_ROOT, script=script)
+    payload, _ = run_powershell_result(
+        repo_root=REPO_ROOT,
+        script=script,
+        executable=executable,
+    )
     payload["receipt"] = (
         json.loads(payload["receipt_json"])
         if payload["receipt_json"] is not None
@@ -186,3 +192,35 @@ def test_run_ps1_cron_skip_uses_launcher_receipt(tmp_path: Path) -> None:
     assert result["start_job_calls"] == 0
     assert any("Skip:" in line and "next-due=" in line for line in result["logs"])
     assert result["receipt"]["completed_at_utc"] == completed_at
+
+
+def test_run_ps1_pwsh_valid_iso_receipt_skips_without_invalid_timestamp_warning(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / ".run"
+    receipt_path = run_dir / "last_successful_backup_receipt.json"
+    artifact = (tmp_path / "backups") / "von_db_20260416_054045Z_auto-daily.zip"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_bytes(b"pwsh")
+
+    completed_at = (
+        datetime.now(timezone.utc) - timedelta(hours=2)
+    ).isoformat().replace("+00:00", "Z")
+    _write_receipt(
+        receipt_path,
+        _receipt_payload(completed_at_utc=completed_at, artifact_path=artifact),
+    )
+
+    result = _run_daily_backup_probe(
+        tmp_path,
+        "$env:VON_BACKUP_INTERVAL_HOURS = '24'",
+        executable="pwsh",
+    )
+
+    assert result["start_job_calls"] == 0
+    assert result["receipt"]["completed_at_utc"] == completed_at
+    assert not any("has invalid completed_at_utc" in line for line in result["logs"])
+    assert not any(
+        "falling back to legacy last_backup_utc.txt sentinel" in line
+        for line in result["logs"]
+    )

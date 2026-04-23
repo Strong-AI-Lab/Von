@@ -198,6 +198,10 @@ def _artifact_kind(final_artifact: Path) -> str:
     return "file"
 
 
+def _count_dump_bson_files(db_dir: Path) -> int:
+    return sum(1 for item in db_dir.rglob("*.bson") if item.is_file())
+
+
 def _compress_backup_dir_to_zip(backup_root: Path) -> Path:
     import zipfile
 
@@ -381,6 +385,7 @@ def main(argv: list[str] | None = None) -> int:
         raise RuntimeError(
             f"Backup completed but expected folder not found: {db_dir} (mongodump output missing?)"
         )
+    collection_count = _count_dump_bson_files(db_dir)
 
     final_artifact: Path = backup_root
 
@@ -421,9 +426,6 @@ def main(argv: list[str] | None = None) -> int:
         protect_paths={final_artifact} if final_artifact.exists() else set(),
     )
 
-    collection_count = sum(
-        1 for item in db_dir.iterdir() if item.is_file() and item.name.endswith(".bson")
-    )
     artifact_size_bytes = _artifact_size_bytes(final_artifact)
 
     receipt = BackupSuccessReceipt(
