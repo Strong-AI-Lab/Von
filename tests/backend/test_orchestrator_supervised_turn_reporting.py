@@ -1187,6 +1187,134 @@ def test_turn_execution_route_preserves_non_default_selector_intent_with_safe_ge
         assert override_entry["requested_candidate_workflow_id"] == excluded_workflow_id
 
 
+def test_turn_execution_route_recovers_launchable_requested_workflow_after_discovery_timeout(
+    monkeypatch,
+) -> None:
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
+        gateway=cast(Any, _DummyGateway()),
+        selector_enabled=True,
+    )
+    selected_workflow_id = "#V#entity_information_retrieval_workflow"
+    aux_llm_calls: list[dict[str, Any]] = []
+
+    orchestrator._workflow_registry.register_or_replace(
+        WorkflowRegistration(
+            workflow_id=selected_workflow_id,
+            definition=WorkflowDefinition(
+                workflow_id=selected_workflow_id,
+                initial_state="complete",
+                states={
+                    "complete": WorkflowStateSpec(
+                        state_id="complete",
+                        actions=(
+                            WorkflowActionInvocation(action_id="tool.prepare_custom"),
+                        ),
+                        terminal=True,
+                    )
+                },
+            ),
+            purpose=(
+                "Canonical grounded retrieval workflow for authenticated "
+                "self-relative entity questions."
+            ),
+            source="test",
+        )
+    )
+
+    llm = SimpleNamespace(
+        generate=lambda prompt, context=None, model=None: (
+            '{"workflow_id":"#V#entity_information_retrieval_workflow",'
+            '"confidence":0.98,'
+            '"reasoning":"This is an authenticated self-relative entity '
+            'information request, so the entity-information retrieval workflow '
+            'is the best fit."}'
+        )
+    )
+
+    result = orchestrator._action_turn_execution_route(
+        SimpleNamespace(
+            data={
+                "user_prompt": (
+                    "What research interests of mine are explicitly represented "
+                    "here?"
+                ),
+                "workflow_discovery_result": {
+                    "requested_query": (
+                        "What research interests of mine are explicitly represented "
+                        "here?"
+                    ),
+                    "query": (
+                        "What research interests of mine are explicitly represented "
+                        "here?"
+                    ),
+                    "discovery_query_input": (
+                        "What research interests of mine are explicitly represented "
+                        "here?"
+                    ),
+                    "search_sources": [],
+                    "matches": [],
+                    "candidates": [],
+                    "routing_matches": [],
+                    "match_count": 0,
+                    "candidate_count": 0,
+                    "excluded_candidate_ids": [],
+                    "excluded_candidates": [],
+                    "budget_exhausted": True,
+                    "match_absence_reason": "workflow_discovery_budget_exhausted",
+                    "budget_exhaustion_stage": "workflow_discovery_for_turn",
+                    "budget_exhaustion_detail": (
+                        "workflow_discovery_for_turn timed out after 10.000s "
+                        "during workflow discovery"
+                    ),
+                    "errors": [
+                        "workflow_discovery_budget_exhausted: "
+                        "workflow_discovery_for_turn timed out after 10.000s "
+                        "during workflow discovery"
+                    ],
+                },
+                "workflow_discovery": None,
+                "policy_state": SimpleNamespace(
+                    enabled=False,
+                    policy=None,
+                    policy_id=None,
+                    predicate_id=None,
+                    errors=(),
+                ),
+                "registry_snapshot": None,
+                "llm_calls": [],
+                "aux_llm_calls": aux_llm_calls,
+            },
+            environment=SimpleNamespace(
+                user_namespace="#V#user",
+                llm_client=llm,
+                model="test-model",
+            ),
+        )
+    )
+
+    assert result.status == "success"
+    assert result.outputs["selected_workflow_id"] == selected_workflow_id
+    workflow_routing = result.outputs["workflow_routing"]
+    assert workflow_routing["workflow_id"] == selected_workflow_id
+    assert workflow_routing["verdict"] == "rag_selected"
+    assert workflow_routing["source"] == "selector_override"
+
+    recovery_entry = next(
+        entry
+        for entry in aux_llm_calls
+        if isinstance(entry, dict)
+        and entry.get("type") == "workflow_selector_override"
+        and entry.get("reason")
+        == (
+            "selector_unmatched_candidate_budget_timeout_recovered_to_requested_workflow"
+        )
+    )
+    assert recovery_entry["selected_workflow_id"] == selected_workflow_id
+    assert recovery_entry["requested_candidate_workflow_id"] == selected_workflow_id
+    assert recovery_entry["workflow_discovery_budget_exhausted"] is True
+
+
 def test_turn_execution_route_recovers_single_discovered_execution_workflow_after_selector_default(
     monkeypatch,
 ) -> None:

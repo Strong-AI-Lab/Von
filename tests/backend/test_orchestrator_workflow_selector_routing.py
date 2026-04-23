@@ -3174,7 +3174,6 @@ def test_selector_unmatched_non_default_candidate_uses_safe_general_tool_fallbac
         "tool_pipeline"
     )
 
-
 def test_selector_safe_general_fallback_finalises_selection_experience_with_override_truth(
     monkeypatch,
 ):

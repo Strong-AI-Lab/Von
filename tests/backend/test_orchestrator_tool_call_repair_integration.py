@@ -120,7 +120,17 @@ def _stub_authoritative_prompts(monkeypatch: pytest.MonkeyPatch) -> None:
     ):
         prompt_ids = tuple(concept_ids or ())
         if "#V#tool_call_repair_prompt" not in prompt_ids:
-            return None
+            prompt_id = "#V#test_stub_prompt"
+            for raw_prompt_id in prompt_ids:
+                if isinstance(raw_prompt_id, str) and raw_prompt_id.strip():
+                    prompt_id = raw_prompt_id
+                    break
+            return RenderedPrompt(
+                prompt_id=prompt_id,
+                text=str(fallback or "Prompt stub"),
+                variables=dict(variables or {}),
+                truncated=False,
+            )
         rendered = _TEST_TOOL_CALL_REPAIR_PROMPT
         for key, value in dict(variables or {}).items():
             rendered = rendered.replace("{" + key + "}", str(value))
@@ -244,6 +254,65 @@ def test_attempt_tool_call_repair_emits_annotated_prompt_and_response_events(
     assert repair_entries[0].get("decision_source") == "workflow_retry_prompt"
     assert repair_entries[1].get("decision_class") == "tool_call_repair_response"
     assert repair_entries[1].get("decision_source") == "workflow_retry_response"
+
+
+def test_attempt_tool_call_repair_prefers_required_tools_for_unavailable_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VON_TOOL_CALL_REPAIR_ENABLE", "1")
+
+    gateway = _Gateway()
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, gateway))
+    llm = _SequencedLLM(
+        [
+            '{"action":"call_tool","tool":"get_predicate_incidence","payload":{"concept_id":"#V#test_user"}}'
+        ]
+    )
+    aux_llm_calls: list[Mapping[str, Any]] = []
+
+    repaired_calls = orchestrator._attempt_tool_call_repair(
+        current_response='{"action":"call_tool","tool":"get_all_predicates","payload":{"concept_id":"#V#test_user"}}',
+        errors=["Tool 'get_all_predicates' is unavailable."],
+        tool_list=[
+            "get_predicate_incidence",
+            "find_relations_with_argument",
+            "search_knowledge_base",
+        ],
+        preferred_tools=[
+            "get_predicate_incidence",
+            "find_relations_with_argument",
+        ],
+        llm_client=llm,
+        policy_state=cast(Any, None),
+        default_model="test-model",
+        registry_snapshot=None,
+        user_concept_id=None,
+        org_concept_id=None,
+        aux_llm_calls=aux_llm_calls,
+        llm_calls_log=[],
+        record_llm_call=None,
+    )
+
+    assert repaired_calls is not None
+    assert repaired_calls[0]["tool"] == "get_predicate_incidence"
+    repair_prompt = llm.calls[0]["prompt"]
+    assert "- get_predicate_incidence" in repair_prompt
+    assert "- find_relations_with_argument" in repair_prompt
+    assert "- search_knowledge_base" not in repair_prompt
+
+    repair_entries = [
+        entry
+        for entry in aux_llm_calls
+        if isinstance(entry, dict) and entry.get("type") == "tool_call_repair"
+    ]
+    assert repair_entries
+    assert repair_entries[0].get("repair_tool_list_strategy") == (
+        "preferred_tools_only_for_unavailable_tool"
+    )
+    assert repair_entries[0].get("preferred_tools") == [
+        "get_predicate_incidence",
+        "find_relations_with_argument",
+    ]
 
 
 def test_attempt_tool_call_repair_skips_when_authoritative_prompt_missing(

@@ -859,6 +859,55 @@ def build_turn_execution_selected_workflow_outputs(
     child_tool_messages = child_outputs_map.get("tool_messages")
     if isinstance(child_tool_messages, list):
         outputs["tool_messages"] = list(child_tool_messages)
+    child_aux_llm_calls = child_outputs_map.get("aux_llm_calls")
+    if isinstance(child_aux_llm_calls, list):
+        outputs["aux_llm_calls"] = [
+            dict(item) for item in child_aux_llm_calls if isinstance(item, Mapping)
+        ]
+    child_llm_calls = child_outputs_map.get("llm_calls")
+    if isinstance(child_llm_calls, list):
+        outputs["llm_calls"] = [
+            dict(item) for item in child_llm_calls if isinstance(item, Mapping)
+        ]
+    for key in (
+        "required_prompt_tools",
+        "required_prompt_fetch_concept_ids",
+        "required_prompt_read_file_copy_ids",
+        "required_prompt_scholarly_representation_for_file_copy_ids",
+        "missing_prompt_tools",
+        "missing_prompt_fetch_concept_ids",
+        "missing_prompt_read_file_copy_ids",
+        "missing_prompt_scholarly_representation_for_file_copy_ids",
+        "llm_allowed_tools",
+    ):
+        value = child_outputs_map.get(key)
+        if isinstance(value, list):
+            outputs[key] = list(value)
+    for key in (
+        "prompt_requirement_url_policy",
+        "tool_plan_context_lineage",
+        "tool_follow_up_context_lineage",
+    ):
+        value = child_outputs_map.get(key)
+        if isinstance(value, Mapping):
+            outputs[key] = {
+                str(item_key): item_value
+                for item_key, item_value in value.items()
+                if isinstance(item_key, str)
+            }
+    for key in (
+        "required_prompt_url_extraction_tool",
+        "required_prompt_url_extraction_url",
+        "required_prompt_create_type_name",
+        "missing_tool_call_retry_reason_override",
+    ):
+        value = child_outputs_map.get(key)
+        if isinstance(value, str) and value.strip():
+            outputs[key] = value
+    if isinstance(child_outputs_map.get("prompt_requirements_preflight_completed"), bool):
+        outputs["prompt_requirements_preflight_completed"] = bool(
+            child_outputs_map.get("prompt_requirements_preflight_completed")
+        )
     if clean_selected_workflow_id:
         outputs["selected_workflow_id"] = clean_selected_workflow_id
     if derived_user_response:

@@ -1206,6 +1206,136 @@ class _CustomWorkflowDispatchSupport:
         )
         return True
 
+    def maybe_recover_selector_unmatched_candidate_after_discovery_timeout(
+        self,
+        state: _WorkflowDispatchSelectionState,
+        *,
+        selector_safe_general_fallback_payload: Mapping[str, Any] | None,
+        workflow_discovery_result: Mapping[str, Any] | None,
+    ) -> bool:
+        requested_workflow_id = (
+            str(
+                (selector_safe_general_fallback_payload or {}).get(
+                    "requested_candidate_workflow_id"
+                )
+                or ""
+            ).strip()
+            if isinstance(selector_safe_general_fallback_payload, Mapping)
+            else ""
+        )
+        if not requested_workflow_id:
+            return False
+        if requested_workflow_id in _SELECTOR_GENERIC_WORKFLOW_IDS:
+            return False
+
+        discovery_payload = (
+            {
+                str(key): value
+                for key, value in workflow_discovery_result.items()
+                if isinstance(key, str)
+            }
+            if isinstance(workflow_discovery_result, Mapping)
+            else {}
+        )
+        match_absence_reason = (
+            str(discovery_payload.get("match_absence_reason") or "").strip().lower()
+        )
+        budget_exhausted = bool(discovery_payload.get("budget_exhausted")) or (
+            match_absence_reason == "workflow_discovery_budget_exhausted"
+        )
+        if not budget_exhausted:
+            return False
+
+        try:
+            candidate_count = int(discovery_payload.get("candidate_count") or 0)
+        except (TypeError, ValueError):
+            candidate_count = 0
+        try:
+            match_count = int(discovery_payload.get("match_count") or 0)
+        except (TypeError, ValueError):
+            match_count = 0
+        if candidate_count > 0 or match_count > 0:
+            return False
+
+        excluded_candidate_ids = {
+            str(item).strip().lower()
+            for item in (discovery_payload.get("excluded_candidate_ids") or [])
+            if isinstance(item, str) and str(item).strip()
+        }
+        for raw_candidate in discovery_payload.get("excluded_candidates") or ():
+            if not isinstance(raw_candidate, Mapping):
+                continue
+            concept_id = str(raw_candidate.get("concept_id") or "").strip().lower()
+            if concept_id:
+                excluded_candidate_ids.add(concept_id)
+        if requested_workflow_id.lower() in excluded_candidate_ids:
+            return False
+
+        try:
+            requested_probe = self.get_cached_custom_workflow_launchability_probe(
+                requested_workflow_id
+            )
+        except Exception as exc:
+            self.record_custom_workflow_launchability_override_failure(
+                reason="selector_unmatched_candidate_launchability_probe_failed",
+                error=exc,
+                selected_workflow_id=requested_workflow_id,
+            )
+            return False
+
+        if not bool(requested_probe.get("launchable")):
+            return False
+
+        workflow_label = (
+            self.resolve_selected_workflow_name(requested_workflow_id)
+            or requested_workflow_id
+        )
+        budget_exhaustion_detail = (
+            str(discovery_payload.get("budget_exhaustion_detail") or "").strip()
+            or None
+        )
+        reasoning = (
+            "Workflow discovery timed out before surfacing the selector's "
+            "requested workflow, so the requested workflow was launch-checked "
+            "directly and selected."
+        )
+        extra_payload: dict[str, Any] = {
+            "requested_candidate_workflow_id": requested_workflow_id,
+            "workflow_discovery_budget_exhausted": True,
+            "launch_viability_probe": {
+                "requested_candidate_workflow": dict(requested_probe)
+            },
+        }
+        if isinstance(selector_safe_general_fallback_payload, Mapping):
+            for key in ("selection_resolution", "raw_candidate_label"):
+                value = selector_safe_general_fallback_payload.get(key)
+                if value is not None:
+                    extra_payload[key] = value
+        if budget_exhaustion_detail:
+            extra_payload["workflow_discovery_budget_exhaustion_detail"] = (
+                budget_exhaustion_detail
+            )
+
+        return self.promote_selected_workflow_to_custom_dispatch(
+            state,
+            replacement_probe=requested_probe,
+            reason=(
+                "selector_unmatched_candidate_budget_timeout_recovered_to_requested_workflow"
+            ),
+            verdict="rag_selected",
+            reasoning=reasoning,
+            prior_selected_workflow_id=state.selected_workflow_id_text,
+            prior_selector_verdict=state.selector_verdict or None,
+            extra_payload=extra_payload,
+            decision_source="workflow_launchability_check",
+            dispatch_prepare_step_id="selector_unmatched_candidate_recovery",
+            dispatch_prepare_step_label="Recover selector-requested workflow",
+            dispatch_prepare_result_summary=(
+                f"Workflow discovery timed out, but {workflow_label} was directly "
+                "launchable from the current turn inputs and was selected."
+            ),
+        )
+
 
 class _ToolCallRequest(TypedDict):
     action: Required[str]
@@ -6755,6 +6885,26 @@ class InternalMCPChatOrchestrator:
                 for item in orchestrator_result.aux_llm_calls
                 if isinstance(item, Mapping)
             )
+        else:
+            data["aux_llm_calls"] = [
+                dict(item)
+                for item in orchestrator_result.aux_llm_calls
+                if isinstance(item, Mapping)
+            ]
+
+        llm_calls = data.get("llm_calls")
+        if isinstance(llm_calls, list):
+            llm_calls.extend(
+                dict(item)
+                for item in orchestrator_result.llm_calls
+                if isinstance(item, Mapping)
+            )
+        else:
+            data["llm_calls"] = [
+                dict(item)
+                for item in orchestrator_result.llm_calls
+                if isinstance(item, Mapping)
+            ]
 
     @staticmethod
     def _build_tool_calling_state_outputs(
@@ -6777,6 +6927,55 @@ class InternalMCPChatOrchestrator:
             outputs["tool_messages"] = [
                 dict(item) for item in tool_messages if isinstance(item, Mapping)
             ]
+        aux_llm_calls = data.get("aux_llm_calls")
+        if isinstance(aux_llm_calls, list):
+            outputs["aux_llm_calls"] = [
+                dict(item) for item in aux_llm_calls if isinstance(item, Mapping)
+            ]
+        llm_calls = data.get("llm_calls")
+        if isinstance(llm_calls, list):
+            outputs["llm_calls"] = [
+                dict(item) for item in llm_calls if isinstance(item, Mapping)
+            ]
+        for key in (
+            "required_prompt_tools",
+            "required_prompt_fetch_concept_ids",
+            "required_prompt_read_file_copy_ids",
+            "required_prompt_scholarly_representation_for_file_copy_ids",
+            "missing_prompt_tools",
+            "missing_prompt_fetch_concept_ids",
+            "missing_prompt_read_file_copy_ids",
+            "missing_prompt_scholarly_representation_for_file_copy_ids",
+            "llm_allowed_tools",
+        ):
+            value = data.get(key)
+            if isinstance(value, list):
+                outputs[key] = list(value)
+        for key in (
+            "prompt_requirement_url_policy",
+            "tool_plan_context_lineage",
+            "tool_follow_up_context_lineage",
+        ):
+            value = data.get(key)
+            if isinstance(value, Mapping):
+                outputs[key] = {
+                    str(item_key): item_value
+                    for item_key, item_value in value.items()
+                    if isinstance(item_key, str)
+                }
+        for key in (
+            "required_prompt_url_extraction_tool",
+            "required_prompt_url_extraction_url",
+            "required_prompt_create_type_name",
+            "missing_tool_call_retry_reason_override",
+        ):
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                outputs[key] = value
+        if isinstance(data.get("prompt_requirements_preflight_completed"), bool):
+            outputs["prompt_requirements_preflight_completed"] = bool(
+                data.get("prompt_requirements_preflight_completed")
+            )
         for key, value in extra_outputs.items():
             outputs[key] = value
         return outputs
@@ -7043,6 +7242,8 @@ class InternalMCPChatOrchestrator:
         )
         self._store_prompt_requirement_evaluation(data, prompt_requirements)
         required_prompt_tools = list(prompt_requirements.required_tools)
+        if required_prompt_tools:
+            data["llm_allowed_tools"] = list(required_prompt_tools)
         data["tool_plan_context_lineage"] = dict(tool_plan_context_telemetry)
 
         # Emit planning phase.
@@ -12645,6 +12846,8 @@ class InternalMCPChatOrchestrator:
         """Persist shared prompt-requirement state into workflow data."""
 
         data["required_prompt_tools"] = list(evaluation.required_tools)
+        if evaluation.required_tools:
+            data["llm_allowed_tools"] = list(evaluation.required_tools)
         data["required_prompt_url_extraction_tool"] = (
             evaluation.required_url_extraction_tool
         )
@@ -17048,6 +17251,7 @@ class InternalMCPChatOrchestrator:
         current_response: str,
         errors: Sequence[str],
         tool_list: Sequence[str],
+        preferred_tools: Sequence[str] = (),
         llm_client: Any,
         policy_state: _WorkflowModelPolicyState,
         default_model: str | None,
@@ -17061,10 +17265,70 @@ class InternalMCPChatOrchestrator:
         if not self._tool_call_repair_enabled():
             return None
 
+        cleaned_tool_list: list[str] = []
+        seen_tool_names: set[str] = set()
+        for raw_tool_name in tool_list:
+            if not isinstance(raw_tool_name, str) or not raw_tool_name.strip():
+                continue
+            clean_tool_name = raw_tool_name.strip()
+            tool_key = clean_tool_name.lower()
+            if tool_key in seen_tool_names:
+                continue
+            seen_tool_names.add(tool_key)
+            cleaned_tool_list.append(clean_tool_name)
+
+        preferred_tool_names: list[str] = []
+        preferred_tool_keys: set[str] = set()
+        available_tool_lookup = {
+            tool_name.lower(): tool_name for tool_name in cleaned_tool_list
+        }
+        for raw_tool_name in preferred_tools:
+            if not isinstance(raw_tool_name, str) or not raw_tool_name.strip():
+                continue
+            matched_tool_name = available_tool_lookup.get(raw_tool_name.strip().lower())
+            if not matched_tool_name:
+                continue
+            matched_key = matched_tool_name.lower()
+            if matched_key in preferred_tool_keys:
+                continue
+            preferred_tool_keys.add(matched_key)
+            preferred_tool_names.append(matched_tool_name)
+
+        unavailable_error_detected = any(
+            isinstance(error_text, str)
+            and any(
+                marker in error_text.lower()
+                for marker in (
+                    "unavailable",
+                    "unknown tool",
+                    "tool is not available",
+                    "not one of the available tools",
+                )
+            )
+            for error_text in errors
+        )
+        if preferred_tool_names and unavailable_error_detected:
+            repair_tool_list = list(preferred_tool_names)
+            repair_tool_list_strategy = "preferred_tools_only_for_unavailable_tool"
+        elif preferred_tool_names:
+            repair_tool_list = [
+                *preferred_tool_names,
+                *[
+                    tool_name
+                    for tool_name in cleaned_tool_list
+                    if tool_name.lower() not in preferred_tool_keys
+                ],
+            ]
+            repair_tool_list_strategy = "preferred_tools_prioritised"
+        else:
+            repair_tool_list = list(cleaned_tool_list)
+            repair_tool_list_strategy = "full_tool_list"
+
         variables = {
-            "tool_list": "\n".join(f"- {name}" for name in tool_list),
+            "tool_list": "\n".join(f"- {name}" for name in repair_tool_list),
             "errors": "\n".join(f"- {err}" for err in errors),
             "raw_tool_call": (current_response[:4000] if current_response else ""),
+            "preferred_tools": "\n".join(f"- {name}" for name in preferred_tool_names),
         }
         rendered_prompt = self._render_authoritative_prompt(
             self._TOOL_CALL_REPAIR_PROMPTS,
@@ -17083,6 +17347,8 @@ class InternalMCPChatOrchestrator:
                         "type": "tool_call_repair",
                         "stage": "tool_recovery",
                         "prompt_preview": prompt_text[:800],
+                        "repair_tool_list_strategy": repair_tool_list_strategy,
+                        "preferred_tools": list(preferred_tool_names),
                     },
                     stage="tool_recovery",
                     component="internal_mcp_orchestrator",
@@ -27905,51 +28171,208 @@ class InternalMCPChatOrchestrator:
                 )
             )
             if selector_safe_general_fallback_payload is not None:
-                selected_workflow_id = TOOL_CALLING_WORKFLOW_ID
-                selector_reasoning = (
-                    "Selector proposed a concrete non-default workflow that was "
-                    "not eligible from the current candidate set, so the safe "
-                    "general tool workflow was selected instead."
-                )
-                selector_override_trace = {
-                    "type": "workflow_selector_override",
-                    "reason": "selector_unmatched_candidate_requires_safe_general_fallback",
-                    "selected_workflow_id": TOOL_CALLING_WORKFLOW_ID,
-                    "prior_selected_workflow_id": CHAT_ASSISTANT_WORKFLOW_ID,
-                    "prior_selector_verdict": selector_selection.verdict,
-                    **selector_safe_general_fallback_payload,
-                }
-                aux_llm_calls.append(
-                    annotate_python_decision_event(
-                        selector_override_trace,
-                        stage="workflow_dispatch",
-                        component="internal_mcp_orchestrator",
-                        function="_action_turn_execution_route",
-                        decision_class="workflow_selector_override",
-                        decision_source="workflow_launchability_check",
-                        changed_outcome=True,
-                        reason_code=(
-                            "selector_unmatched_candidate_requires_safe_general_fallback"
-                        ),
-                        possible_inappropriate_python_code_use=False,
+                requested_candidate_workflow_id = str(
+                    selector_safe_general_fallback_payload.get(
+                        "requested_candidate_workflow_id"
                     )
+                    or ""
+                ).strip()
+                recovered_requested_workflow = False
+                match_absence_reason = str(
+                    workflow_discovery_result.get("match_absence_reason") or ""
+                ).strip()
+                budget_exhausted = bool(
+                    workflow_discovery_result.get("budget_exhausted")
+                ) or (
+                    match_absence_reason.lower()
+                    == "workflow_discovery_budget_exhausted"
                 )
-                routing_info = WorkflowRoutingInfo(
-                    workflow_id=selected_workflow_id,
-                    verdict="tool_contract_override",
-                    prompt_id=selector_selection.prompt_id,
-                    discovered_workflow_ids=selector_selection.discovered_workflow_ids,
-                    source="selector_override",
-                    confidence_score=selector_selection.confidence_score,
-                    reasoning=selector_reasoning,
-                    selection_rationale=_derive_workflow_selection_rationale(
-                        selected_workflow_id=selected_workflow_id,
-                        selector_verdict="tool_contract_override",
-                        selector_source="selector_override",
-                        candidate_workflow_ids=selector_selection.discovered_workflow_ids,
-                        explicit_reasoning=selector_reasoning,
-                    ),
-                )
+                if (
+                    requested_candidate_workflow_id
+                    and requested_candidate_workflow_id
+                    not in _SELECTOR_GENERIC_WORKFLOW_IDS
+                    and budget_exhausted
+                    and not workflow_discovery_result.get("candidate_count")
+                    and not workflow_discovery_result.get("match_count")
+                ):
+                    excluded_candidate_ids = {
+                        str(item).strip().lower()
+                        for item in (
+                            workflow_discovery_result.get("excluded_candidate_ids")
+                            or []
+                        )
+                        if isinstance(item, str) and str(item).strip()
+                    }
+                    for raw_candidate in (
+                        workflow_discovery_result.get("excluded_candidates") or ()
+                    ):
+                        if not isinstance(raw_candidate, Mapping):
+                            continue
+                        concept_id = str(raw_candidate.get("concept_id") or "").strip()
+                        if concept_id:
+                            excluded_candidate_ids.add(concept_id.lower())
+                    if (
+                        requested_candidate_workflow_id.lower()
+                        not in excluded_candidate_ids
+                    ):
+                        try:
+                            requested_probe = self._probe_workflow_launchability_for_inputs(
+                                requested_candidate_workflow_id,
+                                available_inputs=self._build_turn_launchability_probe_inputs(
+                                    prompt_text=(
+                                        str(data.get("prompt") or "").strip() or ""
+                                    ),
+                                    augmented_context=cast(
+                                        Sequence[Mapping[str, Any]],
+                                        augmented_context,
+                                    ),
+                                    workflow_discovery_result=workflow_discovery_result,
+                                    continuation_context=(
+                                        data.get("continuation_context")
+                                        if isinstance(
+                                            data.get("continuation_context"), Mapping
+                                        )
+                                        else None
+                                    ),
+                                    user_namespace=env.user_namespace,
+                                    user_concept_id=(
+                                        str(data.get("user_concept_id") or "").strip()
+                                        or None
+                                    ),
+                                    org_concept_id=(
+                                        str(data.get("org_concept_id") or "").strip()
+                                        or None
+                                    ),
+                                    gmail_profile=(
+                                        str(data.get("gmail_profile") or "").strip()
+                                        or None
+                                    ),
+                                    base_data=data if isinstance(data, Mapping) else None,
+                                ),
+                            )
+                        except Exception:
+                            requested_probe = None
+                        if isinstance(requested_probe, Mapping) and bool(
+                            requested_probe.get("launchable")
+                        ):
+                            selected_workflow_id = requested_candidate_workflow_id
+                            selector_reasoning = (
+                                "Workflow discovery timed out before surfacing the "
+                                "selector's requested workflow, so the requested "
+                                "workflow was launch-checked directly and selected."
+                            )
+                            selector_override_trace = {
+                                "type": "workflow_selector_override",
+                                "reason": (
+                                    "selector_unmatched_candidate_budget_timeout_recovered_to_requested_workflow"
+                                ),
+                                "selected_workflow_id": (
+                                    requested_candidate_workflow_id
+                                ),
+                                "prior_selected_workflow_id": (
+                                    CHAT_ASSISTANT_WORKFLOW_ID
+                                ),
+                                "prior_selector_verdict": selector_selection.verdict,
+                                "workflow_discovery_budget_exhausted": True,
+                                "launch_viability_probe": {
+                                    "requested_candidate_workflow": dict(
+                                        requested_probe
+                                    )
+                                },
+                                **selector_safe_general_fallback_payload,
+                            }
+                            budget_exhaustion_detail = str(
+                                workflow_discovery_result.get(
+                                    "budget_exhaustion_detail"
+                                )
+                                or ""
+                            ).strip()
+                            if budget_exhaustion_detail:
+                                selector_override_trace[
+                                    "workflow_discovery_budget_exhaustion_detail"
+                                ] = budget_exhaustion_detail
+                            aux_llm_calls.append(
+                                annotate_python_decision_event(
+                                    selector_override_trace,
+                                    stage="workflow_dispatch",
+                                    component="internal_mcp_orchestrator",
+                                    function="_action_turn_execution_route",
+                                    decision_class="workflow_selector_override",
+                                    decision_source="workflow_launchability_check",
+                                    changed_outcome=True,
+                                    reason_code=(
+                                        "selector_unmatched_candidate_budget_timeout_recovered_to_requested_workflow"
+                                    ),
+                                    possible_inappropriate_python_code_use=False,
+                                )
+                            )
+                            routing_info = WorkflowRoutingInfo(
+                                workflow_id=selected_workflow_id,
+                                verdict="rag_selected",
+                                prompt_id=selector_selection.prompt_id,
+                                discovered_workflow_ids=(
+                                    selector_selection.discovered_workflow_ids
+                                ),
+                                source="selector_override",
+                                confidence_score=selector_selection.confidence_score,
+                                reasoning=selector_reasoning,
+                                selection_rationale=_derive_workflow_selection_rationale(
+                                    selected_workflow_id=selected_workflow_id,
+                                    selector_verdict="rag_selected",
+                                    selector_source="selector_override",
+                                    candidate_workflow_ids=(
+                                        selector_selection.discovered_workflow_ids
+                                    ),
+                                    explicit_reasoning=selector_reasoning,
+                                ),
+                            )
+                            recovered_requested_workflow = True
+                if not recovered_requested_workflow:
+                    selected_workflow_id = TOOL_CALLING_WORKFLOW_ID
+                    selector_reasoning = (
+                        "Selector proposed a concrete non-default workflow that was "
+                        "not eligible from the current candidate set, so the safe "
+                        "general tool workflow was selected instead."
+                    )
+                    selector_override_trace = {
+                        "type": "workflow_selector_override",
+                        "reason": "selector_unmatched_candidate_requires_safe_general_fallback",
+                        "selected_workflow_id": TOOL_CALLING_WORKFLOW_ID,
+                        "prior_selected_workflow_id": CHAT_ASSISTANT_WORKFLOW_ID,
+                        "prior_selector_verdict": selector_selection.verdict,
+                        **selector_safe_general_fallback_payload,
+                    }
+                    aux_llm_calls.append(
+                        annotate_python_decision_event(
+                            selector_override_trace,
+                            stage="workflow_dispatch",
+                            component="internal_mcp_orchestrator",
+                            function="_action_turn_execution_route",
+                            decision_class="workflow_selector_override",
+                            decision_source="workflow_launchability_check",
+                            changed_outcome=True,
+                            reason_code=(
+                                "selector_unmatched_candidate_requires_safe_general_fallback"
+                            ),
+                            possible_inappropriate_python_code_use=False,
+                        )
+                    )
+                    routing_info = WorkflowRoutingInfo(
+                        workflow_id=selected_workflow_id,
+                        verdict="tool_contract_override",
+                        prompt_id=selector_selection.prompt_id,
+                        discovered_workflow_ids=selector_selection.discovered_workflow_ids,
+                        source="selector_override",
+                        confidence_score=selector_selection.confidence_score,
+                        reasoning=selector_reasoning,
+                        selection_rationale=_derive_workflow_selection_rationale(
+                            selected_workflow_id=selected_workflow_id,
+                            selector_verdict="tool_contract_override",
+                            selector_source="selector_override",
+                            candidate_workflow_ids=selector_selection.discovered_workflow_ids,
+                            explicit_reasoning=selector_reasoning,
+                        ),
+                    )
             elif selector_single_discovered_recovery_payload is not None:
                 selected_workflow_id = str(
                     selector_single_discovered_recovery_payload.get(
@@ -35871,11 +36294,22 @@ class InternalMCPChatOrchestrator:
         )
         selector_single_discovered_recovery_payload: dict[str, Any] | None = None
         if selector_safe_general_fallback_payload is not None:
-            _force_tool_pipeline_routing(
-                reason="selector_unmatched_candidate_requires_safe_general_fallback",
-                excluded_selector_verdicts=[selector_verdict or "rag_default"],
-                extra_payload=selector_safe_general_fallback_payload,
+            recovered_requested_workflow = (
+                custom_workflow_dispatch_support.maybe_recover_selector_unmatched_candidate_after_discovery_timeout(
+                    dispatch_selection_state,
+                    selector_safe_general_fallback_payload=(
+                        selector_safe_general_fallback_payload
+                    ),
+                    workflow_discovery_result=workflow_discovery_result,
+                )
             )
+            _sync_selected_workflow_locals_from_state()
+            if not recovered_requested_workflow:
+                _force_tool_pipeline_routing(
+                    reason="selector_unmatched_candidate_requires_safe_general_fallback",
+                    excluded_selector_verdicts=[selector_verdict or "rag_default"],
+                    extra_payload=selector_safe_general_fallback_payload,
+                )
         else:
             selector_single_discovered_recovery_payload = (
                 _build_selector_single_discovered_execution_recovery_payload(
