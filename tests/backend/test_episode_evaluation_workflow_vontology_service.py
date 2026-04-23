@@ -10,6 +10,8 @@ from src.backend.services.episode_evaluation_workflow_contracts import (
     EPISODE_EVALUATION_PROMPT_CONCEPT_ID,
     EPISODE_EVALUATION_PROMPT_LINK_PREDICATE,
     EPISODE_EVALUATION_WORKFLOW_ID,
+    EPISODE_GROUNDED_HELPFULNESS_PROMPT_CONCEPT_ID,
+    EPISODE_GROUNDED_HELPFULNESS_WORKFLOW_ID,
     EPISODE_SELF_IMPROVEMENT_PROMOTION_PROMPT_CONCEPT_ID,
     EPISODE_SELF_IMPROVEMENT_PROMOTION_WORKFLOW_ID,
     EPISODE_SELF_IMPROVEMENT_PROPOSAL_PROMPT_CONCEPT_ID,
@@ -68,11 +70,15 @@ def test_bootstrap_materialises_episode_evaluation_workflow_family(
     counts = publication.get("counts") or {}
     assert report.get("success") is True
     assert counts.get("errors") == 0
-    assert counts.get("workflows_published") == 3
+    assert counts.get("workflows_published") == 4
     assert report.get("self_improvement_profile_support", {}).get("success") is True
 
     definition = load_workflow_definition_from_vontology(EPISODE_EVALUATION_WORKFLOW_ID)
     assert definition is not None
+    grounded_definition = load_workflow_definition_from_vontology(
+        EPISODE_GROUNDED_HELPFULNESS_WORKFLOW_ID
+    )
+    assert grounded_definition is not None
     proposal_definition = load_workflow_definition_from_vontology(
         EPISODE_SELF_IMPROVEMENT_PROPOSAL_WORKFLOW_ID
     )
@@ -93,6 +99,16 @@ def test_bootstrap_materialises_episode_evaluation_workflow_family(
     assert EPISODE_EVALUATION_BUILD_EVIDENCE_ACTION_ID in action_ids
     assert EPISODE_EVALUATION_PERSIST_MEMORY_ACTION_ID in action_ids
     assert "workflow_create_instance" in action_ids
+    assert "workflow_invoke_subworkflow" in action_ids
+    grounded_action_ids = sorted(
+        {
+            action.action_id
+            for state in grounded_definition.states.values()
+            for action in state.actions
+            if action.action_id
+        }
+    )
+    assert grounded_action_ids == ["llm.action"]
     proposal_action_ids = sorted(
         {
             action.action_id
@@ -133,6 +149,19 @@ def test_bootstrap_materialises_episode_evaluation_workflow_family(
         limit=5,
     )
     assert any((row or {}).get("text") for row in proposal_prompt_rows)
+    grounded_prompt_rows = get_texts_for_concept(
+        EPISODE_GROUNDED_HELPFULNESS_PROMPT_CONCEPT_ID,
+        predicate="hasContent",
+        limit=5,
+    )
+    assert any((row or {}).get("text") for row in grounded_prompt_rows)
+    grounded_prompt_text = next(
+        ((row or {}).get("text") for row in grounded_prompt_rows if (row or {}).get("text")),
+        "",
+    )
+    assert isinstance(grounded_prompt_text, str)
+    assert "grounded helpfulness" in grounded_prompt_text.lower()
+    assert "answer-support evidence" in grounded_prompt_text.lower()
     promotion_prompt_rows = get_texts_for_concept(
         EPISODE_SELF_IMPROVEMENT_PROMOTION_PROMPT_CONCEPT_ID,
         predicate="hasContent",
@@ -175,7 +204,7 @@ def test_episode_prompt_support_seeds_content_from_repo_asset(
     report = _ensure_episode_evaluation_prompt_support()
 
     assert report.get("success") is True
-    assert report.get("seeded_prompt_count") == 3
+    assert report.get("seeded_prompt_count") == 4
     prompt_content_rows = get_texts_for_concept(
         EPISODE_EVALUATION_PROMPT_CONCEPT_ID,
         predicate="hasContent",
@@ -195,6 +224,12 @@ def test_episode_prompt_support_seeds_content_from_repo_asset(
         limit=5,
     )
     assert any((row or {}).get("text") for row in proposal_prompt_rows)
+    grounded_prompt_rows = get_texts_for_concept(
+        EPISODE_GROUNDED_HELPFULNESS_PROMPT_CONCEPT_ID,
+        predicate="hasContent",
+        limit=5,
+    )
+    assert any((row or {}).get("text") for row in grounded_prompt_rows)
     promotion_prompt_rows = get_texts_for_concept(
         EPISODE_SELF_IMPROVEMENT_PROMOTION_PROMPT_CONCEPT_ID,
         predicate="hasContent",

@@ -88,6 +88,21 @@ _SECTION_LIMITS: dict[str, dict[str, int]] = {
         "max_list_items": 60,
         "max_depth": 6,
     },
+    "answer_artifacts": {
+        "max_string_chars": 1200,
+        "max_list_items": 20,
+        "max_depth": 6,
+    },
+    "answer_support_evidence": {
+        "max_string_chars": 1000,
+        "max_list_items": 30,
+        "max_depth": 6,
+    },
+    "response_context_lineage": {
+        "max_string_chars": 900,
+        "max_list_items": 20,
+        "max_depth": 6,
+    },
     "workflow_instance": {
         "max_string_chars": 900,
         "max_list_items": 40,
@@ -834,6 +849,191 @@ def _build_tool_ledger(
     }
 
 
+def _build_answer_artifacts(
+    *,
+    turn_record: Mapping[str, Any] | None,
+    history_context: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    completion_report = (
+        _mapping_or_empty(turn_record.get("completion_report"))
+        if isinstance(turn_record, Mapping)
+        else {}
+    )
+    final_response = (
+        _mapping_or_empty(turn_record.get("final_response"))
+        if isinstance(turn_record, Mapping)
+        else {}
+    )
+    target_message = (
+        _mapping_or_empty(history_context.get("target_message"))
+        if isinstance(history_context, Mapping)
+        else {}
+    )
+
+    response_text = _safe_str(completion_report.get("response_text")) or _safe_str(
+        target_message.get("content")
+    )
+    response_text_source = (
+        "turn_execution_record.completion_report.response_text"
+        if _safe_str(completion_report.get("response_text"))
+        else "chat_history.target_message.content"
+        if _safe_str(target_message.get("content"))
+        else None
+    )
+    response_sha256 = _safe_str(final_response.get("response_sha256")) or (
+        _hash_payload(response_text) if response_text else None
+    )
+    assistant_message = {
+        "role": _safe_str(target_message.get("role")) or "assistant",
+        "content": _safe_str(target_message.get("content")),
+        "timestamp": target_message.get("timestamp"),
+        "request_id": (
+            _safe_str(_mapping_or_empty(target_message.get("llm_debug_data")).get("request_id"))
+            or (
+                _safe_str(turn_record.get("request_id"))
+                if isinstance(turn_record, Mapping)
+                else None
+            )
+        ),
+    }
+    if not any(
+        (
+            response_text,
+            response_sha256,
+            assistant_message.get("content"),
+            final_response,
+        )
+    ):
+        return None
+
+    return {
+        "response_surface_kind": "assistant_response",
+        "response_text": response_text,
+        "response_text_source": response_text_source,
+        "response_sha256": response_sha256,
+        "response_char_count": len(response_text) if response_text else 0,
+        "assistant_message": assistant_message,
+        "completion_report": completion_report or None,
+        "final_response": final_response or None,
+    }
+
+
+def _build_answer_support_evidence(
+    *,
+    turn_record: Mapping[str, Any] | None,
+    tool_ledger: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(turn_record, Mapping):
+        return None
+
+    execution = _mapping_or_empty(turn_record.get("execution"))
+    execution_summary = _mapping_or_empty(execution.get("summary"))
+    completion_gate = _mapping_or_empty(turn_record.get("completion_gate"))
+    evidence_payload = _mapping_or_empty(completion_gate.get("evidence_payload"))
+    required_effects = [
+        effect
+        for effect in _normalise_mapping_list(turn_record.get("required_effects"))
+        if _safe_str(effect.get("effect_type")) == "required_evidence_answer_consistency"
+    ]
+    blocker = _mapping_or_empty(
+        evidence_payload.get("required_evidence_answer_consistency_blocker")
+    )
+    search_evidence = (
+        _normalise_mapping_list(tool_ledger.get("search_evidence"))
+        if isinstance(tool_ledger, Mapping)
+        else []
+    )
+    retrieval_tool_invocations = [
+        item
+        for item in (
+            _normalise_mapping_list(tool_ledger.get("tool_invocations"))
+            if isinstance(tool_ledger, Mapping)
+            else []
+        )
+        if _tool_name_family(_safe_str(item.get("tool")) or "") in {"search", "rag"}
+    ]
+
+    if not any(
+        (
+            required_effects,
+            blocker,
+            completion_gate,
+            search_evidence,
+            retrieval_tool_invocations,
+            execution.get("turn_expected_outcome_contract_state"),
+        )
+    ):
+        return None
+
+    return {
+        "required_evidence_answer_consistency_effects": required_effects,
+        "required_evidence_answer_consistency_blocker": blocker or None,
+        "required_evidence_answer_consistency_blocked": execution_summary.get(
+            "required_evidence_answer_consistency_blocked"
+        ),
+        "required_evidence_answer_consistency_source": _safe_str(
+            execution_summary.get("required_evidence_answer_consistency_source")
+        ),
+        "completion_gate_decision": _safe_str(completion_gate.get("decision")),
+        "completion_gate_requires_follow_up": bool(
+            completion_gate.get("requires_follow_up")
+        ),
+        "completion_gate_blocking_failure_codes": _normalise_string_list(
+            completion_gate.get("blocking_failure_codes")
+        ),
+        "search_evidence_count": len(search_evidence),
+        "search_evidence": search_evidence[:5],
+        "retrieval_tool_invocations": retrieval_tool_invocations[:5],
+        "turn_expected_outcome_contract_state": _normalise_mapping(
+            execution.get("turn_expected_outcome_contract_state")
+        ),
+    }
+
+
+def _build_response_context_lineage(
+    *,
+    turn_record: Mapping[str, Any] | None,
+    llm_debug: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(turn_record, Mapping):
+        return None
+
+    execution = _mapping_or_empty(turn_record.get("execution"))
+    routing_diagnostics = _mapping_or_empty(turn_record.get("workflow_routing_diagnostics"))
+    selector = _mapping_or_empty(routing_diagnostics.get("selector"))
+    direct_response_context_lineage = _mapping_or_empty(
+        _mapping_or_empty(execution.get("selected_workflow_trace")).get(
+            "direct_response_context_lineage"
+        )
+    )
+    selector_context_lineage = _mapping_or_empty(selector.get("context_lineage"))
+    selector_context_summary = _mapping_or_empty(selector.get("context_summary"))
+    workflow_stage_path = execution.get("workflow_stage_path")
+    if workflow_stage_path is None and isinstance(llm_debug, Mapping):
+        workflow_stage_path = _mapping_or_empty(
+            _mapping_or_empty(llm_debug.get("turn_execution_diagnostics")).get(
+                "workflow_stage_path"
+            )
+        )
+
+    if not any(
+        (
+            direct_response_context_lineage,
+            selector_context_lineage,
+            selector_context_summary,
+            workflow_stage_path,
+        )
+    ):
+        return None
+
+    return {
+        "workflow_stage_path": workflow_stage_path,
+        "selector_context_summary": selector_context_summary or None,
+        "selector_context_lineage": selector_context_lineage or None,
+        "direct_response_context_lineage": direct_response_context_lineage or None,
+    }
+
+
 def _build_workflow_instance_section(instance: Any | None) -> dict[str, Any] | None:
     if instance is None:
         return None
@@ -1551,6 +1751,18 @@ def build_episode_critic_evidence_bundle(
         turn_record=turn_record if isinstance(turn_record, Mapping) else None,
         llm_debug=llm_debug if isinstance(llm_debug, Mapping) else None,
     )
+    answer_artifacts = _build_answer_artifacts(
+        turn_record=turn_record if isinstance(turn_record, Mapping) else None,
+        history_context=history_context if isinstance(history_context, Mapping) else None,
+    )
+    answer_support_evidence = _build_answer_support_evidence(
+        turn_record=turn_record if isinstance(turn_record, Mapping) else None,
+        tool_ledger=tool_ledger if isinstance(tool_ledger, Mapping) else None,
+    )
+    response_context_lineage = _build_response_context_lineage(
+        turn_record=turn_record if isinstance(turn_record, Mapping) else None,
+        llm_debug=llm_debug if isinstance(llm_debug, Mapping) else None,
+    )
     neighbouring_context = _build_neighbouring_context(
         history_context=history_context,
         neighbour_message_count=neighbour_count,
@@ -1576,6 +1788,9 @@ def build_episode_critic_evidence_bundle(
         "selected_llm_debug": selected_llm_debug,
         "aux_llm_calls": aux_llm_calls or None,
         "tool_ledger": tool_ledger,
+        "answer_artifacts": answer_artifacts,
+        "answer_support_evidence": answer_support_evidence,
+        "response_context_lineage": response_context_lineage,
         "workflow_instance": workflow_instance_section,
         "workflow_episode": _normalise_mapping(episode),
         "workflow_trace": workflow_trace_section,
@@ -1610,6 +1825,9 @@ def build_episode_critic_evidence_bundle(
             "selected_llm_debug": "mongo.chat_history",
             "aux_llm_calls": "mongo.chat_history",
             "tool_ledger": "mongo.turn_execution_records",
+            "answer_artifacts": "episode.answer_artifacts",
+            "answer_support_evidence": "episode.answer_support_evidence",
+            "response_context_lineage": "episode.response_context_lineage",
             "workflow_instance": "mongo.workflow_instances",
             "workflow_episode": "mongo.workflow_use_episodes",
             "workflow_trace": "mongo.workflow_executions",

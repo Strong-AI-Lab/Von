@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from src.backend.workflows.action_registry import WorkflowActionRequest, WorkflowEnvironment
 
 
@@ -176,6 +178,98 @@ def test_evidence_bundle_handler_surfaces_format_over_content_diagnostic(monkeyp
     assert any(
         "output contract" in recommendation.lower()
         for recommendation in fallback["recommendations"]
+    )
+
+
+def test_persist_memory_handler_merges_grounded_helpfulness_assessment(monkeypatch):
+    from src.backend.workflows.durable import episode_evaluation_workflow as mod
+
+    captured: dict[str, Any] = {}
+
+    def _fake_upsert(**kwargs):
+        captured["assessment"] = kwargs.get("assessment")
+        return {
+            "success": True,
+            "memory_id": "#V#episode_critique_memory_gh_1",
+            "state": {
+                "memory_id": "#V#episode_critique_memory_gh_1",
+                "namespace": "#V#user@org",
+                "improvement_suggestions": [],
+            },
+        }
+
+    monkeypatch.setattr(
+        mod,
+        "upsert_episode_critique_memory_from_episode_assessment",
+        _fake_upsert,
+    )
+    monkeypatch.setattr(
+        mod,
+        "route_episode_critique_memory",
+        lambda **kwargs: {"success": True, "decision": "memory_only"},
+    )
+    monkeypatch.setattr(
+        mod,
+        "launch_episode_self_improvement_workflows",
+        lambda **kwargs: {"success": True, "launches": []},
+    )
+
+    handler = mod._build_persist_memory_handler()
+    result = handler(
+        _request(
+            {
+                "episode_evidence_bundle": {
+                    "episode_locator": {
+                        "request_id": "req-1999-merge",
+                        "workflow_id": "#V#chat_assistant_workflow",
+                        "namespace": "#V#user@org",
+                    }
+                },
+                "critic_assessment": {
+                    "verdict": "pass",
+                    "confidence": 0.82,
+                    "unresolved_check_count": 0,
+                    "summary": "The route completed, but grounded helpfulness must still be tracked.",
+                    "maintenance_follow_up_recommended": False,
+                    "recommendations": [],
+                    "root_causes": [],
+                    "improvement_suggestions": [],
+                },
+                "grounded_helpfulness_assessment": {
+                    "axis_id": "grounded_helpfulness",
+                    "status": "fail",
+                    "confidence": 0.91,
+                    "summary": "The answer contradicted retained retrieval evidence.",
+                    "reason_codes": [
+                        "authoritative_answer_consistency_blocker_present"
+                    ],
+                    "counterfactual_recommended_action": (
+                        "abstain_or_follow_up_instead_of_overclaiming"
+                    ),
+                },
+                "namespace": "#V#user@org",
+                "user_id": "#V#user",
+                "org_id": "#V#org",
+            }
+        )
+    )
+
+    assert result.ok
+    assessment = captured["assessment"]
+    grounded_axis = next(
+        axis
+        for axis in assessment["evaluator_contract"]["axes"]
+        if axis["axis_id"] == "grounded_helpfulness"
+    )
+    assert grounded_axis["status"] == "fail"
+    assert grounded_axis["summary"] == (
+        "The answer contradicted retained retrieval evidence."
+    )
+    assert grounded_axis["reason_codes"] == [
+        "authoritative_answer_consistency_blocker_present"
+    ]
+    assert grounded_axis["counterfactual_recommended_action"] == (
+        "abstain_or_follow_up_instead_of_overclaiming"
     )
 
 

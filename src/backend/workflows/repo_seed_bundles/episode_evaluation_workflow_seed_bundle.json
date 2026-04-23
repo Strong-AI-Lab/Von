@@ -7,7 +7,8 @@
     "episode_critic.build_evidence_bundle",
     "llm.action",
     "episode_critic.persist_memory",
-    "workflow_create_instance"
+    "workflow_create_instance",
+    "workflow_invoke_subworkflow"
   ],
   "workflows": [
     {
@@ -66,7 +67,7 @@
             "on_continue_state": null,
             "on_failure_state": "failed",
             "on_false_state": "persist_assessment",
-            "on_true_state": "evaluate_episode",
+            "on_true_state": "evaluate_grounded_helpfulness",
             "on_unknown_state": null,
             "prompt_concept_ids": [],
             "state_id": "build_evidence",
@@ -112,6 +113,11 @@
                 "concept_id": "#V#workflow_mapping_tool_field_episode_evaluation_workflow_build_evidence_fail_closed_reason_codes_to_fail_closed_reason_codes",
                 "context_key": "fail_closed_reason_codes",
                 "tool_output_field": "fail_closed_reason_codes"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_evaluation_workflow_build_evidence_format_over_content_diagnostic_to_format_over_content_diagnostic",
+                "context_key": "format_over_content_diagnostic",
+                "tool_output_field": "format_over_content_diagnostic"
               },
               {
                 "concept_id": "#V#workflow_mapping_tool_field_episode_evaluation_workflow_build_evidence_selected_workflow_id_to_selected_workflow_id",
@@ -169,6 +175,7 @@
               "observed_evidence",
               "capability_gaps",
               "fail_closed_reason_codes",
+              "format_over_content_diagnostic",
               "selected_workflow_id",
               "request_id",
               "instance_id",
@@ -179,6 +186,48 @@
               "maintenance_apply_repairs_default",
               "episode_critic_fallback_assessment"
             ]
+          },
+          {
+            "action_concept_id": null,
+            "action_id": "workflow_invoke_subworkflow",
+            "concept_id": null,
+            "conditional_transitions": [
+              {
+                "condition_spec": {
+                  "kind": "always"
+                },
+                "reason": "grounded_helpfulness_completed",
+                "to_state": "evaluate_episode"
+              }
+            ],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": "subworkflow",
+            "invoked_workflow_id": "#V#episode_grounded_helpfulness_critic_workflow",
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "failed",
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "evaluate_grounded_helpfulness",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_evaluation_workflow_evaluate_grounded_helpfulness_result_grounded_helpfulness_assessment_to_grounded_helpfulness_assessment",
+                "context_key": "grounded_helpfulness_assessment",
+                "tool_output_field": "result.grounded_helpfulness_assessment"
+              }
+            ],
+            "validation_policy": null,
+            "writes_context_keys": []
           },
           {
             "action_concept_id": null,
@@ -214,6 +263,10 @@
                 {
                   "context_key": "fail_closed_reason_codes",
                   "label": "Fail-closed reason codes"
+                },
+                {
+                  "context_key": "grounded_helpfulness_assessment",
+                  "label": "Grounded helpfulness assessment"
                 }
               ]
             },
@@ -426,6 +479,150 @@
             "writes_context_keys": [
               "maintenance_follow_up_instance_id",
               "maintenance_follow_up_status"
+            ]
+          },
+          {
+            "action_concept_id": null,
+            "action_id": null,
+            "concept_id": null,
+            "conditional_transitions": [],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": null,
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "complete",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [],
+            "validation_policy": null,
+            "writes_context_keys": []
+          },
+          {
+            "action_concept_id": null,
+            "action_id": null,
+            "concept_id": null,
+            "conditional_transitions": [],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": null,
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "failed",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [],
+            "validation_policy": null,
+            "writes_context_keys": []
+          }
+        ]
+      }
+    },
+    {
+      "workflow_id": "#V#episode_grounded_helpfulness_critic_workflow",
+      "display_name": "Episode Grounded Helpfulness Critic Workflow",
+      "description": "Score grounded helpfulness and evidence-answer consistency for a completed episode using the shared episode evidence bundle.",
+      "content": "Axis-specific evaluator workflow for grounded helpfulness. Consumes the shared episode evidence bundle, answer artefacts, answer-support evidence, and retained context-lineage signals, then returns a bounded grounded_helpfulness assessment for later persistence and benchmarking.",
+      "type_ids": [
+        "#V#ai_workflow",
+        "#V#durable_workflow"
+      ],
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"evaluation\",\"authoring_intent_required\":false,\"prefer_existing_capability\":true}",
+          "lang": "en-NZ"
+        }
+      ],
+      "publication_spec": {
+        "initial_state": "evaluate_grounded_helpfulness",
+        "steps": [
+          {
+            "action_concept_id": null,
+            "action_id": "llm.action",
+            "concept_id": null,
+            "conditional_transitions": [],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": "llm",
+            "invoked_workflow_id": null,
+            "llm_policy": {
+              "policy_stage": "postcondition_critic",
+              "tool_mode": "none",
+              "response_contract_text": "Return JSON with keys axis_id, status, confidence, summary, reason_codes, and counterfactual_recommended_action.",
+              "context_fields": [
+                {
+                  "context_key": "episode_locator",
+                  "label": "Episode locator"
+                },
+                {
+                  "context_key": "expected_context",
+                  "label": "Expected behaviour context"
+                },
+                {
+                  "context_key": "observed_evidence",
+                  "label": "Observed evidence"
+                },
+                {
+                  "context_key": "format_over_content_diagnostic",
+                  "label": "Format-over-content diagnostic"
+                },
+                {
+                  "context_key": "fail_closed_reason_codes",
+                  "label": "Fail-closed reason codes"
+                }
+              ]
+            },
+            "mutation_authority": null,
+            "next_state": "complete",
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "failed",
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [
+              "#V#episode_grounded_helpfulness_critic_prompt"
+            ],
+            "state_id": "evaluate_grounded_helpfulness",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_grounded_helpfulness_critic_workflow_evaluate_grounded_helpfulness_validated_json_to_grounded_helpfulness_assessment",
+                "context_key": "grounded_helpfulness_assessment",
+                "tool_output_field": "validated_json"
+              }
+            ],
+            "validation_policy": {
+              "output_format": "json_value"
+            },
+            "writes_context_keys": [
+              "grounded_helpfulness_assessment"
             ]
           },
           {

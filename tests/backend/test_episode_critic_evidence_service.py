@@ -319,6 +319,175 @@ def test_episode_critic_bundle_surfaces_routing_quality_signals(monkeypatch):
     assert "completion_requires_follow_up" in signals["diagnostic_flags"]
 
 
+def test_episode_critic_bundle_surfaces_answer_artifacts_and_support_receipts(
+    monkeypatch,
+):
+    from src.backend.services import episode_critic_evidence_service as svc
+
+    turn_record = {
+        "request_id": "req-critic-grounded-1",
+        "session_id": "sess-critic-grounded-1",
+        "namespace": "#V#user@org",
+        "user_id": "#V#user",
+        "workflow_selection": {
+            "selected_workflow_id": "#V#tool_calling_workflow",
+        },
+        "workflow_routing_diagnostics": {
+            "selector": {
+                "context_lineage": {
+                    "base_context_source": "augmented_context",
+                    "stage_added_message_count": 1,
+                },
+                "context_summary": {"message_count": 3},
+            }
+        },
+        "execution": {
+            "tool_invocations": [
+                {
+                    "tool": "search_concepts",
+                    "result_summary": "Found 1 result",
+                }
+            ],
+            "search_evidence": [
+                {
+                    "tool": "search_concepts",
+                    "query": "grounded represented links",
+                    "result": {
+                        "results": [
+                            {
+                                "id": "result:1",
+                                "text": "Example Record is linked to Test User.",
+                            }
+                        ]
+                    },
+                }
+            ],
+            "summary": {
+                "required_evidence_answer_consistency_blocked": True,
+                "required_evidence_answer_consistency_source": "critic_verdict",
+            },
+            "required_effects_contract": {},
+            "turn_expected_outcome_contract_state": {
+                "schema_version": "turn_expected_outcome_contract_state.v1",
+                "required_effect_ids": [
+                    "effect_prompt_required_evidence_answer_consistency"
+                ],
+            },
+            "workflow_stage_path": {"path": [{"stage_id": "direct_response"}]},
+            "selected_workflow_trace": {
+                "direct_response_context_lineage": {
+                    "base_context_source": "augmented_context",
+                    "turn_memory_context": {"status": "available"},
+                }
+            },
+        },
+        "required_effects": [
+            {
+                "effect_id": "effect_prompt_required_evidence_answer_consistency",
+                "effect_type": "required_evidence_answer_consistency",
+                "status": "not_satisfied",
+            }
+        ],
+        "postcondition_checks": [],
+        "completion_gate": {
+            "decision": "partial",
+            "requires_follow_up": True,
+            "blocking_failure_codes": [
+                "authoritative_required_evidence_answer_consistency_mismatch"
+            ],
+            "evidence_payload": {
+                "required_evidence_answer_consistency_blocker": {
+                    "effect_type": "required_evidence_answer_consistency",
+                    "status": "not_satisfied",
+                    "failure_code": (
+                        "authoritative_required_evidence_answer_consistency_mismatch"
+                    ),
+                    "decision": "partial",
+                    "blocker_source": "critic_verdict",
+                }
+            },
+        },
+        "critic": {
+            "workflow_id": "#V#kb_mutation_postcondition_critic_workflow",
+        },
+        "completion_report": {
+            "response_text": "I couldn't find any grounded represented links.",
+        },
+        "final_response": {
+            "response_sha256": "resp-hash-1",
+            "completion_claim_detected": True,
+            "completion_claim_validated": False,
+        },
+    }
+
+    monkeypatch.setattr(svc, "_load_turn_execution_record", lambda **_: turn_record)
+    monkeypatch.setattr(svc, "_resolve_history_context", lambda **_: _history_context())
+    monkeypatch.setattr(
+        svc,
+        "get_latest_workflow_use_episode",
+        lambda **_: {
+            "episode_id": "wfep-grounded-1",
+            "workflow_id": "#V#tool_calling_workflow",
+        },
+    )
+    monkeypatch.setattr(
+        svc,
+        "_resolve_workflow_definition_identity",
+        lambda **_: (
+            {
+                "workflow_id": "#V#tool_calling_workflow",
+                "definition_hash": "wf-grounded-hash",
+                "source": "runtime_registry",
+            },
+            "workflow_registry",
+        ),
+    )
+
+    class _StubManager:
+        def get_instance(self, _instance_id):
+            return None
+
+        def list_instances(self, **_kwargs):
+            return []
+
+    monkeypatch.setattr(svc, "WorkflowInstanceManager", lambda: _StubManager())
+
+    result = svc.build_episode_critic_evidence_bundle(
+        request_id="req-critic-grounded-1"
+    )
+
+    assert result["success"] is True
+    answer_artifacts = result["observed_evidence"]["answer_artifacts"]
+    assert answer_artifacts["response_text"] == (
+        "I couldn't find any grounded represented links."
+    )
+    assert answer_artifacts["response_sha256"] == "resp-hash-1"
+    assert answer_artifacts["response_text_source"] == (
+        "turn_execution_record.completion_report.response_text"
+    )
+
+    support = result["observed_evidence"]["answer_support_evidence"]
+    assert support["required_evidence_answer_consistency_blocked"] is True
+    assert support["required_evidence_answer_consistency_source"] == "critic_verdict"
+    assert support["required_evidence_answer_consistency_blocker"]["blocker_source"] == (
+        "critic_verdict"
+    )
+    assert support["required_evidence_answer_consistency_effects"][0]["effect_type"] == (
+        "required_evidence_answer_consistency"
+    )
+
+    lineage = result["observed_evidence"]["response_context_lineage"]
+    assert lineage["selector_context_lineage"]["base_context_source"] == (
+        "augmented_context"
+    )
+    assert lineage["direct_response_context_lineage"]["turn_memory_context"] == {
+        "status": "available"
+    }
+    assert result["receipts"]["answer_artifacts"]["present"] is True
+    assert result["receipts"]["answer_support_evidence"]["present"] is True
+    assert result["receipts"]["response_context_lineage"]["present"] is True
+
+
 def test_episode_critic_bundle_surfaces_format_over_content_suspicion(monkeypatch):
     from src.backend.services import episode_critic_evidence_service as svc
 

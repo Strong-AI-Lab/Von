@@ -68,6 +68,75 @@ def _normalise_string_list(value: Any, *, limit: int = 40) -> list[str]:
     return items
 
 
+def _normalise_grounded_helpfulness_assessment(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+
+    status = _clean_text(value.get("status"))
+    summary = _clean_text(value.get("summary"))
+    confidence = value.get("confidence")
+    counterfactual = _clean_text(value.get("counterfactual_recommended_action"))
+    reason_codes = _normalise_string_list(value.get("reason_codes"), limit=20)
+    evidence_receipt_ids = _normalise_string_list(
+        value.get("evidence_receipt_ids"),
+        limit=20,
+    )
+
+    if not any(
+        (
+            status,
+            summary,
+            confidence is not None,
+            counterfactual,
+            reason_codes,
+            evidence_receipt_ids,
+        )
+    ):
+        return {}
+
+    normalised: dict[str, Any] = {"axis_id": "grounded_helpfulness"}
+    if status:
+        normalised["status"] = status
+    if summary:
+        normalised["summary"] = summary
+    if confidence is not None:
+        normalised["confidence"] = confidence
+    if reason_codes:
+        normalised["reason_codes"] = reason_codes
+    if evidence_receipt_ids:
+        normalised["evidence_receipt_ids"] = evidence_receipt_ids
+    if counterfactual:
+        normalised["counterfactual_recommended_action"] = counterfactual
+    return normalised
+
+
+def _merge_grounded_helpfulness_assessment(
+    assessment: Mapping[str, Any],
+    grounded_helpfulness_assessment: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    merged = dict(assessment)
+    axis_payload = _normalise_grounded_helpfulness_assessment(
+        grounded_helpfulness_assessment
+    )
+    if not axis_payload:
+        return merged
+
+    existing_contract = _mapping_or_empty(merged.get("evaluator_contract"))
+    raw_axes = existing_contract.get("axes")
+    axes = [
+        dict(item)
+        for item in raw_axes
+        if isinstance(item, Mapping)
+        and _clean_text(item.get("axis_id")) != "grounded_helpfulness"
+    ] if isinstance(raw_axes, Sequence) and not isinstance(raw_axes, (str, bytes, bytearray)) else []
+    axes.append(axis_payload)
+
+    existing_contract["axes"] = axes
+    merged["evaluator_contract"] = existing_contract
+    merged["grounded_helpfulness_assessment"] = axis_payload
+    return merged
+
+
 def _coerce_bool(value: Any, *, default: bool) -> bool:
     if isinstance(value, bool):
         return value
@@ -259,10 +328,20 @@ def _build_evidence_bundle_handler():
 
 
 def _resolve_critic_assessment(request: WorkflowActionRequest) -> dict[str, Any]:
+    grounded_helpfulness_assessment = (
+        request.data.get("grounded_helpfulness_assessment")
+        if isinstance(request.data.get("grounded_helpfulness_assessment"), Mapping)
+        else None
+    )
     for key in ("critic_assessment", "episode_critic_fallback_assessment"):
         value = request.data.get(key)
         if isinstance(value, Mapping):
-            return dict(value)
+            return _merge_grounded_helpfulness_assessment(
+                value,
+                grounded_helpfulness_assessment,
+            )
+    if grounded_helpfulness_assessment is not None:
+        return _merge_grounded_helpfulness_assessment({}, grounded_helpfulness_assessment)
     return {}
 
 

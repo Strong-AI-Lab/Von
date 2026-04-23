@@ -43,8 +43,8 @@ current shortfall is now concentrated in four areas:
    umbrella `JVNAUTOSCI-1964`: `JVNAUTOSCI-1998`, `JVNAUTOSCI-1999`,
    `JVNAUTOSCI-2000`, and `JVNAUTOSCI-2001` now carry the multi-axis evaluator
    contract, grounded helpfulness critic, calibration and abstention evaluator,
-   and long-horizon evaluator support. `1998` is now landed, so the remaining
-   work on this line is the axis-specific evaluator families plus the
+   and long-horizon evaluator support. `1998` and `1999` are now landed, so
+   the remaining work on this line is the calibration/recovery slice plus the
    long-horizon support slice.
 2. The self-improvement-world line now also has concrete child tasks rather
    than only the umbrella `JVNAUTOSCI-1963`: `JVNAUTOSCI-2002`,
@@ -264,43 +264,48 @@ The following architecture tasks from the 21-23 April tranche are now landed:
     quality, and long-horizon task-state integrity, with legacy
     verdict/confidence retained only as roll-up compatibility state.
 
+16. `JVNAUTOSCI-1999`
+    The evaluator line now has a represented grounded-helpfulness critic
+    workflow and prompt, plus shared evidence-bundle support for answer
+    artefacts, answer-support consistency evidence, and response-context
+    lineage. The live episode-evaluation path now persists grounded
+    helpfulness as a first-class evaluator axis rather than inferring it only
+    from the older format-over-content diagnostic.
+
 ### P1 Next Tranche
 
 The next substantive sequence should now be:
 
-1. `JVNAUTOSCI-1999`
-   Grounded helpfulness and evidence-answer consistency critic workflow.
-
-2. `JVNAUTOSCI-2000`
+1. `JVNAUTOSCI-2000`
    Calibration, abstention, and recovery-quality evaluator workflow.
 
-3. `JVNAUTOSCI-1995`
+2. `JVNAUTOSCI-1995`
    Canonical enduring-memory manifest and query surface.
 
-4. `JVNAUTOSCI-2001`
+3. `JVNAUTOSCI-2001`
    Long-horizon task-state reconstruction and memory-conditioned evaluator
    support.
 
-5. `JVNAUTOSCI-2002`
+4. `JVNAUTOSCI-2002`
    Represented candidate-world manifests and proposal-to-experiment-run
    linkage for workflow self-improvement.
 
-6. `JVNAUTOSCI-2003`
+5. `JVNAUTOSCI-2003`
    Evaluator- and memory-backed baseline-vs-candidate comparison for
    self-improvement experiment runs.
 
-7. `JVNAUTOSCI-2004`
+6. `JVNAUTOSCI-2004`
    Experiment-backed promotion, bounded shadow evaluation, and rollback-safe
    publication gating for workflow candidates.
 
-8. `JVNAUTOSCI-1996`
+7. `JVNAUTOSCI-1996`
    Represented memory-promotion and revision workflow.
 
-9. `JVNAUTOSCI-1997`
+8. `JVNAUTOSCI-1997`
     Long-horizon enduring-memory evaluation and task-state reconstruction
     harness.
 
-10. `JVNAUTOSCI-2005`
+9. `JVNAUTOSCI-2005`
     Prompt, policy, and retrieval or memory candidate-world expansion beyond
     the workflow-first line.
 
@@ -308,9 +313,10 @@ Why this is now the right order:
 
 - `1964` is now done as architecture and decomposition work, so the next moves
   should be concrete evaluator slices rather than another umbrella pass.
-- `1998` is now landed, so `1999` and `2000` can build on a live stored axis
-  contract instead of inventing local evaluator result shapes.
-- `1999` and `2000` now come before the later `1963` child tasks because
+- `1998` and `1999` are now landed, so `2000` and `2001` can build on a live
+  stored axis contract plus a represented grounded-helpfulness critic rather
+  than inventing local evaluator result shapes.
+- `2000` now comes before the later `1963` child tasks because
   self-improvement and
   promotion gating become more valuable once they can reason over richer
   evaluator outputs for grounded helpfulness, calibration, abstention, and

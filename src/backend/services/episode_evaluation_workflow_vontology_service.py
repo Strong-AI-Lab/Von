@@ -11,6 +11,9 @@ from .episode_evaluation_workflow_contracts import (
     EPISODE_EVALUATION_PROMPT_LINK_PREDICATE,
     EPISODE_EVALUATION_WORKFLOW_ID,
     EPISODE_EVALUATION_WORKFLOW_IDS,
+    EPISODE_GROUNDED_HELPFULNESS_PROMPT_CONCEPT_ID,
+    EPISODE_GROUNDED_HELPFULNESS_PROMPT_LINK_PREDICATE,
+    EPISODE_GROUNDED_HELPFULNESS_WORKFLOW_ID,
     EPISODE_SELF_IMPROVEMENT_PROMOTION_PROMPT_CONCEPT_ID,
     EPISODE_SELF_IMPROVEMENT_PROMOTION_PROMPT_LINK_PREDICATE,
     EPISODE_SELF_IMPROVEMENT_PROMOTION_WORKFLOW_ID,
@@ -57,6 +60,12 @@ _EPISODE_PROMPT_SEED_ASSET_PATH = (
     / "repo_seed_bundles"
     / "episode_evaluation_prompt_seed.md"
 )
+_GROUNDED_HELPFULNESS_PROMPT_SEED_ASSET_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "workflows"
+    / "repo_seed_bundles"
+    / "episode_grounded_helpfulness_prompt_seed.md"
+)
 _SELF_IMPROVEMENT_PROPOSAL_PROMPT_SEED_ASSET_PATH = (
     Path(__file__).resolve().parents[1]
     / "workflows"
@@ -80,6 +89,18 @@ _PROMPT_CONFIGS = (
         "description": (
             "Canonical LLM prompt for workflow-first actor/critic evaluation of "
             "completed chat turns and durable workflow runs."
+        ),
+    },
+    {
+        "concept_id": EPISODE_GROUNDED_HELPFULNESS_PROMPT_CONCEPT_ID,
+        "workflow_id": EPISODE_GROUNDED_HELPFULNESS_WORKFLOW_ID,
+        "predicate": EPISODE_GROUNDED_HELPFULNESS_PROMPT_LINK_PREDICATE,
+        "asset_path": _GROUNDED_HELPFULNESS_PROMPT_SEED_ASSET_PATH,
+        "name": "Episode grounded helpfulness critic prompt",
+        "description": (
+            "Canonical LLM prompt for scoring grounded helpfulness and "
+            "evidence-answer consistency from the shared episode evidence "
+            "bundle."
         ),
     },
     {

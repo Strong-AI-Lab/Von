@@ -24,6 +24,9 @@ Return JSON with exactly these fields:
 Rules:
 - If capability_gaps or fail-closed evidence mean the episode cannot be judged
   confidently, prefer verdict "inconclusive".
+- If `grounded_helpfulness_assessment` is present, treat it as a bounded
+  axis-specific evaluator input rather than re-inventing that judgement from
+  scratch.
 - Use "follow_up_required" when the episode itself signals unresolved follow-up.
 - Distinguish between execution failure on an otherwise appropriate route,
   verification/evidence insufficiency, workflow/routing selection defects, and
