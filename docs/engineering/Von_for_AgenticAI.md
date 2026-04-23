@@ -1,7 +1,7 @@
 # Von for Agentic AI
 
 **Status:** working architecture note
-**Updated:** 21 April 2026
+**Updated:** 24 April 2026
 **Scope:** current Von architectural direction, recent progress, remaining gaps, and the path from a capable neuro-symbolic assistant toward minimal-imposition agentic AI in the stronger Von sense
 
 ## 1. Purpose
@@ -13,7 +13,8 @@ It is intended to do four things:
 1. state clearly what class of system Von is trying to become;
 2. distinguish recent real architectural progress from stale earlier diagnoses;
 3. identify the most important remaining gaps between the present system and Von's minimal-imposition agent platform vision;
-4. give engineering and research guidance for how to close those gaps without sliding back into "LLM wrapped in Python heuristics".
+4. make explicit the near-term proving ground in Strong AI Lab research operations and role learning;
+5. give engineering and research guidance for how to close those gaps without sliding back into "LLM wrapped in Python heuristics".
 
 This is not a full changelog. It is an architecture and programme note.
 
@@ -25,14 +26,24 @@ The intended direction is a **deployable neuro-symbolic agent platform** in whic
 
 - enduring knowledge lives in explicit represented form rather than only in latent model state;
 - durable behavioural policy is authored in Vontology, workflows, prompt programmes, KB assertions, and other inspectable authority surfaces;
-- Python provides reusable support surfaces such as execution, validation, telemetry, persistence, integration, and, where implementation in Pythin will not compromise agentic generality, safety;
+- Python provides reusable support surfaces such as execution, validation, telemetry, persistence, integration, and, where implementation in Python will not compromise agentic generality, safety;
 - a **portfolio of model scales** is used intentionally rather than pretending one model class should do everything;
 - the system learns and adapts by promoting evidence-backed knowledge, workflows, prompts, and policy artefacts into durable represented form;
-- knowledge representation may be in many forms: human or AI authored NL documents (in any language); propositions in a logical language based on predicate calculuse; knowledge in stronger, higher order, contextual or modal logics (think the representational power of the Cyc KB, as a baseline); potentially - embeddings; other forms
+- knowledge representation may be in many forms: human or AI authored natural-language documents in any language; propositions in a logical language based on predicate calculus; knowledge in stronger, higher-order, contextual, temporal, or modal logics, with the representational power of the Cyc KB as a useful baseline; embeddings; and other forms;
 - the agent acts with **minimal imposition**: it searches, retrieves, reasons, and explains before burdening people with clarification or process disruption;
 - long-horizon reasoning, episodic memory, explicit provenance, and safe revision matter as much as immediate answer quality.
 
 Recent work moved Von materially in that direction. The architecture is cleaner than it was ten days earlier, but the programme is not finished. Several major semantic-policy surfaces still remain in Python, enduring memory is still immature, multi-agent coordination is still mostly a future shape, and continual self-improvement remains more a direction than a fully closed operational loop.
+
+The near-term proving ground should be more explicit than earlier versions of
+this note made it. Von should first become useful by improving process and
+operational effectiveness for AI research in the Strong AI Lab, especially by
+learning to perform otherwise hard-to-fill research-operations roles with
+minimal imposition. From there it should generalise to scientific research,
+discovery and R&D more broadly, then to auxiliary organisational roles, and
+eventually to roles in general. This staged path narrows the immediate focus
+without narrowing the AGI ambition: SAIL research operations are the first
+living laboratory for the broader role-learning architecture.
 
 ## 3. Current Architectural Assessment
 
@@ -260,6 +271,51 @@ Von therefore needs to become a clean capability platform, not just an applicati
 - a clean split between represented authority and runtime substrate;
 - support for private local deployment with selective escalation to stronger remote models when policy allows.
 
+### 4.9 Role learning as the near-term proving ground
+
+Von's most important near-term application spine should be
+**minimal-imposition role learning**.
+
+The system should learn how to take on useful roles in an organisation or team
+when those roles are otherwise hard to fill because of availability, cost, or
+capability constraints. For the current programme, the first target should be
+process improvement and operational effectiveness for AI research in the Strong
+AI Lab.
+
+The staged path is:
+
+1. **SAIL AI research operations:** help with real research-process drag,
+   continuity, literature and evaluation support, project tracking, meeting and
+   action-note follow-through, artefact curation, and onboarding.
+2. **Science, discovery, and R&D:** generalise from SAIL to broader research
+   workflows, experiment and evaluation management, interdisciplinary
+   collaboration, and discovery-support work.
+3. **Auxiliary organisational roles:** extend to coordination, administration,
+   communications, compliance, support, and other roles around research teams.
+4. **Roles in general:** abstract the role-learning machinery so new
+   organisations can safely onboard Von into hard-to-fill roles through bounded
+   observation, represented role modelling, evaluation, and improvement loops.
+
+The role itself should become a represented object, not a prompt persona or a
+Python role-name branch. A role-performance representation should include:
+
+- responsibilities, authority boundaries, permissions, and escalation rules;
+- recurring workflows, process states, handoffs, and interaction patterns;
+- expected work products and quality/evidence contracts;
+- notes, dossiers, evidence receipts, and episodic traces;
+- procedural memory such as workflows, prompts, skills, validators, and
+  playbooks;
+- policy memory such as role-specific guidance, routing rules, model choices,
+  and learned improvement advice;
+- evaluator axes for operational effectiveness, burden reduction, work-product
+  quality, groundedness, calibration, recovery, and long-horizon continuity.
+
+This is where the AGI-shaped substrate becomes operationally concrete. Von
+should learn from work episodes, promote useful traces into semantic,
+episodic, procedural, and policy memory, test candidate role improvements in
+bounded worlds, and publish improvements only through represented,
+evaluable, rollback-aware artefacts.
+
 ## 5. Engineering Implications of This Architecture
 
 This architecture changes how engineering work should be understood.
@@ -324,6 +380,28 @@ That includes:
 ### 5.5 Security, provenance, and namespace discipline stay central
 
 A minimal-imposition agent that works in sensitive real environments cannot trade away access safety for convenience. Namespace discipline, provenance preservation, and clear authorisation boundaries must remain part of the design, not bolt-ons.
+
+### 5.6 Role-learning work must consume the shared substrate
+
+Role-learning implementation should not create a parallel stack.
+
+When Von learns a role, the evidence and improvements should flow through the
+same architectural surfaces already being built:
+
+- enduring-memory manifests and query surfaces for role episodes, work products,
+  dossiers, notes, and evidence receipts;
+- memory-promotion workflows for role facts, process knowledge, procedural
+  artefacts, and policy guidance;
+- multi-axis evaluators for grounded helpfulness, calibration, recovery,
+  continuity, operational effectiveness, and work-product quality;
+- candidate worlds for evaluating workflow, prompt, skill, model-routing, or
+  retrieval-policy changes before promotion;
+- Vontology-authored workflows, prompt concepts, role concepts, and policy
+  artefacts as the durable authority surfaces.
+
+Python may add reusable support for manifests, validators, telemetry,
+connectors, durable execution, and benchmark harnesses. It should not become
+the place where SAIL-specific or role-specific task policy is encoded.
 
 ## 6. What Is Still Missing on the Path to Fully Helpful Agentic AI
 
@@ -426,17 +504,57 @@ A fully helpful agent is not just one that retrieves better. It is one that:
 
 Recent work on critic pathways and answer-first discipline helps here, but the broader transparency model is still incomplete.
 
+### 6.9 Role-performance representation and evaluation
+
+The current architecture still does not make role performance first-class
+enough.
+
+Von needs a canonical way to represent:
+
+- a role in an organisation or team;
+- the role's responsibilities, obligations, authority boundaries, and
+  escalation points;
+- recurring workflows, interactions, handoffs, and process states;
+- work products, review standards, and acceptance evidence;
+- notes, artefacts, meetings, decisions, and follow-up state;
+- the skills, prompts, models, tools, and other capabilities used to perform the
+  role;
+- evidence that the role is being performed better over time.
+
+This is especially important for the near-term SAIL research-operations aim.
+Without this representation, Von risks becoming a collection of helpful
+features rather than a system that can learn an under-filled role, improve at
+it, and generalise that learning to new research teams and eventually to new
+organisational roles.
+
 ## 7. A Concrete Path Forward
 
 ### 7.1 Near-term engineering priorities
 
-The most important near-term engineering work is:
+The most important near-term engineering work has two connected tracks.
+
+First, continue the substrate work that prevents Von from regressing into a
+large Python application with prompts attached:
 
 1. finish replacing remaining Python semantic policy surfaces with represented authority or prompt-backed critic/evaluator surfaces;
 2. continue extracting mixed responsibilities out of the orchestrator and route monoliths;
 3. keep anti-drift tests and purity checks aligned with the newer architecture;
 4. harden scaling and telemetry around new support surfaces such as predicate incidence;
 5. keep documentation and programme notes aligned with the actually landed authority surfaces so follow-on work targets the right remaining seams.
+
+Second, start the role-learning application spine:
+
+1. define the canonical role-performance representation for SAIL research
+   operations;
+2. identify a small set of SAIL process-improvement pilot roles and their work
+   products;
+3. connect those pilots to enduring-memory, evaluator, and candidate-world
+   tasks rather than inventing a separate role stack;
+4. extend minimal-imposition evaluation to measure operational effectiveness,
+   avoided burden, workflow continuity, work-product quality, and team adoption
+   friction;
+5. use the SAIL pilots to discover missing reusable Vontology, workflow,
+   evaluator, and telemetry primitives.
 
 ### 7.2 Medium-term platform priorities
 
@@ -465,6 +583,16 @@ The current umbrella Jira epic for this broader research and engineering directi
 
 That epic is intended to **shape** the programme rather than prematurely overdetermine it. It does not replace the anti-hack and authority-alignment substrate work under `JVNAUTOSCI-1116` / `JVNAUTOSCI-1913`; instead, it integrates that line with the wider memory, evaluation, multimodal, multi-agent, and deployment questions required for a true minimal-imposition agent platform.
 
+The near-term role-learning application spine is tracked separately in
+[`JVNAUTOSCI-2011`](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-2011).
+That epic should consume the `JVNAUTOSCI-1960` substrate rather than compete
+with it. It exists to make the practical first deployment path explicit:
+minimal-imposition role learning for SAIL research operations, then broader
+science and R&D, then auxiliary organisational roles, then roles in general.
+
+The first design-framing task for that epic is
+[`JVNAUTOSCI-2012`](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-2012).
+
 At the time of writing, its main child tasks are:
 
 - [`JVNAUTOSCI-1961`](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-1961): define the minimal-imposition benchmark and deployment acceptance model for Von
@@ -486,6 +614,10 @@ To preserve the architecture, the following remain design smells:
 - hidden phase-specific context thinning;
 - prompt bodies in Python for Vontology-governed features;
 - code-side answer-repair heuristics that should really be critic or workflow policy;
+- role-name or organisation-name branches in Python that turn a SAIL pilot into
+  hidden durable role policy;
+- persona-only "role learning" that does not represent workflows,
+  responsibilities, work products, evidence, and improvement lineage;
 - treating vector search or transient context as if they were adequate substitutes for durable represented memory;
 - treating one giant general model as if it removes the need for architecture.
 
@@ -502,6 +634,7 @@ The path to fully helpful minimal-imposition agentic AI still requires:
 - removal of the remaining Python semantic policy seams;
 - mature enduring memory and consolidation;
 - safe self-improvement loops;
+- first-class role-performance representation and SAIL research-operations pilots;
 - multimodal knowledge fusion;
 - multi-agent coordination;
 - stronger temporal, institutional, and normative reasoning;
