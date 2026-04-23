@@ -6,8 +6,10 @@ This note records the current engineering status of the Von codebase against the
 design intent described in `docs/engineering/Von_for_AgenticAI.md`, using a
 bounded static review of the live code on 23 April 2026. It was first written
 earlier the same day, refreshed after the landings through
-`JVNAUTOSCI-1994` and `JVNAUTOSCI-1993`, and then refreshed again as the
-implemented output of `JVNAUTOSCI-1989`.
+`JVNAUTOSCI-1994` and `JVNAUTOSCI-1993`, then refreshed again as the
+implemented output of `JVNAUTOSCI-1989`, and then refreshed again after
+`JVNAUTOSCI-1962` split the enduring-memory line into a concrete architecture
+note plus first implementation slices.
 
 It is not a replacement for `Von_for_AgenticAI.md`. That document remains the
 long-horizon design note. This document is the current engineering-status and
@@ -29,21 +31,21 @@ landings through `JVNAUTOSCI-1972`, then again by the 23 April landings of
 `JVNAUTOSCI-1987`, `JVNAUTOSCI-1992`, `JVNAUTOSCI-1994`, and
 `JVNAUTOSCI-1993`.
 
-After the repeat review in `JVNAUTOSCI-1989`, the current shortfall is now
+After the `JVNAUTOSCI-1962` architecture pass, the current shortfall is now
 concentrated in four areas:
 
-1. `JVNAUTOSCI-1962` is now the sharpest substantive umbrella. Main-turn memory
-   support landed in `1988`, but enduring memory still lacks one integrated
-   architecture for semantic, episodic, procedural, and policy memory with
-   explicit promotion, revision, provenance, and namespace rules.
-2. `JVNAUTOSCI-1964` now edges ahead of `1963`. Von has a real
+1. `JVNAUTOSCI-1964` is now the sharpest next umbrella. Von has a real
    authority-backed critic substrate, but evaluator coverage is still too narrow
    for grounded helpfulness, calibration, uncertainty, and long-horizon success
    to act as first-class machine-usable evidence.
-3. `JVNAUTOSCI-1963` remains essential, but its gap has changed shape. The
+2. `JVNAUTOSCI-1963` remains essential, but its gap has changed shape. The
    self-improvement loop is no longer absent; the remaining need is isolated
    experiment worlds, baseline-vs-candidate comparison, rollback, and promotion
    gating that build on richer evaluator outputs rather than bypass them.
+3. The enduring-memory line now has concrete child tasks rather than only an
+   umbrella: `JVNAUTOSCI-1995`, `JVNAUTOSCI-1996`, and `JVNAUTOSCI-1997`
+   carry the canonical manifest/query surface, promotion/revision workflow, and
+   long-horizon evaluation harness that `1962` identified.
 4. Monolith pressure remains real, especially in the orchestrator and
    catalogue, but it is now secondary to the broader memory/evaluator/
    self-improvement substrate work. The files are still too large, but they are
@@ -99,17 +101,27 @@ claims.
 
 ## Targeted Literature Check
 
-The `JVNAUTOSCI-1989` repeat review included a short targeted literature pass on
-memory, evaluator design, and safe self-improvement.
+The `JVNAUTOSCI-1989` and `JVNAUTOSCI-1962` passes together included a short
+targeted literature pass on memory, evaluator design, and safe
+self-improvement.
 
 - [Memory for Autonomous LLM Agents: Mechanisms, Evaluation, and Emerging Frontiers](https://arxiv.org/abs/2603.07670)
   argues that agent memory should be treated as a write-manage-read loop over
   temporal scope, representational substrate, and control policy. That
   reinforces `1962` as an architecture task, not just a retrieval feature task.
-- [Skill-Pro: Learning Reusable Skills from Experience via Non-Parametric PPO for LLM Agents](https://arxiv.org/abs/2602.01869)
+- [E-mem: Multi-agent based Episodic Context Reconstruction for LLM Agent Memory](https://arxiv.org/abs/2601.21714)
+  reinforces keeping some episodic context reconstructable rather than reducing
+  everything to flattened preprocessed memory.
+- [MemoryArena: Benchmarking Agent Memory in Interdependent Multi-Session Agentic Tasks](https://arxiv.org/abs/2602.16313)
+  reinforces that memory and action should be evaluated together on
+  interdependent multi-session tasks rather than only through static recall.
+- [LongMemEval: Benchmarking Chat Assistants on Long-Term Interactive Memory](https://arxiv.org/abs/2410.10813)
+  reinforces that update handling, temporal reasoning, multi-session grounding,
+  and abstention belong in the enduring-memory acceptance surface.
+- [ProcMEM: Learning Reusable Procedural Memory from Experience via Non-Parametric PPO for LLM Agents](https://arxiv.org/abs/2602.01869)
   supports promoting episodic traces into reusable procedural artefacts with
-  explicit executability and gating, which maps directly onto Von's memory-
-  promotion and procedural-memory direction under `1962`.
+  explicit executability and gating, which maps directly onto Von's
+  memory-promotion direction under `1962`.
 - [Agentic Confidence Calibration](https://arxiv.org/abs/2601.15778) and
   [Four-Axis Decision Alignment for Long-Horizon Enterprise AI Agents](https://arxiv.org/abs/2604.19457)
   both reinforce that aggregate success is too weak a target. Richer evaluator
@@ -178,25 +190,36 @@ The following architecture tasks from the 21-23 April tranche are now landed:
     purposes, the main monolith sizes were re-measured, and the remaining
     umbrella tasks were updated with cold-start comments against the live code.
 
+12. `JVNAUTOSCI-1962`
+    The enduring-memory line now has a dated architecture note at
+    `docs/engineering/jvnautosci_1962_enduring_memory_architecture_2026-04-23.md`,
+    plus concrete linked child tasks for the first implementation slices:
+    `JVNAUTOSCI-1995`, `JVNAUTOSCI-1996`, and `JVNAUTOSCI-1997`.
+
 ### P1 Next Tranche
 
 The next substantive sequence should now be:
 
-1. `JVNAUTOSCI-1962`
-   Enduring-memory and memory-promotion architecture umbrella.
-
-2. `JVNAUTOSCI-1964`
+1. `JVNAUTOSCI-1964`
    Authority-backed critic/evaluator workflow expansion umbrella.
 
-3. `JVNAUTOSCI-1963`
+2. `JVNAUTOSCI-1963`
    Isolated self-improvement loops and benchmark worlds umbrella.
+
+3. `JVNAUTOSCI-1995`
+   Canonical enduring-memory manifest and query surface.
+
+4. `JVNAUTOSCI-1996`
+   Represented memory-promotion and revision workflow.
+
+5. `JVNAUTOSCI-1997`
+   Long-horizon enduring-memory evaluation and task-state reconstruction
+   harness.
 
 Why this is now the right order:
 
-- `1962` is the sharpest substantive gap because `1988` integrated memory into
-  the main turn path without yet giving Von one coherent enduring-memory and
-  promotion architecture across semantic, episodic, procedural, and policy
-  strata.
+- `1962` is now done as architecture and decomposition work, so the next
+  sharpest umbrella is `1964`.
 - `1964` now comes before `1963` because the self-improvement loop is present
   but still reasons over too narrow an evaluator substrate. Richer machine-usable
   critic outputs for grounded helpfulness, calibration, abstention, and
@@ -206,6 +229,10 @@ Why this is now the right order:
   It should now extend the represented loop into isolated experiment worlds,
   baseline-vs-candidate comparison, rollback, and promotion gating while
   consuming the broader evaluator evidence designed under `1964`.
+- `1995`/`1996`/`1997` are now cold-startable enduring-memory slices rather
+  than abstract future work. They can proceed as the concrete continuation of
+  the memory line once capacity returns to it, and `1996`/`1997` in particular
+  directly benefit from the richer evaluator substrate targeted by `1964`.
 
 ### P2 Longer-Horizon Platform Work
 
@@ -260,7 +287,8 @@ reopened or duplicated here:
 `JVNAUTOSCI-1989` has now executed the first bounded repeat review after the
 same-day architecture tranche. The review cadence itself should remain in force.
 
-After completion of any substantive P1 slice under `1962`, `1964`, or `1963`:
+After completion of any substantive P1 slice under `1964`, `1963`, `1995`,
+`1996`, or `1997`:
 
 1. rerun a bounded architecture scan against the then-current code;
 2. re-measure the main monolith sizes and re-check the strongest remaining live
@@ -277,10 +305,14 @@ The key rule is simple:
 
 ## Doc Status
 
-This repeat review produced three documentation conclusions:
+This repeat review plus the `1962` architecture pass produced four
+documentation conclusions:
 
 - this dated status note needed a real refresh and now reflects the live
-  post-`1993`/`1994`/`1989` state;
+  post-`1993`/`1994`/`1989`/`1962` state;
+- `docs/engineering/jvnautosci_1962_enduring_memory_architecture_2026-04-23.md`
+  now carries the concrete enduring-memory architecture and first child-task
+  decomposition;
 - `docs/engineering/recent_architecture_progress_2026-04-20.md` still remains
   useful as a historical anti-drift note through the April 21 tranche, but its
   sequencing advice should no longer be used as the current programme-wide next
