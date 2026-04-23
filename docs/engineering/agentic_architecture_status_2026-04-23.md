@@ -10,7 +10,9 @@ earlier the same day, refreshed after the landings through
 implemented output of `JVNAUTOSCI-1989`, and then refreshed again after
 `JVNAUTOSCI-1962` split the enduring-memory line into a concrete architecture
 note plus first implementation slices, and then refreshed again after
-`JVNAUTOSCI-1964` did the same for the evaluator line.
+`JVNAUTOSCI-1964` did the same for the evaluator line, and then refreshed again
+after `JVNAUTOSCI-1963` did the same for the isolated self-improvement and
+benchmark-world line.
 
 It is not a replacement for `Von_for_AgenticAI.md`. That document remains the
 long-horizon design note. This document is the current engineering-status and
@@ -32,7 +34,8 @@ landings through `JVNAUTOSCI-1972`, then again by the 23 April landings of
 `JVNAUTOSCI-1987`, `JVNAUTOSCI-1992`, `JVNAUTOSCI-1994`, and
 `JVNAUTOSCI-1993`.
 
-After the `JVNAUTOSCI-1962` and `JVNAUTOSCI-1964` architecture passes, the
+After the `JVNAUTOSCI-1962`, `JVNAUTOSCI-1964`, and `JVNAUTOSCI-1963`
+architecture passes, the
 current shortfall is now concentrated in four areas:
 
 1. The evaluator line now has concrete child tasks rather than only the
@@ -40,10 +43,12 @@ current shortfall is now concentrated in four areas:
    `JVNAUTOSCI-2000`, and `JVNAUTOSCI-2001` now carry the multi-axis evaluator
    contract, grounded helpfulness critic, calibration and abstention evaluator,
    and long-horizon evaluator support.
-2. `JVNAUTOSCI-1963` remains essential, but its gap has changed shape. The
-   self-improvement loop is no longer absent; the remaining need is isolated
-   experiment worlds, baseline-vs-candidate comparison, rollback, and promotion
-   gating that consume richer evaluator outputs rather than bypass them.
+2. The self-improvement-world line now also has concrete child tasks rather
+   than only the umbrella `JVNAUTOSCI-1963`: `JVNAUTOSCI-2002`,
+   `JVNAUTOSCI-2003`, `JVNAUTOSCI-2004`, and `JVNAUTOSCI-2005` now carry the
+   candidate-world manifest, baseline-vs-candidate comparison, experiment-backed
+   promotion and rollback gating, and later prompt or policy candidate-world
+   expansion.
 3. The enduring-memory line still has its own concrete child tasks:
    `JVNAUTOSCI-1995`, `JVNAUTOSCI-1996`, and `JVNAUTOSCI-1997` carry the
    canonical manifest/query surface, promotion/revision workflow, and
@@ -87,6 +92,16 @@ surfaces rather than against older pre-`1988` or pre-`1993` wording:
   [episode_self_improvement_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/services/episode_self_improvement_service.py:706),
   [episode_self_improvement_workflow.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/workflows/durable/episode_self_improvement_workflow.py:239),
   [workflow_studio_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/workflows/workflow_studio_service.py:869)
+
+- Experiment worlds, testing theories, and publication rollback support:
+  [experiment_run_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/services/experiment_run_service.py:1046),
+  [experiment_run_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/services/experiment_run_service.py:1181),
+  [experiment_run_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/services/experiment_run_service.py:1688),
+  [testing_theory_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/services/testing_theory_service.py:363),
+  [testing_theory_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/services/testing_theory_service.py:573),
+  [testing_theory_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/services/testing_theory_service.py:625),
+  [workflow_studio_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/workflows/workflow_studio_service.py:1684),
+  [workflow_studio_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/workflows/workflow_studio_service.py:2251)
 
 - Current critic/evaluator surfaces:
   [turn_execution_record_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/services/turn_execution_record_service.py:1300),
@@ -150,6 +165,16 @@ and safe self-improvement.
   keep a single canonical version line, require regression-aware promotion
   evidence, and treat self-improvement as an auditable release pipeline rather
   than an opaque in-agent recursion.
+- [Governed Capability Evolution for Embodied Agents: Safe Upgrade, Compatibility Checking, and Runtime Rollback for Embodied Capability Modules](https://arxiv.org/abs/2604.08059)
+  reinforced staged validation, sandbox evaluation, shadow deployment, gated
+  activation, and rollback as first-class system phases rather than ad-hoc
+  recovery behaviour.
+- [Benchmark Self-Evolving: A Multi-Agent Framework for Dynamic LLM Evaluation](https://arxiv.org/abs/2402.11443)
+  reinforced that the right benchmark-world line should be able to evolve or
+  harden over time rather than relying only on one static suite.
+- [OccuBench: Evaluating AI Agents on Real-World Professional Tasks via Language Environment Simulation](https://arxiv.org/abs/2604.10866)
+  reinforced the value of simulator-backed evaluation worlds plus controlled
+  fault injection when measuring robustness before canonical promotion.
 
 This literature did not overturn Von's design direction. It did sharpen the task
 ordering.
@@ -220,6 +245,14 @@ The following architecture tasks from the 21-23 April tranche are now landed:
     `JVNAUTOSCI-1998`, `JVNAUTOSCI-1999`, `JVNAUTOSCI-2000`, and
     `JVNAUTOSCI-2001`.
 
+14. `JVNAUTOSCI-1963`
+    The isolated self-improvement-world line now has a dated architecture note
+    at
+    `docs/engineering/jvnautosci_1963_self_improvement_worlds_architecture_2026-04-23.md`,
+    plus concrete linked child tasks for the first implementation slices:
+    `JVNAUTOSCI-2002`, `JVNAUTOSCI-2003`, `JVNAUTOSCI-2004`, and
+    `JVNAUTOSCI-2005`.
+
 ### P1 Next Tranche
 
 The next substantive sequence should now be:
@@ -241,15 +274,28 @@ The next substantive sequence should now be:
    Long-horizon task-state reconstruction and memory-conditioned evaluator
    support.
 
-6. `JVNAUTOSCI-1963`
-   Isolated self-improvement loops and benchmark worlds umbrella.
+6. `JVNAUTOSCI-2002`
+   Represented candidate-world manifests and proposal-to-experiment-run
+   linkage for workflow self-improvement.
 
-7. `JVNAUTOSCI-1996`
+7. `JVNAUTOSCI-2003`
+   Evaluator- and memory-backed baseline-vs-candidate comparison for
+   self-improvement experiment runs.
+
+8. `JVNAUTOSCI-2004`
+   Experiment-backed promotion, bounded shadow evaluation, and rollback-safe
+   publication gating for workflow candidates.
+
+9. `JVNAUTOSCI-1996`
    Represented memory-promotion and revision workflow.
 
-8. `JVNAUTOSCI-1997`
+10. `JVNAUTOSCI-1997`
    Long-horizon enduring-memory evaluation and task-state reconstruction
    harness.
+
+11. `JVNAUTOSCI-2005`
+    Prompt, policy, and retrieval or memory candidate-world expansion beyond
+    the workflow-first line.
 
 Why this is now the right order:
 
@@ -265,14 +311,14 @@ Why this is now the right order:
 - `1995` comes before the long-horizon evaluator slice because `2001` should
   score memory-conditioned continuity against stable memory refs rather than
   bespoke point lookups.
-- `1963` still matters, but its starting point is no longer "there is no loop".
-  It should now extend the represented loop into isolated experiment worlds,
-  baseline-vs-candidate comparison, rollback, and promotion gating while
-  consuming the broader evaluator and memory evidence designed under
-  `1998`-`2001` and `1995`.
+- `2002` now comes before the later self-improvement-world slices because the
+  live code still lacks one explicit candidate-world identity linking proposal,
+  experiment run, benchmark world, and baseline.
+- `2003` and `2004` then build on that manifest plus the richer evaluator and
+  memory evidence from `1998`-`2001` and `1995`.
 - `1996` and `1997` remain cold-startable enduring-memory slices rather than
-  abstract future work, and they now have a clearer evaluator substrate to
-  consume.
+  abstract future work, but broadening candidate worlds beyond workflows is now
+  lower priority than landing the workflow-first experiment and evaluation line.
 
 ### P2 Longer-Horizon Platform Work
 
