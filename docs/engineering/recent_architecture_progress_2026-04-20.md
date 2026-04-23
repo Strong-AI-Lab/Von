@@ -2,12 +2,19 @@
 
 ## Purpose
 
-This note records the current state of the `JVNAUTOSCI-1913` / `JVNAUTOSCI-1116` anti-hack and de-bloating programme after the April 21, 2026 landings through `JVNAUTOSCI-1972`.
+This note records the state of the `JVNAUTOSCI-1913` / `JVNAUTOSCI-1116`
+anti-hack and de-bloating programme after the April 21, 2026 landings through
+`JVNAUTOSCI-1972`.
 
 For the broader current-code review of where Von still falls short of the
 agentic architecture described in `Von_for_AgenticAI.md`, and for the latest
-priority ordering after the 23 April 2026 scan, see
+priority ordering after the 23 April 2026 repeat review, see
 `docs/engineering/agentic_architecture_status_2026-04-23.md`.
+
+This note remains useful as a historical anti-drift snapshot through the April
+21 tranche. Its code-size measurements and "recommended next steps" should be
+read as historical April 21 guidance, not as the live post-`1989`
+programme-wide ordering.
 
 It replaces an earlier draft that had become materially stale. In particular:
 
@@ -224,19 +231,25 @@ That means it is still a structural concern, but it is not the highest-priority 
 
 ## Recommended Next Steps
 
-The earlier version of this note said the most impactful next task was replacing `_STRUCTURED_TOOL_FAMILY_HINTS`. That is now outdated because `JVNAUTOSCI-1953` is done. It also predated both the prompt-backed postcondition-critic landing that removed the remaining turn-record response-surface fallback under `JVNAUTOSCI-1956` and the first route-layer de-bloating landing under `JVNAUTOSCI-1121`.
+This section is now historical for overall programme sequencing.
 
-The current best sequencing is:
+After the later same-day landings through `JVNAUTOSCI-1994`, `1993`, and the
+repeat review in `1989`, the live next-task ordering moved to the broader
+memory/evaluator/self-improvement umbrellas recorded in
+`docs/engineering/agentic_architecture_status_2026-04-23.md`.
 
-1. continued orchestrator extraction where it removes real mixed-responsibility pressure rather than opening noise tickets based only on file size
-2. further route-layer de-bloating after `1121`/`1825`, with the focus now on the remaining large route modules rather than the Flask app factory
-3. `JVNAUTOSCI-768` / `770` when represented tool metadata and rule-loader follow-through becomes the best lever for new capability work
+The still-relevant `JVNAUTOSCI-1913`-local guidance from this note is narrower:
 
-If the goal is specifically to continue the `1913` anti-egregious-path doctrine, the next most important principle is:
+1. continue orchestrator extraction where it removes real mixed-responsibility
+   pressure or hidden policy drift rather than opening noise tickets based only
+   on file size;
+2. continue route-layer de-bloating where it produces clearer reusable support
+   seams; and
+3. keep anti-drift tests and purity checks aligned with the newer
+   authority-backed architecture.
 
-> do not let the recent success at removing code-side semantic policy from the write path and buttonify path hide the fact that the largest remaining risks are now structural monolith pressure and the next represented-metadata follow-through tasks.
-
-That is where the next meaningful authority-alignment work now sits.
+Do not use this note's April 21 sequencing as the current programme-wide next
+step list.
 
 ## Implementation Note — April 21, 2026
 
