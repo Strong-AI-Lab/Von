@@ -1063,7 +1063,53 @@ Persistence semantics:
 - uncertain or provisional relation proposals SHOULD be stored through the canonical uncertain-assertion pathway, not legacy side channels;
 - acquisition workflows SHOULD preserve provenance (`source`, interaction identifier, evidence count, confidence score) for later promotion/audit.
 
-### 10.12 Representation and Acquisition Profiles as Workflow Contracts (JVNAUTOSCI-1380)
+### 10.12 Workflow-Governed Episode Self-Improvement Profiles (JVNAUTOSCI-1993)
+
+Critique-driven self-improvement policy is a workflow contract, not a Python
+constant slab.
+
+Canonical Vontology surface:
+
+- profile type: `#V#episode_self_improvement_profile`
+- profile payload predicate: `#V#has_episode_self_improvement_profile_json`
+- workflow-to-profile link predicate: `#V#has_episode_self_improvement_profile`
+- current canonical profile: `#V#episode_self_improvement_profile_workflow_revision_default`
+
+Current runtime anchors:
+
+- `#V#episode_evaluation_workflow`
+- `#V#episode_self_improvement_proposal_workflow`
+- `#V#episode_self_improvement_promotion_workflow`
+
+Current canonical profile payload shape:
+
+- `candidate_selection_policy`
+  Defines represented launch budget, priority ordering, eligible target
+  surfaces, and dedupe identity for critique-driven candidate selection.
+- `benchmark_policy`
+  Defines represented benchmark evidence budget, including scan limit and audit
+  depth for proposal and promotion context construction.
+
+Normative policy semantics:
+
+- self-improvement candidate launch budget MUST resolve from the linked profile,
+  not from Python constants;
+- priority ordering and eligible target-surface policy MUST resolve from the
+  linked profile, not from hard-coded workflow-only filtering;
+- dedupe identity for candidate selection SHOULD remain explicit in the linked
+  profile so later surface expansion does not require hidden Python policy;
+- benchmark evidence budget for proposal and promotion context MUST resolve
+  from the linked profile, not from ad hoc `scan_limit` / `max_audit_cases`
+  literals in support code;
+- if the linked episode self-improvement profile cannot be resolved, the live
+  path MUST fail closed with explicit
+  `episode_self_improvement_profile_unavailable` diagnostics;
+- if the linked profile is present but incomplete or invalid, the live path
+  MUST fail closed with explicit
+  `episode_self_improvement_profile_invalid` diagnostics rather than
+  synthesising fallback launch or benchmark policy in Python.
+
+### 10.13 Representation and Acquisition Profiles as Workflow Contracts (JVNAUTOSCI-1380)
 
 Representation profiles and knowledge-acquisition profiles are workflow contracts.
 

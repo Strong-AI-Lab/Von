@@ -20,6 +20,9 @@ from .episode_evaluation_workflow_contracts import (
     EVENT_TYPE_TURN_COMPLETION_GATE_FINALISED,
     EVENT_TYPE_WORKFLOW_INSTANCE_TERMINAL,
 )
+from .episode_self_improvement_profile_vontology_service import (
+    ensure_canonical_episode_self_improvement_profiles,
+)
 from .text_value_service import upsert_singleton_text_relation
 from .workflow_prompt_authority_service import (
     DEFAULT_PROMPT_TYPE_ID,
@@ -253,6 +256,9 @@ def bootstrap_canonical_episode_evaluation_workflow(
         publish_context_manager_factory=suspend_event_workflow_integration,
         force_republish=force_republish,
     )
+    self_improvement_profile_support = ensure_canonical_episode_self_improvement_profiles(
+        context={"jira": _SOURCE_TAG, "source": _MANAGED_BY},
+    )
     event_bindings = _ensure_episode_evaluation_event_bindings()
     publication = _merge_publication_reports(
         episode_publication.get("publication"),
@@ -260,10 +266,12 @@ def bootstrap_canonical_episode_evaluation_workflow(
     )
     return {
         "success": bool(prompt_support.get("success"))
+        and bool(self_improvement_profile_support.get("success"))
         and bool(event_bindings.get("success"))
         and int((publication.get("counts") or {}).get("errors") or 0) == 0,
         "workflow_ids": list(EPISODE_EVALUATION_WORKFLOW_IDS),
         "prompt_support": prompt_support,
+        "self_improvement_profile_support": self_improvement_profile_support,
         "publication": publication,
         "typed_workflow_ids": [
             *list(episode_publication.get("typed_workflow_ids") or []),

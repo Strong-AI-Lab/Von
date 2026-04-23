@@ -15,8 +15,12 @@ from .episode_critique_memory_service import (
     record_episode_critique_memory_self_improvement,
 )
 from .episode_evaluation_workflow_contracts import (
-    EPISODE_SELF_IMPROVEMENT_MAX_LAUNCHES,
+    EPISODE_EVALUATION_WORKFLOW_ID,
     EPISODE_SELF_IMPROVEMENT_PROPOSAL_WORKFLOW_ID,
+    EPISODE_SELF_IMPROVEMENT_PROMOTION_WORKFLOW_ID,
+)
+from .episode_self_improvement_profile_vontology_service import (
+    load_episode_self_improvement_profile,
 )
 from .workflow_authoring_vontology_service import (
     build_workflow_authoring_prompt_contract,
@@ -51,8 +55,6 @@ EPISODE_SELF_IMPROVEMENT_PROPOSAL_CONTEXT_SCHEMA_VERSION = (
 EPISODE_SELF_IMPROVEMENT_PROMOTION_EVALUATION_SCHEMA_VERSION = (
     "episode_self_improvement_promotion_evaluation.v1"
 )
-
-_PRIORITY_RANK = {"high": 0, "medium": 1, "low": 2}
 
 
 def _utcnow_iso() -> str:
@@ -98,6 +100,76 @@ def _normalise_strings(values: Any, *, limit: int = 40) -> list[str]:
         if len(items) >= limit:
             break
     return items
+
+
+def _load_self_improvement_profile(
+    *,
+    workflow_id: str,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    profile, diagnostics = load_episode_self_improvement_profile(workflow_id=workflow_id)
+    return (
+        _mapping_or_empty(profile) or None,
+        _mapping_or_empty(diagnostics),
+    )
+
+
+def _profile_error_code(diagnostics: Mapping[str, Any]) -> str:
+    return (
+        _safe_str(_mapping_or_empty(diagnostics).get("error_code"))
+        or "episode_self_improvement_profile_unavailable"
+    )
+
+
+def _candidate_selection_policy(profile: Mapping[str, Any]) -> dict[str, Any]:
+    policy = _mapping_or_empty(profile.get("candidate_selection_policy"))
+    dedupe_identity_fields_by_surface = {
+        str(surface): _normalise_strings(fields, limit=10)
+        for surface, fields in _mapping_or_empty(
+            policy.get("dedupe_identity_fields_by_surface")
+        ).items()
+    }
+    return {
+        "max_candidate_launches": max(
+            1,
+            _safe_int(policy.get("max_candidate_launches"), default=1),
+        ),
+        "priority_order": _normalise_strings(policy.get("priority_order"), limit=20),
+        "eligible_target_surfaces": _normalise_strings(
+            policy.get("eligible_target_surfaces"),
+            limit=20,
+        ),
+        "dedupe_identity_fields_by_surface": dedupe_identity_fields_by_surface,
+    }
+
+
+def _benchmark_policy(profile: Mapping[str, Any]) -> dict[str, int]:
+    policy = _mapping_or_empty(profile.get("benchmark_policy"))
+    return {
+        "scan_limit": max(1, _safe_int(policy.get("scan_limit"), default=1)),
+        "max_audit_cases": max(1, _safe_int(policy.get("max_audit_cases"), default=1)),
+    }
+
+
+def _candidate_identity(
+    item: Mapping[str, Any],
+    *,
+    target_surface: str,
+    dedupe_identity_fields_by_surface: Mapping[str, Sequence[str]],
+) -> str | None:
+    identity_fields = tuple(dedupe_identity_fields_by_surface.get(target_surface) or ())
+    identity_values = [target_surface]
+    if identity_fields:
+        for field in identity_fields:
+            value = _safe_str(item.get(field))
+            if not value:
+                return None
+            identity_values.append(value)
+    else:
+        suggestion_id = _safe_str(item.get("suggestion_id"))
+        if not suggestion_id:
+            return None
+        identity_values.append(suggestion_id)
+    return "|".join(identity_values)
 
 
 def _json_fingerprint(value: Any, *, length: int = 16) -> str:
@@ -170,31 +242,59 @@ def _find_workflow_target_suggestion(
 def list_episode_self_improvement_candidates(
     *,
     memory_state: Mapping[str, Any],
-    limit: int = EPISODE_SELF_IMPROVEMENT_MAX_LAUNCHES,
+    profile: Mapping[str, Any],
+    limit: int | None = None,
 ) -> list[dict[str, Any]]:
+    selection_policy = _candidate_selection_policy(profile)
+    priority_order = list(selection_policy.get("priority_order") or [])
+    priority_rank = {
+        priority: index for index, priority in enumerate(priority_order)
+    }
+    eligible_target_surfaces = set(
+        selection_policy.get("eligible_target_surfaces") or []
+    )
+    candidate_limit = selection_policy.get("max_candidate_launches") or 1
+    if limit is not None:
+        candidate_limit = max(1, min(_safe_int(limit, default=1), int(candidate_limit)))
+
     suggestions = [
         _mapping_or_empty(item)
         for item in (memory_state.get("improvement_suggestions") or [])
         if isinstance(item, Mapping)
     ]
     candidates: list[dict[str, Any]] = []
-    seen_workflow_ids: set[str] = set()
+    seen_target_keys: set[str] = set()
     for item in sorted(
         suggestions,
         key=lambda row: (
-            _PRIORITY_RANK.get(_safe_str(row.get("priority")) or "low", 99),
+            priority_rank.get(_safe_str(row.get("priority")) or "", len(priority_rank) + 1),
+            _safe_str(row.get("target_surface")) or "",
             _safe_str(row.get("target_workflow_id")) or "",
             _safe_str(row.get("suggestion_id")) or "",
         ),
     ):
-        if _safe_str(item.get("target_surface")) != "workflow":
+        target_surface = _safe_str(item.get("target_surface"))
+        if not target_surface or target_surface not in eligible_target_surfaces:
             continue
+        identity_key = _candidate_identity(
+            item,
+            target_surface=target_surface,
+            dedupe_identity_fields_by_surface=_mapping_or_empty(
+                selection_policy.get("dedupe_identity_fields_by_surface")
+            ),
+        )
+        if not identity_key or identity_key in seen_target_keys:
+            continue
+        seen_target_keys.add(identity_key)
         workflow_id = _safe_str(item.get("target_workflow_id"))
         suggestion_id = _safe_str(item.get("suggestion_id"))
-        if not workflow_id or not suggestion_id or workflow_id in seen_workflow_ids:
+        if not suggestion_id:
             continue
-        seen_workflow_ids.add(workflow_id)
-        proposal = _mapping_or_empty(get_workflow_authoring_proposal(workflow_id))
+        proposal = (
+            _mapping_or_empty(get_workflow_authoring_proposal(workflow_id))
+            if target_surface == "workflow" and workflow_id
+            else {}
+        )
         candidates.append(
             {
                 **item,
@@ -202,7 +302,7 @@ def list_episode_self_improvement_candidates(
                 "active_proposal_id": _safe_str(proposal.get("proposal_id")),
             }
         )
-        if len(candidates) >= max(1, min(int(limit), EPISODE_SELF_IMPROVEMENT_MAX_LAUNCHES)):
+        if len(candidates) >= int(candidate_limit):
             break
     return candidates
 
@@ -231,20 +331,50 @@ def launch_episode_self_improvement_workflows(
     if not resolved_memory_id or not resolved_namespace or not resolved_user_id:
         return {"success": False, "reason": "self_improvement_actor_context_missing"}
 
+    profile, profile_diagnostics = _load_self_improvement_profile(
+        workflow_id=EPISODE_EVALUATION_WORKFLOW_ID,
+    )
+    if not profile:
+        return {
+            "success": False,
+            "reason": _profile_error_code(profile_diagnostics),
+            "profile_diagnostics": profile_diagnostics,
+        }
+
     launches: list[dict[str, Any]] = []
     manager = WorkflowInstanceManager()
-    for candidate in list_episode_self_improvement_candidates(memory_state=state):
+    for candidate in list_episode_self_improvement_candidates(
+        memory_state=state,
+        profile=profile,
+    ):
+        target_surface = _safe_str(candidate.get("target_surface")) or "unknown"
         target_workflow_id = _safe_str(candidate.get("target_workflow_id"))
         suggestion_id = _safe_str(candidate.get("suggestion_id"))
-        if not target_workflow_id or not suggestion_id:
+        if not suggestion_id:
             continue
         created_at_utc = _utcnow_iso()
+        if target_surface != "workflow":
+            launches.append(
+                {
+                    "created_at_utc": created_at_utc,
+                    "suggestion_id": suggestion_id,
+                    "target_surface": target_surface,
+                    "launch_workflow_id": EPISODE_SELF_IMPROVEMENT_PROPOSAL_WORKFLOW_ID,
+                    "success": False,
+                    "status": "suppressed_unsupported_target_surface",
+                    "reason": "episode_self_improvement_target_surface_not_yet_supported",
+                }
+            )
+            continue
+        if not target_workflow_id:
+            continue
         existing_status = _safe_str(candidate.get("active_proposal_status"))
         if existing_status == "pending_review":
             launches.append(
                 {
                     "created_at_utc": created_at_utc,
                     "suggestion_id": suggestion_id,
+                    "target_surface": target_surface,
                     "target_workflow_id": target_workflow_id,
                     "launch_workflow_id": EPISODE_SELF_IMPROVEMENT_PROPOSAL_WORKFLOW_ID,
                     "success": False,
@@ -280,12 +410,13 @@ def launch_episode_self_improvement_workflows(
             ),
         )
         launches.append(
-            {
-                "created_at_utc": created_at_utc,
-                "suggestion_id": suggestion_id,
-                "target_workflow_id": target_workflow_id,
-                "launch_workflow_id": EPISODE_SELF_IMPROVEMENT_PROPOSAL_WORKFLOW_ID,
-                "success": bool(submission.success),
+                {
+                    "created_at_utc": created_at_utc,
+                    "suggestion_id": suggestion_id,
+                    "target_surface": target_surface,
+                    "target_workflow_id": target_workflow_id,
+                    "launch_workflow_id": EPISODE_SELF_IMPROVEMENT_PROPOSAL_WORKFLOW_ID,
+                    "success": bool(submission.success),
                 "status": submission.status,
                 "instance_id": submission.instance_id,
                 "reason": _safe_str(submission.error_code) or _safe_str(submission.error),
@@ -329,6 +460,16 @@ def build_workflow_improvement_context(
     if not resolved_target_workflow_id:
         return {"success": False, "error": "workflow_target_id_missing"}
 
+    profile, profile_diagnostics = _load_self_improvement_profile(
+        workflow_id=EPISODE_SELF_IMPROVEMENT_PROPOSAL_WORKFLOW_ID,
+    )
+    if not profile:
+        return {
+            "success": False,
+            "error": _profile_error_code(profile_diagnostics),
+            "profile_diagnostics": profile_diagnostics,
+        }
+
     existing_proposal = _mapping_or_empty(
         get_workflow_authoring_proposal(resolved_target_workflow_id)
     )
@@ -362,11 +503,12 @@ def build_workflow_improvement_context(
         definition=definition,
         authoritative_definition=definition,
     )
+    benchmark_policy = _benchmark_policy(profile)
     benchmark_report = build_episode_critique_benchmark_report(
         namespace=_safe_str(namespace) or _safe_str(memory_state.get("namespace")) or "",
         workflow_id=resolved_target_workflow_id,
-        scan_limit=200,
-        max_audit_cases=5,
+        scan_limit=benchmark_policy["scan_limit"],
+        max_audit_cases=benchmark_policy["max_audit_cases"],
     )
     benchmark_summary = _benchmark_prompt_context(_mapping_or_empty(benchmark_report))
 
@@ -513,6 +655,16 @@ def build_workflow_promotion_context(
     if not suggestion:
         return {"success": False, "error": "workflow_target_improvement_suggestion_missing"}
 
+    profile, profile_diagnostics = _load_self_improvement_profile(
+        workflow_id=EPISODE_SELF_IMPROVEMENT_PROMOTION_WORKFLOW_ID,
+    )
+    if not profile:
+        return {
+            "success": False,
+            "error": _profile_error_code(profile_diagnostics),
+            "profile_diagnostics": profile_diagnostics,
+        }
+
     resolved_proposal_id = _safe_str(proposal_id)
     proposal = _mapping_or_empty(
         get_workflow_authoring_proposal_by_id(
@@ -530,11 +682,12 @@ def build_workflow_promotion_context(
         return {"success": False, "error": "workflow_authoring_proposal_id_mismatch"}
 
     lifecycle, _source = resolve_workflow_publication_lifecycle(target_workflow_id)
+    benchmark_policy = _benchmark_policy(profile)
     benchmark_report = build_episode_critique_benchmark_report(
         namespace=_safe_str(namespace) or _safe_str(memory_state.get("namespace")) or "",
         workflow_id=target_workflow_id,
-        scan_limit=200,
-        max_audit_cases=5,
+        scan_limit=benchmark_policy["scan_limit"],
+        max_audit_cases=benchmark_policy["max_audit_cases"],
     )
     return {
         "success": True,

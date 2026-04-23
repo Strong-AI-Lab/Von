@@ -22,6 +22,10 @@ from src.backend.services.episode_evaluation_workflow_vontology_service import (
     _ensure_episode_evaluation_prompt_support,
     bootstrap_canonical_episode_evaluation_workflow,
 )
+from src.backend.services.episode_self_improvement_profile_vontology_service import (
+    DEFAULT_EPISODE_SELF_IMPROVEMENT_PROFILE_CONCEPT_ID,
+    EPISODE_SELF_IMPROVEMENT_PROFILE_LINK_PREDICATE,
+)
 from src.backend.services.text_value_service import get_texts_for_concept
 from src.backend.workflows.durable.startup import get_instance_manager
 from src.backend.workflows.vontology_loader import load_workflow_definition_from_vontology
@@ -65,6 +69,7 @@ def test_bootstrap_materialises_episode_evaluation_workflow_family(
     assert report.get("success") is True
     assert counts.get("errors") == 0
     assert counts.get("workflows_published") == 3
+    assert report.get("self_improvement_profile_support", {}).get("success") is True
 
     definition = load_workflow_definition_from_vontology(EPISODE_EVALUATION_WORKFLOW_ID)
     assert definition is not None
@@ -134,6 +139,15 @@ def test_bootstrap_materialises_episode_evaluation_workflow_family(
         limit=5,
     )
     assert any((row or {}).get("text") for row in promotion_prompt_rows)
+    profile_link_rows = get_texts_for_concept(
+        EPISODE_EVALUATION_WORKFLOW_ID,
+        predicate=EPISODE_SELF_IMPROVEMENT_PROFILE_LINK_PREDICATE,
+        limit=5,
+    )
+    assert any(
+        (row or {}).get("text") == DEFAULT_EPISODE_SELF_IMPROVEMENT_PROFILE_CONCEPT_ID
+        for row in profile_link_rows
+    )
 
     manager = get_instance_manager()
     turn_bindings = manager.list_event_bindings(

@@ -11,6 +11,24 @@ def test_launch_episode_self_improvement_workflows_suppresses_when_proposal_pend
     recorded: dict[str, Any] = {}
     monkeypatch.setattr(
         svc,
+        "_load_self_improvement_profile",
+        lambda **_kwargs: (
+            {
+                "candidate_selection_policy": {
+                    "max_candidate_launches": 3,
+                    "priority_order": ["high", "medium", "low"],
+                    "eligible_target_surfaces": ["workflow"],
+                    "dedupe_identity_fields_by_surface": {
+                        "workflow": ["target_workflow_id"]
+                    },
+                },
+                "benchmark_policy": {"scan_limit": 200, "max_audit_cases": 5},
+            },
+            {},
+        ),
+    )
+    monkeypatch.setattr(
+        svc,
         "get_workflow_authoring_proposal",
         lambda _workflow_id: {"proposal_id": "proposal-1", "status": "pending_review"},
     )
@@ -48,6 +66,24 @@ def test_launch_episode_self_improvement_workflows_accepts_user_only_namespace(
 ) -> None:
     recorded: dict[str, Any] = {}
     submissions: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        svc,
+        "_load_self_improvement_profile",
+        lambda **_kwargs: (
+            {
+                "candidate_selection_policy": {
+                    "max_candidate_launches": 3,
+                    "priority_order": ["high", "medium", "low"],
+                    "eligible_target_surfaces": ["workflow"],
+                    "dedupe_identity_fields_by_surface": {
+                        "workflow": ["target_workflow_id"]
+                    },
+                },
+                "benchmark_policy": {"scan_limit": 200, "max_audit_cases": 5},
+            },
+            {},
+        ),
+    )
 
     class _Submission:
         success = True
@@ -96,6 +132,104 @@ def test_launch_episode_self_improvement_workflows_accepts_user_only_namespace(
     assert submissions[0]["org_id"] is None
     assert submissions[0]["inputs"]["org_id"] is None
     assert recorded["launches"][0]["success"] is True
+
+
+def test_launch_episode_self_improvement_workflows_fails_closed_when_profile_missing(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        svc,
+        "_load_self_improvement_profile",
+        lambda **_kwargs: (
+            None,
+            {"error_code": "episode_self_improvement_profile_unavailable"},
+        ),
+    )
+
+    result = svc.launch_episode_self_improvement_workflows(
+        memory_state={
+            "memory_id": "#V#episode_critique_memory_abc",
+            "namespace": "#V#user@org",
+            "user_id": "#V#user",
+            "org_id": "#V#org",
+            "improvement_suggestions": [],
+        }
+    )
+
+    assert result["success"] is False
+    assert result["reason"] == "episode_self_improvement_profile_unavailable"
+
+
+def test_launch_episode_self_improvement_workflows_uses_profile_budget_and_priority(
+    monkeypatch,
+) -> None:
+    submissions: list[dict[str, Any]] = []
+    recorded: dict[str, Any] = {}
+
+    class _Submission:
+        success = True
+        status = "created"
+        instance_id = "#V#wf_instance_self_improvement_1"
+        error_code = None
+        error = None
+
+    monkeypatch.setattr(
+        svc,
+        "_load_self_improvement_profile",
+        lambda **_kwargs: (
+            {
+                "candidate_selection_policy": {
+                    "max_candidate_launches": 1,
+                    "priority_order": ["medium", "high", "low"],
+                    "eligible_target_surfaces": ["workflow"],
+                    "dedupe_identity_fields_by_surface": {
+                        "workflow": ["target_workflow_id"]
+                    },
+                },
+                "benchmark_policy": {"scan_limit": 200, "max_audit_cases": 5},
+            },
+            {},
+        ),
+    )
+    monkeypatch.setattr(svc, "get_workflow_authoring_proposal", lambda _workflow_id: {})
+    monkeypatch.setattr(
+        svc,
+        "submit_verified_workflow_instance",
+        lambda **kwargs: submissions.append(kwargs) or _Submission(),
+    )
+    monkeypatch.setattr(
+        svc,
+        "record_episode_critique_memory_self_improvement",
+        lambda **kwargs: recorded.update(kwargs) or {"state": {"memory_id": kwargs["memory_id"]}},
+    )
+
+    result = svc.launch_episode_self_improvement_workflows(
+        memory_state={
+            "memory_id": "#V#episode_critique_memory_profile_budget",
+            "namespace": "#V#user@org",
+            "user_id": "#V#user",
+            "org_id": "#V#org",
+            "improvement_suggestions": [
+                {
+                    "suggestion_id": "workflow_change_alpha",
+                    "priority": "high",
+                    "target_surface": "workflow",
+                    "target_workflow_id": "#V#alpha_workflow",
+                },
+                {
+                    "suggestion_id": "workflow_change_beta",
+                    "priority": "medium",
+                    "target_surface": "workflow",
+                    "target_workflow_id": "#V#beta_workflow",
+                },
+            ],
+        }
+    )
+
+    assert result["success"] is True
+    assert result["launched_count"] == 1
+    assert submissions[0]["inputs"]["target_workflow_id"] == "#V#beta_workflow"
+    assert recorded["launches"][0]["target_workflow_id"] == "#V#beta_workflow"
 
 
 def test_submit_workflow_improvement_proposal_records_proposal_and_builds_launch(
@@ -193,6 +327,26 @@ def test_record_workflow_promotion_evaluation_updates_memory_and_proposal(
 def test_build_workflow_promotion_context_uses_exact_proposal_id(
     monkeypatch,
 ) -> None:
+    benchmark_args: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        svc,
+        "_load_self_improvement_profile",
+        lambda **_kwargs: (
+            {
+                "candidate_selection_policy": {
+                    "max_candidate_launches": 3,
+                    "priority_order": ["high", "medium", "low"],
+                    "eligible_target_surfaces": ["workflow"],
+                    "dedupe_identity_fields_by_surface": {
+                        "workflow": ["target_workflow_id"]
+                    },
+                },
+                "benchmark_policy": {"scan_limit": 11, "max_audit_cases": 3},
+            },
+            {},
+        ),
+    )
     monkeypatch.setattr(
         svc,
         "get_episode_critique_memory_state",
@@ -229,7 +383,7 @@ def test_build_workflow_promotion_context_uses_exact_proposal_id(
     monkeypatch.setattr(
         svc,
         "build_episode_critique_benchmark_report",
-        lambda **_kwargs: {"benchmark_fingerprint": "bench-1"},
+        lambda **kwargs: benchmark_args.update(kwargs) or {"benchmark_fingerprint": "bench-1"},
     )
 
     result = svc.build_workflow_promotion_context(
@@ -244,3 +398,92 @@ def test_build_workflow_promotion_context_uses_exact_proposal_id(
     assert result["proposal_id"] == "proposal-1"
     assert result["workflow_authoring_proposal"]["proposal_id"] == "proposal-1"
     assert result["workflow_authoring_proposal"]["status"] == "superseded"
+    assert benchmark_args["scan_limit"] == 11
+    assert benchmark_args["max_audit_cases"] == 3
+
+
+def test_build_workflow_improvement_context_uses_profile_benchmark_policy(
+    monkeypatch,
+) -> None:
+    benchmark_args: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        svc,
+        "_load_self_improvement_profile",
+        lambda **_kwargs: (
+            {
+                "candidate_selection_policy": {
+                    "max_candidate_launches": 3,
+                    "priority_order": ["high", "medium", "low"],
+                    "eligible_target_surfaces": ["workflow"],
+                    "dedupe_identity_fields_by_surface": {
+                        "workflow": ["target_workflow_id"]
+                    },
+                },
+                "benchmark_policy": {"scan_limit": 17, "max_audit_cases": 2},
+            },
+            {},
+        ),
+    )
+    monkeypatch.setattr(
+        svc,
+        "get_episode_critique_memory_state",
+        lambda _memory_id: {
+            "memory_id": "#V#episode_critique_memory_abc",
+            "namespace": "#V#user@org",
+            "subject_episode": {"workflow_id": "#V#episode_evaluation_workflow"},
+            "improvement_suggestions": [
+                {
+                    "suggestion_id": "workflow_change_alpha",
+                    "target_surface": "workflow",
+                    "target_workflow_id": "#V#alpha_workflow",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(svc, "get_workflow_authoring_proposal", lambda _workflow_id: {})
+    monkeypatch.setattr(
+        svc,
+        "load_workflow_definition_from_vontology",
+        lambda _workflow_id: object(),
+    )
+    monkeypatch.setattr(
+        svc,
+        "serialise_workflow_definition_to_authoring_spec",
+        lambda _definition: {"workflow_id": "#V#alpha_workflow", "steps": []},
+    )
+    monkeypatch.setattr(
+        svc,
+        "build_workflow_definition_identity",
+        lambda **_kwargs: {"definition_hash": "hash-1"},
+    )
+    monkeypatch.setattr(
+        svc,
+        "build_episode_critique_benchmark_report",
+        lambda **kwargs: benchmark_args.update(kwargs)
+        or {
+            "benchmark_fingerprint": "bench-1",
+            "benchmark_signal_summary": {"fail": 1},
+        },
+    )
+    monkeypatch.setattr(
+        svc,
+        "build_workflow_authoring_prompt_contract",
+        lambda: {"schema_version": "workflow_authoring_prompt_contract.v1"},
+    )
+    monkeypatch.setattr(
+        svc,
+        "get_workflow_authoring_prompt_health_status",
+        lambda: {"healthy": True},
+    )
+
+    result = svc.build_workflow_improvement_context(
+        episode_critique_memory_id="#V#episode_critique_memory_abc",
+        suggestion_id="workflow_change_alpha",
+        target_workflow_id="#V#alpha_workflow",
+        namespace="#V#user@org",
+    )
+
+    assert result["success"] is True
+    assert benchmark_args["scan_limit"] == 17
+    assert benchmark_args["max_audit_cases"] == 2

@@ -5,7 +5,7 @@
 This note records the current engineering status of the Von codebase against the
 design intent described in `docs/engineering/Von_for_AgenticAI.md`, using a
 bounded static review of the live code on 23 April 2026, refreshed later the
-same day after the landings through `JVNAUTOSCI-1988` and `JVNAUTOSCI-1987`.
+same day after the landings through `JVNAUTOSCI-1994` and `JVNAUTOSCI-1993`.
 
 It is not a replacement for `Von_for_AgenticAI.md`. That document remains the
 long-horizon design note. This document is the current engineering-status and
@@ -24,14 +24,16 @@ buttonify, turn-contract prose, or broad tool-metadata seams. Those were
 materially reduced first by the April 21 landings through `JVNAUTOSCI-1972`,
 and then again by the 23 April landings of `JVNAUTOSCI-1974`,
 `JVNAUTOSCI-1975`, `JVNAUTOSCI-1985`, `JVNAUTOSCI-1973`, and
-`JVNAUTOSCI-1986`, `JVNAUTOSCI-1988`, and `JVNAUTOSCI-1987`.
+`JVNAUTOSCI-1986`, `JVNAUTOSCI-1988`, `JVNAUTOSCI-1987`,
+`JVNAUTOSCI-1994`, and `JVNAUTOSCI-1993`.
 
 The current shortfall is now concentrated in four areas:
 
 1. Broader enduring-memory and memory-promotion architecture still remains more
    programme direction than integrated operational substrate.
 2. The episode-evaluation loop now has represented proposal and promotion
-   workflows, but broader isolated self-improvement and benchmark-world support
+   workflows plus represented proposal persistence and self-improvement policy
+   profiles, but broader isolated self-improvement and benchmark-world support
    is still only partial rather than a general experimentation substrate.
 3. Authority-backed critic/evaluator expansion is still narrower than the
    design target for self-correction and policy learning.
@@ -41,13 +43,13 @@ The current shortfall is now concentrated in four areas:
 
 ## Current Code Reality
 
-As measured on 23 April 2026 after the `JVNAUTOSCI-1987` landing:
+As measured on 23 April 2026 after the `JVNAUTOSCI-1993` landing:
 
-- `src/backend/integrations/internal_mcp/orchestrator.py` is `35095` lines
-- `src/backend/integrations/internal_mcp/catalogue.py` is `27480` lines
-- `src/backend/server/routes/von_routes.py` is `13351` lines
-- `src/backend/services/turn_execution_record_service.py` is `6916` lines
-- `src/backend/server/utils_flask.py` is `3036` lines
+- `src/backend/integrations/internal_mcp/orchestrator.py` is `37675` lines
+- `src/backend/integrations/internal_mcp/catalogue.py` is `30083` lines
+- `src/backend/server/routes/von_routes.py` is `14908` lines
+- `src/backend/services/turn_execution_record_service.py` is `7480` lines
+- `src/backend/server/utils_flask.py` is `3392` lines
 
 Large files are not the whole problem, but they remain the strongest pressure
 surface for hidden policy drift and inline patching.
@@ -100,12 +102,28 @@ now landed:
    recommendations back onto proposal lifecycle plus critique memory, and no
    longer relies on Python fallback suggestion synthesis on the live path.
 
+8. `JVNAUTOSCI-1994`
+   Workflow-authoring proposal persistence is now proposal-addressable rather
+   than singleton-per-workflow: exact proposal rows remain reviewable by
+   `proposal_id`, workflows keep an explicit current-proposal pointer, new
+   submissions supersede earlier pending-review proposals instead of
+   overwriting them in place, and promotion evaluation binds to the exact
+   launched candidate revision.
+
+9. `JVNAUTOSCI-1993`
+   The remaining self-improvement launch and benchmark policy slab now resolves
+   from a canonical episode self-improvement profile linked through Vontology:
+   launch budget, priority order, eligible target surfaces, dedupe identity,
+   and benchmark scan/audit depth are no longer owned by Python constants, and
+   missing or invalid profile payloads fail closed on the live path.
+
 ### P0 Remaining Architecture Work
 
-The previously identified immediate P0 tranche is now landed, and the
-previously identified `1987` P1 close-out is also landed. The next sharpest
-work is no longer one more missing live-path repair; it is the bounded
-repeat-review plus the broader architecture umbrellas that still remain.
+The previously identified immediate P0 tranche is now landed, the previously
+identified `1987` P1 close-out is landed, and the sharpest same-day follow-on
+repairs from that landing are also landed. The next sharpest work is no longer
+one more missing live-path repair; it is the bounded repeat-review plus the
+broader architecture umbrellas that still remain.
 
 ### P1 Next Tranche
 
@@ -188,8 +206,8 @@ reopened or duplicated here:
 This review must be repeated. It should not remain a one-off note.
 
 This same-day refresh now incorporates the landings of `1974`, `1975`, `1985`,
-`1973`, `1986`, `1988`, and `1987`, but it does not replace the fuller
-repeat-review task tracked in `JVNAUTOSCI-1989`.
+`1973`, `1986`, `1988`, `1987`, `1994`, and `1993`, but it does not replace
+the fuller repeat-review task tracked in `JVNAUTOSCI-1989`.
 
 After completion of any P0 or P1 task from this tranche:
 
