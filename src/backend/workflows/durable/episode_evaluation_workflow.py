@@ -10,6 +10,9 @@ from typing import Any, Mapping, Sequence
 from ...services.episode_critic_evidence_service import (
     build_episode_critic_evidence_bundle,
 )
+from ...services.episode_evaluator_contract_service import (
+    build_episode_evaluator_contract,
+)
 from ...services.episode_critique_memory_service import (
     upsert_episode_critique_memory_from_episode_assessment,
 )
@@ -131,10 +134,39 @@ def _build_fallback_assessment(bundle: Mapping[str, Any]) -> dict[str, Any]:
         recommendations.append(
             f"Review the reusable behaviour surfaces around {workflow_id} before applying a repair."
         )
+    evidence_receipt_ids = [
+        value
+        for value in (
+            (
+                f"episode_bundle_receipt:{_clean_text(_mapping_or_empty(bundle.get('bundle_receipt')).get('sha256'))}"
+                if _clean_text(_mapping_or_empty(bundle.get("bundle_receipt")).get("sha256"))
+                else None
+            ),
+            (
+                f"episode_request:{_clean_text(locator.get('request_id'))}"
+                if _clean_text(locator.get("request_id"))
+                else None
+            ),
+        )
+        if value
+    ]
+    evaluator_contract = build_episode_evaluator_contract(
+        legacy_verdict="inconclusive",
+        legacy_confidence=0.0,
+        legacy_unresolved_check_count=len(gap_codes),
+        summary="Episode evidence was not complete enough for a reliable critic judgement.",
+        format_over_content_diagnostic=format_over_content_diagnostic,
+        evidence_receipt_ids=evidence_receipt_ids,
+        source_memory_ids=[],
+        subject_workflow_ids=[workflow_id] if workflow_id else [],
+        subject_tool_names=[],
+        subject_concept_ids=[],
+        measured_at_utc=None,
+    )
     result = {
-        "verdict": "inconclusive",
-        "confidence": 0.0,
-        "unresolved_check_count": len(gap_codes),
+        "verdict": _clean_text(evaluator_contract.get("verdict")) or "inconclusive",
+        "confidence": evaluator_contract.get("confidence"),
+        "unresolved_check_count": evaluator_contract.get("unresolved_check_count"),
         "summary": (
             "Episode evidence was not complete enough for a reliable critic judgement."
         ),
@@ -145,6 +177,7 @@ def _build_fallback_assessment(bundle: Mapping[str, Any]) -> dict[str, Any]:
         "recommendations": recommendations[:6],
         "root_causes": _build_root_causes_from_gaps(capability_gaps),
         "improvement_suggestions": [],
+        "evaluator_contract": evaluator_contract,
     }
     if format_over_content_diagnostic:
         result["format_over_content_diagnostic"] = format_over_content_diagnostic

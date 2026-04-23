@@ -12,7 +12,8 @@ implemented output of `JVNAUTOSCI-1989`, and then refreshed again after
 note plus first implementation slices, and then refreshed again after
 `JVNAUTOSCI-1964` did the same for the evaluator line, and then refreshed again
 after `JVNAUTOSCI-1963` did the same for the isolated self-improvement and
-benchmark-world line.
+benchmark-world line, and then refreshed again after `JVNAUTOSCI-1998` landed
+the first concrete multi-axis evaluator contract slice.
 
 It is not a replacement for `Von_for_AgenticAI.md`. That document remains the
 long-horizon design note. This document is the current engineering-status and
@@ -42,7 +43,9 @@ current shortfall is now concentrated in four areas:
    umbrella `JVNAUTOSCI-1964`: `JVNAUTOSCI-1998`, `JVNAUTOSCI-1999`,
    `JVNAUTOSCI-2000`, and `JVNAUTOSCI-2001` now carry the multi-axis evaluator
    contract, grounded helpfulness critic, calibration and abstention evaluator,
-   and long-horizon evaluator support.
+   and long-horizon evaluator support. `1998` is now landed, so the remaining
+   work on this line is the axis-specific evaluator families plus the
+   long-horizon support slice.
 2. The self-improvement-world line now also has concrete child tasks rather
    than only the umbrella `JVNAUTOSCI-1963`: `JVNAUTOSCI-2002`,
    `JVNAUTOSCI-2003`, `JVNAUTOSCI-2004`, and `JVNAUTOSCI-2005` now carry the
@@ -104,6 +107,7 @@ surfaces rather than against older pre-`1988` or pre-`1993` wording:
   [workflow_studio_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/workflows/workflow_studio_service.py:2251)
 
 - Current critic/evaluator surfaces:
+  [episode_evaluator_contract_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/services/episode_evaluator_contract_service.py:1),
   [turn_execution_record_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/services/turn_execution_record_service.py:1300),
   [turn_execution_record_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/services/turn_execution_record_service.py:6399),
   [episode_critic_evidence_service.py](/C:/Users/mwit860/Programming/Strong-AI-Lab/Von/src/backend/services/episode_critic_evidence_service.py:1395),
@@ -253,47 +257,50 @@ The following architecture tasks from the 21-23 April tranche are now landed:
     `JVNAUTOSCI-2002`, `JVNAUTOSCI-2003`, `JVNAUTOSCI-2004`, and
     `JVNAUTOSCI-2005`.
 
+15. `JVNAUTOSCI-1998`
+    Critique memory, fallback episode assessment, and benchmark reporting now
+    share a canonical multi-axis evaluator contract across execution
+    correctness, grounded helpfulness, calibration and abstention, recovery
+    quality, and long-horizon task-state integrity, with legacy
+    verdict/confidence retained only as roll-up compatibility state.
+
 ### P1 Next Tranche
 
 The next substantive sequence should now be:
 
-1. `JVNAUTOSCI-1998`
-   Canonical multi-axis episode evaluator contract and critique-memory
-   projection expansion.
-
-2. `JVNAUTOSCI-1999`
+1. `JVNAUTOSCI-1999`
    Grounded helpfulness and evidence-answer consistency critic workflow.
 
-3. `JVNAUTOSCI-2000`
+2. `JVNAUTOSCI-2000`
    Calibration, abstention, and recovery-quality evaluator workflow.
 
-4. `JVNAUTOSCI-1995`
+3. `JVNAUTOSCI-1995`
    Canonical enduring-memory manifest and query surface.
 
-5. `JVNAUTOSCI-2001`
+4. `JVNAUTOSCI-2001`
    Long-horizon task-state reconstruction and memory-conditioned evaluator
    support.
 
-6. `JVNAUTOSCI-2002`
+5. `JVNAUTOSCI-2002`
    Represented candidate-world manifests and proposal-to-experiment-run
    linkage for workflow self-improvement.
 
-7. `JVNAUTOSCI-2003`
+6. `JVNAUTOSCI-2003`
    Evaluator- and memory-backed baseline-vs-candidate comparison for
    self-improvement experiment runs.
 
-8. `JVNAUTOSCI-2004`
+7. `JVNAUTOSCI-2004`
    Experiment-backed promotion, bounded shadow evaluation, and rollback-safe
    publication gating for workflow candidates.
 
-9. `JVNAUTOSCI-1996`
+8. `JVNAUTOSCI-1996`
    Represented memory-promotion and revision workflow.
 
-10. `JVNAUTOSCI-1997`
-   Long-horizon enduring-memory evaluation and task-state reconstruction
-   harness.
+9. `JVNAUTOSCI-1997`
+    Long-horizon enduring-memory evaluation and task-state reconstruction
+    harness.
 
-11. `JVNAUTOSCI-2005`
+10. `JVNAUTOSCI-2005`
     Prompt, policy, and retrieval or memory candidate-world expansion beyond
     the workflow-first line.
 
@@ -301,10 +308,10 @@ Why this is now the right order:
 
 - `1964` is now done as architecture and decomposition work, so the next moves
   should be concrete evaluator slices rather than another umbrella pass.
-- `1998` comes first because the live evaluator substrate still collapses too
-  much state into one verdict/confidence pair. The later groundedness,
-  calibration, and long-horizon slices need a stable machine-usable contract.
-- `1999` and `2000` now come before `1963` because self-improvement and
+- `1998` is now landed, so `1999` and `2000` can build on a live stored axis
+  contract instead of inventing local evaluator result shapes.
+- `1999` and `2000` now come before the later `1963` child tasks because
+  self-improvement and
   promotion gating become more valuable once they can reason over richer
   evaluator outputs for grounded helpfulness, calibration, abstention, and
   recovery quality.

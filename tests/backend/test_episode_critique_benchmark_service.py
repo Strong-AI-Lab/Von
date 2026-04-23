@@ -38,6 +38,12 @@ def _sample_docs() -> list[dict[str, Any]]:
             "verdict": "follow_up_required",
             "confidence": 0.85,
             "unresolved_check_count": 2,
+            "evaluator_schema_version": "episode_evaluator_contract.v1",
+            "evaluator_axis_statuses": {
+                "execution_correctness": "follow_up_required",
+            },
+            "evaluator_evaluated_axis_ids": ["execution_correctness"],
+            "evaluator_actionable_axis_ids": ["execution_correctness"],
             "routing_decision": "create_task",
             "routing_repeat_count": 0,
             "routing_fingerprint": "fp-a",
@@ -62,6 +68,16 @@ def _sample_docs() -> list[dict[str, Any]]:
             "verdict": "pass",
             "confidence": 0.6,
             "unresolved_check_count": 0,
+            "evaluator_schema_version": "episode_evaluator_contract.v1",
+            "evaluator_axis_statuses": {
+                "execution_correctness": "pass",
+                "grounded_helpfulness": "pass",
+            },
+            "evaluator_evaluated_axis_ids": [
+                "execution_correctness",
+                "grounded_helpfulness",
+            ],
+            "evaluator_actionable_axis_ids": [],
             "routing_decision": "create_task",
             "routing_repeat_count": 0,
             "routing_fingerprint": "fp-b",
@@ -86,6 +102,12 @@ def _sample_docs() -> list[dict[str, Any]]:
             "verdict": "fail",
             "confidence": 0.91,
             "unresolved_check_count": 3,
+            "evaluator_schema_version": "episode_evaluator_contract.v1",
+            "evaluator_axis_statuses": {
+                "execution_correctness": "fail",
+            },
+            "evaluator_evaluated_axis_ids": ["execution_correctness"],
+            "evaluator_actionable_axis_ids": ["execution_correctness"],
             "routing_decision": "create_task",
             "routing_repeat_count": 1,
             "routing_fingerprint": "fp-c",
@@ -111,6 +133,19 @@ def _sample_docs() -> list[dict[str, Any]]:
             "verdict": "fail",
             "confidence": 0.88,
             "unresolved_check_count": 2,
+            "evaluator_schema_version": "episode_evaluator_contract.v1",
+            "evaluator_axis_statuses": {
+                "execution_correctness": "fail",
+                "grounded_helpfulness": "fail",
+            },
+            "evaluator_evaluated_axis_ids": [
+                "execution_correctness",
+                "grounded_helpfulness",
+            ],
+            "evaluator_actionable_axis_ids": [
+                "execution_correctness",
+                "grounded_helpfulness",
+            ],
             "routing_decision": "create_task",
             "routing_repeat_count": 2,
             "routing_fingerprint": "fp-c",
@@ -136,6 +171,16 @@ def _sample_docs() -> list[dict[str, Any]]:
             "verdict": "inconclusive",
             "confidence": 0.55,
             "unresolved_check_count": 1,
+            "evaluator_schema_version": "episode_evaluator_contract.v1",
+            "evaluator_axis_statuses": {
+                "execution_correctness": "inconclusive",
+                "grounded_helpfulness": "inconclusive",
+            },
+            "evaluator_evaluated_axis_ids": [
+                "execution_correctness",
+                "grounded_helpfulness",
+            ],
+            "evaluator_actionable_axis_ids": [],
             "routing_decision": "memory_only",
             "routing_repeat_count": 0,
             "routing_fingerprint": "fp-d",
@@ -167,6 +212,9 @@ def _state_for(memory_id: str) -> dict[str, Any]:
             "summary": {
                 "summary": "Critic memory summary",
                 "root_cause_count": 1,
+            },
+            "evaluator_contract": {
+                "schema_version": "episode_evaluator_contract.v1",
             },
         },
         "routing": {
@@ -243,6 +291,16 @@ def test_build_episode_critique_benchmark_report_returns_metrics_and_sampled_cas
     assert recurrence_metrics["remediated_fingerprint_count"] == 2
     assert recurrence_metrics["post_remediation_recurrence_fingerprint_count"] == 1
     assert recurrence_metrics["post_remediation_recurrence_rate_pct"] == 50.0
+    evaluator_axis_metrics = report["metrics"]["evaluator_axis_metrics"]["axes"]
+    assert evaluator_axis_metrics["execution_correctness"]["status_counts"] == {
+        "follow_up_required": 1,
+        "pass": 1,
+        "fail": 2,
+        "inconclusive": 1,
+    }
+    assert (
+        evaluator_axis_metrics["grounded_helpfulness"]["actionable_episode_count"] == 1
+    )
 
     improvement_metrics = report["metrics"]["improvement_suggestion_metrics"]
     assert improvement_metrics["episode_with_suggestions_count"] == 3
@@ -260,6 +318,13 @@ def test_build_episode_critique_benchmark_report_returns_metrics_and_sampled_cas
     assert sampled_meta_audit["bucket_counts"]["false_negative_task_proxy"] == 2
     assert sampled_meta_audit["bucket_counts"]["inconclusive_actionable"] == 1
     assert sampled_meta_audit["cases"][0]["improvement_suggestion_count"] >= 0
+    assert "execution_correctness" in sampled_meta_audit["cases"][0]["evaluator_axis_statuses"]
+    assert (
+        sampled_meta_audit["cases"][0]["critic_memory_preview"]["critic"][
+            "evaluator_contract"
+        ]["schema_version"]
+        == "episode_evaluator_contract.v1"
+    )
 
     regression = report["regression_assessment"]
     assert regression["regression_detected"] is True

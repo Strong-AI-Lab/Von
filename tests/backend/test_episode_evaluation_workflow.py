@@ -164,6 +164,15 @@ def test_evidence_bundle_handler_surfaces_format_over_content_diagnostic(monkeyp
     fallback = result.outputs["episode_critic_fallback_assessment"]
     assert fallback["format_over_content_diagnostic"]["status"] == "suspected"
     assert fallback["improvement_suggestions"] == []
+    assert fallback["evaluator_contract"]["schema_version"] == (
+        "episode_evaluator_contract.v1"
+    )
+    grounded_axis = next(
+        axis
+        for axis in fallback["evaluator_contract"]["axes"]
+        if axis["axis_id"] == "grounded_helpfulness"
+    )
+    assert grounded_axis["status"] == "inconclusive"
     assert any(
         "output contract" in recommendation.lower()
         for recommendation in fallback["recommendations"]

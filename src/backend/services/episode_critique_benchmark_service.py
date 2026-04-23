@@ -10,6 +10,7 @@ from typing import Any
 
 from pymongo import ASCENDING
 
+from .episode_evaluator_contract_service import EPISODE_EVALUATOR_AXIS_IDS
 from .episode_critic_evidence_service import build_episode_critic_evidence_bundle
 from .episode_critique_memory_service import (
     get_episode_critique_memories_collection,
@@ -161,6 +162,9 @@ def _build_query(
 
 
 def _normalise_projection_doc(doc: Mapping[str, Any]) -> dict[str, Any]:
+    evaluator_axis_statuses = _mapping_or_empty(doc.get("evaluator_axis_statuses"))
+    evaluator_axis_confidences = _mapping_or_empty(doc.get("evaluator_axis_confidences"))
+    evaluator_axis_reason_codes = _mapping_or_empty(doc.get("evaluator_axis_reason_codes"))
     return {
         "memory_id": _safe_str(doc.get("memory_id")),
         "request_id": _safe_str(doc.get("request_id")),
@@ -174,6 +178,40 @@ def _normalise_projection_doc(doc: Mapping[str, Any]) -> dict[str, Any]:
         "critic_summary_text": _safe_str(doc.get("critic_summary_text")),
         "confidence": _safe_float(doc.get("confidence")),
         "unresolved_check_count": _safe_int(doc.get("unresolved_check_count")),
+        "evaluator_schema_version": _safe_str(doc.get("evaluator_schema_version")),
+        "evaluator_axes": [
+            dict(item)
+            for item in (doc.get("evaluator_axes") or [])
+            if isinstance(item, Mapping)
+        ],
+        "evaluator_axis_ids": _normalise_strings(
+            doc.get("evaluator_axis_ids"),
+            limit=20,
+        ),
+        "evaluator_axis_statuses": {
+            key: _safe_str(value) or "not_evaluated"
+            for key, value in evaluator_axis_statuses.items()
+            if _safe_str(key)
+        },
+        "evaluator_axis_confidences": {
+            key: parsed
+            for key, value in evaluator_axis_confidences.items()
+            for parsed in [_safe_float(value)]
+            if _safe_str(key) and parsed is not None
+        },
+        "evaluator_axis_reason_codes": {
+            key: _normalise_strings(value, limit=20)
+            for key, value in evaluator_axis_reason_codes.items()
+            if _safe_str(key)
+        },
+        "evaluator_evaluated_axis_ids": _normalise_strings(
+            doc.get("evaluator_evaluated_axis_ids"),
+            limit=20,
+        ),
+        "evaluator_actionable_axis_ids": _normalise_strings(
+            doc.get("evaluator_actionable_axis_ids"),
+            limit=20,
+        ),
         "implicated_workflow_ids": _normalise_strings(
             doc.get("implicated_workflow_ids"),
             limit=20,
@@ -245,6 +283,14 @@ def _fetch_projection_rows(
         "critic_summary_text": 1,
         "confidence": 1,
         "unresolved_check_count": 1,
+        "evaluator_schema_version": 1,
+        "evaluator_axes": 1,
+        "evaluator_axis_ids": 1,
+        "evaluator_axis_statuses": 1,
+        "evaluator_axis_confidences": 1,
+        "evaluator_axis_reason_codes": 1,
+        "evaluator_evaluated_axis_ids": 1,
+        "evaluator_actionable_axis_ids": 1,
         "implicated_workflow_ids": 1,
         "implicated_tool_names": 1,
         "implicated_concept_ids": 1,
@@ -339,7 +385,35 @@ def _has_useful_improvement_suggestions(row: Mapping[str, Any]) -> bool:
     return bool(implicated_tool_names.intersection(targeted_tool_names))
 
 
+def _row_evaluator_axis_statuses(row: Mapping[str, Any]) -> dict[str, str]:
+    statuses = _mapping_or_empty(row.get("evaluator_axis_statuses"))
+    return {
+        axis_id: _safe_str(statuses.get(axis_id)) or "not_evaluated"
+        for axis_id in EPISODE_EVALUATOR_AXIS_IDS
+        if _safe_str(statuses.get(axis_id))
+    }
+
+
+def _row_actionable_axis_ids(row: Mapping[str, Any]) -> list[str]:
+    explicit = _normalise_strings(row.get("evaluator_actionable_axis_ids"), limit=20)
+    if explicit:
+        return explicit
+    return [
+        axis_id
+        for axis_id, status in _row_evaluator_axis_statuses(row).items()
+        if status in {"follow_up_required", "fail"}
+    ]
+
+
+def _row_has_fail_axis(row: Mapping[str, Any]) -> bool:
+    return any(
+        status == "fail" for status in _row_evaluator_axis_statuses(row).values()
+    )
+
+
 def _is_likely_actionable(row: Mapping[str, Any]) -> bool:
+    if _row_actionable_axis_ids(row):
+        return True
     verdict = str(row.get("verdict") or "").strip().lower()
     unresolved = _safe_int(row.get("unresolved_check_count"))
     repeat_count = _safe_int(row.get("routing_repeat_count"))
@@ -347,6 +421,9 @@ def _is_likely_actionable(row: Mapping[str, Any]) -> bool:
 
 
 def _is_strong_actionable(row: Mapping[str, Any]) -> bool:
+    actionable_axis_ids = _row_actionable_axis_ids(row)
+    if _row_has_fail_axis(row) or len(actionable_axis_ids) >= 2:
+        return True
     verdict = str(row.get("verdict") or "").strip().lower()
     unresolved = _safe_int(row.get("unresolved_check_count"))
     repeat_count = _safe_int(row.get("routing_repeat_count"))
@@ -373,6 +450,39 @@ def _count_by_string(rows: Sequence[Mapping[str, Any]], field: str) -> dict[str,
         key = _safe_str(row.get(field)) or "unknown"
         counts[key] = counts.get(key, 0) + 1
     return counts
+
+
+def _build_evaluator_axis_metrics(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    scanned_count = len(rows)
+    axis_metrics: dict[str, Any] = {}
+    for axis_id in EPISODE_EVALUATOR_AXIS_IDS:
+        status_counts: dict[str, int] = {}
+        actionable_count = 0
+        evaluated_count = 0
+        for row in rows:
+            status = _row_evaluator_axis_statuses(row).get(axis_id) or "not_evaluated"
+            status_counts[status] = status_counts.get(status, 0) + 1
+            if status != "not_evaluated":
+                evaluated_count += 1
+            if status in {"follow_up_required", "fail"}:
+                actionable_count += 1
+        axis_metrics[axis_id] = {
+            "status_counts": status_counts,
+            "status_rates_pct": {
+                status: _rate_pct(count, scanned_count)
+                for status, count in status_counts.items()
+            },
+            "evaluated_episode_count": evaluated_count,
+            "evaluated_episode_rate_pct": _rate_pct(evaluated_count, scanned_count),
+            "actionable_episode_count": actionable_count,
+            "actionable_episode_rate_pct": _rate_pct(actionable_count, scanned_count),
+        }
+    return {
+        "axis_ids": list(EPISODE_EVALUATOR_AXIS_IDS),
+        "axes": axis_metrics,
+    }
 
 
 def _analyse_recurrence(
@@ -501,6 +611,7 @@ def _build_metrics(
     ]
 
     recurrence_metrics, _ = _analyse_recurrence(rows)
+    evaluator_axis_metrics = _build_evaluator_axis_metrics(rows)
 
     return {
         "scanned_count": scanned_count,
@@ -508,6 +619,7 @@ def _build_metrics(
         "verdict_rates_pct": verdict_rates_pct,
         "workflow_counts": workflow_counts,
         "routing_decision_counts": routing_decision_counts,
+        "evaluator_axis_metrics": evaluator_axis_metrics,
         "actionability_metrics": {
             "actionable_episode_count": len(actionable_rows),
             "actionable_episode_rate_pct": _rate_pct(len(actionable_rows), scanned_count),
@@ -1073,6 +1185,7 @@ def _build_case_state_preview(
     state_mapping = _mapping_or_empty(state)
     critic = _mapping_or_empty(state_mapping.get("critic"))
     critic_summary = _mapping_or_empty(critic.get("summary"))
+    evaluator_contract = _mapping_or_empty(critic.get("evaluator_contract"))
     subject_episode = _mapping_or_empty(state_mapping.get("subject_episode"))
     routing = _mapping_or_empty(state_mapping.get("routing"))
     return {
@@ -1094,6 +1207,14 @@ def _build_case_state_preview(
             ),
             "summary": _safe_str(critic_summary.get("summary")),
             "root_cause_count": _safe_int(critic_summary.get("root_cause_count")),
+            "evaluator_contract": {
+                "schema_version": _safe_str(evaluator_contract.get("schema_version")),
+                "axis_statuses": _mapping_or_empty(row.get("evaluator_axis_statuses")),
+                "actionable_axis_ids": _normalise_strings(
+                    row.get("evaluator_actionable_axis_ids"),
+                    limit=10,
+                ),
+            },
         },
         "routing": {
             "decision": _safe_str(routing.get("decision")) or _safe_str(row.get("routing_decision")),
@@ -1250,6 +1371,13 @@ def _build_sampled_meta_audit_cases(
                 "verdict": _safe_str(row.get("verdict")),
                 "confidence": _safe_float(row.get("confidence")),
                 "unresolved_check_count": _safe_int(row.get("unresolved_check_count")),
+                "evaluator_axis_statuses": _mapping_or_empty(
+                    row.get("evaluator_axis_statuses")
+                ),
+                "evaluator_actionable_axis_ids": _normalise_strings(
+                    row.get("evaluator_actionable_axis_ids"),
+                    limit=10,
+                ),
                 "routing_decision": _safe_str(row.get("routing_decision")),
                 "routing_repeat_count": _safe_int(row.get("routing_repeat_count")),
                 "remediation_task_ids": _normalise_strings(

@@ -197,6 +197,14 @@ def test_build_episode_critique_memory_state_extracts_links_and_receipts(monkeyp
     assert state["subject_episode"]["episode_id"] == "wfep_123"
     assert state["critic"]["verdict"] == "pass"
     assert state["critic"]["confidence"] == 1.0
+    evaluator_contract = state["critic"]["evaluator_contract"]
+    assert evaluator_contract["schema_version"] == "episode_evaluator_contract.v1"
+    execution_axis = next(
+        axis
+        for axis in evaluator_contract["axes"]
+        if axis["axis_id"] == "execution_correctness"
+    )
+    assert execution_axis["status"] == "pass"
     assert "#V#paper" in state["implicated"]["concept_ids"]
     assert "#V#task_123" in state["remediation"]["task_ids"]
     assert "JVNAUTOSCI-999" in state["remediation"]["jira_issue_keys"]
@@ -220,6 +228,53 @@ def test_upsert_episode_critique_memory_projection_persists_document(monkeypatch
             "verdict": "pass",
             "confidence": 1.0,
             "unresolved_check_count": 0,
+            "evaluator_contract": {
+                "schema_version": "episode_evaluator_contract.v1",
+                "axes": [
+                    {
+                        "axis_id": "execution_correctness",
+                        "axis_version": "episode_evaluator_axis.v1",
+                        "status": "pass",
+                        "confidence": 1.0,
+                        "summary": "All recorded effects verified.",
+                        "reason_codes": ["completion_gate_clear"],
+                        "evidence_receipt_ids": ["turn_execution_record:req-1607-1"],
+                        "source_memory_ids": [],
+                        "subject_workflow_ids": ["#V#workflow"],
+                        "subject_tool_names": ["search_concepts"],
+                        "subject_concept_ids": ["#V#paper"],
+                        "measured_at_utc": "2026-03-29T05:05:00Z",
+                    },
+                    {
+                        "axis_id": "grounded_helpfulness",
+                        "axis_version": "episode_evaluator_axis.v1",
+                        "status": "inconclusive",
+                        "confidence": 0.67,
+                        "summary": "Structured output may have displaced nuance.",
+                        "reason_codes": [
+                            "structured_output_contract_present",
+                            "grounded_tool_path_unused",
+                        ],
+                        "evidence_receipt_ids": ["turn_execution_record:req-1607-1"],
+                        "source_memory_ids": [],
+                        "subject_workflow_ids": ["#V#workflow"],
+                        "subject_tool_names": ["search_concepts"],
+                        "subject_concept_ids": ["#V#paper"],
+                        "counterfactual_recommended_action": (
+                            "gather_or_use_stronger_answer_supporting_evidence"
+                        ),
+                        "measured_at_utc": "2026-03-29T05:05:00Z",
+                    },
+                ],
+                "evaluated_axis_ids": [
+                    "execution_correctness",
+                    "grounded_helpfulness",
+                ],
+                "actionable_axis_ids": [],
+                "verdict": "pass",
+                "confidence": 1.0,
+                "unresolved_check_count": 0,
+            },
             "format_over_content_diagnostic": {
                 "status": "suspected",
                 "summary": "Structured output may have displaced nuance.",
@@ -287,6 +342,9 @@ def test_upsert_episode_critique_memory_projection_persists_document(monkeypatch
     assert stored["improvement_target_tool_names"] == ["search_web"]
     assert stored["format_over_content_status"] == "suspected"
     assert stored["format_over_content_confidence"] == 0.67
+    assert stored["evaluator_schema_version"] == "episode_evaluator_contract.v1"
+    assert stored["evaluator_axis_statuses"]["execution_correctness"] == "pass"
+    assert stored["evaluator_axis_statuses"]["grounded_helpfulness"] == "inconclusive"
     assert stored["format_over_content_reason_codes"] == [
         "structured_output_contract_present",
         "grounded_tool_path_unused",
@@ -345,6 +403,16 @@ def test_build_episode_assessment_state_normalises_improvement_suggestions():
     assert suggestions[1]["category"] == "critic_self_improvement"
     assert suggestions[1]["target_surface"] == "episode_critic"
     assert suggestions[1]["recursion_level"] == 1
+    assert state["critic"]["evaluator_contract"]["axis_ids"] == [
+        "execution_correctness",
+        "grounded_helpfulness",
+        "calibration_and_abstention",
+        "recovery_quality",
+        "long_horizon_task_state_integrity",
+    ]
+    assert state["critic"]["evaluator_contract"]["axes"][0]["axis_id"] == (
+        "execution_correctness"
+    )
 
 
 def test_build_episode_assessment_state_preserves_format_over_content_diagnostic():
@@ -388,6 +456,16 @@ def test_build_episode_assessment_state_preserves_format_over_content_diagnostic
     assert diagnostic["selected_model"] == "gpt-5.4-mini"
     assert diagnostic["observed_stage_id"] == "selector_decision"
     assert diagnostic["raw_response_format"] == "json_object"
+    grounded_axis = next(
+        axis
+        for axis in state["critic"]["evaluator_contract"]["axes"]
+        if axis["axis_id"] == "grounded_helpfulness"
+    )
+    assert grounded_axis["status"] == "inconclusive"
+    assert grounded_axis["reason_codes"] == [
+        "structured_output_contract_present",
+        "grounded_tool_path_unused",
+    ]
 
 
 def test_build_episode_assessment_state_does_not_synthesise_fallback_improvement_suggestions():

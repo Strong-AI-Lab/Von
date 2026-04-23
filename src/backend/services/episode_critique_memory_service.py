@@ -16,6 +16,10 @@ from pymongo.errors import OperationFailure, PyMongoError
 from ..db.mongo_client import get_db
 from . import concept_service
 from .concept_service import ConceptNotFoundError, get_concept_by_concept_id_exact
+from .episode_evaluator_contract_service import (
+    build_episode_evaluator_contract,
+    build_episode_evaluator_projection_fields,
+)
 from .episode_evaluation_workflow_contracts import (
     EPISODE_EVALUATION_IMPROVEMENT_SUGGESTION_CATEGORIES,
     EPISODE_EVALUATION_IMPROVEMENT_SUGGESTION_MAX_COUNT,
@@ -877,6 +881,81 @@ def _build_evidence_receipts(
     return receipt
 
 
+def _build_evaluator_receipt_ids(evidence_receipts: Mapping[str, Any]) -> list[str]:
+    receipt_ids: list[str] = []
+    seen: set[str] = set()
+
+    def _add(value: str | None) -> None:
+        cleaned = _safe_str(value)
+        if not cleaned or cleaned in seen:
+            return
+        seen.add(cleaned)
+        receipt_ids.append(cleaned)
+
+    receipt_hash = _safe_str(evidence_receipts.get("receipt_hash"))
+    if receipt_hash:
+        _add(f"episode_critique_receipt:{receipt_hash}")
+
+    turn_execution_record = _mapping_or_empty(evidence_receipts.get("turn_execution_record"))
+    request_id = _safe_str(turn_execution_record.get("request_id"))
+    if request_id:
+        _add(f"turn_execution_record:{request_id}")
+
+    episode_bundle_receipt = _mapping_or_empty(evidence_receipts.get("episode_bundle_receipt"))
+    _add(
+        f"episode_bundle_receipt:{_safe_str(episode_bundle_receipt.get('sha256'))}"
+        if _safe_str(episode_bundle_receipt.get("sha256"))
+        else None
+    )
+
+    workflow_episode = _mapping_or_empty(evidence_receipts.get("workflow_episode"))
+    episode_id = _safe_str(workflow_episode.get("episode_id"))
+    if episode_id:
+        _add(f"workflow_episode:{episode_id}")
+
+    return receipt_ids
+
+
+def _build_evaluator_contract_for_memory_state(
+    *,
+    verdict: str,
+    confidence: float | None,
+    unresolved_check_count: int,
+    summary: str | None,
+    critic_summary: Mapping[str, Any] | None,
+    completion_gate: Mapping[str, Any] | None,
+    format_over_content_diagnostic: Mapping[str, Any] | None,
+    explicit_axes: Any,
+    evidence_receipts: Mapping[str, Any],
+    workflow_id: str | None,
+    implicated_workflow_ids: Sequence[str] | None,
+    implicated_tool_names: Sequence[str] | None,
+    implicated_concept_ids: Sequence[str] | None,
+    measured_at_utc: str,
+) -> dict[str, Any]:
+    subject_workflow_ids = _merge_string_lists(
+        [workflow_id] if workflow_id else [],
+        implicated_workflow_ids,
+        limit=40,
+    )
+    return build_episode_evaluator_contract(
+        legacy_verdict=verdict,
+        legacy_confidence=confidence,
+        legacy_unresolved_check_count=unresolved_check_count,
+        summary=summary,
+        completion_gate=completion_gate,
+        critic_summary=critic_summary,
+        format_over_content_diagnostic=format_over_content_diagnostic,
+        explicit_axes=explicit_axes,
+        evidence_receipt_ids=_build_evaluator_receipt_ids(evidence_receipts),
+        source_memory_ids=[],
+        subject_workflow_ids=subject_workflow_ids,
+        subject_tool_names=implicated_tool_names,
+        subject_concept_ids=implicated_concept_ids,
+        measured_at_utc=measured_at_utc,
+    )
+
+
 def _build_description(
     *,
     request_id: str,
@@ -998,6 +1077,42 @@ def build_episode_critique_memory_state_from_episode_assessment(
         "assessment_sha256": _hash_payload(assessment),
     }
 
+    evidence_receipts = {
+        **receipt_payload,
+        "receipt_hash": _hash_payload(receipt_payload),
+    }
+    evaluator_contract = _build_evaluator_contract_for_memory_state(
+        verdict=verdict,
+        confidence=confidence,
+        unresolved_check_count=unresolved_check_count,
+        summary=summary,
+        critic_summary={
+            "root_cause_count": len(
+                [
+                    item
+                    for item in (assessment.get("root_causes") or [])
+                    if isinstance(item, Mapping)
+                ]
+            )
+        },
+        completion_gate={},
+        format_over_content_diagnostic=format_over_content_diagnostic,
+        explicit_axes=assessment.get("evaluator_contract")
+        or assessment.get("evaluator_axes"),
+        evidence_receipts=evidence_receipts,
+        workflow_id=workflow_id,
+        implicated_workflow_ids=workflow_ids,
+        implicated_tool_names=tool_names,
+        implicated_concept_ids=concept_ids,
+        measured_at_utc=updated_at_utc,
+    )
+    verdict = _safe_str(evaluator_contract.get("verdict")) or verdict
+    confidence = _safe_float(evaluator_contract.get("confidence"))
+    unresolved_check_count = _safe_int(
+        evaluator_contract.get("unresolved_check_count"),
+        default=unresolved_check_count,
+    )
+
     critic_state: dict[str, Any] = {
         "workflow_id": EPISODE_EVALUATION_WORKFLOW_ID,
         "summary": {
@@ -1017,6 +1132,7 @@ def build_episode_critique_memory_state_from_episode_assessment(
         "confidence": confidence,
         "unresolved_check_count": unresolved_check_count,
         "assessment": dict(assessment),
+        "evaluator_contract": evaluator_contract,
     }
     if format_over_content_diagnostic is not None:
         critic_state["format_over_content_diagnostic"] = format_over_content_diagnostic
@@ -1057,10 +1173,7 @@ def build_episode_critique_memory_state_from_episode_assessment(
         "recommendations": recommendations,
         "improvement_suggestions": improvement_suggestions,
         "self_improvement": {},
-        "evidence_receipts": {
-            **receipt_payload,
-            "receipt_hash": _hash_payload(receipt_payload),
-        },
+        "evidence_receipts": evidence_receipts,
         "dedupe_fingerprint": _hash_payload(
             {
                 "request_id": request_id,
@@ -1171,6 +1284,33 @@ def build_episode_critique_memory_state_from_turn(
     format_over_content_diagnostic = _normalise_format_over_content_diagnostic(
         critic.get("format_over_content_diagnostic")
     )
+    evidence_receipts = _build_evidence_receipts(
+        record=record,
+        episode=episode_payload if episode_payload else None,
+        llm_debug_data=llm_debug_data,
+    )
+    evaluator_contract = _build_evaluator_contract_for_memory_state(
+        verdict=verdict,
+        confidence=confidence,
+        unresolved_check_count=unresolved_check_count,
+        summary=_safe_str(critic_summary.get("summary")),
+        critic_summary=critic_summary,
+        completion_gate=completion_gate,
+        format_over_content_diagnostic=format_over_content_diagnostic,
+        explicit_axes=critic.get("evaluator_contract") or critic.get("evaluator_axes"),
+        evidence_receipts=evidence_receipts,
+        workflow_id=workflow_id,
+        implicated_workflow_ids=implicated_workflow_ids,
+        implicated_tool_names=implicated_tool_names,
+        implicated_concept_ids=implicated_concept_ids,
+        measured_at_utc=now_iso,
+    )
+    verdict = _safe_str(evaluator_contract.get("verdict")) or verdict
+    confidence = _safe_float(evaluator_contract.get("confidence"))
+    unresolved_check_count = _safe_int(
+        evaluator_contract.get("unresolved_check_count"),
+        default=unresolved_check_count,
+    )
 
     critic_state: dict[str, Any] = {
         "workflow_id": _safe_str(critic.get("workflow_id")),
@@ -1178,6 +1318,7 @@ def build_episode_critique_memory_state_from_turn(
         "verdict": verdict,
         "confidence": confidence,
         "unresolved_check_count": unresolved_check_count,
+        "evaluator_contract": evaluator_contract,
     }
     if format_over_content_diagnostic is not None:
         critic_state["format_over_content_diagnostic"] = format_over_content_diagnostic
@@ -1225,11 +1366,7 @@ def build_episode_critique_memory_state_from_turn(
             completion_gate=completion_gate,
             implicated_tool_names=implicated_tool_names,
         ),
-        "evidence_receipts": _build_evidence_receipts(
-            record=record,
-            episode=episode_payload if episode_payload else None,
-            llm_debug_data=llm_debug_data,
-        ),
+        "evidence_receipts": evidence_receipts,
         "dedupe_fingerprint": _hash_payload(
             {
                 "request_id": request_id,
@@ -1282,6 +1419,8 @@ def _build_episode_critique_memory_projection(
     evidence_receipts = _mapping_or_empty(state.get("evidence_receipts"))
     routing = _mapping_or_empty(state.get("routing"))
     critic_summary = _mapping_or_empty(critic.get("summary"))
+    evaluator_contract = _mapping_or_empty(critic.get("evaluator_contract"))
+    evaluator_projection = build_episode_evaluator_projection_fields(evaluator_contract)
     format_over_content_diagnostic = _mapping_or_empty(
         critic.get("format_over_content_diagnostic")
     )
@@ -1306,6 +1445,7 @@ def _build_episode_critique_memory_projection(
         "critic_summary_text": _safe_str(critic_summary.get("summary")),
         "confidence": _safe_float(critic.get("confidence")),
         "unresolved_check_count": _safe_int(critic.get("unresolved_check_count")),
+        **evaluator_projection,
         "format_over_content_status": _safe_str(
             format_over_content_diagnostic.get("status")
         ),
