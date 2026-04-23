@@ -1,0 +1,668 @@
+{
+  "family_id": "episode_self_improvement_workflow_seed_bundle",
+  "managed_by": "episode_evaluation_workflow_vontology_service",
+  "schema_version": "repo_seed_workflow_bundle.v1",
+  "source_tag": "JVNAUTOSCI-1987",
+  "supported_action_ids": [
+    "episode_critic.load_workflow_improvement_context",
+    "episode_critic.submit_workflow_improvement_proposal",
+    "episode_critic.load_workflow_promotion_context",
+    "episode_critic.record_workflow_promotion_evaluation",
+    "llm.action",
+    "workflow_create_instance"
+  ],
+  "workflows": [
+    {
+      "workflow_id": "#V#episode_self_improvement_proposal_workflow",
+      "display_name": "Episode Self Improvement Proposal Workflow",
+      "description": "Turn an episode critique into a represented workflow revision proposal and launch promotion evaluation.",
+      "content": "Critique-driven workflow self-improvement path. Loads a workflow-targeted critique suggestion, designs a candidate revision through an authoritative prompt, stores the candidate as a reviewable workflow proposal, and launches represented promotion evaluation.",
+      "type_ids": [
+        "#V#ai_workflow",
+        "#V#durable_workflow"
+      ],
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"authoring\",\"authoring_intent_required\":true,\"prefer_existing_capability\":true,\"routing_eligible\":false}",
+          "lang": "en-NZ"
+        }
+      ],
+      "publication_spec": {
+        "initial_state": "load_improvement_context",
+        "steps": [
+          {
+            "action_concept_id": null,
+            "action_id": "episode_critic.load_workflow_improvement_context",
+            "concept_id": null,
+            "conditional_transitions": [],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": "design_candidate_proposal",
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "failed",
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "load_improvement_context",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_self_improvement_proposal_workflow_load_improvement_context_episode_critique_memory_id_to_episode_critique_memory_id",
+                "context_key": "episode_critique_memory_id",
+                "tool_output_field": "episode_critique_memory_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_self_improvement_proposal_workflow_load_improvement_context_target_workflow_id_to_target_workflow_id",
+                "context_key": "target_workflow_id",
+                "tool_output_field": "target_workflow_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_self_improvement_proposal_workflow_load_improvement_context_target_workflow_definition_identity_to_target_workflow_definition_identity",
+                "context_key": "target_workflow_definition_identity",
+                "tool_output_field": "target_workflow_definition_identity"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_self_improvement_proposal_workflow_load_improvement_context_base_definition_hash_to_base_definition_hash",
+                "context_key": "base_definition_hash",
+                "tool_output_field": "base_definition_hash"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_self_improvement_proposal_workflow_load_improvement_context_existing_workflow_spec_to_existing_workflow_spec",
+                "context_key": "existing_workflow_spec",
+                "tool_output_field": "existing_workflow_spec"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_self_improvement_proposal_workflow_load_improvement_context_episode_self_improvement_suggestion_to_episode_self_improvement_suggestion",
+                "context_key": "episode_self_improvement_suggestion",
+                "tool_output_field": "episode_self_improvement_suggestion"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_self_improvement_proposal_workflow_load_improvement_context_episode_self_improvement_benchmark_summary_to_episode_self_improvement_benchmark_summary",
+                "context_key": "episode_self_improvement_benchmark_summary",
+                "tool_output_field": "episode_self_improvement_benchmark_summary"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_self_improvement_proposal_workflow_load_improvement_context_proposal_context_to_proposal_context",
+                "context_key": "proposal_context",
+                "tool_output_field": "proposal_context"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_self_improvement_proposal_workflow_load_improvement_context_workflow_authoring_prompt_contract_to_workflow_authoring_prompt_contract",
+                "context_key": "workflow_authoring_prompt_contract",
+                "tool_output_field": "workflow_authoring_prompt_contract"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_self_improvement_proposal_workflow_load_improvement_context_workflow_authoring_prompt_health_to_workflow_authoring_prompt_health",
+                "context_key": "workflow_authoring_prompt_health",
+                "tool_output_field": "workflow_authoring_prompt_health"
+              }
+            ],
+            "validation_policy": null,
+            "writes_context_keys": [
+              "episode_critique_memory_id",
+              "target_workflow_id",
+              "target_workflow_definition_identity",
+              "base_definition_hash",
+              "existing_workflow_spec",
+              "episode_self_improvement_suggestion",
+              "episode_self_improvement_benchmark_summary",
+              "proposal_context",
+              "workflow_authoring_prompt_contract",
+              "workflow_authoring_prompt_health"
+            ]
+          },
+          {
+            "action_concept_id": null,
+            "action_id": "llm.action",
+            "concept_id": null,
+            "conditional_transitions": [],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": "llm",
+            "invoked_workflow_id": null,
+            "llm_policy": {
+              "policy_stage": "authoring",
+              "tool_mode": "none",
+              "response_contract_text": "Return JSON with keys target_workflow_id, repair_summary, and repaired_workflow_spec.",
+              "context_fields": [
+                {
+                  "context_key": "target_workflow_id",
+                  "label": "Target workflow ID"
+                },
+                {
+                  "context_key": "existing_workflow_spec",
+                  "label": "Existing workflow spec"
+                },
+                {
+                  "context_key": "episode_self_improvement_suggestion",
+                  "label": "Critique improvement suggestion"
+                },
+                {
+                  "context_key": "episode_self_improvement_benchmark_summary",
+                  "label": "Benchmark summary"
+                },
+                {
+                  "context_key": "workflow_authoring_prompt_contract",
+                  "label": "Workflow authoring contract"
+                },
+                {
+                  "context_key": "workflow_authoring_prompt_health",
+                  "label": "Workflow authoring prompt health"
+                }
+              ]
+            },
+            "mutation_authority": null,
+            "next_state": "submit_candidate_proposal",
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "failed",
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [
+              "#V#episode_self_improvement_proposal_prompt"
+            ],
+            "state_id": "design_candidate_proposal",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_self_improvement_proposal_workflow_design_candidate_proposal_validated_json_repair_summary_to_workflow_repair_summary",
+                "context_key": "workflow_repair_summary",
+                "tool_output_field": "validated_json.repair_summary"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_self_improvement_proposal_workflow_design_candidate_proposal_validated_json_repaired_workflow_spec_to_candidate_workflow_spec",
+                "context_key": "candidate_workflow_spec",
+                "tool_output_field": "validated_json.repaired_workflow_spec"
+              }
+            ],
+            "validation_policy": {
+              "output_format": "json_value"
+            },
+            "writes_context_keys": [
+              "workflow_repair_summary",
+              "candidate_workflow_spec"
+            ]
+          },
+          {
+            "action_concept_id": null,
+            "action_id": "episode_critic.submit_workflow_improvement_proposal",
+            "concept_id": null,
+            "conditional_transitions": [],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "failed",
+            "on_false_state": "complete",
+            "on_true_state": "launch_promotion_evaluation",
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "submit_candidate_proposal",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_self_improvement_proposal_workflow_submit_candidate_proposal_proposal_to_workflow_authoring_proposal",
+                "context_key": "workflow_authoring_proposal",
+                "tool_output_field": "proposal"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_self_improvement_proposal_workflow_submit_candidate_proposal_proposal_id_to_proposal_id",
+                "context_key": "proposal_id",
+                "tool_output_field": "proposal_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_self_improvement_proposal_workflow_submit_candidate_proposal_proposal_status_to_proposal_status",
+                "context_key": "proposal_status",
+                "tool_output_field": "proposal_status"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_self_improvement_proposal_workflow_submit_candidate_proposal_candidate_validation_to_candidate_validation",
+                "context_key": "candidate_validation",
+                "tool_output_field": "candidate_validation"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_self_improvement_proposal_workflow_submit_candidate_proposal_promotion_launch_inputs_to_promotion_launch_inputs",
+                "context_key": "promotion_launch_inputs",
+                "tool_output_field": "promotion_launch_inputs"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_self_improvement_proposal_workflow_submit_candidate_proposal_promotion_launch_source_event_id_to_promotion_launch_source_event_id",
+                "context_key": "promotion_launch_source_event_id",
+                "tool_output_field": "promotion_launch_source_event_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_self_improvement_proposal_workflow_submit_candidate_proposal_promotion_launch_event_idempotency_key_to_promotion_launch_event_idempotency_key",
+                "context_key": "promotion_launch_event_idempotency_key",
+                "tool_output_field": "promotion_launch_event_idempotency_key"
+              }
+            ],
+            "validation_policy": null,
+            "writes_context_keys": [
+              "workflow_authoring_proposal",
+              "proposal_id",
+              "proposal_status",
+              "candidate_validation",
+              "promotion_launch_inputs",
+              "promotion_launch_source_event_id",
+              "promotion_launch_event_idempotency_key"
+            ]
+          },
+          {
+            "action_concept_id": null,
+            "action_id": "workflow_create_instance",
+            "concept_id": null,
+            "conditional_transitions": [],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_episode_self_improvement_proposal_workflow_launch_promotion_evaluation_namespace_to_namespace_parameter",
+                "context_key": "namespace",
+                "required": false,
+                "tool_param": "namespace"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_episode_self_improvement_proposal_workflow_launch_promotion_evaluation_user_id_to_user_id_parameter",
+                "context_key": "user_id",
+                "required": false,
+                "tool_param": "user_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_episode_self_improvement_proposal_workflow_launch_promotion_evaluation_org_id_to_org_id_parameter",
+                "context_key": "org_id",
+                "required": false,
+                "tool_param": "org_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_episode_self_improvement_proposal_workflow_launch_promotion_evaluation_promotion_launch_inputs_to_inputs_parameter",
+                "context_key": "promotion_launch_inputs",
+                "required": true,
+                "tool_param": "inputs"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_episode_self_improvement_proposal_workflow_launch_promotion_evaluation_promotion_launch_source_event_id_to_source_event_id_parameter",
+                "context_key": "promotion_launch_source_event_id",
+                "required": true,
+                "tool_param": "source_event_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_episode_self_improvement_proposal_workflow_launch_promotion_evaluation_promotion_launch_event_idempotency_key_to_event_idempotency_key_parameter",
+                "context_key": "promotion_launch_event_idempotency_key",
+                "required": true,
+                "tool_param": "event_idempotency_key"
+              }
+            ],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": "complete",
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "failed",
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "launch_promotion_evaluation",
+            "static_input_bindings": [
+              [
+                "workflow_id",
+                "#V#episode_self_improvement_promotion_workflow"
+              ],
+              [
+                "source_event_type",
+                "episode_critic.self_improvement_promotion"
+              ]
+            ],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_self_improvement_proposal_workflow_launch_promotion_evaluation_instance_id_to_promotion_workflow_instance_id",
+                "context_key": "promotion_workflow_instance_id",
+                "tool_output_field": "instance_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_self_improvement_proposal_workflow_launch_promotion_evaluation_status_to_promotion_workflow_submission_status",
+                "context_key": "promotion_workflow_submission_status",
+                "tool_output_field": "status"
+              }
+            ],
+            "validation_policy": null,
+            "writes_context_keys": [
+              "promotion_workflow_instance_id",
+              "promotion_workflow_submission_status"
+            ]
+          },
+          {
+            "action_concept_id": null,
+            "action_id": null,
+            "concept_id": null,
+            "conditional_transitions": [],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": null,
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "complete",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [],
+            "validation_policy": null,
+            "writes_context_keys": []
+          },
+          {
+            "action_concept_id": null,
+            "action_id": null,
+            "concept_id": null,
+            "conditional_transitions": [],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": null,
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "failed",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [],
+            "validation_policy": null,
+            "writes_context_keys": []
+          }
+        ]
+      }
+    },
+    {
+      "workflow_id": "#V#episode_self_improvement_promotion_workflow",
+      "display_name": "Episode Self Improvement Promotion Workflow",
+      "description": "Evaluate a critique-driven workflow proposal and persist an explicit promotion recommendation.",
+      "content": "Critique-driven workflow promotion evaluation path. Loads the represented workflow proposal, combines it with benchmark evidence, asks a bounded promotion prompt for a recommendation, and records that recommendation back onto the proposal and critique memory.",
+      "type_ids": [
+        "#V#ai_workflow",
+        "#V#durable_workflow"
+      ],
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"maintenance\",\"authoring_intent_required\":true,\"explicit_workflow_context_required\":true,\"prefer_existing_capability\":true,\"routing_eligible\":false}",
+          "lang": "en-NZ"
+        }
+      ],
+      "publication_spec": {
+        "initial_state": "load_promotion_context",
+        "steps": [
+          {
+            "action_concept_id": null,
+            "action_id": "episode_critic.load_workflow_promotion_context",
+            "concept_id": null,
+            "conditional_transitions": [],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": "evaluate_promotion_candidate",
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "failed",
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "load_promotion_context",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_self_improvement_promotion_workflow_load_promotion_context_episode_critique_memory_id_to_episode_critique_memory_id",
+                "context_key": "episode_critique_memory_id",
+                "tool_output_field": "episode_critique_memory_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_self_improvement_promotion_workflow_load_promotion_context_target_workflow_id_to_target_workflow_id",
+                "context_key": "target_workflow_id",
+                "tool_output_field": "target_workflow_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_self_improvement_promotion_workflow_load_promotion_context_proposal_id_to_proposal_id",
+                "context_key": "proposal_id",
+                "tool_output_field": "proposal_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_self_improvement_promotion_workflow_load_promotion_context_workflow_authoring_proposal_to_workflow_authoring_proposal",
+                "context_key": "workflow_authoring_proposal",
+                "tool_output_field": "workflow_authoring_proposal"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_self_improvement_promotion_workflow_load_promotion_context_workflow_publication_lifecycle_to_workflow_publication_lifecycle",
+                "context_key": "workflow_publication_lifecycle",
+                "tool_output_field": "workflow_publication_lifecycle"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_self_improvement_promotion_workflow_load_promotion_context_episode_self_improvement_suggestion_to_episode_self_improvement_suggestion",
+                "context_key": "episode_self_improvement_suggestion",
+                "tool_output_field": "episode_self_improvement_suggestion"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_self_improvement_promotion_workflow_load_promotion_context_episode_self_improvement_benchmark_summary_to_episode_self_improvement_benchmark_summary",
+                "context_key": "episode_self_improvement_benchmark_summary",
+                "tool_output_field": "episode_self_improvement_benchmark_summary"
+              }
+            ],
+            "validation_policy": null,
+            "writes_context_keys": [
+              "episode_critique_memory_id",
+              "target_workflow_id",
+              "proposal_id",
+              "workflow_authoring_proposal",
+              "workflow_publication_lifecycle",
+              "episode_self_improvement_suggestion",
+              "episode_self_improvement_benchmark_summary"
+            ]
+          },
+          {
+            "action_concept_id": null,
+            "action_id": "llm.action",
+            "concept_id": null,
+            "conditional_transitions": [],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": "llm",
+            "invoked_workflow_id": null,
+            "llm_policy": {
+              "policy_stage": "postcondition_critic",
+              "tool_mode": "none",
+              "response_contract_text": "Return JSON with keys promotion_recommendation, summary, reasoning, required_follow_up, and approval_ready.",
+              "context_fields": [
+                {
+                  "context_key": "workflow_authoring_proposal",
+                  "label": "Workflow authoring proposal"
+                },
+                {
+                  "context_key": "workflow_publication_lifecycle",
+                  "label": "Workflow publication lifecycle"
+                },
+                {
+                  "context_key": "episode_self_improvement_suggestion",
+                  "label": "Critique improvement suggestion"
+                },
+                {
+                  "context_key": "episode_self_improvement_benchmark_summary",
+                  "label": "Benchmark summary"
+                }
+              ]
+            },
+            "mutation_authority": null,
+            "next_state": "record_promotion_recommendation",
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "failed",
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [
+              "#V#episode_self_improvement_promotion_prompt"
+            ],
+            "state_id": "evaluate_promotion_candidate",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_self_improvement_promotion_workflow_evaluate_promotion_candidate_validated_json_to_workflow_promotion_assessment",
+                "context_key": "workflow_promotion_assessment",
+                "tool_output_field": "validated_json"
+              }
+            ],
+            "validation_policy": {
+              "output_format": "json_value"
+            },
+            "writes_context_keys": [
+              "workflow_promotion_assessment"
+            ]
+          },
+          {
+            "action_concept_id": null,
+            "action_id": "episode_critic.record_workflow_promotion_evaluation",
+            "concept_id": null,
+            "conditional_transitions": [],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": "complete",
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "failed",
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "record_promotion_recommendation",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_self_improvement_promotion_workflow_record_promotion_recommendation_promotion_evaluation_to_promotion_evaluation",
+                "context_key": "promotion_evaluation",
+                "tool_output_field": "promotion_evaluation"
+              }
+            ],
+            "validation_policy": null,
+            "writes_context_keys": [
+              "promotion_evaluation"
+            ]
+          },
+          {
+            "action_concept_id": null,
+            "action_id": null,
+            "concept_id": null,
+            "conditional_transitions": [],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": null,
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "complete",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [],
+            "validation_policy": null,
+            "writes_context_keys": []
+          },
+          {
+            "action_concept_id": null,
+            "action_id": null,
+            "concept_id": null,
+            "conditional_transitions": [],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": null,
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "failed",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [],
+            "validation_policy": null,
+            "writes_context_keys": []
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,4 +1,5 @@
 from src.backend.workflows import workflow_studio_service as mod
+from typing import Any
 from types import SimpleNamespace
 
 
@@ -469,8 +470,8 @@ def test_build_workflow_studio_detail_payload_includes_improvement_guidance(
 def test_submit_workflow_authoring_proposal_sets_pending_review_lifecycle(
     monkeypatch,
 ) -> None:
-    stored_payloads: list[dict[str, object]] = []
-    lifecycle_calls: list[dict[str, object]] = []
+    stored_payloads: list[dict[str, Any]] = []
+    lifecycle_calls: list[dict[str, Any]] = []
 
     monkeypatch.setattr(
         mod,
@@ -548,15 +549,82 @@ def test_submit_workflow_authoring_proposal_sets_pending_review_lifecycle(
         session_id="session-1",
         turn_id="turn-1",
         proposed_by="#V#test_user",
+        proposal_context={
+            "schema_version": "episode_self_improvement_proposal_context.v1",
+            "source": "episode_self_improvement_workflow",
+        },
     )
 
     assert result["success"] is True
     assert result["proposal"]["status"] == "pending_review"
     assert result["next_step"] == "approval"
     assert stored_payloads[0]["created_by"] == "#V#test_user"
+    assert stored_payloads[0]["proposal_context"]["source"] == "episode_self_improvement_workflow"
     assert lifecycle_calls[0]["review_state"] == "pending_review"
     assert lifecycle_calls[0]["approval_required"] is True
     assert lifecycle_calls[0]["proposal_source_session_id"] == "session-1"
+
+
+def test_record_workflow_authoring_promotion_evaluation_updates_proposal_and_lifecycle(
+    monkeypatch,
+) -> None:
+    lifecycle_calls: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        mod,
+        "_load_workflow_authoring_proposal",
+        lambda _workflow_id: {
+            "proposal_id": "proposal-1",
+            "status": "pending_review",
+            "proposal_source_session_id": "session-1",
+            "proposal_source_turn_id": "turn-1",
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "_store_workflow_authoring_proposal",
+        lambda _workflow_id, proposal_payload: dict(proposal_payload),
+    )
+    monkeypatch.setattr(
+        mod,
+        "resolve_workflow_publication_lifecycle",
+        lambda _workflow_id: (
+            {
+                "phase": "published",
+                "published": True,
+                "review_state": "pending_review",
+                "approval_required": True,
+                "routing_eligible": True,
+            },
+            "vontology",
+        ),
+    )
+    monkeypatch.setattr(
+        mod,
+        "resolve_workflow_routing_profile",
+        lambda _workflow_id: ({"role": "authoring", "routing_eligible": True}, "vontology"),
+    )
+    monkeypatch.setattr(
+        mod,
+        "upsert_workflow_publication_lifecycle",
+        lambda **kwargs: lifecycle_calls.append(dict(kwargs)) or dict(kwargs),
+    )
+
+    result = mod.record_workflow_authoring_promotion_evaluation(
+        "#V#alpha_workflow",
+        proposal_id="proposal-1",
+        promotion_evaluation={
+            "promotion_recommendation": "ready_for_review",
+            "summary": "The candidate is structurally valid and reviewable.",
+        },
+    )
+
+    assert result["success"] is True
+    assert result["proposal"]["promotion_evaluation"]["promotion_recommendation"] == (
+        "ready_for_review"
+    )
+    assert lifecycle_calls[0]["promotion_decision"] == "ready_for_review"
+    assert lifecycle_calls[0]["review_state"] == "pending_review"
 
 
 def test_review_workflow_authoring_proposal_approve_publishes_and_updates_lifecycle(

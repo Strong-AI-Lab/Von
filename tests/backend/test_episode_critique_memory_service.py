@@ -390,6 +390,35 @@ def test_build_episode_assessment_state_preserves_format_over_content_diagnostic
     assert diagnostic["raw_response_format"] == "json_object"
 
 
+def test_build_episode_assessment_state_does_not_synthesise_fallback_improvement_suggestions():
+    from src.backend.services import episode_critique_memory_service as svc
+
+    state = svc.build_episode_critique_memory_state_from_episode_assessment(
+        evidence_bundle={
+            "episode_locator": {
+                "request_id": "req-1990",
+                "workflow_id": "#V#alpha_workflow",
+                "namespace": "#V#user@org",
+            },
+            "capability_gaps": [
+                {
+                    "gap_id": "missing_tool",
+                    "description": "A missing tool prevented stronger evidence.",
+                    "required": True,
+                }
+            ],
+            "fail_closed_reason_codes": ["bundle_fail_closed"],
+        },
+        assessment={
+            "verdict": "inconclusive",
+            "summary": "The episode could not be judged authoritatively.",
+        },
+    )
+
+    assert state is not None
+    assert state["improvement_suggestions"] == []
+
+
 def test_list_recent_workflow_improvement_suggestions_filters_and_flattens(monkeypatch):
     from src.backend.services import episode_critique_memory_service as svc
 
@@ -510,6 +539,73 @@ def test_record_episode_critique_memory_routing_merges_remediation_links(monkeyp
         "JVNAUTOSCI-1700",
         "JVNAUTOSCI-1710",
     ]
+
+
+def test_record_episode_critique_memory_self_improvement_merges_entries(monkeypatch):
+    from src.backend.services import episode_critique_memory_service as svc
+
+    base_state = {
+        "memory_id": "#V#episode_critique_memory_abc",
+        "namespace": "#V#user@org",
+        "user_id": "#V#user",
+        "org_id": "#V#org",
+        "self_improvement": {
+            "schema_version": "episode_critique_self_improvement.v1",
+            "launches": [
+                {
+                    "suggestion_id": "workflow_change_alpha",
+                    "target_workflow_id": "#V#alpha_workflow",
+                    "launch_workflow_id": "#V#episode_self_improvement_proposal_workflow",
+                    "instance_id": "#V#wf_instance_1",
+                    "success": True,
+                }
+            ],
+            "proposals": [],
+            "promotion_evaluations": [],
+        },
+    }
+    persisted_payloads: list[dict] = []
+
+    monkeypatch.setattr(svc, "get_episode_critique_memory_state", lambda _memory_id: base_state)
+    monkeypatch.setattr(
+        svc,
+        "_persist_episode_critique_memory_state",
+        lambda **kwargs: persisted_payloads.append(kwargs["state"]) or kwargs["state"],
+    )
+    monkeypatch.setattr(
+        svc,
+        "upsert_episode_critique_memory_projection",
+        lambda **kwargs: {"updated": True, "record": kwargs["record"]},
+    )
+
+    outcome = svc.record_episode_critique_memory_self_improvement(
+        memory_id="#V#episode_critique_memory_abc",
+        proposals=[
+            {
+                "proposal_id": "proposal-1",
+                "target_workflow_id": "#V#alpha_workflow",
+                "status": "pending_review",
+            }
+        ],
+        promotion_evaluations=[
+            {
+                "proposal_id": "proposal-1",
+                "target_workflow_id": "#V#alpha_workflow",
+                "promotion_recommendation": "ready_for_review",
+            }
+        ],
+    )
+
+    assert outcome["success"] is True
+    updated_state = persisted_payloads[-1]
+    assert len(updated_state["self_improvement"]["launches"]) == 1
+    assert updated_state["self_improvement"]["proposals"][0]["proposal_id"] == "proposal-1"
+    assert (
+        updated_state["self_improvement"]["promotion_evaluations"][0][
+            "promotion_recommendation"
+        ]
+        == "ready_for_review"
+    )
 
 
 def test_chat_history_projection_path_invokes_episode_critique_memory_upsert(monkeypatch):

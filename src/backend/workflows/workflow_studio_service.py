@@ -658,6 +658,8 @@ def _proposal_summary(proposal_payload: Mapping[str, Any] | None) -> dict[str, A
     status = _clean_text(proposal.get("status")) or "unknown"
     candidate_validation = _as_mapping(proposal.get("candidate_validation"))
     preview_summary = _as_mapping(proposal.get("preview_summary"))
+    proposal_context = _as_mapping(proposal.get("proposal_context"))
+    promotion_evaluation = _as_mapping(proposal.get("promotion_evaluation"))
     return {
         "available": True,
         "active": status == _WORKFLOW_AUTHORING_PROPOSAL_STATUS_PENDING_REVIEW,
@@ -674,11 +676,23 @@ def _proposal_summary(proposal_payload: Mapping[str, Any] | None) -> dict[str, A
         "authoring_spec": proposal.get("authoring_spec")
         if isinstance(proposal.get("authoring_spec"), Mapping)
         else None,
+        "proposal_context": proposal_context or None,
+        "promotion_evaluation": promotion_evaluation or None,
         "previous_authoring_spec_available": isinstance(
             proposal.get("previous_authoring_spec"),
             Mapping,
         ),
     }
+
+
+def get_workflow_authoring_proposal(workflow_id: str) -> dict[str, Any] | None:
+    """Return the full stored workflow-authoring proposal payload when present."""
+
+    workflow_id_clean = _clean_text(workflow_id)
+    if not workflow_id_clean:
+        return None
+    proposal = _load_workflow_authoring_proposal(workflow_id_clean)
+    return _as_mapping(proposal) or None
 
 
 def _normalise_routing_profile(value: Any) -> dict[str, Any] | None:
@@ -1664,6 +1678,7 @@ def submit_workflow_authoring_proposal(
     session_id: str | None = None,
     turn_id: str | None = None,
     proposed_by: str | None = None,
+    proposal_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     workflow_id_clean = _clean_text(workflow_id)
     preview_payload = preview_workflow_authoring_spec(
@@ -1728,6 +1743,8 @@ def submit_workflow_authoring_proposal(
         "prompt_contract": build_workflow_authoring_prompt_contract(),
         "prompt_health": get_workflow_authoring_prompt_health_status(),
     }
+    if isinstance(proposal_context, Mapping) and proposal_context:
+        proposal_payload["proposal_context"] = _json_roundtrip(proposal_context)
     if isinstance(existing_proposal, Mapping) and isinstance(
         existing_proposal.get("previous_authoring_spec"),
         Mapping,
@@ -1781,6 +1798,92 @@ def submit_workflow_authoring_proposal(
             "publishes_to_vontology": False,
         },
         "next_step": "approval",
+    }
+
+
+def record_workflow_authoring_promotion_evaluation(
+    workflow_id: str,
+    *,
+    promotion_evaluation: Mapping[str, Any],
+    proposal_id: str | None = None,
+) -> dict[str, Any]:
+    workflow_id_clean = _clean_text(workflow_id)
+    if not workflow_id_clean:
+        raise ValueError("workflow_id_required")
+
+    proposal = _load_workflow_authoring_proposal(workflow_id_clean)
+    if not isinstance(proposal, Mapping):
+        raise ValueError("workflow_authoring_proposal_missing")
+    proposal_payload = _as_mapping(proposal)
+
+    expected_proposal_id = _clean_text(proposal_id)
+    stored_proposal_id = _clean_text(proposal_payload.get("proposal_id"))
+    if expected_proposal_id and stored_proposal_id and expected_proposal_id != stored_proposal_id:
+        raise ValueError("workflow_authoring_proposal_id_mismatch")
+
+    evaluation = _json_roundtrip(_as_mapping(promotion_evaluation))
+    if not evaluation:
+        raise ValueError("promotion_evaluation_required")
+
+    proposal_payload["promotion_evaluation"] = evaluation
+    proposal_payload["updated_at_utc"] = _utc_now_iso()
+    stored_proposal = _store_workflow_authoring_proposal(
+        workflow_id_clean,
+        proposal_payload,
+    )
+
+    current_lifecycle, _current_lifecycle_source = resolve_workflow_publication_lifecycle(
+        workflow_id_clean
+    )
+    lifecycle = _as_mapping(current_lifecycle)
+    routing_profile = resolve_workflow_routing_profile(workflow_id_clean)[0]
+    upsert_workflow_publication_lifecycle(
+        workflow_id=workflow_id_clean,
+        phase=_clean_text(lifecycle.get("phase")) or "published",
+        published=bool(lifecycle.get("published", True)),
+        validation_passed=lifecycle.get("validation_passed")
+        if isinstance(lifecycle.get("validation_passed"), bool)
+        else None,
+        postconditions_verified=lifecycle.get("postconditions_verified")
+        if isinstance(lifecycle.get("postconditions_verified"), bool)
+        else None,
+        optional_test_instance_id=_clean_text(lifecycle.get("optional_test_instance_id"))
+        or None,
+        last_error=_clean_text(lifecycle.get("last_error")) or None,
+        review_state=_clean_text(lifecycle.get("review_state")) or None,
+        review_reason=_clean_text(lifecycle.get("review_reason")) or None,
+        reviewed_at=_clean_text(lifecycle.get("reviewed_at")) or None,
+        reviewed_by=_clean_text(lifecycle.get("reviewed_by")) or None,
+        proposal_id=stored_proposal_id or expected_proposal_id,
+        proposal_source_session_id=_clean_text(
+            stored_proposal.get("proposal_source_session_id")
+        )
+        or None,
+        proposal_source_turn_id=_clean_text(
+            stored_proposal.get("proposal_source_turn_id")
+        )
+        or None,
+        experiment_run_id=_clean_text(evaluation.get("experiment_run_id")) or None,
+        supersedes_workflow_id=_clean_text(lifecycle.get("supersedes_workflow_id")) or None,
+        superseded_by_workflow_id=_clean_text(lifecycle.get("superseded_by_workflow_id"))
+        or None,
+        routing_eligible=_metadata_routing_eligible(
+            publication_lifecycle=lifecycle,
+            routing_profile=_as_mapping(routing_profile),
+        ),
+        rollout_state=_clean_text(lifecycle.get("rollout_state")) or None,
+        approval_required=lifecycle.get("approval_required")
+        if isinstance(lifecycle.get("approval_required"), bool)
+        else True,
+        promotion_decision=_clean_text(evaluation.get("promotion_recommendation")) or None,
+        event_binding_ids=_clean_string_list(lifecycle.get("event_binding_ids")),
+        schedule_ids=_clean_string_list(lifecycle.get("schedule_ids")),
+    )
+    return {
+        "success": True,
+        "workflow_id": workflow_id_clean,
+        "proposal": _proposal_summary(stored_proposal),
+        "promotion_evaluation": evaluation,
     }
 
 
@@ -2232,7 +2335,9 @@ __all__ = [
     "build_workflow_description_proposal",
     "build_workflow_studio_detail_payload",
     "demote_workflow_routing",
+    "get_workflow_authoring_proposal",
     "preview_workflow_authoring_spec",
+    "record_workflow_authoring_promotion_evaluation",
     "review_workflow_authoring_proposal",
     "rollback_workflow_authoring_promotion",
     "submit_workflow_authoring_proposal",

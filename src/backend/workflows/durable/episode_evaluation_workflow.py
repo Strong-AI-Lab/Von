@@ -16,9 +16,11 @@ from ...services.episode_critique_memory_service import (
 from ...services.episode_critique_routing_service import (
     route_episode_critique_memory,
 )
+from ...services.episode_self_improvement_service import (
+    launch_episode_self_improvement_workflows,
+)
 from ...services.episode_evaluation_workflow_contracts import (
     EPISODE_EVALUATION_BUILD_EVIDENCE_ACTION_ID,
-    EPISODE_EVALUATION_IMPROVEMENT_SUGGESTION_MAX_COUNT,
     EPISODE_EVALUATION_PERSIST_MEMORY_ACTION_ID,
 )
 from ..action_registry import (
@@ -102,84 +104,6 @@ def _build_root_causes_from_gaps(
     return root_causes
 
 
-def _build_fallback_improvement_suggestions(
-    *,
-    capability_gaps: Sequence[Mapping[str, Any]],
-    gap_codes: Sequence[str],
-    workflow_id: str | None,
-) -> list[dict[str, Any]]:
-    suggestions: list[dict[str, Any]] = []
-
-    for index, raw_gap in enumerate(capability_gaps):
-        if len(suggestions) >= EPISODE_EVALUATION_IMPROVEMENT_SUGGESTION_MAX_COUNT:
-            break
-        gap = _mapping_or_empty(raw_gap)
-        gap_id = _clean_text(gap.get("gap_id")) or f"gap_{index + 1}"
-        description = _clean_text(gap.get("description")) or (
-            "Episode evidence bundle capability gap."
-        )
-        lowered = description.lower()
-        tool_name = _clean_text(gap.get("tool_name"))
-        category = (
-            "tool_addition"
-            if tool_name or "tool" in lowered
-            else "support_surface_addition"
-        )
-        target_surface = "tool" if category == "tool_addition" else "support_surface"
-        title = (
-            "Add the missing tool support surface"
-            if category == "tool_addition"
-            else "Add the missing reusable support surface"
-        )
-        suggestions.append(
-            {
-                "suggestion_id": f"fallback_{gap_id}",
-                "category": category,
-                "priority": "high" if bool(gap.get("required")) else "medium",
-                "target_surface": target_surface,
-                "target_workflow_id": workflow_id,
-                "target_prompt_concept_id": None,
-                "target_tool_name": tool_name,
-                "title": title,
-                "rationale": description,
-                "suggested_change": description,
-                "evidence_refs": [f"capability_gaps:{gap_id}"],
-                "recursion_level": 0,
-            }
-        )
-
-    if (
-        gap_codes
-        and len(suggestions) < EPISODE_EVALUATION_IMPROVEMENT_SUGGESTION_MAX_COUNT
-    ):
-        suggestions.append(
-            {
-                "suggestion_id": "fallback_fail_closed_telemetry",
-                "category": "telemetry_addition",
-                "priority": "high",
-                "target_surface": "telemetry",
-                "target_workflow_id": workflow_id,
-                "target_prompt_concept_id": None,
-                "target_tool_name": None,
-                "title": "Add stronger episode-evaluation evidence capture",
-                "rationale": (
-                    "Fail-closed reason codes prevented an authoritative episode "
-                    "judgement."
-                ),
-                "suggested_change": (
-                    "Add the telemetry or verification support needed to avoid "
-                    "future fail-closed episode evaluations."
-                ),
-                "evidence_refs": [
-                    f"fail_closed_reason_codes:{code}" for code in gap_codes[:4]
-                ],
-                "recursion_level": 0,
-            }
-        )
-
-    return suggestions[:EPISODE_EVALUATION_IMPROVEMENT_SUGGESTION_MAX_COUNT]
-
-
 def _build_fallback_assessment(bundle: Mapping[str, Any]) -> dict[str, Any]:
     capability_gaps = [
         item
@@ -220,11 +144,7 @@ def _build_fallback_assessment(bundle: Mapping[str, Any]) -> dict[str, Any]:
         ),
         "recommendations": recommendations[:6],
         "root_causes": _build_root_causes_from_gaps(capability_gaps),
-        "improvement_suggestions": _build_fallback_improvement_suggestions(
-            capability_gaps=capability_gaps,
-            gap_codes=gap_codes,
-            workflow_id=workflow_id,
-        ),
+        "improvement_suggestions": [],
     }
     if format_over_content_diagnostic:
         result["format_over_content_diagnostic"] = format_over_content_diagnostic
@@ -394,6 +314,19 @@ def _build_persist_memory_handler():
         maintenance_follow_up_requested = bool(
             assessment.get("maintenance_follow_up_recommended")
         )
+        self_improvement_result = (
+            launch_episode_self_improvement_workflows(
+                memory_id=memory_id,
+                memory_state=_mapping_or_empty(outcome.get("state")),
+                user_id=_clean_text(request.data.get("user_id")),
+                org_id=_clean_text(request.data.get("org_id")),
+                namespace=_clean_text(request.data.get("namespace")),
+                current_depth=int(request.data.get("episode_evaluation_depth") or 0),
+            )
+            if memory_id
+            else {"success": False, "launches": []}
+        )
+        self_improvement_launches = list(self_improvement_result.get("launches") or [])
         maintenance_payload = (
             _build_maintenance_launch_payload(
                 bundle=bundle,
@@ -432,6 +365,18 @@ def _build_persist_memory_handler():
                             )
                             or []
                         )
+                    ],
+                    limit=20,
+                ),
+                "self_improvement": dict(self_improvement_result),
+                "self_improvement_launches": self_improvement_launches,
+                "self_improvement_workflow_count": len(
+                    [item for item in self_improvement_launches if item.get("success")]
+                ),
+                "self_improvement_target_workflow_ids": _normalise_string_list(
+                    [
+                        _mapping_or_empty(item).get("target_workflow_id")
+                        for item in self_improvement_launches
                     ],
                     limit=20,
                 ),

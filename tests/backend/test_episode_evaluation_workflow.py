@@ -58,6 +58,23 @@ def test_persist_memory_handler_surfaces_remediation_routing(monkeypatch):
             "jira_action": "created_new",
         },
     )
+    monkeypatch.setattr(
+        mod,
+        "launch_episode_self_improvement_workflows",
+        lambda **kwargs: {
+            "success": True,
+            "launches": [
+                {
+                    "suggestion_id": "workflow_change_alpha",
+                    "target_workflow_id": "#V#alpha_workflow",
+                    "launch_workflow_id": "#V#episode_self_improvement_proposal_workflow",
+                    "instance_id": "#V#wf_instance_alpha",
+                    "success": True,
+                    "status": "created",
+                }
+            ],
+        },
+    )
 
     handler = mod._build_persist_memory_handler()
     result = handler(
@@ -87,6 +104,10 @@ def test_persist_memory_handler_surfaces_remediation_routing(monkeypatch):
     assert result.outputs["improvement_suggestions"][0]["target_workflow_id"] == (
         "#V#alpha_workflow"
     )
+    assert result.outputs["self_improvement_workflow_count"] == 1
+    assert result.outputs["self_improvement_target_workflow_ids"] == [
+        "#V#alpha_workflow"
+    ]
     assert result.outputs["maintenance_follow_up_requested"] is False
 
 
@@ -142,6 +163,7 @@ def test_evidence_bundle_handler_surfaces_format_over_content_diagnostic(monkeyp
     assert diagnostic["selected_model"] == "gpt-5.4-mini"
     fallback = result.outputs["episode_critic_fallback_assessment"]
     assert fallback["format_over_content_diagnostic"]["status"] == "suspected"
+    assert fallback["improvement_suggestions"] == []
     assert any(
         "output contract" in recommendation.lower()
         for recommendation in fallback["recommendations"]
@@ -167,6 +189,11 @@ def test_persist_memory_handler_emits_maintenance_launch_payload(monkeypatch):
         mod,
         "route_episode_critique_memory",
         lambda **kwargs: {"success": True, "decision": "maintenance_follow_up"},
+    )
+    monkeypatch.setattr(
+        mod,
+        "launch_episode_self_improvement_workflows",
+        lambda **kwargs: {"success": True, "launches": []},
     )
 
     handler = mod._build_persist_memory_handler()

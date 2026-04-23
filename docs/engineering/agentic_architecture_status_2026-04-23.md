@@ -5,7 +5,7 @@
 This note records the current engineering status of the Von codebase against the
 design intent described in `docs/engineering/Von_for_AgenticAI.md`, using a
 bounded static review of the live code on 23 April 2026, refreshed later the
-same day after the landings through `JVNAUTOSCI-1988`.
+same day after the landings through `JVNAUTOSCI-1988` and `JVNAUTOSCI-1987`.
 
 It is not a replacement for `Von_for_AgenticAI.md`. That document remains the
 long-horizon design note. This document is the current engineering-status and
@@ -24,26 +24,26 @@ buttonify, turn-contract prose, or broad tool-metadata seams. Those were
 materially reduced first by the April 21 landings through `JVNAUTOSCI-1972`,
 and then again by the 23 April landings of `JVNAUTOSCI-1974`,
 `JVNAUTOSCI-1975`, `JVNAUTOSCI-1985`, `JVNAUTOSCI-1973`, and
-`JVNAUTOSCI-1986`, and `JVNAUTOSCI-1988`.
+`JVNAUTOSCI-1986`, `JVNAUTOSCI-1988`, and `JVNAUTOSCI-1987`.
 
 The current shortfall is now concentrated in four areas:
 
-1. The main turn can now consume richer represented memory substrates, but the
-   self-improvement loop is still mostly remediation-routing rather than a
-   closed represented promotion loop.
-2. Broader enduring-memory and memory-promotion architecture still remains more
+1. Broader enduring-memory and memory-promotion architecture still remains more
    programme direction than integrated operational substrate.
+2. The episode-evaluation loop now has represented proposal and promotion
+   workflows, but broader isolated self-improvement and benchmark-world support
+   is still only partial rather than a general experimentation substrate.
 3. Authority-backed critic/evaluator expansion is still narrower than the
    design target for self-correction and policy learning.
-4. The next review still needs to be repeated after the remaining tranche
-   lands, because the highest-value gaps have already shifted materially once
-   today.
+4. The next review still needs to be repeated after the tranche lands, because
+   the highest-value remaining gaps have shifted materially several times in
+   one day.
 
 ## Current Code Reality
 
-As measured on 23 April 2026 after the `JVNAUTOSCI-1988` landing:
+As measured on 23 April 2026 after the `JVNAUTOSCI-1987` landing:
 
-- `src/backend/integrations/internal_mcp/orchestrator.py` is `35091` lines
+- `src/backend/integrations/internal_mcp/orchestrator.py` is `35095` lines
 - `src/backend/integrations/internal_mcp/catalogue.py` is `27480` lines
 - `src/backend/server/routes/von_routes.py` is `13351` lines
 - `src/backend/services/turn_execution_record_service.py` is `6916` lines
@@ -92,47 +92,49 @@ now landed:
    the added context is visible in lineage/aux telemetry rather than hidden
    stage-local prompt shaping.
 
+7. `JVNAUTOSCI-1987`
+   Episode evaluation now launches represented workflow-improvement proposal
+   workflows from critique memory, stores candidate revisions as reviewable
+   workflow-authoring proposals with proposal context, launches represented
+   promotion evaluation workflows, records explicit promotion
+   recommendations back onto proposal lifecycle plus critique memory, and no
+   longer relies on Python fallback suggestion synthesis on the live path.
+
 ### P0 Remaining Architecture Work
 
-The previously identified immediate P0 tranche is now landed. The next sharpest
-work is no longer another narrow live heuristic-removal seam; it is the
-closure of the represented self-improvement and memory-promotion loop.
+The previously identified immediate P0 tranche is now landed, and the
+previously identified `1987` P1 close-out is also landed. The next sharpest
+work is no longer one more missing live-path repair; it is the bounded
+repeat-review plus the broader architecture umbrellas that still remain.
 
 ### P1 Next Tranche
 
 These should follow immediately after the P0 tranche, not be deferred
 indefinitely behind unrelated feature work.
 
-1. `JVNAUTOSCI-1987`
-   Close the episode-evaluation self-improvement loop with represented
-   improvement and promotion workflows instead of Python fallback suggestions
-   and remediation-only routing.
-
-2. `JVNAUTOSCI-1989`
+1. `JVNAUTOSCI-1989`
    Repeat the AGI-alignment architecture review after the current P0/P1 tranche
    and refresh status notes, task ordering, and stale issue wording.
 
-3. `JVNAUTOSCI-1962`
+2. `JVNAUTOSCI-1962`
    Enduring-memory and memory-promotion architecture umbrella.
 
-4. `JVNAUTOSCI-1963`
+3. `JVNAUTOSCI-1963`
    Isolated self-improvement loops and benchmark worlds umbrella.
 
-5. `JVNAUTOSCI-1964`
+4. `JVNAUTOSCI-1964`
    Authority-backed critic/evaluator workflow expansion umbrella.
 
 Why this is P1:
 
-- with the broad tool-authority seams reduced and live memory integration now
-  landed, the highest-leverage next step is to close the represented
-  self-improvement and promotion loop rather than leaving
-  episode critique memory as mostly advisory context;
-- `1989` is included here deliberately because `1988` materially changes the
-  architecture picture and the dated review should not be left steering future
-  work as if memory were still mostly off-path; and
-- the remaining umbrellas (`1962`-`1964`) still matter, but they are now more
-  clearly downstream of the `1987`/`1989` tranche than of another missing
-  narrow live-path heuristic-removal task.
+- the represented self-improvement loop is now materially closed enough that
+  the next rational move is to repeat the review rather than continue steering
+  from an already stale pre-`1987` ordering note;
+- `1962` is now the sharpest substantive architecture umbrella because memory
+  substrate and promotion architecture still remain more fragmented than the
+  design note intends; and
+- `1963` and `1964` still matter, but they now sit downstream of a clean
+  post-`1987` reassessment rather than behind another missing narrow repair.
 
 ### P2 Longer-Horizon Platform Work
 
@@ -186,8 +188,8 @@ reopened or duplicated here:
 This review must be repeated. It should not remain a one-off note.
 
 This same-day refresh now incorporates the landings of `1974`, `1975`, `1985`,
-`1973`, `1986`, and `1988`, but it does not replace the fuller repeat-review
-task tracked in `JVNAUTOSCI-1989`.
+`1973`, `1986`, `1988`, and `1987`, but it does not replace the fuller
+repeat-review task tracked in `JVNAUTOSCI-1989`.
 
 After completion of any P0 or P1 task from this tranche:
 

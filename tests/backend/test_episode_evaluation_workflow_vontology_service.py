@@ -10,6 +10,11 @@ from src.backend.services.episode_evaluation_workflow_contracts import (
     EPISODE_EVALUATION_PROMPT_CONCEPT_ID,
     EPISODE_EVALUATION_PROMPT_LINK_PREDICATE,
     EPISODE_EVALUATION_WORKFLOW_ID,
+    EPISODE_SELF_IMPROVEMENT_PROMOTION_PROMPT_CONCEPT_ID,
+    EPISODE_SELF_IMPROVEMENT_PROMOTION_WORKFLOW_ID,
+    EPISODE_SELF_IMPROVEMENT_PROPOSAL_PROMPT_CONCEPT_ID,
+    EPISODE_SELF_IMPROVEMENT_PROPOSAL_WORKFLOW_ID,
+    EPISODE_SELF_IMPROVEMENT_SUBMIT_PROPOSAL_ACTION_ID,
     EVENT_TYPE_TURN_COMPLETION_GATE_FINALISED,
     EVENT_TYPE_WORKFLOW_INSTANCE_TERMINAL,
 )
@@ -59,10 +64,18 @@ def test_bootstrap_materialises_episode_evaluation_workflow_family(
     counts = publication.get("counts") or {}
     assert report.get("success") is True
     assert counts.get("errors") == 0
-    assert counts.get("workflows_published") == 1
+    assert counts.get("workflows_published") == 3
 
     definition = load_workflow_definition_from_vontology(EPISODE_EVALUATION_WORKFLOW_ID)
     assert definition is not None
+    proposal_definition = load_workflow_definition_from_vontology(
+        EPISODE_SELF_IMPROVEMENT_PROPOSAL_WORKFLOW_ID
+    )
+    assert proposal_definition is not None
+    promotion_definition = load_workflow_definition_from_vontology(
+        EPISODE_SELF_IMPROVEMENT_PROMOTION_WORKFLOW_ID
+    )
+    assert promotion_definition is not None
 
     action_ids = sorted(
         {
@@ -75,6 +88,16 @@ def test_bootstrap_materialises_episode_evaluation_workflow_family(
     assert EPISODE_EVALUATION_BUILD_EVIDENCE_ACTION_ID in action_ids
     assert EPISODE_EVALUATION_PERSIST_MEMORY_ACTION_ID in action_ids
     assert "workflow_create_instance" in action_ids
+    proposal_action_ids = sorted(
+        {
+            action.action_id
+            for state in proposal_definition.states.values()
+            for action in state.actions
+            if action.action_id
+        }
+    )
+    assert EPISODE_SELF_IMPROVEMENT_SUBMIT_PROPOSAL_ACTION_ID in proposal_action_ids
+    assert "workflow_create_instance" in proposal_action_ids
 
     prompt_rows = get_texts_for_concept(
         EPISODE_EVALUATION_WORKFLOW_ID,
@@ -99,6 +122,18 @@ def test_bootstrap_materialises_episode_evaluation_workflow_family(
     assert "routing_quality_signals" in prompt_text
     assert "workflow/routing selection defects" in prompt_text
     assert "improvement_suggestions" in prompt_text
+    proposal_prompt_rows = get_texts_for_concept(
+        EPISODE_SELF_IMPROVEMENT_PROPOSAL_PROMPT_CONCEPT_ID,
+        predicate="hasContent",
+        limit=5,
+    )
+    assert any((row or {}).get("text") for row in proposal_prompt_rows)
+    promotion_prompt_rows = get_texts_for_concept(
+        EPISODE_SELF_IMPROVEMENT_PROMOTION_PROMPT_CONCEPT_ID,
+        predicate="hasContent",
+        limit=5,
+    )
+    assert any((row or {}).get("text") for row in promotion_prompt_rows)
 
     manager = get_instance_manager()
     turn_bindings = manager.list_event_bindings(
@@ -126,7 +161,7 @@ def test_episode_prompt_support_seeds_content_from_repo_asset(
     report = _ensure_episode_evaluation_prompt_support()
 
     assert report.get("success") is True
-    assert report.get("seeded_prompt_count") == 1
+    assert report.get("seeded_prompt_count") == 3
     prompt_content_rows = get_texts_for_concept(
         EPISODE_EVALUATION_PROMPT_CONCEPT_ID,
         predicate="hasContent",
@@ -140,6 +175,18 @@ def test_episode_prompt_support_seeds_content_from_repo_asset(
     assert "routing_quality_signals" in prompt_text
     assert "workflow/routing selection defects" in prompt_text
     assert "improvement_suggestions" in prompt_text
+    proposal_prompt_rows = get_texts_for_concept(
+        EPISODE_SELF_IMPROVEMENT_PROPOSAL_PROMPT_CONCEPT_ID,
+        predicate="hasContent",
+        limit=5,
+    )
+    assert any((row or {}).get("text") for row in proposal_prompt_rows)
+    promotion_prompt_rows = get_texts_for_concept(
+        EPISODE_SELF_IMPROVEMENT_PROMOTION_PROMPT_CONCEPT_ID,
+        predicate="hasContent",
+        limit=5,
+    )
+    assert any((row or {}).get("text") for row in promotion_prompt_rows)
 
 
 def test_episode_prompt_support_force_prompt_seed_refreshes_existing_content(

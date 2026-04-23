@@ -29,6 +29,7 @@ from .workflow_episode_service import get_latest_workflow_use_episode
 logger = logging.getLogger(__name__)
 
 EPISODE_CRITIQUE_MEMORY_SCHEMA_VERSION = "episode_critique_memory.v1"
+EPISODE_CRITIQUE_SELF_IMPROVEMENT_SCHEMA_VERSION = "episode_critique_self_improvement.v1"
 EPISODE_CRITIQUE_MEMORIES_COLLECTION = "episode_critique_memories"
 EPISODE_CRITIQUE_MEMORY_TYPE_ID = "#V#episode_critique_memory"
 EPISODE_CRITIQUE_MEMORY_PARENT_TYPE_ID = "#V#artifact"
@@ -259,99 +260,10 @@ def _build_episode_improvement_suggestion_id(
     return f"{category}_{scope_token}_{title_token}_{digest}".strip("_")
 
 
-def _build_fallback_episode_improvement_suggestions(
-    *,
-    assessment: Mapping[str, Any],
-    evidence_bundle: Mapping[str, Any],
-    workflow_id: str | None,
-) -> list[dict[str, Any]]:
-    suggestions: list[dict[str, Any]] = []
-    capability_gaps = [
-        item
-        for item in (evidence_bundle.get("capability_gaps") or [])
-        if isinstance(item, Mapping)
-    ]
-    for index, raw_gap in enumerate(capability_gaps):
-        if len(suggestions) >= EPISODE_EVALUATION_IMPROVEMENT_SUGGESTION_MAX_COUNT:
-            break
-        gap = _mapping_or_empty(raw_gap)
-        gap_id = _safe_str(gap.get("gap_id")) or f"gap_{index + 1}"
-        description = _safe_str(gap.get("description")) or (
-            "Episode evidence bundle capability gap."
-        )
-        lowered = description.lower()
-        target_tool_name = _safe_str(gap.get("tool_name"))
-        category = (
-            "tool_addition"
-            if target_tool_name or "tool" in lowered
-            else "support_surface_addition"
-        )
-        target_surface = (
-            "tool" if category == "tool_addition" else "support_surface"
-        )
-        title = (
-            "Add missing tool support"
-            if category == "tool_addition"
-            else "Add missing reusable support surface"
-        )
-        suggestions.append(
-            {
-                "schema_version": EPISODE_EVALUATION_IMPROVEMENT_SUGGESTION_SCHEMA_VERSION,
-                "suggestion_id": f"fallback_{gap_id}",
-                "category": category,
-                "priority": "high" if bool(gap.get("required")) else "medium",
-                "target_surface": target_surface,
-                "target_workflow_id": workflow_id,
-                "target_prompt_concept_id": None,
-                "target_tool_name": target_tool_name,
-                "title": title,
-                "rationale": description,
-                "suggested_change": description,
-                "evidence_refs": [f"capability_gaps:{gap_id}"],
-                "recursion_level": 0,
-            }
-        )
-
-    if suggestions:
-        return suggestions[:EPISODE_EVALUATION_IMPROVEMENT_SUGGESTION_MAX_COUNT]
-
-    fail_closed_codes = _normalise_strings(
-        evidence_bundle.get("fail_closed_reason_codes"),
-        limit=4,
-    )
-    if not fail_closed_codes:
-        return []
-    return [
-        {
-            "schema_version": EPISODE_EVALUATION_IMPROVEMENT_SUGGESTION_SCHEMA_VERSION,
-            "suggestion_id": "fallback_fail_closed_telemetry",
-            "category": "telemetry_addition",
-            "priority": "high",
-            "target_surface": "telemetry",
-            "target_workflow_id": workflow_id,
-            "target_prompt_concept_id": None,
-            "target_tool_name": None,
-            "title": "Add stronger episode-evaluation evidence capture",
-            "rationale": _safe_str(assessment.get("summary"))
-            or "Fail-closed reason codes prevented an authoritative episode judgement.",
-            "suggested_change": (
-                "Add the telemetry or verification support needed to avoid future "
-                "fail-closed episode evaluations."
-            ),
-            "evidence_refs": [
-                f"fail_closed_reason_codes:{code}" for code in fail_closed_codes
-            ],
-            "recursion_level": 0,
-        }
-    ]
-
-
 def _normalise_episode_improvement_suggestions(
     value: Any,
     *,
     default_workflow_id: str | None,
-    assessment: Mapping[str, Any],
-    evidence_bundle: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
     if isinstance(value, Mapping):
         raw_items = [value]
@@ -421,13 +333,56 @@ def _normalise_episode_improvement_suggestions(
         if len(suggestions) >= EPISODE_EVALUATION_IMPROVEMENT_SUGGESTION_MAX_COUNT:
             break
 
-    if suggestions:
-        return suggestions
-    return _build_fallback_episode_improvement_suggestions(
-        assessment=assessment,
-        evidence_bundle=evidence_bundle,
-        workflow_id=default_workflow_id,
+    return suggestions
+
+
+def _normalise_self_improvement_rows(
+    value: Any,
+    *,
+    key_fields: Sequence[str],
+) -> list[dict[str, Any]]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return []
+
+    rows: list[dict[str, Any]] = []
+    row_index: dict[tuple[str, ...], int] = {}
+    for raw_item in value:
+        item = _mapping_or_empty(raw_item)
+        if not item:
+            continue
+        key = tuple(_safe_str(item.get(field)) or "" for field in key_fields)
+        if not any(key):
+            continue
+        if key in row_index:
+            rows[row_index[key]].update(item)
+            continue
+        row_index[key] = len(rows)
+        rows.append(item)
+    return rows
+
+
+def _normalise_self_improvement_state(value: Any) -> dict[str, Any]:
+    raw = _mapping_or_empty(value)
+    launches = _normalise_self_improvement_rows(
+        raw.get("launches"),
+        key_fields=("suggestion_id", "launch_workflow_id", "target_workflow_id"),
     )
+    proposals = _normalise_self_improvement_rows(
+        raw.get("proposals"),
+        key_fields=("proposal_id", "target_workflow_id"),
+    )
+    promotion_evaluations = _normalise_self_improvement_rows(
+        raw.get("promotion_evaluations"),
+        key_fields=("proposal_id", "target_workflow_id"),
+    )
+    if not launches and not proposals and not promotion_evaluations:
+        return {}
+    return {
+        "schema_version": EPISODE_CRITIQUE_SELF_IMPROVEMENT_SCHEMA_VERSION,
+        "launches": launches,
+        "proposals": proposals,
+        "promotion_evaluations": promotion_evaluations,
+    }
 
 
 def _build_memory_id(*, request_id: str, episode_id: str | None) -> str:
@@ -1022,8 +977,6 @@ def build_episode_critique_memory_state_from_episode_assessment(
     improvement_suggestions = _normalise_episode_improvement_suggestions(
         assessment.get("improvement_suggestions"),
         default_workflow_id=workflow_id,
-        assessment=assessment,
-        evidence_bundle=evidence_bundle,
     )
     format_over_content_diagnostic = _normalise_format_over_content_diagnostic(
         assessment.get("format_over_content_diagnostic")
@@ -1103,6 +1056,7 @@ def build_episode_critique_memory_state_from_episode_assessment(
         },
         "recommendations": recommendations,
         "improvement_suggestions": improvement_suggestions,
+        "self_improvement": {},
         "evidence_receipts": {
             **receipt_payload,
             "receipt_hash": _hash_payload(receipt_payload),
@@ -1334,8 +1288,6 @@ def _build_episode_critique_memory_projection(
     improvement_suggestions = _normalise_episode_improvement_suggestions(
         state.get("improvement_suggestions"),
         default_workflow_id=_safe_str(subject_episode.get("workflow_id")),
-        assessment=_mapping_or_empty(critic.get("assessment")),
-        evidence_bundle={},
     )
 
     return {
@@ -1422,6 +1374,40 @@ def _build_episode_critique_memory_projection(
         ),
         "improvement_target_tool_names": _normalise_strings(
             [item.get("target_tool_name") for item in improvement_suggestions],
+            limit=20,
+        ),
+        "self_improvement_launch_count": len(
+            _normalise_self_improvement_state(state.get("self_improvement")).get("launches")
+            or []
+        ),
+        "self_improvement_proposal_count": len(
+            _normalise_self_improvement_state(state.get("self_improvement")).get(
+                "proposals"
+            )
+            or []
+        ),
+        "self_improvement_target_workflow_ids": _normalise_strings(
+            [
+                item.get("target_workflow_id")
+                for item in (
+                    _normalise_self_improvement_state(state.get("self_improvement")).get(
+                        "proposals"
+                    )
+                    or []
+                )
+            ],
+            limit=20,
+        ),
+        "self_improvement_promotion_recommendations": _normalise_strings(
+            [
+                item.get("promotion_recommendation")
+                for item in (
+                    _normalise_self_improvement_state(state.get("self_improvement")).get(
+                        "promotion_evaluations"
+                    )
+                    or []
+                )
+            ],
             limit=20,
         ),
         "receipt_hash": _safe_str(evidence_receipts.get("receipt_hash")),
@@ -1827,9 +1813,76 @@ def record_episode_critique_memory_routing(
     }
 
 
+def record_episode_critique_memory_self_improvement(
+    *,
+    memory_id: str,
+    launches: Sequence[Mapping[str, Any]] | None = None,
+    proposals: Sequence[Mapping[str, Any]] | None = None,
+    promotion_evaluations: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    state = get_episode_critique_memory_state(memory_id)
+    if not isinstance(state, Mapping):
+        return {"success": False, "reason": "memory_not_found", "memory_id": memory_id}
+
+    updated_state = dict(state)
+    updated_state["updated_at_utc"] = _utcnow_iso()
+    existing = _normalise_self_improvement_state(updated_state.get("self_improvement"))
+    merged_state = _normalise_self_improvement_state(
+        {
+            "launches": [
+                *(existing.get("launches") or []),
+                *(
+                    [dict(item) for item in launches if isinstance(item, Mapping)]
+                    if isinstance(launches, Sequence)
+                    else []
+                ),
+            ],
+            "proposals": [
+                *(existing.get("proposals") or []),
+                *(
+                    [dict(item) for item in proposals if isinstance(item, Mapping)]
+                    if isinstance(proposals, Sequence)
+                    else []
+                ),
+            ],
+            "promotion_evaluations": [
+                *(existing.get("promotion_evaluations") or []),
+                *(
+                    [
+                        dict(item)
+                        for item in promotion_evaluations
+                        if isinstance(item, Mapping)
+                    ]
+                    if isinstance(promotion_evaluations, Sequence)
+                    else []
+                ),
+            ],
+        }
+    )
+    updated_state["self_improvement"] = merged_state
+
+    persisted = _persist_episode_critique_memory_state(
+        memory_id=memory_id,
+        state=updated_state,
+    )
+    projection = upsert_episode_critique_memory_projection(
+        record=persisted,
+        namespace=_safe_str(updated_state.get("namespace")),
+        user_id=_safe_str(updated_state.get("user_id")),
+        org_id=_safe_str(updated_state.get("org_id")),
+    )
+    return {
+        "success": True,
+        "memory_id": memory_id,
+        "state": persisted,
+        "projection": projection,
+    }
+
+
 __all__ = [
     "EPISODE_CRITIQUE_MEMORIES_COLLECTION",
     "EPISODE_CRITIQUE_MEMORY_SCHEMA_VERSION",
+    "EPISODE_CRITIQUE_SELF_IMPROVEMENT_SCHEMA_VERSION",
     "EPISODE_CRITIQUE_MEMORY_TYPE_ID",
     "build_episode_critique_memory_state_from_episode_assessment",
     "build_episode_critique_memory_state_from_turn",
@@ -1838,6 +1891,7 @@ __all__ = [
     "get_episode_critique_memory_state",
     "list_recent_workflow_improvement_suggestions",
     "record_episode_critique_memory_routing",
+    "record_episode_critique_memory_self_improvement",
     "upsert_episode_critique_memory_from_episode_assessment",
     "upsert_episode_critique_memory_from_turn",
     "upsert_episode_critique_memory_projection",
