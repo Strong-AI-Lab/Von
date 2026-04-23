@@ -212,6 +212,142 @@ def test_episode_self_improvement_proposal_workflow_executes_end_to_end(
     assert captured["promotion_launch"]["inputs"]["proposal_id"] == "proposal-1"
 
 
+def test_episode_self_improvement_proposal_workflow_accepts_user_only_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.backend.workflows.durable.episode_self_improvement_workflow as mod
+
+    bootstrap_canonical_episode_evaluation_workflow()
+    definition = load_workflow_definition_from_vontology(
+        EPISODE_SELF_IMPROVEMENT_PROPOSAL_WORKFLOW_ID
+    )
+    assert definition is not None
+
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        mod,
+        "build_workflow_improvement_context",
+        lambda **kwargs: {
+            "success": True,
+            "episode_critique_memory_id": kwargs["episode_critique_memory_id"],
+            "target_workflow_id": kwargs["target_workflow_id"],
+            "target_workflow_definition_identity": {
+                "workflow_id": kwargs["target_workflow_id"],
+                "definition_hash": "base-hash-user-only",
+            },
+            "base_definition_hash": "base-hash-user-only",
+            "existing_workflow_spec": {
+                "workflow_id": kwargs["target_workflow_id"],
+                "steps": [{"state_id": "complete", "terminal": True}],
+            },
+            "episode_self_improvement_suggestion": {
+                "suggestion_id": kwargs["suggestion_id"],
+                "target_workflow_id": kwargs["target_workflow_id"],
+                "target_surface": "workflow",
+                "category": "workflow_change",
+                "title": "Tighten route selection",
+                "rationale": "Critique evidence showed the wrong workflow was used.",
+                "suggested_change": "Restrict the eligible workflow branch.",
+            },
+            "episode_self_improvement_benchmark_summary": {
+                "benchmark_fingerprint": "bench-user-only",
+                "benchmark_signal_summary": {"fail": 1},
+            },
+            "proposal_context": {
+                "schema_version": "episode_self_improvement_proposal_context.v1",
+                "episode_critique_memory_id": kwargs["episode_critique_memory_id"],
+            },
+            "workflow_authoring_prompt_contract": {
+                "required_keys": ["workflow_id", "steps"]
+            },
+            "workflow_authoring_prompt_health": {"healthy": True},
+        },
+    )
+
+    def _submit(**kwargs: Any) -> dict[str, Any]:
+        captured["submit"] = kwargs
+        return {
+            "success": True,
+            "proposal": {
+                "proposal_id": "proposal-user-only",
+                "status": "pending_review",
+            },
+            "candidate_validation": {"valid": True},
+            "promotion_launch_inputs": {
+                "episode_critique_memory_id": kwargs["episode_critique_memory_id"],
+                "target_workflow_id": kwargs["target_workflow_id"],
+                "proposal_id": "proposal-user-only",
+                "suggestion_id": kwargs["suggestion"]["suggestion_id"],
+                "namespace": kwargs["namespace"],
+                "user_id": kwargs["user_id"],
+                "org_id": kwargs["org_id"],
+                "episode_evaluation_depth": kwargs["current_depth"] + 1,
+            },
+            "promotion_launch_source_event_id": "proposal-user-only",
+            "promotion_launch_event_idempotency_key": "promotion-key-user-only",
+        }
+
+    monkeypatch.setattr(mod, "submit_workflow_improvement_proposal", _submit)
+
+    registry = ActionRegistry()
+    register_episode_self_improvement_actions(registry)
+
+    def _launch_promotion(request) -> WorkflowActionResult:
+        captured["promotion_launch"] = dict(request.inputs)
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "instance_id": "#V#wf_instance_promotion_user_only",
+                "status": "created",
+            },
+        )
+
+    registry.register(
+        ActionSpec(
+            action_id="workflow_create_instance",
+            handler=_launch_promotion,
+        )
+    )
+
+    result = WorkflowExecutor(registry=registry, max_transitions=10).run(
+        definition,
+        environment=WorkflowEnvironment(
+            llm_client=_QueuedLLM(
+                [
+                    json.dumps(
+                        {
+                            "target_workflow_id": "#V#alpha_workflow",
+                            "repair_summary": "Restrict the discovery path.",
+                            "repaired_workflow_spec": {
+                                "workflow_id": "#V#alpha_workflow",
+                                "steps": [{"state_id": "complete", "terminal": True}],
+                            },
+                        }
+                    )
+                ]
+            ),
+            user_namespace="#V#user",
+        ),
+        data={
+            "episode_critique_memory_id": "#V#episode_critique_memory_user_only",
+            "suggestion_id": "workflow_change_alpha",
+            "target_workflow_id": "#V#alpha_workflow",
+            "namespace": "#V#user",
+            "user_id": "#V#user",
+            "episode_evaluation_depth": 0,
+        },
+    )
+
+    assert result.completed is True
+    assert result.error is None
+    assert result.data["proposal_id"] == "proposal-user-only"
+    assert captured["submit"]["namespace"] == "#V#user"
+    assert captured["submit"]["user_id"] == "#V#user"
+    assert captured["submit"]["org_id"] is None
+    assert captured["promotion_launch"]["inputs"]["org_id"] is None
+
+
 def test_episode_self_improvement_promotion_workflow_executes_end_to_end(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

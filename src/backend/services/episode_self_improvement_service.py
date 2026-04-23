@@ -227,7 +227,7 @@ def launch_episode_self_improvement_workflows(
     resolved_namespace = _safe_str(namespace) or _safe_str(state.get("namespace"))
     resolved_user_id = _safe_str(user_id) or _safe_str(state.get("user_id"))
     resolved_org_id = _safe_str(org_id) or _safe_str(state.get("org_id"))
-    if not resolved_memory_id or not resolved_namespace or not resolved_user_id or not resolved_org_id:
+    if not resolved_memory_id or not resolved_namespace or not resolved_user_id:
         return {"success": False, "reason": "self_improvement_actor_context_missing"}
 
     launches: list[dict[str, Any]] = []

@@ -43,6 +43,61 @@ def test_launch_episode_self_improvement_workflows_suppresses_when_proposal_pend
     assert recorded["launches"][0]["target_workflow_id"] == "#V#alpha_workflow"
 
 
+def test_launch_episode_self_improvement_workflows_accepts_user_only_namespace(
+    monkeypatch,
+) -> None:
+    recorded: dict[str, Any] = {}
+    submissions: list[dict[str, Any]] = []
+
+    class _Submission:
+        success = True
+        status = "created"
+        instance_id = "#V#wf_instance_self_improvement_1"
+        error_code = None
+        error = None
+
+    monkeypatch.setattr(
+        svc,
+        "get_workflow_authoring_proposal",
+        lambda _workflow_id: {},
+    )
+    monkeypatch.setattr(
+        svc,
+        "submit_verified_workflow_instance",
+        lambda **kwargs: submissions.append(kwargs) or _Submission(),
+    )
+    monkeypatch.setattr(
+        svc,
+        "record_episode_critique_memory_self_improvement",
+        lambda **kwargs: recorded.update(kwargs)
+        or {"state": {"memory_id": kwargs["memory_id"]}},
+    )
+
+    result = svc.launch_episode_self_improvement_workflows(
+        memory_state={
+            "memory_id": "#V#episode_critique_memory_user_only",
+            "namespace": "#V#user",
+            "user_id": "#V#user",
+            "improvement_suggestions": [
+                {
+                    "suggestion_id": "workflow_change_alpha",
+                    "priority": "high",
+                    "target_surface": "workflow",
+                    "target_workflow_id": "#V#alpha_workflow",
+                }
+            ],
+        }
+    )
+
+    assert result["success"] is True
+    assert result["launched_count"] == 1
+    assert submissions[0]["namespace"] == "#V#user"
+    assert submissions[0]["user_id"] == "#V#user"
+    assert submissions[0]["org_id"] is None
+    assert submissions[0]["inputs"]["org_id"] is None
+    assert recorded["launches"][0]["success"] is True
+
+
 def test_submit_workflow_improvement_proposal_records_proposal_and_builds_launch(
     monkeypatch,
 ) -> None:
