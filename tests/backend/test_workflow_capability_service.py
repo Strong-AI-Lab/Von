@@ -40,6 +40,8 @@ class _FakeWorkflowRetrievalBackend:
         self.reset_calls: list[str] = []
         self.upsert_calls: list[dict[str, Any]] = []
         self.persistence_dir: str | None = None
+        self.runtime_embed_model: object | None = object()
+        self.namespace_runtime_state_override: dict[str, Any] | None = None
         self.embedding_signature = {
             "schema_version": "rag_component_signature.v1",
             "kind": "embedder",
@@ -47,6 +49,9 @@ class _FakeWorkflowRetrievalBackend:
             "model": "fake-workflow-capability-embedder",
             "host": None,
         }
+
+    def get_runtime_embed_model(self) -> object | None:
+        return self.runtime_embed_model
 
     def reset_namespace(self, namespace: str) -> None:
         namespace_key = str(namespace)
@@ -80,6 +85,11 @@ class _FakeWorkflowRetrievalBackend:
 
     def get_namespace_runtime_state(self, namespace: str | None = None) -> dict[str, Any]:
         namespace_key = str(namespace or "")
+        if self.namespace_runtime_state_override is not None:
+            return {
+                "namespace": namespace_key,
+                **dict(self.namespace_runtime_state_override),
+            }
         return {
             "namespace": namespace_key,
             "has_persisted_index": bool(self.docs_by_namespace.get(namespace_key)),
@@ -993,3 +1003,162 @@ def test_invalidate_workflow_capability_index_records_reason_and_backend_reset(
     assert reset_calls == ["workflow_capabilities"]
     assert readiness["status"] == "rebuild_required"
     assert readiness["detail"] == "RAG embedder changed; rebuild required."
+
+
+def test_readiness_report_starts_auto_rebuild_for_embedding_signature_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+    _fake_retrieval_backend: _FakeWorkflowRetrievalBackend,
+) -> None:
+    import src.backend.services.workflow_capability_service as capability_service
+
+    reset_workflow_capability_index()
+    _fake_retrieval_backend.namespace_runtime_state_override = {
+        "has_persisted_index": True,
+        "compatible": False,
+        "status": "embedding_signature_mismatch",
+        "detail": "Persisted index embeddings were built with a different embedding signature.",
+        "current_embedding_signature": dict(_fake_retrieval_backend.embedding_signature),
+        "stored_embedding_signature": None,
+    }
+    started: list[dict[str, Any]] = []
+
+    def _fake_start_background(
+        *,
+        force_refresh: bool = False,
+        workflow_registry: object | None = None,
+        mode: str = "background",
+    ) -> bool:
+        started.append(
+            {
+                "force_refresh": force_refresh,
+                "workflow_registry": workflow_registry,
+                "mode": mode,
+            }
+        )
+        return True
+
+    monkeypatch.setattr(
+        capability_service,
+        "_start_background_workflow_capability_index_build",
+        _fake_start_background,
+    )
+
+    readiness = get_workflow_capability_index_readiness_report()
+
+    assert started == [
+        {
+            "force_refresh": True,
+            "workflow_registry": None,
+            "mode": "auto_rebuild",
+        }
+    ]
+    assert readiness["status"] == "rebuilding"
+    assert readiness["summary"] == "Workflow capability index rebuilding."
+    assert readiness["auto_rebuild"]["attempt_count"] == 1
+    assert readiness["auto_rebuild"]["last_status"] == "started"
+    assert readiness["auto_rebuild"]["started_this_report"] is True
+
+
+def test_readiness_report_throttles_repeated_auto_rebuild_status_calls(
+    monkeypatch: pytest.MonkeyPatch,
+    _fake_retrieval_backend: _FakeWorkflowRetrievalBackend,
+) -> None:
+    import src.backend.services.workflow_capability_service as capability_service
+
+    reset_workflow_capability_index()
+    _fake_retrieval_backend.namespace_runtime_state_override = {
+        "has_persisted_index": True,
+        "compatible": False,
+        "status": "embedding_signature_mismatch",
+        "detail": "Persisted index embeddings were built with a different embedding signature.",
+        "current_embedding_signature": dict(_fake_retrieval_backend.embedding_signature),
+        "stored_embedding_signature": None,
+    }
+    started: list[str] = []
+
+    monkeypatch.setattr(
+        capability_service,
+        "_start_background_workflow_capability_index_build",
+        lambda *, force_refresh=False, workflow_registry=None, mode="background": (
+            started.append(mode) or True
+        ),
+    )
+
+    first = get_workflow_capability_index_readiness_report()
+    second = get_workflow_capability_index_readiness_report()
+
+    assert first["status"] == "rebuilding"
+    assert second["status"] == "error"
+    assert started == ["auto_rebuild"]
+    assert second["auto_rebuild"]["attempt_count"] == 1
+    assert second["auto_rebuild"]["last_status"] == "skipped"
+    assert second["auto_rebuild"]["skipped_reason_this_report"] == "throttled"
+
+
+def test_readiness_report_does_not_auto_rebuild_without_runtime_embedder(
+    monkeypatch: pytest.MonkeyPatch,
+    _fake_retrieval_backend: _FakeWorkflowRetrievalBackend,
+) -> None:
+    import src.backend.services.workflow_capability_service as capability_service
+
+    reset_workflow_capability_index()
+    _fake_retrieval_backend.runtime_embed_model = None
+    _fake_retrieval_backend.namespace_runtime_state_override = {
+        "has_persisted_index": True,
+        "compatible": False,
+        "status": "embedding_signature_mismatch",
+        "detail": "Persisted index embeddings were built with a different embedding signature.",
+        "current_embedding_signature": dict(_fake_retrieval_backend.embedding_signature),
+        "stored_embedding_signature": None,
+    }
+
+    monkeypatch.setattr(
+        capability_service,
+        "_start_background_workflow_capability_index_build",
+        lambda **_kwargs: pytest.fail("auto rebuild should not start"),
+    )
+
+    readiness = get_workflow_capability_index_readiness_report()
+
+    assert readiness["status"] == "error"
+    assert readiness["auto_rebuild"]["attempt_count"] == 0
+    assert readiness["auto_rebuild"]["last_status"] == "skipped"
+    assert (
+        readiness["auto_rebuild"]["skipped_reason_this_report"]
+        == "runtime_embedder_unavailable"
+    )
+
+
+def test_readiness_report_does_not_auto_rebuild_while_build_in_progress(
+    monkeypatch: pytest.MonkeyPatch,
+    _fake_retrieval_backend: _FakeWorkflowRetrievalBackend,
+) -> None:
+    import src.backend.services.workflow_capability_service as capability_service
+
+    reset_workflow_capability_index()
+    _fake_retrieval_backend.namespace_runtime_state_override = {
+        "has_persisted_index": True,
+        "compatible": False,
+        "status": "embedding_signature_mismatch",
+        "detail": "Persisted index embeddings were built with a different embedding signature.",
+        "current_embedding_signature": dict(_fake_retrieval_backend.embedding_signature),
+        "stored_embedding_signature": None,
+    }
+    capability_service._set_workflow_capability_rebuild_state(
+        build_in_progress=True,
+        mode="background",
+        error=None,
+    )
+
+    monkeypatch.setattr(
+        capability_service,
+        "_start_background_workflow_capability_index_build",
+        lambda **_kwargs: pytest.fail("auto rebuild should not start"),
+    )
+
+    readiness = get_workflow_capability_index_readiness_report()
+
+    assert readiness["status"] == "building"
+    assert readiness["auto_rebuild"]["attempt_count"] == 0
+    assert readiness["auto_rebuild"]["last_status"] == "skipped"
+    assert readiness["auto_rebuild"]["skipped_reason_this_report"] == "build_in_progress"

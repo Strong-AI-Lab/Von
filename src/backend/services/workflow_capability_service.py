@@ -61,6 +61,10 @@ def _get_positive_float_env(name: str, default: float) -> float:
 BUILTIN_WORKFLOW_CAPABILITIES: Dict[str, str] = {}
 
 _CAPABILITY_INDEX_REBUILD_MIN_INTERVAL_SECONDS = 30.0
+_CAPABILITY_INDEX_AUTO_REBUILD_MIN_INTERVAL_SECONDS = _get_positive_float_env(
+    "VON_WORKFLOW_CAPABILITY_INDEX_AUTO_REBUILD_MIN_INTERVAL_SECONDS",
+    300.0,
+)
 _WORKFLOW_CAPABILITY_INDEX_STARTUP_TIMEOUT_SECONDS = _get_positive_float_env(
     "VON_WORKFLOW_CAPABILITY_INDEX_STARTUP_TIMEOUT_SECONDS",
     45.0,
@@ -80,6 +84,12 @@ _WORKFLOW_CAPABILITY_RETRIEVAL_WARM_QUERIES: tuple[str, ...] = (
         "affiliations, or roles.\n"
         "- Required tools: fetch_concept, find_relations_with_argument"
     ),
+)
+_AUTO_REBUILD_REPAIRABLE_NAMESPACE_STATUSES = frozenset(
+    {
+        "signature_missing",
+        "embedding_signature_mismatch",
+    }
 )
 
 _INDEX_REBUILD_LOCK = Lock()
@@ -102,6 +112,14 @@ _INDEX_REBUILD_STATE: Dict[str, Any] = {
     "last_manifest_path": None,
     "last_manifest_digest": None,
     "last_manifest_checked_at_utc": None,
+    "auto_rebuild_attempt_count": 0,
+    "auto_rebuild_last_attempt_monotonic": 0.0,
+    "auto_rebuild_last_attempt_at_utc": None,
+    "auto_rebuild_last_started_at_utc": None,
+    "auto_rebuild_last_finished_at_utc": None,
+    "auto_rebuild_last_status": None,
+    "auto_rebuild_last_skipped_reason": None,
+    "auto_rebuild_last_detail": None,
 }
 _INDEX_REBUILD_COMPLETED = threading.Event()
 _INDEX_REBUILD_COMPLETED.set()
@@ -1098,6 +1116,212 @@ def _set_workflow_capability_query_surface_state(
             )
 
 
+def _snapshot_workflow_capability_auto_rebuild_state_locked() -> dict[str, Any]:
+    return {
+        "attempt_count": int(
+            _INDEX_REBUILD_STATE.get("auto_rebuild_attempt_count", 0) or 0
+        ),
+        "last_attempt_at_utc": _INDEX_REBUILD_STATE.get(
+            "auto_rebuild_last_attempt_at_utc"
+        ),
+        "last_started_at_utc": _INDEX_REBUILD_STATE.get(
+            "auto_rebuild_last_started_at_utc"
+        ),
+        "last_finished_at_utc": _INDEX_REBUILD_STATE.get(
+            "auto_rebuild_last_finished_at_utc"
+        ),
+        "last_status": _INDEX_REBUILD_STATE.get("auto_rebuild_last_status"),
+        "last_skipped_reason": _INDEX_REBUILD_STATE.get(
+            "auto_rebuild_last_skipped_reason"
+        ),
+        "last_detail": _INDEX_REBUILD_STATE.get("auto_rebuild_last_detail"),
+        "min_interval_seconds": _CAPABILITY_INDEX_AUTO_REBUILD_MIN_INTERVAL_SECONDS,
+    }
+
+
+def _snapshot_workflow_capability_auto_rebuild_state() -> dict[str, Any]:
+    with _INDEX_STATE_LOCK:
+        return _snapshot_workflow_capability_auto_rebuild_state_locked()
+
+
+def _record_workflow_capability_auto_rebuild_state(
+    *,
+    status: str | None = None,
+    skipped_reason: str | None = None,
+    detail: str | None = None,
+    mark_attempt: bool = False,
+    mark_started: bool = False,
+    mark_finished: bool = False,
+    attempt_monotonic: float | None = None,
+) -> None:
+    now_utc = _utc_now_iso()
+    with _INDEX_STATE_LOCK:
+        if mark_attempt:
+            _INDEX_REBUILD_STATE["auto_rebuild_attempt_count"] = int(
+                _INDEX_REBUILD_STATE.get("auto_rebuild_attempt_count", 0) or 0
+            ) + 1
+            _INDEX_REBUILD_STATE["auto_rebuild_last_attempt_at_utc"] = now_utc
+            if attempt_monotonic is not None:
+                _INDEX_REBUILD_STATE["auto_rebuild_last_attempt_monotonic"] = float(
+                    attempt_monotonic
+                )
+        if mark_started:
+            _INDEX_REBUILD_STATE["auto_rebuild_last_started_at_utc"] = now_utc
+        if mark_finished:
+            _INDEX_REBUILD_STATE["auto_rebuild_last_finished_at_utc"] = now_utc
+        if status is not None:
+            _INDEX_REBUILD_STATE["auto_rebuild_last_status"] = str(status)
+        _INDEX_REBUILD_STATE["auto_rebuild_last_skipped_reason"] = skipped_reason
+        if detail is not None:
+            _INDEX_REBUILD_STATE["auto_rebuild_last_detail"] = str(detail)
+
+
+def _workflow_capability_namespace_status(
+    namespace_state: Mapping[str, Any] | None,
+) -> str:
+    if not isinstance(namespace_state, Mapping):
+        return ""
+    return str(namespace_state.get("status") or "").strip()
+
+
+def _workflow_capability_namespace_auto_rebuildable(
+    namespace_state: Mapping[str, Any] | None,
+) -> bool:
+    return (
+        _workflow_capability_namespace_status(namespace_state)
+        in _AUTO_REBUILD_REPAIRABLE_NAMESPACE_STATUSES
+    )
+
+
+def _workflow_capability_runtime_embedder_ready_for_auto_rebuild(
+    namespace_state: Mapping[str, Any],
+) -> tuple[bool, str | None]:
+    current_signature = namespace_state.get("current_embedding_signature")
+    if not isinstance(current_signature, Mapping) or not current_signature:
+        return False, "current_embedding_signature_missing"
+
+    try:
+        rag_service = _get_workflow_capability_rag_service()
+        get_runtime_embed_model = getattr(rag_service, "get_runtime_embed_model", None)
+        if callable(get_runtime_embed_model) and get_runtime_embed_model() is None:
+            return False, "runtime_embedder_unavailable"
+    except Exception as exc:
+        return False, f"runtime_embedder_check_failed:{exc}"
+    return True, None
+
+
+def _maybe_start_workflow_capability_index_auto_rebuild(
+    runtime_state: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Start one throttled repair rebuild for a derived-index signature mismatch."""
+
+    event: dict[str, Any] = {
+        "checked": False,
+        "started": False,
+        "skipped_reason": None,
+        "detail": None,
+    }
+    if bool(runtime_state.get("ready", False)):
+        return event
+
+    namespace_state_raw = runtime_state.get("namespace_state")
+    namespace_state: Mapping[str, Any] | None = (
+        namespace_state_raw if isinstance(namespace_state_raw, Mapping) else None
+    )
+    if not _workflow_capability_namespace_auto_rebuildable(namespace_state):
+        return event
+
+    event["checked"] = True
+    namespace_status = _workflow_capability_namespace_status(namespace_state)
+    namespace_detail = (
+        str(namespace_state.get("detail") or "").strip()
+        if isinstance(namespace_state, Mapping)
+        else ""
+    )
+
+    if bool(runtime_state.get("build_in_progress", False)):
+        event["skipped_reason"] = "build_in_progress"
+        _record_workflow_capability_auto_rebuild_state(
+            status="skipped",
+            skipped_reason="build_in_progress",
+            detail=namespace_detail,
+        )
+        return event
+
+    embedder_ready, embedder_skip_reason = (
+        _workflow_capability_runtime_embedder_ready_for_auto_rebuild(namespace_state)
+        if isinstance(namespace_state, Mapping)
+        else (False, "namespace_state_missing")
+    )
+    if not embedder_ready:
+        event["skipped_reason"] = embedder_skip_reason
+        _record_workflow_capability_auto_rebuild_state(
+            status="skipped",
+            skipped_reason=embedder_skip_reason,
+            detail=namespace_detail,
+        )
+        return event
+
+    now = time.monotonic()
+    with _INDEX_STATE_LOCK:
+        if bool(_INDEX_REBUILD_STATE.get("build_in_progress", False)):
+            event["skipped_reason"] = "build_in_progress"
+            _INDEX_REBUILD_STATE["auto_rebuild_last_status"] = "skipped"
+            _INDEX_REBUILD_STATE["auto_rebuild_last_skipped_reason"] = (
+                "build_in_progress"
+            )
+            _INDEX_REBUILD_STATE["auto_rebuild_last_detail"] = namespace_detail
+            return event
+        last_attempt = float(
+            _INDEX_REBUILD_STATE.get("auto_rebuild_last_attempt_monotonic", 0.0)
+            or 0.0
+        )
+        if (
+            last_attempt > 0.0
+            and (now - last_attempt)
+            < _CAPABILITY_INDEX_AUTO_REBUILD_MIN_INTERVAL_SECONDS
+        ):
+            event["skipped_reason"] = "throttled"
+            _INDEX_REBUILD_STATE["auto_rebuild_last_status"] = "skipped"
+            _INDEX_REBUILD_STATE["auto_rebuild_last_skipped_reason"] = "throttled"
+            _INDEX_REBUILD_STATE["auto_rebuild_last_detail"] = namespace_detail
+            return event
+
+    _record_workflow_capability_auto_rebuild_state(
+        status="starting",
+        skipped_reason=None,
+        detail=namespace_detail,
+        mark_attempt=True,
+        attempt_monotonic=now,
+    )
+    logger.warning(
+        "[workflow_capability_index] auto rebuild starting for repairable "
+        "namespace status %s: %s",
+        namespace_status,
+        namespace_detail,
+    )
+    started = _start_background_workflow_capability_index_build(
+        force_refresh=True,
+        mode="auto_rebuild",
+    )
+    event["started"] = bool(started)
+    if started:
+        _record_workflow_capability_auto_rebuild_state(
+            status="started",
+            skipped_reason=None,
+            detail=namespace_detail,
+            mark_started=True,
+        )
+    else:
+        event["skipped_reason"] = "background_start_refused"
+        _record_workflow_capability_auto_rebuild_state(
+            status="skipped",
+            skipped_reason="background_start_refused",
+            detail=namespace_detail,
+        )
+    return event
+
+
 def _warm_workflow_capability_query_surface(
     index: "WorkflowCapabilityIndex",
     *,
@@ -1202,6 +1426,7 @@ def get_workflow_capability_index_runtime_state() -> Dict[str, Any]:
             "last_manifest_checked_at_utc": _INDEX_REBUILD_STATE.get(
                 "last_manifest_checked_at_utc"
             ),
+            "auto_rebuild": _snapshot_workflow_capability_auto_rebuild_state_locked(),
             "namespace_state": namespace_state,
         }
 
@@ -1210,6 +1435,12 @@ def get_workflow_capability_index_readiness_report() -> Dict[str, Any]:
     """Return a user-facing readiness report for the capability index."""
 
     runtime_state = get_workflow_capability_index_runtime_state()
+    auto_rebuild_event = _maybe_start_workflow_capability_index_auto_rebuild(
+        runtime_state
+    )
+    if auto_rebuild_event.get("started"):
+        runtime_state = get_workflow_capability_index_runtime_state()
+
     ready = bool(runtime_state.get("ready", False))
     build_in_progress = bool(runtime_state.get("build_in_progress", False))
     last_error = str(runtime_state.get("last_error") or "").strip()
@@ -1241,6 +1472,15 @@ def get_workflow_capability_index_readiness_report() -> Dict[str, Any]:
     query_surface_last_error = str(
         runtime_state.get("query_surface_last_error") or ""
     ).strip()
+    auto_rebuild_state = _snapshot_workflow_capability_auto_rebuild_state()
+    if auto_rebuild_event.get("checked"):
+        auto_rebuild_state["checked_this_report"] = True
+    if auto_rebuild_event.get("started"):
+        auto_rebuild_state["started_this_report"] = True
+    if auto_rebuild_event.get("skipped_reason"):
+        auto_rebuild_state["skipped_reason_this_report"] = auto_rebuild_event.get(
+            "skipped_reason"
+        )
 
     if ready:
         status = "ready"
@@ -1251,12 +1491,31 @@ def get_workflow_capability_index_readiness_report() -> Dict[str, Any]:
             f"{size} indexed workflow entries."
         )
     elif build_in_progress:
-        status = "building"
+        auto_rebuild_status = str(auto_rebuild_state.get("last_status") or "").strip()
+        last_mode = str(runtime_state.get("last_mode") or "").strip()
+        if last_mode == "auto_rebuild" and auto_rebuild_status in {"starting", "started"}:
+            status = "rebuilding"
+            warning_level = "warning"
+            summary = "Workflow capability index rebuilding."
+            detail = (
+                "Von detected an incompatible persisted workflow capability "
+                "index and started an automatic background rebuild."
+            )
+        else:
+            status = "building"
+            warning_level = "warning"
+            summary = "Workflow capability index still building."
+            detail = (
+                "Workflow discovery is waiting on the authoritative capability "
+                "index to finish building."
+            )
+    elif auto_rebuild_event.get("started"):
+        status = "rebuilding"
         warning_level = "warning"
-        summary = "Workflow capability index still building."
+        summary = "Workflow capability index rebuilding."
         detail = (
-            "Workflow discovery is waiting on the authoritative capability "
-            "index to finish building."
+            "Von detected an incompatible persisted workflow capability index "
+            "and started an automatic background rebuild."
         )
     elif size > 0 and namespace_compatible and not query_surface_ready:
         status = "warming"
@@ -1305,6 +1564,7 @@ def get_workflow_capability_index_readiness_report() -> Dict[str, Any]:
         "warning_level": warning_level,
         "summary": summary,
         "detail": detail,
+        "auto_rebuild": auto_rebuild_state,
         "checked_at_utc": _utc_now_iso(),
     }
     if isinstance(startup_report, dict):
@@ -1443,6 +1703,13 @@ def _perform_workflow_capability_index_build(
             success_monotonic=success_monotonic,
             clear_invalidation=True,
         )
+        if mode == "auto_rebuild":
+            _record_workflow_capability_auto_rebuild_state(
+                status="succeeded",
+                skipped_reason=None,
+                detail=f"Automatic rebuild completed with {count} entries.",
+                mark_finished=True,
+            )
         logger.info(
             "[workflow_capability_index] %s %s completed with %d entries.",
             mode,
@@ -1456,6 +1723,13 @@ def _perform_workflow_capability_index_build(
             mode=mode,
             error=str(exc),
         )
+        if mode == "auto_rebuild":
+            _record_workflow_capability_auto_rebuild_state(
+                status="failed",
+                skipped_reason=None,
+                detail=str(exc),
+                mark_finished=True,
+            )
         raise
     finally:
         _INDEX_REBUILD_COMPLETED.set()
@@ -1465,6 +1739,7 @@ def _start_background_workflow_capability_index_build(
     *,
     force_refresh: bool = False,
     workflow_registry: Any | None = None,
+    mode: str = "background",
 ) -> bool:
     """Trigger a background build if one is not already running."""
 
@@ -1480,7 +1755,7 @@ def _start_background_workflow_capability_index_build(
         ):
             return False
         _INDEX_REBUILD_STATE["build_in_progress"] = True
-        _INDEX_REBUILD_STATE["last_mode"] = "background"
+        _INDEX_REBUILD_STATE["last_mode"] = mode
         _INDEX_REBUILD_STATE["last_error"] = None
         _INDEX_REBUILD_STATE["last_attempt_monotonic"] = now
         _INDEX_REBUILD_COMPLETED.clear()
@@ -1490,7 +1765,7 @@ def _start_background_workflow_capability_index_build(
             with _INDEX_REBUILD_LOCK:
                 _perform_workflow_capability_index_build(
                     force_refresh=force_refresh,
-                    mode="background",
+                    mode=mode,
                     workflow_registry=workflow_registry,
                 )
         except Exception as exc:
@@ -1507,9 +1782,16 @@ def _start_background_workflow_capability_index_build(
     except Exception as exc:
         _set_workflow_capability_rebuild_state(
             build_in_progress=False,
-            mode="background",
+            mode=mode,
             error=f"thread_start_failed:{exc}",
         )
+        if mode == "auto_rebuild":
+            _record_workflow_capability_auto_rebuild_state(
+                status="failed",
+                skipped_reason=None,
+                detail=f"thread_start_failed:{exc}",
+                mark_finished=True,
+            )
         _INDEX_REBUILD_COMPLETED.set()
         logger.warning("workflow_capability_index_background_thread_start_failed: %s", exc)
         return False
@@ -1655,6 +1937,14 @@ def reset_workflow_capability_index() -> None:
         _INDEX_REBUILD_STATE["last_manifest_path"] = None
         _INDEX_REBUILD_STATE["last_manifest_digest"] = None
         _INDEX_REBUILD_STATE["last_manifest_checked_at_utc"] = None
+        _INDEX_REBUILD_STATE["auto_rebuild_attempt_count"] = 0
+        _INDEX_REBUILD_STATE["auto_rebuild_last_attempt_monotonic"] = 0.0
+        _INDEX_REBUILD_STATE["auto_rebuild_last_attempt_at_utc"] = None
+        _INDEX_REBUILD_STATE["auto_rebuild_last_started_at_utc"] = None
+        _INDEX_REBUILD_STATE["auto_rebuild_last_finished_at_utc"] = None
+        _INDEX_REBUILD_STATE["auto_rebuild_last_status"] = None
+        _INDEX_REBUILD_STATE["auto_rebuild_last_skipped_reason"] = None
+        _INDEX_REBUILD_STATE["auto_rebuild_last_detail"] = None
     _INDEX_REBUILD_COMPLETED.set()
 
 

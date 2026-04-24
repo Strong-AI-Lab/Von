@@ -654,6 +654,31 @@ describe('workflow monitor capability-index warning cartouche', () => {
         const exportPayload = __testOnly_buildWorkflowMonitorExportPayload();
         expect(exportPayload.capability_index.status).toBe('building');
     });
+
+    test('renders automatic rebuild state without asking the user to repair the index', () => {
+        __testOnly_setWorkflowCapabilityIndexPayload({
+            ready: false,
+            status: 'rebuilding',
+            warning_level: 'warning',
+            summary: 'Workflow capability index rebuilding.',
+            detail: 'Von detected an incompatible persisted workflow capability index and started an automatic background rebuild.',
+            size: 62,
+            auto_rebuild: {
+                attempt_count: 1,
+                last_status: 'started',
+                last_started_at_utc: '2026-04-24T09:17:45.000Z'
+            }
+        });
+
+        __testOnly_renderWorkflowDefinitionsBody([]);
+
+        const bodyText = document.getElementById('workflowStatusBody').textContent;
+        expect(bodyText).toContain('Workflow capability index rebuilding');
+        expect(bodyText).toContain('automatic background rebuild');
+        expect(bodyText).not.toContain('requires rebuild');
+        const exportPayload = __testOnly_buildWorkflowMonitorExportPayload();
+        expect(exportPayload.capability_index.auto_rebuild.last_status).toBe('started');
+    });
 });
 
 describe('workflow monitor capability-index polling and global furl', () => {
