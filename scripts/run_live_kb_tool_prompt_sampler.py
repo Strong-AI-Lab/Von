@@ -39,6 +39,10 @@ DEFAULT_USER_CONCEPT_ID = "#V#michael_witbrock"
 DEFAULT_ORGANISATION_CONCEPT_ID = "university_of_auckland_strong_ai_lab"
 DEFAULT_SESSION_NAME = "JVNAUTOSCI-1894 live prompt sample"
 ACTIVE_AUTHENTICATED_MODEL_LABEL = "active_authenticated_model"
+CHAT_SESSION_ORIGIN_KIND_CODING_AGENT_TEST = "coding_agent_test"
+CHAT_SESSION_CREATED_BY_ACTOR_CONCEPT_ID = "#V#von_system"
+CHAT_SESSION_CREATED_BY_ACTOR_TYPE = "#V#coding_agent"
+LIVE_PROMPT_SAMPLER_TEST_ARTIFACT_KIND = "live_kb_tool_prompt_sampler_chat_session"
 PROMPT_BANK_PATH = Path(__file__).with_name("live_kb_tool_prompt_bank.json")
 REAL_PATH_REPLAY_GUIDE = "docs/engineering/real_path_server_replay_and_telemetry_loop.md"
 REAL_PATH_REPLAY_GUIDE_NOTE = (
@@ -642,6 +646,18 @@ def _assert(condition: bool, message: str) -> None:
         raise RuntimeError(message)
 
 
+def _build_replay_session_creation_payload(session_name: str) -> dict[str, Any]:
+    # Mirrors the create_chat_session provenance contract without importing backend services.
+    return {
+        "session_name": session_name,
+        "origin_kind": CHAT_SESSION_ORIGIN_KIND_CODING_AGENT_TEST,
+        "created_by_actor_concept_id": CHAT_SESSION_CREATED_BY_ACTOR_CONCEPT_ID,
+        "created_by_actor_type": CHAT_SESSION_CREATED_BY_ACTOR_TYPE,
+        "is_agent_created": True,
+        "test_artifact_kind": LIVE_PROMPT_SAMPLER_TEST_ARTIFACT_KIND,
+    }
+
+
 def _emit_replay_guide_note() -> None:
     print(
         f"NOTE: {REAL_PATH_REPLAY_GUIDE_NOTE}",
@@ -915,7 +931,7 @@ def _establish_authenticated_session(
         session,
         "POST",
         f"{base_url}/von/api/session/create_chat_session",
-        json={"session_name": session_name},
+        json=_build_replay_session_creation_payload(session_name),
     )
     session_id = _safe_text(session_payload.get("session_id"))
     _assert(bool(session_id), "Session creation did not return a session_id.")

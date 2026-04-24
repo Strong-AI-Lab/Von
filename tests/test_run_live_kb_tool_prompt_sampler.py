@@ -437,6 +437,81 @@ def test_run_generate_background_omits_model_when_not_requested(
     assert "model" not in seen_payloads[0]
 
 
+def test_replay_session_creation_payload_marks_sampler_chat_as_test_run() -> None:
+    payload = sampler._build_replay_session_creation_payload("Replay run")
+
+    assert payload == {
+        "session_name": "Replay run",
+        "origin_kind": "coding_agent_test",
+        "created_by_actor_concept_id": "#V#von_system",
+        "created_by_actor_type": "#V#coding_agent",
+        "is_agent_created": True,
+        "test_artifact_kind": "live_kb_tool_prompt_sampler_chat_session",
+    }
+
+
+def test_multi_arm_session_creation_payload_keeps_test_run_provenance() -> None:
+    session_name = sampler._build_arm_session_name(
+        base_session_name="Replay run",
+        arm_metadata={
+            "arm_id": "arm_2",
+            "label": sampler.ACTIVE_AUTHENTICATED_MODEL_LABEL,
+            "requested_model": None,
+        },
+    )
+
+    payload = sampler._build_replay_session_creation_payload(session_name)
+
+    assert payload["session_name"] == "Replay run [arm_2:active_authenticated_model]"
+    assert payload["origin_kind"] == "coding_agent_test"
+    assert payload["is_agent_created"] is True
+    assert payload["test_artifact_kind"] == "live_kb_tool_prompt_sampler_chat_session"
+
+
+def test_establish_authenticated_session_sends_test_run_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen_create_payloads: list[dict[str, object]] = []
+
+    def fake_request_json(*args: object, **kwargs: object) -> dict[str, object]:
+        url = str(args[2])
+        if url.endswith("/von/api/session/set_user_concept"):
+            return {"ok": True}
+        if url.endswith("/von/api/session/set_organisation"):
+            return {"ok": True}
+        if url.endswith("/von/api/session/context"):
+            return {"user_id": "#V#michael_witbrock"}
+        if url.endswith("/von/api/session/create_chat_session"):
+            seen_create_payloads.append(dict(kwargs["json"]))  # type: ignore[index]
+            return {"session_id": "session-123"}
+        if url.endswith("/von/reset"):
+            return {"ok": True}
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    monkeypatch.setattr(sampler, "_request_json", fake_request_json)
+
+    session_id, window_session_id = sampler._establish_authenticated_session(
+        session=requests.Session(),
+        base_url="http://127.0.0.1:5000",
+        user_concept_id="#V#michael_witbrock",
+        organisation_concept_id="university_of_auckland_strong_ai_lab",
+        session_name="JVNAUTOSCI-1894 live prompt sample",
+    )
+
+    assert session_id == "session-123"
+    assert window_session_id
+    assert seen_create_payloads == [
+        {
+            "session_name": "JVNAUTOSCI-1894 live prompt sample",
+            "origin_kind": "coding_agent_test",
+            "created_by_actor_concept_id": "#V#von_system",
+            "created_by_actor_type": "#V#coding_agent",
+            "is_agent_created": True,
+            "test_artifact_kind": "live_kb_tool_prompt_sampler_chat_session",
+        }
+    ]
+
+
 def test_build_model_arm_plan_includes_active_arm_and_deduplicates() -> None:
     arms = sampler._build_model_arm_plan(
         requested_model="gemma4:26b",

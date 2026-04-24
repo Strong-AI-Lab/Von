@@ -151,6 +151,13 @@ def test_agent_created_provenance_backfill_marks_only_reliable_candidates(
             "namespace": "#V#user@org",
         },
         {
+            "_id": "doc-live-sampler",
+            "user_id": "#V#user",
+            "session_id": "live-sampler-1",
+            "session_name": "JVNAUTOSCI-1894 live prompt sample [arm_1:gemma4:26b]",
+            "namespace": "#V#user@org",
+        },
+        {
             "_id": "doc-normal",
             "user_id": "#V#user",
             "session_id": "normal-1",
@@ -187,7 +194,7 @@ def test_agent_created_provenance_backfill_marks_only_reliable_candidates(
         namespace="#V#user@org",
         dry_run=True,
     )
-    assert dry_run["reliable_candidate_count"] == 2
+    assert dry_run["reliable_candidate_count"] == 3
     assert dry_run["sessions_marked"] == 0
     assert "is_agent_created" not in docs[0]
 
@@ -197,10 +204,13 @@ def test_agent_created_provenance_backfill_marks_only_reliable_candidates(
         dry_run=False,
     )
 
-    assert applied["reliable_candidate_count"] == 2
-    assert applied["sessions_marked"] == 2
+    assert applied["reliable_candidate_count"] == 3
+    assert applied["sessions_marked"] == 3
     assert docs[0]["origin_kind"] == "browser_test_fixture"
     assert docs[0]["is_agent_created"] is True
     assert docs[1]["origin_kind"] == "benchmark_harness"
     assert docs[1]["is_agent_created"] is True
-    assert "is_agent_created" not in docs[2]
+    assert docs[2]["origin_kind"] == "coding_agent_test"
+    assert docs[2]["is_agent_created"] is True
+    assert docs[2]["test_artifact_kind"] == "live_kb_tool_prompt_sampler_chat_session"
+    assert "is_agent_created" not in docs[3]

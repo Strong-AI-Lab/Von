@@ -75,6 +75,12 @@ VALID_CHAT_SESSION_AGENT_VISIBILITY_VALUES = frozenset(
 )
 _BROWSER_TEST_SESSION_ID_PREFIX = "browser-fixture-"
 _BENCHMARK_SESSION_NAME_PREFIX = "Benchmark session "
+_LIVE_KB_TOOL_PROMPT_SAMPLER_SESSION_NAME_PREFIX = (
+    "JVNAUTOSCI-1894 live prompt sample"
+)
+_LIVE_KB_TOOL_PROMPT_SAMPLER_TEST_ARTIFACT_KIND = (
+    "live_kb_tool_prompt_sampler_chat_session"
+)
 
 
 def _parse_bool_env(name: str, default: bool) -> bool:
@@ -3075,6 +3081,18 @@ def _agent_created_backfill_candidate(doc: Dict[str, Any]) -> Optional[Dict[str,
             ),
         }
 
+    if session_name.startswith(_LIVE_KB_TOOL_PROMPT_SAMPLER_SESSION_NAME_PREFIX):
+        return {
+            "reason": "live_kb_tool_prompt_sampler_session_name",
+            "fields": _normalise_chat_session_provenance_fields(
+                origin_kind=CHAT_SESSION_ORIGIN_KIND_CODING_AGENT_TEST,
+                created_by_actor_concept_id=VON_SYSTEM_ID,
+                created_by_actor_type=CODING_AGENT_TYPE_ID,
+                is_agent_created=True,
+                test_artifact_kind=_LIVE_KB_TOOL_PROMPT_SAMPLER_TEST_ARTIFACT_KIND,
+            ),
+        }
+
     return None
 
 
@@ -3088,8 +3106,9 @@ def backfill_agent_created_chat_session_provenance(
 ) -> Dict[str, Any]:
     """Mark reliable historical test/agent-created conversations.
 
-    Only deterministic browser-test fixture session IDs and benchmark harness
-    names are mutated. Ambiguous historical conversations remain untouched.
+    Only deterministic browser-test fixture session IDs, benchmark harness
+    names, and live prompt sampler names are mutated. Ambiguous historical
+    conversations remain untouched.
     """
 
     if not isinstance(user_concept_id, str) or not user_concept_id:
