@@ -2,6 +2,7 @@
   "family_id": "arxiv_paper_ingestion_testing_workflow_seed_bundle",
   "managed_by": "testing_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
+  "seed_version": "1",
   "source_tag": "JVNAUTOSCI-1570",
   "supported_action_ids": [
     "testing.prepare_arxiv_paper_ingestion_fixture",

@@ -2,6 +2,7 @@
   "family_id": "capability_test_execution_workflow_seed_bundle",
   "managed_by": "testing_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
+  "seed_version": "1",
   "source_tag": "JVNAUTOSCI-1722",
   "supported_action_ids": [
     "testing.prepare_experiment_spec",

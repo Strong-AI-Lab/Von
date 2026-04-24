@@ -38,6 +38,15 @@ class _FakeWorkflowRetrievalBackend:
         self.docs_by_namespace: dict[str, dict[str, dict[str, Any]]] = {}
         self.queries: list[dict[str, Any]] = []
         self.reset_calls: list[str] = []
+        self.upsert_calls: list[dict[str, Any]] = []
+        self.persistence_dir: str | None = None
+        self.embedding_signature = {
+            "schema_version": "rag_component_signature.v1",
+            "kind": "embedder",
+            "provider": "fake",
+            "model": "fake-workflow-capability-embedder",
+            "host": None,
+        }
 
     def reset_namespace(self, namespace: str) -> None:
         namespace_key = str(namespace)
@@ -51,14 +60,35 @@ class _FakeWorkflowRetrievalBackend:
         namespace: str | None = None,
         allow_partial_failures: bool = True,
     ) -> tuple[int, int]:
-        store = self.docs_by_namespace.setdefault(str(namespace or ""), {})
-        for doc in docs:
+        docs_list = list(docs)
+        namespace_key = str(namespace or "")
+        self.upsert_calls.append(
+            {
+                "namespace": namespace_key,
+                "count": len(docs_list),
+                "allow_partial_failures": allow_partial_failures,
+            }
+        )
+        store = self.docs_by_namespace.setdefault(namespace_key, {})
+        for doc in docs_list:
             store[str(doc["id"])] = {
                 "id": str(doc["id"]),
                 "text": str(doc.get("text") or ""),
                 "metadata": dict(doc.get("metadata") or {}),
             }
-        return (len(docs), 0)
+        return (len(docs_list), 0)
+
+    def get_namespace_runtime_state(self, namespace: str | None = None) -> dict[str, Any]:
+        namespace_key = str(namespace or "")
+        return {
+            "namespace": namespace_key,
+            "has_persisted_index": bool(self.docs_by_namespace.get(namespace_key)),
+            "compatible": True,
+            "status": "compatible",
+            "detail": "Fake namespace is compatible.",
+            "current_embedding_signature": dict(self.embedding_signature),
+            "stored_embedding_signature": dict(self.embedding_signature),
+        }
 
     def query(
         self,
@@ -144,6 +174,18 @@ def _stub_authoritative_workflow_description_resolution(
             "text_relation:#V#hasDescription",
         ),
     )
+
+
+def _enable_fake_backend_persistence(
+    backend: _FakeWorkflowRetrievalBackend,
+    tmp_path: Any,
+) -> None:
+    backend.persistence_dir = str(tmp_path)
+
+    def _namespace_persist_dir(namespace: str) -> str:
+        return str(tmp_path / "namespaces" / f"{namespace}_fake")
+
+    backend._namespace_persist_dir = _namespace_persist_dir  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------
@@ -525,6 +567,95 @@ class TestIndexFromRegistry:
         results = index.search("Create a workflow from this description request.")
         assert results
         assert results[0].workflow_id == "#V#workflow_repair_or_create_workflow"
+
+    def test_blocking_build_reuses_current_persisted_manifest_without_backend_reset(
+        self,
+        tmp_path: Any,
+        _fake_retrieval_backend: _FakeWorkflowRetrievalBackend,
+    ) -> None:
+        import src.backend.services.workflow_capability_service as capability_service
+        from src.backend.workflows import WorkflowRegistry
+        from src.backend.workflows.workflow_registry import LazyWorkflowRegistration
+
+        _enable_fake_backend_persistence(_fake_retrieval_backend, tmp_path)
+        registry = WorkflowRegistry()
+        registry.register_lazy(
+            LazyWorkflowRegistration(
+                workflow_id="#V#workflow_repair_or_create_workflow",
+                purpose="Repair workflows from requests.",
+                source="vontology",
+            )
+        )
+
+        first_index = capability_service._perform_workflow_capability_index_build(
+            mode="blocking",
+            workflow_registry=registry,
+        )
+        assert first_index.size == 1
+        assert _fake_retrieval_backend.reset_calls == ["workflow_capabilities"]
+        assert len(_fake_retrieval_backend.upsert_calls) == 1
+
+        reset_workflow_capability_index()
+
+        second_index = capability_service._perform_workflow_capability_index_build(
+            mode="blocking",
+            workflow_registry=registry,
+        )
+
+        assert second_index.size == 1
+        assert _fake_retrieval_backend.reset_calls == ["workflow_capabilities"]
+        assert len(_fake_retrieval_backend.upsert_calls) == 1
+        readiness = get_workflow_capability_index_readiness_report()
+        assert readiness["last_manifest_status"] == "loaded"
+        assert readiness["ready"] is True
+
+    def test_blocking_build_rebuilds_when_authoritative_manifest_digest_changes(
+        self,
+        tmp_path: Any,
+        _fake_retrieval_backend: _FakeWorkflowRetrievalBackend,
+    ) -> None:
+        import src.backend.services.workflow_capability_service as capability_service
+        from src.backend.workflows import WorkflowRegistry
+        from src.backend.workflows.workflow_registry import LazyWorkflowRegistration
+
+        _enable_fake_backend_persistence(_fake_retrieval_backend, tmp_path)
+
+        first_registry = WorkflowRegistry()
+        first_registry.register_lazy(
+            LazyWorkflowRegistration(
+                workflow_id="#V#workflow_repair_or_create_workflow",
+                purpose="Repair workflows from requests.",
+                source="vontology",
+            )
+        )
+        capability_service._perform_workflow_capability_index_build(
+            mode="blocking",
+            workflow_registry=first_registry,
+        )
+
+        reset_workflow_capability_index()
+        second_registry = WorkflowRegistry()
+        second_registry.register_lazy(
+            LazyWorkflowRegistration(
+                workflow_id="#V#workflow_repair_or_create_workflow",
+                purpose="Repair or create workflows from current user requests.",
+                source="vontology",
+            )
+        )
+
+        second_index = capability_service._perform_workflow_capability_index_build(
+            mode="blocking",
+            workflow_registry=second_registry,
+        )
+
+        assert second_index.size == 1
+        assert _fake_retrieval_backend.reset_calls == [
+            "workflow_capabilities",
+            "workflow_capabilities",
+        ]
+        assert len(_fake_retrieval_backend.upsert_calls) == 2
+        readiness = get_workflow_capability_index_readiness_report()
+        assert readiness["last_manifest_status"] == "written"
 
 
 # ---------------------------------------------------------------------------

@@ -2,6 +2,7 @@
   "family_id": "paper_recommendation_workflow_seed_bundle",
   "managed_by": "paper_recommendation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
+  "seed_version": "1",
   "source_tag": "JVNAUTOSCI-1679",
   "supported_action_ids": [
     "materialise_paper_recommendations",

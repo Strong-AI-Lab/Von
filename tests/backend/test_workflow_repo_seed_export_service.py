@@ -17,6 +17,7 @@ def test_build_repo_seed_workflow_bundle_from_authority_uses_raw_bundle_scaffold
                 "family_id": "episode_evaluation_workflow_seed_bundle",
                 "managed_by": "episode_evaluation_workflow_vontology_service",
                 "schema_version": "repo_seed_workflow_bundle.v1",
+                "seed_version": "3",
                 "source_tag": "JVNAUTOSCI-1665",
                 "supported_action_ids": ["episode_critic.build_evidence_bundle"],
                 "workflows": [
@@ -62,6 +63,7 @@ def test_build_repo_seed_workflow_bundle_from_authority_uses_raw_bundle_scaffold
         "family_id": "episode_evaluation_workflow_seed_bundle",
         "managed_by": "episode_evaluation_workflow_vontology_service",
         "schema_version": "repo_seed_workflow_bundle.v1",
+        "seed_version": "3",
         "source_tag": "JVNAUTOSCI-1665",
         "supported_action_ids": ["episode_critic.build_evidence_bundle"],
         "workflows": [

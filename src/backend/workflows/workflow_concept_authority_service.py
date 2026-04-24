@@ -858,6 +858,11 @@ def _load_repo_seed_workflow_bundle_cached(
         "asset_path": str(path),
         "family_id": _normalise_seed_bundle_text(payload.get("family_id")),
         "managed_by": _normalise_seed_bundle_text(payload.get("managed_by")),
+        "seed_version": (
+            _normalise_seed_bundle_text(payload.get("seed_version"))
+            or _normalise_seed_bundle_text(payload.get("bundle_version"))
+            or _normalise_seed_bundle_text(payload.get("version"))
+        ),
         "source_tag": _normalise_seed_bundle_text(payload.get("source_tag")),
         "supported_action_ids": _normalise_seed_bundle_string_tuple(
             payload.get("supported_action_ids")

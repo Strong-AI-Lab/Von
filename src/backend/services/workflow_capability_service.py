@@ -14,11 +14,14 @@ lists.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime, timezone
 import logging
 import math
 import os
 import shutil
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -33,6 +36,8 @@ from ..workflows.workflow_definition_identity_service import (
 logger = logging.getLogger(__name__)
 
 WORKFLOW_CAPABILITY_NAMESPACE = "workflow_capabilities"
+_WORKFLOW_CAPABILITY_MANIFEST_FILENAME = "workflow_capability_manifest.json"
+_WORKFLOW_CAPABILITY_MANIFEST_SCHEMA_VERSION = "workflow_capability_manifest.v1"
 
 
 def _get_positive_float_env(name: str, default: float) -> float:
@@ -92,6 +97,11 @@ _INDEX_REBUILD_STATE: Dict[str, Any] = {
     "query_surface_ready": False,
     "query_surface_last_error": None,
     "query_surface_last_warm_monotonic": 0.0,
+    "last_manifest_status": None,
+    "last_manifest_detail": None,
+    "last_manifest_path": None,
+    "last_manifest_digest": None,
+    "last_manifest_checked_at_utc": None,
 }
 _INDEX_REBUILD_COMPLETED = threading.Event()
 _INDEX_REBUILD_COMPLETED.set()
@@ -201,6 +211,200 @@ def _reset_workflow_capability_backend_namespace(rag_service: Any) -> None:
         )
 
 
+def _normalise_manifest_value(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, Mapping):
+        return {
+            str(key): _normalise_manifest_value(value[key])
+            for key in sorted(value.keys(), key=lambda item: str(item))
+        }
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_normalise_manifest_value(item) for item in value]
+    return str(value)
+
+
+def _entry_manifest_row(entry: "_CapabilityEntry") -> dict[str, Any]:
+    return {
+        "workflow_id": entry.workflow_id,
+        "doc_id": entry.doc_id,
+        "text": entry.text,
+        "metadata": _normalise_manifest_value(entry.metadata),
+    }
+
+
+def _compute_workflow_capability_entries_digest(
+    entries: Mapping[str, "_CapabilityEntry"],
+) -> str:
+    rows = [
+        _entry_manifest_row(entry)
+        for _workflow_id, entry in sorted(entries.items(), key=lambda item: item[0])
+    ]
+    payload = json.dumps(
+        rows,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _get_workflow_capability_namespace_state(
+    rag_service: Any,
+) -> dict[str, Any] | None:
+    get_namespace_runtime_state = getattr(
+        rag_service,
+        "get_namespace_runtime_state",
+        None,
+    )
+    if not callable(get_namespace_runtime_state):
+        return None
+    try:
+        state = get_namespace_runtime_state(WORKFLOW_CAPABILITY_NAMESPACE)
+    except Exception:
+        return None
+    return dict(state) if isinstance(state, dict) else None
+
+
+def _workflow_capability_manifest_path(rag_service: Any) -> Path | None:
+    namespace_dir_builder = getattr(rag_service, "_namespace_persist_dir", None)
+    if not callable(namespace_dir_builder):
+        return None
+
+    namespace_dir = Path(
+        str(namespace_dir_builder(WORKFLOW_CAPABILITY_NAMESPACE))
+    ).resolve()
+    persistence_dir = getattr(rag_service, "persistence_dir", None)
+    if isinstance(persistence_dir, str) and persistence_dir.strip():
+        namespaces_root = (Path(persistence_dir).resolve() / "namespaces").resolve()
+        try:
+            common_root = os.path.commonpath(
+                [str(namespace_dir), str(namespaces_root)]
+            )
+        except ValueError as exc:
+            raise RuntimeError(
+                f"workflow capability manifest path mismatch: {exc}"
+            ) from exc
+        if common_root != str(namespaces_root):
+            raise RuntimeError(
+                "workflow capability manifest path refused outside persistence root"
+            )
+    return namespace_dir / _WORKFLOW_CAPABILITY_MANIFEST_FILENAME
+
+
+def _set_workflow_capability_manifest_state(
+    *,
+    status: str | None,
+    detail: str | None = None,
+    path: Path | str | None = None,
+    digest: str | None = None,
+) -> None:
+    with _INDEX_STATE_LOCK:
+        _INDEX_REBUILD_STATE["last_manifest_status"] = (
+            str(status).strip() if status else None
+        )
+        _INDEX_REBUILD_STATE["last_manifest_detail"] = (
+            str(detail).strip() if detail else None
+        )
+        _INDEX_REBUILD_STATE["last_manifest_path"] = str(path) if path else None
+        _INDEX_REBUILD_STATE["last_manifest_digest"] = (
+            str(digest).strip() if digest else None
+        )
+        _INDEX_REBUILD_STATE["last_manifest_checked_at_utc"] = _utc_now_iso()
+
+
+def _read_workflow_capability_manifest(rag_service: Any) -> dict[str, Any] | None:
+    path = _workflow_capability_manifest_path(rag_service)
+    if path is None:
+        _set_workflow_capability_manifest_state(
+            status="unavailable",
+            detail="RAG backend does not expose a namespace persistence path.",
+        )
+        return None
+    if not path.is_file():
+        _set_workflow_capability_manifest_state(
+            status="missing",
+            detail="No workflow capability manifest exists for the persisted namespace.",
+            path=path,
+        )
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        _set_workflow_capability_manifest_state(
+            status="read_error",
+            detail=str(exc),
+            path=path,
+        )
+        return None
+    if not isinstance(payload, dict):
+        _set_workflow_capability_manifest_state(
+            status="invalid",
+            detail="Workflow capability manifest payload is not a mapping.",
+            path=path,
+        )
+        return None
+    return payload
+
+
+def _write_workflow_capability_manifest(
+    rag_service: Any,
+    entries: Mapping[str, "_CapabilityEntry"],
+    *,
+    mode: str | None = None,
+) -> None:
+    path = _workflow_capability_manifest_path(rag_service)
+    digest = _compute_workflow_capability_entries_digest(entries)
+    if path is None:
+        _set_workflow_capability_manifest_state(
+            status="write_skipped",
+            detail="RAG backend does not expose a namespace persistence path.",
+            digest=digest,
+        )
+        return
+
+    namespace_state = _get_workflow_capability_namespace_state(rag_service) or {}
+    payload = {
+        "schema_version": _WORKFLOW_CAPABILITY_MANIFEST_SCHEMA_VERSION,
+        "namespace": WORKFLOW_CAPABILITY_NAMESPACE,
+        "written_at_utc": _utc_now_iso(),
+        "build_mode": str(mode or "").strip() or None,
+        "entry_count": len(entries),
+        "entry_digest": digest,
+        "workflow_ids": sorted(str(workflow_id) for workflow_id in entries.keys()),
+        "embedding_signature": namespace_state.get("current_embedding_signature")
+        or namespace_state.get("stored_embedding_signature"),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(
+        prefix="workflow_capability_manifest.",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=True, sort_keys=True, indent=2)
+            handle.write("\n")
+            handle.flush()
+            try:
+                os.fsync(handle.fileno())
+            except OSError:
+                pass
+        os.replace(temp_path, path)
+        _set_workflow_capability_manifest_state(
+            status="written",
+            detail=f"Workflow capability manifest written with {len(entries)} entries.",
+            path=path,
+            digest=digest,
+        )
+    finally:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+
 @dataclass
 class _CapabilityEntry:
     workflow_id: str
@@ -262,6 +466,9 @@ class WorkflowCapabilityIndex:
     def _replace_entries(
         self,
         pending_entries: Mapping[str, _CapabilityEntry],
+        *,
+        mode: str | None = None,
+        write_manifest: bool = True,
     ) -> None:
         rag_service = _get_workflow_capability_rag_service()
         _reset_workflow_capability_backend_namespace(rag_service)
@@ -280,6 +487,17 @@ class WorkflowCapabilityIndex:
                     f"(success={success_count}, failed={failure_count}, "
                     f"expected={len(payload)})"
                 )
+        if write_manifest and payload:
+            _write_workflow_capability_manifest(
+                rag_service,
+                pending_entries,
+                mode=mode,
+            )
+        elif write_manifest:
+            _set_workflow_capability_manifest_state(
+                status="empty_not_written",
+                detail="No workflow capability entries were available to persist.",
+            )
         with self._lock:
             self._entries = dict(pending_entries)
 
@@ -310,17 +528,18 @@ class WorkflowCapabilityIndex:
         with self._lock:
             pending_entries = dict(self._entries)
         pending_entries[workflow_id] = entry
-        self._replace_entries(pending_entries)
+        self._replace_entries(pending_entries, mode="single_workflow")
 
-    def index_from_registry(self, registry: Any) -> int:
-        """Index all workflows from a ``WorkflowRegistry``.
+    def _entries_from_registry(
+        self,
+        registry: Any,
+    ) -> tuple[Dict[str, _CapabilityEntry], dict[str, Any]]:
+        """Build capability entries from a ``WorkflowRegistry`` without syncing RAG.
 
         Only indexes workflows whose routing text is already authoritative:
         Vontology-sourced registrations with non-empty narrative text.
         Non-authoritative registrations and textless workflows are skipped so
         discovery fails closed instead of routing on guessed fallback prose.
-
-        Returns the number of workflows indexed.
         """
         skipped_non_authoritative = 0
         skipped_missing_purpose = 0
@@ -414,7 +633,22 @@ class WorkflowCapabilityIndex:
                 routing_metadata=authoritative_routing_metadata.get(workflow_id),
             )
 
-        self._replace_entries(pending_entries)
+        count = len(pending_entries)
+        diagnostics = {
+            "count": count,
+            "eager_count": len(list(registry.eager_workflow_ids())),
+            "lazy_count": len(list(registry.lazy_workflow_ids())),
+            "skipped_non_authoritative": skipped_non_authoritative,
+            "skipped_missing_authoritative_text": skipped_missing_purpose,
+            "skipped_invalid_workflow_id": skipped_invalid_workflow_id,
+        }
+        return pending_entries, diagnostics
+
+    def index_from_registry(self, registry: Any, *, mode: str | None = None) -> int:
+        """Index all authoritative workflows from a ``WorkflowRegistry``."""
+
+        pending_entries, diagnostics = self._entries_from_registry(registry)
+        self._replace_entries(pending_entries, mode=mode or "registry")
 
         count = len(pending_entries)
         logger.info(
@@ -423,13 +657,122 @@ class WorkflowCapabilityIndex:
             "skipped_missing_authoritative_text=%d "
             "skipped_invalid_workflow_id=%d",
             count,
-            len(list(registry.eager_workflow_ids())),
-            len(list(registry.lazy_workflow_ids())),
-            skipped_non_authoritative,
-            skipped_missing_purpose,
-            skipped_invalid_workflow_id,
+            int(diagnostics.get("eager_count") or 0),
+            int(diagnostics.get("lazy_count") or 0),
+            int(diagnostics.get("skipped_non_authoritative") or 0),
+            int(diagnostics.get("skipped_missing_authoritative_text") or 0),
+            int(diagnostics.get("skipped_invalid_workflow_id") or 0),
         )
         return count
+
+    def load_from_persisted_namespace_if_current(self, registry: Any) -> bool:
+        """Load process-local entries when the persisted RAG namespace is current.
+
+        The manifest is a support-surface fingerprint of the authoritative
+        Vontology-derived capability documents.  It lets startup avoid deleting
+        and re-embedding a compatible namespace while still detecting changed
+        workflow routing text before trusting the persisted index.
+        """
+
+        rag_service = _get_workflow_capability_rag_service()
+        namespace_state = _get_workflow_capability_namespace_state(rag_service)
+        if isinstance(namespace_state, dict):
+            if not bool(namespace_state.get("compatible", False)):
+                _set_workflow_capability_manifest_state(
+                    status="namespace_incompatible",
+                    detail=str(namespace_state.get("detail") or "").strip()
+                    or "Persisted namespace is not compatible with this runtime.",
+                    path=_workflow_capability_manifest_path(rag_service),
+                )
+                return False
+            if not bool(namespace_state.get("has_persisted_index", False)):
+                _set_workflow_capability_manifest_state(
+                    status="namespace_missing",
+                    detail="No persisted workflow capability namespace exists.",
+                    path=_workflow_capability_manifest_path(rag_service),
+                )
+                return False
+
+        manifest = _read_workflow_capability_manifest(rag_service)
+        manifest_path = _workflow_capability_manifest_path(rag_service)
+        if not isinstance(manifest, dict):
+            return False
+
+        if manifest.get("schema_version") != _WORKFLOW_CAPABILITY_MANIFEST_SCHEMA_VERSION:
+            _set_workflow_capability_manifest_state(
+                status="schema_mismatch",
+                detail="Workflow capability manifest schema is unsupported.",
+                path=manifest_path,
+            )
+            return False
+        if manifest.get("namespace") != WORKFLOW_CAPABILITY_NAMESPACE:
+            _set_workflow_capability_manifest_state(
+                status="namespace_mismatch",
+                detail="Workflow capability manifest belongs to a different namespace.",
+                path=manifest_path,
+            )
+            return False
+
+        current_entries, diagnostics = self._entries_from_registry(registry)
+        current_digest = _compute_workflow_capability_entries_digest(current_entries)
+        manifest_digest = str(manifest.get("entry_digest") or "").strip()
+        if manifest_digest != current_digest:
+            _set_workflow_capability_manifest_state(
+                status="digest_mismatch",
+                detail=(
+                    "Authoritative workflow capability documents changed since "
+                    "the persisted namespace was built."
+                ),
+                path=manifest_path,
+                digest=current_digest,
+            )
+            logger.info(
+                "[workflow_capability_index] Persisted manifest digest mismatch "
+                "(manifest=%s current=%s); rebuilding namespace.",
+                manifest_digest,
+                current_digest,
+            )
+            return False
+
+        if isinstance(namespace_state, dict):
+            current_signature = namespace_state.get("current_embedding_signature")
+            manifest_signature = manifest.get("embedding_signature")
+            if (
+                isinstance(current_signature, Mapping)
+                and isinstance(manifest_signature, Mapping)
+                and dict(current_signature) != dict(manifest_signature)
+            ):
+                _set_workflow_capability_manifest_state(
+                    status="embedding_signature_mismatch",
+                    detail=(
+                        "Workflow capability manifest was built with a different "
+                        "embedding signature."
+                    ),
+                    path=manifest_path,
+                    digest=current_digest,
+                )
+                return False
+
+        with self._lock:
+            self._entries = dict(current_entries)
+        _set_workflow_capability_manifest_state(
+            status="loaded",
+            detail=(
+                "Loaded workflow capability process cache from a compatible "
+                "persisted namespace without rebuilding embeddings."
+            ),
+            path=manifest_path,
+            digest=current_digest,
+        )
+        logger.info(
+            "[workflow_capability_index] Loaded %d workflows from persisted "
+            "namespace manifest without RAG reset/upsert "
+            "(%d eager, %d lazy).",
+            len(current_entries),
+            int(diagnostics.get("eager_count") or 0),
+            int(diagnostics.get("lazy_count") or 0),
+        )
+        return True
 
     @property
     def size(self) -> int:
@@ -852,6 +1195,13 @@ def get_workflow_capability_index_runtime_state() -> Dict[str, Any]:
             "query_surface_last_warm_monotonic": float(
                 _INDEX_REBUILD_STATE.get("query_surface_last_warm_monotonic", 0.0)
             ),
+            "last_manifest_status": _INDEX_REBUILD_STATE.get("last_manifest_status"),
+            "last_manifest_detail": _INDEX_REBUILD_STATE.get("last_manifest_detail"),
+            "last_manifest_path": _INDEX_REBUILD_STATE.get("last_manifest_path"),
+            "last_manifest_digest": _INDEX_REBUILD_STATE.get("last_manifest_digest"),
+            "last_manifest_checked_at_utc": _INDEX_REBUILD_STATE.get(
+                "last_manifest_checked_at_utc"
+            ),
             "namespace_state": namespace_state,
         }
 
@@ -1066,7 +1416,22 @@ def _perform_workflow_capability_index_build(
         )
 
         index = get_workflow_capability_index()
-        count = index.index_from_registry(registry)
+        loaded_from_manifest = False
+        load_from_persisted = getattr(
+            index,
+            "load_from_persisted_namespace_if_current",
+            None,
+        )
+        if not force_refresh and callable(load_from_persisted):
+            loaded_from_manifest = bool(load_from_persisted(registry))
+
+        if loaded_from_manifest:
+            count = index.size
+        else:
+            try:
+                count = index.index_from_registry(registry, mode=mode)
+            except TypeError:
+                count = index.index_from_registry(registry)
         if count > 0:
             _warm_workflow_capability_query_surface(index, mode=mode)
         success_monotonic = time.monotonic()
@@ -1079,8 +1444,9 @@ def _perform_workflow_capability_index_build(
             clear_invalidation=True,
         )
         logger.info(
-            "[workflow_capability_index] %s build completed with %d entries.",
+            "[workflow_capability_index] %s %s completed with %d entries.",
             mode,
+            "manifest load" if loaded_from_manifest else "build",
             count,
         )
         return index
@@ -1284,6 +1650,11 @@ def reset_workflow_capability_index() -> None:
         _INDEX_REBUILD_STATE["query_surface_ready"] = False
         _INDEX_REBUILD_STATE["query_surface_last_error"] = None
         _INDEX_REBUILD_STATE["query_surface_last_warm_monotonic"] = 0.0
+        _INDEX_REBUILD_STATE["last_manifest_status"] = None
+        _INDEX_REBUILD_STATE["last_manifest_detail"] = None
+        _INDEX_REBUILD_STATE["last_manifest_path"] = None
+        _INDEX_REBUILD_STATE["last_manifest_digest"] = None
+        _INDEX_REBUILD_STATE["last_manifest_checked_at_utc"] = None
     _INDEX_REBUILD_COMPLETED.set()
 
 

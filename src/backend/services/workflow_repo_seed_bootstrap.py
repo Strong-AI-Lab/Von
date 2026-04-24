@@ -5,11 +5,12 @@ from __future__ import annotations
 import copy
 import json
 from contextlib import nullcontext
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from . import concept_service
-from .text_value_service import upsert_singleton_text_relation
+from .text_value_service import get_texts_for_concept, upsert_singleton_text_relation
 from .workflow_discovery_service import (
     invalidate_workflow_discovery_executability_caches,
 )
@@ -30,6 +31,8 @@ from ..workflows.workflow_definition_identity_service import (
 _WORKFLOW_STEP_TYPE_ID = "#V#workflow_step"
 _REQUIRED_AUTHORITY_SURFACE_LAUNCH_CONTRACT = "launch_contract"
 _REQUIRED_AUTHORITY_SURFACE_LAUNCH_INPUT_CONTRACT = "launch_input_contract"
+_REPO_SEED_VERSION_TEXT_PREDICATE = "#V#hasWorkflowRepoSeedVersionJson"
+_REPO_SEED_VERSION_SCHEMA_VERSION = "workflow_repo_seed_version.v1"
 
 
 def _stable_state_metadata_subset(state: Any) -> dict[str, Any]:
@@ -94,6 +97,251 @@ def _normalise_string_tuple(values: tuple[str, ...]) -> tuple[str, ...]:
                 str(item or "").strip() for item in values if str(item or "").strip()
             )
         )
+    )
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _normalise_seed_version(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
+def _split_seed_version_token(value: str) -> tuple[Any, ...]:
+    pieces: list[Any] = []
+    current = ""
+    current_is_digit: bool | None = None
+    for char in value.strip():
+        is_digit = char.isdigit()
+        if not char.isalnum():
+            if current:
+                pieces.append(int(current) if current_is_digit else current.lower())
+            current = ""
+            current_is_digit = None
+            continue
+        if current and current_is_digit is not None and is_digit != current_is_digit:
+            pieces.append(int(current) if current_is_digit else current.lower())
+            current = ""
+        current += char
+        current_is_digit = is_digit
+    if current:
+        pieces.append(int(current) if current_is_digit else current.lower())
+    return tuple(pieces) if pieces else (value.strip().lower(),)
+
+
+def _compare_seed_versions(left: str | None, right: str | None) -> int | None:
+    """Compare two seed version strings.
+
+    Returns 1 when left is newer, 0 when equal, -1 when older, and None when
+    either side is missing.  Numeric components sort numerically; text
+    components provide a deterministic fallback for labelled experimental
+    versions.
+    """
+
+    left_text = _normalise_seed_version(left)
+    right_text = _normalise_seed_version(right)
+    if not left_text or not right_text:
+        return None
+    left_parts = _split_seed_version_token(left_text)
+    right_parts = _split_seed_version_token(right_text)
+    max_len = max(len(left_parts), len(right_parts))
+    for index in range(max_len):
+        left_part = left_parts[index] if index < len(left_parts) else 0
+        right_part = right_parts[index] if index < len(right_parts) else 0
+        if left_part == right_part:
+            continue
+        if isinstance(left_part, int) and isinstance(right_part, int):
+            return 1 if left_part > right_part else -1
+        return 1 if str(left_part) > str(right_part) else -1
+    return 0
+
+
+def _load_workflow_repo_seed_version_marker(
+    workflow_id: str,
+) -> dict[str, Any] | None:
+    rows = get_texts_for_concept(
+        workflow_id,
+        predicate=_REPO_SEED_VERSION_TEXT_PREDICATE,
+        limit=5,
+    )
+    for row in rows:
+        raw_text = row.get("text") if isinstance(row, Mapping) else None
+        if not isinstance(raw_text, str) or not raw_text.strip():
+            continue
+        try:
+            payload = json.loads(raw_text)
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        seed_version = _normalise_seed_version(payload.get("seed_version"))
+        if not seed_version:
+            continue
+        return {
+            "seed_version": seed_version,
+            "schema_version": str(payload.get("schema_version") or "").strip()
+            or None,
+            "family_id": str(payload.get("family_id") or "").strip() or None,
+            "source_tag": str(payload.get("source_tag") or "").strip() or None,
+            "relation_id": row.get("relation_id"),
+            "text_value_id": row.get("text_value_id"),
+        }
+    return None
+
+
+def _repo_seed_version_status_by_workflow(
+    *,
+    seed_version: str | None,
+    workflow_ids: Sequence[str],
+) -> dict[str, dict[str, Any]]:
+    status_by_workflow: dict[str, dict[str, Any]] = {}
+    clean_seed_version = _normalise_seed_version(seed_version)
+    for workflow_id in workflow_ids:
+        marker = (
+            _load_workflow_repo_seed_version_marker(workflow_id)
+            if clean_seed_version
+            else None
+        )
+        existing_version = (
+            _normalise_seed_version(marker.get("seed_version"))
+            if isinstance(marker, Mapping)
+            else None
+        )
+        comparison = _compare_seed_versions(clean_seed_version, existing_version)
+        blocked = comparison is not None and comparison <= 0
+        if comparison is None:
+            reason = (
+                "seed_version_missing"
+                if not clean_seed_version
+                else "vontology_seed_version_missing"
+            )
+        elif comparison > 0:
+            reason = "repo_seed_version_newer"
+        elif comparison == 0:
+            reason = "repo_seed_version_equal"
+        else:
+            reason = "vontology_seed_version_newer"
+        status_by_workflow[workflow_id] = {
+            "workflow_id": workflow_id,
+            "seed_version": clean_seed_version,
+            "vontology_seed_version": existing_version,
+            "comparison": comparison,
+            "blocked": blocked,
+            "reason": reason,
+            "marker": marker,
+        }
+    return status_by_workflow
+
+
+def _suppress_repo_seed_snapshot_drift_when_vontology_version_is_current(
+    *,
+    materialisation_preflight: dict[str, Any],
+    version_blocked_workflow_ids: Sequence[str],
+    target_workflow_ids: Sequence[str],
+) -> dict[str, Any]:
+    """Let Vontology's equal/newer seed marker outrank a stale repo snapshot.
+
+    Version markers must not hide actual missing/corrupt materialisation.  They
+    only suppress bundle-snapshot drift for workflows whose current Vontology
+    materialisation is otherwise healthy.
+    """
+
+    blocked = {
+        str(workflow_id or "").strip()
+        for workflow_id in version_blocked_workflow_ids
+        if str(workflow_id or "").strip()
+    }
+    if not blocked:
+        return materialisation_preflight
+    if materialisation_preflight.get("drift_workflow_ids"):
+        return materialisation_preflight
+
+    snapshot_drift_ids = [
+        str(workflow_id or "").strip()
+        for workflow_id in (
+            materialisation_preflight.get("bundle_snapshot_drift_workflow_ids") or []
+        )
+        if str(workflow_id or "").strip()
+    ]
+    if not snapshot_drift_ids:
+        return materialisation_preflight
+
+    suppressed_ids = [
+        workflow_id for workflow_id in snapshot_drift_ids if workflow_id in blocked
+    ]
+    if not suppressed_ids:
+        return materialisation_preflight
+
+    remaining_snapshot_drift_ids = [
+        workflow_id for workflow_id in snapshot_drift_ids if workflow_id not in blocked
+    ]
+    updated = dict(materialisation_preflight)
+    updated["bundle_snapshot_drift_workflow_ids"] = remaining_snapshot_drift_ids
+    updated["bundle_snapshot_drift_detected"] = bool(remaining_snapshot_drift_ids)
+    if not remaining_snapshot_drift_ids:
+        updated["bundle_snapshot_issue_codes"] = []
+    else:
+        status_by_id = materialisation_preflight.get("bundle_snapshot_status_by_id")
+        if isinstance(status_by_id, Mapping):
+            updated["bundle_snapshot_issue_codes"] = sorted(
+                {
+                    str(
+                        (status_by_id.get(workflow_id) or {}).get("issue_code")
+                        or ""
+                    ).strip()
+                    for workflow_id in remaining_snapshot_drift_ids
+                    if str(
+                        (status_by_id.get(workflow_id) or {}).get("issue_code")
+                        or ""
+                    ).strip()
+                }
+            )
+    updated["repo_seed_version_suppressed_bundle_snapshot_drift_workflow_ids"] = (
+        suppressed_ids
+    )
+    already_current = bool(target_workflow_ids) and not remaining_snapshot_drift_ids
+    updated["already_current"] = already_current
+    updated["drift_detected"] = not already_current
+    return updated
+
+
+def _upsert_workflow_repo_seed_version_marker(
+    *,
+    workflow_id: str,
+    seed_version: str,
+    family_id: str | None,
+    source_tag: str | None,
+    managed_by: str | None,
+    asset_path: str,
+) -> dict[str, Any]:
+    payload = {
+        "schema_version": _REPO_SEED_VERSION_SCHEMA_VERSION,
+        "seed_version": seed_version,
+        "family_id": family_id,
+        "source_tag": source_tag,
+        "managed_by": managed_by,
+        "asset_path": asset_path,
+        "recorded_at_utc": _utc_now_iso(),
+    }
+    return upsert_singleton_text_relation(
+        subject_concept_id=workflow_id,
+        predicate=_REPO_SEED_VERSION_TEXT_PREDICATE,
+        text=json.dumps(payload, ensure_ascii=True, sort_keys=True),
+        lang="en-NZ",
+        context={
+            key: value
+            for key, value in {
+                "workflow_id": workflow_id,
+                "family_id": family_id,
+                "source": source_tag,
+                "managed_by": managed_by,
+                "repo_seed_role": "version_marker_only",
+            }.items()
+            if value is not None
+        },
+        garbage_collect=True,
     )
 
 
@@ -966,11 +1214,16 @@ def bootstrap_repo_seed_workflow_bundle(
     Repo-side bundles are startup seed fixtures only. Canonical runtime
     workflow authority remains in Vontology; this helper only verifies whether
     Vontology is already current and, when it is not, republishes the missing or
-    drifted materialisation through the shared publication pathway.
+    drifted materialisation through the shared publication pathway.  When a
+    bundle declares a seed version, the repo seed may publish only workflows
+    whose declared version is higher than the version marker already recorded in
+    Vontology.
     """
 
     bundle = authority_service.load_repo_seed_workflow_bundle(asset_path)
+    family_id = str(bundle.get("family_id") or "").strip() or None
     managed_by = str(bundle.get("managed_by") or "").strip() or None
+    seed_version = _normalise_seed_version(bundle.get("seed_version"))
     source_tag = str(bundle.get("source_tag") or "").strip() or None
     publication_specs = dict(bundle.get("publication_specs") or {})
     publication_purposes = dict(bundle.get("publication_purposes") or {})
@@ -1016,6 +1269,20 @@ def bootstrap_repo_seed_workflow_bundle(
             if workflow_id in allowed_ids
         }
     target_workflow_ids = tuple(publication_specs.keys())
+    authority_contract = {
+        "canonical_source": "vontology",
+        "repo_seed_role": "startup_seed_publication_and_repair_only",
+        "request_path_dependency_allowed": False,
+    }
+    repo_seed_version_status_by_id = _repo_seed_version_status_by_workflow(
+        seed_version=seed_version,
+        workflow_ids=target_workflow_ids,
+    )
+    repo_seed_version_blocked_ids = tuple(
+        workflow_id
+        for workflow_id, status in repo_seed_version_status_by_id.items()
+        if bool(status.get("blocked")) and not force_republish
+    )
     already_current, existing_validation_by_workflow_id, materialisation_preflight = (
         _validate_existing_materialisation(
             target_workflow_ids=target_workflow_ids,
@@ -1025,14 +1292,28 @@ def bootstrap_repo_seed_workflow_bundle(
             workflow_launch_input_contracts=workflow_launch_input_contracts,
         )
     )
-    authority_contract = {
-        "canonical_source": "vontology",
-        "repo_seed_role": "startup_seed_publication_and_repair_only",
-        "request_path_dependency_allowed": False,
+    materialisation_preflight = (
+        _suppress_repo_seed_snapshot_drift_when_vontology_version_is_current(
+            materialisation_preflight=materialisation_preflight,
+            version_blocked_workflow_ids=repo_seed_version_blocked_ids,
+            target_workflow_ids=target_workflow_ids,
+        )
+    )
+    already_current = bool(materialisation_preflight.get("already_current"))
+    materialisation_preflight["repo_seed_version_gate"] = {
+        "seed_version": seed_version,
+        "version_marker_predicate": _REPO_SEED_VERSION_TEXT_PREDICATE,
+        "blocked_workflow_ids": list(repo_seed_version_blocked_ids),
+        "status_by_workflow_id": repo_seed_version_status_by_id,
+        "forced_republish": bool(force_republish),
     }
+    no_op_version_blocked_ids = (
+        repo_seed_version_blocked_ids if already_current and not force_republish else ()
+    )
 
     typed_workflow_ids: list[str] = []
     typed_step_ids: list[str] = []
+    seed_version_marker_updates: list[dict[str, Any]] = []
     validation_by_workflow_id: dict[str, dict[str, Any]] = {}
     if already_current and not force_republish:
         validation_by_workflow_id.update(existing_validation_by_workflow_id)
@@ -1100,6 +1381,20 @@ def bootstrap_repo_seed_workflow_bundle(
         )
         publication_report["bundle_snapshot_issue_codes"] = list(
             materialisation_preflight.get("bundle_snapshot_issue_codes") or []
+        )
+        publication_report[
+            "repo_seed_version_suppressed_bundle_snapshot_drift_workflow_ids"
+        ] = list(
+            materialisation_preflight.get(
+                "repo_seed_version_suppressed_bundle_snapshot_drift_workflow_ids"
+            )
+            or []
+        )
+        publication_report["repo_seed_version_gate"] = materialisation_preflight[
+            "repo_seed_version_gate"
+        ]
+        publication_report["skipped_due_to_seed_version_not_newer"] = list(
+            no_op_version_blocked_ids
         )
 
         should_apply_seed_bundle_mutations = not (
@@ -1220,13 +1515,39 @@ def bootstrap_repo_seed_workflow_bundle(
                         )
                     )
 
-    invalidate_workflow_discovery_executability_caches()
+        if seed_version:
+            blocked_ids = set(repo_seed_version_blocked_ids)
+            for workflow_id in target_workflow_ids:
+                if workflow_id in blocked_ids:
+                    continue
+                update = _upsert_workflow_repo_seed_version_marker(
+                    workflow_id=workflow_id,
+                    seed_version=seed_version,
+                    family_id=family_id,
+                    source_tag=source_tag,
+                    managed_by=managed_by,
+                    asset_path=str(bundle.get("asset_path") or Path(asset_path)),
+                )
+                seed_version_marker_updates.append(
+                    {
+                        "workflow_id": workflow_id,
+                        "relation_created": bool(update.get("relation_created")),
+                        "replaced_count": int(update.get("replaced_count") or 0),
+                    }
+                )
+
+    if should_apply_seed_bundle_mutations:
+        invalidate_workflow_discovery_executability_caches()
     return {
         "asset_path": str(bundle.get("asset_path") or Path(asset_path)),
         "family_id": bundle.get("family_id"),
         "authority_contract": authority_contract,
         "materialisation_preflight": materialisation_preflight,
         "workflow_ids": list(target_workflow_ids),
+        "repo_seed_version_gate": materialisation_preflight[
+            "repo_seed_version_gate"
+        ],
+        "seed_version_marker_updates": seed_version_marker_updates,
         "publication": publication_report,
         "typed_workflow_ids": typed_workflow_ids,
         "typed_step_ids": typed_step_ids,

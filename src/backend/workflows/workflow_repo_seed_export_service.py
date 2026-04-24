@@ -590,6 +590,9 @@ def build_repo_seed_workflow_bundle_from_authority(
             "family_id": raw_payload.get("family_id"),
             "managed_by": raw_payload.get("managed_by"),
             "schema_version": authority_service.REPO_SEED_WORKFLOW_BUNDLE_SCHEMA_VERSION,
+            "seed_version": raw_payload.get("seed_version")
+            or raw_payload.get("bundle_version")
+            or raw_payload.get("version"),
             "source_tag": raw_payload.get("source_tag"),
             "supported_action_ids": ordered_supported_action_ids,
             "workflows": workflow_entries,
