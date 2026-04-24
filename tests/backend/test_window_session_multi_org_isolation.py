@@ -418,15 +418,27 @@ class TestCreateChatSessionUsesWindowContext:
         )
         monkeypatch.setattr(
             chat_history_service,
-            "get_chat_history_session_summaries",
-            lambda *args, **kwargs: [
-                {
-                    "session_id": payload["session_id"],
-                    "session_name": payload["session_name"],
-                    "last_message_at": "2026-04-13T06:00:00Z",
-                    "namespace": "#V#michael_witbrock@university_of_auckland_strong_ai_lab",
-                }
-            ],
+            "get_chat_history_session_summaries_result",
+            lambda *args, **kwargs: {
+                "sessions": [
+                    {
+                        "session_id": payload["session_id"],
+                        "session_name": payload["session_name"],
+                        "last_message_at": "2026-04-13T06:00:00Z",
+                        "namespace": "#V#michael_witbrock@university_of_auckland_strong_ai_lab",
+                    }
+                ],
+                "agent_visibility": "include",
+                "agent_visibility_applied": True,
+                "keep_newest_agent_created": True,
+                "agent_created_session_total": 0,
+                "hidden_agent_created_session_count": 0,
+                "newest_visible_agent_created_session_id": None,
+                "total_after_agent_visibility": 1,
+                "hidden_by_limit_count": 0,
+                "raw_session_count": 1,
+                "limit": 50,
+            },
         )
         monkeypatch.setattr(
             chat_history_service,

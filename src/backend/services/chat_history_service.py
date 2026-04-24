@@ -63,6 +63,16 @@ CHAT_SESSION_PROVENANCE_FIELDS = (
     "is_agent_created",
     "test_artifact_kind",
 )
+CHAT_SESSION_AGENT_VISIBILITY_EXCLUDE = "exclude"
+CHAT_SESSION_AGENT_VISIBILITY_INCLUDE = "include"
+CHAT_SESSION_AGENT_VISIBILITY_ONLY = "only"
+VALID_CHAT_SESSION_AGENT_VISIBILITY_VALUES = frozenset(
+    {
+        CHAT_SESSION_AGENT_VISIBILITY_EXCLUDE,
+        CHAT_SESSION_AGENT_VISIBILITY_INCLUDE,
+        CHAT_SESSION_AGENT_VISIBILITY_ONLY,
+    }
+)
 _BROWSER_TEST_SESSION_ID_PREFIX = "browser-fixture-"
 _BENCHMARK_SESSION_NAME_PREFIX = "Benchmark session "
 
@@ -399,6 +409,131 @@ def _session_provenance_from_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
         "created_by_actor_type": actor_type,
         "is_agent_created": is_agent_created,
         "test_artifact_kind": test_kind,
+    }
+
+
+def _normalise_chat_session_agent_visibility(value: Any) -> str:
+    if value is None:
+        return CHAT_SESSION_AGENT_VISIBILITY_INCLUDE
+    if isinstance(value, str):
+        cleaned = value.strip().lower()
+        if not cleaned:
+            return CHAT_SESSION_AGENT_VISIBILITY_INCLUDE
+        if cleaned in VALID_CHAT_SESSION_AGENT_VISIBILITY_VALUES:
+            return cleaned
+    raise ChatHistoryServiceError(
+        "agent_visibility must be one of: "
+        + ", ".join(sorted(VALID_CHAT_SESSION_AGENT_VISIBILITY_VALUES))
+    )
+
+
+def _coerce_bool(value: Any, *, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        cleaned = value.strip().lower()
+        if cleaned in {"1", "true", "yes", "on", "y"}:
+            return True
+        if cleaned in {"0", "false", "no", "off", "n"}:
+            return False
+    return default
+
+
+def _session_summary_is_agent_created(summary: Dict[str, Any]) -> bool:
+    if not isinstance(summary, dict):
+        return False
+    if _normalise_session_agent_created_flag(summary.get("is_agent_created")) is True:
+        return True
+    origin_kind = _normalise_session_provenance_text(
+        summary.get("origin_kind"),
+        max_len=80,
+        identifier=True,
+    )
+    test_kind = _normalise_session_provenance_text(
+        summary.get("test_artifact_kind"),
+        max_len=100,
+        identifier=True,
+    )
+    return bool(origin_kind in CHAT_SESSION_AGENT_CREATED_ORIGIN_KINDS or test_kind)
+
+
+def _session_summary_recency(summary: Dict[str, Any]) -> datetime:
+    for key in ("last_message_at", "created_at", "shared_accepted_at"):
+        value = summary.get(key)
+        parsed = _coerce_datetime(value)
+        if parsed is not None:
+            return parsed
+    return datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def apply_chat_session_agent_visibility(
+    sessions: Iterable[Dict[str, Any]],
+    *,
+    agent_visibility: Any = CHAT_SESSION_AGENT_VISIBILITY_INCLUDE,
+    keep_newest_agent_created: Any = True,
+    limit: int | None = None,
+) -> Dict[str, Any]:
+    """Apply test/agent-created conversation visibility before count limiting."""
+
+    visibility = _normalise_chat_session_agent_visibility(agent_visibility)
+    keep_newest = _coerce_bool(keep_newest_agent_created, default=True)
+    session_list = [session for session in sessions if isinstance(session, dict)]
+    agent_sessions = [
+        session for session in session_list if _session_summary_is_agent_created(session)
+    ]
+    newest_agent_session = None
+    if keep_newest and agent_sessions:
+        newest_agent_session = max(agent_sessions, key=_session_summary_recency)
+    newest_agent_session_id = (
+        newest_agent_session.get("session_id") if newest_agent_session else None
+    )
+
+    hidden_agent_session_ids: set[str] = set()
+    filtered: List[Dict[str, Any]] = []
+    for session_summary in session_list:
+        session_id = session_summary.get("session_id")
+        is_agent_session = _session_summary_is_agent_created(session_summary)
+        if visibility == CHAT_SESSION_AGENT_VISIBILITY_ONLY:
+            if is_agent_session:
+                filtered.append(session_summary)
+            continue
+        if visibility == CHAT_SESSION_AGENT_VISIBILITY_EXCLUDE and is_agent_session:
+            if keep_newest and session_id and session_id == newest_agent_session_id:
+                filtered.append(session_summary)
+            else:
+                if isinstance(session_id, str) and session_id:
+                    hidden_agent_session_ids.add(session_id)
+            continue
+        filtered.append(session_summary)
+
+    total_after_visibility = len(filtered)
+    safe_limit = None
+    if limit is not None:
+        try:
+            safe_limit = max(1, int(limit))
+        except (TypeError, ValueError):
+            safe_limit = None
+    limited = filtered[:safe_limit] if safe_limit is not None else filtered
+    visible_ids: set[str] = set()
+    for session in limited:
+        session_id = session.get("session_id")
+        if isinstance(session_id, str) and session_id:
+            visible_ids.add(session_id)
+    hidden_by_limit_count = max(0, total_after_visibility - len(limited))
+
+    return {
+        "sessions": limited,
+        "agent_visibility": visibility,
+        "keep_newest_agent_created": keep_newest,
+        "agent_created_session_total": len(agent_sessions),
+        "hidden_agent_created_session_count": len(hidden_agent_session_ids),
+        "hidden_agent_created_session_ids": sorted(hidden_agent_session_ids)[:200],
+        "newest_visible_agent_created_session_id": newest_agent_session_id,
+        "total_after_agent_visibility": total_after_visibility,
+        "hidden_by_limit_count": hidden_by_limit_count,
+        "limit": safe_limit,
+        "agent_visibility_applied": True,
+        "visible_session_ids": sorted(visible_ids),
     }
 
 
@@ -2107,7 +2242,7 @@ def _get_chat_history_session_summaries_metadata_only(
     chat_history_coll,
     *,
     query: Dict[str, Any],
-    safe_limit: int,
+    safe_limit: int | None,
 ) -> List[Dict[str, Any]]:
     projection: Dict[str, Any] = _add_chat_session_provenance_projection(
         {
@@ -2135,21 +2270,25 @@ def _get_chat_history_session_summaries_metadata_only(
         or datetime(1970, 1, 1, tzinfo=timezone.utc),
         reverse=True,
     )
+    if safe_limit is None:
+        return summaries
     return summaries[:safe_limit]
 
 
-def get_chat_history_session_summaries(
+def _safe_chat_history_session_summary_limit(limit: Any) -> int:
+    safe_limit = 50
+    if isinstance(limit, int) and limit > 0:
+        safe_limit = min(limit, 500)
+    return safe_limit
+
+
+def _load_chat_history_session_summaries(
     user_id: str,
-    limit: int = 50,
     *,
     namespace: Optional[str] = None,
     include_legacy: bool = True,
     summary_mode: str = "full",
 ) -> List[Dict[str, Any]]:
-    """Return per-session summaries ordered by inferred last message timestamp desc.
-
-    summary_mode="light" is metadata-only to avoid large history reads.
-    """
     if not user_id:
         raise ChatHistoryServiceError("user_id is required.")
 
@@ -2158,10 +2297,6 @@ def get_chat_history_session_summaries(
         raise ChatHistoryServiceError("Could not connect to chat history collection.")
 
     _guard_chat_history_read("get_chat_history_session_summaries")
-
-    safe_limit = 50
-    if isinstance(limit, int) and limit > 0:
-        safe_limit = min(limit, 500)
 
     mode = summary_mode.strip().lower() if isinstance(summary_mode, str) else "full"
     light_mode = mode in ("light", "minimal", "summary")
@@ -2173,7 +2308,7 @@ def get_chat_history_session_summaries(
     if light_mode:
         try:
             summaries = _get_chat_history_session_summaries_metadata_only(
-                chat_history_coll, query=query, safe_limit=safe_limit
+                chat_history_coll, query=query, safe_limit=None
             )
             _record_chat_history_read_success()
             return summaries
@@ -2212,7 +2347,7 @@ def get_chat_history_session_summaries(
         )
         try:
             summaries = _get_chat_history_session_summaries_metadata_only(
-                chat_history_coll, query=query, safe_limit=safe_limit
+                chat_history_coll, query=query, safe_limit=None
             )
             _record_chat_history_read_success()
             return summaries
@@ -2298,7 +2433,7 @@ def get_chat_history_session_summaries(
             reverse=True,
         )
         _record_chat_history_read_success()
-        return summaries[:safe_limit]
+        return summaries
     except PyMongoError as e:
         _record_chat_history_read_failure("get_chat_history_session_summaries", e)
         logger.error(
@@ -2307,6 +2442,67 @@ def get_chat_history_session_summaries(
         raise ChatHistoryServiceError(
             f"Could not retrieve chat history session summaries: {e}"
         ) from e
+
+
+def get_chat_history_session_summaries_result(
+    user_id: str,
+    limit: int = 50,
+    *,
+    namespace: Optional[str] = None,
+    include_legacy: bool = True,
+    summary_mode: str = "full",
+    agent_visibility: Any = CHAT_SESSION_AGENT_VISIBILITY_INCLUDE,
+    keep_newest_agent_created: Any = True,
+) -> Dict[str, Any]:
+    """Return session summaries plus test-conversation visibility metadata."""
+
+    safe_limit = _safe_chat_history_session_summary_limit(limit)
+    summaries = _load_chat_history_session_summaries(
+        user_id,
+        namespace=namespace,
+        include_legacy=include_legacy,
+        summary_mode=summary_mode,
+    )
+    visibility_payload = apply_chat_session_agent_visibility(
+        summaries,
+        agent_visibility=agent_visibility,
+        keep_newest_agent_created=keep_newest_agent_created,
+        limit=safe_limit,
+    )
+    return {
+        "sessions": visibility_payload["sessions"],
+        "limit": safe_limit,
+        "raw_session_count": len(summaries),
+        **{
+            key: value
+            for key, value in visibility_payload.items()
+            if key not in {"sessions", "limit"}
+        },
+    }
+
+
+def get_chat_history_session_summaries(
+    user_id: str,
+    limit: int = 50,
+    *,
+    namespace: Optional[str] = None,
+    include_legacy: bool = True,
+    summary_mode: str = "full",
+) -> List[Dict[str, Any]]:
+    """Return per-session summaries ordered by inferred last message timestamp desc.
+
+    summary_mode="light" is metadata-only to avoid large history reads.
+    """
+
+    result = get_chat_history_session_summaries_result(
+        user_id,
+        limit=limit,
+        namespace=namespace,
+        include_legacy=include_legacy,
+        summary_mode=summary_mode,
+        agent_visibility=CHAT_SESSION_AGENT_VISIBILITY_INCLUDE,
+    )
+    return result["sessions"]
 
 
 def has_chat_history_session(

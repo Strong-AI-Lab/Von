@@ -12274,6 +12274,12 @@ def history_sessions():
     summary_mode = request.args.get("summary", default="full")
     if not isinstance(summary_mode, str) or not summary_mode.strip():
         summary_mode = "full"
+    agent_visibility = (
+        request.args.get("agent_visibility")
+        or request.args.get("agent_created_visibility")
+        or chat_history_service.CHAT_SESSION_AGENT_VISIBILITY_INCLUDE
+    )
+    keep_newest_agent_created = request.args.get("keep_newest_agent_created")
     active_session_id: str | None = None
     try:
         from ...services.shared_conversation_service import (
@@ -12314,13 +12320,16 @@ def history_sessions():
         # JVNAUTOSCI-1015: Legacy conversations without namespace are excluded.
         # Run utilities/backfill_chat_history_namespace.py to migrate any old data.
         include_legacy = False
-        sessions = chat_history_service.get_chat_history_session_summaries(
+        session_result = chat_history_service.get_chat_history_session_summaries_result(
             user_concept_id,
             limit=limit,
             namespace=namespace,
             include_legacy=include_legacy,
             summary_mode=summary_mode,
+            agent_visibility=agent_visibility,
+            keep_newest_agent_created=keep_newest_agent_created,
         )
+        sessions = session_result.get("sessions") if isinstance(session_result, dict) else []
         if not isinstance(sessions, list):
             sessions = []
 
@@ -12540,6 +12549,41 @@ def history_sessions():
             "sessions": combined,
             "active_session_id": active_session_id,
         }
+        if isinstance(session_result, dict):
+            response_payload.update(
+                {
+                    "agent_visibility": session_result.get("agent_visibility"),
+                    "agent_visibility_applied": session_result.get(
+                        "agent_visibility_applied"
+                    )
+                    is True,
+                    "keep_newest_agent_created": session_result.get(
+                        "keep_newest_agent_created"
+                    )
+                    is True,
+                    "agent_created_session_total": session_result.get(
+                        "agent_created_session_total",
+                        0,
+                    ),
+                    "hidden_agent_created_session_count": session_result.get(
+                        "hidden_agent_created_session_count",
+                        0,
+                    ),
+                    "newest_visible_agent_created_session_id": session_result.get(
+                        "newest_visible_agent_created_session_id"
+                    ),
+                    "total_after_agent_visibility": session_result.get(
+                        "total_after_agent_visibility",
+                        len(sessions),
+                    ),
+                    "hidden_by_limit_count": session_result.get(
+                        "hidden_by_limit_count",
+                        0,
+                    ),
+                    "raw_session_count": session_result.get("raw_session_count"),
+                    "limit": session_result.get("limit", limit),
+                }
+            )
         if warnings:
             response_payload["warnings"] = warnings
 

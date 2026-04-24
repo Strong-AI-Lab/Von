@@ -140,3 +140,56 @@ def test_full_session_summaries_fall_back_when_history_read_times_out(monkeypatc
     assert summary["is_completed"] is False
     assert summary["origin_kind"] == "benchmark_harness"
     assert summary["is_agent_created"] is True
+
+
+def test_agent_visibility_excludes_before_limit_and_keeps_newest(monkeypatch):
+    docs = []
+    for index in range(60):
+        docs.append(
+            {
+                "user_id": "#V#u",
+                "session_id": f"agent-{index:02d}",
+                "session_name": f"Agent {index:02d}",
+                "namespace": "#V#u@org",
+                "created_at": _utc(f"2026-02-25T{23 - (index // 3):02d}:00:00Z"),
+                "updated_at": _utc(f"2026-02-25T{23 - (index // 3):02d}:01:00Z"),
+                "origin_kind": "coding_agent_test",
+                "is_agent_created": True,
+            }
+        )
+    for index in range(10):
+        docs.append(
+            {
+                "user_id": "#V#u",
+                "session_id": f"human-{index:02d}",
+                "session_name": f"Human {index:02d}",
+                "namespace": "#V#u@org",
+                "created_at": _utc(f"2026-02-20T{index:02d}:00:00Z"),
+                "updated_at": _utc(f"2026-02-20T{index:02d}:01:00Z"),
+            }
+        )
+
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_collection_service",
+        lambda **kwargs: _NoHistoryReadCollection(docs),
+    )
+
+    result = chat_history_service.get_chat_history_session_summaries_result(
+        "#V#u",
+        limit=20,
+        namespace="#V#u@org",
+        include_legacy=False,
+        summary_mode="light",
+        agent_visibility="exclude",
+        keep_newest_agent_created=True,
+    )
+
+    returned_ids = [session["session_id"] for session in result["sessions"]]
+    assert returned_ids[0] == "agent-00"
+    assert all(session_id.startswith("human-") for session_id in returned_ids[1:])
+    assert len(returned_ids) == 11
+    assert result["agent_created_session_total"] == 60
+    assert result["hidden_agent_created_session_count"] == 59
+    assert result["newest_visible_agent_created_session_id"] == "agent-00"
+    assert result["hidden_by_limit_count"] == 0

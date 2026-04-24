@@ -623,6 +623,7 @@ const LS_PINNED_CHAT_SESSIONS_PREFIX = 'von:pinnedChatSessionIds';
 const LS_CHAT_SESSION_LAST_ACCESSED_PREFIX = 'von:chatSessionLastAccessed';
 const LS_AGENT_CREATED_CHAT_SESSIONS_VISIBLE_PREFIX = 'von:showAgentCreatedChatSessions';
 const MAX_DELETABLE_TURNS = 4;
+const CHAT_SESSION_TABS_FETCH_LIMIT = 200;
 const AGENT_CREATED_CHAT_SESSION_ORIGIN_KINDS = new Set([
     'browser_test_fixture',
     'benchmark_harness',
@@ -645,6 +646,7 @@ let agentCreatedSessionVisibilityState = {
     hiddenCount: 0,
     newestVisibleSessionId: null
 };
+let serverAgentCreatedSessionVisibilityState = null;
 
 /**
  * Get the user-scoped localStorage key for hidden sessions.
@@ -753,6 +755,46 @@ function saveAgentCreatedSessionsVisibilityPreference() {
     } catch (e) {
         console.warn('[chatTab] Failed to save agent-created session visibility to localStorage:', e);
     }
+}
+
+function buildChatSessionTabsFetchUrl() {
+    const params = new URLSearchParams();
+    params.set('limit', String(CHAT_SESSION_TABS_FETCH_LIMIT));
+    params.set('summary', 'light');
+    params.set('agent_visibility', showAgentCreatedSessions ? 'include' : 'exclude');
+    params.set('keep_newest_agent_created', 'true');
+    return `/von/history/sessions?${params.toString()}`;
+}
+
+function readNonNegativeCount(value) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? Math.max(0, Math.trunc(parsed)) : 0;
+}
+
+function normaliseServerAgentCreatedVisibilityState(data) {
+    if (!data || data.agent_visibility_applied !== true) {
+        return null;
+    }
+    const newestId = (
+        typeof data.newest_visible_agent_created_session_id === 'string'
+        && data.newest_visible_agent_created_session_id.trim()
+    )
+        ? data.newest_visible_agent_created_session_id.trim()
+        : null;
+    return {
+        applied: true,
+        visibility: (
+            typeof data.agent_visibility === 'string' && data.agent_visibility.trim()
+                ? data.agent_visibility.trim()
+                : (showAgentCreatedSessions ? 'include' : 'exclude')
+        ),
+        totalCount: readNonNegativeCount(data.agent_created_session_total),
+        hiddenCount: readNonNegativeCount(data.hidden_agent_created_session_count),
+        newestVisibleSessionId: newestId,
+        totalAfterVisibility: readNonNegativeCount(data.total_after_agent_visibility),
+        hiddenByLimitCount: readNonNegativeCount(data.hidden_by_limit_count),
+        rawSessionCount: readNonNegativeCount(data.raw_session_count)
+    };
 }
 
 function loadChatSessionLastAccessedMap() {
@@ -976,6 +1018,77 @@ function toggleConversationPinned(sessionId) {
     pinConversation(sessionId);
 }
 
+function buildConversationReferencePayload(session) {
+    const sid = (typeof session?.session_id === 'string') ? session.session_id.trim() : '';
+    if (!sid) {
+        return null;
+    }
+    const orgContext = getSessionScopedOrgContext();
+    const orgId = (
+        typeof session?.organisation_concept_id === 'string' && session.organisation_concept_id.trim()
+            ? session.organisation_concept_id.trim()
+            : (
+                typeof orgContext?.concept_id === 'string' && orgContext.concept_id.trim()
+                    ? orgContext.concept_id.trim()
+                    : (typeof orgContext?.id === 'string' && orgContext.id.trim() ? orgContext.id.trim() : null)
+            )
+    );
+    const currentUserId = getCurrentUserConceptId() || null;
+    const ownerUserId = (
+        typeof session?.shared_owner_user_id === 'string' && session.shared_owner_user_id.trim()
+            ? session.shared_owner_user_id.trim()
+            : currentUserId
+    );
+    const namespace = (
+        typeof session?.namespace === 'string' && session.namespace.trim()
+            ? session.namespace.trim()
+            : (getSessionScopedNamespace() || null)
+    );
+    return {
+        kind: 'von_conversation_ref',
+        conversation_ref: {
+            session_id: sid,
+            user_concept_id: ownerUserId,
+            namespace,
+            organisation_concept_id: orgId,
+            include_legacy: false,
+        },
+        chat_history_lookup: {
+            user_id: ownerUserId,
+            session_id: sid,
+            namespace,
+            include_legacy: false,
+        },
+        display: {
+            session_name: typeof session?.session_name === 'string' ? session.session_name : null,
+            last_message_at: typeof session?.last_message_at === 'string' ? session.last_message_at : null,
+            current_user_concept_id: currentUserId,
+        },
+    };
+}
+
+async function copyConversationReferenceToClipboard(session) {
+    const payload = buildConversationReferencePayload(session);
+    if (!payload) {
+        showToast('No conversation ID is available.', 'info');
+        return false;
+    }
+    let text;
+    try {
+        text = JSON.stringify(payload, null, 2);
+    } catch (err) {
+        console.error('[chatTab] Failed to serialize conversation reference:', err);
+        showToast('Failed to prepare conversation reference.', 'error');
+        return false;
+    }
+    const copied = await copyTextToClipboard(text);
+    showToast(
+        copied ? 'Copied conversation reference.' : 'Failed to copy conversation reference.',
+        copied ? 'success' : 'error'
+    );
+    return copied;
+}
+
 function toggleShowHiddenSessions() {
     showHiddenSessions = !showHiddenSessions;
     // Re-render tabs to show/hide hidden conversations
@@ -987,9 +1100,8 @@ function toggleShowHiddenSessions() {
 function toggleShowAgentCreatedSessions() {
     showAgentCreatedSessions = !showAgentCreatedSessions;
     saveAgentCreatedSessionsVisibilityPreference();
-    if (Array.isArray(sessionTabsCache)) {
-        renderChatSessionTabs(sessionTabsCache, activeChatSessionId);
-    }
+    serverAgentCreatedSessionVisibilityState = null;
+    scheduleChatSessionTabsRefresh(true);
 }
 
 async function deleteConversation(sessionId) {
@@ -16858,7 +16970,7 @@ async function refreshChatSessionTabs() {
     lastSessionTabsRefreshMs = Date.now();
 
     try {
-        const response = await fetch('/von/history/sessions?limit=50&summary=light', {
+        const response = await fetch(buildChatSessionTabsFetchUrl(), {
             cache: 'no-store',
             headers: buildChatFetchHeaders()
         });
@@ -16906,6 +17018,7 @@ async function refreshChatSessionTabs() {
         }
 
         const sessions = Array.isArray(data?.sessions) ? data.sessions : [];
+        serverAgentCreatedSessionVisibilityState = normaliseServerAgentCreatedVisibilityState(data);
         const acceptedInvites = Array.isArray(incomingInviteState?.acceptedInvites)
             ? incomingInviteState.acceptedInvites
             : [];
@@ -17070,16 +17183,27 @@ function renderChatSessionTabs(sessions, activeSessionId) {
         ? canonicalSessions
         : canonicalSessions.filter(s => !isConversationHidden(s?.session_id));
     const agentFilterResult = filterAgentCreatedSessionsForDefaultView(sessionsAfterHiddenFilter);
-    const sessionsAfterAgentFilter = agentFilterResult.sessions;
-    agentCreatedSessionVisibilityState = {
-        totalCount: agentFilterResult.totalCount,
-        hiddenCount: agentFilterResult.hiddenCount,
-        newestVisibleSessionId: (
-            typeof agentFilterResult.newestVisibleSession?.session_id === 'string'
-            ? agentFilterResult.newestVisibleSession.session_id.trim()
-            : null
-        )
-    };
+    const serverAgentState = serverAgentCreatedSessionVisibilityState?.applied === true
+        ? serverAgentCreatedSessionVisibilityState
+        : null;
+    const sessionsAfterAgentFilter = serverAgentState
+        ? sessionsAfterHiddenFilter
+        : agentFilterResult.sessions;
+    agentCreatedSessionVisibilityState = serverAgentState
+        ? {
+            totalCount: serverAgentState.totalCount,
+            hiddenCount: serverAgentState.hiddenCount,
+            newestVisibleSessionId: serverAgentState.newestVisibleSessionId
+        }
+        : {
+            totalCount: agentFilterResult.totalCount,
+            hiddenCount: agentFilterResult.hiddenCount,
+            newestVisibleSessionId: (
+                typeof agentFilterResult.newestVisibleSession?.session_id === 'string'
+                ? agentFilterResult.newestVisibleSession.session_id.trim()
+                : null
+            )
+        };
 
     const conversationHistorySettings = loadConversationHistorySettings((key) => safeLocalStorageGet(key));
     const filteredResult = selectConversationHistorySessions({
@@ -17420,6 +17544,12 @@ function renderChatSessionTabs(sessions, activeSessionId) {
                     label: isPinned ? 'Unpin conversation' : 'Pin conversation',
                     onClick: () => {
                         toggleConversationPinned(sid);
+                    }
+                },
+                {
+                    label: 'Copy conversation reference',
+                    onClick: () => {
+                        void copyConversationReferenceToClipboard(session);
                     }
                 }
             ];
@@ -18333,7 +18463,7 @@ async function updateHistoryLength() {
                                 }
                             } catch (_) { /* ignore */ }
 
-                            const res = await fetch('/von/history/sessions?limit=50&summary=light', {
+                            const res = await fetch(buildChatSessionTabsFetchUrl(), {
                                 cache: 'no-store',
                                 headers: buildChatFetchHeaders()
                             });

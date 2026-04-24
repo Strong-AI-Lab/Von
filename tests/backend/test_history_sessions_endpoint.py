@@ -18,6 +18,118 @@ def app_client():
         yield app, client
 
 
+def _session_result(sessions, **overrides):
+    payload = {
+        "sessions": sessions,
+        "agent_visibility": "include",
+        "agent_visibility_applied": True,
+        "keep_newest_agent_created": True,
+        "agent_created_session_total": 0,
+        "hidden_agent_created_session_count": 0,
+        "newest_visible_agent_created_session_id": None,
+        "total_after_agent_visibility": len(sessions),
+        "hidden_by_limit_count": 0,
+        "raw_session_count": len(sessions),
+        "limit": 50,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_history_sessions_passes_agent_visibility_and_returns_counts(
+    monkeypatch, app_client
+):
+    _, client = app_client
+    called = {}
+
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: "#V#u",
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "get_effective_context",
+        lambda *args, **kwargs: {
+            "user_id": "#V#u",
+            "organisation_id": "#V#org",
+            "role": None,
+            "namespace": "#V#u@org",
+            "chat_session_id": None,
+            "source": "test",
+        },
+    )
+
+    def _fake_summaries(*args, **kwargs):
+        called.update(kwargs)
+        return _session_result(
+            [
+                {
+                    "session_id": "human-1",
+                    "session_name": "Human",
+                    "last_message_at": "2026-02-25T00:00:00Z",
+                    "namespace": "#V#u@org",
+                },
+                {
+                    "session_id": "agent-new",
+                    "session_name": "Newest test",
+                    "last_message_at": "2026-02-24T00:00:00Z",
+                    "namespace": "#V#u@org",
+                    "is_agent_created": True,
+                    "origin_kind": "coding_agent_test",
+                },
+            ],
+            agent_visibility="exclude",
+            agent_created_session_total=60,
+            hidden_agent_created_session_count=59,
+            newest_visible_agent_created_session_id="agent-new",
+            total_after_agent_visibility=11,
+            raw_session_count=70,
+            limit=50,
+        )
+
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "get_chat_history_session_summaries_result",
+        _fake_summaries,
+    )
+
+    import src.backend.services.shared_conversation_service as shared_conversation_service
+
+    monkeypatch.setattr(
+        shared_conversation_service,
+        "list_accepted_invites_for_user",
+        lambda **kwargs: [],
+    )
+    monkeypatch.setattr(
+        shared_conversation_service,
+        "list_outgoing_accepted_invites_for_user",
+        lambda **kwargs: [],
+    )
+    monkeypatch.setattr(
+        shared_conversation_service,
+        "resolve_conversation_owner",
+        lambda **kwargs: None,
+    )
+
+    response = client.get(
+        "/von/history/sessions?limit=50&summary=light&agent_visibility=exclude&keep_newest_agent_created=true",
+        headers={"X-Von-Window-Session": "ws_test"},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert [session["session_id"] for session in payload["sessions"]] == [
+        "human-1",
+        "agent-new",
+    ]
+    assert called["agent_visibility"] == "exclude"
+    assert called["keep_newest_agent_created"] == "true"
+    assert payload["agent_visibility_applied"] is True
+    assert payload["hidden_agent_created_session_count"] == 59
+    assert payload["agent_created_session_total"] == 60
+    assert payload["newest_visible_agent_created_session_id"] == "agent-new"
+
+
 def test_history_sessions_tolerates_shared_invite_lookup_failure(
     monkeypatch, app_client
 ):
@@ -42,15 +154,15 @@ def test_history_sessions_tolerates_shared_invite_lookup_failure(
     )
     monkeypatch.setattr(
         von_routes.chat_history_service,
-        "get_chat_history_session_summaries",
-        lambda *args, **kwargs: [
+        "get_chat_history_session_summaries_result",
+        lambda *args, **kwargs: _session_result([
             {
                 "session_id": "sess-1",
                 "session_name": "Session 1",
                 "last_message_at": "2026-02-25T00:00:00Z",
                 "namespace": "#V#u@org",
             }
-        ],
+        ]),
     )
 
     import src.backend.services.shared_conversation_service as shared_conversation_service
@@ -108,8 +220,8 @@ def test_history_sessions_skips_bad_shared_invite_rows(monkeypatch, app_client):
     )
     monkeypatch.setattr(
         von_routes.chat_history_service,
-        "get_chat_history_session_summaries",
-        lambda *args, **kwargs: [],
+        "get_chat_history_session_summaries_result",
+        lambda *args, **kwargs: _session_result([]),
     )
     monkeypatch.setattr(
         von_routes,
@@ -208,7 +320,7 @@ def test_history_sessions_returns_degraded_payload_for_transient_history_errors(
     )
     monkeypatch.setattr(
         von_routes.chat_history_service,
-        "get_chat_history_session_summaries",
+        "get_chat_history_session_summaries_result",
         lambda *args, **kwargs: (_ for _ in ()).throw(
             chat_history_service.ChatHistoryServiceError(
                 "read circuit open for 3.0s"
@@ -257,15 +369,15 @@ def test_history_sessions_ignores_stale_flask_active_session_id(
     )
     monkeypatch.setattr(
         von_routes.chat_history_service,
-        "get_chat_history_session_summaries",
-        lambda *args, **kwargs: [
+        "get_chat_history_session_summaries_result",
+        lambda *args, **kwargs: _session_result([
             {
                 "session_id": "sess-1",
                 "session_name": "Session 1",
                 "last_message_at": "2026-02-25T00:00:00Z",
                 "namespace": "#V#u@org",
             }
-        ],
+        ]),
     )
     monkeypatch.setattr(
         von_routes.chat_history_service,
@@ -334,15 +446,15 @@ def test_history_sessions_returns_effective_active_session_id_when_authorised(
     )
     monkeypatch.setattr(
         von_routes.chat_history_service,
-        "get_chat_history_session_summaries",
-        lambda *args, **kwargs: [
+        "get_chat_history_session_summaries_result",
+        lambda *args, **kwargs: _session_result([
             {
                 "session_id": "sess-1",
                 "session_name": "Session 1",
                 "last_message_at": "2026-02-25T00:00:00Z",
                 "namespace": "#V#u@org",
             }
-        ],
+        ]),
     )
     monkeypatch.setattr(
         von_routes.chat_history_service,
