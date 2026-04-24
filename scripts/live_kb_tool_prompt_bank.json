@@ -58,7 +58,8 @@
         "kb"
       ],
       "likely_tools": [
-        "search_concepts"
+        "search_concepts",
+        "get_predicate_incidence"
       ]
     },
     {
@@ -71,7 +72,8 @@
         "kb"
       ],
       "likely_tools": [
-        "search_concepts"
+        "search_concepts",
+        "get_predicate_incidence"
       ]
     },
     {
@@ -84,7 +86,8 @@
         "kb"
       ],
       "likely_tools": [
-        "search_concepts"
+        "search_concepts",
+        "get_predicate_incidence"
       ]
     },
     {

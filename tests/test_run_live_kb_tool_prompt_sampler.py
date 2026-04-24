@@ -300,6 +300,237 @@ def test_evaluate_user_happiness_flags_missing_workflow_required_evidence_tools(
         and "get_predicate_incidence" in reason
         for reason in evaluation["reasons"]
     )
+    assert evaluation["missing_answer_evidence"] == [
+        {
+            "effect_id": "grounded_entity_information_evidence",
+            "effect_type": "grounded_evidence",
+            "required_tools": [
+                "get_predicate_incidence",
+                "find_relations_with_argument",
+            ],
+            "missing_tools": ["get_predicate_incidence"],
+            "match": "all",
+            "requirement_source": "workflow_required_effects_contract",
+            "user_answer_required": True,
+            "reason": (
+                "Workflow-authored required evidence was not retrieved for "
+                "grounded_entity_information_evidence; missing tools: "
+                "get_predicate_incidence."
+            ),
+        }
+    ]
+
+
+def test_evaluate_user_happiness_keeps_diagnostic_only_evidence_out_of_ontology_verdict() -> (
+    None
+):
+    evaluation = sampler._evaluate_user_happiness(
+        prompt_entry={
+            "id": "key_predicates_for_scientific_papers",
+            "category": "ontology_predicate_lookup",
+            "complexity_class": "vontology_grounded",
+            "prompt": "What are key predicates for scientific papers in Vontology?",
+            "knowledge_surfaces": ["background_knowledge", "kb"],
+            "likely_tools": ["search_concepts", "get_predicate_incidence"],
+        },
+        generate_payload={
+            "response": (
+                "Based on Vontology predicate incidence for represented scientific "
+                "paper instances, key predicates include Has Author, Has First "
+                "Author, hasName, and hasContent."
+            )
+        },
+        llm_debug_data={
+            "tool_invocations": [
+                {"tool": "search_concepts"},
+                {"tool": "get_predicate_incidence"},
+            ],
+            "turn_execution_record": {
+                "execution": {
+                    "workflow_required_effects_contract": {
+                        "schema_version": "workflow_required_effects_contract.v1",
+                        "required_effects": [
+                            {
+                                "effect_id": "conversation_locator",
+                                "effect_type": "diagnostic_evidence",
+                                "required_tools": [
+                                    "conversation_telemetry_get_locator"
+                                ],
+                            },
+                            {
+                                "effect_id": "conversation_history",
+                                "effect_type": "diagnostic_evidence",
+                                "required_tools": [
+                                    "chat_history_get_segments",
+                                    "chat_history_get_debug_entry",
+                                ],
+                                "required_tools_match": "all",
+                            },
+                        ],
+                    }
+                }
+            },
+            "turn_execution_diagnostics": {
+                "workflow_routing_diagnostics": {
+                    "dispatch": {
+                        "selected_execution_mode": "tool_pipeline",
+                        "dispatch_workflow_id": "#V#tool_calling_workflow",
+                    }
+                },
+                "tool_history": [],
+            },
+        },
+    )
+
+    assert evaluation["should_user_be_happy"] is True
+    assert evaluation["verdict"] == "happy"
+    assert evaluation["reasons"] == []
+    assert evaluation["diagnostic_evidence_complete"] is False
+    assert len(evaluation["diagnostic_evidence_reasons"]) == 2
+    assert evaluation["missing_answer_evidence"] == []
+    assert [
+        entry["effect_id"] for entry in evaluation["missing_diagnostic_evidence"]
+    ] == ["conversation_locator", "conversation_history"]
+    assert all(
+        entry["requirement_source"] == "workflow_required_effects_contract"
+        for entry in evaluation["missing_evidence"]
+    )
+    assert all(
+        entry["user_answer_required"] is False
+        for entry in evaluation["missing_diagnostic_evidence"]
+    )
+
+
+def test_evaluate_user_happiness_flags_dispatch_missing_answer_required_tools() -> None:
+    evaluation = sampler._evaluate_user_happiness(
+        prompt_entry={
+            "id": "key_predicates_for_scientific_papers",
+            "category": "ontology_predicate_lookup",
+            "complexity_class": "vontology_grounded",
+            "prompt": "What are key predicates for scientific papers in Vontology?",
+            "knowledge_surfaces": ["background_knowledge", "kb"],
+            "likely_tools": ["search_concepts", "get_predicate_incidence"],
+        },
+        generate_payload={
+            "response": (
+                "I couldn't complete that request because the authoritative "
+                "conversation-turn workflow did not produce a user-visible response."
+            )
+        },
+        llm_debug_data={
+            "turn_execution_diagnostics": {
+                "workflow_routing_diagnostics": {
+                    "dispatch": {
+                        "selected_execution_mode": "tool_pipeline",
+                        "dispatch_workflow_id": "#V#tool_calling_workflow",
+                        "required_effects_required_tools": [
+                            "vontology_concept_search",
+                            "fetch_concept",
+                            "get_predicate_incidence",
+                        ],
+                        "required_effects_missing_required_tools": [
+                            "get_predicate_incidence"
+                        ],
+                        "required_effects_unresolved_effect_ids": [
+                            "effect_prompt_required_evidence_get_predicate_incidence"
+                        ],
+                        "required_effects_unresolved_effect_types": [
+                            "required_evidence"
+                        ],
+                    }
+                },
+                "tool_history": [
+                    {"tool": "vontology_concept_search", "success": True},
+                    {"tool": "fetch_concept", "success": False},
+                ],
+            }
+        },
+    )
+
+    assert evaluation["should_user_be_happy"] is False
+    assert evaluation["verdict"] == "unhappy"
+    assert any(
+        "concrete failure or access marker" in reason.lower()
+        for reason in evaluation["reasons"]
+    )
+    assert any(
+        entry["requirement_source"] == "workflow_dispatch_required_effects"
+        and entry["missing_tools"] == ["get_predicate_incidence"]
+        and entry["user_answer_required"] is True
+        for entry in evaluation["missing_answer_evidence"]
+    )
+
+
+def test_evaluate_user_happiness_fails_missing_diagnostic_tools_for_diagnostic_prompt() -> (
+    None
+):
+    evaluation = sampler._evaluate_user_happiness(
+        prompt_entry={
+            "id": "diagnose_last_turn_telemetry",
+            "category": "turn_diagnostics",
+            "complexity_class": "tool_augmented",
+            "prompt": "Diagnose the last conversation turn telemetry.",
+            "knowledge_surfaces": ["conversation_telemetry"],
+            "likely_tools": [
+                "conversation_telemetry_get_locator",
+                "chat_history_get_segments",
+            ],
+            "requires_diagnostic_evidence": True,
+        },
+        generate_payload={
+            "response": (
+                "The previous turn appears to have selected a workflow, but the "
+                "diagnostic locator and chat history were not inspected."
+            )
+        },
+        llm_debug_data={
+            "turn_execution_record": {
+                "execution": {
+                    "workflow_required_effects_contract": {
+                        "required_effects": [
+                            {
+                                "effect_id": "conversation_locator",
+                                "effect_type": "diagnostic_evidence",
+                                "required_tools": [
+                                    "conversation_telemetry_get_locator"
+                                ],
+                            },
+                            {
+                                "effect_id": "conversation_history",
+                                "effect_type": "diagnostic_evidence",
+                                "required_tools": ["chat_history_get_segments"],
+                            },
+                        ]
+                    }
+                }
+            },
+            "turn_execution_diagnostics": {
+                "workflow_routing_diagnostics": {
+                    "dispatch": {
+                        "selected_execution_mode": "tool_pipeline",
+                        "dispatch_workflow_id": "#V#tool_calling_workflow",
+                    }
+                },
+                "tool_history": [],
+            },
+        },
+    )
+
+    assert evaluation["should_user_be_happy"] is False
+    assert evaluation["verdict"] == "unhappy"
+    assert evaluation["diagnostic_evidence_complete"] is False
+    assert [entry["effect_id"] for entry in evaluation["missing_answer_evidence"]] == [
+        "conversation_locator",
+        "conversation_history",
+    ]
+    assert all(
+        entry["user_answer_required"] is True
+        for entry in evaluation["missing_diagnostic_evidence"]
+    )
+    assert any(
+        "conversation_telemetry_get_locator" in reason
+        for reason in evaluation["reasons"]
+    )
 
 
 def test_evaluate_user_happiness_accepts_grounded_empty_operational_result() -> None:
@@ -389,19 +620,16 @@ def test_prompt_bank_includes_operational_task_and_message_cases() -> None:
         if isinstance(prompt, dict) and isinstance(prompt.get("id"), str)
     }
 
-    assert by_id["create_von_task_for_replay_review"]["likely_tools"] == [
-        "task_create"
-    ]
+    assert by_id["create_von_task_for_replay_review"]["likely_tools"] == ["task_create"]
     assert by_id["mark_replay_related_von_task_in_progress"]["likely_tools"] == [
         "task_search",
         "task_update_status",
     ]
-    assert by_id["send_myself_a_von_message_about_replay_results"][
-        "requires_tool_use"
-    ] is True
-    assert by_id["count_my_unread_von_messages"][
-        "allows_grounded_empty_result"
-    ] is True
+    assert (
+        by_id["send_myself_a_von_message_about_replay_results"]["requires_tool_use"]
+        is True
+    )
+    assert by_id["count_my_unread_von_messages"]["allows_grounded_empty_result"] is True
 
 
 def test_run_generate_background_omits_model_when_not_requested(
@@ -700,7 +928,7 @@ def test_build_summary_includes_replay_guide_metadata() -> None:
                     }
                 },
                 "tool_history": [],
-            }
+            },
         },
         evaluation={"verdict": "happy", "should_user_be_happy": True},
         prompt_bank_schema_version="live_kb_tool_prompt_bank.v3",
@@ -727,20 +955,32 @@ def test_build_summary_includes_replay_guide_metadata() -> None:
     )
 
     assert summary["guidance"]["replay_guide_path"] == sampler.REAL_PATH_REPLAY_GUIDE
-    assert "real_path_server_replay_and_telemetry_loop.md" in summary["guidance"][
-        "replay_guide_note"
-    ]
+    assert (
+        "real_path_server_replay_and_telemetry_loop.md"
+        in summary["guidance"]["replay_guide_note"]
+    )
     assert summary["prompt"]["complexity_class"] == "vontology_grounded"
-    assert summary["selection"]["prompt_bank_schema_version"] == "live_kb_tool_prompt_bank.v3"
+    assert (
+        summary["selection"]["prompt_bank_schema_version"]
+        == "live_kb_tool_prompt_bank.v3"
+    )
     assert summary["selection"]["requested_complexity_classes"] == [
         "vontology_grounded"
     ]
     assert summary["selection"]["seed"] == 17
     assert summary["selection"]["requested_model"] == "gemma4:26b"
     assert summary["environment"]["base_url"] == "http://127.0.0.1:5000"
-    assert summary["environment"]["authenticated_user_concept_id"] == "#V#michael_witbrock"
-    assert summary["environment"]["local_repo_git_branch"] == "jvnautosci-1894-replay-programme"
-    assert summary["environment"]["server_reported_git_branch"] == "jvnautosci-1894-replay-programme"
+    assert (
+        summary["environment"]["authenticated_user_concept_id"] == "#V#michael_witbrock"
+    )
+    assert (
+        summary["environment"]["local_repo_git_branch"]
+        == "jvnautosci-1894-replay-programme"
+    )
+    assert (
+        summary["environment"]["server_reported_git_branch"]
+        == "jvnautosci-1894-replay-programme"
+    )
     assert summary["environment"]["server_resolved_active_llm_model"] == "gemma4:26b"
 
 

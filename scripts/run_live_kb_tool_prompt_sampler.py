@@ -44,7 +44,9 @@ CHAT_SESSION_CREATED_BY_ACTOR_CONCEPT_ID = "#V#von_system"
 CHAT_SESSION_CREATED_BY_ACTOR_TYPE = "#V#coding_agent"
 LIVE_PROMPT_SAMPLER_TEST_ARTIFACT_KIND = "live_kb_tool_prompt_sampler_chat_session"
 PROMPT_BANK_PATH = Path(__file__).with_name("live_kb_tool_prompt_bank.json")
-REAL_PATH_REPLAY_GUIDE = "docs/engineering/real_path_server_replay_and_telemetry_loop.md"
+REAL_PATH_REPLAY_GUIDE = (
+    "docs/engineering/real_path_server_replay_and_telemetry_loop.md"
+)
 REAL_PATH_REPLAY_GUIDE_NOTE = (
     "Use this random prompt sampler together with "
     f"`{REAL_PATH_REPLAY_GUIDE}`. Before judging the turn, follow that guide's "
@@ -75,12 +77,15 @@ PROMPT_COMPLEXITY_CLASS_DESCRIPTIONS: dict[str, str] = {
     ),
 }
 HARD_FAILURE_RESPONSE_MARKERS = (
+    "i couldn't complete",
+    "i could not complete",
     "i can't access",
     "i cannot access",
     "not authenticated",
     "workflow not runnable",
     "instance was not created",
     "authoritative conversation-turn workflow failed",
+    "did not produce a user-visible response",
     "workflow_llm_step_timeout",
     "llm call timed out",
     "i am unable to retrieve",
@@ -121,6 +126,26 @@ RELATIONSHIP_CLAIM_MARKERS = (
     "papers of yours",
     "my papers",
     "our papers",
+)
+DIAGNOSTIC_EVIDENCE_EFFECT_TYPE = "diagnostic_evidence"
+DIAGNOSTIC_EVIDENCE_KNOWLEDGE_SURFACES = frozenset(
+    {
+        "conversation_diagnostics",
+        "conversation_history",
+        "conversation_telemetry",
+        "stored_chat_context",
+        "turn_execution_diagnostics",
+        "turn_telemetry",
+    }
+)
+DIAGNOSTIC_EVIDENCE_TOOLS = frozenset(
+    {
+        "conversation_telemetry_get_locator",
+        "chat_history_get_segments",
+        "chat_history_get_debug_entry",
+        "turn_execution_get_diagnostics",
+        "workflow_get_execution_trace",
+    }
 )
 
 PROMPT_BANK_PAYLOAD: dict[str, Any] = {
@@ -171,7 +196,7 @@ PROMPT_BANK_PAYLOAD: dict[str, Any] = {
             "complexity_class": "vontology_grounded",
             "prompt": "What are key predicates for scientific papers in Vontology?",
             "knowledge_surfaces": ["background_knowledge", "kb"],
-            "likely_tools": ["search_concepts"],
+            "likely_tools": ["search_concepts", "get_predicate_incidence"],
         },
         {
             "id": "key_predicates_for_sail_students",
@@ -182,7 +207,7 @@ PROMPT_BANK_PAYLOAD: dict[str, Any] = {
                 "students?"
             ),
             "knowledge_surfaces": ["background_knowledge", "kb"],
-            "likely_tools": ["search_concepts"],
+            "likely_tools": ["search_concepts", "get_predicate_incidence"],
         },
         {
             "id": "salient_predicates_for_sail_students",
@@ -190,7 +215,7 @@ PROMPT_BANK_PAYLOAD: dict[str, Any] = {
             "complexity_class": "vontology_grounded",
             "prompt": "What predicates are salient to SAIL students?",
             "knowledge_surfaces": ["background_knowledge", "kb"],
-            "likely_tools": ["search_concepts"],
+            "likely_tools": ["search_concepts", "get_predicate_incidence"],
         },
         {
             "id": "list_my_papers",
@@ -639,6 +664,18 @@ def _as_list(value: Any) -> list[Any]:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return list(value)
     return []
+
+
+def _optional_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "yes", "1"}:
+            return True
+        if lowered in {"false", "no", "0"}:
+            return False
+    return None
 
 
 def _assert(condition: bool, message: str) -> None:
@@ -1113,9 +1150,7 @@ def _required_workflow_tool_groups(
 ) -> list[dict[str, Any]]:
     turn_record = _as_mapping(llm_debug_data.get("turn_execution_record"))
     execution = _as_mapping(turn_record.get("execution"))
-    workflow_contract = _as_mapping(
-        execution.get("workflow_required_effects_contract")
-    )
+    workflow_contract = _as_mapping(execution.get("workflow_required_effects_contract"))
     required_effects = _as_list(workflow_contract.get("required_effects"))
     groups: list[dict[str, Any]] = []
     for effect in required_effects:
@@ -1128,16 +1163,107 @@ def _required_workflow_tool_groups(
         ]
         if not required_tools:
             continue
+        explicit_answer_required: bool | None = None
+        for key in (
+            "user_answer_required",
+            "answer_required",
+            "required_for_user_answer",
+        ):
+            if key in effect:
+                explicit_answer_required = _optional_bool(effect.get(key))
+                break
         groups.append(
             {
                 "effect_id": _safe_text(effect.get("effect_id")),
+                "effect_type": _safe_text(effect.get("effect_type")),
                 "required_tools": required_tools,
                 "match": (_safe_text(effect.get("required_tools_match")) or "any")
                 .strip()
                 .lower(),
+                "requirement_source": "workflow_required_effects_contract",
+                "explicit_user_answer_required": explicit_answer_required,
             }
         )
     return groups
+
+
+def _dispatch_missing_required_tool_group(
+    dispatch: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    missing_tools = [
+        _safe_text(tool_name)
+        for tool_name in _as_list(
+            dispatch.get("required_effects_missing_required_tools")
+        )
+        if _safe_text(tool_name)
+    ]
+    if not missing_tools:
+        return None
+    required_tools = [
+        _safe_text(tool_name)
+        for tool_name in _as_list(dispatch.get("required_effects_required_tools"))
+        if _safe_text(tool_name)
+    ]
+    unresolved_effect_ids = [
+        _safe_text(effect_id)
+        for effect_id in _as_list(
+            dispatch.get("required_effects_unresolved_effect_ids")
+        )
+        if _safe_text(effect_id)
+    ]
+    unresolved_effect_types = [
+        _safe_text(effect_type)
+        for effect_type in _as_list(
+            dispatch.get("required_effects_unresolved_effect_types")
+        )
+        if _safe_text(effect_type)
+    ]
+    return {
+        "effect_id": (
+            ", ".join(unresolved_effect_ids) or "workflow_dispatch_required_effects"
+        ),
+        "effect_type": (", ".join(unresolved_effect_types) or "required_evidence"),
+        "required_tools": required_tools or missing_tools,
+        "known_missing_tools": missing_tools,
+        "match": "all",
+        "requirement_source": "workflow_dispatch_required_effects",
+        "explicit_user_answer_required": True,
+    }
+
+
+def _prompt_requires_diagnostic_evidence(prompt_entry: Mapping[str, Any]) -> bool:
+    explicit_requirement = _optional_bool(
+        prompt_entry.get("requires_diagnostic_evidence")
+    )
+    if explicit_requirement is not None:
+        return explicit_requirement
+    knowledge_surfaces = {
+        _safe_text(surface).lower()
+        for surface in _as_list(prompt_entry.get("knowledge_surfaces"))
+        if _safe_text(surface)
+    }
+    if knowledge_surfaces & DIAGNOSTIC_EVIDENCE_KNOWLEDGE_SURFACES:
+        return True
+    likely_tools = {
+        _safe_text(tool_name).lower()
+        for tool_name in _as_list(prompt_entry.get("likely_tools"))
+        if _safe_text(tool_name)
+    }
+    return bool(likely_tools & DIAGNOSTIC_EVIDENCE_TOOLS)
+
+
+def _workflow_tool_group_is_user_answer_required(
+    group: Mapping[str, Any],
+    *,
+    prompt_requires_diagnostic_evidence: bool,
+) -> bool:
+    explicit_requirement = group.get("explicit_user_answer_required")
+    if isinstance(explicit_requirement, bool):
+        return explicit_requirement
+    effect_type = _safe_text(group.get("effect_type")).lower()
+    if effect_type == DIAGNOSTIC_EVIDENCE_EFFECT_TYPE:
+        return prompt_requires_diagnostic_evidence
+    return True
 
 
 def _evaluate_user_happiness(
@@ -1147,6 +1273,8 @@ def _evaluate_user_happiness(
     llm_debug_data: Mapping[str, Any],
 ) -> dict[str, Any]:
     reasons: list[str] = []
+    diagnostic_evidence_reasons: list[str] = []
+    missing_evidence: list[dict[str, Any]] = []
     complexity_class = _safe_text(prompt_entry.get("complexity_class"))
     response_text = (
         _safe_text(generate_payload.get("response"))
@@ -1238,13 +1366,25 @@ def _evaluate_user_happiness(
             "Prompt required operational tool use but no tool usage was recorded."
         )
     observed_tool_lookup = {tool_name.lower() for tool_name in tool_names}
-    for group in _required_workflow_tool_groups(llm_debug_data):
+    prompt_requires_diagnostic_evidence = _prompt_requires_diagnostic_evidence(
+        prompt_entry
+    )
+    required_tool_groups = _required_workflow_tool_groups(llm_debug_data)
+    dispatch_required_tool_group = _dispatch_missing_required_tool_group(dispatch)
+    if dispatch_required_tool_group is not None:
+        required_tool_groups.append(dispatch_required_tool_group)
+    for group in required_tool_groups:
         required_tools = [
             tool_name
             for tool_name in _as_list(group.get("required_tools"))
             if isinstance(tool_name, str) and tool_name.strip()
         ]
-        missing_tools = [
+        known_missing_tools = [
+            tool_name
+            for tool_name in _as_list(group.get("known_missing_tools"))
+            if isinstance(tool_name, str) and tool_name.strip()
+        ]
+        missing_tools = known_missing_tools or [
             tool_name
             for tool_name in required_tools
             if tool_name.lower() not in observed_tool_lookup
@@ -1258,17 +1398,38 @@ def _evaluate_user_happiness(
         if requirement_satisfied:
             continue
         effect_id = _safe_text(group.get("effect_id")) or "workflow required effect"
-        reasons.append(
+        effect_type = _safe_text(group.get("effect_type")) or None
+        reason = (
             "Workflow-authored required evidence was not retrieved for "
             f"{effect_id}; missing tools: {', '.join(missing_tools)}."
         )
+        user_answer_required = _workflow_tool_group_is_user_answer_required(
+            group,
+            prompt_requires_diagnostic_evidence=prompt_requires_diagnostic_evidence,
+        )
+        evidence_entry = {
+            "effect_id": effect_id,
+            "effect_type": effect_type,
+            "required_tools": required_tools,
+            "missing_tools": missing_tools,
+            "match": match_mode,
+            "requirement_source": (
+                _safe_text(group.get("requirement_source"))
+                or "workflow_required_effects_contract"
+            ),
+            "user_answer_required": user_answer_required,
+            "reason": reason,
+        }
+        missing_evidence.append(evidence_entry)
+        if (effect_type or "").lower() == DIAGNOSTIC_EVIDENCE_EFFECT_TYPE:
+            diagnostic_evidence_reasons.append(reason)
+        if user_answer_required:
+            reasons.append(reason)
 
     minimum_response_length = (
         4
         if complexity_class == "direct_context_or_background"
-        else 20
-        if requires_tool_use or allows_grounded_empty_result
-        else 40
+        else 20 if requires_tool_use or allows_grounded_empty_result else 40
     )
     if len(response_text) < minimum_response_length:
         reasons.append("Response was too short to plausibly satisfy the prompt.")
@@ -1278,9 +1439,7 @@ def _evaluate_user_happiness(
             "No positive evidence of grounded execution was recorded for this turn."
         )
 
-    inventory_only_tools = [
-        name for name in tool_names if name in INVENTORY_ONLY_TOOLS
-    ]
+    inventory_only_tools = [name for name in tool_names if name in INVENTORY_ONLY_TOOLS]
     if (
         inventory_only_tools
         and len(inventory_only_tools) == len(tool_names)
@@ -1292,6 +1451,16 @@ def _evaluate_user_happiness(
 
     should_user_be_happy = not reasons
     verdict = "happy" if should_user_be_happy else "unhappy"
+    missing_answer_evidence = [
+        entry for entry in missing_evidence if entry.get("user_answer_required") is True
+    ]
+    missing_diagnostic_evidence = [
+        entry
+        for entry in missing_evidence
+        if _safe_text(entry.get("effect_type")).lower()
+        == DIAGNOSTIC_EVIDENCE_EFFECT_TYPE
+    ]
+    diagnostic_evidence_complete = not missing_diagnostic_evidence
     positive_evidence: list[str] = []
     if selected_workflow_id:
         positive_evidence.append(f"selected_workflow_id={selected_workflow_id}")
@@ -1306,6 +1475,11 @@ def _evaluate_user_happiness(
         "verdict": verdict,
         "should_user_be_happy": should_user_be_happy,
         "reasons": reasons,
+        "diagnostic_evidence_complete": diagnostic_evidence_complete,
+        "diagnostic_evidence_reasons": diagnostic_evidence_reasons,
+        "missing_evidence": missing_evidence,
+        "missing_answer_evidence": missing_answer_evidence,
+        "missing_diagnostic_evidence": missing_diagnostic_evidence,
         "positive_evidence": positive_evidence,
         "response_length": len(response_text),
         "response_preview": response_text[:400],
@@ -1626,7 +1800,9 @@ def _build_multi_arm_summary(
                 happy_arm_labels.append(label)
         elif label:
             unhappy_arm_labels.append(label)
-        telemetry_model = _safe_text(_as_mapping(arm_summary.get("telemetry")).get("model"))
+        telemetry_model = _safe_text(
+            _as_mapping(arm_summary.get("telemetry")).get("model")
+        )
         if telemetry_model and telemetry_model not in telemetry_models:
             telemetry_models.append(telemetry_model)
         workflow_id = _safe_text(
@@ -1763,13 +1939,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     {
                         "id": _safe_text(entry.get("id")),
                         "category": _safe_text(entry.get("category")),
-                        "complexity_class": _safe_text(
-                            entry.get("complexity_class")
-                        ),
+                        "complexity_class": _safe_text(entry.get("complexity_class")),
                         "prompt": _safe_text(entry.get("prompt")),
-                        "requires_tool_use": bool(
-                            entry.get("requires_tool_use")
-                        ),
+                        "requires_tool_use": bool(entry.get("requires_tool_use")),
                         "allows_grounded_empty_result": bool(
                             entry.get("allows_grounded_empty_result")
                         ),
@@ -1801,8 +1973,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     compare_models = [
         cleaned
         for entry in _as_list(args.compare_models)
-        if isinstance(entry, str)
-        and (cleaned := _safe_text(entry))
+        if isinstance(entry, str) and (cleaned := _safe_text(entry))
     ]
     model_arms = _build_model_arm_plan(
         requested_model=requested_model,
