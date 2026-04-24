@@ -24,12 +24,11 @@ from __future__ import annotations
 
 import logging
 import os
-import threading
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, cast
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ..vontology.utils_vontology import get_concept_description
 from .file_copy_reference_service import extract_file_copy_concept_ids_from_text
@@ -112,45 +111,6 @@ def _is_discovery_budget_timeout(exc: Exception) -> bool:
     return isinstance(exc, TimeoutError)
 
 
-def _run_with_search_timeout(
-    *,
-    label: str,
-    timeout_seconds: float,
-    operation: Callable[[], Any],
-) -> Any:
-    if timeout_seconds <= 0.0:
-        raise TimeoutError(
-            f"{label} exceeded discovery timeout budget before it started"
-        )
-
-    state: dict[str, object] = {}
-    completed = threading.Event()
-
-    def _worker() -> None:
-        try:
-            state["result"] = operation()
-        except Exception as exc:  # pragma: no cover - re-raised on caller thread
-            state["error"] = exc
-        finally:
-            completed.set()
-
-    threading.Thread(
-        target=_worker,
-        daemon=True,
-        name=f"workflow-discovery-{label}",
-    ).start()
-
-    if not completed.wait(timeout=timeout_seconds):
-        raise TimeoutError(
-            f"{label} timed out after {timeout_seconds:.3f}s during workflow discovery"
-        )
-
-    error = state.get("error")
-    if isinstance(error, Exception):
-        raise error
-    return state.get("result")
-
-
 def _count_workflow_steps(graph: Optional[Dict[str, Any]]) -> int:
     """Count concrete step nodes in a workflow graph payload."""
     steps = graph.get("steps") if isinstance(graph, dict) else None
@@ -182,10 +142,10 @@ def _classify_registry_workflow_executability(
         registry = workflow_registry
         if registry is None:
             from ..workflows.durable.registry_factory import (
-                build_durable_workflow_registry_read_only,
+                get_shared_workflow_registry_read_only,
             )
 
-            registry = build_durable_workflow_registry_read_only()
+            registry = get_shared_workflow_registry_read_only(defer_parity_work=True)
         registration = registry.get_registration(concept_id)
     except Exception:
         return None
@@ -309,6 +269,7 @@ class WorkflowDiscoveryResult:
     budget_exhausted: bool = False
     budget_exhaustion_stage: Optional[str] = None
     budget_exhaustion_detail: Optional[str] = None
+    stage_timings: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialisation."""
@@ -341,8 +302,45 @@ class WorkflowDiscoveryResult:
             "budget_exhausted": bool(self.budget_exhausted),
             "budget_exhaustion_stage": self.budget_exhaustion_stage,
             "budget_exhaustion_detail": self.budget_exhaustion_detail,
+            "stage_timings": list(self.stage_timings),
+            "stage_timing_count": len(self.stage_timings),
             "errors": self.errors if self.errors else None,
         }
+
+
+def _record_discovery_stage_timing(
+    stage_timings: List[Dict[str, Any]],
+    *,
+    stage: str,
+    started_at: float,
+    status: str,
+    **details: Any,
+) -> None:
+    """Append safe, bounded timing metadata for one discovery stage."""
+
+    stage_name = str(stage or "").strip() or "workflow_discovery"
+    status_token = str(status or "").strip() or "unknown"
+    payload: Dict[str, Any] = {
+        "stage": stage_name,
+        "status": status_token,
+        "elapsed_ms": round(max(0.0, (time.perf_counter() - started_at) * 1000), 2),
+    }
+    for key, value in details.items():
+        key_text = str(key or "").strip()
+        if not key_text:
+            continue
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            payload[key_text] = value
+        elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+            payload[key_text] = [str(item)[:240] for item in list(value)[:20]]
+        elif isinstance(value, Mapping):
+            scalar_map: Dict[str, Any] = {}
+            for map_key, map_value in value.items():
+                if isinstance(map_value, (str, int, float, bool)) or map_value is None:
+                    scalar_map[str(map_key)[:120]] = map_value
+            if scalar_map:
+                payload[key_text] = scalar_map
+    stage_timings.append(payload)
 
 
 def _get_workflow_description(concept_doc: Dict[str, Any]) -> Optional[str]:
@@ -1145,12 +1143,22 @@ def discover_workflows(
     all_matches: List[WorkflowMatch] = []
     errors: List[str] = []
     search_sources: List[str] = []
+    stage_timings: List[Dict[str, Any]] = []
     budget_exhausted = False
     budget_exhaustion_stage: str | None = None
     budget_exhaustion_detail: str | None = None
+    file_context_started_at = time.perf_counter()
     file_copy_contexts, context_errors = _resolve_query_file_copy_contexts(query)
     errors.extend(context_errors)
     search_query = _augment_query_with_file_copy_context(query, file_copy_contexts)
+    _record_discovery_stage_timing(
+        stage_timings,
+        stage="file_copy_context",
+        started_at=file_context_started_at,
+        status="completed",
+        context_count=len(file_copy_contexts),
+        error_count=len(context_errors),
+    )
     capability_index_wait_seconds = _compute_capability_index_wait_seconds(
         effective_timeout_seconds
     )
@@ -1165,47 +1173,148 @@ def discover_workflows(
         budget_exhaustion_stage = str(stage or "").strip() or "workflow_discovery"
         budget_exhaustion_detail = str(detail or "").strip() or None
 
+    def _finalise_result(
+        *,
+        ranked_matches: List[WorkflowMatch],
+        routing_matches: List[WorkflowMatch],
+    ) -> WorkflowDiscoveryResult:
+        match_absence_reason = _derive_discovery_result_match_absence_reason(
+            candidates=ranked_matches,
+            routing_matches=routing_matches or [],
+            errors=errors,
+        )
+
+        executable_match_count = _count_executable_matches(ranked_matches)
+        try:
+            from ..workflows.workflow_baseline_telemetry import (
+                record_workflow_discovery_observation,
+            )
+
+            record_workflow_discovery_observation(
+                discovered_match_count=len(ranked_matches),
+                executable_match_count=executable_match_count,
+                budget_exhausted=budget_exhausted,
+                budget_exhaustion_stage=budget_exhaustion_stage,
+                timeout_budget_seconds=effective_timeout_seconds,
+            )
+        except Exception:
+            pass
+
+        elapsed_ms = (time.perf_counter() - start_time) * 1000
+        _record_discovery_stage_timing(
+            stage_timings,
+            stage="finalise_result",
+            started_at=start_time,
+            status="completed",
+            candidate_count=len(ranked_matches),
+            routing_match_count=len(routing_matches),
+            budget_exhausted=budget_exhausted,
+        )
+
+        logger.info(
+            f"[workflow_discovery] query='{query[:50]}...' "
+            f"candidates={len(ranked_matches)} eligible={len(routing_matches)} "
+            f"executable={executable_match_count} "
+            f"elapsed_ms={elapsed_ms:.1f}"
+        )
+
+        return WorkflowDiscoveryResult(
+            matches=ranked_matches,
+            routing_matches=routing_matches,
+            search_time_ms=elapsed_ms,
+            query=search_query,
+            requested_query=query,
+            threshold=relevance_threshold,
+            errors=errors if errors else [],
+            search_sources=search_sources,
+            allow_non_executable=allow_non_executable,
+            match_absence_reason=match_absence_reason,
+            timeout_budget_seconds=effective_timeout_seconds,
+            budget_exhausted=budget_exhausted,
+            budget_exhaustion_stage=budget_exhaustion_stage,
+            budget_exhaustion_detail=budget_exhaustion_detail,
+            stage_timings=stage_timings,
+        )
+
     # JVNAUTOSCI-1424 Phase 2: Search the dedicated capability index FIRST.
     # This covers all registered workflows (built-in + Vontology) with rich
     # capability descriptions.  Built-in workflows like chat_assistant and
     # tool_calling are discoverable on equal footing with Vontology workflows.
+    capability_index_state: Mapping[str, Any] = {}
     try:
         search_sources.append("capability_index")
-        capability_matches = cast(
-            List[WorkflowMatch],
-            _run_with_search_timeout(
-                label="capability_index_search",
-                timeout_seconds=_remaining_search_timeout_seconds(
-                    started_at=start_time,
-                    timeout_seconds=effective_timeout_seconds,
-                ),
-                operation=lambda: _search_workflow_capabilities(
-                    search_query,
-                    limit=max_results * 3,
-                    max_wait_seconds=capability_index_wait_seconds,
-                    workflow_registry=workflow_registry,
-                ),
+        capability_started_at = time.perf_counter()
+        capability_timeout_remaining = _remaining_search_timeout_seconds(
+            started_at=start_time,
+            timeout_seconds=effective_timeout_seconds,
+        )
+        if capability_timeout_remaining <= 0.0:
+            raise TimeoutError(
+                "Discovery timeout budget was exhausted before "
+                "capability_index_search could start "
+                f"(budget={effective_timeout_seconds:.3f}s)."
+            )
+        capability_matches = _search_workflow_capabilities(
+            search_query,
+            limit=max_results * 3,
+            max_wait_seconds=min(
+                capability_index_wait_seconds,
+                capability_timeout_remaining,
             ),
+            workflow_registry=workflow_registry,
         )
         capability_index_state = get_workflow_capability_index_runtime_state()
+        capability_elapsed = time.perf_counter() - capability_started_at
         all_matches.extend(capability_matches)
         capability_matches_sufficient = _has_enough_capability_matches(
             capability_matches,
             threshold=relevance_threshold,
             max_results=max_results,
         )
+        _record_discovery_stage_timing(
+            stage_timings,
+            stage="capability_index_search",
+            started_at=capability_started_at,
+            status="completed",
+            match_count=len(capability_matches),
+            sufficient=capability_matches_sufficient,
+            runtime_ready=bool(capability_index_state.get("ready")),
+            build_in_progress=bool(capability_index_state.get("build_in_progress")),
+        )
+        if capability_elapsed > capability_timeout_remaining:
+            _record_budget_exhaustion(
+                "capability_index_search",
+                (
+                    "capability_index_search exceeded remaining discovery budget "
+                    f"(elapsed={capability_elapsed:.3f}s, "
+                    f"budget={capability_timeout_remaining:.3f}s)."
+                ),
+            )
         if not capability_matches:
-            errors.extend(
+            capability_unavailability_errors = (
                 _derive_capability_index_unavailability_errors(
                     runtime_state=capability_index_state,
-                    wait_seconds=capability_index_wait_seconds,
+                    wait_seconds=min(
+                        capability_index_wait_seconds,
+                        capability_timeout_remaining,
+                    ),
                 )
             )
+            errors.extend(capability_unavailability_errors)
+            if capability_unavailability_errors:
+                return _finalise_result(ranked_matches=[], routing_matches=[])
     except Exception as e:
         capability_matches_sufficient = False
         errors.append(f"capability_index_error: {e}")
         if _is_discovery_budget_timeout(e):
             _record_budget_exhaustion("capability_index_search", str(e))
+        _record_discovery_stage_timing(
+            stage_timings,
+            stage="capability_index_search",
+            started_at=locals().get("capability_started_at", start_time),
+            status="error",
+            error=type(e).__name__,
+        )
         logger.warning("Workflow capability index search failed: %s", e)
 
     # Secondary authoritative search sources fill gaps the capability index misses.
@@ -1224,21 +1333,41 @@ def discover_workflows(
     elif not capability_matches_sufficient:
         try:
             search_sources.append("semantic")
-            semantic_matches = cast(
-                List[WorkflowMatch],
-                _run_with_search_timeout(
-                    label="semantic_search",
-                    timeout_seconds=semantic_budget_remaining,
-                    operation=lambda: _search_workflows_semantic(
-                        search_query, limit=max_results * 2
-                    ),
-                ),
+            semantic_started_at = time.perf_counter()
+            semantic_matches = _search_workflows_semantic(
+                search_query,
+                limit=max_results * 2,
             )
             all_matches.extend(semantic_matches)
+            semantic_elapsed = time.perf_counter() - semantic_started_at
+            _record_discovery_stage_timing(
+                stage_timings,
+                stage="semantic_search",
+                started_at=semantic_started_at,
+                status="completed",
+                match_count=len(semantic_matches),
+                budget_seconds=round(semantic_budget_remaining, 3),
+            )
+            if semantic_elapsed > semantic_budget_remaining:
+                _record_budget_exhaustion(
+                    "semantic_search",
+                    (
+                        "semantic_search exceeded remaining discovery budget "
+                        f"(elapsed={semantic_elapsed:.3f}s, "
+                        f"budget={semantic_budget_remaining:.3f}s)."
+                    ),
+                )
         except Exception as e:
             errors.append(f"semantic_search_error: {e}")
             if _is_discovery_budget_timeout(e):
                 _record_budget_exhaustion("semantic_search", str(e))
+            _record_discovery_stage_timing(
+                stage_timings,
+                stage="semantic_search",
+                started_at=locals().get("semantic_started_at", start_time),
+                status="error",
+                error=type(e).__name__,
+            )
             logger.warning(f"Semantic workflow discovery failed: {e}")
 
     vontology_budget_remaining = _remaining_search_timeout_seconds(
@@ -1256,88 +1385,101 @@ def discover_workflows(
     elif not capability_matches_sufficient:
         try:
             search_sources.append("vontology")
-            vontology_matches = cast(
-                List[WorkflowMatch],
-                _run_with_search_timeout(
-                    label="vontology_search",
-                    timeout_seconds=vontology_budget_remaining,
-                    operation=lambda: _search_workflows_vontology(
-                        search_query, limit=max_results * 2
-                    ),
-                ),
+            vontology_started_at = time.perf_counter()
+            vontology_matches = _search_workflows_vontology(
+                search_query,
+                limit=max_results * 2,
             )
             all_matches.extend(vontology_matches)
+            vontology_elapsed = time.perf_counter() - vontology_started_at
+            _record_discovery_stage_timing(
+                stage_timings,
+                stage="vontology_search",
+                started_at=vontology_started_at,
+                status="completed",
+                match_count=len(vontology_matches),
+                budget_seconds=round(vontology_budget_remaining, 3),
+            )
+            if vontology_elapsed > vontology_budget_remaining:
+                _record_budget_exhaustion(
+                    "vontology_search",
+                    (
+                        "vontology_search exceeded remaining discovery budget "
+                        f"(elapsed={vontology_elapsed:.3f}s, "
+                        f"budget={vontology_budget_remaining:.3f}s)."
+                    ),
+                )
         except Exception as e:
             errors.append(f"vontology_search_error: {e}")
             if _is_discovery_budget_timeout(e):
                 _record_budget_exhaustion("vontology_search", str(e))
+            _record_discovery_stage_timing(
+                stage_timings,
+                stage="vontology_search",
+                started_at=locals().get("vontology_started_at", start_time),
+                status="error",
+                error=type(e).__name__,
+            )
             logger.warning(f"Vontology workflow discovery failed: {e}")
 
     # Deduplicate and rank (keep a larger pre-limit for executability-aware
     # ranking to avoid early relevance-only truncation).
+    dedupe_started_at = time.perf_counter()
     ranked_matches = _deduplicate_and_rank(
         all_matches,
         threshold=relevance_threshold,
         max_results=max(max_results * 4, max_results),
     )
+    _record_discovery_stage_timing(
+        stage_timings,
+        stage="deduplicate_and_rank",
+        started_at=dedupe_started_at,
+        status="completed",
+        input_count=len(all_matches),
+        output_count=len(ranked_matches),
+    )
 
     # Enrich with descriptions
+    enrich_started_at = time.perf_counter()
     ranked_matches = _enrich_workflow_matches(ranked_matches)
+    _record_discovery_stage_timing(
+        stage_timings,
+        stage="enrich_matches",
+        started_at=enrich_started_at,
+        status="completed",
+        candidate_count=len(ranked_matches),
+    )
+    annotate_started_at = time.perf_counter()
     ranked_matches = _annotate_and_rank_candidates(
         ranked_matches,
         max_results=max_results,
         workflow_registry=workflow_registry,
     )
+    _record_discovery_stage_timing(
+        stage_timings,
+        stage="annotate_and_rank",
+        started_at=annotate_started_at,
+        status="completed",
+        candidate_count=len(ranked_matches),
+        routing_eligible_count=sum(
+            1 for item in ranked_matches if item.routing_eligible
+        ),
+    )
+    filter_started_at = time.perf_counter()
     routing_matches = _filter_routing_candidates(
         ranked_matches,
         allow_non_executable=allow_non_executable,
     )
-    match_absence_reason = _derive_discovery_result_match_absence_reason(
-        candidates=ranked_matches,
-        routing_matches=routing_matches or [],
-        errors=errors,
+    _record_discovery_stage_timing(
+        stage_timings,
+        stage="filter_routing_candidates",
+        started_at=filter_started_at,
+        status="completed",
+        routing_match_count=len(routing_matches),
     )
-
-    executable_match_count = _count_executable_matches(ranked_matches)
-    try:
-        from ..workflows.workflow_baseline_telemetry import (
-            record_workflow_discovery_observation,
-        )
-
-        record_workflow_discovery_observation(
-            discovered_match_count=len(ranked_matches),
-            executable_match_count=executable_match_count,
-            budget_exhausted=budget_exhausted,
-            budget_exhaustion_stage=budget_exhaustion_stage,
-            timeout_budget_seconds=effective_timeout_seconds,
-        )
-    except Exception:
-        pass
-
-    elapsed_ms = (time.perf_counter() - start_time) * 1000
-
-    logger.info(
-        f"[workflow_discovery] query='{query[:50]}...' "
-        f"candidates={len(ranked_matches)} eligible={len(routing_matches)} "
-        f"executable={executable_match_count} "
-        f"elapsed_ms={elapsed_ms:.1f}"
-    )
-
-    return WorkflowDiscoveryResult(
-        matches=ranked_matches,
+    return _finalise_result(
+        ranked_matches=ranked_matches,
         routing_matches=routing_matches,
-        search_time_ms=elapsed_ms,
-        query=search_query,
-        requested_query=query,
-        threshold=relevance_threshold,
-        errors=errors if errors else [],
-        search_sources=search_sources,
-        allow_non_executable=allow_non_executable,
-        match_absence_reason=match_absence_reason,
-        timeout_budget_seconds=effective_timeout_seconds,
-        budget_exhausted=budget_exhausted,
-        budget_exhaustion_stage=budget_exhaustion_stage,
-        budget_exhaustion_detail=budget_exhaustion_detail,
     )
 
 
@@ -1380,20 +1522,13 @@ def discover_workflows_for_turn(
             if allow_non_executable is None
             else bool(allow_non_executable)
         )
-        result = cast(
-            WorkflowDiscoveryResult,
-            _run_with_search_timeout(
-                label="workflow_discovery_for_turn",
-                timeout_seconds=effective_timeout_seconds,
-                operation=lambda: discover_workflows(
-                    user_input,
-                    relevance_threshold=relevance_threshold,
-                    max_results=max_results,
-                    timeout_seconds=effective_timeout_seconds,
-                    allow_non_executable=effective_allow_non_executable,
-                    workflow_registry=workflow_registry,
-                ),
-            ),
+        result = discover_workflows(
+            user_input,
+            relevance_threshold=relevance_threshold,
+            max_results=max_results,
+            timeout_seconds=effective_timeout_seconds,
+            allow_non_executable=effective_allow_non_executable,
+            workflow_registry=workflow_registry,
         )
         return result.to_dict()
 
@@ -1443,4 +1578,12 @@ def discover_workflows_for_turn(
                 "workflow_discovery_for_turn" if budget_exhausted else None
             ),
             budget_exhaustion_detail=str(e) if budget_exhausted else None,
+            stage_timings=[
+                {
+                    "stage": "workflow_discovery_for_turn",
+                    "status": "error",
+                    "elapsed_ms": 0.0,
+                    "error": type(e).__name__,
+                }
+            ],
         ).to_dict()

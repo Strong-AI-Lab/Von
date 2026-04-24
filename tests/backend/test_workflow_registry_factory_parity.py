@@ -57,7 +57,9 @@ def test_get_shared_workflow_registry_read_only_starts_capability_index_warmup(
     monkeypatch.setattr(
         registry_factory,
         "build_workflow_registry_read_only",
-        lambda defer_parity_work=True: sentinel_registry,
+        lambda defer_parity_work=True, start_deferred_registry_work=False: (
+            sentinel_registry
+        ),
     )
     monkeypatch.setattr(
         "src.backend.services.workflow_capability_service.prewarm_workflow_capability_index",
@@ -511,3 +513,63 @@ def test_get_or_build_inventory_snapshot_returns_pending_when_sync_build_disable
     assert snapshot["diagnostics"]["reason_codes"] == [
         "inventory_pending_background_build"
     ]
+
+
+def test_read_only_registry_defaults_to_no_deferred_parity_work(monkeypatch):
+    observed: list[tuple[bool, bool]] = []
+
+    def _fake_build_workflow_registry(
+        *,
+        allow_bootstrap,
+        force_background_deferred_work,
+        start_deferred_registry_work,
+    ):
+        observed.append(
+            (
+                bool(force_background_deferred_work),
+                bool(start_deferred_registry_work),
+            )
+        )
+        return WorkflowRegistry()
+
+    monkeypatch.setattr(
+        registry_factory,
+        "_build_workflow_registry",
+        _fake_build_workflow_registry,
+    )
+
+    registry = registry_factory.build_workflow_registry_read_only()
+
+    assert isinstance(registry, WorkflowRegistry)
+    assert observed == [(True, False)]
+
+
+def test_read_only_registry_can_opt_into_background_deferred_work(monkeypatch):
+    observed: list[tuple[bool, bool]] = []
+
+    def _fake_build_workflow_registry(
+        *,
+        allow_bootstrap,
+        force_background_deferred_work,
+        start_deferred_registry_work,
+    ):
+        observed.append(
+            (
+                bool(force_background_deferred_work),
+                bool(start_deferred_registry_work),
+            )
+        )
+        return WorkflowRegistry()
+
+    monkeypatch.setattr(
+        registry_factory,
+        "_build_workflow_registry",
+        _fake_build_workflow_registry,
+    )
+
+    registry = registry_factory.build_workflow_registry_read_only(
+        start_deferred_registry_work=True
+    )
+
+    assert isinstance(registry, WorkflowRegistry)
+    assert observed == [(True, True)]

@@ -791,6 +791,37 @@ def test_search_workflow_capabilities_non_blocking_triggers_background_rebuild(
     assert started == [(False, sentinel_registry)]
 
 
+def test_non_blocking_search_does_not_query_half_warmed_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _HalfWarmedIndex:
+        size = 1
+
+        def search(self, *_args, **_kwargs):
+            raise AssertionError("non-blocking search must not query unready index")
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_capability_service.ensure_workflow_capability_index_populated",
+        lambda **_kwargs: _HalfWarmedIndex(),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_capability_service.get_workflow_capability_index_runtime_state",
+        lambda: {
+            "ready": False,
+            "build_in_progress": True,
+            "query_surface_ready": False,
+        },
+    )
+
+    results = search_workflow_capabilities(
+        "Who am I in this conversation?",
+        non_blocking=True,
+        max_wait_seconds=0.01,
+    )
+
+    assert results == []
+
+
 def test_prewarm_workflow_capability_index_starts_background_build(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

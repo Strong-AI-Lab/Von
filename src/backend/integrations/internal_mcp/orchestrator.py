@@ -1609,6 +1609,107 @@ def _workflow_required_tools_from_contract(
     return tools
 
 
+def _normalise_tool_name_sequence(value: Any) -> list[str]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return []
+    tools: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        tool = item.strip()
+        if not tool:
+            continue
+        lowered = tool.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        tools.append(tool)
+    return tools
+
+
+def _llm_policy_enables_tool_surface(llm_policy: Mapping[str, Any]) -> bool:
+    raw_mode = str(llm_policy.get("tool_mode") or "").strip().lower()
+    if raw_mode in {"none", "disabled", "off"}:
+        return False
+    if raw_mode in {"allowed", "tool_augmented", "tools"}:
+        return True
+    return "allowed_tools" in llm_policy or "required_tools" in llm_policy
+
+
+def _evaluate_workflow_required_effects_tool_policy(
+    workflow_def: Any | None,
+) -> dict[str, Any]:
+    metadata = (
+        getattr(workflow_def, "metadata", None) if workflow_def is not None else None
+    )
+    contract = (
+        metadata.get("required_effects_contract")
+        if isinstance(metadata, Mapping)
+        else None
+    )
+    required_tools = _workflow_required_tools_from_contract(
+        contract if isinstance(contract, Mapping) else None
+    )
+    if not required_tools:
+        return {
+            "checked": False,
+            "ok": True,
+            "required_tools": [],
+            "allowed_tools": [],
+            "unavailable_required_tools": [],
+            "reason_code": "no_required_effect_tools",
+        }
+
+    allowed_tools: set[str] = set()
+    direct_action_tools: set[str] = set()
+    has_unrestricted_llm_tool_step = False
+    states = getattr(workflow_def, "states", None)
+    if isinstance(states, Mapping):
+        for state in states.values():
+            actions = getattr(state, "actions", None)
+            if not isinstance(actions, Sequence) or isinstance(actions, str):
+                continue
+            for action in actions:
+                action_id = getattr(action, "action_id", None)
+                if isinstance(action_id, str) and action_id.strip():
+                    direct_action_tools.add(action_id.strip().lower())
+                if not bool(getattr(action, "is_llm_step", False)):
+                    continue
+                llm_policy = getattr(action, "llm_policy", None)
+                llm_policy_map = llm_policy if isinstance(llm_policy, Mapping) else {}
+                if not _llm_policy_enables_tool_surface(llm_policy_map):
+                    continue
+                allowed = _normalise_tool_name_sequence(
+                    llm_policy_map.get("allowed_tools")
+                )
+                if allowed:
+                    allowed_tools.update(tool.lower() for tool in allowed)
+                else:
+                    has_unrestricted_llm_tool_step = True
+
+    if has_unrestricted_llm_tool_step:
+        unavailable_required_tools: list[str] = []
+    else:
+        available_lower = set(allowed_tools)
+        available_lower.update(direct_action_tools)
+        unavailable_required_tools = [
+            tool for tool in required_tools if tool.lower() not in available_lower
+        ]
+
+    ok = not unavailable_required_tools
+    return {
+        "checked": True,
+        "ok": ok,
+        "required_tools": list(required_tools),
+        "allowed_tools": sorted(allowed_tools),
+        "direct_action_tools": sorted(direct_action_tools),
+        "unrestricted_llm_tool_step": bool(has_unrestricted_llm_tool_step),
+        "unavailable_required_tools": list(unavailable_required_tools),
+        "reason_code": ("ok" if ok else "workflow_required_effect_tool_not_allowed"),
+    }
+
+
 def _workflow_selection_outcome_safe_int(value: Any) -> int:
     try:
         return int(value)
@@ -23629,6 +23730,15 @@ class InternalMCPChatOrchestrator:
                             }
                         )
                     continue
+                if pure_ontology_follow_up and retry_actor_concept_id:
+                    forced_calls.append(
+                        {
+                            "action": "call_tool",
+                            "tool": name,
+                            "payload": {"concept_id": retry_actor_concept_id},
+                        }
+                    )
+                    continue
                 if pure_ontology_follow_up:
                     continue
                 if not retry_actor_concept_id:
@@ -23671,6 +23781,19 @@ class InternalMCPChatOrchestrator:
                             },
                         }
                     )
+                    continue
+                if predicate_incidence_follow_up_concept_ids:
+                    for concept_id in predicate_incidence_follow_up_concept_ids:
+                        forced_calls.append(
+                            {
+                                "action": "call_tool",
+                                "tool": name,
+                                "payload": {
+                                    "concept_id": concept_id,
+                                    "limit": 20,
+                                },
+                            }
+                        )
                     continue
                 if ontology_follow_up_concept_ids:
                     for concept_id in ontology_follow_up_concept_ids:
@@ -25663,6 +25786,56 @@ class InternalMCPChatOrchestrator:
 
         if workflow_def is not None:
             workflow_metadata = getattr(workflow_def, "metadata", None)
+            required_effects_tool_policy = (
+                _evaluate_workflow_required_effects_tool_policy(workflow_def)
+            )
+            if required_effects_tool_policy.get("ok") is False:
+                initial_state = (
+                    str(getattr(workflow_def, "initial_state", "") or "").strip()
+                    or None
+                )
+                unavailable_tools = [
+                    str(item).strip()
+                    for item in (
+                        required_effects_tool_policy.get("unavailable_required_tools")
+                        or []
+                    )
+                    if isinstance(item, str) and item.strip()
+                ]
+                message = (
+                    f"Workflow {workflow_id} could not start because its "
+                    "required-effect evidence tools are not allowed by any "
+                    "executable workflow step"
+                )
+                if unavailable_tools:
+                    message += ": " + ", ".join(unavailable_tools)
+                message += "."
+                launch_failure_result = WorkflowResult(
+                    data={
+                        "response_text": message,
+                        "summary": message,
+                        "workflow_required_effects_tool_policy": dict(
+                            required_effects_tool_policy
+                        ),
+                    },
+                    completed=False,
+                    final_state=(
+                        initial_state or "workflow_required_effects_tool_policy"
+                    ),
+                    error=(
+                        "workflow_required_effects_tools_unavailable:"
+                        + ",".join(unavailable_tools)
+                    ),
+                )
+                _attach_terminal_success_contract(launch_failure_result)
+                _attach_required_effects_contract(launch_failure_result)
+                launch_failure_result.data["workflow_execution_summary"] = (
+                    _build_workflow_execution_summary(
+                        workflow_id=workflow_id,
+                        workflow_result=launch_failure_result,
+                    )
+                )
+                return launch_failure_result
             launch_contract = (
                 workflow_metadata.get("launch_input_contract")
                 if isinstance(workflow_metadata, Mapping)
@@ -38206,6 +38379,37 @@ class InternalMCPChatOrchestrator:
             else {}
         )
         workflow_metadata = getattr(workflow_def, "metadata", None)
+        required_effects_tool_policy = _evaluate_workflow_required_effects_tool_policy(
+            workflow_def
+        )
+        if required_effects_tool_policy.get("ok") is False:
+            return {
+                "workflow_id": clean_workflow_id,
+                "initial_state_id": (
+                    str(getattr(workflow_def, "initial_state", "") or "").strip()
+                    or None
+                ),
+                "launchable": False,
+                "launch_input_resolution": {
+                    "status": "workflow_required_effects_tools_unavailable",
+                    "unresolved_required_inputs": [],
+                    "resolved_inputs": [],
+                },
+                "pre_action_validation": {
+                    "applied": True,
+                    "ok": False,
+                    "reason_code": required_effects_tool_policy.get("reason_code"),
+                    "symbol": ",".join(
+                        required_effects_tool_policy.get("unavailable_required_tools")
+                        or []
+                    ),
+                    "message": (
+                        "Required-effect tools are not allowed by any executable "
+                        "workflow step."
+                    ),
+                },
+                "required_effects_tool_policy": required_effects_tool_policy,
+            }
 
         launch_input_contract = (
             workflow_metadata.get("launch_input_contract")
@@ -38333,6 +38537,7 @@ class InternalMCPChatOrchestrator:
             "launchable": not unresolved_required_inputs and pre_action_ok,
             "launch_input_resolution": launch_input_summary,
             "pre_action_validation": pre_action_summary,
+            "required_effects_tool_policy": required_effects_tool_policy,
         }
 
     def _probe_custom_workflow_launchability(

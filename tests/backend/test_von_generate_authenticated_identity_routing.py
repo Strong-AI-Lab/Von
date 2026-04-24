@@ -1322,6 +1322,92 @@ class _EntityInformationFalseNegativeAfterIncidenceLLM:
         return "I couldn't find any grounded papers explicitly attributed to you."
 
 
+class _EntityInformationProfileFalseNegativeAfterIncidenceLLM:
+    def __init__(self, *, initial_tool_call: bool = True) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.initial_tool_call = initial_tool_call
+
+    def generate(self, prompt, context=None, model=None):
+        context_messages = list(context or [])
+        self.calls.append(
+            {"prompt": prompt, "context": context_messages, "model": model}
+        )
+        context_text = "\n".join(
+            str(message.get("content") or "")
+            for message in context_messages
+            if isinstance(message, dict)
+        )
+        if isinstance(prompt, str) and "expected-success inference policy" in prompt:
+            return (
+                '{"expected_outcome_summary":"Summarise grounded represented information about the authenticated user.",'
+                '"grounding_requirement":"Use represented predicate incidence and relation evidence before claiming profile facts.",'
+                '"precision_policy":"Prefer explicit insufficiency over unsupported profile claims.",'
+                '"selector_guidance":"Prefer the specialised entity-information retrieval workflow or equivalent grounded relation-retrieval route.",'
+                '"answering_guidance":"Answer from grounded represented evidence; broad profile requests should not stop at simple identity.",'
+                '"reasoning":"The request asks for a broad self-profile, so the workflow should retrieve represented relations before answering.",'
+                '"required_tools":["get_predicate_incidence","find_relations_with_argument"]}'
+            )
+        if isinstance(prompt, str) and prompt.strip().startswith("Select workflow"):
+            return (
+                '{"workflow_id":"#V#entity_information_retrieval_workflow",'
+                '"confidence":0.97,'
+                '"reasoning":"This is a grounded self-profile retrieval request and the specialised workflow is available."}'
+            )
+        if (
+            isinstance(prompt, str)
+            and prompt.startswith(
+                "You execute the canonical entity-information retrieval workflow for Von."
+            )
+            and "Tell me about myself." in prompt
+        ):
+            if (
+                "CURRENT USER CONTEXT: Test User (#V#test_user)" in context_text
+                or "Authenticated user concept:\n#V#test_user" in prompt
+            ):
+                if not self.initial_tool_call:
+                    return "No information about you is available in the ontology."
+                return (
+                    '{"action":"call_tool","tool":"get_predicate_incidence",'
+                    '"payload":{"concept_id":"#V#test_user"}}'
+                )
+            return "I need grounded authenticated user context first."
+        if isinstance(prompt, str) and prompt.startswith(
+            "Provide a final answer to the user now that the tool result is available."
+        ):
+            if (
+                "Predicate incidence summary" in context_text
+                and "Relation-bearing evidence excerpts" not in context_text
+            ):
+                return (
+                    "You are Test User (#V#test_user), but no broader grounded "
+                    "profile facts were retrieved."
+                )
+            if (
+                "Predicate incidence summary" in context_text
+                and "Relation-bearing evidence excerpts" in context_text
+                and "Test Paper One" in context_text
+                and "Test Paper Two" in context_text
+            ):
+                return (
+                    "You are Test User (#V#test_user). The ontology includes "
+                    "grounded relations from you to Test Paper One and Test Paper Two."
+                )
+            return "I couldn't find grounded profile relations for you."
+        if isinstance(prompt, str) and prompt.startswith(
+            "# prompt_turn_execution_narrate_completion_report"
+        ):
+            if (
+                "The ontology includes grounded relations from you to Test Paper One and Test Paper Two."
+                in prompt
+            ):
+                return (
+                    "You are Test User (#V#test_user). The ontology includes "
+                    "grounded relations from you to Test Paper One and Test Paper Two."
+                )
+            return "I couldn't find grounded profile relations for you."
+        return "I couldn't find grounded profile relations for you."
+
+
 class _EntityInformationUnfilteredRelationLLM:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
@@ -1419,6 +1505,7 @@ def _make_app(
         | _PredicateExtentRoutingLLM
         | _EntityInformationRetrievalWorkflowLLM
         | _EntityInformationFalseNegativeAfterIncidenceLLM
+        | _EntityInformationProfileFalseNegativeAfterIncidenceLLM
         | _EntityInformationUnfilteredRelationLLM
     ),
     gateway_override: Any | None = None,
@@ -2426,6 +2513,93 @@ def test_generate_authenticated_entity_information_turn_forces_relation_follow_u
     assert gateway.invocations[1]["tool"] == "find_relations_with_argument"
     assert gateway.invocations[1]["payload"]["concept_id"] == "#V#test_user"
     assert gateway.invocations[1]["payload"]["predicate_filter"] == ["#V#author_of"]
+
+    llm_debug = body.get("llm_debug") or {}
+    tool_invocations = llm_debug.get("tool_invocations") or []
+    recorded_tools = [
+        (record.get("tool") or record.get("method"))
+        for record in tool_invocations
+        if isinstance(record, dict)
+    ]
+    assert recorded_tools.count("get_predicate_incidence") == 1
+    assert recorded_tools.count("find_relations_with_argument") == 1
+
+
+def test_generate_authenticated_profile_turn_forces_broad_relation_follow_up_after_predicate_incidence(
+    monkeypatch,
+) -> None:
+    llm = _EntityInformationProfileFalseNegativeAfterIncidenceLLM()
+    gateway = _NoisyPredicateExtentRoutingGatewayStub()
+    app = _make_app(
+        monkeypatch,
+        llm=llm,
+        gateway_override=gateway,
+        discovery_override=_entity_information_retrieval_discovery,
+        max_tool_invocations=3,
+    )
+
+    client = app.test_client()
+    response = client.post("/von/generate", json={"prompt": "Tell me about myself."})
+    assert response.status_code == 200
+
+    body = response.get_json()
+    assert isinstance(body, dict)
+    assert body.get("response") == (
+        "You are Test User (#V#test_user). The ontology includes grounded "
+        "relations from you to Test Paper One and Test Paper Two."
+    )
+
+    assert gateway.invocations
+    assert gateway.invocations[0]["tool"] == "get_predicate_incidence"
+    assert gateway.invocations[0]["payload"]["concept_id"] == "#V#test_user"
+    assert gateway.invocations[1]["tool"] == "find_relations_with_argument"
+    assert gateway.invocations[1]["payload"]["concept_id"] == "#V#test_user"
+    assert "predicate_filter" not in gateway.invocations[1]["payload"]
+
+    llm_debug = body.get("llm_debug") or {}
+    tool_invocations = llm_debug.get("tool_invocations") or []
+    recorded_tools = [
+        (record.get("tool") or record.get("method"))
+        for record in tool_invocations
+        if isinstance(record, dict)
+    ]
+    assert recorded_tools.count("get_predicate_incidence") == 1
+    assert recorded_tools.count("find_relations_with_argument") == 1
+
+
+def test_generate_authenticated_profile_turn_forces_seed_incidence_when_model_answers_without_tools(
+    monkeypatch,
+) -> None:
+    llm = _EntityInformationProfileFalseNegativeAfterIncidenceLLM(
+        initial_tool_call=False
+    )
+    gateway = _NoisyPredicateExtentRoutingGatewayStub()
+    app = _make_app(
+        monkeypatch,
+        llm=llm,
+        gateway_override=gateway,
+        discovery_override=_entity_information_retrieval_discovery,
+        max_tool_invocations=3,
+    )
+
+    client = app.test_client()
+    response = client.post("/von/generate", json={"prompt": "Tell me about myself."})
+    assert response.status_code == 200
+
+    body = response.get_json()
+    assert isinstance(body, dict)
+    assert body.get("response") == (
+        "You are Test User (#V#test_user). The ontology includes grounded "
+        "relations from you to Test Paper One and Test Paper Two."
+    )
+
+    assert [entry["tool"] for entry in gateway.invocations] == [
+        "get_predicate_incidence",
+        "find_relations_with_argument",
+    ]
+    assert gateway.invocations[0]["payload"]["concept_id"] == "#V#test_user"
+    assert gateway.invocations[1]["payload"]["concept_id"] == "#V#test_user"
+    assert "predicate_filter" not in gateway.invocations[1]["payload"]
 
     llm_debug = body.get("llm_debug") or {}
     tool_invocations = llm_debug.get("tool_invocations") or []

@@ -213,9 +213,12 @@ def test_build_durable_workflow_registry_uses_shared_deferred_read_only_builder(
     observed: dict[str, object] = {}
 
     def _stub_get_shared_workflow_registry_read_only(
-        *, defer_parity_work: bool = False
+        *,
+        defer_parity_work: bool = False,
+        start_deferred_registry_work: bool = False,
     ):
         observed["defer_parity_work"] = defer_parity_work
+        observed["start_deferred_registry_work"] = start_deferred_registry_work
         return sentinel_registry
 
     monkeypatch.setattr(
@@ -227,4 +230,7 @@ def test_build_durable_workflow_registry_uses_shared_deferred_read_only_builder(
     result = utils_flask._build_durable_workflow_registry()
 
     assert result is sentinel_registry
-    assert observed == {"defer_parity_work": True}
+    assert observed == {
+        "defer_parity_work": True,
+        "start_deferred_registry_work": True,
+    }

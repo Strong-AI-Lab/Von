@@ -270,7 +270,10 @@ def _build_durable_workflow_registry():
     # Durable startup should populate the same shared registry that verified
     # submission and discovery reuse later, otherwise launch-time verification
     # pays for a second full lazy-registry build in the same process.
-    return get_shared_workflow_registry_read_only(defer_parity_work=True)
+    return get_shared_workflow_registry_read_only(
+        defer_parity_work=True,
+        start_deferred_registry_work=True,
+    )
 
 
 def _bootstrap_workflow_authority_for_startup(app_logger) -> dict[str, Any]:

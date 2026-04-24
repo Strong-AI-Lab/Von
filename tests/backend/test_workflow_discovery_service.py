@@ -161,7 +161,10 @@ class TestWorkflowDiscoveryResult:
         assert output["timeout_budget_seconds"] == 2.5
         assert output["budget_exhausted"] is True
         assert output["budget_exhaustion_stage"] == "semantic_search"
-        assert output["budget_exhaustion_detail"] == "semantic_search timed out after 2.500s"
+        assert (
+            output["budget_exhaustion_detail"]
+            == "semantic_search timed out after 2.500s"
+        )
         assert output["errors"] == ["minor warning"]
 
     def test_to_dict_errors_none_when_empty(self) -> None:
@@ -191,7 +194,9 @@ class TestGetWorkflowDescription:
     def test_extracts_from_attributes_description(self) -> None:
         """Should extract from attributes.description when needed."""
         concept_doc = {"attributes": {"description": "Workflow attributes description"}}
-        assert _get_workflow_description(concept_doc) == "Workflow attributes description"
+        assert (
+            _get_workflow_description(concept_doc) == "Workflow attributes description"
+        )
 
     def test_returns_none_when_no_description(self) -> None:
         """Should return None when no description found."""
@@ -453,7 +458,9 @@ class TestDiscoverWorkflows:
             )
 
         mock_classify.side_effect = _classify
-        mock_has_authoritative_text.side_effect = lambda concept_id: concept_id == "#V#wf_exec"
+        mock_has_authoritative_text.side_effect = (
+            lambda concept_id: concept_id == "#V#wf_exec"
+        )
 
         with patch(
             "src.backend.services.workflow_discovery_service._enrich_workflow_matches",
@@ -465,10 +472,7 @@ class TestDiscoverWorkflows:
         reasons = {m.concept_id: m.executability_reason for m in result.matches}
         assert reasons["#V#wf_exec"] == EXECUTABILITY_EXECUTABLE_NOW
         assert reasons["#V#wf_graph"] == EXECUTABILITY_GRAPH_INCOMPLETE
-        assert (
-            reasons["#V#wf_design"]
-            == EXECUTABILITY_NON_EXECUTABLE_DESIGN_ARTIFACT
-        )
+        assert reasons["#V#wf_design"] == EXECUTABILITY_NON_EXECUTABLE_DESIGN_ARTIFACT
         assert len(result.routing_matches or []) == 1
         assert (result.routing_matches or [])[0].concept_id == "#V#wf_exec"
 
@@ -606,9 +610,13 @@ class TestDiscoverWorkflowsForTurn:
         assert mock_discover.call_args.kwargs["timeout_seconds"] == 2.25
 
     @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
-    @patch("src.backend.services.workflow_discovery_service._search_workflows_vontology")
+    @patch(
+        "src.backend.services.workflow_discovery_service._search_workflows_vontology"
+    )
     @patch("src.backend.services.workflow_discovery_service._search_workflows_semantic")
-    @patch("src.backend.services.workflow_discovery_service.build_file_copy_typing_context")
+    @patch(
+        "src.backend.services.workflow_discovery_service.build_file_copy_typing_context"
+    )
     def test_augments_discovery_query_with_typed_file_copy_context(
         self,
         mock_typing_context: MagicMock,
@@ -641,9 +649,15 @@ class TestDiscoverWorkflowsForTurn:
         assert "route_hint=scholarly" in result.query
 
     @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
-    @patch("src.backend.services.workflow_discovery_service._has_authoritative_routing_text")
-    @patch("src.backend.services.workflow_discovery_service._classify_workflow_concept_executability")
-    @patch("src.backend.services.workflow_discovery_service._search_workflows_vontology")
+    @patch(
+        "src.backend.services.workflow_discovery_service._has_authoritative_routing_text"
+    )
+    @patch(
+        "src.backend.services.workflow_discovery_service._classify_workflow_concept_executability"
+    )
+    @patch(
+        "src.backend.services.workflow_discovery_service._search_workflows_vontology"
+    )
     @patch("src.backend.services.workflow_discovery_service._search_workflows_semantic")
     def test_textless_semantic_match_is_visible_but_not_routing_eligible(
         self,
@@ -654,7 +668,9 @@ class TestDiscoverWorkflowsForTurn:
         mock_enrich: MagicMock,
     ) -> None:
         mock_semantic.return_value = [
-            WorkflowMatch("#V#textless_candidate", "Textless candidate", relevance_score=0.86)
+            WorkflowMatch(
+                "#V#textless_candidate", "Textless candidate", relevance_score=0.86
+            )
         ]
         mock_vontology.return_value = []
         mock_classify.return_value = (True, EXECUTABILITY_EXECUTABLE_NOW, None)
@@ -672,12 +688,14 @@ class TestDiscoverWorkflowsForTurn:
         assert result.routing_matches == []
 
     @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
-    @patch("src.backend.services.workflow_discovery_service._search_workflows_vontology")
+    @patch(
+        "src.backend.services.workflow_discovery_service._search_workflows_vontology"
+    )
     @patch("src.backend.services.workflow_discovery_service._search_workflows_semantic")
     @patch(
         "src.backend.services.workflow_discovery_service.get_workflow_capability_index_runtime_state"
     )
-    def test_secondary_search_trace_excludes_name_fallback_when_semantic_search_returns_candidates(
+    def test_capability_index_build_in_progress_fails_fast_without_secondary_search(
         self,
         mock_capability_state: MagicMock,
         mock_semantic: MagicMock,
@@ -690,19 +708,32 @@ class TestDiscoverWorkflowsForTurn:
             "last_error": None,
         }
         mock_semantic.return_value = [
-            WorkflowMatch("#V#semantic_candidate", "Semantic candidate", relevance_score=0.81)
+            WorkflowMatch(
+                "#V#semantic_candidate", "Semantic candidate", relevance_score=0.81
+            )
         ]
         mock_vontology.return_value = []
         mock_enrich.side_effect = lambda matches: matches
 
         result = discover_workflows("Represent the uploaded paper now", max_results=1)
 
-        assert result.search_sources == ["capability_index", "semantic", "vontology"]
+        assert result.search_sources == ["capability_index"]
+        assert result.match_absence_reason == (
+            "capability_index_wait_timed_out_build_in_progress"
+        )
+        assert "capability_index_build_in_progress" in result.errors
+        assert mock_semantic.called is False
+        assert mock_vontology.called is False
+        assert result.stage_timings[1]["stage"] == "capability_index_search"
 
     @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
-    @patch("src.backend.services.workflow_discovery_service._search_workflows_vontology")
+    @patch(
+        "src.backend.services.workflow_discovery_service._search_workflows_vontology"
+    )
     @patch("src.backend.services.workflow_discovery_service._search_workflows_semantic")
-    @patch("src.backend.services.workflow_discovery_service._search_workflow_capabilities")
+    @patch(
+        "src.backend.services.workflow_discovery_service._search_workflow_capabilities"
+    )
     @patch(
         "src.backend.services.workflow_discovery_service.get_workflow_capability_index_runtime_state"
     )
@@ -739,12 +770,18 @@ class TestDiscoverWorkflowsForTurn:
             result.match_absence_reason
             == "capability_index_wait_timed_out_build_in_progress"
         )
-        assert mock_semantic.called is True
+        assert mock_semantic.called is False
+        assert mock_vontology.called is False
+        assert result.stage_timings[1]["stage"] == "capability_index_search"
 
     @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
-    @patch("src.backend.services.workflow_discovery_service._search_workflows_vontology")
+    @patch(
+        "src.backend.services.workflow_discovery_service._search_workflows_vontology"
+    )
     @patch("src.backend.services.workflow_discovery_service._search_workflows_semantic")
-    @patch("src.backend.services.workflow_discovery_service._search_workflow_capabilities")
+    @patch(
+        "src.backend.services.workflow_discovery_service._search_workflow_capabilities"
+    )
     @patch(
         "src.backend.services.workflow_discovery_service.get_workflow_capability_index_runtime_state"
     )
@@ -758,8 +795,8 @@ class TestDiscoverWorkflowsForTurn:
     ) -> None:
         mock_capability.return_value = []
         mock_capability_state.return_value = {
-            "ready": False,
-            "build_in_progress": True,
+            "ready": True,
+            "build_in_progress": False,
             "last_error": None,
         }
         mock_semantic.return_value = [
@@ -791,9 +828,13 @@ class TestDiscoverWorkflowsForTurn:
         assert mock_vontology.called is True
 
     @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
-    @patch("src.backend.services.workflow_discovery_service._search_workflows_vontology")
+    @patch(
+        "src.backend.services.workflow_discovery_service._search_workflows_vontology"
+    )
     @patch("src.backend.services.workflow_discovery_service._search_workflows_semantic")
-    @patch("src.backend.services.workflow_discovery_service._search_workflow_capabilities")
+    @patch(
+        "src.backend.services.workflow_discovery_service._search_workflow_capabilities"
+    )
     def test_capability_index_short_circuits_secondary_search_when_sufficient(
         self,
         mock_capability: MagicMock,
@@ -810,14 +851,19 @@ class TestDiscoverWorkflowsForTurn:
         mock_vontology.return_value = []
         mock_enrich.side_effect = lambda matches: matches
 
-        with patch(
-            "src.backend.services.workflow_discovery_service._classify_workflow_concept_executability",
-            return_value=(True, EXECUTABILITY_EXECUTABLE_NOW, None),
-        ), patch(
-            "src.backend.services.workflow_discovery_service._has_authoritative_routing_text",
-            return_value=True,
+        with (
+            patch(
+                "src.backend.services.workflow_discovery_service._classify_workflow_concept_executability",
+                return_value=(True, EXECUTABILITY_EXECUTABLE_NOW, None),
+            ),
+            patch(
+                "src.backend.services.workflow_discovery_service._has_authoritative_routing_text",
+                return_value=True,
+            ),
         ):
-            result = discover_workflows("Represent the uploaded paper now", max_results=3)
+            result = discover_workflows(
+                "Represent the uploaded paper now", max_results=3
+            )
 
         assert len(result.matches) == 3
         assert result.search_sources == ["capability_index"]
@@ -825,13 +871,17 @@ class TestDiscoverWorkflowsForTurn:
         assert mock_vontology.called is False
 
     @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
-    @patch("src.backend.services.workflow_discovery_service._search_workflows_vontology")
+    @patch(
+        "src.backend.services.workflow_discovery_service._search_workflows_vontology"
+    )
     @patch("src.backend.services.workflow_discovery_service._search_workflows_semantic")
-    @patch("src.backend.services.workflow_discovery_service._search_workflow_capabilities")
+    @patch(
+        "src.backend.services.workflow_discovery_service._search_workflow_capabilities"
+    )
     @patch(
         "src.backend.services.workflow_discovery_service.get_workflow_capability_index_runtime_state"
     )
-    def test_hard_timeboxes_blocking_capability_index_search(
+    def test_records_cooperative_budget_overrun_in_capability_index_search(
         self,
         mock_capability_state: MagicMock,
         mock_capability: MagicMock,
@@ -859,19 +909,26 @@ class TestDiscoverWorkflowsForTurn:
             timeout_seconds=0.05,
         )
 
-        assert any(
-            "capability_index_search timed out" in error for error in result.errors
-        )
-        assert result.search_time_ms < 200.0
         assert result.timeout_budget_seconds == 0.05
         assert result.budget_exhausted is True
         assert result.budget_exhaustion_stage == "capability_index_search"
+        assert "capability_index_search exceeded" in str(
+            result.budget_exhaustion_detail
+        )
+        assert result.match_absence_reason == (
+            "capability_index_wait_timed_out_build_in_progress"
+        )
         assert mock_semantic.called is False
+        assert mock_vontology.called is False
 
     @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
-    @patch("src.backend.services.workflow_discovery_service._search_workflows_vontology")
+    @patch(
+        "src.backend.services.workflow_discovery_service._search_workflows_vontology"
+    )
     @patch("src.backend.services.workflow_discovery_service._search_workflows_semantic")
-    @patch("src.backend.services.workflow_discovery_service._search_workflow_capabilities")
+    @patch(
+        "src.backend.services.workflow_discovery_service._search_workflow_capabilities"
+    )
     @patch(
         "src.backend.services.workflow_discovery_service.get_workflow_capability_index_runtime_state"
     )
@@ -905,11 +962,8 @@ class TestDiscoverWorkflowsForTurn:
 
         assert result.budget_exhausted is True
         assert result.budget_exhaustion_stage == "semantic_search"
-        assert (
-            any("semantic_search timed out" in error for error in result.errors)
-            or "semantic_search" in str(result.budget_exhaustion_detail)
-        )
-        assert result.search_time_ms < 200.0
+        assert "semantic_search exceeded" in str(result.budget_exhaustion_detail)
+        assert result.search_time_ms >= 200.0
         assert result.timeout_budget_seconds == 0.06
         assert mock_vontology.called is False
 
@@ -959,7 +1013,9 @@ class TestDiscoverWorkflowsForTurn:
         mock_has_authoritative_text: MagicMock,
         mock_classify: MagicMock,
     ) -> None:
-        match = WorkflowMatch("#V#authoring_workflow", "Authoring Workflow", relevance_score=0.95)
+        match = WorkflowMatch(
+            "#V#authoring_workflow", "Authoring Workflow", relevance_score=0.95
+        )
         mock_classify.return_value = (True, EXECUTABILITY_EXECUTABLE_NOW, None)
         mock_has_authoritative_text.return_value = True
         mock_routing_profile.return_value = (
@@ -995,31 +1051,30 @@ class TestDiscoverWorkflowsForTurn:
         assert result["budget_exhausted"] is False
 
     @patch("src.backend.services.workflow_discovery_service.discover_workflows")
-    def test_turn_wrapper_hard_timeboxes_blocking_discovery(
+    def test_turn_wrapper_does_not_spawn_outer_timeout_worker(
         self,
         mock_discover: MagicMock,
     ) -> None:
         def _blocking_discovery(*_args, **_kwargs):
-            time.sleep(0.7)
-            return WorkflowDiscoveryResult()
+            time.sleep(0.05)
+            return WorkflowDiscoveryResult(
+                budget_exhausted=True,
+                budget_exhaustion_stage="semantic_search",
+                budget_exhaustion_detail="semantic_search exceeded remaining budget",
+            )
 
         mock_discover.side_effect = _blocking_discovery
 
         result = discover_workflows_for_turn(
             "test query input",
-            timeout_seconds=0.1,
+            timeout_seconds=0.01,
         )
 
         assert isinstance(result, dict)
         assert result["matches"] == []
-        assert any(
-            "workflow_discovery_budget_exhausted:" in error
-            for error in (result.get("errors") or [])
-        )
-        assert result["match_absence_reason"] == "workflow_discovery_budget_exhausted"
         assert result["budget_exhausted"] is True
-        assert result["budget_exhaustion_stage"] == "workflow_discovery_for_turn"
-        assert "timed out after 0.100s" in str(result["budget_exhaustion_detail"])
+        assert result["budget_exhaustion_stage"] == "semantic_search"
+        assert mock_discover.call_count == 1
 
 
 class TestWorkflowTypeIds:
@@ -1042,12 +1097,15 @@ def test_invalidate_workflow_discovery_executability_caches_clears_lru_state() -
     _classify_workflow_concept_executability.cache_clear()
     _is_executable_workflow_concept.cache_clear()
 
-    with patch(
-        "src.backend.workflows.vontology_loader.build_workflow_process_graph",
-        return_value=(None, ["workflow_has_no_steps"]),
-    ), patch(
-        "src.backend.workflows.vontology_loader.load_workflow_definition_from_vontology",
-        return_value=None,
+    with (
+        patch(
+            "src.backend.workflows.vontology_loader.build_workflow_process_graph",
+            return_value=(None, ["workflow_has_no_steps"]),
+        ),
+        patch(
+            "src.backend.workflows.vontology_loader.load_workflow_definition_from_vontology",
+            return_value=None,
+        ),
     ):
         _classify_workflow_concept_executability("#V#wf_cache_probe")
         _is_executable_workflow_concept("#V#wf_cache_probe")
@@ -1085,12 +1143,15 @@ def test_classify_workflow_treats_partial_vacuous_steps_as_non_executable() -> N
         "warnings": [],
     }
 
-    with patch(
-        "src.backend.workflows.vontology_loader.build_workflow_process_graph",
-        return_value=(graph, []),
-    ), patch(
-        "src.backend.workflows.vontology_loader.load_workflow_definition_from_vontology",
-        return_value=object(),
+    with (
+        patch(
+            "src.backend.workflows.vontology_loader.build_workflow_process_graph",
+            return_value=(graph, []),
+        ),
+        patch(
+            "src.backend.workflows.vontology_loader.load_workflow_definition_from_vontology",
+            return_value=object(),
+        ),
     ):
         is_executable, reason, detail = _classify_workflow_concept_executability(
             "#V#wf_vacancy"
@@ -1171,12 +1232,15 @@ def test_classify_workflow_treats_completely_vacuous_steps_as_non_executable() -
         "warnings": [],
     }
 
-    with patch(
-        "src.backend.workflows.vontology_loader.build_workflow_process_graph",
-        return_value=(graph, []),
-    ), patch(
-        "src.backend.workflows.vontology_loader.load_workflow_definition_from_vontology",
-        return_value=object(),
+    with (
+        patch(
+            "src.backend.workflows.vontology_loader.build_workflow_process_graph",
+            return_value=(graph, []),
+        ),
+        patch(
+            "src.backend.workflows.vontology_loader.load_workflow_definition_from_vontology",
+            return_value=object(),
+        ),
     ):
         is_executable, reason, detail = _classify_workflow_concept_executability(
             "#V#wf_vacancy_full"
@@ -1204,21 +1268,22 @@ def test_classify_workflow_rejects_actionless_output_only_contract() -> None:
                 "reads_variables": [],
                 "reads_context_keys": [],
                 "writes_variables": [],
-                "writes_context_keys": [
-                    "#V#workflow_context_key_validated_type_name"
-                ],
+                "writes_context_keys": ["#V#workflow_context_key_validated_type_name"],
             }
         ],
         "edges": [],
         "warnings": [],
     }
 
-    with patch(
-        "src.backend.workflows.vontology_loader.build_workflow_process_graph",
-        return_value=(graph, []),
-    ), patch(
-        "src.backend.workflows.vontology_loader.load_workflow_definition_from_vontology",
-        return_value=object(),
+    with (
+        patch(
+            "src.backend.workflows.vontology_loader.build_workflow_process_graph",
+            return_value=(graph, []),
+        ),
+        patch(
+            "src.backend.workflows.vontology_loader.load_workflow_definition_from_vontology",
+            return_value=object(),
+        ),
     ):
         is_executable, reason, detail = _classify_workflow_concept_executability(
             "#V#wf_output_only"
@@ -1270,12 +1335,15 @@ def test_classify_workflow_treats_student_lookup_subworkflow_as_executable() -> 
         "warnings": [],
     }
 
-    with patch(
-        "src.backend.workflows.vontology_loader.build_workflow_process_graph",
-        return_value=(graph, []),
-    ), patch(
-        "src.backend.workflows.vontology_loader.load_workflow_definition_from_vontology",
-        return_value=object(),
+    with (
+        patch(
+            "src.backend.workflows.vontology_loader.build_workflow_process_graph",
+            return_value=(graph, []),
+        ),
+        patch(
+            "src.backend.workflows.vontology_loader.load_workflow_definition_from_vontology",
+            return_value=object(),
+        ),
     ):
         is_executable, reason, detail = _classify_workflow_concept_executability(
             "#V#student_supervision_lookup_workflow"
@@ -1301,13 +1369,17 @@ def test_classify_workflow_uses_registry_fallback_for_built_in_workflow() -> Non
         get=lambda workflow_id: None,
     )
 
-    with patch(
-        "src.backend.workflows.vontology_loader.build_workflow_process_graph"
-    ) as mock_build_graph, patch(
-        "src.backend.workflows.vontology_loader.load_workflow_definition_from_vontology"
-    ) as mock_load_definition, patch(
-        "src.backend.workflows.durable.registry_factory.build_durable_workflow_registry_read_only",
-        return_value=fake_registry,
+    with (
+        patch(
+            "src.backend.workflows.vontology_loader.build_workflow_process_graph"
+        ) as mock_build_graph,
+        patch(
+            "src.backend.workflows.vontology_loader.load_workflow_definition_from_vontology"
+        ) as mock_load_definition,
+        patch(
+            "src.backend.workflows.durable.registry_factory.get_shared_workflow_registry_read_only",
+            return_value=fake_registry,
+        ),
     ):
         is_executable, reason, detail = _classify_workflow_concept_executability(
             "#V#chat_assistant_workflow"
@@ -1339,17 +1411,22 @@ def test_annotation_reuses_provided_registry_for_built_in_workflow() -> None:
         relevance_score=0.95,
     )
 
-    with patch(
-        "src.backend.workflows.durable.registry_factory.build_durable_workflow_registry_read_only"
-    ) as mock_build_registry, patch(
-        "src.backend.services.workflow_discovery_service._has_authoritative_routing_text",
-        return_value=True,
-    ), patch(
-        "src.backend.services.workflow_discovery_service._resolve_workflow_routing_profile_data",
-        return_value=(None, None),
-    ), patch(
-        "src.backend.services.workflow_discovery_service._resolve_workflow_publication_lifecycle_data",
-        return_value=(None, None),
+    with (
+        patch(
+            "src.backend.workflows.durable.registry_factory.build_durable_workflow_registry_read_only"
+        ) as mock_build_registry,
+        patch(
+            "src.backend.services.workflow_discovery_service._has_authoritative_routing_text",
+            return_value=True,
+        ),
+        patch(
+            "src.backend.services.workflow_discovery_service._resolve_workflow_routing_profile_data",
+            return_value=(None, None),
+        ),
+        patch(
+            "src.backend.services.workflow_discovery_service._resolve_workflow_publication_lifecycle_data",
+            return_value=(None, None),
+        ),
     ):
         annotated = _annotate_and_rank_candidates(
             [match],
@@ -1378,15 +1455,19 @@ def test_classify_workflow_keeps_vontology_source_graph_authoritative() -> None:
         get=lambda workflow_id: None,
     )
 
-    with patch(
-        "src.backend.workflows.vontology_loader.build_workflow_process_graph",
-        return_value=(None, ["workflow_concept_not_found"]),
-    ), patch(
-        "src.backend.workflows.vontology_loader.load_workflow_definition_from_vontology",
-        return_value=None,
-    ), patch(
-        "src.backend.workflows.durable.registry_factory.build_durable_workflow_registry_read_only",
-        return_value=fake_registry,
+    with (
+        patch(
+            "src.backend.workflows.vontology_loader.build_workflow_process_graph",
+            return_value=(None, ["workflow_concept_not_found"]),
+        ),
+        patch(
+            "src.backend.workflows.vontology_loader.load_workflow_definition_from_vontology",
+            return_value=None,
+        ),
+        patch(
+            "src.backend.workflows.durable.registry_factory.build_durable_workflow_registry_read_only",
+            return_value=fake_registry,
+        ),
     ):
         is_executable, reason, detail = _classify_workflow_concept_executability(
             "#V#vontology_workflow_without_graph"

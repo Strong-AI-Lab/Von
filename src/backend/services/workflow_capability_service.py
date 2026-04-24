@@ -1873,6 +1873,12 @@ def search_workflow_capabilities(
         max_wait_seconds=max_wait_seconds,
         workflow_registry=workflow_registry,
     )
+    if non_blocking:
+        runtime_state = get_workflow_capability_index_runtime_state()
+        if not bool(runtime_state.get("ready", False)) or bool(
+            runtime_state.get("build_in_progress", False)
+        ):
+            return []
     try:
         results = index.search(query, max_results=max_results, min_score=min_score)
         _set_workflow_capability_query_surface_state(

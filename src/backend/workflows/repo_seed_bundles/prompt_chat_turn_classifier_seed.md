@@ -18,13 +18,17 @@ Return exactly one JSON object. Do not wrap it in Markdown fences. Do not includ
 Rules:
 
 - Prefer the most specific routing-eligible executable workflow.
+- Treat the expected answer contract, selector guidance, and authenticated/session context included in the turn context as routing evidence, not as a maximum answer scope. It is acceptable to select a grounded retrieval workflow when it can produce a materially better, grounded answer than the minimum contract.
+- Use `#V#chat_assistant_workflow` for self-relative direct responses only when the user is asking for a narrow identity/session-context reflection, such as their name, canonical ID, or current organisation, and no materially useful grounded lookup is needed.
+- Do not treat broader prompts such as "tell me about myself", "what do you know about me", "summarise my profile", or "what are my papers/interests/roles/relationships" as narrow identity checks. Those requests invite a grounded concept profile or predicate/relation retrieval when a suitable workflow is eligible and launchable.
+- For authenticated self-relative turns, distinguish identity or organisation reflection that is already explicit in context from requests for additional represented facts. Use retrieval workflows for papers, affiliations, students, collaborators, predicate-filtered relationships, richer concept profiles, or other represented facts that would improve the answer beyond the already-present context.
 - `workflow_id` must be exactly one of the candidate workflow IDs listed below.
 - Do not ask the user a clarification question from this selector stage.
 - Do not answer the user directly from this selector stage.
 - If the request is ambiguous, still choose the best candidate from the provided list and explain the ambiguity in `reasoning`.
 - Treat the full turn context messages and the workflow continuation context as authoritative routing context for continuation, repair, verification, or failure-explanation turns unless the user explicitly diverges.
 - When the current request is a represented-knowledge lookup about an already-resolved entity and its related facts, artefacts, or relationships, prefer KB/concept/relation retrieval workflows over creation, ingestion, or representation workflows unless the user explicitly asks to create or ingest new artefacts.
-- When the current request is an authenticated self-relative entity-information question such as "who am I", "list my papers", "what papers of mine do you know about", "which organisations am I affiliated with", or another predicate/extent-filtered question about the current user, prefer `#V#entity_information_retrieval_workflow` when it is in the candidate list.
+- When the current request is an authenticated self-relative entity-information question such as "who am I", "tell me about myself", "what do you know about me", "list my papers", "what papers of mine do you know about", "which organisations am I affiliated with", or another predicate/extent-filtered question about the current user, prefer `#V#entity_information_retrieval_workflow` when it is in the candidate list and launchable.
 - Prefer `#V#concept_search_instance_retrieval_workflow` for explicit concept-profile retrieval turns where a single represented concept or instance can answer the request directly without the predicate-incidence, relation-extent, or type-filtering discipline expected from `#V#entity_information_retrieval_workflow`.
 - When grounded retrieval is still needed and no eligible specialised retrieval workflow is available, prefer `#V#tool_calling_workflow` over a generic chat fallback.
 - Treat maintenance or testing workflows as requiring explicit workflow, test, or experiment intent when the candidate evidence says workflow context is required.
@@ -35,10 +39,12 @@ Canonical valid output examples:
 
 These examples show the required JSON shape and reasoning style only. In the real answer, `workflow_id` must be copied exactly from the supplied candidate list.
 
+- Direct authenticated-context response:
+  `{"workflow_id":"#V#chat_assistant_workflow","confidence":0.87,"reasoning":"The authenticated context already contains the narrow identity requested, and no grounded lookup is needed for this direct-response turn."}`
 - Specialised discovered workflow:
   `{"workflow_id":"#V#concept_search_instance_retrieval_workflow","confidence":0.96,"reasoning":"The request asks for represented information about a specific concept, so the specialised retrieval workflow is the best eligible candidate."}`
 - Self-relative entity-information workflow:
-  `{"workflow_id":"#V#entity_information_retrieval_workflow","confidence":0.98,"reasoning":"The request is an authenticated self-relative entity-information query about identity and papers, so the specialised entity-information retrieval workflow is the most specific eligible candidate."}`
+  `{"workflow_id":"#V#entity_information_retrieval_workflow","confidence":0.98,"reasoning":"The request asks for represented facts about the authenticated user, so the specialised entity-information retrieval workflow is the most specific eligible candidate."}`
 - Tool-calling workflow:
   `{"workflow_id":"#V#tool_calling_workflow","confidence":0.91,"reasoning":"The request asks for grounded represented facts about an entity, and no eligible specialised retrieval workflow is available, so the general tool-calling workflow should retrieve them before answering."}`
 - Generic chat fallback:

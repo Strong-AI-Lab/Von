@@ -85,6 +85,7 @@ def _utc_now_iso() -> str:
 def get_shared_workflow_registry_read_only(
     *,
     defer_parity_work: bool = True,
+    start_deferred_registry_work: bool = False,
     force_rebuild: bool = False,
 ) -> WorkflowRegistry:
     """Return a process-wide read-only registry for interactive runtime paths.
@@ -99,7 +100,8 @@ def get_shared_workflow_registry_read_only(
     with _shared_workflow_registry_lock:
         if force_rebuild or _shared_workflow_registry is None:
             _shared_workflow_registry = build_workflow_registry_read_only(
-                defer_parity_work=defer_parity_work
+                defer_parity_work=defer_parity_work,
+                start_deferred_registry_work=start_deferred_registry_work,
             )
             created_registry = True
         registry = _shared_workflow_registry
@@ -863,6 +865,7 @@ def _build_workflow_registry(
     *,
     allow_bootstrap: bool,
     force_background_deferred_work: bool = False,
+    start_deferred_registry_work: bool = True,
 ) -> WorkflowRegistry:
     """Build the unified workflow registry.
 
@@ -942,24 +945,26 @@ def _build_workflow_registry(
         len(discovered_workflow_ids),
     )
 
-    # 4. Deferred work — bootstrap + parity inventory in a daemon thread.
-    #    These operations trigger lazy-loading of definitions so they must
-    #    NOT block the registry return path (JVNAUTOSCI-1424).
-    _launch_deferred_registry_work(
-        registry=registry,
-        discovered_workflow_ids=discovered_workflow_ids,
-        expected_authoritative_file_copy_workflow_ids=(
-            _EXPECTED_AUTHORITATIVE_FILE_COPY_WORKFLOW_IDS
-        ),
-        expected_authoritative_reasoning_recovery_workflow_ids=(
-            _EXPECTED_AUTHORITATIVE_REASONING_RECOVERY_WORKFLOW_IDS
-        ),
-        expected_authoritative_support_maintenance_workflow_ids=(
-            _EXPECTED_AUTHORITATIVE_SUPPORT_MAINTENANCE_WORKFLOW_IDS
-        ),
-        requested_bootstrap=requested_bootstrap,
-        force_background=force_background_deferred_work,
-    )
+    # 4. Deferred work — bootstrap + parity inventory.
+    #    These operations trigger lazy-loading of definitions. Read-only
+    #    interactive registry construction therefore skips them by default and
+    #    leaves operator inventory callers to request a snapshot explicitly.
+    if start_deferred_registry_work:
+        _launch_deferred_registry_work(
+            registry=registry,
+            discovered_workflow_ids=discovered_workflow_ids,
+            expected_authoritative_file_copy_workflow_ids=(
+                _EXPECTED_AUTHORITATIVE_FILE_COPY_WORKFLOW_IDS
+            ),
+            expected_authoritative_reasoning_recovery_workflow_ids=(
+                _EXPECTED_AUTHORITATIVE_REASONING_RECOVERY_WORKFLOW_IDS
+            ),
+            expected_authoritative_support_maintenance_workflow_ids=(
+                _EXPECTED_AUTHORITATIVE_SUPPORT_MAINTENANCE_WORKFLOW_IDS
+            ),
+            requested_bootstrap=requested_bootstrap,
+            force_background=force_background_deferred_work,
+        )
 
     return registry
 
@@ -1088,18 +1093,21 @@ def build_workflow_registry() -> WorkflowRegistry:
 
 def build_workflow_registry_read_only(
     *,
-    defer_parity_work: bool = False,
+    defer_parity_work: bool = True,
+    start_deferred_registry_work: bool = False,
 ) -> WorkflowRegistry:
     """Build the unified WorkflowRegistry without side effects.
 
-    ``defer_parity_work=True`` keeps operator-facing read surfaces responsive by
-    forcing deferred inventory/parity work into a daemon thread even when
-    parity enforcement is configured as strict. Callers that need an immediate
-    fully-built parity snapshot should use the default synchronous behaviour.
+    ``start_deferred_registry_work=False`` keeps request and status surfaces
+    responsive by avoiding the heavy parity inventory graph scan entirely.
+    Callers that need a full inventory should use
+    ``get_or_build_workflow_registry_inventory_snapshot`` explicitly or opt in
+    to deferred work from an operator/startup surface.
     """
     return _build_workflow_registry(
         allow_bootstrap=False,
         force_background_deferred_work=defer_parity_work,
+        start_deferred_registry_work=start_deferred_registry_work,
     )
 
 

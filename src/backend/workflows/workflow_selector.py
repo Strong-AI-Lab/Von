@@ -36,6 +36,8 @@ SELECTOR_PROMPT_MISSING_CANDIDATE_LIST_REASON = (
 )
 SELECTOR_PROMPT_MISSING_TURN_TEXT_REASON = "selector_prompt_missing_turn_text"
 SELECTOR_FAIL_CLOSED_SOURCE = "selector_fail_closed"
+SELECTOR_PROMPT_MAX_CHARS = 24000
+SELECTOR_CANDIDATE_DESCRIPTION_MAX_CHARS = 900
 
 
 @dataclass(frozen=True)
@@ -132,6 +134,19 @@ class WorkflowSelector:
         if number <= 1.0:
             return f"{number * 100:.0f}%"
         return f"{number:.2f}"
+
+    @staticmethod
+    def _compact_candidate_description(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        text = " ".join(text.split())
+        if len(text) <= SELECTOR_CANDIDATE_DESCRIPTION_MAX_CHARS:
+            return text
+        return (
+            text[:SELECTOR_CANDIDATE_DESCRIPTION_MAX_CHARS].rstrip()
+            + f"... [truncated {len(text) - SELECTOR_CANDIDATE_DESCRIPTION_MAX_CHARS} chars]"
+        )
 
     @classmethod
     def _build_candidate_evidence_items(
@@ -559,7 +574,9 @@ class WorkflowSelector:
                 entry: dict[str, Any] = {
                     "concept_id": cid,
                     "name": str(wf.get("name") or cid),
-                    "description": str(wf.get("description") or ""),
+                    "description": self._compact_candidate_description(
+                        wf.get("description")
+                    ),
                 }
                 for field_name in (
                     "match_source",
@@ -706,7 +723,7 @@ class WorkflowSelector:
                     "continuation_routing_context": continuation_context_text,
                 },
                 fallback=None,
-                max_chars=6000,
+                max_chars=SELECTOR_PROMPT_MAX_CHARS,
             )
         except Exception as exc:
             return WorkflowSelectionPrompt(
@@ -747,7 +764,7 @@ class WorkflowSelector:
         if candidate_list and candidate_list not in prompt_text:
             return WorkflowSelectionPrompt(
                 prompt_id=prompt.prompt_id,
-                prompt_text=prompt_text,
+                prompt_text=None,
                 discovered_workflow_ids=tuple(candidate_ids),
                 candidate_entries=immutable_candidate_entries,
                 candidate_list_text=candidate_list,
@@ -760,7 +777,7 @@ class WorkflowSelector:
         if turn_text and turn_text not in prompt_text:
             return WorkflowSelectionPrompt(
                 prompt_id=prompt.prompt_id,
-                prompt_text=prompt_text,
+                prompt_text=None,
                 discovered_workflow_ids=tuple(candidate_ids),
                 candidate_entries=immutable_candidate_entries,
                 candidate_list_text=candidate_list,

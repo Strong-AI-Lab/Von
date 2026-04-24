@@ -260,6 +260,7 @@ class TestRagFirstPrompt:
 
         assert prompt.continuation_routing_context_text is not None
         assert "wfep_telemetry" in prompt.continuation_routing_context_text
+        assert prompt.prompt_text is not None
         assert "workflow continuation context" in prompt.prompt_text.lower()
         assert "#V#missing_tool_call_workflow" in prompt.prompt_text
         assert prompt.prompt_provenance["render_variables"][
@@ -401,7 +402,43 @@ class TestRagFirstPrompt:
         )
 
         assert prompt.prompt_failure_reason == "selector_prompt_missing_candidate_list"
+        assert prompt.prompt_text is None
+
+    def test_long_candidate_descriptions_do_not_truncate_required_candidate_list(self):
+        selector = _build_selector()
+        long_description = " ".join(
+            f"capability-detail-{index}" for index in range(900)
+        )
+
+        prompt = selector.prepare_selection_prompt(
+            turn_text="Who am I in this conversation?",
+            discovered_workflows=[
+                {
+                    "concept_id": "#V#concept_search_instance_retrieval_workflow",
+                    "name": "Concept Search Instance Retrieval Workflow",
+                    "description": long_description,
+                    "is_executable": True,
+                    "routing_eligible": True,
+                    "is_policy_safe": True,
+                },
+                {
+                    "concept_id": "#V#chat_assistant_workflow",
+                    "name": "Chat Assistant Workflow",
+                    "description": long_description,
+                    "candidate_source": "selector_default",
+                    "is_executable": True,
+                    "routing_eligible": True,
+                    "is_policy_safe": True,
+                },
+            ],
+        )
+
+        assert prompt.prompt_failure_reason is None
         assert prompt.prompt_text is not None
+        assert prompt.candidate_list_text
+        assert prompt.candidate_list_text in prompt.prompt_text
+        assert "#V#concept_search_instance_retrieval_workflow" in prompt.prompt_text
+        assert "[truncated " in prompt.prompt_text
 
     def test_select_workflow_prompt_unavailable_fails_closed_without_selector_llm(self):
         selector = WorkflowSelector(
