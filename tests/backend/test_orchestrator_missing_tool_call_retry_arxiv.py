@@ -387,6 +387,56 @@ def test_missing_tool_call_retry_chains_predicate_incidence_after_search_concept
     ]
 
 
+def test_missing_tool_call_retry_prefers_search_target_over_actor_predicate_filter():
+    orchestrator = _build_orchestrator_stub()
+
+    forced = orchestrator._infer_missing_tool_call_retry_tool_calls(
+        [],
+        user_prompt="What are key predicates for scientific papers in Vontology?",
+        missing_required_tools=["get_predicate_incidence"],
+        tool_invocations=[
+            {
+                "tool": "search_concepts",
+                "status": "ok",
+                "effective_payload": {
+                    "success": True,
+                    "query": "scientific paper",
+                    "results": [
+                        {
+                            "concept_id": "#V#has_paper_recommendation_assertion",
+                            "name": "Has Paper Recommendation Assertion",
+                            "kind": "predicate",
+                        },
+                        {
+                            "concept_id": "#V#scientific_paper",
+                            "name": "scientific paper",
+                            "kind": "type",
+                        },
+                    ],
+                },
+            },
+            {
+                "tool": "get_predicate_incidence",
+                "status": "ok",
+                "arguments": {
+                    "concept_id": "#V#michael_witbrock",
+                    "predicate_filter": ["#V#has_paper_recommendation_assertion"],
+                },
+                "effective_payload": {"success": True},
+            },
+        ],
+        user_concept_id="#V#michael_witbrock",
+    )
+
+    assert forced == [
+        {
+            "action": "call_tool",
+            "tool": "get_predicate_incidence",
+            "payload": {"concept_id": "#V#scientific_paper"},
+        }
+    ]
+
+
 def test_missing_tool_call_retry_chains_predicate_incidence_after_fetch_concept():
     orchestrator = _build_orchestrator_stub()
 
@@ -665,6 +715,46 @@ def test_missing_tool_call_retry_chains_predicate_incidence_after_resolution():
             "action": "call_tool",
             "tool": "get_predicate_incidence",
             "payload": {"concept_id": "#V#scientific_paper"},
+        }
+    ]
+
+
+def test_missing_tool_call_retry_searches_after_resolution_returns_no_target():
+    orchestrator = _build_orchestrator_stub()
+
+    forced = orchestrator._infer_missing_tool_call_retry_tool_calls(
+        [],
+        user_prompt="What are key predicates for scientific papers in Vontology?",
+        turn_expected_outcome_contract={
+            "selector_guidance": (
+                "Resolve the 'scientific paper' concept before predicate lookup."
+            ),
+            "required_tools": [
+                "resolve_concept_by_name",
+                "get_predicate_incidence",
+            ],
+        },
+        missing_required_tools=["get_predicate_incidence"],
+        tool_invocations=[
+            {
+                "tool": "resolve_concept_by_name",
+                "status": "ok",
+                "arguments": {"name": "scientific paper"},
+                "effective_payload": {
+                    "success": True,
+                    "status": "not_found",
+                    "summary": "Not found",
+                },
+            }
+        ],
+        user_concept_id="#V#michael_witbrock",
+    )
+
+    assert forced == [
+        {
+            "action": "call_tool",
+            "tool": "search_concepts",
+            "payload": {"query": "scientific paper"},
         }
     ]
 

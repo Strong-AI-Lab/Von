@@ -48,6 +48,7 @@ _JSON_FENCE_RE = re.compile(
     re.IGNORECASE,
 )
 
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -209,6 +210,20 @@ def _extract_json_payload(raw_text: str) -> tuple[Any, str]:
             return json.loads(candidate), "braced_json"
         except Exception:
             pass
+
+    decoder = json.JSONDecoder()
+    embedded_candidate: Any = None
+    for index, char in enumerate(cleaned):
+        if char not in "{[":
+            continue
+        candidate = cleaned[index:]
+        try:
+            parsed, _end = decoder.raw_decode(candidate)
+        except json.JSONDecodeError:
+            continue
+        embedded_candidate = parsed
+    if embedded_candidate is not None:
+        return embedded_candidate, "embedded_json"
 
     return None, "unparsed"
 
@@ -548,7 +563,9 @@ def _handle_validate_plan(request: WorkflowActionRequest) -> WorkflowActionResul
 
         dependencies = _coerce_str_list(action.get("dependencies"), max_items=8)
         valid_dependencies = [
-            dep for dep in dependencies if dep in known_action_ids and dep != action.get("id")
+            dep
+            for dep in dependencies
+            if dep in known_action_ids and dep != action.get("id")
         ]
         if len(valid_dependencies) != len(dependencies):
             issues.append("dropped_unknown_dependencies")

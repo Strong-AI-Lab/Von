@@ -44,6 +44,9 @@ _DEFAULT_WORKFLOW_TOOL_INVOCATION_CAP = 4
 _COMPLETION_REPORT_NARRATION_PROMPT_IDS = frozenset(
     {"#V#prompt_turn_execution_narrate_completion_report"}
 )
+_TURN_EXPECTED_OUTCOME_INFERENCE_PROMPT_ID = (
+    "#V#prompt_turn_execution_expected_outcome_inference"
+)
 
 
 def _context_string(value: Any) -> str:
@@ -641,9 +644,53 @@ def _build_planning_outputs(
     )
 
 
+def _normalise_validated_json_payload_for_prompt(
+    payload: Any,
+    *,
+    prompt_id: str | None,
+    workflow_state_id: str | None = None,
+) -> Any:
+    """Apply schema-boundary normalisation for known JSON contracts."""
+
+    if not isinstance(payload, Mapping):
+        return payload
+    clean_prompt_id = _context_string(prompt_id)
+    clean_workflow_state_id = _context_string(workflow_state_id).lower()
+    is_expected_outcome_step = (
+        clean_prompt_id == _TURN_EXPECTED_OUTCOME_INFERENCE_PROMPT_ID
+        or "expected_outcome_inference" in clean_workflow_state_id
+    )
+    if not is_expected_outcome_step:
+        return payload
+
+    contract = TurnExpectedOutcomeContract.from_mapping(payload)
+    if contract.is_empty():
+        return payload
+
+    normalised = dict(payload)
+    if contract.summary:
+        normalised["expected_outcome_summary"] = contract.summary
+        normalised["summary"] = contract.summary
+    if contract.grounding_requirement:
+        normalised["grounding_requirement"] = contract.grounding_requirement
+    if contract.precision_policy:
+        normalised["precision_policy"] = contract.precision_policy
+    if contract.selector_guidance:
+        normalised["selector_guidance"] = contract.selector_guidance
+    if contract.answering_guidance:
+        normalised["answering_guidance"] = contract.answering_guidance
+    if contract.reasoning:
+        normalised["reasoning"] = contract.reasoning
+    if contract.required_tools:
+        normalised["required_tools"] = list(contract.required_tools)
+    return normalised
+
+
 def _build_validated_json_outputs(
     *,
     response_text: str,
+    prompt_id: str | None = None,
+    workflow_state_id: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     from .durable.planning_workflow import _extract_json_payload
 
@@ -658,9 +705,15 @@ def _build_validated_json_outputs(
             },
         )
 
+    normalised_payload = _normalise_validated_json_payload_for_prompt(
+        parsed_payload,
+        prompt_id=prompt_id,
+        workflow_state_id=workflow_state_id,
+    )
+
     return (
         {
-            "validated_json": parsed_payload,
+            "validated_json": normalised_payload,
             "validated_json_parse_mode": parse_mode,
             "validated_json_raw_response": response_text,
             "result": True,
@@ -744,7 +797,11 @@ def _apply_validation_policy(
         return _build_planning_outputs(response_text=response_text, request=request)
 
     if output_format == "json_value":
-        return _build_validated_json_outputs(response_text=response_text)
+        return _build_validated_json_outputs(
+            response_text=response_text,
+            prompt_id=prompt_id,
+            workflow_state_id=request.workflow_state_id,
+        )
 
     return (
         {"llm_step_validation_unhandled": output_format},

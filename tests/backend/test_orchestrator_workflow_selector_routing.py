@@ -7313,6 +7313,152 @@ def test_completed_custom_workflow_missing_required_tools_recovers_to_tool_pipel
     ]
 
 
+def test_custom_workflow_required_effects_recovery_carries_tools_to_pipeline(
+    monkeypatch,
+):
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    selected_workflow_id = "#V#concept_search_instance_retrieval_workflow"
+
+    _register_terminal_custom_workflow(
+        orchestrator,
+        workflow_id=selected_workflow_id,
+        purpose="Retrieve grounded concept profiles from Vontology.",
+    )
+    monkeypatch.setattr(
+        orchestrator._gateway,
+        "describe_methods",
+        lambda: {
+            "search_concepts": {"category": "read"},
+            "get_predicate_incidence": {"category": "read"},
+        },
+    )
+
+    execute_calls: list[str] = []
+    tool_pipeline_payload: dict[str, Any] = {}
+
+    required_effects_contract = {
+        "schema_version": "workflow_required_effects_contract.v1",
+        "required_effects": [
+            {
+                "effect_id": "effect_prompt_required_evidence_search_concepts_1",
+                "effect_type": "required_evidence",
+                "required_tools": ["search_concepts"],
+            },
+            {
+                "effect_id": (
+                    "effect_prompt_required_evidence_get_predicate_incidence_2"
+                ),
+                "effect_type": "required_evidence",
+                "required_tools": ["get_predicate_incidence"],
+            },
+        ],
+    }
+
+    def _execute_workflow(workflow_id: str, **kwargs: Any):
+        execute_calls.append(workflow_id)
+        if workflow_id == selected_workflow_id:
+            return SimpleNamespace(
+                data={
+                    "final_response": (
+                        "The selected workflow completed without evidence tools."
+                    ),
+                    "tool_messages": [],
+                    "invocations": [],
+                    "workflow_required_effects_contract": required_effects_contract,
+                    "iteration_count": 0,
+                },
+                final_state="complete",
+                completed=True,
+            )
+        if workflow_id == TOOL_CALLING_WORKFLOW_ID:
+            tool_pipeline_payload.update(dict(kwargs))
+            return SimpleNamespace(
+                data={
+                    "final_response": "Recovered with required evidence.",
+                    "tool_messages": [],
+                    "invocations": [
+                        {"tool": "search_concepts", "payload": {"success": True}},
+                        {
+                            "tool": "get_predicate_incidence",
+                            "payload": {"success": True},
+                        },
+                    ],
+                    "iteration_count": 2,
+                },
+                final_state="complete",
+                completed=True,
+            )
+        raise AssertionError(f"Unexpected workflow execution: {workflow_id}")
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
+
+    result = orchestrator.run(
+        prompt="What are key predicates for scientific papers in Vontology?",
+        context=[],
+        llm_client=_CapturingLLM(
+            [
+                json.dumps(
+                    {
+                        "workflow_id": selected_workflow_id,
+                        "confidence": 0.95,
+                        "reasoning": (
+                            "The specialised represented-retrieval workflow fits."
+                        ),
+                    }
+                )
+            ]
+        ),
+        model=None,
+        user_namespace="#V#user@org",
+        workflow_discovery_result={
+            "matches": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Concept Search Instance Retrieval Workflow",
+                    "description": "Retrieve grounded concept profiles.",
+                    "routing_eligible": True,
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "candidate_source": "workflow_discovery",
+                    "relevance_score": 0.99,
+                    "confidence_score": 0.99,
+                }
+            ],
+            "candidates": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Concept Search Instance Retrieval Workflow",
+                    "description": "Retrieve grounded concept profiles.",
+                    "routing_eligible": True,
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "candidate_source": "workflow_discovery",
+                    "relevance_score": 0.99,
+                    "confidence_score": 0.99,
+                }
+            ],
+            "match_count": 1,
+        },
+    )
+
+    assert execute_calls == [selected_workflow_id, TOOL_CALLING_WORKFLOW_ID]
+    assert result.response_text == "Recovered with required evidence."
+    tool_pipeline_data = tool_pipeline_payload["data"]
+    assert tool_pipeline_data["required_prompt_tools"] == [
+        "search_concepts",
+        "get_predicate_incidence",
+    ]
+    assert tool_pipeline_data["missing_prompt_tools"] == [
+        "search_concepts",
+        "get_predicate_incidence",
+    ]
+    contract_state = tool_pipeline_data["turn_expected_outcome_contract_state"]
+    assert contract_state["required_tools"] == [
+        "search_concepts",
+        "get_predicate_incidence",
+    ]
+
+
 def test_url_read_prompt_stays_selector_owned_without_python_url_preselection(
     monkeypatch,
 ):

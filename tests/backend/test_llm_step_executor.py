@@ -48,6 +48,99 @@ def test_execute_llm_step_parses_json_value_output() -> None:
     assert envelope["validation"]["output_format"] == "json_value"
 
 
+def test_execute_llm_step_recovers_embedded_json_value_output() -> None:
+    request = _build_request(
+        llm_response=(
+            'Analysis: an example shape could be {"ignored": true}.\n'
+            "Final JSON:\n"
+            '{"meeting_type":"project_meeting","title":"Roadmap sync"}'
+        )
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "success"
+    assert result.outputs["validated_json"] == {
+        "meeting_type": "project_meeting",
+        "title": "Roadmap sync",
+    }
+    assert result.outputs["validated_json_parse_mode"] == "embedded_json"
+
+
+def test_execute_llm_step_normalises_expected_outcome_json_contract_aliases() -> None:
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(llm_client=MagicMock()),
+        data={
+            "expected_outcome_prompt_id": (
+                "#V#prompt_turn_execution_expected_outcome_inference"
+            ),
+            "expected_outcome_prompt_text": "Return the expected-outcome JSON.",
+        },
+        prompt_contract={},
+        llm_policy={
+            "prompt_id_context_key": "expected_outcome_prompt_id",
+            "prompt_text_context_key": "expected_outcome_prompt_text",
+        },
+        validation_policy={"output_format": "json_value"},
+    )
+    request.environment.llm_client.generate.return_value = (
+        "```json\n"
+        '{"expected_outcome_summary":"List the grounded predicates.",'
+        '"grounding_relation":"Use retrieved ontology evidence.",'
+        '"precision_policy":"Only list confirmed predicates.",'
+        '"selector_guidance":"Search the concept, then inspect predicates.",'
+        '"answering_guidance":"Group the retrieved predicates.",'
+        '"reasoning":"This is a schema discovery request.",'
+        '"required_tools":["search_concepts","get_predicate_extent"]}'
+        "\n```"
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "success"
+    assert result.outputs["validated_json"]["grounding_requirement"] == (
+        "Use retrieved ontology evidence."
+    )
+    assert result.outputs["validated_json"]["required_tools"] == [
+        "search_concepts",
+        "get_predicate_incidence",
+    ]
+
+
+def test_execute_llm_step_normalises_expected_outcome_by_workflow_state() -> None:
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(llm_client=MagicMock()),
+        data={},
+        prompt_contract={
+            "prompt_text": "Return the expected-outcome JSON.",
+        },
+        validation_policy={"output_format": "json_value"},
+        workflow_state_id=(
+            "#V#workflow_step_conversation_turn_execution_workflow_"
+            "expected_outcome_inference"
+        ),
+    )
+    request.environment.llm_client.generate.return_value = (
+        '{"summary":"List grounded scientific-paper predicates.",'
+        '"evidence_standard":"Use Vontology relation evidence.",'
+        '"required_tools":["get_predicates_for_class"]}'
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "success"
+    assert result.outputs["validated_json"]["grounding_requirement"] == (
+        "Use Vontology relation evidence."
+    )
+    assert result.outputs["validated_json"]["required_tools"] == [
+        "get_predicate_incidence"
+    ]
+
+
 def test_execute_llm_step_fails_closed_when_json_value_is_invalid() -> None:
     request = _build_request(llm_response="This is not valid JSON.")
 

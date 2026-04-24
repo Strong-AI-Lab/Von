@@ -5099,7 +5099,9 @@ class InternalMCPChatOrchestrator:
         turn_expected_outcome_contract_object = (
             self._build_turn_expected_outcome_contract_object(data)
         )
-        turn_expected_outcome_contract = turn_expected_outcome_contract_object.to_dict()
+        turn_expected_outcome_contract = self._turn_expected_outcome_contract_payload(
+            turn_expected_outcome_contract_object
+        )
         missing_surface_notes: list[str] = []
         turn_contract_required_tools = {
             str(tool_name).strip().lower()
@@ -13195,6 +13197,34 @@ class InternalMCPChatOrchestrator:
         if contract_object.required_tools:
             payload["required_tools"] = list(contract_object.required_tools)
         return payload
+
+    @classmethod
+    def _turn_expected_outcome_contract_payload_with_required_tools(
+        cls,
+        contract: TurnExpectedOutcomeContract | Mapping[str, Any] | None,
+        required_tools: Sequence[str],
+    ) -> dict[str, Any]:
+        contract_object = (
+            contract
+            if isinstance(contract, TurnExpectedOutcomeContract)
+            else TurnExpectedOutcomeContract.from_mapping(contract)
+        )
+        merged_required_tools = cls._dedupe_preserving_order(
+            [
+                *contract_object.required_tools,
+                *[
+                    str(item).strip()
+                    for item in required_tools
+                    if isinstance(item, str) and str(item).strip()
+                ],
+            ]
+        )
+        if tuple(merged_required_tools) != contract_object.required_tools:
+            contract_object = replace(
+                contract_object,
+                required_tools=tuple(merged_required_tools),
+            )
+        return cls._turn_expected_outcome_contract_payload(contract_object)
 
     @classmethod
     def _infer_turn_contract_required_tools(
@@ -24154,6 +24184,10 @@ class InternalMCPChatOrchestrator:
                     tool_invocations,
                 )
                 if not search_query:
+                    search_query = self._extract_unresolved_resolution_search_query(
+                        tool_invocations,
+                    )
+                if not search_query:
                     search_query = self._extract_concept_name_required_for_resolution(
                         turn_expected_outcome_contract=turn_expected_outcome_contract,
                         user_text=user_text,
@@ -24198,6 +24232,11 @@ class InternalMCPChatOrchestrator:
                     if pure_ontology_follow_up
                     else None
                 )
+                unresolved_resolution_search_query = (
+                    self._extract_unresolved_resolution_search_query(tool_invocations)
+                    if pure_ontology_follow_up
+                    else None
+                )
                 if (
                     pure_ontology_follow_up
                     and structural_search_query
@@ -24237,6 +24276,27 @@ class InternalMCPChatOrchestrator:
                             }
                         )
                         continue
+                    if unresolved_resolution_search_query:
+                        forced_calls.append(
+                            {
+                                "action": "call_tool",
+                                "tool": "search_concepts",
+                                "payload": {
+                                    "query": unresolved_resolution_search_query,
+                                },
+                            }
+                        )
+                        continue
+                if ontology_follow_up_concept_ids:
+                    for concept_id in ontology_follow_up_concept_ids:
+                        forced_calls.append(
+                            {
+                                "action": "call_tool",
+                                "tool": name,
+                                "payload": {"concept_id": concept_id},
+                            }
+                        )
+                    continue
                 if retry_actor_concept_id and ontology_follow_up_predicate_ids:
                     forced_calls.append(
                         {
@@ -24248,16 +24308,6 @@ class InternalMCPChatOrchestrator:
                             },
                         }
                     )
-                    continue
-                if ontology_follow_up_concept_ids:
-                    for concept_id in ontology_follow_up_concept_ids:
-                        forced_calls.append(
-                            {
-                                "action": "call_tool",
-                                "tool": name,
-                                "payload": {"concept_id": concept_id},
-                            }
-                        )
                     continue
                 if pure_ontology_follow_up and retry_actor_concept_id:
                     if missing_tool_lookup & {
@@ -24847,6 +24897,45 @@ class InternalMCPChatOrchestrator:
         return None
 
     @classmethod
+    def _extract_unresolved_resolution_search_query(
+        cls,
+        tool_invocations: Sequence[Mapping[str, Any]] | None,
+    ) -> str | None:
+        """Reuse a resolver target when resolution produced no concept ID."""
+
+        if not tool_invocations:
+            return None
+
+        for invocation in reversed(list(tool_invocations)):
+            if not isinstance(invocation, Mapping):
+                continue
+            raw_tool = invocation.get("tool")
+            if (
+                not isinstance(raw_tool, str)
+                or raw_tool.strip().lower() != "resolve_concept_by_name"
+            ):
+                continue
+            if cls._extract_resolved_concept_ids_from_invocations(
+                [invocation],
+                max_concept_ids=1,
+            ):
+                continue
+            for field_name in (
+                "effective_arguments",
+                "arguments",
+                "effective_payload",
+                "payload",
+            ):
+                payload = invocation.get(field_name)
+                if not isinstance(payload, Mapping):
+                    continue
+                for key in ("name", "query", "concept_name"):
+                    value = payload.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return value.strip()
+        return None
+
+    @classmethod
     def _infer_ontology_follow_up_retry_tool_calls(
         cls,
         *,
@@ -24941,8 +25030,6 @@ class InternalMCPChatOrchestrator:
         forced_calls: list[_ToolCallRequest] = []
         for tool_name in missing_tools:
             if tool_name == "get_predicate_incidence":
-                if predicate_ids:
-                    continue
                 forced_calls.append(
                     {
                         "action": "call_tool",
@@ -37381,6 +37468,59 @@ class InternalMCPChatOrchestrator:
                     invocations.append(value)
             return invocations
 
+        def _required_tools_from_custom_workflow_mapping(
+            candidate: Mapping[str, Any],
+        ) -> list[str]:
+            for key in (
+                "required_prompt_tools",
+                "missing_prompt_tools",
+                "workflow_required_effects_required_tools",
+            ):
+                tools = _normalise_tool_name_sequence(candidate.get(key))
+                if tools:
+                    return tools
+
+            for key in (
+                "turn_expected_outcome_contract_state",
+                "turn_expected_outcome_contract",
+                "expected_outcome_contract_state",
+                "expected_outcome_contract",
+            ):
+                contract = TurnExpectedOutcomeContract.from_mapping(candidate.get(key))
+                tools = _normalise_tool_name_sequence(contract.required_tools)
+                if tools:
+                    return tools
+
+            tools = _workflow_required_tools_from_contract(
+                candidate.get("workflow_required_effects_contract")
+                if isinstance(
+                    candidate.get("workflow_required_effects_contract"), Mapping
+                )
+                else None
+            )
+            if tools:
+                return tools
+
+            return []
+
+        def _custom_workflow_required_tools(result: Any) -> list[str]:
+            result_data = getattr(result, "data", None)
+            if not isinstance(result_data, Mapping):
+                return []
+
+            for candidate in (
+                result_data,
+                result_data.get("completion_report"),
+                result_data.get("workflow_execution_summary"),
+                result_data.get("selected_workflow_trace"),
+            ):
+                if not isinstance(candidate, Mapping):
+                    continue
+                tools = _required_tools_from_custom_workflow_mapping(candidate)
+                if tools:
+                    return tools
+            return []
+
         def _custom_workflow_missing_required_prompt_tools(
             result: Any,
         ) -> list[str]:
@@ -37403,20 +37543,8 @@ class InternalMCPChatOrchestrator:
             required_tools = _normalise_tool_name_sequence(
                 routing_prompt_requirements.required_tools
             )
-            if not required_tools and isinstance(result_data, Mapping):
-                for candidate in (
-                    result_data,
-                    result_data.get("completion_report"),
-                    result_data.get("workflow_execution_summary"),
-                    result_data.get("selected_workflow_trace"),
-                ):
-                    if not isinstance(candidate, Mapping):
-                        continue
-                    required_tools = _normalise_tool_name_sequence(
-                        candidate.get("required_prompt_tools")
-                    )
-                    if required_tools:
-                        break
+            if not required_tools:
+                required_tools = _custom_workflow_required_tools(result)
             if not required_tools:
                 return []
             invocations = _workflow_result_tool_invocations(result)
@@ -37479,6 +37607,7 @@ class InternalMCPChatOrchestrator:
             return snapshot
 
         prior_failed_selected_workflow_snapshot: dict[str, Any] | None = None
+        tool_pipeline_required_tools_from_custom_workflow: list[str] = []
 
         # ----------------------------------------------------------------
         # JVNAUTOSCI-825: Route turns to the appropriate pathway.
@@ -38449,6 +38578,9 @@ class InternalMCPChatOrchestrator:
                                     workflow_result=wf_result,
                                     missing_required_tools=missing_required_prompt_tools,
                                 )
+                            tool_pipeline_required_tools_from_custom_workflow = list(
+                                missing_required_prompt_tools
+                            )
                             custom_failure_extra = {
                                 **custom_failure_extra,
                                 "continued_to_tool_pipeline": True,
@@ -38726,15 +38858,26 @@ class InternalMCPChatOrchestrator:
                 "completion_gate_escalation_signal": False,
                 "completion_gate_escalation_reason": None,
             }
+            tool_pipeline_turn_contract = routing_turn_expected_outcome_contract
+            if tool_pipeline_required_tools_from_custom_workflow:
+                tool_pipeline_turn_contract = (
+                    self._turn_expected_outcome_contract_payload_with_required_tools(
+                        routing_turn_expected_outcome_contract,
+                        tool_pipeline_required_tools_from_custom_workflow,
+                    )
+                )
             tc_data.update(
                 self._build_turn_expected_outcome_context_payload(
-                    {
-                        "turn_expected_outcome_contract": (
-                            routing_turn_expected_outcome_contract
-                        )
-                    }
+                    {"turn_expected_outcome_contract": (tool_pipeline_turn_contract)}
                 )
             )
+            if tool_pipeline_required_tools_from_custom_workflow:
+                required_tools_for_pipeline = list(
+                    tool_pipeline_required_tools_from_custom_workflow
+                )
+                tc_data.setdefault("required_prompt_tools", required_tools_for_pipeline)
+                tc_data.setdefault("missing_prompt_tools", required_tools_for_pipeline)
+                tc_data.setdefault("llm_allowed_tools", required_tools_for_pipeline)
             if isinstance(prior_failed_selected_workflow_snapshot, Mapping):
                 tc_data["prior_failed_selected_workflow"] = dict(
                     prior_failed_selected_workflow_snapshot

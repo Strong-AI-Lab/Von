@@ -29,6 +29,20 @@ TURN_EXPECTED_OUTCOME_CONTEXT_FIELD_MAPPING: dict[str, str] = {
 }
 TURN_EXPECTED_OUTCOME_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "summary": ("expected_outcome_summary",),
+    "grounding_requirement": (
+        "grounding",
+        "grounding_evidence",
+        "grounding_relation",
+        "grounding_standard",
+        "evidence_standard",
+        "evidence_requirement",
+        "required_evidence",
+        "required_grounding",
+    ),
+}
+TURN_EXPECTED_OUTCOME_REQUIRED_TOOL_ALIASES: dict[str, str] = {
+    "get_predicate_extent": "get_predicate_incidence",
+    "get_predicates_for_class": "get_predicate_incidence",
 }
 
 
@@ -46,9 +60,7 @@ def _copy_string_key_mapping(value: Any) -> dict[str, Any] | None:
 
 
 def _dedupe_sources(values: Any) -> tuple[str, ...]:
-    if not isinstance(values, Sequence) or isinstance(
-        values, (str, bytes, bytearray)
-    ):
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes, bytearray)):
         return ()
     seen: set[str] = set()
     ordered: list[str] = []
@@ -65,9 +77,7 @@ def _dedupe_sources(values: Any) -> tuple[str, ...]:
 
 
 def _dedupe_strings(values: Any) -> tuple[str, ...]:
-    if not isinstance(values, Sequence) or isinstance(
-        values, (str, bytes, bytearray)
-    ):
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes, bytearray)):
         return ()
     seen: set[str] = set()
     ordered: list[str] = []
@@ -80,6 +90,32 @@ def _dedupe_strings(values: Any) -> tuple[str, ...]:
             continue
         seen.add(lowered)
         ordered.append(cleaned)
+    return tuple(ordered)
+
+
+def _normalise_required_tool_id(value: str) -> str:
+    cleaned = value.strip()
+    if not cleaned:
+        return ""
+    return TURN_EXPECTED_OUTCOME_REQUIRED_TOOL_ALIASES.get(
+        cleaned.lower(),
+        cleaned,
+    )
+
+
+def _dedupe_required_tools(values: Any) -> tuple[str, ...]:
+    raw_values = _dedupe_strings(values)
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for raw_value in raw_values:
+        tool_id = _normalise_required_tool_id(raw_value)
+        if not tool_id:
+            continue
+        lowered = tool_id.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        ordered.append(tool_id)
     return tuple(ordered)
 
 
@@ -104,9 +140,10 @@ class TurnExpectedOutcomeContract:
         payload = _copy_string_key_mapping(value) or {}
         field_payload = payload
         source_values = _dedupe_sources(payload.get("sources"))
-        if (
-            payload.get("schema_version") == TURN_EXPECTED_OUTCOME_CONTRACT_SCHEMA_VERSION
-            and isinstance(payload.get("fields"), Mapping)
+        if payload.get(
+            "schema_version"
+        ) == TURN_EXPECTED_OUTCOME_CONTRACT_SCHEMA_VERSION and isinstance(
+            payload.get("fields"), Mapping
         ):
             field_payload = _copy_string_key_mapping(payload.get("fields")) or {}
         if source:
@@ -115,7 +152,9 @@ class TurnExpectedOutcomeContract:
         for field_name in TURN_EXPECTED_OUTCOME_CONTRACT_FIELDS:
             candidate = _clean_text(field_payload.get(field_name))
             if not candidate:
-                context_key = TURN_EXPECTED_OUTCOME_CONTEXT_FIELD_MAPPING.get(field_name)
+                context_key = TURN_EXPECTED_OUTCOME_CONTEXT_FIELD_MAPPING.get(
+                    field_name
+                )
                 if context_key:
                     candidate = _clean_text(field_payload.get(context_key))
             if not candidate:
@@ -124,7 +163,7 @@ class TurnExpectedOutcomeContract:
                     if candidate:
                         break
             field_values[field_name] = candidate
-        required_tools = _dedupe_strings(
+        required_tools = _dedupe_required_tools(
             payload.get("required_tools")
             if "required_tools" in payload
             else field_payload.get("required_tools")
@@ -228,14 +267,17 @@ def build_turn_expected_outcome_boundary_payload(
     if not profile_payload:
         profile_from_contract: dict[str, Any] = dict(contract_payload)
         if contract_object.required_tools:
-            profile_from_contract["required_tools"] = list(contract_object.required_tools)
+            profile_from_contract["required_tools"] = list(
+                contract_object.required_tools
+            )
         payload["turn_expected_outcome_profile"] = profile_from_contract
     if contract_payload:
         payload["turn_expected_outcome_contract"] = dict(contract_payload)
-    payload["turn_expected_outcome_contract_state"] = (
-        contract_object.to_state_payload()
-    )
-    for contract_field, context_key in TURN_EXPECTED_OUTCOME_CONTEXT_FIELD_MAPPING.items():
+    payload["turn_expected_outcome_contract_state"] = contract_object.to_state_payload()
+    for (
+        contract_field,
+        context_key,
+    ) in TURN_EXPECTED_OUTCOME_CONTEXT_FIELD_MAPPING.items():
         field_value = contract_payload.get(contract_field)
         if isinstance(field_value, str) and field_value.strip():
             payload[context_key] = field_value.strip()
