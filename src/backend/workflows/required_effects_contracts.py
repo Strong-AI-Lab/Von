@@ -86,16 +86,20 @@ def _normalise_required_effect_template(
         "description": _normalise_text(raw_effect.get("description")),
         "required_tools": required_tools,
         "required_tools_match": _normalise_match_mode(
-            raw_effect.get("required_tools_match")
-            if "required_tools_match" in raw_effect
-            else raw_effect.get("tool_match_mode"),
+            (
+                raw_effect.get("required_tools_match")
+                if "required_tools_match" in raw_effect
+                else raw_effect.get("tool_match_mode")
+            ),
             default="any",
         ),
         "activation_required_tools": activation_required_tools,
         "activation_required_tools_match": _normalise_match_mode(
-            raw_effect.get("activation_required_tools_match")
-            if "activation_required_tools_match" in raw_effect
-            else raw_effect.get("activation_match_mode"),
+            (
+                raw_effect.get("activation_required_tools_match")
+                if "activation_required_tools_match" in raw_effect
+                else raw_effect.get("activation_match_mode")
+            ),
             default="any",
         ),
         "missing_failure_code": _normalise_text(
@@ -107,14 +111,23 @@ def _normalise_required_effect_template(
             or raw_effect.get("not_satisfied_failure_code")
         ),
         "not_executed_reason": _normalise_text(
-            raw_effect.get("not_executed_reason")
-            or raw_effect.get("missing_reason")
+            raw_effect.get("not_executed_reason") or raw_effect.get("missing_reason")
         ),
         "not_satisfied_reason": _normalise_text(
-            raw_effect.get("not_satisfied_reason")
-            or raw_effect.get("failed_reason")
+            raw_effect.get("not_satisfied_reason") or raw_effect.get("failed_reason")
         ),
     }
+    targets = _normalise_string_list(raw_effect.get("targets"))
+    if targets:
+        normalised["targets"] = targets
+    wrong_target_failure_code = _normalise_text(
+        raw_effect.get("wrong_target_failure_code")
+    )
+    if wrong_target_failure_code:
+        normalised["wrong_target_failure_code"] = wrong_target_failure_code
+    wrong_target_reason = _normalise_text(raw_effect.get("wrong_target_reason"))
+    if wrong_target_reason:
+        normalised["wrong_target_reason"] = wrong_target_reason
     return normalised
 
 
@@ -139,9 +152,7 @@ def normalise_workflow_required_effects_contract(
 
     return {
         "schema_version": WORKFLOW_REQUIRED_EFFECTS_CONTRACT_SCHEMA_VERSION,
-        "contract_id": _normalise_text(
-            value.get("contract_id") or value.get("id")
-        ),
+        "contract_id": _normalise_text(value.get("contract_id") or value.get("id")),
         "required_effects": required_effects,
     }
 

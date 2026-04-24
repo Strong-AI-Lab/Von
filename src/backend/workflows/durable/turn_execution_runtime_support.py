@@ -109,6 +109,18 @@ def _dedupe_string_sequence(raw_values: Any) -> list[str]:
     return normalised
 
 
+def _filter_string_sequence_to_allowed(
+    raw_values: Any,
+    allowed_values: Any,
+) -> list[str]:
+    values = _dedupe_string_sequence(raw_values)
+    allowed = _dedupe_string_sequence(allowed_values)
+    if not allowed:
+        return values
+    allowed_lower = {item.lower() for item in allowed}
+    return [item for item in values if item.lower() in allowed_lower]
+
+
 def _is_mapping_sequence(value: Any) -> bool:
     return isinstance(value, Sequence) and not isinstance(
         value, (str, bytes, bytearray)
@@ -1018,6 +1030,9 @@ def build_turn_execution_selected_workflow_outputs(
     turn_expected_outcome_contract_payload = (
         resolved_turn_expected_outcome_contract.to_dict()
     )
+    turn_expected_outcome_contract_available = (
+        not resolved_turn_expected_outcome_contract.is_empty()
+    )
     derived_user_response = _coerce_non_empty_text(rendered_response) or (
         render_selected_workflow_user_response(
             selected_workflow_id=clean_selected_workflow_id,
@@ -1064,7 +1079,7 @@ def build_turn_execution_selected_workflow_outputs(
         for key, value in child_snapshot.items():
             if isinstance(key, str) and key not in completion_report_map:
                 completion_report_map[key] = value
-    if turn_expected_outcome_contract_payload:
+    if turn_expected_outcome_contract_available:
         completion_report_map["turn_expected_outcome_contract"] = dict(
             turn_expected_outcome_contract_payload
         )
@@ -1085,7 +1100,7 @@ def build_turn_execution_selected_workflow_outputs(
         if isinstance(selected_workflow_trace, Mapping)
         else {}
     )
-    if turn_expected_outcome_contract_payload:
+    if turn_expected_outcome_contract_available:
         selected_workflow_trace_payload["expected_outcome_contract"] = dict(
             turn_expected_outcome_contract_payload
         )
@@ -1197,8 +1212,12 @@ def build_turn_execution_selected_workflow_outputs(
     child_invocations = child_outputs_map.get("invocations")
     if isinstance(child_invocations, list):
         outputs["invocations"] = list(child_invocations)
-    contract_required_tools = _dedupe_string_sequence(
-        resolved_turn_expected_outcome_contract.required_tools
+    child_allowed_tools = _dedupe_string_sequence(
+        child_outputs_map.get("llm_allowed_tools")
+    )
+    contract_required_tools = _filter_string_sequence_to_allowed(
+        resolved_turn_expected_outcome_contract.required_tools,
+        child_allowed_tools,
     )
     contract_missing_tools = _missing_required_tools_from_invocations(
         required_tools=contract_required_tools,
@@ -1242,6 +1261,15 @@ def build_turn_execution_selected_workflow_outputs(
     if contract_required_tools:
         existing_required_prompt_tools = outputs.get("required_prompt_tools")
         existing_missing_prompt_tools = outputs.get("missing_prompt_tools")
+        if child_allowed_tools:
+            existing_required_prompt_tools = _filter_string_sequence_to_allowed(
+                existing_required_prompt_tools,
+                child_allowed_tools,
+            )
+            existing_missing_prompt_tools = _filter_string_sequence_to_allowed(
+                existing_missing_prompt_tools,
+                child_allowed_tools,
+            )
         outputs["required_prompt_tools"] = _dedupe_string_sequence(
             [
                 *(existing_required_prompt_tools or []),
@@ -1392,6 +1420,9 @@ def build_turn_recovery_tool_batch_outputs(
     turn_expected_outcome_contract_payload = (
         resolved_turn_expected_outcome_contract.to_dict()
     )
+    turn_expected_outcome_contract_available = (
+        not resolved_turn_expected_outcome_contract.is_empty()
+    )
     derived_user_response = _derive_tool_batch_user_response(invocation_records)
     status = "completed"
     if failed_records:
@@ -1419,7 +1450,7 @@ def build_turn_recovery_tool_batch_outputs(
         execution_payload["error"] = first_error
     if derived_user_response:
         execution_payload["response_text"] = derived_user_response
-    if turn_expected_outcome_contract_payload:
+    if turn_expected_outcome_contract_available:
         execution_payload["turn_expected_outcome_contract"] = dict(
             turn_expected_outcome_contract_payload
         )
@@ -1461,7 +1492,7 @@ def build_turn_recovery_tool_batch_outputs(
     merged_selected_workflow_trace["recovery_tool_batch_execution"] = dict(
         execution_payload
     )
-    if turn_expected_outcome_contract_payload:
+    if turn_expected_outcome_contract_available:
         merged_selected_workflow_trace["expected_outcome_contract"] = dict(
             turn_expected_outcome_contract_payload
         )

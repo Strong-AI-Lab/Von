@@ -42,7 +42,10 @@ from ..workflows.conversation_turn_stage_model import (
 from ..workflows.required_effects_contracts import (
     WORKFLOW_REQUIRED_EFFECTS_CONTRACT_SCHEMA_VERSION,
 )
-from ..workflows.turn_expected_outcome_contract import TurnExpectedOutcomeContract
+from ..workflows.turn_expected_outcome_contract import (
+    TurnExpectedOutcomeContract,
+    extract_vontology_concept_ids_from_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +64,9 @@ _TOOL_CALLING_SELECTOR_VERDICTS = {"tool_seeking", "tool_calling"}
 _PLAIN_RESPONSE_WORKFLOW_IDS = {
     "#V#chat_assistant_workflow",
     "#V#plain_response_workflow",
+}
+_CONCEPT_PROFILE_RETRIEVAL_WORKFLOW_IDS = {
+    "#V#concept_search_instance_retrieval_workflow",
 }
 _ABSTAIN_OR_NO_SAFE_ROUTE_SELECTOR_VERDICTS = {
     "abstain",
@@ -4804,11 +4810,123 @@ def _is_prompt_required_mutation_tool(tool_name: Any) -> bool:
     return is_tool_prompt_required_mutation(cleaned)
 
 
+def _tool_supports_concept_target(tool_name: Any) -> bool:
+    lowered = (_safe_str(tool_name) or "").lower()
+    return lowered in {
+        "fetch_concept",
+        "fetch_concept_content",
+        "find_relations_with_argument",
+        "get_predicate_incidence",
+        "get_text_relations_summary",
+    }
+
+
+def _target_concept_ids_from_contract_surfaces(
+    *surfaces: Mapping[str, Any] | None,
+) -> list[str]:
+    target_ids: list[str] = []
+    for surface in surfaces:
+        if not isinstance(surface, Mapping):
+            continue
+        for key in (
+            "target_concept_ids",
+            "required_prompt_fetch_concept_ids",
+            "missing_prompt_fetch_concept_ids",
+        ):
+            target_ids.extend(_extract_string_sequence_from_mapping(surface, key))
+        for key in (
+            "turn_expected_outcome_contract_state",
+            "expected_outcome_contract_state",
+            "turn_expected_outcome_profile",
+        ):
+            nested = surface.get(key)
+            if not isinstance(nested, Mapping):
+                continue
+            target_ids.extend(
+                _extract_string_sequence_from_mapping(nested, "target_concept_ids")
+            )
+    return _dedupe_string_sequence(target_ids)
+
+
+def _derive_required_evidence_target_concept_ids(
+    *,
+    prompt_text: Any,
+    selected_workflow_id: str | None,
+    resolved_turn_expected_outcome_contract: TurnExpectedOutcomeContract,
+    selected_workflow_trace: Mapping[str, Any] | None,
+    completion_report: Mapping[str, Any] | None,
+) -> list[str]:
+    target_ids = [
+        *resolved_turn_expected_outcome_contract.target_concept_ids,
+        *_target_concept_ids_from_contract_surfaces(
+            selected_workflow_trace,
+            completion_report,
+        ),
+    ]
+    if (
+        selected_workflow_id
+        and selected_workflow_id in _CONCEPT_PROFILE_RETRIEVAL_WORKFLOW_IDS
+    ):
+        target_ids.extend(extract_vontology_concept_ids_from_text(prompt_text))
+    return _dedupe_string_sequence(target_ids)
+
+
+def _apply_target_concepts_to_evidence_contract(
+    *,
+    contract: Mapping[str, Any] | None,
+    target_concept_ids: Sequence[Any],
+) -> dict[str, Any] | None:
+    if not isinstance(contract, Mapping):
+        return None
+    targets = _dedupe_string_sequence(target_concept_ids)
+    if not targets:
+        return dict(contract)
+
+    raw_effects = contract.get("required_effects")
+    if not isinstance(raw_effects, Sequence) or isinstance(raw_effects, (str, bytes)):
+        return dict(contract)
+
+    contract_payload = dict(contract)
+    required_effects: list[Any] = []
+    changed = False
+    for raw_effect in raw_effects:
+        if not isinstance(raw_effect, Mapping):
+            required_effects.append(raw_effect)
+            continue
+        effect = dict(raw_effect)
+        existing_targets = _dedupe_string_sequence(effect.get("targets") or [])
+        required_tools = _dedupe_string_sequence(effect.get("required_tools") or [])
+        targetable = any(_tool_supports_concept_target(tool) for tool in required_tools)
+        if (
+            targetable
+            and not existing_targets
+            and _is_evidence_effect_type(_safe_str(effect.get("effect_type")))
+        ):
+            effect["targets"] = list(targets)
+            effect.setdefault(
+                "wrong_target_failure_code",
+                f"{_effect_failure_code_slug(effect)}_wrong_target",
+            )
+            changed = True
+        required_effects.append(effect)
+
+    if changed:
+        contract_payload["required_effects"] = required_effects
+        artefact_context = contract_payload.get("artefact_context")
+        if isinstance(artefact_context, Mapping):
+            contract_payload["artefact_context"] = {
+                **dict(artefact_context),
+                "target_concept_ids": list(targets),
+            }
+    return contract_payload
+
+
 def _build_prompt_required_evidence_contract(
     *,
     prompt_text: Any,
     aux_llm_calls: Sequence[Mapping[str, Any]] | None,
     required_prompt_tools: Sequence[Any] | None = None,
+    target_concept_ids: Sequence[Any] | None = None,
 ) -> dict[str, Any] | None:
     continuation_context = _extract_applied_workflow_continuation_context(aux_llm_calls)
     continuation_contract = _required_effects_contract_from_continuation_context(
@@ -4832,10 +4950,13 @@ def _build_prompt_required_evidence_contract(
     if not evidence_tools:
         return None
 
+    targets = _dedupe_string_sequence(target_concept_ids or [])
     required_effects: list[dict[str, Any]] = []
     for index, tool_name in enumerate(evidence_tools, start=1):
         slug = re.sub(r"[^a-z0-9]+", "_", tool_name.lower()).strip("_") or "tool"
         missing_code = f"prompt_required_evidence_{slug}_missing"
+        wrong_target_code = f"prompt_required_evidence_{slug}_wrong_target"
+        effect_targets = targets if _tool_supports_concept_target(tool_name) else []
         required_effects.append(
             {
                 "effect_id": f"effect_prompt_required_evidence_{slug}_{index}",
@@ -4846,7 +4967,7 @@ def _build_prompt_required_evidence_contract(
                 ),
                 "required_tools": [tool_name],
                 "required_tools_match": "all",
-                "targets": [],
+                "targets": list(effect_targets),
                 "required_predicates": [],
                 "postcondition_required": True,
                 "postcondition_strategy": "execution_observed",
@@ -4856,6 +4977,7 @@ def _build_prompt_required_evidence_contract(
                 ),
                 "missing_failure_code": missing_code,
                 "failed_failure_code": f"prompt_required_evidence_{slug}_failed",
+                "wrong_target_failure_code": wrong_target_code,
                 "failure_code": missing_code,
                 "failure_codes": [missing_code],
             }
@@ -4872,6 +4994,7 @@ def _build_prompt_required_evidence_contract(
         "domain_profile_id": "prompt_required_evidence",
         "artefact_context": {
             "required_tools": list(evidence_tools),
+            "target_concept_ids": list(targets),
             "prompt_preview": prompt_preview[:500] if prompt_preview else "",
         },
         "profile_source": "prompt_tool_requirements",
@@ -5439,6 +5562,9 @@ def _materialise_required_effects_from_contract(
         is_representation_effect = contract_intent == "representation" or (
             _is_representation_effect_type(_safe_str(effect.get("effect_type")))
         )
+        is_evidence_effect = contract_intent == "evidence" or _is_evidence_effect_type(
+            _safe_str(effect.get("effect_type"))
+        )
         if not required_tools:
             if (
                 _safe_str(effect.get("effect_type")) or ""
@@ -5529,13 +5655,23 @@ def _materialise_required_effects_from_contract(
                     blocked_tools=blocked_lookup,
                     tool_invocations=tool_invocations,
                 )
-            elif successful_other_target and is_representation_effect:
+            elif successful_other_target and (
+                is_representation_effect or is_evidence_effect
+            ):
                 effect_status = "not_executed"
-                status_reason = (
-                    "Required representation tool ran, but not for the required "
-                    "artefact target."
+                status_reason = _safe_str(effect.get("wrong_target_reason")) or (
+                    "Required "
+                    f"{'representation' if is_representation_effect else 'evidence'} "
+                    "tool ran, but not for the required target."
                 )
-                failure_codes = [f"{domain_id}_representation_wrong_target"]
+                failure_codes = [
+                    _safe_str(effect.get("wrong_target_failure_code"))
+                    or (
+                        f"{domain_id}_representation_wrong_target"
+                        if is_representation_effect
+                        else f"{effect_slug}_wrong_target"
+                    )
+                ]
             else:
                 effect_status = "not_executed"
                 status_reason = default_not_executed_reason
@@ -6260,6 +6396,9 @@ def build_turn_execution_record(
     turn_expected_outcome_contract_payload = (
         resolved_turn_expected_outcome_contract.to_dict()
     )
+    turn_expected_outcome_contract_available = (
+        not resolved_turn_expected_outcome_contract.is_empty()
+    )
     selected_workflow_trace_payload = (
         {
             str(key): value
@@ -6271,7 +6410,7 @@ def build_turn_execution_record(
     )
     if (
         selected_workflow_trace_payload is not None
-        and turn_expected_outcome_contract_payload
+        and turn_expected_outcome_contract_available
     ):
         selected_workflow_trace_payload["expected_outcome_contract"] = dict(
             turn_expected_outcome_contract_payload
@@ -6281,6 +6420,13 @@ def build_turn_execution_record(
         )
     completion_report_payload = (
         dict(completion_report) if isinstance(completion_report, Mapping) else None
+    )
+    required_evidence_target_concept_ids = _derive_required_evidence_target_concept_ids(
+        prompt_text=prompt_text,
+        selected_workflow_id=selected_workflow_id,
+        resolved_turn_expected_outcome_contract=resolved_turn_expected_outcome_contract,
+        selected_workflow_trace=selected_workflow_trace_payload,
+        completion_report=completion_report_payload,
     )
     effective_required_prompt_tools = _dedupe_string_sequence(
         [
@@ -6348,6 +6494,7 @@ def build_turn_execution_record(
         prompt_text=prompt_text,
         aux_llm_calls=aux_llm_calls,
         required_prompt_tools=effective_required_prompt_tools,
+        target_concept_ids=required_evidence_target_concept_ids,
     )
     workflow_required_effects_contract, workflow_required_effects_contract_source = (
         _resolve_workflow_required_effects_contract(
@@ -6355,6 +6502,14 @@ def build_turn_execution_record(
             selected_workflow_trace=selected_workflow_trace_payload,
             completion_report=completion_report,
         )
+    )
+    prompt_required_evidence_contract = _apply_target_concepts_to_evidence_contract(
+        contract=prompt_required_evidence_contract,
+        target_concept_ids=required_evidence_target_concept_ids,
+    )
+    workflow_required_effects_contract = _apply_target_concepts_to_evidence_contract(
+        contract=workflow_required_effects_contract,
+        target_concept_ids=required_evidence_target_concept_ids,
     )
     representation_effects = _materialise_required_effects_from_contract(
         contract=representation_effects_contract,
@@ -6433,7 +6588,7 @@ def build_turn_execution_record(
         aux_llm_calls=aux_llm_calls,
         turn_expected_outcome_contract=(
             resolved_turn_expected_outcome_contract.to_state_payload()
-            if turn_expected_outcome_contract_payload
+            if turn_expected_outcome_contract_available
             else None
         ),
         execution_summary=execution_summary,
@@ -6603,6 +6758,12 @@ def build_turn_execution_record(
     execution_summary_with_contract["turn_expected_outcome_contract_field_count"] = len(
         turn_expected_outcome_contract_payload
     )
+    execution_summary_with_contract["turn_expected_outcome_target_concept_ids"] = list(
+        resolved_turn_expected_outcome_contract.target_concept_ids
+    )
+    execution_summary_with_contract["required_evidence_target_concept_ids"] = list(
+        required_evidence_target_concept_ids
+    )
     execution_summary_with_contract["turn_expected_outcome_contract_sources"] = list(
         resolved_turn_expected_outcome_contract.sources
     )
@@ -6660,12 +6821,12 @@ def build_turn_execution_record(
         },
         "turn_expected_outcome_contract": (
             dict(turn_expected_outcome_contract_payload)
-            if turn_expected_outcome_contract_payload
+            if turn_expected_outcome_contract_available
             else None
         ),
         "turn_expected_outcome_contract_state": (
             resolved_turn_expected_outcome_contract.to_state_payload()
-            if turn_expected_outcome_contract_payload
+            if turn_expected_outcome_contract_available
             else None
         ),
         "workflow_routing_diagnostics": workflow_routing_diagnostics,
@@ -6676,12 +6837,12 @@ def build_turn_execution_record(
             "summary": execution_summary_with_contract,
             "turn_expected_outcome_contract": (
                 dict(turn_expected_outcome_contract_payload)
-                if turn_expected_outcome_contract_payload
+                if turn_expected_outcome_contract_available
                 else None
             ),
             "turn_expected_outcome_contract_state": (
                 resolved_turn_expected_outcome_contract.to_state_payload()
-                if turn_expected_outcome_contract_payload
+                if turn_expected_outcome_contract_available
                 else None
             ),
             "required_effects_contract": primary_required_effects_contract,

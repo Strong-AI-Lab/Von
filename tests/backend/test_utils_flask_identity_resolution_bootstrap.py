@@ -24,6 +24,13 @@ def test_build_durable_workflow_bootstrap_summary_surfaces_seed_repair_drift() -
                     "drift_detected": False,
                 },
             },
+            "concept_search_instance_retrieval_workflow_bootstrap": {
+                "success": True,
+                "publication": {
+                    "materialisation_status": "current",
+                    "drift_detected": False,
+                },
+            },
             "paper_workflow_bootstrap": {
                 "success": True,
                 "publication": {
@@ -56,6 +63,11 @@ def test_build_durable_workflow_bootstrap_summary_surfaces_seed_repair_drift() -
             "materialisation_status": "current",
             "drift_detected": False,
         },
+        "concept_search_instance_retrieval_workflow_bootstrap": {
+            "success": True,
+            "materialisation_status": "current",
+            "drift_detected": False,
+        },
         "paper_workflow_bootstrap": {
             "success": True,
             "materialisation_status": "repaired_from_repo_seed",
@@ -77,6 +89,7 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     import src.backend.server.utils_flask as utils_flask
     from src.backend.workflows.durable import startup as durable_startup
     from src.backend.services import (
+        concept_search_instance_retrieval_workflow_vontology_service as concept_search_instance_retrieval_workflow_bootstrap,
         conversation_turn_workflow_vontology_service as conversation_turn_workflow_bootstrap,
         entity_information_retrieval_workflow_vontology_service as entity_information_retrieval_workflow_bootstrap,
         entity_representation_workflow_vontology_service as entity_workflow_bootstrap,
@@ -100,9 +113,13 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     monkeypatch.setattr(utils_flask, "_durable_workflow_registry", None)
     monkeypatch.setattr(utils_flask, "_durable_action_registry", None)
 
-    monkeypatch.setattr(utils_flask, "_build_durable_workflow_registry", lambda: object())
+    monkeypatch.setattr(
+        utils_flask, "_build_durable_workflow_registry", lambda: object()
+    )
     monkeypatch.setattr(utils_flask, "_build_durable_action_registry", lambda: object())
-    monkeypatch.setattr(utils_flask, "_get_durable_definition_loader", lambda: lambda _workflow_id: None)
+    monkeypatch.setattr(
+        utils_flask, "_get_durable_definition_loader", lambda: lambda _workflow_id: None
+    )
     monkeypatch.setattr(
         workflow_capability_service,
         "run_workflow_capability_index_startup_check",
@@ -168,7 +185,10 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     monkeypatch.setattr(
         parent_specificity_prompt_bootstrap,
         "ensure_parent_specificity_prompt_support",
-        lambda: {"success": True, "linked_workflow_ids": ["#V#parent_specificity_rumination_workflow"]},
+        lambda: {
+            "success": True,
+            "linked_workflow_ids": ["#V#parent_specificity_rumination_workflow"],
+        },
     )
     monkeypatch.setattr(
         parent_specificity_schedule_bootstrap,
@@ -209,6 +229,15 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
         lambda: {
             "success": True,
             "workflow_ids": ["#V#entity_information_retrieval_workflow"],
+            "publication": {"skipped": True},
+        },
+    )
+    monkeypatch.setattr(
+        concept_search_instance_retrieval_workflow_bootstrap,
+        "bootstrap_canonical_concept_search_instance_retrieval_workflow",
+        lambda: {
+            "success": True,
+            "workflow_ids": ["#V#concept_search_instance_retrieval_workflow"],
             "publication": {"skipped": True},
         },
     )
@@ -311,6 +340,17 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     )
     assert isinstance(entity_information_retrieval_workflow_bootstrap_report, dict)
     assert entity_information_retrieval_workflow_bootstrap_report.get("success") is True
+    concept_search_instance_retrieval_workflow_bootstrap_report = result.get(
+        "concept_search_instance_retrieval_workflow_bootstrap"
+    )
+    assert isinstance(
+        concept_search_instance_retrieval_workflow_bootstrap_report,
+        dict,
+    )
+    assert (
+        concept_search_instance_retrieval_workflow_bootstrap_report.get("success")
+        is True
+    )
     conversation_turn_workflow_bootstrap_report = result.get(
         "conversation_turn_workflow_bootstrap"
     )

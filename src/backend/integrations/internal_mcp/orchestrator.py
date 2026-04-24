@@ -7616,10 +7616,18 @@ class InternalMCPChatOrchestrator:
             ),
             tool_invocations=(),
         )
+        prompt_requirements = self._merge_prompt_requirements_with_existing_tool_policy(
+            data=data,
+            evaluation=prompt_requirements,
+            method_catalogue=(
+                method_catalogue_for_requirements
+                if isinstance(method_catalogue_for_requirements, Mapping)
+                else None
+            ),
+            tool_invocations=(),
+        )
         self._store_prompt_requirement_evaluation(data, prompt_requirements)
         required_prompt_tools = list(prompt_requirements.required_tools)
-        if required_prompt_tools:
-            data["llm_allowed_tools"] = list(required_prompt_tools)
         data["tool_plan_context_lineage"] = dict(tool_plan_context_telemetry)
 
         # Emit planning phase.
@@ -9202,6 +9210,18 @@ class InternalMCPChatOrchestrator:
                     else None
                 ),
                 tool_invocations=invocations_for_requirements,
+            )
+            prompt_requirements = (
+                self._merge_prompt_requirements_with_existing_tool_policy(
+                    data=data,
+                    evaluation=prompt_requirements,
+                    method_catalogue=(
+                        method_catalogue_for_requirements
+                        if isinstance(method_catalogue_for_requirements, Mapping)
+                        else None
+                    ),
+                    tool_invocations=invocations_for_requirements,
+                )
             )
             required_prompt_tools = list(prompt_requirements.required_tools)
             required_prompt_fetch_concept_ids = list(
@@ -13196,6 +13216,8 @@ class InternalMCPChatOrchestrator:
         payload: dict[str, Any] = contract_object.to_dict()
         if contract_object.required_tools:
             payload["required_tools"] = list(contract_object.required_tools)
+        if contract_object.target_concept_ids:
+            payload["target_concept_ids"] = list(contract_object.target_concept_ids)
         return payload
 
     @classmethod
@@ -13515,7 +13537,19 @@ class InternalMCPChatOrchestrator:
             method_catalogue=method_catalogue,
             allowed_tools=allowed_tools,
         )
-        if not contract_required_tools:
+        contract_object = (
+            turn_expected_outcome_contract
+            if isinstance(turn_expected_outcome_contract, TurnExpectedOutcomeContract)
+            else TurnExpectedOutcomeContract.from_mapping(
+                turn_expected_outcome_contract
+            )
+        )
+        target_concept_ids = tuple(
+            str(item).strip()
+            for item in (contract_object.target_concept_ids or ())
+            if isinstance(item, str) and str(item).strip()
+        )
+        if not contract_required_tools and not target_concept_ids:
             return evaluation
 
         merged_required_tools: list[str] = []
@@ -13526,6 +13560,18 @@ class InternalMCPChatOrchestrator:
                 continue
             seen_required.add(lowered)
             merged_required_tools.append(str(tool_name).strip())
+
+        merged_required_fetch_concept_ids: list[str] = []
+        seen_required_fetch: set[str] = set()
+        for concept_id in (
+            *evaluation.required_fetch_concept_ids,
+            *(target_concept_ids if "fetch_concept" in seen_required else ()),
+        ):
+            lowered = str(concept_id).strip().lower()
+            if not lowered or lowered in seen_required_fetch:
+                continue
+            seen_required_fetch.add(lowered)
+            merged_required_fetch_concept_ids.append(str(concept_id).strip())
 
         available_tools = {
             str(tool_name).strip().lower()
@@ -13549,6 +13595,266 @@ class InternalMCPChatOrchestrator:
                 str(item).strip().lower()
                 for item in evaluation.unavailable_required_tools
                 if isinstance(item, str) and str(item).strip()
+            }:
+                continue
+            seen_unavailable.add(lowered)
+            unavailable_required_tools.append(lowered)
+
+        (
+            missing_tools,
+            missing_fetch_concept_ids,
+            missing_read_file_copy_ids,
+            missing_scholarly_representation_file_copy_ids,
+        ) = cls._derive_missing_prompt_requirements(
+            required_tools=tuple(merged_required_tools),
+            required_fetch_concept_ids=tuple(merged_required_fetch_concept_ids),
+            required_read_file_copy_ids=evaluation.required_read_file_copy_ids,
+            required_scholarly_representation_for_file_copy_ids=(
+                evaluation.required_scholarly_representation_file_copy_ids
+            ),
+            tool_invocations=tool_invocations,
+        )
+        missing_retry_reason = cls._build_missing_prompt_retry_reason(
+            missing_tools=missing_tools,
+            missing_fetch_concept_ids=missing_fetch_concept_ids,
+            missing_read_file_copy_ids=missing_read_file_copy_ids,
+            missing_scholarly_representation_file_copy_ids=(
+                missing_scholarly_representation_file_copy_ids
+            ),
+        )
+
+        return replace(
+            evaluation,
+            required_tools=tuple(merged_required_tools),
+            required_fetch_concept_ids=tuple(merged_required_fetch_concept_ids),
+            unavailable_required_tools=tuple(unavailable_required_tools),
+            missing_tools=tuple(missing_tools),
+            missing_fetch_concept_ids=tuple(missing_fetch_concept_ids),
+            missing_read_file_copy_ids=tuple(missing_read_file_copy_ids),
+            missing_scholarly_representation_file_copy_ids=tuple(
+                missing_scholarly_representation_file_copy_ids
+            ),
+            missing_retry_reason=missing_retry_reason,
+        )
+
+    @staticmethod
+    def _store_prompt_requirement_evaluation(
+        data: MutableMapping[str, Any],
+        evaluation: _PromptRequirementEvaluation,
+    ) -> None:
+        """Persist shared prompt-requirement state into workflow data."""
+
+        data["required_prompt_tools"] = list(evaluation.required_tools)
+        existing_allowed_tools = InternalMCPChatOrchestrator._ordered_unique_tool_names(
+            data.get("llm_allowed_tools")
+        )
+        if evaluation.required_tools and not existing_allowed_tools:
+            data["llm_allowed_tools"] = list(evaluation.required_tools)
+        elif existing_allowed_tools:
+            data["llm_allowed_tools"] = list(existing_allowed_tools)
+        data["required_prompt_url_extraction_tool"] = (
+            evaluation.required_url_extraction_tool
+        )
+        data["required_prompt_url_extraction_url"] = (
+            evaluation.required_url_extraction_url
+        )
+        data["required_prompt_fetch_concept_ids"] = list(
+            evaluation.required_fetch_concept_ids
+        )
+        data["required_prompt_read_file_copy_ids"] = list(
+            evaluation.required_read_file_copy_ids
+        )
+        data["required_prompt_scholarly_representation_for_file_copy_ids"] = list(
+            evaluation.required_scholarly_representation_file_copy_ids
+        )
+        data["required_prompt_create_type_name"] = evaluation.required_create_type_name
+        data["missing_prompt_tools"] = list(evaluation.missing_tools)
+        data["missing_prompt_fetch_concept_ids"] = list(
+            evaluation.missing_fetch_concept_ids
+        )
+        data["missing_prompt_read_file_copy_ids"] = list(
+            evaluation.missing_read_file_copy_ids
+        )
+        data["missing_prompt_scholarly_representation_for_file_copy_ids"] = list(
+            evaluation.missing_scholarly_representation_file_copy_ids
+        )
+        if evaluation.missing_retry_reason:
+            data["missing_tool_call_retry_reason_override"] = (
+                evaluation.missing_retry_reason
+            )
+        else:
+            data.pop("missing_tool_call_retry_reason_override", None)
+
+    @staticmethod
+    def _ordered_unique_tool_names(value: Any) -> tuple[str, ...]:
+        if isinstance(value, str):
+            value = (value,)
+        if not isinstance(value, Sequence) or isinstance(value, (bytes, bytearray)):
+            return ()
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for raw_tool_name in value:
+            if not isinstance(raw_tool_name, str):
+                continue
+            tool_name = raw_tool_name.strip()
+            lowered = tool_name.lower()
+            if not tool_name or lowered in seen:
+                continue
+            seen.add(lowered)
+            ordered.append(tool_name)
+        return tuple(ordered)
+
+    @classmethod
+    def _merge_prompt_requirements_with_existing_tool_policy(
+        cls,
+        *,
+        data: Mapping[str, Any],
+        evaluation: _PromptRequirementEvaluation,
+        method_catalogue: Mapping[str, Any] | None = None,
+        tool_invocations: Sequence[Mapping[str, Any]] = (),
+    ) -> _PromptRequirementEvaluation:
+        """Keep workflow-authored tool policy when refreshing prompt requirements.
+
+        Prompt-requirement inference can add useful turn-local requirements, but
+        it must not silently replace a workflow step's represented required or
+        allowed tool set.  This merge keeps the workflow-owned requirements and
+        filters newly inferred tools through the existing allowed set when one is
+        present.
+        """
+
+        if not isinstance(evaluation, _PromptRequirementEvaluation):
+            evaluation = _PromptRequirementEvaluation(
+                required_tools=cls._ordered_unique_tool_names(
+                    getattr(evaluation, "required_tools", ())
+                ),
+                required_url_extraction_tool=(
+                    str(getattr(evaluation, "required_url_extraction_tool")).strip()
+                    if isinstance(
+                        getattr(evaluation, "required_url_extraction_tool", None), str
+                    )
+                    and str(
+                        getattr(evaluation, "required_url_extraction_tool", None)
+                    ).strip()
+                    else None
+                ),
+                required_url_extraction_url=(
+                    str(getattr(evaluation, "required_url_extraction_url")).strip()
+                    if isinstance(
+                        getattr(evaluation, "required_url_extraction_url", None), str
+                    )
+                    and str(
+                        getattr(evaluation, "required_url_extraction_url", None)
+                    ).strip()
+                    else None
+                ),
+                required_fetch_concept_ids=cls._ordered_unique_tool_names(
+                    getattr(evaluation, "required_fetch_concept_ids", ())
+                ),
+                required_read_file_copy_ids=cls._ordered_unique_tool_names(
+                    getattr(evaluation, "required_read_file_copy_ids", ())
+                ),
+                required_scholarly_representation_file_copy_ids=(
+                    cls._ordered_unique_tool_names(
+                        getattr(
+                            evaluation,
+                            "required_scholarly_representation_file_copy_ids",
+                            (),
+                        )
+                    )
+                ),
+                required_create_type_name=(
+                    str(getattr(evaluation, "required_create_type_name")).strip()
+                    if isinstance(
+                        getattr(evaluation, "required_create_type_name", None), str
+                    )
+                    and str(
+                        getattr(evaluation, "required_create_type_name", None)
+                    ).strip()
+                    else None
+                ),
+                unavailable_required_tools=cls._ordered_unique_tool_names(
+                    getattr(evaluation, "unavailable_required_tools", ())
+                ),
+                missing_tools=cls._ordered_unique_tool_names(
+                    getattr(evaluation, "missing_tools", ())
+                ),
+                missing_fetch_concept_ids=cls._ordered_unique_tool_names(
+                    getattr(evaluation, "missing_fetch_concept_ids", ())
+                ),
+                missing_read_file_copy_ids=cls._ordered_unique_tool_names(
+                    getattr(evaluation, "missing_read_file_copy_ids", ())
+                ),
+                missing_scholarly_representation_file_copy_ids=(
+                    cls._ordered_unique_tool_names(
+                        getattr(
+                            evaluation,
+                            "missing_scholarly_representation_file_copy_ids",
+                            (),
+                        )
+                    )
+                ),
+                missing_retry_reason=(
+                    str(getattr(evaluation, "missing_retry_reason")).strip()
+                    if isinstance(
+                        getattr(evaluation, "missing_retry_reason", None), str
+                    )
+                    and str(getattr(evaluation, "missing_retry_reason", None)).strip()
+                    else None
+                ),
+            )
+
+        existing_required_tools = cls._ordered_unique_tool_names(
+            data.get("required_prompt_tools")
+        )
+        existing_allowed_tools = cls._ordered_unique_tool_names(
+            data.get("llm_allowed_tools")
+        )
+        allowed_lookup = {
+            tool_name.lower(): tool_name for tool_name in existing_allowed_tools
+        }
+
+        filtered_evaluation_tools: list[str] = []
+        for tool_name in evaluation.required_tools:
+            if existing_allowed_tools and tool_name.lower() not in allowed_lookup:
+                continue
+            filtered_evaluation_tools.append(
+                allowed_lookup.get(tool_name.lower(), tool_name)
+            )
+
+        merged_required_tools: list[str] = []
+        seen_required: set[str] = set()
+        for tool_name in (*existing_required_tools, *filtered_evaluation_tools):
+            lowered = tool_name.lower()
+            if lowered in seen_required:
+                continue
+            if existing_allowed_tools and lowered not in allowed_lookup:
+                continue
+            seen_required.add(lowered)
+            merged_required_tools.append(allowed_lookup.get(lowered, tool_name))
+
+        if not merged_required_tools:
+            merged_required_tools = list(filtered_evaluation_tools)
+
+        available_tools = {
+            str(tool_name).strip().lower()
+            for tool_name in (
+                method_catalogue.keys() if isinstance(method_catalogue, Mapping) else ()
+            )
+            if isinstance(tool_name, str) and str(tool_name).strip()
+        }
+        unavailable_required_tools: list[str] = []
+        seen_unavailable: set[str] = set()
+        for tool_name in (
+            *evaluation.unavailable_required_tools,
+            *merged_required_tools,
+        ):
+            lowered = tool_name.lower()
+            if not lowered or lowered in seen_unavailable:
+                continue
+            if available_tools and lowered in available_tools:
+                continue
+            if not available_tools and lowered not in {
+                item.lower() for item in evaluation.unavailable_required_tools
             }:
                 continue
             seen_unavailable.add(lowered)
@@ -13589,49 +13895,6 @@ class InternalMCPChatOrchestrator:
             ),
             missing_retry_reason=missing_retry_reason,
         )
-
-    @staticmethod
-    def _store_prompt_requirement_evaluation(
-        data: MutableMapping[str, Any],
-        evaluation: _PromptRequirementEvaluation,
-    ) -> None:
-        """Persist shared prompt-requirement state into workflow data."""
-
-        data["required_prompt_tools"] = list(evaluation.required_tools)
-        if evaluation.required_tools:
-            data["llm_allowed_tools"] = list(evaluation.required_tools)
-        data["required_prompt_url_extraction_tool"] = (
-            evaluation.required_url_extraction_tool
-        )
-        data["required_prompt_url_extraction_url"] = (
-            evaluation.required_url_extraction_url
-        )
-        data["required_prompt_fetch_concept_ids"] = list(
-            evaluation.required_fetch_concept_ids
-        )
-        data["required_prompt_read_file_copy_ids"] = list(
-            evaluation.required_read_file_copy_ids
-        )
-        data["required_prompt_scholarly_representation_for_file_copy_ids"] = list(
-            evaluation.required_scholarly_representation_file_copy_ids
-        )
-        data["required_prompt_create_type_name"] = evaluation.required_create_type_name
-        data["missing_prompt_tools"] = list(evaluation.missing_tools)
-        data["missing_prompt_fetch_concept_ids"] = list(
-            evaluation.missing_fetch_concept_ids
-        )
-        data["missing_prompt_read_file_copy_ids"] = list(
-            evaluation.missing_read_file_copy_ids
-        )
-        data["missing_prompt_scholarly_representation_for_file_copy_ids"] = list(
-            evaluation.missing_scholarly_representation_file_copy_ids
-        )
-        if evaluation.missing_retry_reason:
-            data["missing_tool_call_retry_reason_override"] = (
-                evaluation.missing_retry_reason
-            )
-        else:
-            data.pop("missing_tool_call_retry_reason_override", None)
 
     @staticmethod
     def _looks_like_missing_tool_call(response: str) -> bool:
@@ -16507,6 +16770,11 @@ class InternalMCPChatOrchestrator:
                 self._ACTION_FIELD,
                 self._TOOL_FIELD,
                 self._PAYLOAD_FIELD,
+                "name",
+                "arguments",
+                "args",
+                "method",
+                "params",
                 "status",
                 "duration_ms",
                 "error",
@@ -16772,6 +17040,11 @@ class InternalMCPChatOrchestrator:
                 f'"{self._TOOL_FIELD}"',
                 f'"{self._PAYLOAD_FIELD}"',
                 '"call_tool"',
+                '"name"',
+                '"arguments"',
+                '"args"',
+                '"method"',
+                '"params"',
                 '"tool_calls"',
                 '"tool_uses"',
                 '"recipient_name"',
@@ -27746,7 +28019,11 @@ class InternalMCPChatOrchestrator:
     ) -> list[dict[str, str]]:
         contract_object = cls._build_turn_expected_outcome_contract_object(data)
         contract = contract_object.to_dict()
-        if not contract and not contract_object.required_tools:
+        if (
+            not contract
+            and not contract_object.required_tools
+            and not contract_object.target_concept_ids
+        ):
             return []
 
         lines = ["Expected answer contract for this turn:"]
@@ -27781,6 +28058,18 @@ class InternalMCPChatOrchestrator:
         }:
             lines.append(
                 "- Required tools: " + ", ".join(contract_object.required_tools)
+            )
+        if contract_object.target_concept_ids and stage in {
+            "selector_preparation",
+            "selector_decision",
+            "workflow_dispatch",
+            "tool_call",
+            "tool_plan",
+            "tool_follow_up",
+            "recovery_decision",
+        }:
+            lines.append(
+                "- Target concept IDs: " + ", ".join(contract_object.target_concept_ids)
             )
 
         if stage in {
@@ -28476,6 +28765,10 @@ class InternalMCPChatOrchestrator:
         if contract_object.required_tools:
             guidance_lines.append(
                 "- Required tools: " + ", ".join(contract_object.required_tools)
+            )
+        if contract_object.target_concept_ids:
+            guidance_lines.append(
+                "- Target concept IDs: " + ", ".join(contract_object.target_concept_ids)
             )
 
         if not guidance_lines:

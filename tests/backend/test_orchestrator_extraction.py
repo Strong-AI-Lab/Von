@@ -538,6 +538,51 @@ def test_extract_tool_calls_accepts_tool_uses_recipient_envelope():
     assert [call["payload"]["x"] for call in calls] == [1, 2]
 
 
+def test_extract_tool_calls_accepts_openai_style_name_arguments_batch():
+    text = (
+        "["
+        '{"name": "fetch_concept", "arguments": {"concept_id": "#V#kobe_knowles"}},'
+        '{"name": "get_text_relations_summary", '
+        '"arguments": {"concept_id": "#V#kobe_knowles"}}'
+        "]"
+    )
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+
+    calls = orchestrator._extract_tool_calls(text)
+
+    assert calls == [
+        {
+            "action": "call_tool",
+            "tool": "fetch_concept",
+            "payload": {"concept_id": "#V#kobe_knowles"},
+        },
+        {
+            "action": "call_tool",
+            "tool": "get_text_relations_summary",
+            "payload": {"concept_id": "#V#kobe_knowles"},
+        },
+    ]
+
+
+def test_interpret_model_turn_accepts_openai_style_arguments_string():
+    text = (
+        '{"name": "find_relations_with_argument", '
+        '"arguments": "{\\"concept_id\\": \\"#V#kobe_knowles\\"}"}'
+    )
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+
+    interpretation = orchestrator._interpret_model_turn(text)
+
+    assert interpretation.tool_call_parse_error is None
+    assert interpretation.tool_calls == [
+        {
+            "action": "call_tool",
+            "tool": "find_relations_with_argument",
+            "payload": {"concept_id": "#V#kobe_knowles"},
+        }
+    ]
+
+
 def test_extract_tool_calls_recovers_tool_uses_from_corrupted_wrapper_and_cleans_payload():
     text = (
         '{"commentary to=multi_tool_use.parallel malformed wrapper"}'

@@ -8,6 +8,9 @@ from src.backend.integrations.internal_mcp.orchestrator import (
     OrchestratorResult,
     _PromptRequirementEvaluation,
 )
+from src.backend.services.turn_execution_record_service import (
+    build_turn_execution_record,
+)
 from src.backend.workflows.durable.turn_execution_runtime_support import (
     build_turn_execution_selected_workflow_outputs,
     render_selected_workflow_user_response,
@@ -128,6 +131,50 @@ def test_store_prompt_requirement_evaluation_sets_effective_allowed_tools() -> N
     assert data["llm_allowed_tools"] == [
         "get_predicate_incidence",
         "find_relations_with_argument",
+    ]
+
+
+def test_prompt_requirement_merge_preserves_workflow_tool_policy() -> None:
+    data: dict[str, Any] = {
+        "required_prompt_tools": [
+            "fetch_concept",
+            "get_text_relations_summary",
+            "find_relations_with_argument",
+        ],
+        "llm_allowed_tools": [
+            "fetch_concept",
+            "get_text_relations_summary",
+            "find_relations_with_argument",
+            "search_concepts",
+        ],
+    }
+    evaluation = _PromptRequirementEvaluation(
+        required_tools=("fetch_concept", "get_related_concepts"),
+    )
+
+    merged = InternalMCPChatOrchestrator._merge_prompt_requirements_with_existing_tool_policy(
+        data=data,
+        evaluation=evaluation,
+        method_catalogue={
+            "fetch_concept": {},
+            "get_text_relations_summary": {},
+            "find_relations_with_argument": {},
+            "search_concepts": {},
+        },
+    )
+    InternalMCPChatOrchestrator._store_prompt_requirement_evaluation(data, merged)
+
+    assert list(merged.required_tools) == [
+        "fetch_concept",
+        "get_text_relations_summary",
+        "find_relations_with_argument",
+    ]
+    assert "get_related_concepts" not in merged.required_tools
+    assert data["llm_allowed_tools"] == [
+        "fetch_concept",
+        "get_text_relations_summary",
+        "find_relations_with_argument",
+        "search_concepts",
     ]
 
 
@@ -330,6 +377,170 @@ def test_selected_workflow_outputs_derives_missing_tools_from_turn_contract() ->
     ]
     assert outputs["selected_workflow_trace"]["missing_prompt_tools"] == [
         "fetch_concept"
+    ]
+
+
+def test_selected_workflow_outputs_filters_turn_contract_tools_to_child_allowed_policy() -> (
+    None
+):
+    outputs = build_turn_execution_selected_workflow_outputs(
+        selected_workflow_id="#V#concept_search_instance_retrieval_workflow",
+        child_completed=True,
+        final_state="completed",
+        failure_detail=None,
+        child_outputs={
+            "response_text": "Grounded Kobe answer.",
+            "llm_allowed_tools": [
+                "fetch_concept",
+                "get_text_relations_summary",
+                "find_relations_with_argument",
+                "search_concepts",
+            ],
+            "required_prompt_tools": ["fetch_concept", "get_related_concepts"],
+            "missing_prompt_tools": ["get_related_concepts"],
+            "invocations": [
+                {"tool": "fetch_concept", "status": "ok"},
+                {"tool": "get_text_relations_summary", "status": "ok"},
+                {"tool": "find_relations_with_argument", "status": "ok"},
+            ],
+        },
+        rendered_child_response_text="Grounded Kobe answer.",
+        turn_expected_outcome_contract={
+            "required_tools": ["fetch_concept", "get_related_concepts"],
+        },
+    )
+
+    assert outputs["required_prompt_tools"] == ["fetch_concept"]
+    assert outputs["missing_prompt_tools"] == []
+    assert (
+        "get_related_concepts"
+        not in outputs["completion_report"]["required_prompt_tools"]
+    )
+
+
+def test_concept_profile_wrong_target_evidence_blocks_completion() -> None:
+    workflow_required_effects_contract = {
+        "schema_version": "workflow_required_effects_contract.v1",
+        "contract_id": "grounded_concept_profile_retrieval_evidence",
+        "required_effects": [
+            {
+                "effect_id": "grounded_concept_profile_evidence",
+                "effect_type": "grounded_evidence",
+                "required_tools": [
+                    "fetch_concept",
+                    "get_text_relations_summary",
+                    "find_relations_with_argument",
+                ],
+                "required_tools_match": "all",
+                "missing_failure_code": "concept_profile_evidence_missing",
+                "wrong_target_failure_code": "concept_profile_evidence_wrong_target",
+            }
+        ],
+    }
+    outputs = build_turn_execution_selected_workflow_outputs(
+        selected_workflow_id="#V#concept_search_instance_retrieval_workflow",
+        child_completed=True,
+        final_state="completed",
+        failure_detail=None,
+        child_outputs={
+            "response_text": "Michael Witbrock is represented as a person.",
+            "final_response": "Michael Witbrock is represented as a person.",
+            "invocations": [
+                {
+                    "tool": "fetch_concept",
+                    "status": "ok",
+                    "effective_arguments": {"concept_id": "#V#michael_witbrock"},
+                    "effective_payload": {
+                        "success": True,
+                        "concept_id": "#V#michael_witbrock",
+                    },
+                },
+                {
+                    "tool": "get_text_relations_summary",
+                    "status": "ok",
+                    "effective_arguments": {"concept_id": "#V#michael_witbrock"},
+                    "effective_payload": {
+                        "success": True,
+                        "concept_id": "#V#michael_witbrock",
+                    },
+                },
+                {
+                    "tool": "find_relations_with_argument",
+                    "status": "ok",
+                    "effective_arguments": {"concept_id": "#V#michael_witbrock"},
+                    "effective_payload": {
+                        "success": True,
+                        "concept_id": "#V#michael_witbrock",
+                    },
+                },
+            ],
+            "required_prompt_tools": [
+                "fetch_concept",
+                "get_text_relations_summary",
+                "find_relations_with_argument",
+            ],
+            "workflow_required_effects_contract": workflow_required_effects_contract,
+            "workflow_required_effects_contract_source": "definition_metadata",
+        },
+        rendered_child_response_text="Michael Witbrock is represented as a person.",
+        child_result_snapshot={
+            "response_text": "Michael Witbrock is represented as a person."
+        },
+        turn_expected_outcome_contract={
+            "schema_version": "turn_expected_outcome_contract.v1",
+            "fields": {"summary": "Tell me about #V#kobe_knowles."},
+            "required_tools": [
+                "fetch_concept",
+                "get_text_relations_summary",
+                "find_relations_with_argument",
+            ],
+            "target_concept_ids": ["#V#kobe_knowles"],
+        },
+    )
+
+    record = build_turn_execution_record(
+        request_id="req-wrong-target",
+        session_id="session-1",
+        namespace="#V#test_namespace",
+        actor_concept_id="#V#michael_witbrock",
+        user_id="#V#michael_witbrock",
+        org_id="#V#university_of_auckland_strong_ai_lab",
+        prompt_text="tell me about #V#kobe_knowles",
+        response_text=outputs["final_response"],
+        interaction_timestamp_utc="2026-04-24T08:00:00Z",
+        workflow_routing={
+            "workflow_id": "#V#concept_search_instance_retrieval_workflow",
+            "verdict": "rag_selected",
+            "source": "selector",
+        },
+        tool_invocations=outputs["invocations"],
+        selected_workflow_trace=outputs["selected_workflow_trace"],
+        turn_expected_outcome_contract=outputs["turn_expected_outcome_contract_state"],
+        completion_report=outputs["completion_report"],
+        required_prompt_tools=outputs["required_prompt_tools"],
+    )
+
+    gate = record["completion_gate"]
+    assert gate["safe_to_claim_completion"] is False
+    assert "concept_profile_evidence_wrong_target" in (
+        gate.get("blocking_failure_codes") or []
+    )
+    effect_by_id = {
+        effect["effect_id"]: effect for effect in record["required_effects"]
+    }
+    workflow_effect = effect_by_id["grounded_concept_profile_evidence"]
+    assert workflow_effect["status"] == "not_executed"
+    assert workflow_effect["targets"] == ["#V#kobe_knowles"]
+    assert workflow_effect["failure_code"] == "concept_profile_evidence_wrong_target"
+    prompt_fetch_effect = effect_by_id[
+        "effect_prompt_required_evidence_fetch_concept_1"
+    ]
+    assert prompt_fetch_effect["targets"] == ["#V#kobe_knowles"]
+    assert prompt_fetch_effect["failure_code"] == (
+        "prompt_required_evidence_fetch_concept_wrong_target"
+    )
+    assert record["execution"]["summary"]["required_evidence_target_concept_ids"] == [
+        "#V#kobe_knowles"
     ]
 
 

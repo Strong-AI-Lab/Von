@@ -1,0 +1,134 @@
+{
+  "family_id": "concept_search_instance_retrieval_workflow_seed_bundle",
+  "managed_by": "concept_search_instance_retrieval_workflow_vontology_service",
+  "schema_version": "repo_seed_workflow_bundle.v1",
+  "seed_version": "1",
+  "source_tag": "JVNAUTOSCI-2063",
+  "supported_action_ids": [
+    "llm.action"
+  ],
+  "workflows": [
+    {
+      "workflow_id": "#V#concept_search_instance_retrieval_workflow",
+      "display_name": "Concept Search and Instance Retrieval Workflow",
+      "description": "Canonical reusable workflow for grounded profile retrieval about an explicit Vontology concept ID, resolved concept, or authenticated first-person concept.",
+      "content": "Resolve the focal concept, keep every required retrieval anchored to that same concept ID, retrieve direct concept metadata, text relations, and relation evidence, and answer only from the represented evidence for that focal concept.",
+      "type_ids": [
+        "#V#ai_workflow",
+        "#V#durable_workflow"
+      ],
+      "launch_input_contract": {
+        "schema_version": "workflow_launch_input_contract.v1",
+        "required_inputs": [
+          "prompt"
+        ],
+        "input_mappings": [
+          {
+            "target_context_key": "prompt",
+            "source_expression": "inputs.prompt",
+            "extractor": "identity",
+            "required": true,
+            "description": "Pass through the user's concept-profile request."
+          }
+        ]
+      },
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"execution\",\"authoring_intent_required\":false,\"prefer_existing_capability\":false}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
+          "text": "{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"concept profile retrieval\",\"tell me about #V#concept\",\"describe represented concept\",\"who is #V#person\",\"what do we know about this concept\"],\"examples\":[\"Tell me about #V#kobe_knowles.\",\"Describe #V#michael_witbrock from represented evidence.\",\"What do we know about the concept #V#university_of_auckland_strong_ai_lab?\",\"Tell me about myself from represented facts.\"]}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowTerminalSuccessContractJson",
+          "text": "{\"schema_version\":\"workflow_terminal_success_contract.v1\",\"success_statuses\":[\"completed\"],\"required_summary_fields\":[\"workflow_id\",\"terminal_status\",\"final_state\",\"completed\"],\"require_terminal_status\":true,\"require_final_state\":true,\"require_completed_true\":true,\"require_completion_gate_safe_to_claim_completion\":false}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowRequiredEffectsContractJson",
+          "text": "{\"schema_version\":\"workflow_required_effects_contract.v1\",\"contract_id\":\"grounded_concept_profile_retrieval_evidence\",\"required_effects\":[{\"effect_id\":\"grounded_concept_profile_evidence\",\"effect_type\":\"grounded_evidence\",\"description\":\"The workflow must retrieve direct concept, text-relation, and relation evidence for the requested focal concept before claiming a grounded concept-profile answer.\",\"required_tools\":[\"fetch_concept\",\"get_text_relations_summary\",\"find_relations_with_argument\"],\"required_tools_match\":\"all\",\"missing_failure_code\":\"concept_profile_evidence_missing\",\"failed_failure_code\":\"concept_profile_evidence_failed\",\"wrong_target_failure_code\":\"concept_profile_evidence_wrong_target\",\"not_executed_reason\":\"Required grounded concept-profile evidence was not retrieved.\",\"not_satisfied_reason\":\"Grounded concept-profile retrieval failed or produced insufficient evidence.\",\"wrong_target_reason\":\"Required concept-profile evidence was retrieved for a different concept than the requested focal concept.\"}]}",
+          "lang": "en-NZ"
+        }
+      ],
+      "publication_spec": {
+        "initial_state": "retrieve_grounded_concept_profile",
+        "steps": [
+          {
+            "state_id": "retrieve_grounded_concept_profile",
+            "action_id": "llm.action",
+            "execution_mode": "llm",
+            "prompt_concept_ids": [
+              "#V#concept_search_instance_retrieval_prompt"
+            ],
+            "llm_policy": {
+              "policy_stage": "concept_search_instance_retrieval",
+              "tool_mode": "allowed",
+              "allowed_tools": [
+                "fetch_concept",
+                "get_text_relations_summary",
+                "find_relations_with_argument",
+                "search_concepts"
+              ],
+              "required_tools": [
+                "fetch_concept",
+                "get_text_relations_summary",
+                "find_relations_with_argument"
+              ],
+              "max_tool_invocations": 6,
+              "tool_argument_defaults": {
+                "fetch_concept": {
+                  "include_relations_arg1": true,
+                  "include_text_relations_arg1": true,
+                  "include_relations_any_arg": true,
+                  "limit": 80
+                },
+                "get_text_relations_summary": {
+                  "max_relation_ids_per_group": 20
+                },
+                "find_relations_with_argument": {
+                  "argument_index": "any",
+                  "relation_kind": "any",
+                  "include_text_snippets": true,
+                  "include_concept_preview": true,
+                  "limit": 30
+                }
+              },
+              "context_messages_context_key": "augmented_context",
+              "response_contract_text": "Answer the user directly from grounded represented evidence for the focal concept. If the prompt contains an explicit #V# concept ID, every required retrieval call must use that exact ID as concept_id. Do not substitute the authenticated user concept for an explicit third-party concept. Retrieve fetch_concept, get_text_relations_summary, and find_relations_with_argument evidence for the same focal concept before answering. If grounded evidence is insufficient, say that clearly instead of guessing or using evidence for another concept.",
+              "context_fields": [
+                {
+                  "context_key": "prompt",
+                  "label": "Current turn request"
+                },
+                {
+                  "context_key": "user_concept_id",
+                  "label": "Authenticated user concept"
+                },
+                {
+                  "context_key": "org_concept_id",
+                  "label": "Authenticated organisation concept"
+                },
+                {
+                  "context_key": "turn_expected_outcome_contract_state",
+                  "label": "Expected answer contract"
+                }
+              ]
+            },
+            "next_state": "completed",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "completed"
+          },
+          {
+            "state_id": "failed"
+          }
+        ]
+      }
+    }
+  ]
+}
