@@ -28,6 +28,34 @@ def test_workflow_discovery_observation_updates_ratio():
     assert ratio is None or (0.0 <= float(ratio) <= 1.0)
 
 
+def test_workflow_discovery_observation_records_timeout_learning_signal():
+    before = get_workflow_baseline_telemetry_snapshot()
+    before_queries = int(before.get("workflow_discovery_queries_total", 0))
+    before_timeouts = int(before.get("workflow_discovery_budget_exhausted_total", 0))
+
+    record_workflow_discovery_observation(
+        discovered_match_count=0,
+        executable_match_count=0,
+        budget_exhausted=True,
+        budget_exhaustion_stage="workflow_discovery_for_turn",
+        timeout_budget_seconds=10.0,
+    )
+
+    after = get_workflow_baseline_telemetry_snapshot()
+    assert int(after.get("workflow_discovery_queries_total", 0)) == before_queries + 1
+    assert int(after.get("workflow_discovery_budget_exhausted_total", 0)) == (
+        before_timeouts + 1
+    )
+    assert (
+        after.get("workflow_discovery_budget_exhaustion_stage_counts", {}).get(
+            "workflow_discovery_for_turn", 0
+        )
+        >= 1
+    )
+    assert after.get("workflow_discovery_budget_exhausted_ratio") is not None
+    assert after.get("workflow_discovery_timeout_budget_seconds_avg") is not None
+
+
 def test_fallback_and_write_policy_counters_increment():
     before = get_workflow_baseline_telemetry_snapshot()
     before_invocations = int(before.get("generic_fallback_mcp_invocations_total", 0))
@@ -67,9 +95,10 @@ def test_mutation_guardrail_event_updates_counters_and_recent_history():
 
     after = get_workflow_baseline_telemetry_snapshot()
     assert int(after.get("mutation_guardrail_events_total", 0)) == before_total + 1
-    assert after.get("mutation_guardrail_decision_counts", {}).get(
-        "approval_required", 0
-    ) >= 1
+    assert (
+        after.get("mutation_guardrail_decision_counts", {}).get("approval_required", 0)
+        >= 1
+    )
     assert after.get("mutation_guardrail_surface_counts", {}).get("execution", 0) >= 1
     assert after.get("mutation_guardrail_risk_counts", {}).get("destructive", 0) >= 1
     recent = after.get("recent_mutation_guardrail_events", [])

@@ -134,6 +134,96 @@ def _outcome_is_success(outcome: str | None) -> bool:
     return outcome in {"completed", "success"}
 
 
+def _normalise_string_list(value: Any) -> list[str]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return []
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        text = item.strip()
+        if not text:
+            continue
+        lowered = text.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        cleaned.append(text)
+    return cleaned
+
+
+def _derive_missing_required_tool_count(
+    outcome_metadata: Mapping[str, Any],
+) -> int:
+    explicit_missing = _coerce_int(
+        outcome_metadata.get("required_evidence_tool_missing_count"),
+        default=-1,
+        minimum=-1,
+    )
+    if explicit_missing >= 0:
+        return explicit_missing
+
+    required_tools = _normalise_string_list(
+        outcome_metadata.get("workflow_required_effects_required_tools")
+    )
+    if not required_tools:
+        return 0
+
+    executed_tools = {
+        tool.lower()
+        for tool in _normalise_string_list(
+            outcome_metadata.get("tool_invocation_names")
+        )
+    }
+    if not executed_tools:
+        return len(required_tools)
+    return sum(1 for tool in required_tools if tool.lower() not in executed_tools)
+
+
+def _outcome_metadata_has_learning_failure(
+    outcome_metadata: Mapping[str, Any],
+) -> bool:
+    if _coerce_bool(outcome_metadata.get("selection_learning_failure")):
+        return True
+    if _coerce_bool(outcome_metadata.get("required_evidence_missing")):
+        return True
+    if _derive_missing_required_tool_count(outcome_metadata) > 0:
+        return True
+    declared_effect_count = _coerce_int(
+        outcome_metadata.get("workflow_required_effects_declared_count"),
+        minimum=0,
+    )
+    declared_required_tools = _coerce_int(
+        outcome_metadata.get("workflow_required_effects_required_tool_count"),
+        minimum=0,
+    )
+    tool_invocation_count = _coerce_int(
+        outcome_metadata.get("tool_invocation_count"),
+        minimum=0,
+    )
+    if (
+        declared_effect_count > 0
+        and declared_required_tools > 0
+        and tool_invocation_count == 0
+    ):
+        return True
+    return False
+
+
+def _derive_effective_learning_outcome(
+    outcome: str | None,
+    outcome_metadata: Mapping[str, Any],
+) -> str | None:
+    clean_outcome = _normalise_outcome(outcome)
+    if clean_outcome in {
+        "completed",
+        "success",
+    } and _outcome_metadata_has_learning_failure(outcome_metadata):
+        return "learning_failure"
+    return clean_outcome
+
+
 @dataclass(frozen=True)
 class SelectionExperienceTuple:
     """One recorded workflow-selection experience tuple."""
@@ -192,7 +282,9 @@ def _serialise_for_storage(entry: SelectionExperienceTuple) -> Dict[str, Any]:
     return payload
 
 
-def _coerce_experience_tuple(payload: Mapping[str, Any]) -> SelectionExperienceTuple | None:
+def _coerce_experience_tuple(
+    payload: Mapping[str, Any],
+) -> SelectionExperienceTuple | None:
     experience_id = _safe_str(payload.get("experience_id"))
     timestamp = _safe_str(payload.get("timestamp"))
     if not experience_id or not timestamp:
@@ -371,9 +463,9 @@ def compute_selection_reward(
 ) -> tuple[float, Dict[str, float]]:
     """Compute a compact reward signal from execution telemetry."""
 
-    clean_outcome = _normalise_outcome(outcome)
     safe_outcome_metadata = _clone_mapping(outcome_metadata)
     safe_selection_metadata = _clone_mapping(selection_metadata)
+    clean_outcome = _derive_effective_learning_outcome(outcome, safe_outcome_metadata)
 
     duration_ms = _coerce_float(
         safe_outcome_metadata.get("orchestrator_duration_ms", routing_duration_ms),
@@ -398,6 +490,24 @@ def compute_selection_reward(
     follow_up_required = _coerce_bool(
         safe_outcome_metadata.get("completion_gate_requires_follow_up")
     )
+    workflow_discovery_budget_exhausted = _coerce_bool(
+        safe_outcome_metadata.get("workflow_discovery_budget_exhausted")
+    )
+    discovery_candidate_count = _coerce_int(
+        safe_outcome_metadata.get("workflow_discovery_candidate_count"),
+        minimum=0,
+    )
+    discovery_match_count = _coerce_int(
+        safe_outcome_metadata.get("workflow_discovery_match_count"),
+        minimum=0,
+    )
+    missing_required_tool_count = _derive_missing_required_tool_count(
+        safe_outcome_metadata
+    )
+    required_evidence_missing = (
+        missing_required_tool_count > 0
+        or _outcome_metadata_has_learning_failure(safe_outcome_metadata)
+    )
     exploration_bonus = _coerce_float(
         safe_selection_metadata.get("selected_exploration_bonus"),
         minimum=0.0,
@@ -408,7 +518,13 @@ def compute_selection_reward(
         completion_signal = 1.0
     elif clean_outcome in {"follow_up_required", "partial"} or follow_up_required:
         completion_signal = 0.35
-    elif clean_outcome in {"failed", "terminated", "error", "selection_failed"}:
+    elif clean_outcome in {
+        "failed",
+        "terminated",
+        "error",
+        "selection_failed",
+        "learning_failure",
+    }:
         completion_signal = -0.75
     else:
         completion_signal = 0.0
@@ -424,6 +540,14 @@ def compute_selection_reward(
 
     retry_penalty = -0.08 * min(retry_attempts, 4)
     cost_penalty = -0.2 * min(total_tokens / 8000.0, 1.0)
+    discovery_timeout_penalty = 0.0
+    if workflow_discovery_budget_exhausted:
+        discovery_timeout_penalty = -0.35
+        if discovery_candidate_count <= 0 and discovery_match_count <= 0:
+            discovery_timeout_penalty -= 0.15
+    required_evidence_penalty = (
+        -0.4 * min(missing_required_tool_count, 3) if required_evidence_missing else 0.0
+    )
     if completion_signal > 0.5:
         calibration_signal = 0.2 * confidence
     elif completion_signal < 0.0:
@@ -436,6 +560,8 @@ def compute_selection_reward(
         + efficiency_signal
         + retry_penalty
         + cost_penalty
+        + discovery_timeout_penalty
+        + required_evidence_penalty
         + calibration_signal
         + exploration_bonus
     )
@@ -445,6 +571,8 @@ def compute_selection_reward(
         "efficiency_signal": round(efficiency_signal, 4),
         "retry_penalty": round(retry_penalty, 4),
         "cost_penalty": round(cost_penalty, 4),
+        "discovery_timeout_penalty": round(discovery_timeout_penalty, 4),
+        "required_evidence_penalty": round(required_evidence_penalty, 4),
         "calibration_signal": round(calibration_signal, 4),
         "exploration_bonus": round(exploration_bonus, 4),
     }
@@ -539,6 +667,15 @@ def finalise_selection_experience(
         return None
 
     safe_outcome_metadata = _clone_mapping(outcome_metadata)
+    runtime_outcome = _normalise_outcome(outcome)
+    effective_outcome = _derive_effective_learning_outcome(
+        runtime_outcome,
+        safe_outcome_metadata,
+    )
+    if effective_outcome != runtime_outcome:
+        safe_outcome_metadata["runtime_outcome"] = runtime_outcome
+        safe_outcome_metadata["selection_learning_outcome"] = effective_outcome
+        safe_outcome_metadata["selection_learning_failure"] = True
     resolved_reward = reward
     resolved_breakdown = (
         {
@@ -550,7 +687,7 @@ def finalise_selection_experience(
     )
     if resolved_reward is None or resolved_breakdown is None:
         resolved_reward, resolved_breakdown = compute_selection_reward(
-            outcome=outcome,
+            outcome=effective_outcome,
             confidence_score=existing.confidence_score,
             routing_duration_ms=existing.routing_duration_ms,
             outcome_metadata=safe_outcome_metadata,
@@ -559,7 +696,7 @@ def finalise_selection_experience(
 
     updated = replace(
         existing,
-        outcome=_normalise_outcome(outcome),
+        outcome=effective_outcome,
         outcome_metadata=safe_outcome_metadata,
         reward=_coerce_float(resolved_reward),
         reward_breakdown=dict(resolved_breakdown),
@@ -620,7 +757,9 @@ def list_selection_experiences(
         query["outcome"] = {"$ne": None}
 
     safe_limit = max(1, min(limit, 5000))
-    cursor = coll.find(query, {"_id": 0}).sort("timestamp", DESCENDING).limit(safe_limit)
+    cursor = (
+        coll.find(query, {"_id": 0}).sort("timestamp", DESCENDING).limit(safe_limit)
+    )
     entries: list[SelectionExperienceTuple] = []
     for payload in cursor:
         if isinstance(payload, Mapping):

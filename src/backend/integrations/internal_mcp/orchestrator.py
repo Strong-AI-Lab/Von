@@ -1575,6 +1575,198 @@ def _workflow_required_effects_contract_source_from_result(
     return None
 
 
+def _workflow_required_tools_from_contract(
+    contract: Mapping[str, Any] | None,
+) -> list[str]:
+    if not isinstance(contract, Mapping):
+        return []
+    required_effects = contract.get("required_effects")
+    if not isinstance(required_effects, Sequence) or isinstance(
+        required_effects, (str, bytes, bytearray)
+    ):
+        return []
+    tools: list[str] = []
+    seen: set[str] = set()
+    for effect in required_effects:
+        if not isinstance(effect, Mapping):
+            continue
+        raw_tools = effect.get("required_tools")
+        if not isinstance(raw_tools, Sequence) or isinstance(
+            raw_tools, (str, bytes, bytearray)
+        ):
+            continue
+        for raw_tool in raw_tools:
+            if not isinstance(raw_tool, str):
+                continue
+            tool = raw_tool.strip()
+            if not tool:
+                continue
+            lowered = tool.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            tools.append(tool)
+    return tools
+
+
+def _workflow_selection_outcome_safe_int(value: Any) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return 0
+
+
+def _workflow_selection_outcome_safe_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _workflow_selection_tool_invocation_names(
+    result: OrchestratorResult,
+) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for invocation in result.tool_invocations or ():
+        if not isinstance(invocation, Mapping):
+            continue
+        tool_name = None
+        for key in ("tool", "tool_name", "method", "name"):
+            value = invocation.get(key)
+            if isinstance(value, str) and value.strip():
+                tool_name = value.strip()
+                break
+        if tool_name is None:
+            continue
+        lowered = tool_name.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        names.append(tool_name)
+    return names
+
+
+def _latest_workflow_execution_summary_from_result(
+    result: OrchestratorResult,
+) -> Mapping[str, Any]:
+    for entry in reversed(tuple(result.aux_llm_calls or ())):
+        if not isinstance(entry, Mapping):
+            continue
+        if entry.get("type") != "workflow_execution":
+            continue
+        summary = entry.get("execution_summary")
+        if isinstance(summary, Mapping):
+            return summary
+    return {}
+
+
+def _workflow_discovery_selection_learning_payload(
+    workflow_discovery_result: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    discovery = (
+        workflow_discovery_result
+        if isinstance(workflow_discovery_result, Mapping)
+        else {}
+    )
+    budget_exhausted = bool(discovery.get("budget_exhausted")) or (
+        str(discovery.get("match_absence_reason") or "").strip().lower()
+        == "workflow_discovery_budget_exhausted"
+    )
+    payload: dict[str, Any] = {
+        "workflow_discovery_budget_exhausted": budget_exhausted,
+        "workflow_discovery_match_absence_reason": (
+            str(discovery.get("match_absence_reason") or "").strip() or None
+        ),
+        "workflow_discovery_budget_exhaustion_stage": (
+            str(discovery.get("budget_exhaustion_stage") or "").strip() or None
+        ),
+        "workflow_discovery_budget_exhaustion_detail": (
+            str(discovery.get("budget_exhaustion_detail") or "").strip() or None
+        ),
+        "workflow_discovery_candidate_count": _workflow_selection_outcome_safe_int(
+            discovery.get("candidate_count")
+        ),
+        "workflow_discovery_match_count": _workflow_selection_outcome_safe_int(
+            discovery.get("match_count")
+        ),
+    }
+    timeout_budget = _workflow_selection_outcome_safe_float(
+        discovery.get("timeout_budget_seconds")
+    )
+    if timeout_budget is not None:
+        payload["workflow_discovery_timeout_budget_seconds"] = timeout_budget
+    search_time_ms = _workflow_selection_outcome_safe_float(
+        discovery.get("search_time_ms")
+    )
+    if search_time_ms is not None:
+        payload["workflow_discovery_search_time_ms"] = search_time_ms
+    return payload
+
+
+def _workflow_required_evidence_selection_learning_payload(
+    result: OrchestratorResult,
+) -> dict[str, Any]:
+    summary = _latest_workflow_execution_summary_from_result(result)
+    required_tools = _workflow_required_tools_from_contract(
+        summary.get("workflow_required_effects_contract")
+        if isinstance(summary.get("workflow_required_effects_contract"), Mapping)
+        else None
+    )
+    if not required_tools:
+        raw_required_tools = summary.get("workflow_required_effects_required_tools")
+        required_tools = [
+            item.strip()
+            for item in (raw_required_tools or ())
+            if isinstance(item, str) and item.strip()
+        ]
+    tool_names = _workflow_selection_tool_invocation_names(result)
+    executed_tool_names = {tool.lower() for tool in tool_names}
+    missing_required_tools = [
+        tool for tool in required_tools if tool.lower() not in executed_tool_names
+    ]
+    declared_count = _workflow_selection_outcome_safe_int(
+        summary.get("workflow_required_effects_declared_count")
+        or summary.get("required_effects_declared_count")
+    )
+    required_tool_count = len(required_tools)
+    tool_invocation_count = len(tool_names)
+    required_evidence_missing = bool(
+        missing_required_tools
+        or (
+            declared_count > 0
+            and required_tool_count > 0
+            and tool_invocation_count == 0
+        )
+    )
+    return {
+        "workflow_required_effects_declared_count": declared_count,
+        "workflow_required_effects_required_tools": required_tools,
+        "workflow_required_effects_required_tool_count": required_tool_count,
+        "tool_invocation_count": tool_invocation_count,
+        "tool_invocation_names": tool_names,
+        "required_evidence_tool_missing_count": len(missing_required_tools),
+        "required_evidence_tool_missing_names": missing_required_tools,
+        "required_evidence_missing": required_evidence_missing,
+        "workflow_execution_action_success_count": _workflow_selection_outcome_safe_int(
+            summary.get("action_success_count")
+        ),
+        "workflow_execution_action_started_count": _workflow_selection_outcome_safe_int(
+            summary.get("action_started_count")
+        ),
+    }
+
+
+def _selector_timeout_recovery_applied(
+    selector_override_entry: Mapping[str, Any] | None,
+) -> bool:
+    return (
+        isinstance(selector_override_entry, Mapping)
+        and str(selector_override_entry.get("reason") or "").strip()
+        == "selector_unmatched_candidate_budget_timeout_recovered_to_requested_workflow"
+    )
+
+
 def _workflow_terminal_success_evaluation_from_result(
     workflow_result: Any,
 ) -> Mapping[str, Any] | None:
@@ -2133,6 +2325,9 @@ def _build_workflow_execution_summary(
     workflow_required_effects_contract_source = (
         _workflow_required_effects_contract_source_from_result(workflow_result)
     )
+    workflow_required_effects_required_tools = _workflow_required_tools_from_contract(
+        workflow_required_effects_contract
+    )
 
     summary: dict[str, Any] = {
         "schema_version": _WORKFLOW_EXECUTION_SUMMARY_SCHEMA_VERSION,
@@ -2178,6 +2373,12 @@ def _build_workflow_execution_summary(
         )
         summary["workflow_required_effects_declared_count"] = len(
             workflow_required_effects_contract.get("required_effects") or []
+        )
+        summary["workflow_required_effects_required_tools"] = list(
+            workflow_required_effects_required_tools
+        )
+        summary["workflow_required_effects_required_tool_count"] = len(
+            workflow_required_effects_required_tools
         )
         if workflow_required_effects_contract_source:
             summary["workflow_required_effects_contract_source"] = (
@@ -30135,6 +30336,18 @@ class InternalMCPChatOrchestrator:
                 ),
                 None,
             )
+
+            discovery_learning_payload = _workflow_discovery_selection_learning_payload(
+                workflow_discovery_result
+            )
+            required_evidence_learning_payload = (
+                _workflow_required_evidence_selection_learning_payload(result)
+            )
+            selector_timeout_recovery_applied = _selector_timeout_recovery_applied(
+                selector_override_entry
+                if isinstance(selector_override_entry, Mapping)
+                else None
+            )
             outcome_payload = {
                 "selected_workflow_id": (
                     routing_info.workflow_id
@@ -30175,6 +30388,11 @@ class InternalMCPChatOrchestrator:
                 "selector_override_applied": isinstance(
                     selector_override_entry, Mapping
                 ),
+                "selector_timeout_recovery_applied": (
+                    selector_timeout_recovery_applied
+                ),
+                **discovery_learning_payload,
+                **required_evidence_learning_payload,
             }
             if isinstance(selector_override_entry, Mapping):
                 outcome_payload["selector_override"] = selector_override_entry

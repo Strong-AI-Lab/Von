@@ -9320,7 +9320,9 @@ def _summarise_turn_execution_tool_invocations(
                 tool_name = value.strip()
                 break
         status = raw_entry.get("status")
-        status_text = status.strip() if isinstance(status, str) and status.strip() else None
+        status_text = (
+            status.strip() if isinstance(status, str) and status.strip() else None
+        )
 
         if tool_name is None and status_text is None:
             continue
@@ -9346,9 +9348,7 @@ def _extract_turn_execution_tool_invocation_summary(
 
     execution_raw = item.get("execution")
     execution = execution_raw if isinstance(execution_raw, Mapping) else {}
-    return _summarise_turn_execution_tool_invocations(
-        execution.get("tool_invocations")
-    )
+    return _summarise_turn_execution_tool_invocations(execution.get("tool_invocations"))
 
 
 def _extract_turn_execution_selector_intended_workflow_id(
@@ -9610,8 +9610,8 @@ def _build_turn_execution_follow_up_summary_by_request_id(
                 or not follow_up_request_id.strip()
             ):
                 continue
-            follow_up_tool_invocation_summary = _extract_turn_execution_tool_invocation_summary(
-                follow_up_item
+            follow_up_tool_invocation_summary = (
+                _extract_turn_execution_tool_invocation_summary(follow_up_item)
             )
             follow_up_weak_follow_up_action = _has_turn_execution_weak_follow_up_action(
                 follow_up_item
@@ -9650,7 +9650,8 @@ def _build_turn_execution_episode_evaluation_context(
     selected_workflow_id_raw = item.get("selected_workflow_id")
     selected_workflow_id = (
         selected_workflow_id_raw.strip()
-        if isinstance(selected_workflow_id_raw, str) and selected_workflow_id_raw.strip()
+        if isinstance(selected_workflow_id_raw, str)
+        and selected_workflow_id_raw.strip()
         else None
     )
     candidate_workflow_ids = {
@@ -9722,8 +9723,8 @@ def _build_turn_execution_replay_diagnosis_layers(
     *,
     episode_evaluation_context: Mapping[str, Any],
 ) -> dict[str, Any]:
-    selector_intended_workflow_id = _extract_turn_execution_selector_intended_workflow_id(
-        item
+    selector_intended_workflow_id = (
+        _extract_turn_execution_selector_intended_workflow_id(item)
     )
     dispatch_workflow_id = _extract_turn_execution_dispatch_workflow_id(item)
     tool_invocation_summary = _extract_turn_execution_tool_invocation_summary(item)
@@ -9872,8 +9873,8 @@ def _build_turn_execution_replay_case(
         else "unknown"
     )
     request_id = item.get("request_id")
-    selector_intended_workflow_id = _extract_turn_execution_selector_intended_workflow_id(
-        item
+    selector_intended_workflow_id = (
+        _extract_turn_execution_selector_intended_workflow_id(item)
     )
     dispatch_workflow_id = _extract_turn_execution_dispatch_workflow_id(item)
     tool_invocation_summary = _extract_turn_execution_tool_invocation_summary(item)
@@ -9927,6 +9928,42 @@ def _build_turn_execution_replay_case(
                 and bool(dispatch_workflow_id)
                 and selector_intended_workflow_id != dispatch_workflow_id
             ),
+            "workflow_discovery": {
+                "budget_exhausted": bool(
+                    item.get("workflow_discovery_budget_exhausted")
+                ),
+                "timeout_budget_seconds": item.get(
+                    "workflow_discovery_timeout_budget_seconds"
+                ),
+                "search_time_ms": item.get("workflow_discovery_search_time_ms"),
+                "match_absence_reason": item.get(
+                    "workflow_discovery_match_absence_reason"
+                ),
+                "candidate_count": item.get("workflow_discovery_candidate_count"),
+                "match_count": item.get("workflow_discovery_match_count"),
+            },
+            "required_evidence": {
+                "declared_effect_count": item.get(
+                    "workflow_required_effects_declared_count"
+                ),
+                "required_tools": (
+                    item.get("workflow_required_effects_required_tools")
+                    if isinstance(
+                        item.get("workflow_required_effects_required_tools"), list
+                    )
+                    else []
+                ),
+                "missing_required_tool_count": item.get(
+                    "required_evidence_tool_missing_count"
+                ),
+                "missing_required_tools": (
+                    item.get("required_evidence_tool_missing_names")
+                    if isinstance(
+                        item.get("required_evidence_tool_missing_names"), list
+                    )
+                    else []
+                ),
+            },
             "tool_invocation_summary": tool_invocation_summary,
             "weak_follow_up_action": _has_turn_execution_weak_follow_up_action(item),
             "follow_up": follow_up,
@@ -10113,6 +10150,8 @@ def _derive_turn_execution_capability_gaps(
     *,
     failure_mode_counts: Mapping[str, int],
     replay_diagnostic_metrics: Mapping[str, Any] | None = None,
+    workflow_discovery_metrics: Mapping[str, Any] | None = None,
+    required_evidence_metrics: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     gaps: list[dict[str, Any]] = []
 
@@ -10220,6 +10259,49 @@ def _derive_turn_execution_capability_gaps(
             }
         )
 
+    discovery_metrics = (
+        workflow_discovery_metrics
+        if isinstance(workflow_discovery_metrics, Mapping)
+        else {}
+    )
+    discovery_timeout_count = int(discovery_metrics.get("budget_exhausted_count") or 0)
+    if discovery_timeout_count > 0:
+        gaps.append(
+            {
+                "gap_id": "workflow_discovery_timeout_learning_candidates",
+                "title": "Workflow discovery timeout examples need policy learning",
+                "evidence_count": discovery_timeout_count,
+                "severity": "high",
+                "description": (
+                    "At least one turn exhausted the discovery budget. The benchmark "
+                    "now reports these as learning candidates so timeout-policy changes "
+                    "can be evaluated instead of silently treating the route as normal."
+                ),
+            }
+        )
+
+    evidence_metrics = (
+        required_evidence_metrics
+        if isinstance(required_evidence_metrics, Mapping)
+        else {}
+    )
+    missing_required_tool_count = int(
+        evidence_metrics.get("missing_required_tool_turn_count") or 0
+    )
+    if missing_required_tool_count > 0:
+        gaps.append(
+            {
+                "gap_id": "grounded_required_evidence_missing",
+                "title": "Grounded retrieval workflows missed required evidence tools",
+                "evidence_count": missing_required_tool_count,
+                "severity": "high",
+                "description": (
+                    "At least one workflow declared required grounded-evidence tools "
+                    "but the turn evidence shows not all of those tools ran."
+                ),
+            }
+        )
+
     replay_metrics = (
         replay_diagnostic_metrics
         if isinstance(replay_diagnostic_metrics, Mapping)
@@ -10299,6 +10381,75 @@ def _format_turn_execution_rate(numerator: int, denominator: int) -> float:
     return round((float(numerator) / float(denominator)) * 100.0, 2)
 
 
+def _safe_turn_execution_float_values(values: Sequence[Any]) -> list[float]:
+    numeric_values: list[float] = []
+    for value in values:
+        if isinstance(value, (int, float)):
+            numeric_values.append(float(value))
+    return numeric_values
+
+
+def _summarise_turn_execution_numeric_values(values: Sequence[Any]) -> dict[str, Any]:
+    numeric_values = _safe_turn_execution_float_values(values)
+    if not numeric_values:
+        return {"count": 0, "avg": None, "max": None}
+    return {
+        "count": len(numeric_values),
+        "avg": round(sum(numeric_values) / len(numeric_values), 3),
+        "max": round(max(numeric_values), 3),
+    }
+
+
+def _derive_workflow_discovery_timeout_policy_recommendation(
+    *,
+    timeout_count: int,
+    timeout_budget_values: Sequence[Any],
+    timeout_search_time_values: Sequence[Any],
+) -> dict[str, Any]:
+    budget_summary = _summarise_turn_execution_numeric_values(timeout_budget_values)
+    search_time_summary = _summarise_turn_execution_numeric_values(
+        timeout_search_time_values
+    )
+    if timeout_count <= 0:
+        return {
+            "action": "none",
+            "reason": "No workflow discovery timeout learning examples were present.",
+            "evidence_count": 0,
+        }
+
+    observed_budget_max = budget_summary.get("max")
+    suggested_min_timeout_seconds = None
+    if isinstance(observed_budget_max, (int, float)):
+        suggested_min_timeout_seconds = round(
+            min(
+                60.0,
+                max(float(observed_budget_max) * 2.0, float(observed_budget_max) + 5.0),
+            ),
+            3,
+        )
+
+    return {
+        "action": "review_and_raise_timeout_budget",
+        "authority_surface": (
+            "represented workflow-discovery timeout policy or "
+            "VON_WORKFLOW_DISCOVERY_TIMEOUT_SECONDS deployment setting"
+        ),
+        "reason": (
+            "At least one turn exhausted the workflow-discovery budget, so the "
+            "timeout should be reviewed through the represented policy/deployment "
+            "surface rather than learned as a successful selector completion."
+        ),
+        "evidence_count": timeout_count,
+        "timeout_budget_seconds": budget_summary,
+        "search_time_ms": search_time_summary,
+        "suggested_min_timeout_seconds": suggested_min_timeout_seconds,
+        "promotion_guardrail": (
+            "Apply only after replay confirms the longer budget improves candidate "
+            "discovery without masking downstream required-evidence failures."
+        ),
+    }
+
+
 def _build_turn_execution_benchmark_signals(
     *,
     metrics: Mapping[str, Any],
@@ -10346,6 +10497,18 @@ def _build_turn_execution_benchmark_signals(
     action_quality_metrics = (
         action_quality_metrics_raw
         if isinstance(action_quality_metrics_raw, Mapping)
+        else {}
+    )
+    workflow_discovery_metrics_raw = metrics.get("workflow_discovery_metrics")
+    workflow_discovery_metrics = (
+        workflow_discovery_metrics_raw
+        if isinstance(workflow_discovery_metrics_raw, Mapping)
+        else {}
+    )
+    required_evidence_metrics_raw = metrics.get("required_evidence_metrics")
+    required_evidence_metrics = (
+        required_evidence_metrics_raw
+        if isinstance(required_evidence_metrics_raw, Mapping)
         else {}
     )
     replay_diagnostic_metrics_raw = metrics.get("replay_diagnostic_metrics")
@@ -10432,7 +10595,9 @@ def _build_turn_execution_benchmark_signals(
     )
 
     weak_follow_up_with_divergence_count = int(
-        action_quality_metrics.get("weak_follow_up_with_selector_dispatch_divergence_count")
+        action_quality_metrics.get(
+            "weak_follow_up_with_selector_dispatch_divergence_count"
+        )
         or 0
     )
     weak_follow_up_request_ids_raw = action_quality_metrics.get(
@@ -10456,6 +10621,50 @@ def _build_turn_execution_benchmark_signals(
             "observed_case_count": weak_follow_up_with_divergence_count,
             "expected_case_count": 0,
             "request_ids": weak_follow_up_request_ids,
+        },
+    )
+
+    workflow_discovery_timeout_count = int(
+        workflow_discovery_metrics.get("budget_exhausted_count") or 0
+    )
+    _add_signal(
+        signal_id="workflow_discovery_timeouts_are_learning_visible",
+        dimension="workflow_discovery",
+        title="Workflow discovery timeout examples are visible to policy learning",
+        passed=workflow_discovery_timeout_count == 0,
+        details={
+            "budget_exhausted_count": workflow_discovery_timeout_count,
+            "budget_exhausted_rate_pct": workflow_discovery_metrics.get(
+                "budget_exhausted_rate_pct"
+            ),
+            "zero_candidate_timeout_count": workflow_discovery_metrics.get(
+                "zero_candidate_timeout_count"
+            ),
+            "timeout_false_success_count": workflow_discovery_metrics.get(
+                "timeout_false_success_count"
+            ),
+        },
+    )
+
+    missing_required_tool_turn_count = int(
+        required_evidence_metrics.get("missing_required_tool_turn_count") or 0
+    )
+    _add_signal(
+        signal_id="grounded_retrieval_required_tools_executed",
+        dimension="required_evidence",
+        title="Grounded retrieval workflows execute declared required evidence tools",
+        passed=missing_required_tool_turn_count == 0,
+        details={
+            "declared_required_evidence_turn_count": required_evidence_metrics.get(
+                "declared_required_evidence_turn_count"
+            ),
+            "missing_required_tool_turn_count": missing_required_tool_turn_count,
+            "missing_required_tool_rate_pct": required_evidence_metrics.get(
+                "missing_required_tool_rate_pct"
+            ),
+            "zero_required_tool_execution_count": required_evidence_metrics.get(
+                "zero_required_tool_execution_count"
+            ),
         },
     )
     selected_case_count = int(replay_diagnostic_metrics.get("selected_case_count") or 0)
@@ -10508,8 +10717,10 @@ def _build_turn_execution_benchmark_signals(
         replay_diagnostic_metrics.get("corrective_evidence_stronger_follow_up_count")
         or 0
     )
-    corrective_persistently_weak_follow_up_request_ids_raw = replay_diagnostic_metrics.get(
-        "corrective_evidence_persistently_weak_follow_up_request_ids"
+    corrective_persistently_weak_follow_up_request_ids_raw = (
+        replay_diagnostic_metrics.get(
+            "corrective_evidence_persistently_weak_follow_up_request_ids"
+        )
     )
     corrective_persistently_weak_follow_up_request_ids = (
         [
@@ -10579,6 +10790,8 @@ _TURN_EXECUTION_OUTCOME_LABEL_NAMES: tuple[str, ...] = (
     "unresolved_follow_up_needed",
     "tool_or_workflow_misrouting",
     "abstain_escalate_no_safe_route",
+    "workflow_discovery_timeout",
+    "required_evidence_missing",
 )
 
 
@@ -11335,9 +11548,7 @@ def _turn_execution_build_benchmark(**kwargs):
     selected_cases = likely_items[:max_cases]
     request_ids_for_critique_lookup = [
         request_id.strip()
-        for request_id in (
-            item.get("request_id") for item in selected_cases
-        )
+        for request_id in (item.get("request_id") for item in selected_cases)
         if isinstance(request_id, str) and request_id.strip()
     ]
     episode_critique_lookup = _build_turn_execution_episode_critique_lookup(
@@ -11345,8 +11556,8 @@ def _turn_execution_build_benchmark(**kwargs):
         namespace=kwargs.get("namespace"),
         request_ids=request_ids_for_critique_lookup,
     )
-    follow_up_summary_by_request_id = _build_turn_execution_follow_up_summary_by_request_id(
-        likely_items
+    follow_up_summary_by_request_id = (
+        _build_turn_execution_follow_up_summary_by_request_id(likely_items)
     )
 
     jira_base_url = _normalise_turn_execution_jira_base_url(kwargs.get("jira_base_url"))
@@ -11365,7 +11576,9 @@ def _turn_execution_build_benchmark(**kwargs):
                 index=idx,
                 jira_base_url=jira_base_url,
                 follow_up_context=(
-                    follow_up_summary_by_request_id.get(request_id, {"available": False})
+                    follow_up_summary_by_request_id.get(
+                        request_id, {"available": False}
+                    )
                     if request_id
                     else {"available": False}
                 ),
@@ -11426,7 +11639,9 @@ def _turn_execution_build_benchmark(**kwargs):
             action_layer_diagnosable_count += 1
         if replay_diagnostic_candidate and bool(telemetry_layer.get("diagnosable")):
             telemetry_sufficient_case_count += 1
-        if replay_diagnostic_candidate and bool(episode_evaluation_layer.get("diagnosable")):
+        if replay_diagnostic_candidate and bool(
+            episode_evaluation_layer.get("diagnosable")
+        ):
             episode_evaluation_available_count += 1
         if replay_diagnostic_candidate and bool(
             episode_evaluation_layer.get("useful_suggestion_present")
@@ -11468,6 +11683,54 @@ def _turn_execution_build_benchmark(**kwargs):
         for item in sorted_items
         if item.get("failure_mode")
         in {"false_completion_claim", "false_completion_gate_state"}
+    )
+    workflow_discovery_timeout_items = [
+        item
+        for item in sorted_items
+        if bool(item.get("workflow_discovery_budget_exhausted"))
+    ]
+    workflow_discovery_timeout_count = len(workflow_discovery_timeout_items)
+    workflow_discovery_timeout_false_success_count = sum(
+        1
+        for item in workflow_discovery_timeout_items
+        if item.get("failure_mode")
+        in {"false_completion_claim", "false_completion_gate_state"}
+    )
+    workflow_discovery_zero_candidate_timeout_count = sum(
+        1
+        for item in workflow_discovery_timeout_items
+        if int(item.get("workflow_discovery_candidate_count") or 0) <= 0
+        and int(item.get("workflow_discovery_match_count") or 0) <= 0
+    )
+    required_evidence_declared_items = [
+        item
+        for item in sorted_items
+        if int(item.get("workflow_required_effects_declared_count") or 0) > 0
+        or bool(item.get("workflow_required_effects_required_tools"))
+    ]
+    required_evidence_missing_items = [
+        item
+        for item in required_evidence_declared_items
+        if int(item.get("required_evidence_tool_missing_count") or 0) > 0
+    ]
+    required_evidence_zero_tool_execution_count = sum(
+        1
+        for item in required_evidence_declared_items
+        if bool(item.get("workflow_required_effects_required_tools"))
+        and not bool(item.get("tool_invocation_summary"))
+    )
+    workflow_discovery_timeout_policy_recommendation = (
+        _derive_workflow_discovery_timeout_policy_recommendation(
+            timeout_count=workflow_discovery_timeout_count,
+            timeout_budget_values=[
+                item.get("workflow_discovery_timeout_budget_seconds")
+                for item in workflow_discovery_timeout_items
+            ],
+            timeout_search_time_values=[
+                item.get("workflow_discovery_search_time_ms")
+                for item in workflow_discovery_timeout_items
+            ],
+        )
     )
     unresolved_follow_up_count = sum(
         1 for item in sorted_items if bool(item.get("requires_follow_up", False))
@@ -11613,6 +11876,43 @@ def _turn_execution_build_benchmark(**kwargs):
                 likely_failure_tool_workflow_count, likely_failure_count
             ),
         },
+        "workflow_discovery_metrics": {
+            "budget_exhausted_count": workflow_discovery_timeout_count,
+            "budget_exhausted_rate_pct": _format_turn_execution_rate(
+                workflow_discovery_timeout_count, scanned_count
+            ),
+            "zero_candidate_timeout_count": (
+                workflow_discovery_zero_candidate_timeout_count
+            ),
+            "timeout_false_success_count": (
+                workflow_discovery_timeout_false_success_count
+            ),
+            "timeout_budget_seconds": _summarise_turn_execution_numeric_values(
+                [
+                    item.get("workflow_discovery_timeout_budget_seconds")
+                    for item in workflow_discovery_timeout_items
+                ]
+            ),
+            "timeout_search_time_ms": _summarise_turn_execution_numeric_values(
+                [
+                    item.get("workflow_discovery_search_time_ms")
+                    for item in workflow_discovery_timeout_items
+                ]
+            ),
+        },
+        "required_evidence_metrics": {
+            "declared_required_evidence_turn_count": len(
+                required_evidence_declared_items
+            ),
+            "missing_required_tool_turn_count": len(required_evidence_missing_items),
+            "missing_required_tool_rate_pct": _format_turn_execution_rate(
+                len(required_evidence_missing_items),
+                len(required_evidence_declared_items),
+            ),
+            "zero_required_tool_execution_count": (
+                required_evidence_zero_tool_execution_count
+            ),
+        },
         "action_quality_metrics": {
             "selector_dispatch_divergence_count": selector_dispatch_divergence_count,
             "selector_dispatch_divergence_rate_pct": _format_turn_execution_rate(
@@ -11652,7 +11952,9 @@ def _turn_execution_build_benchmark(**kwargs):
                 corrective_evidence_stronger_follow_up_count
             ),
             "corrective_evidence_persistently_weak_follow_up_request_ids": list(
-                dict.fromkeys(corrective_evidence_persistently_weak_follow_up_request_ids)
+                dict.fromkeys(
+                    corrective_evidence_persistently_weak_follow_up_request_ids
+                )
             )[:10],
         },
         "gate_metrics": {
@@ -11737,6 +12039,8 @@ def _turn_execution_build_benchmark(**kwargs):
         sorted_items,
         failure_mode_counts=failure_mode_counts,
         replay_diagnostic_metrics=metrics_payload.get("replay_diagnostic_metrics"),
+        workflow_discovery_metrics=metrics_payload.get("workflow_discovery_metrics"),
+        required_evidence_metrics=metrics_payload.get("required_evidence_metrics"),
     )
     if not bool(imposition_assessment.get("success")):
         capability_gaps.append(
@@ -11777,6 +12081,18 @@ def _turn_execution_build_benchmark(**kwargs):
         if isinstance(recommendations_raw, list)
         else list(_derive_turn_execution_failure_recommendations(failure_mode_counts))
     )
+    if workflow_discovery_timeout_count > 0:
+        recommendations.append(
+            "Review workflow-discovery timeout policy using the benchmark timeout "
+            "learning payload before treating selector timeout recoveries as normal "
+            "successful completions."
+        )
+    if required_evidence_missing_items:
+        recommendations.append(
+            "Treat grounded-retrieval workflow completions that miss declared "
+            "required evidence tools as negative learning examples for selector and "
+            "workflow policy."
+        )
     imposition_recommendations = imposition_assessment.get("recommendations")
     if isinstance(imposition_recommendations, list):
         recommendations.extend(imposition_recommendations)
@@ -11798,6 +12114,9 @@ def _turn_execution_build_benchmark(**kwargs):
         "regression_assessment": regression_assessment,
         "benchmark_signals": benchmark_signals,
         "benchmark_signal_summary": benchmark_signal_summary,
+        "workflow_discovery_timeout_policy_recommendation": (
+            workflow_discovery_timeout_policy_recommendation
+        ),
         "imposition_assessment": imposition_assessment,
         "capability_gaps": capability_gaps,
         "recommendations": recommendations,
@@ -13445,9 +13764,7 @@ def _build_related_concepts_graph_fallback(
     ) -> str:
         preferred_row = preferred_name_rows.get(resolved_concept_id)
         preferred_text = (
-            preferred_row.get("text")
-            if isinstance(preferred_row, Mapping)
-            else None
+            preferred_row.get("text") if isinstance(preferred_row, Mapping) else None
         )
         if isinstance(preferred_text, str) and preferred_text.strip():
             return preferred_text.strip()
@@ -13504,7 +13821,9 @@ def _build_related_concepts_graph_fallback(
         )
         related_name = _display_name(related_concept_id, None)
         predicate_id = relation["predicate_id"]
-        predicate_label = predicate_id.replace("#V#", "") if predicate_id else "related_to"
+        predicate_label = (
+            predicate_id.replace("#V#", "") if predicate_id else "related_to"
+        )
         if relation["direction"] == "outgoing":
             relation_text = (
                 f"{subject_name} has relation {predicate_label} with {related_name}."
@@ -17854,6 +18173,9 @@ def _rag_list_indexed(**kwargs):
                     "completion_gate": 1,
                     "required_effects": 1,
                     "workflow_selection": 1,
+                    "workflow_routing_diagnostics": 1,
+                    "execution": 1,
+                    "execution_correctness": 1,
                     "prompt": 1,
                     "critic": 1,
                     "final_response": 1,
@@ -17951,19 +18273,41 @@ def _rag_list_indexed(**kwargs):
                 if isinstance(final_response_payload_raw, dict)
                 else {}
             )
-            execution_correctness_raw = doc.get("execution_correctness")
-            execution_correctness: dict[str, Any] = (
-                dict(execution_correctness_raw)
-                if isinstance(execution_correctness_raw, dict)
-                else build_turn_execution_correctness_summary(
-                    completion_gate=completion_gate,
-                    required_effects=required_effects,
-                    critic_summary=critic_summary,
-                    final_response=final_response_payload,
-                    workflow_selection=workflow_selection,
-                    workflow_routing_diagnostics=workflow_routing_diagnostics,
-                )
+            current_execution_correctness = build_turn_execution_correctness_summary(
+                completion_gate=completion_gate,
+                required_effects=required_effects,
+                critic_summary=critic_summary,
+                final_response=final_response_payload,
+                workflow_selection=workflow_selection,
+                workflow_routing_diagnostics=workflow_routing_diagnostics,
             )
+            execution_correctness_raw = doc.get("execution_correctness")
+            if isinstance(execution_correctness_raw, dict):
+                execution_correctness: dict[str, Any] = dict(execution_correctness_raw)
+                existing_labels_raw = execution_correctness.get("metric_labels")
+                existing_labels = (
+                    dict(existing_labels_raw)
+                    if isinstance(existing_labels_raw, Mapping)
+                    else {}
+                )
+                current_labels = current_execution_correctness.get("metric_labels")
+                if isinstance(current_labels, Mapping):
+                    for label_name, label_value in current_labels.items():
+                        existing_labels.setdefault(label_name, label_value)
+                execution_correctness["metric_labels"] = existing_labels
+                existing_counts_raw = execution_correctness.get("evidence_counts")
+                existing_counts = (
+                    dict(existing_counts_raw)
+                    if isinstance(existing_counts_raw, Mapping)
+                    else {}
+                )
+                current_counts = current_execution_correctness.get("evidence_counts")
+                if isinstance(current_counts, Mapping):
+                    for count_name, count_value in current_counts.items():
+                        existing_counts.setdefault(count_name, count_value)
+                execution_correctness["evidence_counts"] = existing_counts
+            else:
+                execution_correctness = current_execution_correctness
             blocking_effect_ids_raw = completion_gate.get("blocking_effect_ids")
             blocking_effect_ids: list[str] = []
             if isinstance(blocking_effect_ids_raw, list):
@@ -18010,14 +18354,52 @@ def _rag_list_indexed(**kwargs):
                 state_by_chat_session_id=rag_indexing_state_map,
                 lookup_warning=rag_indexing_lookup_warning,
             )
-            execution_payload = (
-                doc.get("execution") if isinstance(doc.get("execution"), dict) else {}
+            execution_payload_raw = doc.get("execution")
+            execution_payload: Mapping[str, Any] = (
+                execution_payload_raw
+                if isinstance(execution_payload_raw, Mapping)
+                else {}
             )
-            tool_invocations = (
-                execution_payload.get("tool_invocations")
-                if isinstance(execution_payload, Mapping)
-                else None
+            execution_summary_raw = execution_payload.get("summary")
+            execution_summary: Mapping[str, Any] = (
+                execution_summary_raw
+                if isinstance(execution_summary_raw, Mapping)
+                else {}
             )
+            tool_invocations = execution_payload.get("tool_invocations")
+            discovery_payload_raw = workflow_routing_diagnostics.get("discovery")
+            discovery_payload: Mapping[str, Any] = (
+                discovery_payload_raw
+                if isinstance(discovery_payload_raw, Mapping)
+                else {}
+            )
+            discovery_budget_exhausted = bool(
+                discovery_payload.get("budget_exhausted")
+            ) or (
+                str(discovery_payload.get("match_absence_reason") or "").strip().lower()
+                == "workflow_discovery_budget_exhausted"
+            )
+            required_tools_raw = execution_summary.get(
+                "workflow_required_effects_required_tools"
+            )
+            required_tools = [
+                str(item).strip()
+                for item in (required_tools_raw or [])
+                if isinstance(item, str) and str(item).strip()
+            ]
+            invoked_tools = [
+                str(entry.get("tool")).strip()
+                for entry in _summarise_turn_execution_tool_invocations(
+                    tool_invocations
+                )
+                if isinstance(entry, Mapping)
+                and isinstance(entry.get("tool"), str)
+                and str(entry.get("tool")).strip()
+            ]
+            invoked_tool_set = {tool.lower() for tool in invoked_tools}
+            missing_required_tools = [
+                tool for tool in required_tools if tool.lower() not in invoked_tool_set
+            ]
 
             items.append(
                 {
@@ -18040,6 +18422,30 @@ def _rag_list_indexed(**kwargs):
                     ),
                     "selector_verdict": workflow_selection.get("selector_verdict"),
                     "workflow_routing_diagnostics": workflow_routing_diagnostics,
+                    "workflow_discovery_budget_exhausted": discovery_budget_exhausted,
+                    "workflow_discovery_timeout_budget_seconds": discovery_payload.get(
+                        "timeout_budget_seconds"
+                    ),
+                    "workflow_discovery_search_time_ms": discovery_payload.get(
+                        "search_time_ms"
+                    ),
+                    "workflow_discovery_match_absence_reason": discovery_payload.get(
+                        "match_absence_reason"
+                    ),
+                    "workflow_discovery_candidate_count": discovery_payload.get(
+                        "candidate_count"
+                    ),
+                    "workflow_discovery_match_count": discovery_payload.get(
+                        "match_count"
+                    ),
+                    "workflow_required_effects_declared_count": (
+                        execution_summary.get(
+                            "workflow_required_effects_declared_count"
+                        )
+                    ),
+                    "workflow_required_effects_required_tools": required_tools,
+                    "required_evidence_tool_missing_count": len(missing_required_tools),
+                    "required_evidence_tool_missing_names": missing_required_tools,
                     "prompt_preview": prompt_payload.get("preview"),
                     "completion_claim_detected": final_response_payload.get(
                         "completion_claim_detected"
@@ -18746,19 +19152,41 @@ def _rag_get_item(**kwargs):
             if isinstance(doc.get("final_response"), dict)
             else {}
         )
-        execution_correctness_raw = doc.get("execution_correctness")
-        execution_correctness = (
-            dict(execution_correctness_raw)
-            if isinstance(execution_correctness_raw, dict)
-            else build_turn_execution_correctness_summary(
-                completion_gate=completion_gate,
-                required_effects=required_effects,
-                critic_summary=critic_summary,
-                final_response=final_response_payload,
-                workflow_selection=workflow_selection,
-                workflow_routing_diagnostics=workflow_routing_diagnostics,
-            )
+        current_execution_correctness = build_turn_execution_correctness_summary(
+            completion_gate=completion_gate,
+            required_effects=required_effects,
+            critic_summary=critic_summary,
+            final_response=final_response_payload,
+            workflow_selection=workflow_selection,
+            workflow_routing_diagnostics=workflow_routing_diagnostics,
         )
+        execution_correctness_raw = doc.get("execution_correctness")
+        if isinstance(execution_correctness_raw, dict):
+            execution_correctness = dict(execution_correctness_raw)
+            existing_labels_raw = execution_correctness.get("metric_labels")
+            existing_labels = (
+                dict(existing_labels_raw)
+                if isinstance(existing_labels_raw, Mapping)
+                else {}
+            )
+            current_labels = current_execution_correctness.get("metric_labels")
+            if isinstance(current_labels, Mapping):
+                for label_name, label_value in current_labels.items():
+                    existing_labels.setdefault(label_name, label_value)
+            execution_correctness["metric_labels"] = existing_labels
+            existing_counts_raw = execution_correctness.get("evidence_counts")
+            existing_counts = (
+                dict(existing_counts_raw)
+                if isinstance(existing_counts_raw, Mapping)
+                else {}
+            )
+            current_counts = current_execution_correctness.get("evidence_counts")
+            if isinstance(current_counts, Mapping):
+                for count_name, count_value in current_counts.items():
+                    existing_counts.setdefault(count_name, count_value)
+            execution_correctness["evidence_counts"] = existing_counts
+        else:
+            execution_correctness = current_execution_correctness
         rag_indexing_state_map, rag_indexing_lookup_warning = (
             _load_turn_execution_rag_indexing_state_map(
                 db=db,
@@ -18775,14 +19203,44 @@ def _rag_get_item(**kwargs):
             state_by_chat_session_id=rag_indexing_state_map,
             lookup_warning=rag_indexing_lookup_warning,
         )
-        execution_payload = (
-            doc.get("execution") if isinstance(doc.get("execution"), dict) else {}
+        execution_payload_raw = doc.get("execution")
+        execution_payload: Mapping[str, Any] = (
+            execution_payload_raw if isinstance(execution_payload_raw, Mapping) else {}
         )
-        tool_invocations = (
-            execution_payload.get("tool_invocations")
-            if isinstance(execution_payload, Mapping)
-            else None
+        execution_summary_raw = execution_payload.get("summary")
+        execution_summary: Mapping[str, Any] = (
+            execution_summary_raw if isinstance(execution_summary_raw, Mapping) else {}
         )
+        tool_invocations = execution_payload.get("tool_invocations")
+        discovery_payload_raw = workflow_routing_diagnostics.get("discovery")
+        discovery_payload: Mapping[str, Any] = (
+            discovery_payload_raw if isinstance(discovery_payload_raw, Mapping) else {}
+        )
+        discovery_budget_exhausted = bool(
+            discovery_payload.get("budget_exhausted")
+        ) or (
+            str(discovery_payload.get("match_absence_reason") or "").strip().lower()
+            == "workflow_discovery_budget_exhausted"
+        )
+        required_tools_raw = execution_summary.get(
+            "workflow_required_effects_required_tools"
+        )
+        required_tools = [
+            str(item).strip()
+            for item in (required_tools_raw or [])
+            if isinstance(item, str) and str(item).strip()
+        ]
+        invoked_tools = [
+            str(entry.get("tool")).strip()
+            for entry in _summarise_turn_execution_tool_invocations(tool_invocations)
+            if isinstance(entry, Mapping)
+            and isinstance(entry.get("tool"), str)
+            and str(entry.get("tool")).strip()
+        ]
+        invoked_tool_set = {tool.lower() for tool in invoked_tools}
+        missing_required_tools = [
+            tool for tool in required_tools if tool.lower() not in invoked_tool_set
+        ]
 
         payload = {
             "collection": collection,
@@ -18805,6 +19263,22 @@ def _rag_get_item(**kwargs):
             "metric_labels": execution_correctness.get("metric_labels"),
             "execution_correctness": execution_correctness,
             "workflow_routing_diagnostics": workflow_routing_diagnostics,
+            "workflow_discovery_budget_exhausted": discovery_budget_exhausted,
+            "workflow_discovery_timeout_budget_seconds": discovery_payload.get(
+                "timeout_budget_seconds"
+            ),
+            "workflow_discovery_search_time_ms": discovery_payload.get(
+                "search_time_ms"
+            ),
+            "workflow_discovery_match_absence_reason": discovery_payload.get(
+                "match_absence_reason"
+            ),
+            "workflow_required_effects_declared_count": execution_summary.get(
+                "workflow_required_effects_declared_count"
+            ),
+            "workflow_required_effects_required_tools": required_tools,
+            "required_evidence_tool_missing_count": len(missing_required_tools),
+            "required_evidence_tool_missing_names": missing_required_tools,
             "prompt_preview": prompt_payload.get("preview"),
             "tool_invocation_summary": _summarise_turn_execution_tool_invocations(
                 tool_invocations
@@ -20886,7 +21360,10 @@ def _jira_issue_type_record_matches(
         return False
 
     issue_type_id = record.get("id")
-    if isinstance(issue_type_id, (str, int)) and str(issue_type_id).strip() == requested:
+    if (
+        isinstance(issue_type_id, (str, int))
+        and str(issue_type_id).strip() == requested
+    ):
         return True
 
     issue_type_name = record.get("name")
@@ -20909,7 +21386,10 @@ def _jira_resolve_issue_type_record(
     if isinstance(requested_issue_type, str) and requested_issue_type.strip():
         for record in records:
             if _jira_issue_type_record_matches(record, requested_issue_type):
-                if require_subtask is None or bool(record.get("subtask")) is require_subtask:
+                if (
+                    require_subtask is None
+                    or bool(record.get("subtask")) is require_subtask
+                ):
                     return record
         return None
 
@@ -21201,8 +21681,7 @@ def _jira_move_issue(**kwargs):
             subtask_names = [
                 str(record.get("name")).strip()
                 for record in _jira_issue_type_records(target_issue_type_context)
-                if bool(record.get("subtask"))
-                and str(record.get("name") or "").strip()
+                if bool(record.get("subtask")) and str(record.get("name") or "").strip()
             ]
             return make_error_response(
                 "jira_move_target_issue_type_ambiguous",
@@ -21290,9 +21769,7 @@ def _jira_move_issue(**kwargs):
         "issueIdsOrKeys": [issue_key_norm],
         "inferFieldDefaults": bool(kwargs.get("infer_field_defaults", True)),
         "inferStatusDefaults": bool(kwargs.get("infer_status_defaults", True)),
-        "inferSubtaskTypeDefault": bool(
-            kwargs.get("infer_subtask_type_default", True)
-        ),
+        "inferSubtaskTypeDefault": bool(kwargs.get("infer_subtask_type_default", True)),
     }
     target_mandatory_fields = kwargs.get("target_mandatory_fields")
     if isinstance(target_mandatory_fields, list) and target_mandatory_fields:
@@ -23270,7 +23747,9 @@ async def _embed_jira_attachment_content(
                     if attachment_payload.get("success") is True:
                         content_base64 = attachment_payload.get("content_base64")
                         if isinstance(content_base64, str) and content_base64.strip():
-                            hydrated_attachment["content_base64"] = content_base64.strip()
+                            hydrated_attachment["content_base64"] = (
+                                content_base64.strip()
+                            )
                     else:
                         fetch_errors.append(
                             {
@@ -24784,7 +25263,9 @@ def _resolve_chat_history_read_target(
 
     history_location_ref = payload.get("history_location_ref")
     if history_location_ref is not None:
-        verified_history_location = verify_history_location_binding(history_location_ref)
+        verified_history_location = verify_history_location_binding(
+            history_location_ref
+        )
         if not verified_history_location.get("success"):
             return _binding_error_result(
                 message=str(verified_history_location.get("error_message")),
@@ -25077,9 +25558,7 @@ def _resolve_chat_history_read_target(
             "requested_namespace": namespace,
             "resolved_history_owner_user_id": read_user_id,
             "resolved_read_namespace": read_namespace,
-            "access_mode": "owner"
-            if read_user_id == user_concept_id
-            else "delegated",
+            "access_mode": "owner" if read_user_id == user_concept_id else "delegated",
         },
     }
 
@@ -26772,7 +27251,9 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
     return definitions
 
 
-def _build_default_catalogue_external_integration_definitions() -> List[MethodDefinition]:
+def _build_default_catalogue_external_integration_definitions() -> (
+    List[MethodDefinition]
+):
     jira_search_output_schema = _jira_generic_output_schema("search")
     jira_get_issue_output_schema = _jira_generic_output_schema("get_issue")
     jira_get_project_issue_types_output_schema = (
@@ -27265,7 +27746,9 @@ def _build_default_catalogue_external_integration_definitions() -> List[MethodDe
     return definitions
 
 
-def _build_default_catalogue_diagnostics_and_research_definitions() -> List[MethodDefinition]:
+def _build_default_catalogue_diagnostics_and_research_definitions() -> (
+    List[MethodDefinition]
+):
     definitions: List[MethodDefinition] = [
         MethodDefinition(
             name="rag_get_status",
@@ -30131,4 +30614,3 @@ def build_default_catalogue() -> MethodCatalogue:
     )
 
     return catalogue
-

@@ -56,6 +56,7 @@ DEFAULT_RELEVANCE_THRESHOLD = 0.70
 # Maximum workflows to return
 DEFAULT_MAX_RESULTS = 3
 
+
 # Search timeout in seconds
 def _coerce_discovery_timeout_seconds(value: Any, *, default: float) -> float:
     try:
@@ -84,12 +85,8 @@ EXECUTABILITY_NON_EXECUTABLE_DESIGN_ARTIFACT = "non_executable_design_artifact"
 EXECUTABILITY_DRAFT_NOT_PUBLISHED = "draft_not_published"
 EXECUTABILITY_WORKFLOW_STEP_INTEGRITY = "workflow_step_integrity_issue"
 EXECUTABILITY_WORKFLOW_STEP_PARTIALLY_VACUOUS = "workflow_step_partially_vacuous"
-EXECUTABILITY_WORKFLOW_STEP_COMPLETELY_VACUOUS = (
-    "workflow_step_completely_vacuous"
-)
-ROUTING_EXCLUSION_MISSING_AUTHORITATIVE_PURPOSE = (
-    "missing_authoritative_purpose"
-)
+EXECUTABILITY_WORKFLOW_STEP_COMPLETELY_VACUOUS = "workflow_step_completely_vacuous"
+ROUTING_EXCLUSION_MISSING_AUTHORITATIVE_PURPOSE = "missing_authoritative_purpose"
 ROUTING_EXCLUSION_EXPLICITLY_DISABLED = "routing_explicitly_disabled"
 
 _EXECUTABILITY_REASON_PRIORITY = {
@@ -122,7 +119,9 @@ def _run_with_search_timeout(
     operation: Callable[[], Any],
 ) -> Any:
     if timeout_seconds <= 0.0:
-        raise TimeoutError(f"{label} exceeded discovery timeout budget before it started")
+        raise TimeoutError(
+            f"{label} exceeded discovery timeout budget before it started"
+        )
 
     state: dict[str, object] = {}
     completed = threading.Event()
@@ -317,7 +316,9 @@ class WorkflowDiscoveryResult:
         # Backward compatibility: if routing_matches is omitted by callers/tests,
         # treat candidates as routing matches.
         routing_source = (
-            self.routing_matches if isinstance(self.routing_matches, list) else self.matches
+            self.routing_matches
+            if isinstance(self.routing_matches, list)
+            else self.matches
         )
         routing_payload = [m.to_dict() for m in routing_source]
         return {
@@ -550,16 +551,16 @@ def _derive_discovery_result_match_absence_reason(
     return "no_routing_match_above_threshold"
 
 
-def _resolve_query_file_copy_contexts(query: str) -> tuple[list[dict[str, Any]], list[str]]:
+def _resolve_query_file_copy_contexts(
+    query: str,
+) -> tuple[list[dict[str, Any]], list[str]]:
     contexts: list[dict[str, Any]] = []
     errors: list[str] = []
     for concept_id in extract_file_copy_concept_ids_from_text(query):
         try:
             context = build_file_copy_typing_context(file_copy_concept_id=concept_id)
         except Exception as exc:
-            errors.append(
-                f"file_copy_context_error:{concept_id}:{type(exc).__name__}"
-            )
+            errors.append(f"file_copy_context_error:{concept_id}:{type(exc).__name__}")
             continue
         if isinstance(context, Mapping):
             contexts.append(dict(context))
@@ -629,8 +630,9 @@ def _enrich_workflow_matches(matches: List[WorkflowMatch]) -> List[WorkflowMatch
             authoritative_description = authoritative_descriptions.get(match.concept_id)
             if concept_doc:
                 if not match.description:
-                    match.description = authoritative_description or _get_workflow_description(
-                        concept_doc
+                    match.description = (
+                        authoritative_description
+                        or _get_workflow_description(concept_doc)
                     )
                 if match.name == "Unknown":
                     match.name = _get_workflow_name(concept_doc)
@@ -730,7 +732,9 @@ def _classify_workflow_concept_executability(
             isinstance(publication_lifecycle, Mapping)
             and publication_lifecycle.get("published") is False
         ):
-            phase = str(publication_lifecycle.get("phase") or "draft").strip() or "draft"
+            phase = (
+                str(publication_lifecycle.get("phase") or "draft").strip() or "draft"
+            )
             detail = f"workflow_not_published:phase={phase}"
             if (
                 isinstance(publication_lifecycle_source, str)
@@ -775,7 +779,9 @@ def _classify_workflow_concept_executability(
             return (True, EXECUTABILITY_EXECUTABLE_NOW, None)
 
         if isinstance(graph, dict):
-            detail = warning_items[0] if warning_items else "workflow_graph_not_loadable"
+            detail = (
+                warning_items[0] if warning_items else "workflow_graph_not_loadable"
+            )
             return (False, EXECUTABILITY_GRAPH_INCOMPLETE, detail)
 
         if "workflow_has_no_steps" in warning_items:
@@ -921,8 +927,8 @@ def _annotate_and_rank_candidates(
             workflow_registry=workflow_registry,
         )
         has_authoritative_text = _has_authoritative_routing_text(match.concept_id)
-        routing_profile, _routing_profile_source = _resolve_workflow_routing_profile_data(
-            match.concept_id
+        routing_profile, _routing_profile_source = (
+            _resolve_workflow_routing_profile_data(match.concept_id)
         )
         publication_lifecycle, _publication_lifecycle_source = (
             _resolve_workflow_publication_lifecycle_data(match.concept_id)
@@ -1301,6 +1307,9 @@ def discover_workflows(
         record_workflow_discovery_observation(
             discovered_match_count=len(ranked_matches),
             executable_match_count=executable_match_count,
+            budget_exhausted=budget_exhausted,
+            budget_exhaustion_stage=budget_exhaustion_stage,
+            timeout_budget_seconds=effective_timeout_seconds,
         )
     except Exception:
         pass
@@ -1391,6 +1400,22 @@ def discover_workflows_for_turn(
     except Exception as e:
         logger.warning(f"Workflow discovery for turn failed: {e}")
         budget_exhausted = _is_discovery_budget_timeout(e)
+        try:
+            from ..workflows.workflow_baseline_telemetry import (
+                record_workflow_discovery_observation,
+            )
+
+            record_workflow_discovery_observation(
+                discovered_match_count=0,
+                executable_match_count=0,
+                budget_exhausted=budget_exhausted,
+                budget_exhaustion_stage=(
+                    "workflow_discovery_for_turn" if budget_exhausted else None
+                ),
+                timeout_budget_seconds=effective_timeout_seconds,
+            )
+        except Exception:
+            pass
         return WorkflowDiscoveryResult(
             query=user_input.strip(),
             requested_query=user_input.strip(),

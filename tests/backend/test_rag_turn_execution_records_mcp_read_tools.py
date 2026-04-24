@@ -55,7 +55,10 @@ class _TurnExecutionCollection:
 
         requires_follow_up = query.get("completion_gate.requires_follow_up")
         if isinstance(requires_follow_up, bool):
-            if bool((doc.get("completion_gate") or {}).get("requires_follow_up")) != requires_follow_up:
+            if (
+                bool((doc.get("completion_gate") or {}).get("requires_follow_up"))
+                != requires_follow_up
+            ):
                 return False
 
         prompt_filter = query.get("prompt.preview")
@@ -95,7 +98,9 @@ class _TurnExecutionCollection:
         docs = [doc for doc in self._docs if self._matches(doc, query)]
         return _Cursor(docs)
 
-    def find_one(self, query: dict[str, Any], _projection: dict[str, Any] | None = None):
+    def find_one(
+        self, query: dict[str, Any], _projection: dict[str, Any] | None = None
+    ):
         for doc in self.find(query, _projection):
             return doc
         return None
@@ -138,7 +143,10 @@ class _EpisodeCritiqueCollection:
                 return False
 
         workflow_filter = query.get("workflow_id")
-        if isinstance(workflow_filter, str) and doc.get("workflow_id") != workflow_filter:
+        if (
+            isinstance(workflow_filter, str)
+            and doc.get("workflow_id") != workflow_filter
+        ):
             return False
 
         episode_filter = query.get("episode_id")
@@ -237,7 +245,9 @@ class _DiagnosticsChatHistoryCollection:
             if isinstance(history_filter, dict)
             else None
         )
-        requested_role = elem_match.get("role") if isinstance(elem_match, dict) else None
+        requested_role = (
+            elem_match.get("role") if isinstance(elem_match, dict) else None
+        )
         requested_request_id = (
             elem_match.get("llm_debug_data.request_id")
             if isinstance(elem_match, dict)
@@ -252,13 +262,14 @@ class _DiagnosticsChatHistoryCollection:
             for entry in doc.get("history") or []:
                 if not isinstance(entry, dict):
                     continue
-                if isinstance(requested_role, str) and entry.get("role") != requested_role:
+                if (
+                    isinstance(requested_role, str)
+                    and entry.get("role") != requested_role
+                ):
                     continue
                 llm_debug = entry.get("llm_debug_data")
                 debug_request_id = (
-                    llm_debug.get("request_id")
-                    if isinstance(llm_debug, dict)
-                    else None
+                    llm_debug.get("request_id") if isinstance(llm_debug, dict) else None
                 )
                 if (
                     isinstance(requested_request_id, str)
@@ -365,7 +376,10 @@ def _install_minimal_imposition_profile_loader(monkeypatch) -> None:
     }
     monkeypatch.setattr(
         "src.backend.services.minimal_imposition_benchmark_service.load_minimal_imposition_benchmark_profile",
-        lambda **_: (profile, {"loaded_profile_concept_id": profile["profile_concept_id"]}),
+        lambda **_: (
+            profile,
+            {"loaded_profile_concept_id": profile["profile_concept_id"]},
+        ),
     )
 
 
@@ -904,9 +918,10 @@ def test_rag_list_indexed_supports_turn_execution_records(monkeypatch):
     assert item["unresolved_effect_count"] == 1
     assert item["overall_outcome"] == "unresolved_follow_up_needed"
     assert item["failure_mode"] == "mutation_not_executed"
-    assert item["execution_correctness"]["metric_labels"][
-        "unresolved_follow_up_needed"
-    ] is True
+    assert (
+        item["execution_correctness"]["metric_labels"]["unresolved_follow_up_needed"]
+        is True
+    )
     assert item["item_kind"] == "turn_execution_record"
     assert item["source_system"] == "mongo.turn_execution_records"
     assert item["workflow_routing_diagnostics"]["dispatch"]["failure_codes"] == [
@@ -974,9 +989,10 @@ def test_rag_get_item_supports_turn_execution_records(monkeypatch):
     assert result["requires_follow_up"] is True
     assert result["overall_outcome"] == "unresolved_follow_up_needed"
     assert result["failure_mode"] == "postcondition_inconclusive"
-    assert result["execution_correctness"]["metric_labels"][
-        "unresolved_follow_up_needed"
-    ] is True
+    assert (
+        result["execution_correctness"]["metric_labels"]["unresolved_follow_up_needed"]
+        is True
+    )
     assert result["item_kind"] == "turn_execution_record"
     assert result["provenance"]["item_kind"] == "turn_execution_record_item"
     assert result["workflow_routing_diagnostics"]["selector"]["response"]["text"] == (
@@ -1066,7 +1082,9 @@ def test_turn_execution_list_includes_rag_indexing_state_from_chat_history(monke
             "created_at_utc": "2026-02-19T01:20:00Z",
             "completion_gate": {"decision": "completed", "requires_follow_up": False},
             "required_effects": [],
-            "workflow_selection": {"selected_workflow_id": "#V#chat_assistant_workflow"},
+            "workflow_selection": {
+                "selected_workflow_id": "#V#chat_assistant_workflow"
+            },
             "prompt": {"preview": "All done"},
             "critic": {"summary": {"not_verified_count": 0}},
         },
@@ -1306,30 +1324,30 @@ def test_turn_execution_get_diagnostics_returns_embedded_payload(monkeypatch):
                     "role": "assistant",
                     "content": "Done",
                     "timestamp": "2026-04-01T00:00:02Z",
-                        "llm_debug_data": {
+                    "llm_debug_data": {
+                        "request_id": "req-diag-1",
+                        "interaction_timestamp_utc": "2026-04-01T00:00:03Z",
+                        "code_version": "v20260401+g1234567",
+                        "code_version_details": {
+                            "schema_version": "runtime_code_version.v1",
+                            "version": "v20260401+g1234567",
+                        },
+                        "workflow_routing_diagnostics": {
+                            "schema_version": "workflow_routing_diagnostics.v1",
+                            "dispatch": {"dispatch_terminal_status": "completed"},
+                        },
+                        "turn_execution_diagnostics": {
                             "request_id": "req-diag-1",
-                            "interaction_timestamp_utc": "2026-04-01T00:00:03Z",
-                            "code_version": "v20260401+g1234567",
-                            "code_version_details": {
-                                "schema_version": "runtime_code_version.v1",
-                                "version": "v20260401+g1234567",
+                            "generated_at_utc": "2026-04-01T00:00:03Z",
+                            "prompt_preview": "Show the turn diagnostics",
+                            "workflow_selection": {
+                                "selected_workflow_id": "#V#chat_assistant_workflow"
                             },
-                            "workflow_routing_diagnostics": {
-                                "schema_version": "workflow_routing_diagnostics.v1",
-                                "dispatch": {"dispatch_terminal_status": "completed"},
-                            },
-                            "turn_execution_diagnostics": {
-                                "request_id": "req-diag-1",
-                                "generated_at_utc": "2026-04-01T00:00:03Z",
-                                "prompt_preview": "Show the turn diagnostics",
-                                "workflow_selection": {
-                                    "selected_workflow_id": "#V#chat_assistant_workflow"
-                                },
-                                "aux_llm_calls": [
-                                    {
-                                        "type": "workflow_execution_trace",
-                                        "execution_id": "exec-diag-1",
-                                        "instance_id": "#V#wf_instance_diag_1",
+                            "aux_llm_calls": [
+                                {
+                                    "type": "workflow_execution_trace",
+                                    "execution_id": "exec-diag-1",
+                                    "instance_id": "#V#wf_instance_diag_1",
                                     "workflow_id": "#V#chat_assistant_workflow",
                                 }
                             ],
@@ -1356,14 +1374,14 @@ def test_turn_execution_get_diagnostics_returns_embedded_payload(monkeypatch):
                                     "phase_elapsed_ms": 42,
                                     "llm_elapsed_ms": 0,
                                     "llm_call_count": 0,
-                                    },
                                 },
                             },
                         },
                     },
-                ],
-            }
-        ]
+                },
+            ],
+        }
+    ]
 
     monkeypatch.setattr(
         "src.backend.services.turn_execution_diagnostics_service.get_chat_history_collection_service",
@@ -1507,7 +1525,9 @@ def test_turn_execution_list_filters_by_session_id(monkeypatch):
             "namespace": "#V#user@org",
             "created_at_utc": "2026-04-01T00:00:01Z",
             "completion_gate": {"decision": "completed", "requires_follow_up": False},
-            "workflow_selection": {"selected_workflow_id": "#V#chat_assistant_workflow"},
+            "workflow_selection": {
+                "selected_workflow_id": "#V#chat_assistant_workflow"
+            },
             "prompt": {"preview": "First session"},
         },
         {
@@ -1516,7 +1536,9 @@ def test_turn_execution_list_filters_by_session_id(monkeypatch):
             "namespace": "#V#user@org",
             "created_at_utc": "2026-04-01T00:00:02Z",
             "completion_gate": {"decision": "completed", "requires_follow_up": False},
-            "workflow_selection": {"selected_workflow_id": "#V#chat_assistant_workflow"},
+            "workflow_selection": {
+                "selected_workflow_id": "#V#chat_assistant_workflow"
+            },
             "prompt": {"preview": "Second session"},
         },
     ]
@@ -1643,9 +1665,12 @@ def test_turn_execution_search_failures_reports_modes_and_recommendations(monkey
     assert "req-fail-2" in result["example_request_ids"]
     first_item = result["items"][0]
     assert isinstance(first_item.get("execution_correctness"), dict)
-    assert first_item["execution_correctness"]["metric_labels"][
-        "unresolved_follow_up_needed"
-    ] is True
+    assert (
+        first_item["execution_correctness"]["metric_labels"][
+            "unresolved_follow_up_needed"
+        ]
+        is True
+    )
     assert any(
         "route through #V#conversation_turn_execution_workflow" in rec
         for rec in result["recommendations"]
@@ -1722,9 +1747,7 @@ def test_turn_execution_search_failures_flags_completed_record_with_failed_dispa
     assert item["failure_mode"] == "false_completion_gate_state"
     assert item["likely_failure_to_act"] is True
     assert item["execution_correctness"]["metric_labels"]["false_success"] is True
-    assert any(
-        "completion-gate invariants" in rec for rec in result["recommendations"]
-    )
+    assert any("completion-gate invariants" in rec for rec in result["recommendations"])
 
 
 def test_turn_execution_build_benchmark_returns_metrics_and_replay_cases(monkeypatch):
@@ -1834,9 +1857,7 @@ def test_turn_execution_build_benchmark_returns_metrics_and_replay_cases(monkeyp
     )
     assert metrics["outcome_label_counts"]["successful_completion"] == 1
     assert metrics["outcome_label_counts"]["unresolved_follow_up_needed"] == 2
-    assert (
-        metrics["outcome_label_rates_pct"]["successful_completion_rate_pct"] == 33.33
-    )
+    assert metrics["outcome_label_rates_pct"]["successful_completion_rate_pct"] == 33.33
     assert isinstance(result.get("benchmark_fingerprint"), str)
     assert len(result["benchmark_fingerprint"]) == 16
 
@@ -1852,9 +1873,8 @@ def test_turn_execution_build_benchmark_returns_metrics_and_replay_cases(monkeyp
     triage = first_case.get("triage")
     assert isinstance(triage, dict)
     assert "JVNAUTOSCI-1202" in triage.get("jira_issue_keys", [])
-    assert (
-        "https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-1202"
-        in triage.get("jira_browse_urls", [])
+    assert "https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-1202" in triage.get(
+        "jira_browse_urls", []
     )
 
     seeded_cases = result.get("seeded_cases")
@@ -1872,6 +1892,117 @@ def test_turn_execution_build_benchmark_returns_metrics_and_replay_cases(monkeyp
         "autopilot_minimal_imposition_v1"
     )
     assert imposition.get("dimension_counts", {}).get("missing_count") == 1
+
+
+def test_turn_execution_build_benchmark_surfaces_discovery_timeout_learning_candidates(
+    monkeypatch,
+):
+    _install_minimal_imposition_profile_loader(monkeypatch)
+    docs = [
+        {
+            "request_id": "req-timeout-grounded-1",
+            "session_id": "chat-timeout-grounded-1",
+            "namespace": "#V#user@org",
+            "created_at_utc": "2026-04-24T07:57:25Z",
+            "completion_gate": {
+                "decision": "completed",
+                "decision_reason": "Workflow reported completion.",
+                "safe_to_claim_completion": True,
+                "requires_follow_up": False,
+                "blocking_effect_ids": [],
+            },
+            "required_effects": [
+                {
+                    "effect_id": "grounded_entity_information_evidence",
+                    "effect_type": "grounded_evidence",
+                    "status": "not_executed",
+                }
+            ],
+            "workflow_selection": {
+                "selected_workflow_id": "#V#entity_information_retrieval_workflow",
+                "selector_verdict": "rag_selected",
+                "selector_source": "selector_override",
+            },
+            "workflow_routing_diagnostics": {
+                "discovery": {
+                    "budget_exhausted": True,
+                    "timeout_budget_seconds": 10.0,
+                    "budget_exhaustion_stage": "workflow_discovery_for_turn",
+                    "budget_exhaustion_detail": (
+                        "workflow_discovery_for_turn timed out after 10.000s"
+                    ),
+                    "match_absence_reason": "workflow_discovery_budget_exhausted",
+                    "candidate_count": 0,
+                    "match_count": 0,
+                    "search_time_ms": 10000.0,
+                },
+                "dispatch": {
+                    "selected_execution_mode": "custom_workflow",
+                    "dispatch_workflow_id": "#V#entity_information_retrieval_workflow",
+                },
+            },
+            "execution": {
+                "summary": {
+                    "workflow_required_effects_declared_count": 1,
+                    "workflow_required_effects_required_tools": [
+                        "get_predicate_incidence",
+                        "find_relations_with_argument",
+                    ],
+                },
+                "tool_invocations": [],
+            },
+            "prompt": {"preview": "Who am I ?"},
+            "critic": {"summary": {"not_verified_count": 0}},
+            "final_response": {
+                "completion_claim_detected": True,
+                "completion_claim_validated": True,
+            },
+        }
+    ]
+
+    coll = _TurnExecutionCollection(docs)
+    monkeypatch.setattr(
+        "src.backend.db.connection_manager.get_db",
+        lambda: _DB({"turn_execution_records": coll}),
+    )
+
+    gateway = _build_gateway()
+    result = gateway.invoke(
+        "turn_execution_build_benchmark",
+        {
+            "namespace": "#V#user@org",
+            "limit": 20,
+            "offset": 0,
+            "max_cases": 1,
+        },
+    ).payload
+
+    assert result["success"] is True
+    metrics = result["metrics"]
+    assert metrics["workflow_discovery_metrics"]["budget_exhausted_count"] == 1
+    assert metrics["workflow_discovery_metrics"]["zero_candidate_timeout_count"] == 1
+    assert metrics["workflow_discovery_metrics"]["timeout_false_success_count"] == 1
+    assert metrics["required_evidence_metrics"]["missing_required_tool_turn_count"] == 1
+    assert metrics["outcome_label_counts"]["workflow_discovery_timeout"] == 1
+    assert metrics["outcome_label_counts"]["required_evidence_missing"] == 1
+
+    recommendation = result["workflow_discovery_timeout_policy_recommendation"]
+    assert recommendation["action"] == "review_and_raise_timeout_budget"
+    assert recommendation["suggested_min_timeout_seconds"] >= 15.0
+    assert any(
+        gap.get("gap_id") == "workflow_discovery_timeout_learning_candidates"
+        for gap in result["capability_gaps"]
+    )
+    assert any(
+        gap.get("gap_id") == "grounded_required_evidence_missing"
+        for gap in result["capability_gaps"]
+    )
+
+    replay_case = result["replay_cases"][0]
+    assert replay_case["evidence"]["workflow_discovery"]["budget_exhausted"] is True
+    assert (
+        replay_case["evidence"]["required_evidence"]["missing_required_tool_count"] == 2
+    )
 
 
 def test_turn_execution_build_benchmark_flags_regression_when_baseline_is_better(
@@ -1984,7 +2115,9 @@ def test_turn_execution_build_benchmark_reports_gap_when_no_records(monkeypatch)
 
     capability_gaps = result.get("capability_gaps")
     assert isinstance(capability_gaps, list)
-    assert any(gap.get("gap_id") == "no_turn_execution_records" for gap in capability_gaps)
+    assert any(
+        gap.get("gap_id") == "no_turn_execution_records" for gap in capability_gaps
+    )
     assert any(
         gap.get("gap_id") == "minimal_imposition_telemetry_missing"
         for gap in capability_gaps
@@ -2025,7 +2158,9 @@ def test_turn_execution_build_benchmark_includes_latency_and_trend_views(monkeyp
     step_breakdown = latency_views.get("pre_dispatch_step_breakdown")
     assert isinstance(step_breakdown, list)
     selector_step = next(
-        step for step in step_breakdown if step.get("step_id") == "selector_candidate_preparation"
+        step
+        for step in step_breakdown
+        if step.get("step_id") == "selector_candidate_preparation"
     )
     assert selector_step.get("observed_count") == 3
     assert selector_step.get("slowest_request_id") == "req-dash-2"
@@ -2269,9 +2404,7 @@ def test_turn_execution_build_benchmark_corrective_evidence_signal_changes_with_
     )
 
     strong_coll = _TurnExecutionCollection(
-        _build_corrective_evidence_failure_docs(
-            follow_up_tool="fetch_concept_content"
-        )
+        _build_corrective_evidence_failure_docs(follow_up_tool="fetch_concept_content")
     )
     monkeypatch.setattr(
         "src.backend.db.connection_manager.get_db",
@@ -2396,19 +2529,18 @@ def test_turn_execution_build_benchmark_links_episode_evaluation_context_and_fol
     assert diagnosis_layers.get("action_layer", {}).get("diagnosable") is True
     assert diagnosis_layers.get("telemetry_layer", {}).get("diagnosable") is True
     assert (
-        diagnosis_layers.get("episode_evaluation_layer", {}).get("diagnosable")
-        is True
+        diagnosis_layers.get("episode_evaluation_layer", {}).get("diagnosable") is True
     )
 
-    replay_diagnostic_metrics = payload.get("metrics", {}).get("replay_diagnostic_metrics")
+    replay_diagnostic_metrics = payload.get("metrics", {}).get(
+        "replay_diagnostic_metrics"
+    )
     assert isinstance(replay_diagnostic_metrics, dict)
     assert replay_diagnostic_metrics.get("selected_case_count") == 2
     assert replay_diagnostic_metrics.get("diagnostic_candidate_case_count") == 2
     assert replay_diagnostic_metrics.get("telemetry_sufficient_case_count") == 2
     assert replay_diagnostic_metrics.get("episode_evaluation_available_count") == 2
-    assert (
-        replay_diagnostic_metrics.get("corrective_evidence_follow_up_count") == 1
-    )
+    assert replay_diagnostic_metrics.get("corrective_evidence_follow_up_count") == 1
     assert (
         replay_diagnostic_metrics.get("corrective_evidence_stronger_follow_up_count")
         == 1
@@ -2424,9 +2556,9 @@ def test_turn_execution_build_benchmark_links_episode_evaluation_context_and_fol
         == "pass"
     )
     assert (
-        signal_by_id[
-            "corrective_evidence_follow_up_strengthens_verification_action"
-        ]["status"]
+        signal_by_id["corrective_evidence_follow_up_strengthens_verification_action"][
+            "status"
+        ]
         == "pass"
     )
 
@@ -2445,8 +2577,13 @@ def test_turn_execution_build_selector_benchmark_gateway_e2e():
     assert metrics.get("matched_case_count") == 4
     assert metrics.get("selector_accuracy_pct") == 80.0
     assert metrics.get("baseline_accuracy_pct") == 20.0
-    assert metrics.get("outcome_label_counts", {}).get("tool_or_workflow_misrouting") == 1
-    assert metrics.get("outcome_label_counts", {}).get("abstain_escalate_no_safe_route") == 1
+    assert (
+        metrics.get("outcome_label_counts", {}).get("tool_or_workflow_misrouting") == 1
+    )
+    assert (
+        metrics.get("outcome_label_counts", {}).get("abstain_escalate_no_safe_route")
+        == 1
+    )
 
     corpus = payload.get("corpus")
     assert isinstance(corpus, dict)
@@ -2475,14 +2612,14 @@ def test_turn_execution_build_context_answering_benchmark_gateway_e2e():
     assert payload["success"] is True
     metrics = payload.get("metrics")
     assert isinstance(metrics, dict)
-    assert metrics.get("scanned_count") == 5
-    assert metrics.get("exact_path_case_count") == 5
-    assert metrics.get("telemetry_check_count") == 10
+    assert metrics.get("scanned_count") == 6
+    assert metrics.get("exact_path_case_count") == 6
+    assert metrics.get("telemetry_check_count") == 12
     assert (
         metrics.get("authoritative_source_counts", {}).get("represented_context") == 1
     )
     assert metrics.get("execution_mode_counts", {}).get("tool_pipeline") == 1
-    assert metrics.get("answer_property_counts", {}).get("answer_first") == 5
+    assert metrics.get("answer_property_counts", {}).get("answer_first") == 6
 
     corpus = payload.get("corpus")
     assert isinstance(corpus, dict)
@@ -2504,24 +2641,16 @@ def test_turn_execution_build_context_answering_benchmark_gateway_e2e():
         for signal in payload.get("benchmark_signals") or []
         if isinstance(signal, dict)
     }
+    assert signal_by_id["context_grounded_benchmark_corpus_present"]["status"] == "pass"
     assert (
-        signal_by_id["context_grounded_benchmark_corpus_present"]["status"]
-        == "pass"
-    )
-    assert (
-        signal_by_id["required_context_grounding_classes_present"]["status"]
-        == "pass"
+        signal_by_id["required_context_grounding_classes_present"]["status"] == "pass"
     )
     assert signal_by_id["authoritative_sources_represented"]["status"] == "pass"
     assert (
-        signal_by_id[
-            "execution_modes_cover_direct_tool_and_workflow_paths"
-        ]["status"]
+        signal_by_id["execution_modes_cover_direct_tool_and_workflow_paths"]["status"]
         == "pass"
     )
-    assert (
-        signal_by_id["benchmark_backed_by_exact_path_validation"]["status"] == "pass"
-    )
+    assert signal_by_id["benchmark_backed_by_exact_path_validation"]["status"] == "pass"
 
 
 def test_turn_execution_build_selector_benchmark_supports_entity_representation_case_set():
@@ -2543,7 +2672,9 @@ def test_turn_execution_build_selector_benchmark_supports_entity_representation_
         metrics.get("outcome_label_counts", {}).get("abstain_escalate_no_safe_route")
         == 1
     )
-    assert metrics.get("outcome_label_counts", {}).get("tool_or_workflow_misrouting") == 0
+    assert (
+        metrics.get("outcome_label_counts", {}).get("tool_or_workflow_misrouting") == 0
+    )
 
     corpus = payload.get("corpus")
     assert isinstance(corpus, dict)
@@ -2644,9 +2775,10 @@ def test_turn_execution_build_dashboard_gateway_e2e(monkeypatch):
     assert isinstance(overview, dict)
     assert overview.get("turn_execution", {}).get("false_success_rate_pct") == 33.33
     assert overview.get("selector_routing", {}).get("selector_accuracy_pct") == 80.0
-    assert overview.get("pre_dispatch_latency", {}).get(
-        "avg_pre_dispatch_duration_ms"
-    ) == 21.0
+    assert (
+        overview.get("pre_dispatch_latency", {}).get("avg_pre_dispatch_duration_ms")
+        == 21.0
+    )
     assert overview.get("minimal_imposition", {}).get("weighted_score_pct") is not None
 
     summary_cards = payload.get("summary_cards")
@@ -2780,6 +2912,5 @@ def test_turn_execution_namespace_coverage_wrapper_returns_provenance(monkeypatc
     assert result["namespace_filter"] == "#V#user@org"
     assert result["namespaces_scanned"] == 1
     assert (
-        result["provenance"]["item_kind"]
-        == "turn_execution_namespace_coverage_report"
+        result["provenance"]["item_kind"] == "turn_execution_namespace_coverage_report"
     )

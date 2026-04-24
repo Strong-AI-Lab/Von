@@ -80,6 +80,8 @@ _EXECUTION_CORRECTNESS_METRIC_LABEL_NAMES = (
     "unresolved_follow_up_needed",
     "tool_or_workflow_misrouting",
     "abstain_escalate_no_safe_route",
+    "workflow_discovery_timeout",
+    "required_evidence_missing",
 )
 
 _SELECTOR_PROMPT_FAILURE_VERDICTS = {
@@ -709,6 +711,8 @@ def build_turn_execution_correctness_summary(
     )
     dispatch_raw = workflow_routing_payload.get("dispatch")
     dispatch = dispatch_raw if isinstance(dispatch_raw, Mapping) else {}
+    discovery_raw = workflow_routing_payload.get("discovery")
+    discovery = discovery_raw if isinstance(discovery_raw, Mapping) else {}
     completion_gate_payload = (
         dict(completion_gate) if isinstance(completion_gate, Mapping) else {}
     )
@@ -799,6 +803,18 @@ def build_turn_execution_correctness_summary(
     )
     false_success = failure_mode in _FALSE_SUCCESS_FAILURE_MODES
     successful_completion = failure_mode == "completed_verified"
+    workflow_discovery_timeout = bool(discovery.get("budget_exhausted")) or (
+        (_safe_str(discovery.get("match_absence_reason")) or "").lower()
+        == "workflow_discovery_budget_exhausted"
+    )
+    required_evidence_missing = bool(
+        unresolved_effect_count > 0
+        and any(
+            (_safe_str(effect.get("effect_type")) or "").lower()
+            in {"grounded_evidence", "prompt_required_evidence"}
+            for effect in required_effect_list
+        )
+    )
 
     metric_labels = {
         "successful_completion": successful_completion,
@@ -806,6 +822,8 @@ def build_turn_execution_correctness_summary(
         "unresolved_follow_up_needed": requires_follow_up,
         "tool_or_workflow_misrouting": tool_or_workflow_misrouting,
         "abstain_escalate_no_safe_route": abstain_escalate_no_safe_route,
+        "workflow_discovery_timeout": workflow_discovery_timeout,
+        "required_evidence_missing": required_evidence_missing,
     }
 
     overall_outcome = "unknown"
@@ -855,6 +873,14 @@ def build_turn_execution_correctness_summary(
         "evidence_counts": {
             "required_effect_count": len(required_effect_list),
             "unresolved_effect_count": unresolved_effect_count,
+            "workflow_discovery_candidate_count": _safe_non_negative_int(
+                discovery.get("candidate_count"),
+                default=0,
+            ),
+            "workflow_discovery_match_count": _safe_non_negative_int(
+                discovery.get("match_count"),
+                default=0,
+            ),
             "critic_not_verified_count": _safe_non_negative_int(
                 critic_summary_payload.get("not_verified_count"),
                 default=0,
@@ -1210,7 +1236,9 @@ def _completion_gate_has_required_evidence_answer_consistency_blocker(
     blocker = evidence_payload.get("required_evidence_answer_consistency_blocker")
     if isinstance(blocker, Mapping):
         return True
-    for code in _dedupe_string_sequence(completion_gate.get("blocking_failure_codes") or []):
+    for code in _dedupe_string_sequence(
+        completion_gate.get("blocking_failure_codes") or []
+    ):
         lowered = code.lower()
         if lowered.startswith("prompt_required_evidence_") and (
             "contradict" in lowered or "not_safe" in lowered
@@ -1244,7 +1272,9 @@ def _apply_completion_gate_blocker(
             or "required_evidence_answer_consistency",
             "status": _safe_str(blocker.get("status")) or "not_satisfied",
             "status_reason": _safe_str(blocker.get("status_reason")) or "",
-            "failure_codes": _dedupe_string_sequence(blocker.get("failure_codes") or []),
+            "failure_codes": _dedupe_string_sequence(
+                blocker.get("failure_codes") or []
+            ),
         }
     )
     evidence_payload["unresolved_preconditions"] = unresolved_preconditions
@@ -2064,6 +2094,7 @@ def _normalise_workflow_candidate_details(values: Any) -> list[dict[str, Any]]:
 
     return normalised
 
+
 def _resolve_turn_expected_outcome_contract_snapshot(
     *sources: Any,
 ) -> TurnExpectedOutcomeContract:
@@ -2484,6 +2515,17 @@ def build_workflow_routing_diagnostics(
             "search_time_ms": _safe_float(
                 workflow_discovery_payload.get("search_time_ms")
             ),
+            "timeout_budget_seconds": _safe_float(
+                workflow_discovery_payload.get("timeout_budget_seconds")
+            ),
+            "budget_exhausted": bool(workflow_discovery_payload.get("budget_exhausted"))
+            or discovery_match_absence_reason == "workflow_discovery_budget_exhausted",
+            "budget_exhaustion_stage": _safe_str(
+                workflow_discovery_payload.get("budget_exhaustion_stage")
+            ),
+            "budget_exhaustion_detail": _safe_str(
+                workflow_discovery_payload.get("budget_exhaustion_detail")
+            ),
             "threshold": _safe_float(workflow_discovery_payload.get("threshold")),
             "candidate_count": discovery_candidate_count,
             "match_count": discovery_match_count,
@@ -2737,7 +2779,9 @@ def build_workflow_routing_diagnostics(
                         )
                     )
                     if isinstance(
-                        latest_turn_contract_check.get("turn_expected_outcome_contract"),
+                        latest_turn_contract_check.get(
+                            "turn_expected_outcome_contract"
+                        ),
                         Mapping,
                     )
                     else None
@@ -4250,7 +4294,9 @@ def _build_representation_required_effects_contract(
         required_effects = _build_representation_effects_for_targets(
             profile=profile,
             targets=scholarly_file_copy_ids,
-            write_request_evidence=_extract_write_request_evidence_from_aux(aux_llm_calls),
+            write_request_evidence=_extract_write_request_evidence_from_aux(
+                aux_llm_calls
+            ),
         )
         if not required_effects:
             failure_code = "paper_representation_requirements_missing"
@@ -4531,7 +4577,9 @@ def _load_workflow_required_effects_contract(
 
     if definition is None:
         try:
-            from ..workflows.vontology_loader import load_workflow_definition_from_vontology
+            from ..workflows.vontology_loader import (
+                load_workflow_definition_from_vontology,
+            )
 
             definition = load_workflow_definition_from_vontology(workflow_id_value)
         except Exception:
@@ -4974,7 +5022,9 @@ def _materialise_required_effects_from_contract(
             _is_representation_effect_type(_safe_str(effect.get("effect_type")))
         )
         if not required_tools:
-            if (_safe_str(effect.get("effect_type")) or "") != "representation_contract_guard":
+            if (
+                _safe_str(effect.get("effect_type")) or ""
+            ) != "representation_contract_guard":
                 continue
             effect["status"] = effect_status
             effect["status_reason"] = status_reason
@@ -5800,7 +5850,10 @@ def build_turn_execution_record(
         if isinstance(selected_workflow_trace, Mapping)
         else None
     )
-    if selected_workflow_trace_payload is not None and turn_expected_outcome_contract_payload:
+    if (
+        selected_workflow_trace_payload is not None
+        and turn_expected_outcome_contract_payload
+    ):
         selected_workflow_trace_payload["expected_outcome_contract"] = dict(
             turn_expected_outcome_contract_payload
         )
@@ -5951,12 +6004,9 @@ def build_turn_execution_record(
         )
         if isinstance(code, str) and code.strip()
     }
-    if (
-        isinstance(prompt_required_evidence_answer_consistency_blocker, Mapping)
-        and (
-            bool(completion_gate.get("safe_to_claim_completion", False))
-            or existing_gate_failure_codes.issubset({"postcondition_inconclusive"})
-        )
+    if isinstance(prompt_required_evidence_answer_consistency_blocker, Mapping) and (
+        bool(completion_gate.get("safe_to_claim_completion", False))
+        or existing_gate_failure_codes.issubset({"postcondition_inconclusive"})
     ):
         completion_gate = _apply_completion_gate_blocker(
             completion_gate=completion_gate,
@@ -6045,7 +6095,9 @@ def build_turn_execution_record(
         )
         execution_summary_with_contract[
             "required_effects_contract_domain_concept_id"
-        ] = _safe_str(primary_required_effects_contract.get("domain_profile_concept_id"))
+        ] = _safe_str(
+            primary_required_effects_contract.get("domain_profile_concept_id")
+        )
         execution_summary_with_contract["required_effects_contract_intent"] = _safe_str(
             primary_required_effects_contract.get("intent_class")
         )
@@ -6082,15 +6134,15 @@ def build_turn_execution_record(
     execution_summary_with_contract["search_evidence_count"] = len(
         search_evidence_payload
     )
-    execution_summary_with_contract["turn_expected_outcome_contract_field_count"] = (
-        len(turn_expected_outcome_contract_payload)
+    execution_summary_with_contract["turn_expected_outcome_contract_field_count"] = len(
+        turn_expected_outcome_contract_payload
     )
     execution_summary_with_contract["turn_expected_outcome_contract_sources"] = list(
         resolved_turn_expected_outcome_contract.sources
     )
-    execution_summary_with_contract[
-        "required_evidence_answer_consistency_blocked"
-    ] = bool(prompt_required_evidence_answer_consistency_blocker)
+    execution_summary_with_contract["required_evidence_answer_consistency_blocked"] = (
+        bool(prompt_required_evidence_answer_consistency_blocker)
+    )
     if isinstance(workflow_required_effects_contract, Mapping):
         execution_summary_with_contract["workflow_required_effects_contract_id"] = (
             _safe_str(workflow_required_effects_contract.get("contract_id"))
@@ -6104,9 +6156,9 @@ def build_turn_execution_record(
     execution_summary_with_contract["workflow_required_effects_materialised_count"] = (
         len(workflow_required_effects)
     )
-    execution_summary_with_contract[
-        "required_evidence_answer_consistency_source"
-    ] = prompt_required_evidence_answer_consistency_source
+    execution_summary_with_contract["required_evidence_answer_consistency_source"] = (
+        prompt_required_evidence_answer_consistency_source
+    )
 
     record_payload = {
         "schema_version": TURN_EXECUTION_RECORD_SCHEMA_VERSION,

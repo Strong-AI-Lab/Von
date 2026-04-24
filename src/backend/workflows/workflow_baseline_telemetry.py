@@ -18,6 +18,10 @@ _state: Dict[str, Any] = {
     "workflow_discovery_queries_total": 0,
     "workflow_discovery_matches_total": 0,
     "workflow_discovery_executable_matches_total": 0,
+    "workflow_discovery_budget_exhausted_total": 0,
+    "workflow_discovery_budget_exhaustion_stage_counts": {},
+    "workflow_discovery_timeout_budget_seconds_sum": 0.0,
+    "workflow_discovery_timeout_budget_observation_count": 0,
     "generic_fallback_mcp_invocations_total": 0,
     "generic_fallback_mcp_invocations_success": 0,
     "generic_fallback_mcp_invocations_failed": 0,
@@ -58,10 +62,19 @@ def record_workflow_discovery_observation(
     *,
     discovered_match_count: int,
     executable_match_count: int,
+    budget_exhausted: bool = False,
+    budget_exhaustion_stage: str | None = None,
+    timeout_budget_seconds: float | None = None,
 ) -> None:
     """Record workflow discovery counters for one query."""
     safe_discovered = max(0, int(discovered_match_count))
     safe_executable = max(0, int(executable_match_count))
+    safe_timeout_budget_seconds: float | None = None
+    if timeout_budget_seconds is not None:
+        try:
+            safe_timeout_budget_seconds = max(0.0, float(timeout_budget_seconds))
+        except Exception:
+            safe_timeout_budget_seconds = None
 
     with _lock:
         _state["workflow_discovery_queries_total"] += 1
@@ -69,6 +82,17 @@ def record_workflow_discovery_observation(
         _state["workflow_discovery_executable_matches_total"] += min(
             safe_discovered, safe_executable
         )
+        if bool(budget_exhausted):
+            _state["workflow_discovery_budget_exhausted_total"] += 1
+            _increment_bucket(
+                "workflow_discovery_budget_exhaustion_stage_counts",
+                budget_exhaustion_stage or "unknown",
+            )
+        if safe_timeout_budget_seconds is not None:
+            _state[
+                "workflow_discovery_timeout_budget_seconds_sum"
+            ] += safe_timeout_budget_seconds
+            _state["workflow_discovery_timeout_budget_observation_count"] += 1
 
 
 def record_generic_fallback_mcp_invocation(*, success: bool) -> None:
@@ -87,7 +111,9 @@ def record_write_policy_decision(
     allowed_tools_count: int,
 ) -> None:
     """Record one write-policy decision with stage-level aggregation."""
-    bucket_stage = stage.strip() if isinstance(stage, str) and stage.strip() else "unknown"
+    bucket_stage = (
+        stage.strip() if isinstance(stage, str) and stage.strip() else "unknown"
+    )
     is_allow = int(allowed_tools_count) > 0
 
     with _lock:
@@ -114,9 +140,7 @@ def record_mutation_guardrail_event(event: Mapping[str, Any]) -> None:
     risk_class = str(event.get("risk_class") or "").strip() or "unknown"
     stage = str(event.get("stage") or "").strip() or "unknown"
     event_copy = {
-        str(key): value
-        for key, value in event.items()
-        if isinstance(key, str)
+        str(key): value for key, value in event.items() if isinstance(key, str)
     }
 
     with _lock:
@@ -144,15 +168,31 @@ def get_workflow_baseline_telemetry_snapshot() -> Dict[str, Any]:
     executable_total = int(
         snapshot.get("workflow_discovery_executable_matches_total", 0)
     )
-    invocations_total = int(
-        snapshot.get("generic_fallback_mcp_invocations_total", 0)
+    queries_total = int(snapshot.get("workflow_discovery_queries_total", 0))
+    budget_exhausted_total = int(
+        snapshot.get("workflow_discovery_budget_exhausted_total", 0)
     )
+    timeout_budget_observations = int(
+        snapshot.get("workflow_discovery_timeout_budget_observation_count", 0)
+    )
+    timeout_budget_sum = float(
+        snapshot.get("workflow_discovery_timeout_budget_seconds_sum", 0.0)
+    )
+    invocations_total = int(snapshot.get("generic_fallback_mcp_invocations_total", 0))
     invocations_success = int(
         snapshot.get("generic_fallback_mcp_invocations_success", 0)
     )
 
     snapshot["workflow_discovery_executable_hit_ratio"] = (
         (executable_total / matches_total) if matches_total > 0 else None
+    )
+    snapshot["workflow_discovery_budget_exhausted_ratio"] = (
+        (budget_exhausted_total / queries_total) if queries_total > 0 else None
+    )
+    snapshot["workflow_discovery_timeout_budget_seconds_avg"] = (
+        (timeout_budget_sum / timeout_budget_observations)
+        if timeout_budget_observations > 0
+        else None
     )
     snapshot["generic_fallback_mcp_success_ratio"] = (
         (invocations_success / invocations_total) if invocations_total > 0 else None

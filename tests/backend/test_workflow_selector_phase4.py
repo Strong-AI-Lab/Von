@@ -144,6 +144,59 @@ def test_selection_experience_finalisation_persists_outcome_and_reward() -> None
     assert snapshot["aggregates"]["policy_direct"] == 0
 
 
+def test_selection_reward_marks_completed_missing_required_evidence_as_failure() -> (
+    None
+):
+    entry = experience_module.record_selection_experience(
+        turn_id="turn-phase4-required-evidence-missing",
+        query="Who am I?",
+        candidate_workflow_ids=[
+            CHAT_ASSISTANT_WORKFLOW_ID,
+            "#V#entity_information_retrieval_workflow",
+        ],
+        selected_workflow_id="#V#entity_information_retrieval_workflow",
+        verdict="rag_selected",
+        selection_source="selector_override",
+        selection_metadata={},
+        confidence_score=0.88,
+        reasoning="Selector recovered requested workflow after discovery timeout.",
+        model_name="phase4-test-model",
+        routing_duration_ms=10.0,
+    )
+
+    finalised = experience_module.finalise_selection_experience(
+        experience_id=entry.experience_id,
+        outcome="completed",
+        outcome_metadata={
+            "workflow_discovery_budget_exhausted": True,
+            "workflow_discovery_candidate_count": 0,
+            "workflow_discovery_match_count": 0,
+            "workflow_discovery_timeout_budget_seconds": 10.0,
+            "selector_timeout_recovery_applied": True,
+            "workflow_required_effects_declared_count": 1,
+            "workflow_required_effects_required_tools": [
+                "get_predicate_incidence",
+                "find_relations_with_argument",
+            ],
+            "tool_invocation_names": [],
+            "tool_invocation_count": 0,
+        },
+        retrain_policy=False,
+    )
+
+    assert finalised is not None
+    assert finalised.outcome == "learning_failure"
+    assert finalised.outcome_metadata["runtime_outcome"] == "completed"
+    assert finalised.outcome_metadata["selection_learning_failure"] is True
+    assert finalised.reward is not None
+    assert finalised.reward < 0.0
+    assert finalised.reward_breakdown["discovery_timeout_penalty"] < 0.0
+    assert finalised.reward_breakdown["required_evidence_penalty"] < 0.0
+
+    snapshot = experience_module.get_selection_experience_snapshot()
+    assert snapshot["aggregates"]["successful_outcomes"] == 0
+
+
 def test_policy_training_improves_held_out_benchmark_cases() -> None:
     for _ in range(4):
         _record_completed_example(
@@ -188,7 +241,10 @@ def test_policy_training_improves_held_out_benchmark_cases() -> None:
             {
                 "turn_text": "Refresh my Jira todo list",
                 "candidate_workflows": [
-                    {"concept_id": CHAT_ASSISTANT_WORKFLOW_ID, "name": "Chat assistant"},
+                    {
+                        "concept_id": CHAT_ASSISTANT_WORKFLOW_ID,
+                        "name": "Chat assistant",
+                    },
                     {"concept_id": TODO_REFRESH_WORKFLOW_ID, "name": "Todo refresh"},
                 ],
                 "baseline_workflow_id": CHAT_ASSISTANT_WORKFLOW_ID,
@@ -197,7 +253,10 @@ def test_policy_training_improves_held_out_benchmark_cases() -> None:
             {
                 "turn_text": "Refresh my Jira tasks",
                 "candidate_workflows": [
-                    {"concept_id": CHAT_ASSISTANT_WORKFLOW_ID, "name": "Chat assistant"},
+                    {
+                        "concept_id": CHAT_ASSISTANT_WORKFLOW_ID,
+                        "name": "Chat assistant",
+                    },
                     {"concept_id": TODO_REFRESH_WORKFLOW_ID, "name": "Todo refresh"},
                 ],
                 "baseline_workflow_id": CHAT_ASSISTANT_WORKFLOW_ID,
@@ -207,7 +266,10 @@ def test_policy_training_improves_held_out_benchmark_cases() -> None:
                 "turn_text": "Hello there",
                 "candidate_workflows": [
                     {"concept_id": TODO_REFRESH_WORKFLOW_ID, "name": "Todo refresh"},
-                    {"concept_id": CHAT_ASSISTANT_WORKFLOW_ID, "name": "Chat assistant"},
+                    {
+                        "concept_id": CHAT_ASSISTANT_WORKFLOW_ID,
+                        "name": "Chat assistant",
+                    },
                 ],
                 "baseline_workflow_id": TODO_REFRESH_WORKFLOW_ID,
                 "expected_workflow_id": CHAT_ASSISTANT_WORKFLOW_ID,
@@ -216,7 +278,10 @@ def test_policy_training_improves_held_out_benchmark_cases() -> None:
                 "turn_text": "Say hello to the user",
                 "candidate_workflows": [
                     {"concept_id": TODO_REFRESH_WORKFLOW_ID, "name": "Todo refresh"},
-                    {"concept_id": CHAT_ASSISTANT_WORKFLOW_ID, "name": "Chat assistant"},
+                    {
+                        "concept_id": CHAT_ASSISTANT_WORKFLOW_ID,
+                        "name": "Chat assistant",
+                    },
                 ],
                 "baseline_workflow_id": TODO_REFRESH_WORKFLOW_ID,
                 "expected_workflow_id": CHAT_ASSISTANT_WORKFLOW_ID,
@@ -230,7 +295,9 @@ def test_policy_training_improves_held_out_benchmark_cases() -> None:
     assert evaluation["accuracy_improvement"] > 0.0
 
 
-def test_selector_uses_policy_guidance_for_candidate_ordering_without_direct_selection() -> None:
+def test_selector_uses_policy_guidance_for_candidate_ordering_without_direct_selection() -> (
+    None
+):
     for _ in range(4):
         _record_completed_example(
             query="Refresh my Jira todo list",
