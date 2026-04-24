@@ -1935,7 +1935,7 @@
         },
         {
             "name": "get_predicate_incidence",
-            "description": "Summarise which predicates are actually observed around a concept or across instances of a type. The anchor entity goes in concept_id; argument_index='subject' means inspect outgoing subject-side relations, not that the payload should contain a subject field. Use when you need distinct predicates plus counts before choosing a predicate-specific extent or filtered relation lookup.",
+            "description": "Summarise which predicates are actually observed around a concept or across instances of a type. The anchor entity goes in concept_id; argument_index='subject' means inspect outgoing subject-side relations, not that the payload should contain a subject field. Use when you need distinct predicates plus counts before choosing a predicate-specific extent or filtered relation lookup. For kind-specific turns such as papers, projects, students, organisations, or other represented related things, set include_argument_type_counts=true to get direct asserted type distributions for non-anchor arguments. Set role_expansion_mode='explicit' with represented node-type or role-predicate filters when the immediate neighbour is a reified/event/claim node whose other role fillers are the useful retrieval targets.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2032,6 +2032,62 @@
                         ],
                         "items": {}
                     },
+                    "include_argument_type_counts": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    },
+                    "type_count_mode": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "include_untyped_bucket": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    },
+                    "max_types_per_predicate": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    },
+                    "max_sample_concepts_per_type": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    },
+                    "role_expansion_mode": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "role_node_type_filter": {
+                        "type": [
+                            "array",
+                            "null"
+                        ],
+                        "items": {}
+                    },
+                    "role_predicate_filter": {
+                        "type": [
+                            "array",
+                            "null"
+                        ],
+                        "items": {}
+                    },
+                    "role_expansion_depth": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    },
                     "namespace": {
                         "type": [
                             "string",
@@ -2041,7 +2097,7 @@
                 },
                 "required": [],
                 "additionalProperties": true,
-                "description": "get_predicate_incidence input: exactly one of concept_id (entity mode; anchor entity concept ID such as '#V#michael_witbrock') or instance_of (type mode). Optional direct_instances_only, argument_index ('subject' inspects outgoing subject-side relations), predicate_filter, relation_kind ('any'|'binary'|'text'), include_text_snippets, include_concept_preview, paging (limit/offset), sort_by ('relation_hit_count'|'grounding_count'|'grounded_instance_count'|'predicate'), uncertainty retrieval controls, and optional namespace passthrough. Do not use top-level payload keys named subject or object; the anchor entity always goes in concept_id."
+                "description": "get_predicate_incidence input: exactly one of concept_id (entity mode; anchor entity concept ID such as '#V#michael_witbrock') or instance_of (type mode). Optional direct_instances_only, argument_index ('subject' inspects outgoing subject-side relations), predicate_filter, relation_kind ('any'|'binary'|'text'), include_text_snippets, include_concept_preview, paging (limit/offset), sort_by ('relation_hit_count'|'grounding_count'|'grounded_instance_count'|'predicate'), uncertainty retrieval controls, include_argument_type_counts for direct asserted type counts of non-anchor arguments, type_count_mode='direct_asserted', include_untyped_bucket, max_types_per_predicate, max_sample_concepts_per_type, and role_expansion_mode ('none'|'explicit'|'auto') with optional explicit role_node_type_filter, role_predicate_filter, and role_expansion_depth=1. Auto role expansion is metadata-gated and reports diagnostics when no authoritative reification profile is available. Optional namespace passthrough. Do not use top-level payload keys named subject or object; the anchor entity always goes in concept_id."
             }
         },
         {

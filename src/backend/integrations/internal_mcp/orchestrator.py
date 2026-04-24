@@ -18250,6 +18250,8 @@ class InternalMCPChatOrchestrator:
         *,
         max_predicates: int = 6,
         max_groundings: int = 3,
+        max_type_counts: int = 8,
+        max_role_counts: int = 8,
         max_text_chars: int = 180,
     ) -> dict[str, Any]:
         raw_rows = payload.get("predicates")
@@ -18293,6 +18295,58 @@ class InternalMCPChatOrchestrator:
                     for index in argument_indexes[:4]
                     if isinstance(index, (int, float))
                 ]
+
+            argument_type_counts = row.get("argument_type_counts")
+            if isinstance(argument_type_counts, list):
+                compact_type_counts: list[dict[str, Any]] = []
+                for type_count in argument_type_counts[:max_type_counts]:
+                    if not isinstance(type_count, Mapping):
+                        continue
+                    compact_type_count: dict[str, Any] = {}
+                    for text_field in (
+                        "argument_role",
+                        "type_concept_id",
+                    ):
+                        value = type_count.get(text_field)
+                        if isinstance(value, str) and value.strip():
+                            compact_type_count[text_field] = value.strip()
+                    for int_field in (
+                        "argument_index",
+                        "concept_count",
+                        "relation_hit_count",
+                    ):
+                        value = type_count.get(int_field)
+                        if isinstance(value, (int, float)):
+                            compact_type_count[int_field] = int(value)
+                    samples = type_count.get("sample_concepts")
+                    if isinstance(samples, list):
+                        compact_samples: list[dict[str, Any]] = []
+                        for sample in samples[:max_groundings]:
+                            if not isinstance(sample, Mapping):
+                                continue
+                            compact_sample: dict[str, Any] = {}
+                            concept_id = sample.get("concept_id")
+                            if isinstance(concept_id, str) and concept_id.strip():
+                                compact_sample["concept_id"] = concept_id.strip()
+                            name = sample.get("name")
+                            if isinstance(name, str) and name.strip():
+                                compact_sample["name"] = name.strip()
+                            if compact_sample:
+                                compact_samples.append(compact_sample)
+                        if compact_samples:
+                            compact_type_count["sample_concepts"] = compact_samples
+                    if compact_type_count:
+                        compact_type_counts.append(compact_type_count)
+                if compact_type_counts:
+                    compact_row["argument_type_counts"] = compact_type_counts
+            for count_field in (
+                "untyped_argument_count",
+                "literal_argument_count",
+                "inaccessible_argument_count",
+            ):
+                value = row.get(count_field)
+                if isinstance(value, (int, float)):
+                    compact_row[count_field] = int(value)
 
             groundings = row.get("sample_groundings")
             if isinstance(groundings, list):
@@ -18356,6 +18410,81 @@ class InternalMCPChatOrchestrator:
                 if compact_instances:
                     compact_row["sample_instances"] = compact_instances
 
+            role_expansion = row.get("role_expansion")
+            if isinstance(role_expansion, Mapping):
+                compact_role: dict[str, Any] = {}
+                for text_field in (
+                    "anchor_predicate_concept_id",
+                    "anchor_direction",
+                ):
+                    value = role_expansion.get(text_field)
+                    if isinstance(value, str) and value.strip():
+                        compact_role[text_field] = value.strip()
+                reified_node_count = role_expansion.get("reified_node_count")
+                if isinstance(reified_node_count, (int, float)):
+                    compact_role["reified_node_count"] = int(reified_node_count)
+                frame_type_counts = role_expansion.get("reified_node_type_counts")
+                if isinstance(frame_type_counts, list):
+                    compact_frame_types: list[dict[str, Any]] = []
+                    for type_count in frame_type_counts[:max_role_counts]:
+                        if not isinstance(type_count, Mapping):
+                            continue
+                        type_id = type_count.get("type_concept_id")
+                        concept_count = type_count.get("concept_count")
+                        compact_frame_type: dict[str, Any] = {}
+                        if isinstance(type_id, str) and type_id.strip():
+                            compact_frame_type["type_concept_id"] = type_id.strip()
+                        if isinstance(concept_count, (int, float)):
+                            compact_frame_type["concept_count"] = int(concept_count)
+                        if compact_frame_type:
+                            compact_frame_types.append(compact_frame_type)
+                    if compact_frame_types:
+                        compact_role["reified_node_type_counts"] = compact_frame_types
+                role_counts = role_expansion.get("role_filler_type_counts")
+                if isinstance(role_counts, list):
+                    compact_role_counts: list[dict[str, Any]] = []
+                    for role_count in role_counts[:max_role_counts]:
+                        if not isinstance(role_count, Mapping):
+                            continue
+                        compact_role_count: dict[str, Any] = {}
+                        for text_field in (
+                            "role_predicate_concept_id",
+                            "type_concept_id",
+                        ):
+                            value = role_count.get(text_field)
+                            if isinstance(value, str) and value.strip():
+                                compact_role_count[text_field] = value.strip()
+                        for int_field in (
+                            "concept_count",
+                            "relation_hit_count",
+                        ):
+                            value = role_count.get(int_field)
+                            if isinstance(value, (int, float)):
+                                compact_role_count[int_field] = int(value)
+                        fillers = role_count.get("sample_fillers")
+                        if isinstance(fillers, list):
+                            sample_fillers: list[dict[str, Any]] = []
+                            for filler in fillers[:max_groundings]:
+                                if not isinstance(filler, Mapping):
+                                    continue
+                                sample: dict[str, Any] = {}
+                                concept_id = filler.get("concept_id")
+                                if isinstance(concept_id, str) and concept_id.strip():
+                                    sample["concept_id"] = concept_id.strip()
+                                name = filler.get("name")
+                                if isinstance(name, str) and name.strip():
+                                    sample["name"] = name.strip()
+                                if sample:
+                                    sample_fillers.append(sample)
+                            if sample_fillers:
+                                compact_role_count["sample_fillers"] = sample_fillers
+                        if compact_role_count:
+                            compact_role_counts.append(compact_role_count)
+                    if compact_role_counts:
+                        compact_role["role_filler_type_counts"] = compact_role_counts
+                if compact_role:
+                    compact_row["role_expansion"] = compact_role
+
             if compact_row:
                 compact_rows.append(compact_row)
 
@@ -18377,6 +18506,9 @@ class InternalMCPChatOrchestrator:
             "total_predicates": payload.get("total_predicates"),
             "shown_predicate_count": len(compact_rows),
             "predicates": compact_rows,
+            "typed_predicate_incidence_diagnostics": payload.get(
+                "typed_predicate_incidence_diagnostics"
+            ),
             "retrieval_diagnostics": {"note": diagnostics_note},
         }
         return {

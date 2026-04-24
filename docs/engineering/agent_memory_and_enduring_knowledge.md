@@ -75,6 +75,12 @@ Prefer richer structure when the task depends on:
 
 But compare against simpler baselines. More structure is not automatically better.
 
+For concrete Vontology tool families that support richer structure, including
+typed predicate incidence, context and microtheory queries, provenance tracing,
+Davidsonian role-frame retrieval, scientific claim materialisation, and
+mixed-initiative knowledge acquisition, see
+`docs/engineering/vontology_tooling_from_ka_kcap_kr_literature.md`.
+
 ## 8. Long-horizon evaluation
 
 Evaluate memory features on tasks that actually require:

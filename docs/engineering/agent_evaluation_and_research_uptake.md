@@ -70,6 +70,13 @@ Adopt a new method only when it:
 - has an acceptable rollback path
 - does not quietly increase architectural opacity
 
+For the current KA/KCAP/common-sense KR/scientific KR uptake pass that proposes
+new Vontology tooling surfaces, see
+`docs/engineering/vontology_tooling_from_ka_kcap_kr_literature.md`. Use it as a
+companion when implementing or evaluating Vontology tools that change retrieval,
+knowledge acquisition, context handling, provenance, or scientific
+representation behaviour.
+
 ## 8. Reporting discipline
 
 When reporting results, state clearly:

@@ -259,6 +259,157 @@ def test_relation_previews_and_predicate_incidence_groundings_include_type_ids()
     ]
 
 
+def test_get_predicate_incidence_counts_other_argument_types() -> None:
+    from src.backend.db.repositories.concepts_repository import ConceptsRepository
+    from src.backend.services.concept_relation_service import get_predicate_incidence
+
+    ConceptsRepository.insert_one(
+        {
+            "concept_id": "#V#michael_witbrock",
+            "relationships": {
+                "#V#author_of": [
+                    "#V#paper_one",
+                    "#V#paper_two",
+                    "#V#diary_one",
+                    "draft note with no concept",
+                ],
+            },
+        }
+    )
+    ConceptsRepository.insert_one(
+        {
+            "concept_id": "#V#paper_one",
+            "relationships": {"is_an_instance_of": ["#V#scholarly_article"]},
+        }
+    )
+    ConceptsRepository.insert_one(
+        {
+            "concept_id": "#V#paper_two",
+            "relationships": {"#V#is_an_instance_of": ["#V#scholarly_article"]},
+        }
+    )
+    ConceptsRepository.insert_one(
+        {
+            "concept_id": "#V#diary_one",
+            "relationships": {"is_an_instance_of": ["#V#diary_entry"]},
+        }
+    )
+
+    payload = get_predicate_incidence(
+        concept_id="#V#michael_witbrock",
+        argument_index="subject",
+        relation_kind="binary",
+        include_concept_preview=False,
+        include_argument_type_counts=True,
+    )
+
+    row = next(
+        row
+        for row in payload.get("predicates") or []
+        if row.get("predicate_concept_id") == "#V#author_of"
+    )
+    counts = {
+        (entry["argument_role"], entry["type_concept_id"]): entry
+        for entry in row.get("argument_type_counts") or []
+    }
+    scholarly = counts[("object", "#V#scholarly_article")]
+    assert scholarly["argument_index"] == 2
+    assert scholarly["relation_hit_count"] == 2
+    assert scholarly["concept_count"] == 2
+    assert {
+        sample.get("concept_id") for sample in scholarly.get("sample_concepts") or []
+    } == {"#V#paper_one", "#V#paper_two"}
+    assert counts[("object", "#V#diary_entry")]["relation_hit_count"] == 1
+    assert row["literal_argument_count"] == 1
+    assert payload["typed_predicate_incidence_diagnostics"][
+        "type_count_mode"
+    ] == "direct_asserted"
+
+
+def test_get_predicate_incidence_role_expands_reified_neighbour_roles() -> None:
+    from src.backend.db.repositories.concepts_repository import ConceptsRepository
+    from src.backend.services.concept_relation_service import get_predicate_incidence
+
+    ConceptsRepository.insert_one({"concept_id": "#V#michael_witbrock", "relationships": {}})
+    ConceptsRepository.insert_one(
+        {
+            "concept_id": "#V#authorship_event_one",
+            "relationships": {
+                "is_an_instance_of": ["#V#authorship_event"],
+                "#V#has_author": ["#V#michael_witbrock"],
+                "#V#has_work": ["#V#paper_one"],
+                "#V#has_evidence": ["#V#file_one"],
+                "#V#has_year": ["2026"],
+            },
+        }
+    )
+    ConceptsRepository.insert_one(
+        {
+            "concept_id": "#V#paper_one",
+            "relationships": {"is_an_instance_of": ["#V#scholarly_article"]},
+        }
+    )
+    ConceptsRepository.insert_one(
+        {
+            "concept_id": "#V#file_one",
+            "relationships": {"is_an_instance_of": ["#V#file_copy"]},
+        }
+    )
+
+    payload = get_predicate_incidence(
+        concept_id="#V#michael_witbrock",
+        argument_index="object",
+        relation_kind="binary",
+        include_argument_type_counts=True,
+        role_expansion_mode="explicit",
+        role_node_type_filter=["#V#authorship_event"],
+    )
+
+    row = next(
+        row
+        for row in payload.get("predicates") or []
+        if row.get("predicate_concept_id") == "#V#has_author"
+    )
+    subject_counts = {
+        entry["type_concept_id"]: entry
+        for entry in row.get("argument_type_counts") or []
+        if entry.get("argument_role") == "subject"
+    }
+    assert subject_counts["#V#authorship_event"]["relation_hit_count"] == 1
+
+    expansion = row["role_expansion"]
+    assert expansion["anchor_direction"] == "incoming"
+    assert expansion["reified_node_count"] == 1
+    frame_type_counts = {
+        entry["type_concept_id"]: entry
+        for entry in expansion.get("reified_node_type_counts") or []
+    }
+    assert frame_type_counts["#V#authorship_event"]["concept_count"] == 1
+    filler_counts = {
+        (entry["role_predicate_concept_id"], entry["type_concept_id"]): entry
+        for entry in expansion.get("role_filler_type_counts") or []
+    }
+    assert filler_counts[("#V#has_work", "#V#scholarly_article")][
+        "relation_hit_count"
+    ] == 1
+    assert filler_counts[("#V#has_evidence", "#V#file_copy")][
+        "relation_hit_count"
+    ] == 1
+    assert expansion["literal_filler_count"] == 1
+    assert payload["role_expansions"][0]["anchor_predicate_concept_id"] == "#V#has_author"
+
+    auto_payload = get_predicate_incidence(
+        concept_id="#V#michael_witbrock",
+        argument_index="object",
+        relation_kind="binary",
+        role_expansion_mode="auto",
+    )
+    assert auto_payload["role_expansions"] == []
+    assert auto_payload["typed_predicate_incidence_diagnostics"][
+        "role_expansion_status"
+    ] == "metadata_unavailable"
+
+
 def test_get_predicate_incidence_type_mode_counts_instances_and_groundings() -> None:
     from src.backend.db.repositories.concepts_repository import ConceptsRepository
     from src.backend.services.concept_relation_service import get_predicate_incidence

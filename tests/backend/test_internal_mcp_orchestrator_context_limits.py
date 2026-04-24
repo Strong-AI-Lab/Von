@@ -553,6 +553,18 @@ def test_format_tool_result_shapes_get_predicate_incidence_payload_for_live_foll
                     "subject_argument_hit_count": 12,
                     "object_argument_hit_count": 0,
                     "argument_indexes": [1],
+                    "argument_type_counts": [
+                        {
+                            "argument_index": 2,
+                            "argument_role": "object",
+                            "type_concept_id": "#V#scholarly_article",
+                            "concept_count": 2,
+                            "relation_hit_count": 2,
+                            "sample_concepts": [
+                                {"concept_id": "#V#paper_one", "name": "Paper One"}
+                            ],
+                        }
+                    ],
                     "sample_groundings": [
                         {
                             "grounding_kind": "concept",
@@ -565,8 +577,38 @@ def test_format_tool_result_shapes_get_predicate_incidence_payload_for_live_foll
                             "text_preview": "Grounded textual mention of authorship evidence.",
                         },
                     ],
+                    "role_expansion": {
+                        "anchor_predicate_concept_id": "#V#has_author",
+                        "anchor_direction": "incoming",
+                        "reified_node_count": 1,
+                        "reified_node_type_counts": [
+                            {
+                                "type_concept_id": "#V#authorship_event",
+                                "concept_count": 1,
+                            }
+                        ],
+                        "role_filler_type_counts": [
+                            {
+                                "role_predicate_concept_id": "#V#has_work",
+                                "type_concept_id": "#V#scholarly_article",
+                                "concept_count": 1,
+                                "relation_hit_count": 1,
+                                "sample_fillers": [
+                                    {
+                                        "concept_id": "#V#paper_one",
+                                        "name": "Paper One",
+                                    }
+                                ],
+                            }
+                        ],
+                    },
                 }
             ],
+            "typed_predicate_incidence_diagnostics": {
+                "include_argument_type_counts": True,
+                "type_count_mode": "direct_asserted",
+                "role_expansion_mode": "explicit",
+            },
             "paging": {
                 "limit": 50,
                 "offset": 0,
@@ -595,6 +637,15 @@ def test_format_tool_result_shapes_get_predicate_incidence_payload_for_live_foll
     assert payload["predicates"][0]["sample_groundings"][0]["type_ids"] == [
         "#V#scholarly_article"
     ]
+    assert payload["predicates"][0]["argument_type_counts"][0][
+        "type_concept_id"
+    ] == "#V#scholarly_article"
+    assert payload["predicates"][0]["role_expansion"][
+        "reified_node_type_counts"
+    ][0]["type_concept_id"] == "#V#authorship_event"
+    assert payload["typed_predicate_incidence_diagnostics"][
+        "role_expansion_mode"
+    ] == "explicit"
     assert "predicate row" in payload["retrieval_diagnostics"]["note"]
 
 

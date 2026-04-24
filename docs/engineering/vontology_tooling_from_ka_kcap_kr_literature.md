@@ -12,6 +12,33 @@ The design assumption is the core Von one: Vontology, workflows, prompt programm
 
 The tool names below are proposals. They should be treated as capability sketches to be refined against existing Vontology predicates and workflow concepts before implementation.
 
+## 1.1 Tool Versus Workflow Interpretation
+
+Several "tool families" below should not be implemented as standalone MCP tools
+that make their own policy decisions. The intended split is:
+
+- **Workflow-primary capabilities:** mixed-initiative KA agendas, concept
+  placement, scientific claim/mechanism materialisation, conflict resolution,
+  analogy/pattern use, authority-surface audit, and ephemeral theory promotion.
+  These should be Vontology/VWL-authored workflows whose prompts, policies,
+  context choices, approval gates, and acceptance criteria live in represented
+  authority surfaces.
+- **Support-tool primitives:** bounded graph reads, typed incidence summaries,
+  context-bounded relation lookup, provenance/evidence bundle retrieval, shape
+  validation, role-frame retrieval, external identifier lookup, graph matching,
+  and safe promotion/write primitives. These tools should be reusable and
+  policy-neutral enough for multiple workflows to call.
+- **Hybrid capabilities:** context/microtheory querying, provenance tracing,
+  belief-state comparison, and scientific mechanism support often need both a
+  reusable read primitive and a supervising workflow that decides which context,
+  claim, or representation is appropriate for the user turn.
+
+When turning this note into Jira work, phrase implementation tasks in terms of
+"author the workflow and add the missing support surfaces" unless the capability
+is clearly just a low-level query/validation primitive. Avoid moving acquisition,
+resolution, conflict-handling, or promotion policy into Python merely because it
+is exposed through an MCP tool.
+
 ## 2. Literature Signals
 
 ### 2.1 Assisted Knowledge Acquisition
@@ -440,6 +467,26 @@ Implementation notes:
 - Promotion must be a write workflow with validation and provenance.
 
 ## 5. Prioritised Roadmap
+
+### Jira Decomposition
+
+The first implementation backlog created from this note is under
+`JVNAUTOSCI-936`:
+
+| Capability family | Jira task | Authority split |
+| --- | --- | --- |
+| Typed predicate incidence and relation profiles | `JVNAUTOSCI-2036` | Support-tool primitive |
+| Context and microtheory query | `JVNAUTOSCI-2038` | Hybrid workflow plus query support |
+| Provenance, evidence, and explanation | `JVNAUTOSCI-2039` | Hybrid workflow plus evidence support |
+| Shape, constraint, and modelling validation | `JVNAUTOSCI-2040` | Workflow plus validation primitive |
+| Mixed-initiative KA agenda | `JVNAUTOSCI-2041` | Workflow-primary |
+| Concept placement and ontology alignment | `JVNAUTOSCI-2042` | Workflow-primary plus lookup support |
+| Scientific claim and mechanism materialisation | `JVNAUTOSCI-2043` | Workflow-primary |
+| Davidsonian role-frame retrieval | `JVNAUTOSCI-2044` | Hybrid retrieval support plus workflow integration |
+| Contradiction, compatibility, and belief-state comparison | `JVNAUTOSCI-2045` | Workflow-primary plus conflict-candidate support |
+| Analogy, pattern, and case retrieval | `JVNAUTOSCI-2046` | Hybrid graph support plus workflow use |
+| Authority-surface and drift audit | `JVNAUTOSCI-2047` | Workflow-primary |
+| Ephemeral theory promotion | `JVNAUTOSCI-2048` | Workflow-primary |
 
 ### Near Term
 

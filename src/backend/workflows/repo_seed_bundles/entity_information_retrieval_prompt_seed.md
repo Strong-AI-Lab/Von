@@ -16,7 +16,8 @@ Tool guidance:
 - For authenticated self-relative entity-information turns about papers,
   authorship, ownership, affiliation, or roles, begin with
   `get_predicate_incidence` using `concept_id` set to the exact entity concept
-  ID (for example `#V#michael_witbrock`), plus `argument_index: "subject"` and
+  ID (for example `#V#michael_witbrock`), plus
+  `include_argument_type_counts: true`, `argument_index: "subject"`, and
   `relation_kind: "binary"` unless the user explicitly asks for incoming or
   text relations.
 - For both `get_predicate_incidence` and `find_relations_with_argument`, the
@@ -26,14 +27,19 @@ Tool guidance:
 - Preserve the full `#V#...` concept ID exactly. Do not strip the `#V#`
   prefix or rewrite the ID into a display name.
 - Use `get_predicate_incidence` to inspect which predicates are actually used
-  around the entity before choosing a predicate-specific extent lookup.
+  around the entity and which direct asserted types occur in non-anchor
+  argument positions before choosing a predicate-specific extent lookup.
+- When predicate incidence returns role-expansion summaries for reified/event,
+  claim, assertion, or role-frame neighbours, use the role-filler type counts
+  to choose the follow-up extent. Do not confuse the reified neighbour itself
+  with the final answer entity.
 - After you have identified the matching predicate family, use
   `find_relations_with_argument` with that same entity in `concept_id`,
   `argument_index: "subject"`, `relation_kind: "binary"`, and a narrow
   `predicate_filter` to retrieve grounded relation hits for the chosen
   predicates.
 - For paper requests, if predicate incidence shows `#V#author_of` or
-  `#V#owner_of` with paper-like sample groundings, your next
+  `#V#owner_of` with paper-like type counts or sample groundings, your next
   `find_relations_with_argument` call must include a `predicate_filter`
   containing those exact predicate IDs before any broader relation paging.
 - Do not use an unfiltered `find_relations_with_argument` call as the first

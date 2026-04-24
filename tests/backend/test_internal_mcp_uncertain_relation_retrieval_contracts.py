@@ -157,3 +157,51 @@ def test_get_predicate_incidence_supports_type_mode_via_gateway() -> None:
     assert rows["#V#member_of_organisation"]["grounded_instance_count"] == 2
     assert rows["#V#has_phd_supervisor"]["relation_hit_count"] == 1
 
+
+def test_get_predicate_incidence_typed_counts_work_through_gateway() -> None:
+    gateway = _gateway()
+    ConceptsRepository.insert_one(
+        {
+            "concept_id": "#V#michael_witbrock",
+            "relationships": {
+                "#V#author_of": ["#V#paper_one", "#V#diary_one"],
+            },
+        }
+    )
+    ConceptsRepository.insert_one(
+        {
+            "concept_id": "#V#paper_one",
+            "relationships": {"is_an_instance_of": ["#V#scholarly_article"]},
+        }
+    )
+    ConceptsRepository.insert_one(
+        {
+            "concept_id": "#V#diary_one",
+            "relationships": {"is_an_instance_of": ["#V#diary_entry"]},
+        }
+    )
+
+    payload = gateway.invoke(
+        "get_predicate_incidence",
+        {
+            "concept_id": "#V#michael_witbrock",
+            "argument_index": "subject",
+            "relation_kind": "binary",
+            "include_concept_preview": False,
+            "include_argument_type_counts": True,
+        },
+    ).payload
+
+    row = next(
+        row
+        for row in payload.get("predicates") or []
+        if row.get("predicate_concept_id") == "#V#author_of"
+    )
+    type_ids = {
+        entry.get("type_concept_id") for entry in row.get("argument_type_counts") or []
+    }
+    assert type_ids == {"#V#scholarly_article", "#V#diary_entry"}
+    assert payload["typed_predicate_incidence_diagnostics"][
+        "include_argument_type_counts"
+    ] is True
+

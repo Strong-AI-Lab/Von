@@ -1944,6 +1944,17 @@ async def _handle_get_predicate_incidence(arguments: dict[str, Any]) -> list[Tex
             include_uncertain=bool(arguments.get("include_uncertain", False)),
             uncertainty_mode=arguments.get("uncertainty_mode"),
             uncertainty_statuses=arguments.get("uncertainty_statuses"),
+            include_argument_type_counts=bool(
+                arguments.get("include_argument_type_counts", False)
+            ),
+            type_count_mode=arguments.get("type_count_mode"),
+            include_untyped_bucket=bool(arguments.get("include_untyped_bucket", True)),
+            max_types_per_predicate=arguments.get("max_types_per_predicate"),
+            max_sample_concepts_per_type=arguments.get("max_sample_concepts_per_type"),
+            role_expansion_mode=arguments.get("role_expansion_mode"),
+            role_node_type_filter=arguments.get("role_node_type_filter"),
+            role_predicate_filter=arguments.get("role_predicate_filter"),
+            role_expansion_depth=arguments.get("role_expansion_depth"),
         )
         return [_json_text(payload)]
     except Exception as exc:

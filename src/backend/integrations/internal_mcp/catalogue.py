@@ -193,6 +193,17 @@ def _get_predicate_incidence(**kwargs):
         include_uncertain=bool(kwargs.get("include_uncertain", False)),
         uncertainty_mode=kwargs.get("uncertainty_mode"),
         uncertainty_statuses=kwargs.get("uncertainty_statuses"),
+        include_argument_type_counts=bool(
+            kwargs.get("include_argument_type_counts", False)
+        ),
+        type_count_mode=kwargs.get("type_count_mode"),
+        include_untyped_bucket=bool(kwargs.get("include_untyped_bucket", True)),
+        max_types_per_predicate=kwargs.get("max_types_per_predicate"),
+        max_sample_concepts_per_type=kwargs.get("max_sample_concepts_per_type"),
+        role_expansion_mode=kwargs.get("role_expansion_mode"),
+        role_node_type_filter=kwargs.get("role_node_type_filter"),
+        role_predicate_filter=kwargs.get("role_predicate_filter"),
+        role_expansion_depth=kwargs.get("role_expansion_depth"),
     )
 
 
@@ -7090,6 +7101,15 @@ def _predicate_incidence_input_schema() -> Schema:
             "include_uncertain": (bool, type(None)),
             "uncertainty_mode": (str, type(None)),
             "uncertainty_statuses": (list, type(None)),
+            "include_argument_type_counts": (bool, type(None)),
+            "type_count_mode": (str, type(None)),
+            "include_untyped_bucket": (bool, type(None)),
+            "max_types_per_predicate": (int, type(None)),
+            "max_sample_concepts_per_type": (int, type(None)),
+            "role_expansion_mode": (str, type(None)),
+            "role_node_type_filter": (list, type(None)),
+            "role_predicate_filter": (list, type(None)),
+            "role_expansion_depth": (int, type(None)),
             "namespace": (str, type(None)),
         },
         allow_unknown=True,
@@ -7101,7 +7121,13 @@ def _predicate_incidence_input_schema() -> Schema:
             "relation_kind ('any'|'binary'|'text'), include_text_snippets, "
             "include_concept_preview, paging (limit/offset), sort_by "
             "('relation_hit_count'|'grounding_count'|'grounded_instance_count'|'predicate'), "
-            "uncertainty retrieval controls, and optional namespace passthrough. "
+            "uncertainty retrieval controls, include_argument_type_counts for direct asserted "
+            "type counts of non-anchor arguments, type_count_mode='direct_asserted', "
+            "include_untyped_bucket, max_types_per_predicate, max_sample_concepts_per_type, "
+            "and role_expansion_mode ('none'|'explicit'|'auto') with optional explicit "
+            "role_node_type_filter, role_predicate_filter, and role_expansion_depth=1. "
+            "Auto role expansion is metadata-gated and reports diagnostics when no "
+            "authoritative reification profile is available. Optional namespace passthrough. "
             "Do not use top-level payload keys named subject or object; the anchor "
             "entity always goes in concept_id."
         ),
@@ -7130,8 +7156,10 @@ def _predicate_incidence_output_schema() -> Schema:
             "predicates[] (predicate_concept_id, relation_hit_count, grounding_count, "
             "binary_relation_hit_count, text_relation_hit_count, subject_argument_hit_count, "
             "object_argument_hit_count, argument_indexes, optional predicate_preview, "
-            "sample_groundings, and in type mode grounded_instance_count/sample_instances), "
-            "plus paging metadata and optional type/uncertainty diagnostics."
+            "sample_groundings, optional argument_type_counts/untyped/literal/inaccessible "
+            "argument counters, optional role_expansion summaries, and in type mode "
+            "grounded_instance_count/sample_instances), plus role_expansions, paging metadata, "
+            "and optional typed/uncertainty diagnostics."
         ),
     )
 
@@ -26004,7 +26032,13 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
                 "argument_index='subject' means inspect outgoing subject-side relations, "
                 "not that the payload should contain a subject field. Use when you need "
                 "distinct predicates plus counts before choosing a predicate-specific "
-                "extent or filtered relation lookup."
+                "extent or filtered relation lookup. For kind-specific turns such as "
+                "papers, projects, students, organisations, or other represented related "
+                "things, set include_argument_type_counts=true to get direct asserted "
+                "type distributions for non-anchor arguments. Set role_expansion_mode="
+                "'explicit' with represented node-type or role-predicate filters when "
+                "the immediate neighbour is a reified/event/claim node whose other role "
+                "fillers are the useful retrieval targets."
             ),
         ),
         MethodDefinition(

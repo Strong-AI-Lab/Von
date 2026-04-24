@@ -120,6 +120,7 @@ def test_bootstrap_materialises_entity_information_retrieval_workflow(
         "get_predicate_incidence": {
             "argument_index": "subject",
             "relation_kind": "binary",
+            "include_argument_type_counts": True,
             "limit": 12,
         },
         "find_relations_with_argument": {

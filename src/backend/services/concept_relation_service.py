@@ -58,6 +58,17 @@ _UNCERTAINTY_RETRIEVAL_STATS: Dict[str, int] = {
     "uncertainty_mode_errors": 0,
 }
 
+_TYPE_COUNT_MODE_DIRECT_ASSERTED = "direct_asserted"
+_ROLE_EXPANSION_MODE_NONE = "none"
+_ROLE_EXPANSION_MODE_EXPLICIT = "explicit"
+_ROLE_EXPANSION_MODE_AUTO = "auto"
+_TYPE_MEMBERSHIP_PREDICATES = {
+    "is_an_instance_of",
+    "#v#is_an_instance_of",
+    "is_a_type_of",
+    "#v#is_a_type_of",
+}
+
 
 @dataclass
 class RelationOptions:
@@ -71,6 +82,26 @@ class RelationOptions:
     include_uncertain: bool = False
     uncertainty_mode: Optional[str] = None
     uncertainty_statuses: Optional[Sequence[str]] = None
+
+
+@dataclass(frozen=True)
+class PredicateIncidenceTypeCountOptions:
+    include: bool = False
+    mode: str = _TYPE_COUNT_MODE_DIRECT_ASSERTED
+    include_untyped_bucket: bool = True
+    max_types_per_predicate: int = 20
+    max_sample_concepts_per_type: int = 3
+
+
+@dataclass(frozen=True)
+class PredicateIncidenceRoleExpansionOptions:
+    mode: str = _ROLE_EXPANSION_MODE_NONE
+    node_type_filter: Tuple[str, ...] = ()
+    predicate_filter: Tuple[str, ...] = ()
+    depth: int = 1
+    max_nodes_per_predicate: int = 12
+    max_role_predicates: int = 20
+    max_sample_concepts_per_type: int = 3
 
 
 def build_concept_relations_payload(
@@ -596,6 +627,15 @@ def get_predicate_incidence(
     include_uncertain: bool = False,
     uncertainty_mode: Optional[str] = None,
     uncertainty_statuses: Optional[Sequence[str]] = None,
+    include_argument_type_counts: bool = False,
+    type_count_mode: Optional[str] = None,
+    include_untyped_bucket: bool = True,
+    max_types_per_predicate: Optional[int] = None,
+    max_sample_concepts_per_type: Optional[int] = None,
+    role_expansion_mode: Optional[str] = None,
+    role_node_type_filter: Optional[Sequence[str]] = None,
+    role_predicate_filter: Optional[Sequence[str]] = None,
+    role_expansion_depth: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Summarise distinct predicates observed for an entity or a type's instances.
 
@@ -603,6 +643,9 @@ def get_predicate_incidence(
     must be provided. The returned payload groups relation hits by predicate and
     records useful counts such as relation-hit count, distinct grounding count,
     and, for type mode, the number of distinct instances contributing evidence.
+    Optional typed summaries are support-surface evidence only: they count direct
+    asserted types already represented in Vontology without adding domain policy
+    or lexical predicate/type steering in Python.
     """
 
     resolved_concept_id = str(concept_id or "").strip()
@@ -618,6 +661,20 @@ def get_predicate_incidence(
     resolved_offset = max(int(offset or 0), 0)
     resolved_sort_by = _normalise_predicate_incidence_sort(sort_by)
     preview_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+    type_count_options = _normalise_predicate_incidence_type_count_options(
+        include_argument_type_counts=include_argument_type_counts,
+        type_count_mode=type_count_mode,
+        include_untyped_bucket=include_untyped_bucket,
+        max_types_per_predicate=max_types_per_predicate,
+        max_sample_concepts_per_type=max_sample_concepts_per_type,
+    )
+    role_expansion_options = _normalise_predicate_incidence_role_expansion_options(
+        role_expansion_mode=role_expansion_mode,
+        role_node_type_filter=role_node_type_filter,
+        role_predicate_filter=role_predicate_filter,
+        role_expansion_depth=role_expansion_depth,
+        max_sample_concepts_per_type=type_count_options.max_sample_concepts_per_type,
+    )
 
     if resolved_concept_id:
         hits, diagnostics = _collect_all_argument_hits_for_incidence(
@@ -638,6 +695,8 @@ def get_predicate_incidence(
             anchor_concept_id=resolved_concept_id,
             mode="entity",
             type_membership_ids=None,
+            type_count_options=type_count_options,
+            role_expansion_options=role_expansion_options,
         )
         sorted_rows = _sort_predicate_incidence_rows(
             predicate_rows,
@@ -651,6 +710,9 @@ def get_predicate_incidence(
             "concept_id": resolved_concept_id,
             "total_predicates": len(sorted_rows),
             "predicates": paged_rows,
+            "role_expansions": _extract_predicate_incidence_role_expansions(
+                paged_rows
+            ),
             "paging": {
                 "limit": resolved_limit_value,
                 "offset": resolved_offset,
@@ -658,6 +720,12 @@ def get_predicate_incidence(
                 "total_available": len(sorted_rows),
             },
             "uncertainty_diagnostics": diagnostics,
+            "typed_predicate_incidence_diagnostics": (
+                _build_typed_predicate_incidence_diagnostics(
+                    type_count_options=type_count_options,
+                    role_expansion_options=role_expansion_options,
+                )
+            ),
         }
 
     type_ids = _resolve_type_incidence_type_ids(
@@ -708,6 +776,8 @@ def get_predicate_incidence(
             mode="type",
             contributing_instance_id=instance_id,
             type_membership_ids=type_ids,
+            type_count_options=type_count_options,
+            role_expansion_options=role_expansion_options,
         )
 
     sorted_rows = _sort_predicate_incidence_rows(
@@ -726,6 +796,7 @@ def get_predicate_incidence(
         "direct_instances_only": bool(direct_instances_only),
         "total_predicates": len(sorted_rows),
         "predicates": paged_rows,
+        "role_expansions": _extract_predicate_incidence_role_expansions(paged_rows),
         "paging": {
             "limit": resolved_limit_value,
             "offset": resolved_offset,
@@ -733,6 +804,12 @@ def get_predicate_incidence(
             "total_available": len(sorted_rows),
         },
         "uncertainty_diagnostics": diagnostics,
+        "typed_predicate_incidence_diagnostics": (
+            _build_typed_predicate_incidence_diagnostics(
+                type_count_options=type_count_options,
+                role_expansion_options=role_expansion_options,
+            )
+        ),
     }
 
 
@@ -872,6 +949,8 @@ def _aggregate_predicate_incidence_rows(
     anchor_concept_id: str,
     mode: str,
     type_membership_ids: Sequence[str] | None,
+    type_count_options: PredicateIncidenceTypeCountOptions,
+    role_expansion_options: PredicateIncidenceRoleExpansionOptions,
 ) -> List[Dict[str, Any]]:
     aggregated_by_predicate: Dict[str, Dict[str, Any]] = {}
     _accumulate_predicate_incidence_rows(
@@ -883,6 +962,8 @@ def _aggregate_predicate_incidence_rows(
         mode=mode,
         contributing_instance_id=(anchor_concept_id if mode == "type" else None),
         type_membership_ids=type_membership_ids,
+        type_count_options=type_count_options,
+        role_expansion_options=role_expansion_options,
     )
     return [
         _finalise_predicate_incidence_row(row, mode=mode)
@@ -900,6 +981,8 @@ def _accumulate_predicate_incidence_rows(
     mode: str,
     contributing_instance_id: Optional[str],
     type_membership_ids: Sequence[str] | None,
+    type_count_options: PredicateIncidenceTypeCountOptions,
+    role_expansion_options: PredicateIncidenceRoleExpansionOptions,
 ) -> None:
     for hit in hits:
         predicate_id = hit.get("predicate_concept_id")
@@ -945,6 +1028,27 @@ def _accumulate_predicate_incidence_rows(
             row["subject_argument_hit_count"] += 1
         if any(index >= _ARG_INDEX_FIRST_OBJECT for index in indexes):
             row["object_argument_hit_count"] += 1
+
+        argument_entries = _extract_predicate_incidence_argument_entries(
+            hit,
+            anchor_concept_id=anchor_concept_id,
+            preview_cache=preview_cache,
+        )
+        if type_count_options.include:
+            _accumulate_predicate_incidence_argument_type_counts(
+                row,
+                argument_entries=argument_entries,
+                type_count_options=type_count_options,
+            )
+        if role_expansion_options.mode != _ROLE_EXPANSION_MODE_NONE:
+            _accumulate_predicate_incidence_role_expansion(
+                row,
+                argument_entries=argument_entries,
+                anchor_concept_id=anchor_concept_id,
+                predicate_concept_id=resolved_predicate_id,
+                preview_cache=preview_cache,
+                role_expansion_options=role_expansion_options,
+            )
 
         for grounding_key, grounding in _extract_predicate_incidence_groundings(
             hit,
@@ -1010,6 +1114,365 @@ def _predicate_incidence_is_type_membership_hit(
     }
 
 
+def _extract_predicate_incidence_argument_entries(
+    hit: Mapping[str, Any],
+    *,
+    anchor_concept_id: str,
+    preview_cache: Dict[str, Optional[Dict[str, Any]]],
+) -> List[Dict[str, Any]]:
+    entries: List[Dict[str, Any]] = []
+
+    source_concept_id = _normalise_concept_id(hit.get("source_concept_id"))
+    if source_concept_id and source_concept_id != anchor_concept_id:
+        entries.append(
+            {
+                "argument_index": _ARG_INDEX_SUBJECT,
+                "argument_role": "subject",
+                "concept_id": source_concept_id,
+                "concept_preview": _resolve_concept_preview(
+                    source_concept_id,
+                    True,
+                    preview_cache,
+                ),
+            }
+        )
+
+    target_preview = hit.get("target_concept_preview")
+    target_concept_id = (
+        _extract_preview_concept_id(target_preview)
+        or _normalise_concept_id(hit.get("target_value"))
+    )
+    if target_concept_id and target_concept_id != anchor_concept_id:
+        resolved_preview = target_preview
+        if not isinstance(resolved_preview, Mapping):
+            resolved_preview = _resolve_concept_preview(
+                target_concept_id,
+                True,
+                preview_cache,
+            )
+        entries.append(
+            {
+                "argument_index": _ARG_INDEX_FIRST_OBJECT,
+                "argument_role": "object",
+                "concept_id": target_concept_id,
+                "concept_preview": resolved_preview,
+            }
+        )
+        return entries
+
+    target_value = hit.get("target_value")
+    text_value = None
+    if (
+        isinstance(target_value, str)
+        and target_value.strip()
+        and not target_value.strip().startswith("#V#")
+    ):
+        text_value = target_value.strip()
+    text_snippet = hit.get("text_snippet")
+    if isinstance(text_snippet, str) and text_snippet.strip():
+        text_value = text_snippet.strip()
+    if text_value:
+        entries.append(
+            {
+                "argument_index": _ARG_INDEX_FIRST_OBJECT,
+                "argument_role": "object",
+                "literal_preview": text_value[:180],
+            }
+        )
+    return entries
+
+
+def _accumulate_predicate_incidence_argument_type_counts(
+    row: Dict[str, Any],
+    *,
+    argument_entries: Sequence[Mapping[str, Any]],
+    type_count_options: PredicateIncidenceTypeCountOptions,
+) -> None:
+    if not argument_entries:
+        return
+    row["_max_types_per_predicate"] = type_count_options.max_types_per_predicate
+    for entry in argument_entries:
+        argument_index = entry.get("argument_index")
+        argument_role = entry.get("argument_role")
+        if not isinstance(argument_index, int) or not isinstance(argument_role, str):
+            continue
+        concept_id = _normalise_concept_id(entry.get("concept_id"))
+        if concept_id is None:
+            if entry.get("literal_preview"):
+                row["_literal_argument_count"] += 1
+            continue
+        preview = entry.get("concept_preview")
+        if not isinstance(preview, Mapping):
+            row["_inaccessible_argument_count"] += 1
+            continue
+        type_ids = _resolve_accessible_concept_type_ids(concept_id)
+        if type_ids is None:
+            row["_inaccessible_argument_count"] += 1
+            continue
+        if not type_ids:
+            if type_count_options.include_untyped_bucket:
+                row["_untyped_argument_count"] += 1
+            continue
+        for type_id in list(dict.fromkeys(type_ids)):
+            bucket_key = (argument_index, argument_role, type_id)
+            buckets = row.get("_argument_type_counts")
+            if not isinstance(buckets, dict):
+                buckets = {}
+                row["_argument_type_counts"] = buckets
+            bucket = buckets.get(bucket_key)
+            if bucket is None:
+                bucket = {
+                    "argument_index": argument_index,
+                    "argument_role": argument_role,
+                    "type_concept_id": type_id,
+                    "relation_hit_count": 0,
+                    "_concept_ids": set(),
+                    "sample_concepts": [],
+                }
+                type_preview = _resolve_concept_preview(
+                    type_id,
+                    True,
+                    {},
+                )
+                if isinstance(type_preview, Mapping):
+                    bucket["type_preview"] = _compact_concept_sample(type_preview)
+                buckets[bucket_key] = bucket
+            bucket["relation_hit_count"] += 1
+            concept_ids = bucket.get("_concept_ids")
+            if isinstance(concept_ids, set):
+                concept_ids.add(concept_id)
+            samples = bucket.get("sample_concepts")
+            if (
+                isinstance(samples, list)
+                and len(samples) < type_count_options.max_sample_concepts_per_type
+            ):
+                sample = _compact_concept_sample(preview)
+                if sample and sample not in samples:
+                    samples.append(sample)
+
+
+def _accumulate_predicate_incidence_role_expansion(
+    row: Dict[str, Any],
+    *,
+    argument_entries: Sequence[Mapping[str, Any]],
+    anchor_concept_id: str,
+    predicate_concept_id: str,
+    preview_cache: Dict[str, Optional[Dict[str, Any]]],
+    role_expansion_options: PredicateIncidenceRoleExpansionOptions,
+) -> None:
+    if role_expansion_options.mode == _ROLE_EXPANSION_MODE_AUTO:
+        # Auto mode requires Vontology-authored reification metadata. That
+        # metadata is not yet surfaced here, so fail closed with diagnostics.
+        return
+    if role_expansion_options.mode != _ROLE_EXPANSION_MODE_EXPLICIT:
+        return
+
+    allowed_node_types = {
+        type_id.lower() for type_id in role_expansion_options.node_type_filter
+    }
+    allowed_role_predicates = {
+        predicate_id.lower() for predicate_id in role_expansion_options.predicate_filter
+    }
+
+    for entry in argument_entries:
+        frame_id = _normalise_concept_id(entry.get("concept_id"))
+        if frame_id is None:
+            continue
+        frames = row.get("_role_expansion_frames")
+        if isinstance(frames, dict) and len(frames) >= role_expansion_options.max_nodes_per_predicate and frame_id not in frames:
+            continue
+        frame_type_ids = _resolve_accessible_concept_type_ids(frame_id)
+        if frame_type_ids is None:
+            continue
+        if allowed_node_types and not (
+            {type_id.lower() for type_id in frame_type_ids} & allowed_node_types
+        ):
+            continue
+        frame_doc = _load_accessible_relation_subject_document(frame_id)
+        if not isinstance(frame_doc, Mapping):
+            continue
+        relationships = frame_doc.get("relationships")
+        if not isinstance(relationships, Mapping):
+            continue
+
+        direction = _anchor_direction_from_other_argument(entry)
+        directions = row.get("_role_expansion_anchor_directions")
+        if isinstance(directions, set):
+            directions.add(direction)
+
+        frame_record = _ensure_role_expansion_frame(row, frame_id, frame_type_ids)
+        for role_predicate_id, raw_targets in relationships.items():
+            if not isinstance(role_predicate_id, str) or not role_predicate_id.strip():
+                continue
+            clean_role_predicate_id = role_predicate_id.strip()
+            if _is_type_membership_predicate_id(clean_role_predicate_id):
+                continue
+            if (
+                clean_role_predicate_id == predicate_concept_id
+                and _relationship_value_mentions_anchor(raw_targets, anchor_concept_id)
+            ):
+                continue
+            if allowed_role_predicates and clean_role_predicate_id.lower() not in allowed_role_predicates:
+                continue
+            role_predicates = frame_record.get("_role_predicates")
+            if isinstance(role_predicates, set):
+                role_predicates.add(clean_role_predicate_id)
+            targets = _normalise_relationship_targets(raw_targets)
+            for target in targets:
+                if target == anchor_concept_id or target == frame_id:
+                    continue
+                _accumulate_role_expansion_filler(
+                    row,
+                    frame_id=frame_id,
+                    role_predicate_id=clean_role_predicate_id,
+                    target=target,
+                    preview_cache=preview_cache,
+                    role_expansion_options=role_expansion_options,
+                )
+
+
+def _anchor_direction_from_other_argument(entry: Mapping[str, Any]) -> str:
+    argument_index = entry.get("argument_index")
+    if argument_index == _ARG_INDEX_SUBJECT:
+        return "incoming"
+    if isinstance(argument_index, int) and argument_index >= _ARG_INDEX_FIRST_OBJECT:
+        return "outgoing"
+    return "unknown"
+
+
+def _relationship_value_mentions_anchor(raw_targets: Any, anchor_concept_id: str) -> bool:
+    return anchor_concept_id in _normalise_relationship_targets(raw_targets)
+
+
+def _ensure_role_expansion_frame(
+    row: Dict[str, Any],
+    frame_id: str,
+    frame_type_ids: Sequence[str],
+) -> Dict[str, Any]:
+    frames = row.get("_role_expansion_frames")
+    if not isinstance(frames, dict):
+        frames = {}
+        row["_role_expansion_frames"] = frames
+    frame_record = frames.get(frame_id)
+    if frame_record is None:
+        frame_record = {
+            "concept_id": frame_id,
+            "type_ids": list(frame_type_ids),
+            "_role_predicates": set(),
+        }
+        frames[frame_id] = frame_record
+    return frame_record
+
+
+def _accumulate_role_expansion_filler(
+    row: Dict[str, Any],
+    *,
+    frame_id: str,
+    role_predicate_id: str,
+    target: str,
+    preview_cache: Dict[str, Optional[Dict[str, Any]]],
+    role_expansion_options: PredicateIncidenceRoleExpansionOptions,
+) -> None:
+    target_concept_id = _normalise_concept_id(target)
+    if target_concept_id is None:
+        row["_role_expansion_literal_filler_count"] += 1
+        return
+
+    preview = _resolve_concept_preview(target_concept_id, True, preview_cache)
+    if not isinstance(preview, Mapping):
+        row["_role_expansion_inaccessible_filler_count"] += 1
+        return
+    type_ids = _resolve_accessible_concept_type_ids(target_concept_id)
+    if type_ids is None:
+        row["_role_expansion_inaccessible_filler_count"] += 1
+        return
+    if not type_ids:
+        row["_role_expansion_untyped_filler_count"] += 1
+        return
+
+    role_counts = row.get("_role_expansion_role_counts")
+    if not isinstance(role_counts, dict):
+        role_counts = {}
+        row["_role_expansion_role_counts"] = role_counts
+    for type_id in list(dict.fromkeys(type_ids)):
+        key = (role_predicate_id, type_id)
+        bucket = role_counts.get(key)
+        if bucket is None:
+            bucket = {
+                "role_predicate_concept_id": role_predicate_id,
+                "type_concept_id": type_id,
+                "relation_hit_count": 0,
+                "_concept_ids": set(),
+                "sample_reified_nodes": [],
+                "sample_fillers": [],
+            }
+            type_preview = _resolve_concept_preview(type_id, True, preview_cache)
+            if isinstance(type_preview, Mapping):
+                bucket["type_preview"] = _compact_concept_sample(type_preview)
+            role_counts[key] = bucket
+        bucket["relation_hit_count"] += 1
+        concept_ids = bucket.get("_concept_ids")
+        if isinstance(concept_ids, set):
+            concept_ids.add(target_concept_id)
+        sample_nodes = bucket.get("sample_reified_nodes")
+        if (
+            isinstance(sample_nodes, list)
+            and len(sample_nodes) < role_expansion_options.max_sample_concepts_per_type
+            and frame_id not in sample_nodes
+        ):
+            sample_nodes.append(frame_id)
+        sample_fillers = bucket.get("sample_fillers")
+        if (
+            isinstance(sample_fillers, list)
+            and len(sample_fillers) < role_expansion_options.max_sample_concepts_per_type
+        ):
+            sample = _compact_concept_sample(preview)
+            if sample and sample not in sample_fillers:
+                sample_fillers.append(sample)
+
+
+def _resolve_accessible_concept_type_ids(concept_id: str) -> Optional[List[str]]:
+    doc = _load_accessible_preview_document(concept_id)
+    if not isinstance(doc, Mapping):
+        return None
+    relationships = doc.get("relationships")
+    if not isinstance(relationships, Mapping):
+        return []
+    type_ids: List[str] = []
+    for predicate_id in ("is_an_instance_of", "#V#is_an_instance_of"):
+        type_ids.extend(_normalise_relationship_targets(relationships.get(predicate_id)))
+    if should_enforce_access_control():
+        type_ids = _filter_accessible_concept_ids(type_ids)
+    return list(dict.fromkeys(type_ids))
+
+
+def _is_type_membership_predicate_id(predicate_id: str) -> bool:
+    return predicate_id.strip().lower() in _TYPE_MEMBERSHIP_PREDICATES
+
+
+def _compact_concept_sample(preview: Mapping[str, Any]) -> Dict[str, Any]:
+    sample: Dict[str, Any] = {}
+    concept_id = preview.get("concept_id")
+    if isinstance(concept_id, str) and concept_id.strip():
+        sample["concept_id"] = concept_id.strip()
+    name = preview.get("name")
+    if isinstance(name, str) and name.strip():
+        sample["name"] = name.strip()
+    kind = preview.get("kind")
+    if isinstance(kind, str) and kind.strip():
+        sample["kind"] = kind.strip()
+    type_ids = preview.get("type_ids")
+    if isinstance(type_ids, list):
+        clean_type_ids = [
+            str(type_id).strip()
+            for type_id in type_ids[:6]
+            if isinstance(type_id, str) and str(type_id).strip()
+        ]
+        if clean_type_ids:
+            sample["type_ids"] = clean_type_ids
+    return sample
+
+
 def _initialise_predicate_incidence_row(
     predicate_concept_id: str,
     *,
@@ -1028,6 +1491,16 @@ def _initialise_predicate_incidence_row(
         "_argument_indexes": set(),
         "_grounding_keys": set(),
         "_instance_ids": set(),
+        "_argument_type_counts": {},
+        "_untyped_argument_count": 0,
+        "_literal_argument_count": 0,
+        "_inaccessible_argument_count": 0,
+        "_role_expansion_frames": {},
+        "_role_expansion_role_counts": {},
+        "_role_expansion_anchor_directions": set(),
+        "_role_expansion_untyped_filler_count": 0,
+        "_role_expansion_literal_filler_count": 0,
+        "_role_expansion_inaccessible_filler_count": 0,
     }
     predicate_preview = _resolve_concept_preview(
         predicate_concept_id,
@@ -1037,6 +1510,147 @@ def _initialise_predicate_incidence_row(
     if predicate_preview is not None:
         row["predicate_preview"] = predicate_preview
     return row
+
+
+def _normalise_predicate_incidence_type_count_options(
+    *,
+    include_argument_type_counts: bool,
+    type_count_mode: Optional[str],
+    include_untyped_bucket: bool,
+    max_types_per_predicate: Optional[int],
+    max_sample_concepts_per_type: Optional[int],
+) -> PredicateIncidenceTypeCountOptions:
+    mode = str(type_count_mode or _TYPE_COUNT_MODE_DIRECT_ASSERTED).strip().lower()
+    if mode in {"", "direct", "direct_types", "direct_asserted_types"}:
+        mode = _TYPE_COUNT_MODE_DIRECT_ASSERTED
+    if mode != _TYPE_COUNT_MODE_DIRECT_ASSERTED:
+        raise ValueError(
+            "type_count_mode currently supports direct_asserted only"
+        )
+    return PredicateIncidenceTypeCountOptions(
+        include=bool(include_argument_type_counts),
+        mode=mode,
+        include_untyped_bucket=bool(include_untyped_bucket),
+        max_types_per_predicate=_coerce_bounded_positive_int(
+            max_types_per_predicate,
+            default=20,
+            minimum=1,
+            maximum=100,
+        ),
+        max_sample_concepts_per_type=_coerce_bounded_positive_int(
+            max_sample_concepts_per_type,
+            default=3,
+            minimum=1,
+            maximum=10,
+        ),
+    )
+
+
+def _normalise_predicate_incidence_role_expansion_options(
+    *,
+    role_expansion_mode: Optional[str],
+    role_node_type_filter: Optional[Sequence[str]],
+    role_predicate_filter: Optional[Sequence[str]],
+    role_expansion_depth: Optional[int],
+    max_sample_concepts_per_type: int,
+) -> PredicateIncidenceRoleExpansionOptions:
+    mode = str(role_expansion_mode or _ROLE_EXPANSION_MODE_NONE).strip().lower()
+    if mode in {"", "false", "off", "disabled"}:
+        mode = _ROLE_EXPANSION_MODE_NONE
+    if mode in {"role_expanded", "role_expansion", "expanded"}:
+        mode = _ROLE_EXPANSION_MODE_EXPLICIT
+    if mode not in {
+        _ROLE_EXPANSION_MODE_NONE,
+        _ROLE_EXPANSION_MODE_EXPLICIT,
+        _ROLE_EXPANSION_MODE_AUTO,
+    }:
+        raise ValueError("role_expansion_mode must be one of: none, explicit, auto")
+    depth = _coerce_bounded_positive_int(
+        role_expansion_depth,
+        default=1,
+        minimum=1,
+        maximum=1,
+    )
+    return PredicateIncidenceRoleExpansionOptions(
+        mode=mode,
+        node_type_filter=tuple(_normalise_exact_concept_terms(role_node_type_filter)),
+        predicate_filter=tuple(_normalise_exact_concept_terms(role_predicate_filter)),
+        depth=depth,
+        max_sample_concepts_per_type=max_sample_concepts_per_type,
+    )
+
+
+def _coerce_bounded_positive_int(
+    raw: Optional[int],
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    try:
+        value = int(raw) if raw is not None else default
+    except (TypeError, ValueError):
+        value = default
+    if value < minimum:
+        return minimum
+    return min(value, maximum)
+
+
+def _normalise_exact_concept_terms(raw: Optional[Sequence[str]]) -> List[str]:
+    if raw is None:
+        return []
+    values: Sequence[Any]
+    if isinstance(raw, str):
+        values = [raw]
+    else:
+        values = raw
+    normalised: List[str] = []
+    for candidate in values:
+        if not isinstance(candidate, str):
+            continue
+        token = candidate.strip()
+        if token:
+            normalised.append(token)
+    return list(dict.fromkeys(normalised))
+
+
+def _build_typed_predicate_incidence_diagnostics(
+    *,
+    type_count_options: PredicateIncidenceTypeCountOptions,
+    role_expansion_options: PredicateIncidenceRoleExpansionOptions,
+) -> Dict[str, Any]:
+    role_status = "disabled"
+    if role_expansion_options.mode == _ROLE_EXPANSION_MODE_EXPLICIT:
+        role_status = "explicit"
+    elif role_expansion_options.mode == _ROLE_EXPANSION_MODE_AUTO:
+        role_status = "metadata_unavailable"
+    return {
+        "include_argument_type_counts": type_count_options.include,
+        "type_count_mode": type_count_options.mode,
+        "include_untyped_bucket": type_count_options.include_untyped_bucket,
+        "max_types_per_predicate": type_count_options.max_types_per_predicate,
+        "max_sample_concepts_per_type": (
+            type_count_options.max_sample_concepts_per_type
+        ),
+        "role_expansion_mode": role_expansion_options.mode,
+        "role_expansion_depth": role_expansion_options.depth,
+        "role_expansion_status": role_status,
+        "role_node_type_filter_count": len(role_expansion_options.node_type_filter),
+        "role_predicate_filter_count": len(role_expansion_options.predicate_filter),
+    }
+
+
+def _extract_predicate_incidence_role_expansions(
+    rows: Sequence[Mapping[str, Any]],
+) -> List[Dict[str, Any]]:
+    expansions: List[Dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        expansion = row.get("role_expansion")
+        if isinstance(expansion, Mapping):
+            expansions.append(dict(expansion))
+    return expansions
 
 
 def _extract_predicate_incidence_groundings(
@@ -1177,7 +1791,185 @@ def _finalise_predicate_incidence_row(
     )
     if mode == "type":
         final_row["grounded_instance_count"] = len(row.get("_instance_ids") or ())
+    argument_type_counts = _finalise_argument_type_counts(row)
+    if argument_type_counts:
+        final_row["argument_type_counts"] = argument_type_counts
+    untyped_argument_count = row.get("_untyped_argument_count")
+    if isinstance(untyped_argument_count, (int, float)) and untyped_argument_count:
+        final_row["untyped_argument_count"] = int(untyped_argument_count)
+    literal_argument_count = row.get("_literal_argument_count")
+    if isinstance(literal_argument_count, (int, float)) and literal_argument_count:
+        final_row["literal_argument_count"] = int(literal_argument_count)
+    inaccessible_argument_count = row.get("_inaccessible_argument_count")
+    if (
+        isinstance(inaccessible_argument_count, (int, float))
+        and inaccessible_argument_count
+    ):
+        final_row["inaccessible_argument_count"] = int(inaccessible_argument_count)
+    role_expansion = _finalise_role_expansion(row)
+    if role_expansion:
+        final_row["role_expansion"] = role_expansion
     return final_row
+
+
+def _finalise_argument_type_counts(row: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    buckets = row.get("_argument_type_counts")
+    if not isinstance(buckets, Mapping):
+        return []
+    final_counts: List[Dict[str, Any]] = []
+    for bucket in buckets.values():
+        if not isinstance(bucket, Mapping):
+            continue
+        concept_ids = bucket.get("_concept_ids")
+        concept_count = len(concept_ids) if isinstance(concept_ids, set) else 0
+        entry = {
+            key: value
+            for key, value in bucket.items()
+            if not str(key).startswith("_")
+        }
+        entry["concept_count"] = concept_count
+        final_counts.append(entry)
+    final_counts.sort(
+        key=lambda item: (
+            int(item.get("argument_index") or 0),
+            str(item.get("argument_role") or ""),
+            -int(item.get("relation_hit_count") or 0),
+            str(item.get("type_concept_id") or ""),
+        )
+    )
+    max_types = row.get("_max_types_per_predicate")
+    if isinstance(max_types, (int, float)) and max_types > 0:
+        return final_counts[: int(max_types)]
+    return final_counts
+
+
+def _finalise_role_expansion(row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    frames = row.get("_role_expansion_frames")
+    if not isinstance(frames, Mapping) or not frames:
+        return None
+    role_counts = _finalise_role_expansion_role_counts(row)
+    directions = row.get("_role_expansion_anchor_directions")
+    clean_directions = (
+        sorted(direction for direction in directions if isinstance(direction, str))
+        if isinstance(directions, set)
+        else []
+    )
+    anchor_direction = (
+        clean_directions[0]
+        if len(clean_directions) == 1
+        else ("mixed" if clean_directions else "unknown")
+    )
+    sample_frames: List[Dict[str, Any]] = []
+    for frame in list(frames.values())[:4]:
+        if not isinstance(frame, Mapping):
+            continue
+        frame_sample: Dict[str, Any] = {}
+        concept_id = frame.get("concept_id")
+        if isinstance(concept_id, str) and concept_id.strip():
+            frame_sample["concept_id"] = concept_id.strip()
+        type_ids = frame.get("type_ids")
+        if isinstance(type_ids, list):
+            clean_type_ids = [
+                str(type_id).strip()
+                for type_id in type_ids[:6]
+                if isinstance(type_id, str) and str(type_id).strip()
+            ]
+            if clean_type_ids:
+                frame_sample["type_ids"] = clean_type_ids
+        role_predicates = frame.get("_role_predicates")
+        if isinstance(role_predicates, set):
+            frame_sample["role_predicate_count"] = len(role_predicates)
+        if frame_sample:
+            sample_frames.append(frame_sample)
+    expansion: Dict[str, Any] = {
+        "anchor_predicate_concept_id": row.get("predicate_concept_id"),
+        "anchor_direction": anchor_direction,
+        "reified_node_count": len(frames),
+        "reified_node_type_counts": _finalise_role_expansion_frame_type_counts(frames),
+        "role_filler_type_counts": role_counts,
+        "sample_reified_nodes": sample_frames,
+    }
+    for field_name, output_name in (
+        ("_role_expansion_untyped_filler_count", "untyped_filler_count"),
+        ("_role_expansion_literal_filler_count", "literal_filler_count"),
+        ("_role_expansion_inaccessible_filler_count", "inaccessible_filler_count"),
+    ):
+        value = row.get(field_name)
+        if isinstance(value, (int, float)) and value:
+            expansion[output_name] = int(value)
+    return {key: value for key, value in expansion.items() if value not in (None, [], {})}
+
+
+def _finalise_role_expansion_frame_type_counts(
+    frames: Mapping[Any, Any],
+) -> List[Dict[str, Any]]:
+    buckets: Dict[str, Dict[str, Any]] = {}
+    for frame in frames.values():
+        if not isinstance(frame, Mapping):
+            continue
+        frame_id = frame.get("concept_id")
+        type_ids = frame.get("type_ids")
+        if not isinstance(frame_id, str) or not isinstance(type_ids, list):
+            continue
+        for type_id in list(dict.fromkeys(type_ids)):
+            if not isinstance(type_id, str) or not type_id.strip():
+                continue
+            bucket = buckets.setdefault(
+                type_id.strip(),
+                {
+                    "type_concept_id": type_id.strip(),
+                    "_concept_ids": set(),
+                    "sample_reified_nodes": [],
+                },
+            )
+            concept_ids = bucket.get("_concept_ids")
+            if isinstance(concept_ids, set):
+                concept_ids.add(frame_id)
+            samples = bucket.get("sample_reified_nodes")
+            if isinstance(samples, list) and len(samples) < 3 and frame_id not in samples:
+                samples.append(frame_id)
+    final_counts: List[Dict[str, Any]] = []
+    for bucket in buckets.values():
+        concept_ids = bucket.get("_concept_ids")
+        entry = {
+            key: value
+            for key, value in bucket.items()
+            if not str(key).startswith("_")
+        }
+        entry["concept_count"] = len(concept_ids) if isinstance(concept_ids, set) else 0
+        final_counts.append(entry)
+    return sorted(
+        final_counts,
+        key=lambda item: (-int(item.get("concept_count") or 0), str(item.get("type_concept_id") or "")),
+    )
+
+
+def _finalise_role_expansion_role_counts(
+    row: Mapping[str, Any],
+) -> List[Dict[str, Any]]:
+    buckets = row.get("_role_expansion_role_counts")
+    if not isinstance(buckets, Mapping):
+        return []
+    final_counts: List[Dict[str, Any]] = []
+    for bucket in buckets.values():
+        if not isinstance(bucket, Mapping):
+            continue
+        concept_ids = bucket.get("_concept_ids")
+        entry = {
+            key: value
+            for key, value in bucket.items()
+            if not str(key).startswith("_")
+        }
+        entry["concept_count"] = len(concept_ids) if isinstance(concept_ids, set) else 0
+        final_counts.append(entry)
+    return sorted(
+        final_counts,
+        key=lambda item: (
+            str(item.get("role_predicate_concept_id") or ""),
+            -int(item.get("relation_hit_count") or 0),
+            str(item.get("type_concept_id") or ""),
+        ),
+    )
 
 
 def _sort_predicate_incidence_rows(
@@ -1487,13 +2279,15 @@ def _build_concept_preview_from_document(doc: Mapping[str, Any]) -> Dict[str, An
             kind = "unknown"
 
     relationships = doc.get("relationships") or {}
-    type_ids = _normalise_relationship_targets(
-        relationships.get("is_an_instance_of")
-        if isinstance(relationships, Mapping)
-        else None
-    )
+    type_ids: List[str] = []
+    if isinstance(relationships, Mapping):
+        for predicate_id in ("is_an_instance_of", "#V#is_an_instance_of"):
+            type_ids.extend(
+                _normalise_relationship_targets(relationships.get(predicate_id))
+            )
     if should_enforce_access_control():
         type_ids = _filter_accessible_concept_ids(type_ids)
+    type_ids = list(dict.fromkeys(type_ids))
 
     preview = {
         "concept_id": doc.get("concept_id"),

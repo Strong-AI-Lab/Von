@@ -181,6 +181,11 @@ This is crucial to Von's ambition. A system that only "remembers" through latent
 
 Von should therefore continue treating durable represented state as an implementation surface, not merely a cache.
 
+For the concrete Vontology tool families implied by this direction, see
+`docs/engineering/vontology_tooling_from_ka_kcap_kr_literature.md`. That note
+connects KA, KCAP, commonsense KR, Cyc-style contextual representation, and
+scientific KR literature to proposed Vontology read/write/support tools.
+
 ### 4.2 Workflows, prompts, and contracts as behavioural authority
 
 Durable behaviour policy should be authored in:
@@ -428,6 +433,12 @@ Von has the right semantic-memory direction but still lacks a mature explicit me
 - long-horizon task-state reconstruction across interruptions.
 
 Without this, Von will remain a capable turn-by-turn assistant rather than a truly enduring collaborator.
+
+The Vontology tooling design note at
+`docs/engineering/vontology_tooling_from_ka_kcap_kr_literature.md` should be
+used as the current companion for graph, provenance, context, Davidsonian
+role-frame, scientific-claim, and knowledge-acquisition tool surfaces that make
+this memory architecture usable from workflows.
 
 ### 6.3 Safe continual self-improvement
 
