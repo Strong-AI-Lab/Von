@@ -329,6 +329,7 @@ class _CustomWorkflowDispatchSupport:
     custom_workflow_launchability_probe_cache: dict[str, dict[str, Any]] = field(
         default_factory=dict
     )
+    selector_override_trace: dict[str, Any] | None = None
 
     def evaluate_turn_contract_dispatch_preflight(
         self,
@@ -472,9 +473,7 @@ class _CustomWorkflowDispatchSupport:
             )
         )
         if self.trace_enabled and self.trace is not None:
-            self.trace.metadata["workflow_dispatch_turn_contract_check"] = dict(
-                payload
-            )
+            self.trace.metadata["workflow_dispatch_turn_contract_check"] = dict(payload)
 
     def apply_turn_contract_dispatch_preflight(
         self,
@@ -606,6 +605,7 @@ class _CustomWorkflowDispatchSupport:
         }
         if extra_payload:
             override_payload.update(dict(extra_payload))
+        self.selector_override_trace = dict(override_payload)
         self.aux_llm_calls.append(
             annotate_python_decision_event(
                 override_payload,
@@ -706,7 +706,9 @@ class _CustomWorkflowDispatchSupport:
         )
         unresolved_required_inputs = [
             item.strip()
-            for item in (launch_input_resolution.get("unresolved_required_inputs") or [])
+            for item in (
+                launch_input_resolution.get("unresolved_required_inputs") or []
+            )
             if isinstance(item, str) and item.strip()
         ]
         pre_action_message = str(pre_action_validation.get("message") or "").strip()
@@ -757,9 +759,7 @@ class _CustomWorkflowDispatchSupport:
             error=error_text,
             launch_input_resolution_status=launch_input_resolution_status,
         )
-        self.custom_workflow_launchability_probe_cache[clean_workflow_id] = dict(
-            probe
-        )
+        self.custom_workflow_launchability_probe_cache[clean_workflow_id] = dict(probe)
         return dict(probe)
 
     @staticmethod
@@ -854,7 +854,9 @@ class _CustomWorkflowDispatchSupport:
             exclude_workflow_ids=exclude_workflow_ids
         )
         launchability_probes = {
-            str(candidate.get("concept_id")): self.get_cached_custom_workflow_launchability_probe(
+            str(
+                candidate.get("concept_id")
+            ): self.get_cached_custom_workflow_launchability_probe(
                 str(candidate.get("concept_id"))
             )
             for candidate in override_candidates
@@ -1050,6 +1052,7 @@ class _CustomWorkflowDispatchSupport:
         }
         if extra_payload:
             override_payload.update(dict(extra_payload))
+        self.selector_override_trace = dict(override_payload)
         self.aux_llm_calls.append(
             annotate_python_decision_event(
                 override_payload,
@@ -1074,7 +1077,9 @@ class _CustomWorkflowDispatchSupport:
             replacement_workflow_id
         )
         replacement_workflow_label = (
-            replacement_workflow_name or replacement_workflow_id or "launchable workflow"
+            replacement_workflow_name
+            or replacement_workflow_id
+            or "launchable workflow"
         )
         note_result_summary = (
             dispatch_prepare_result_summary.strip()
@@ -1167,9 +1172,7 @@ class _CustomWorkflowDispatchSupport:
                 reason=(
                     "selected_custom_workflow_launchability_requires_safe_general_fallback"
                 ),
-                excluded_selector_verdicts=[
-                    prior_selector_verdict or "rag_selected"
-                ],
+                excluded_selector_verdicts=[prior_selector_verdict or "rag_selected"],
                 extra_payload={
                     "prior_selected_workflow_id": prior_selected_workflow_id,
                     "prior_selector_verdict": prior_selector_verdict,
@@ -1291,8 +1294,7 @@ class _CustomWorkflowDispatchSupport:
             or requested_workflow_id
         )
         budget_exhaustion_detail = (
-            str(discovery_payload.get("budget_exhaustion_detail") or "").strip()
-            or None
+            str(discovery_payload.get("budget_exhaustion_detail") or "").strip() or None
         )
         reasoning = (
             "Workflow discovery timed out before surfacing the selector's "
@@ -4196,12 +4198,16 @@ class InternalMCPChatOrchestrator:
                     {
                         "type": "write_tool_request_evidence",
                         "status": (
-                            str(request_evidence_diagnostics.get("status") or "").strip()
+                            str(
+                                request_evidence_diagnostics.get("status") or ""
+                            ).strip()
                             or "unknown"
                         ),
                         "requested_tool_count": len(requested_tool_list),
                         "parse_mode": (
-                            str(request_evidence_diagnostics.get("parse_mode") or "").strip()
+                            str(
+                                request_evidence_diagnostics.get("parse_mode") or ""
+                            ).strip()
                             or None
                         ),
                         "resolved_prompt_concept_id": (
@@ -4350,8 +4356,7 @@ class InternalMCPChatOrchestrator:
             "write_policy_intervention_kinds": {
                 item.tool_name: item.intervention_kind
                 for item in decision.tool_decisions
-                if isinstance(item.intervention_kind, str)
-                and item.intervention_kind
+                if isinstance(item.intervention_kind, str) and item.intervention_kind
             },
             "write_policy_confidence_states": {
                 item.tool_name: item.confidence_state
@@ -4595,10 +4600,12 @@ class InternalMCPChatOrchestrator:
         successful_tool_names = self._extract_successful_tool_names(
             cast(
                 Sequence[Mapping[str, Any]] | None,
-                data.get("invocations")
-                if isinstance(data.get("invocations"), Sequence)
-                and not isinstance(data.get("invocations"), (str, bytes, bytearray))
-                else None,
+                (
+                    data.get("invocations")
+                    if isinstance(data.get("invocations"), Sequence)
+                    and not isinstance(data.get("invocations"), (str, bytes, bytearray))
+                    else None
+                ),
             )
         )
         missing_required_tools = data.get("missing_prompt_tools")
@@ -6032,8 +6039,8 @@ class InternalMCPChatOrchestrator:
                 if callable(emit_progress_raw)
                 else None
             )
-            timeout_override_sec = _conversation_turn_llm_timeout_override_sec_from_data(
-                request.data
+            timeout_override_sec = (
+                _conversation_turn_llm_timeout_override_sec_from_data(request.data)
             )
 
             if (
@@ -7278,7 +7285,9 @@ class InternalMCPChatOrchestrator:
             allowed_tools=(
                 tuple(data.get("llm_allowed_tools"))
                 if isinstance(data.get("llm_allowed_tools"), Sequence)
-                and not isinstance(data.get("llm_allowed_tools"), (str, bytes, bytearray))
+                and not isinstance(
+                    data.get("llm_allowed_tools"), (str, bytes, bytearray)
+                )
                 else None
             ),
             tool_invocations=(),
@@ -7477,69 +7486,65 @@ class InternalMCPChatOrchestrator:
                 )
                 has_valid_tool_call = bool(tool_calls)
             if not has_valid_tool_call:
-                parent_forced_tool_calls = (
-                    self._infer_missing_tool_call_retry_tool_calls(
-                        tool_plan_context,
-                        user_prompt=prompt,
-                        turn_expected_outcome_contract=(
-                            self._build_turn_expected_outcome_contract(data)
-                        ),
-                        missing_required_tools=(
-                            list(data.get("missing_prompt_tools"))
-                            if isinstance(data.get("missing_prompt_tools"), list)
-                            else []
-                        ),
-                        missing_required_fetch_concept_ids=(
-                            list(data.get("missing_prompt_fetch_concept_ids"))
-                            if isinstance(
-                                data.get("missing_prompt_fetch_concept_ids"), list
+                parent_forced_tool_calls = self._infer_missing_tool_call_retry_tool_calls(
+                    tool_plan_context,
+                    user_prompt=prompt,
+                    turn_expected_outcome_contract=(
+                        self._build_turn_expected_outcome_contract(data)
+                    ),
+                    missing_required_tools=(
+                        list(data.get("missing_prompt_tools"))
+                        if isinstance(data.get("missing_prompt_tools"), list)
+                        else []
+                    ),
+                    missing_required_fetch_concept_ids=(
+                        list(data.get("missing_prompt_fetch_concept_ids"))
+                        if isinstance(
+                            data.get("missing_prompt_fetch_concept_ids"), list
+                        )
+                        else []
+                    ),
+                    missing_required_read_file_copy_ids=(
+                        list(data.get("missing_prompt_read_file_copy_ids"))
+                        if isinstance(
+                            data.get("missing_prompt_read_file_copy_ids"), list
+                        )
+                        else []
+                    ),
+                    missing_required_scholarly_representation_file_copy_ids=(
+                        list(
+                            data.get(
+                                "missing_prompt_scholarly_representation_for_file_copy_ids"
                             )
-                            else []
-                        ),
-                        missing_required_read_file_copy_ids=(
-                            list(data.get("missing_prompt_read_file_copy_ids"))
-                            if isinstance(
-                                data.get("missing_prompt_read_file_copy_ids"), list
-                            )
-                            else []
-                        ),
-                        missing_required_scholarly_representation_file_copy_ids=(
-                            list(
-                                data.get(
-                                    "missing_prompt_scholarly_representation_for_file_copy_ids"
-                                )
-                            )
-                            if isinstance(
-                                data.get(
-                                    "missing_prompt_scholarly_representation_for_file_copy_ids"
-                                ),
-                                list,
-                            )
-                            else []
-                        ),
-                        required_create_type_name=(
-                            str(data.get("required_prompt_create_type_name")).strip()
-                            if isinstance(
-                                data.get("required_prompt_create_type_name"), str
-                            )
-                            and str(data.get("required_prompt_create_type_name")).strip()
-                            else None
-                        ),
-                        required_url_extraction_url=(
-                            str(data.get("required_prompt_url_extraction_url")).strip()
-                            if isinstance(
-                                data.get("required_prompt_url_extraction_url"), str
-                            )
-                            and str(data.get("required_prompt_url_extraction_url")).strip()
-                            else None
-                        ),
-                        user_concept_id=(
-                            str(data.get("user_concept_id")).strip()
-                            if isinstance(data.get("user_concept_id"), str)
-                            and str(data.get("user_concept_id")).strip()
-                            else None
-                        ),
-                    )
+                        )
+                        if isinstance(
+                            data.get(
+                                "missing_prompt_scholarly_representation_for_file_copy_ids"
+                            ),
+                            list,
+                        )
+                        else []
+                    ),
+                    required_create_type_name=(
+                        str(data.get("required_prompt_create_type_name")).strip()
+                        if isinstance(data.get("required_prompt_create_type_name"), str)
+                        and str(data.get("required_prompt_create_type_name")).strip()
+                        else None
+                    ),
+                    required_url_extraction_url=(
+                        str(data.get("required_prompt_url_extraction_url")).strip()
+                        if isinstance(
+                            data.get("required_prompt_url_extraction_url"), str
+                        )
+                        and str(data.get("required_prompt_url_extraction_url")).strip()
+                        else None
+                    ),
+                    user_concept_id=(
+                        str(data.get("user_concept_id")).strip()
+                        if isinstance(data.get("user_concept_id"), str)
+                        and str(data.get("user_concept_id")).strip()
+                        else None
+                    ),
                 )
                 if parent_forced_tool_calls:
                     import json
@@ -7564,9 +7569,7 @@ class InternalMCPChatOrchestrator:
                                     {
                                         "type": "missing_tool_call_retry",
                                         "path": (
-                                            "structured"
-                                            if use_structured
-                                            else "legacy"
+                                            "structured" if use_structured else "legacy"
                                         ),
                                         "mechanism": "structured_parent_fallback",
                                         "stage": "response",
@@ -9100,44 +9103,48 @@ class InternalMCPChatOrchestrator:
                             }
                         )
 
-                parent_forced_tool_calls = self._infer_missing_tool_call_retry_tool_calls(
-                    follow_up_context,
-                    user_prompt=(
-                        prompt_for_requirements
-                        if isinstance(prompt_for_requirements, str)
-                        else (
-                            data.get("prompt")
-                            if isinstance(data.get("prompt"), str)
-                            else ""
-                        )
-                    ),
-                    turn_expected_outcome_contract=(
-                        self._build_turn_expected_outcome_contract(data)
-                    ),
-                    missing_required_tools=missing_prompt_tools,
-                    missing_required_fetch_concept_ids=(
-                        missing_prompt_fetch_concept_ids
-                    ),
-                    missing_required_read_file_copy_ids=(
-                        missing_prompt_read_file_copy_ids
-                    ),
-                    missing_required_scholarly_representation_file_copy_ids=(
-                        missing_prompt_scholarly_representation_file_copy_ids
-                    ),
-                    required_create_type_name=required_prompt_create_type_name,
-                    required_url_extraction_url=(
-                        prompt_requirements.required_url_extraction_url
-                    ),
-                    tool_invocations=invocations_for_requirements,
-                    invoked_tool_names=(
-                        self._extract_successful_tool_names(invocations_for_requirements)
-                    ),
-                    user_concept_id=(
-                        str(data.get("user_concept_id")).strip()
-                        if isinstance(data.get("user_concept_id"), str)
-                        and str(data.get("user_concept_id")).strip()
-                        else None
-                    ),
+                parent_forced_tool_calls = (
+                    self._infer_missing_tool_call_retry_tool_calls(
+                        follow_up_context,
+                        user_prompt=(
+                            prompt_for_requirements
+                            if isinstance(prompt_for_requirements, str)
+                            else (
+                                data.get("prompt")
+                                if isinstance(data.get("prompt"), str)
+                                else ""
+                            )
+                        ),
+                        turn_expected_outcome_contract=(
+                            self._build_turn_expected_outcome_contract(data)
+                        ),
+                        missing_required_tools=missing_prompt_tools,
+                        missing_required_fetch_concept_ids=(
+                            missing_prompt_fetch_concept_ids
+                        ),
+                        missing_required_read_file_copy_ids=(
+                            missing_prompt_read_file_copy_ids
+                        ),
+                        missing_required_scholarly_representation_file_copy_ids=(
+                            missing_prompt_scholarly_representation_file_copy_ids
+                        ),
+                        required_create_type_name=required_prompt_create_type_name,
+                        required_url_extraction_url=(
+                            prompt_requirements.required_url_extraction_url
+                        ),
+                        tool_invocations=invocations_for_requirements,
+                        invoked_tool_names=(
+                            self._extract_successful_tool_names(
+                                invocations_for_requirements
+                            )
+                        ),
+                        user_concept_id=(
+                            str(data.get("user_concept_id")).strip()
+                            if isinstance(data.get("user_concept_id"), str)
+                            and str(data.get("user_concept_id")).strip()
+                            else None
+                        ),
+                    )
                 )
                 if parent_forced_tool_calls:
                     import json
@@ -9907,7 +9914,9 @@ class InternalMCPChatOrchestrator:
         )
         escalation_reason = repeat_stop_reason if escalation_signal else None
         recovery_repeat_eligible = bool(
-            repeat_eligible and not terminal_non_repeatable and repeat_stop_reason is None
+            repeat_eligible
+            and not terminal_non_repeatable
+            and repeat_stop_reason is None
         )
 
         completion_gate_evidence_payload: dict[str, Any] = dict(record_evidence_payload)
@@ -11596,9 +11605,7 @@ class InternalMCPChatOrchestrator:
         if not guardrail_lines:
             return base_message
 
-        guardrail_block = "\n".join(
-            ["GROUNDING GUARDRAILS:", *guardrail_lines]
-        )
+        guardrail_block = "\n".join(["GROUNDING GUARDRAILS:", *guardrail_lines])
         marker = "Available tools:\n"
         if marker in base_message:
             return base_message.replace(
@@ -12232,7 +12239,9 @@ class InternalMCPChatOrchestrator:
             return None
         normalised = first.strip()
         normalised = _re.sub(r"(?i)^arxiv:\s*", "", normalised)
-        normalised = _re.sub(r"(?i)^((?:[a-z\-]+/\d{7})|(?:\d{4}\.\d{4,5}))v\d+$", r"\1", normalised)
+        normalised = _re.sub(
+            r"(?i)^((?:[a-z\-]+/\d{7})|(?:\d{4}\.\d{4,5}))v\d+$", r"\1", normalised
+        )
         return normalised or None
 
     @classmethod
@@ -12588,16 +12597,18 @@ class InternalMCPChatOrchestrator:
     def _infer_turn_contract_required_tools(
         cls,
         *,
-        turn_expected_outcome_contract: TurnExpectedOutcomeContract
-        | Mapping[str, Any]
-        | None,
+        turn_expected_outcome_contract: (
+            TurnExpectedOutcomeContract | Mapping[str, Any] | None
+        ),
         method_catalogue: Mapping[str, Any] | None = None,
         allowed_tools: Sequence[str] | None = None,
     ) -> tuple[str, ...]:
         contract_object = (
             turn_expected_outcome_contract
             if isinstance(turn_expected_outcome_contract, TurnExpectedOutcomeContract)
-            else TurnExpectedOutcomeContract.from_mapping(turn_expected_outcome_contract)
+            else TurnExpectedOutcomeContract.from_mapping(
+                turn_expected_outcome_contract
+            )
         )
         if not contract_object.required_tools:
             return ()
@@ -12650,10 +12661,7 @@ class InternalMCPChatOrchestrator:
             if not lowered:
                 continue
             surface_metadata = get_tool_dispatch_surface_metadata(lowered)
-            if (
-                surface_metadata is None
-                or surface_metadata.surface_family in seen
-            ):
+            if surface_metadata is None or surface_metadata.surface_family in seen:
                 continue
             seen.add(surface_metadata.surface_family)
             ordered_families.append(surface_metadata.surface_family)
@@ -12687,9 +12695,9 @@ class InternalMCPChatOrchestrator:
         cls,
         *,
         evaluation: _PromptRequirementEvaluation,
-        turn_expected_outcome_contract: TurnExpectedOutcomeContract
-        | Mapping[str, Any]
-        | None,
+        turn_expected_outcome_contract: (
+            TurnExpectedOutcomeContract | Mapping[str, Any] | None
+        ),
         method_catalogue: Mapping[str, Any] | None = None,
         allowed_tools: Sequence[str] | None = None,
         tool_invocations: Sequence[Mapping[str, Any]] = (),
@@ -12749,7 +12757,9 @@ class InternalMCPChatOrchestrator:
                 ),
                 required_create_type_name=(
                     str(getattr(evaluation, "required_create_type_name")).strip()
-                    if isinstance(getattr(evaluation, "required_create_type_name", None), str)
+                    if isinstance(
+                        getattr(evaluation, "required_create_type_name", None), str
+                    )
                     and str(
                         getattr(evaluation, "required_create_type_name", None)
                     ).strip()
@@ -12798,7 +12808,9 @@ class InternalMCPChatOrchestrator:
                 ),
                 missing_retry_reason=(
                     str(getattr(evaluation, "missing_retry_reason")).strip()
-                    if isinstance(getattr(evaluation, "missing_retry_reason", None), str)
+                    if isinstance(
+                        getattr(evaluation, "missing_retry_reason", None), str
+                    )
                     and str(getattr(evaluation, "missing_retry_reason", None)).strip()
                     else None
                 ),
@@ -12830,7 +12842,10 @@ class InternalMCPChatOrchestrator:
         }
         unavailable_required_tools: list[str] = []
         seen_unavailable: set[str] = set()
-        for tool_name in (*evaluation.unavailable_required_tools, *merged_required_tools):
+        for tool_name in (
+            *evaluation.unavailable_required_tools,
+            *merged_required_tools,
+        ):
             lowered = str(tool_name).strip().lower()
             if not lowered or lowered in seen_unavailable:
                 continue
@@ -12931,111 +12946,6 @@ class InternalMCPChatOrchestrator:
         # Missing-tool-call recovery now relies on structural parse signals and
         # the Vontology-configured detector prompt. Do not reintroduce Python
         # semantic heuristics here.
-        return False
-
-        if not isinstance(response, str):
-            return False
-        text = response.strip()
-        if not text:
-            return False
-
-        # Normalise common Unicode punctuation (smart quotes) so heuristics behave
-        # consistently across models and frontends.
-        normalised = (
-            text.replace("\u2019", "'")
-            .replace("\u2018", "'")
-            .replace("\u2032", "'")
-            .replace("\u201c", '"')
-            .replace("\u201d", '"')
-        )
-        lowered = normalised.lower()
-        triggers = (
-            "here is the actual ontology operation",
-            "here's the actual ontology operation",
-            "here is the actual tool call",
-            "here's the actual tool call",
-            "here is the actual ontology operation.",
-            "here is the actual ontology operation:",
-            "here is the actual operation",
-            "here's the actual operation",
-            # Common narration patterns that precede no-op responses
-            "proceeding now",
-            "what i am about to apply",
-            "what i'm about to apply",
-            "i will now",
-            "i'll now",
-        )
-        if any(t in lowered for t in triggers):
-            return True
-
-        # Detect "promise to do" pattern when combined with tool-related keywords
-        # This catches "I'm going to search..." or "I'll execute the tools now"
-        toolish_keywords = (
-            "search",
-            "web",
-            "fetch",
-            "execute",
-            "tool",
-            "ontology",
-            "mcp",
-            "operation",
-            "concept",
-            "relationship",
-            "create",
-            "link",
-            "add",
-            "update",
-        )
-        promise_patterns = (
-            "i'm going to",
-            "i am going to",
-            "i'll",
-            "i will",
-            "let me",
-            "i'll fix that now",
-            "i'll do that now",
-            "i'll start",
-        )
-
-        has_promise = any(p in lowered for p in promise_patterns)
-        has_toolish = any(k in lowered for k in toolish_keywords)
-
-        if has_promise and has_toolish:
-            # Additional check: the response should be relatively short (< 500 chars)
-            # to avoid triggering on long explanatory responses
-            if len(text) < 500:
-                return True
-
-        # Routing/control-plane leakage is also a no-op in a tool-planning turn.
-        routing_phrases = (
-            "route this as",
-            "route this to",
-            "routing this as",
-            "selected workflow",
-            "select workflow",
-        )
-        routing_targets = (
-            "plain_response",
-            "tool_pipeline",
-            "chat_assistant_workflow",
-            "tool_calling_workflow",
-            "chat_narration_workflow",
-            "workflow_id",
-        )
-        if (
-            len(text) < 300
-            and any(phrase in lowered for phrase in routing_phrases)
-            and any(target in lowered for target in routing_targets)
-        ):
-            return True
-
-        # Secondary trigger: explicit step-by-step change description without any tool JSON.
-        # Only count as missing-tool-call if the assistant also uses tool-y language.
-        toolish = ("ontology", "mcp", "tool", "operation")
-        if any(k in lowered for k in toolish):
-            if "->" in text or "→" in text:
-                return True
-
         return False
 
     def _sanitise_user_visible_action_output(
@@ -16798,9 +16708,9 @@ class InternalMCPChatOrchestrator:
         cls,
         *,
         query_text: str,
-        expected_outcome_contract: TurnExpectedOutcomeContract
-        | Mapping[str, Any]
-        | None,
+        expected_outcome_contract: (
+            TurnExpectedOutcomeContract | Mapping[str, Any] | None
+        ),
         actor_context_lines: Sequence[str] | None = None,
     ) -> str:
         clean_query = str(query_text or "").strip()
@@ -17896,9 +17806,7 @@ class InternalMCPChatOrchestrator:
         if not shown_results:
             diagnostics_note = "No concept results were available."
         elif scope_only:
-            diagnostics_note = (
-                "This search used structural filters or scope constraints without a concrete query."
-            )
+            diagnostics_note = "This search used structural filters or scope constraints without a concrete query."
         else:
             best_score = score_values[0] if score_values else None
             if best_score is None:
@@ -17906,7 +17814,9 @@ class InternalMCPChatOrchestrator:
                     "Top-ranked results did not include numeric relevance scores."
                 )
             elif best_score >= 95.0:
-                diagnostics_note = "Top-ranked results carry very high relevance scores."
+                diagnostics_note = (
+                    "Top-ranked results carry very high relevance scores."
+                )
             elif best_score >= 80.0:
                 diagnostics_note = "Top-ranked results carry moderate relevance scores."
             else:
@@ -18129,7 +18039,10 @@ class InternalMCPChatOrchestrator:
                     if isinstance(field_value, str) and field_value.strip():
                         compact_row[field_name] = field_value.strip()
                 concept_id = compact_row.get("concept_id")
-                if isinstance(concept_id, str) and concept_id not in related_concept_ids:
+                if (
+                    isinstance(concept_id, str)
+                    and concept_id not in related_concept_ids
+                ):
                     related_concept_ids.append(concept_id)
                 predicate = compact_row.get("predicate")
                 if isinstance(predicate, str) and predicate not in predicates:
@@ -18224,10 +18137,7 @@ class InternalMCPChatOrchestrator:
             if not isinstance(hit, Mapping):
                 continue
             predicate_concept_id = hit.get("predicate_concept_id")
-            if (
-                isinstance(predicate_concept_id, str)
-                and predicate_concept_id.strip()
-            ):
+            if isinstance(predicate_concept_id, str) and predicate_concept_id.strip():
                 predicate_value = predicate_concept_id.strip()
                 if predicate_value not in predicate_values:
                     predicate_values.append(predicate_value)
@@ -18280,7 +18190,9 @@ class InternalMCPChatOrchestrator:
             if target_name:
                 compact_hit["target_name"] = target_name
             elif isinstance(target_value, str) and target_value.strip():
-                compact_hit["target_value_preview"] = target_value.strip()[:max_text_chars]
+                compact_hit["target_value_preview"] = target_value.strip()[
+                    :max_text_chars
+                ]
             target_type_ids = _preview_type_ids(target_preview)
             if target_type_ids:
                 compact_hit["target_type_ids"] = target_type_ids
@@ -18629,9 +18541,7 @@ class InternalMCPChatOrchestrator:
             "No retrieval results were available."
             if not results
             else (
-                "Retrieved evidence includes "
-                + ", ".join(diagnostics_parts)
-                + "."
+                "Retrieved evidence includes " + ", ".join(diagnostics_parts) + "."
                 if diagnostics_parts
                 else f"Retrieved {len(compact_results)} result preview(s)."
             )
@@ -23293,10 +23203,7 @@ class InternalMCPChatOrchestrator:
             if pure_ontology_follow_up
             else []
         )
-        if (
-            retry_actor_concept_id is None
-            and predicate_incidence_follow_up_concept_ids
-        ):
+        if retry_actor_concept_id is None and predicate_incidence_follow_up_concept_ids:
             retry_actor_concept_id = predicate_incidence_follow_up_concept_ids[0]
 
         forced_calls: list[_ToolCallRequest] = []
@@ -23442,8 +23349,8 @@ class InternalMCPChatOrchestrator:
                                     "concept_id": concept_id,
                                     "limit": 20,
                                 },
-                        }
-                    )
+                            }
+                        )
                     continue
                 if pure_ontology_follow_up:
                     continue
@@ -23531,7 +23438,10 @@ class InternalMCPChatOrchestrator:
             if not isinstance(invocation, Mapping):
                 continue
             raw_tool = invocation.get("tool")
-            if not isinstance(raw_tool, str) or raw_tool.strip().lower() != "search_concepts":
+            if (
+                not isinstance(raw_tool, str)
+                or raw_tool.strip().lower() != "search_concepts"
+            ):
                 continue
             if not cls._tool_invocation_completed_successfully(invocation):
                 continue
@@ -23583,7 +23493,10 @@ class InternalMCPChatOrchestrator:
             if not isinstance(invocation, Mapping):
                 continue
             raw_tool = invocation.get("tool")
-            if not isinstance(raw_tool, str) or raw_tool.strip().lower() != "search_concepts":
+            if (
+                not isinstance(raw_tool, str)
+                or raw_tool.strip().lower() != "search_concepts"
+            ):
                 continue
             if not cls._tool_invocation_completed_successfully(invocation):
                 continue
@@ -23771,9 +23684,7 @@ class InternalMCPChatOrchestrator:
                 if not isinstance(raw_predicate_filter, list):
                     continue
                 for raw_predicate_id in raw_predicate_filter:
-                    predicate_id = cls._normalise_concept_id_candidate(
-                        raw_predicate_id
-                    )
+                    predicate_id = cls._normalise_concept_id_candidate(raw_predicate_id)
                     if not predicate_id:
                         continue
                     if _append_once(explicit_predicate_ids, predicate_id):
@@ -23893,7 +23804,10 @@ class InternalMCPChatOrchestrator:
                     return True
 
         concept_id = row.get("concept_id")
-        if isinstance(concept_id, str) and concept_id.strip().lower() in predicate_meta_ids:
+        if (
+            isinstance(concept_id, str)
+            and concept_id.strip().lower() in predicate_meta_ids
+        ):
             return True
 
         return False
@@ -23990,7 +23904,8 @@ class InternalMCPChatOrchestrator:
             if isinstance(predicate_id, str) and str(predicate_id).strip()
         }
         concept_ids_are_predicate_only = bool(concept_ids) and all(
-            concept_id.strip().lower() in predicate_id_keys for concept_id in concept_ids
+            concept_id.strip().lower() in predicate_id_keys
+            for concept_id in concept_ids
         )
 
         primary_concept_id = concept_ids[0]
@@ -26582,7 +26497,9 @@ class InternalMCPChatOrchestrator:
         if not isinstance(raw_workflow_discovery, Mapping):
             raw_workflow_discovery = data.get("workflow_discovery")
         workflow_discovery_payload = (
-            raw_workflow_discovery if isinstance(raw_workflow_discovery, Mapping) else {}
+            raw_workflow_discovery
+            if isinstance(raw_workflow_discovery, Mapping)
+            else {}
         )
         return TurnExpectedOutcomeContract.merge_preferred(
             TurnExpectedOutcomeContract.from_mapping(
@@ -26634,8 +26551,8 @@ class InternalMCPChatOrchestrator:
         turn_expected_outcome_profile = cls._copy_string_key_mapping(
             data.get("turn_expected_outcome_profile")
         )
-        turn_expected_outcome_contract = cls._build_turn_expected_outcome_contract_object(
-            data
+        turn_expected_outcome_contract = (
+            cls._build_turn_expected_outcome_contract_object(data)
         )
         return build_turn_expected_outcome_boundary_payload(
             turn_expected_outcome_contract,
@@ -26724,7 +26641,10 @@ class InternalMCPChatOrchestrator:
     ) -> bool:
         if bool(invocation.get("blocked")):
             return False
-        if isinstance(invocation.get("error"), str) and str(invocation.get("error")).strip():
+        if (
+            isinstance(invocation.get("error"), str)
+            and str(invocation.get("error")).strip()
+        ):
             return False
 
         payload = invocation.get("effective_payload")
@@ -26774,7 +26694,9 @@ class InternalMCPChatOrchestrator:
         cls,
         payload: Mapping[str, Any],
     ) -> list[str]:
-        shaped_payload = cls._shape_search_concepts_payload_for_llm(payload, max_results=3)
+        shaped_payload = cls._shape_search_concepts_payload_for_llm(
+            payload, max_results=3
+        )
         results = shaped_payload.get("results")
         if not isinstance(results, list):
             return []
@@ -26897,7 +26819,7 @@ class InternalMCPChatOrchestrator:
             if groups_found != 1:
                 line += "s"
             if isinstance(concept_id, str) and concept_id.strip():
-                line += f" for concept_id \"{concept_id.strip()}\""
+                line += f' for concept_id "{concept_id.strip()}"'
             if isinstance(total_relations_scanned, int):
                 line += f" after scanning {total_relations_scanned} relation"
                 if total_relations_scanned != 1:
@@ -26945,7 +26867,7 @@ class InternalMCPChatOrchestrator:
             if count != 1:
                 line += "s"
             if isinstance(concept_id, str) and concept_id.strip():
-                line += f" for concept_id \"{concept_id.strip()}\""
+                line += f' for concept_id "{concept_id.strip()}"'
             fallback_mode = shaped_payload.get("fallback_mode")
             if isinstance(fallback_mode, str) and fallback_mode.strip():
                 line += f" using {fallback_mode.strip()} mode"
@@ -27092,7 +27014,9 @@ class InternalMCPChatOrchestrator:
         for row in predicate_rows[:4]:
             if not isinstance(row, Mapping):
                 continue
-            predicate_label = row.get("predicate_name") or row.get("predicate_concept_id")
+            predicate_label = row.get("predicate_name") or row.get(
+                "predicate_concept_id"
+            )
             if not isinstance(predicate_label, str) or not predicate_label.strip():
                 continue
             fragment = predicate_label.strip()
@@ -27188,9 +27112,7 @@ class InternalMCPChatOrchestrator:
         data: Mapping[str, Any],
     ) -> list[dict[str, str]]:
         invocations_raw = data.get("invocations")
-        invocations = (
-            invocations_raw if isinstance(invocations_raw, list) else []
-        )
+        invocations = invocations_raw if isinstance(invocations_raw, list) else []
 
         tool_blocks: list[tuple[tuple[int, int, int], list[str], bool]] = []
         for invocation_index, invocation in enumerate(invocations):
@@ -27242,10 +27164,7 @@ class InternalMCPChatOrchestrator:
                 }:
                     query_label = "concept_id"
                     query_value = arguments.get("concept_id")
-                if (
-                    query_value is None
-                    and tool_name == "get_predicate_incidence"
-                ):
+                if query_value is None and tool_name == "get_predicate_incidence":
                     query_label = "instance_of"
                     query_value = arguments.get("instance_of")
             query_text = (
@@ -27266,17 +27185,13 @@ class InternalMCPChatOrchestrator:
                     cls._build_search_knowledge_base_follow_up_lines(payload)
                 )
             elif tool_name == "search_concepts":
-                block_lines.extend(
-                    cls._build_search_concepts_follow_up_lines(payload)
-                )
+                block_lines.extend(cls._build_search_concepts_follow_up_lines(payload))
             elif tool_name == "get_text_relations_summary":
                 block_lines.extend(
                     cls._build_text_relations_summary_follow_up_lines(payload)
                 )
             elif tool_name == "get_related_concepts":
-                block_lines.extend(
-                    cls._build_related_concepts_follow_up_lines(payload)
-                )
+                block_lines.extend(cls._build_related_concepts_follow_up_lines(payload))
             elif tool_name == "find_relations_with_argument":
                 block_lines.extend(
                     cls._build_find_relations_with_argument_follow_up_lines(payload)
@@ -27351,7 +27266,9 @@ class InternalMCPChatOrchestrator:
     def _build_turn_discovery_query_text(
         *,
         turn_text: str,
-        expected_outcome_contract: TurnExpectedOutcomeContract | Mapping[str, Any] | None,
+        expected_outcome_contract: (
+            TurnExpectedOutcomeContract | Mapping[str, Any] | None
+        ),
     ) -> str:
         clean_turn_text = turn_text.strip() if isinstance(turn_text, str) else ""
         if not clean_turn_text:
@@ -27460,9 +27377,9 @@ class InternalMCPChatOrchestrator:
         workflow_discovery_result: Mapping[str, Any] | None,
         requested_query: str,
         discovery_query_input: str,
-        expected_outcome_contract: TurnExpectedOutcomeContract
-        | Mapping[str, Any]
-        | None = None,
+        expected_outcome_contract: (
+            TurnExpectedOutcomeContract | Mapping[str, Any] | None
+        ) = None,
         refreshed: bool = False,
     ) -> dict[str, Any]:
         payload = cls._copy_string_key_mapping(workflow_discovery_result) or {}
@@ -27489,9 +27406,7 @@ class InternalMCPChatOrchestrator:
         )
         if not expected_contract_object.is_empty():
             payload.update(
-                build_turn_expected_outcome_boundary_payload(
-                    expected_contract_object
-                )
+                build_turn_expected_outcome_boundary_payload(expected_contract_object)
             )
 
         existing_query = payload.get("query")
@@ -27717,15 +27632,9 @@ class InternalMCPChatOrchestrator:
             workflow_discovery_result=workflow_discovery_result,
             continuation_context=raw_continuation_context,
             user_namespace=env.user_namespace,
-            user_concept_id=(
-                str(data.get("user_concept_id") or "").strip() or None
-            ),
-            org_concept_id=(
-                str(data.get("org_concept_id") or "").strip() or None
-            ),
-            gmail_profile=(
-                str(data.get("gmail_profile") or "").strip() or None
-            ),
+            user_concept_id=(str(data.get("user_concept_id") or "").strip() or None),
+            org_concept_id=(str(data.get("org_concept_id") or "").strip() or None),
+            gmail_profile=(str(data.get("gmail_profile") or "").strip() or None),
             base_data=data if isinstance(data, Mapping) else None,
         )
         if callable(progress_note):
@@ -28256,208 +28165,245 @@ class InternalMCPChatOrchestrator:
                 )
             )
             if selector_safe_general_fallback_payload is not None:
-                requested_candidate_workflow_id = str(
-                    selector_safe_general_fallback_payload.get(
-                        "requested_candidate_workflow_id"
-                    )
-                    or ""
-                ).strip()
-                recovered_requested_workflow = False
-                match_absence_reason = str(
-                    workflow_discovery_result.get("match_absence_reason") or ""
-                ).strip()
-                budget_exhausted = bool(
-                    workflow_discovery_result.get("budget_exhausted")
-                ) or (
-                    match_absence_reason.lower()
-                    == "workflow_discovery_budget_exhausted"
+                selector_source = (
+                    selector_selection.selection_source
+                    if isinstance(selector_selection.selection_source, str)
+                    and selector_selection.selection_source.strip()
+                    else "selector"
                 )
-                if (
-                    requested_candidate_workflow_id
-                    and requested_candidate_workflow_id
-                    not in _SELECTOR_GENERIC_WORKFLOW_IDS
-                    and budget_exhausted
-                    and not workflow_discovery_result.get("candidate_count")
-                    and not workflow_discovery_result.get("match_count")
-                ):
-                    excluded_candidate_ids = {
-                        str(item).strip().lower()
-                        for item in (
-                            workflow_discovery_result.get("excluded_candidate_ids")
-                            or []
-                        )
-                        if isinstance(item, str) and str(item).strip()
-                    }
-                    for raw_candidate in (
-                        workflow_discovery_result.get("excluded_candidates") or ()
+                base_routing_info = WorkflowRoutingInfo(
+                    workflow_id=selected_workflow_id,
+                    verdict=selector_selection.verdict,
+                    prompt_id=selector_selection.prompt_id,
+                    discovered_workflow_ids=selector_selection.discovered_workflow_ids,
+                    source=selector_source,
+                    confidence_score=selector_selection.confidence_score,
+                    reasoning=selector_selection.reasoning,
+                    selection_rationale=_derive_workflow_selection_rationale(
+                        selected_workflow_id=selected_workflow_id,
+                        selector_verdict=selector_selection.verdict,
+                        selector_source=selector_source,
+                        candidate_workflow_ids=selector_selection.discovered_workflow_ids,
+                        explicit_reasoning=selector_selection.reasoning,
+                    ),
+                )
+                dispatch_selection_state = _WorkflowDispatchSelectionState(
+                    selected_workflow_id=selected_workflow_id,
+                    selected_workflow_id_text=selected_workflow_id,
+                    selector_verdict=selector_selection.verdict,
+                    selector_requests_narration=(
+                        selected_workflow_id == CHAT_NARRATION_WORKFLOW_ID
+                    ),
+                    selector_requests_custom_workflow=(
+                        selected_workflow_id not in _SELECTOR_GENERIC_WORKFLOW_IDS
+                    ),
+                    selected_uses_narration_contract=(
+                        selected_workflow_id == CHAT_NARRATION_WORKFLOW_ID
+                    ),
+                    selected_prefers_direct_response=(
+                        selected_workflow_id == CHAT_ASSISTANT_WORKFLOW_ID
+                    ),
+                    selected_uses_tool_pipeline_contract=(
+                        selected_workflow_id == TOOL_CALLING_WORKFLOW_ID
+                    ),
+                    routing_info=base_routing_info,
+                )
+
+                def _resolve_action_turn_workflow_name(
+                    workflow_id: str | None,
+                ) -> str | None:
+                    clean_workflow_id = (
+                        workflow_id.strip()
+                        if isinstance(workflow_id, str) and workflow_id.strip()
+                        else None
+                    )
+                    if not clean_workflow_id:
+                        return None
+                    for match in (
+                        *selector_candidate_matches,
+                        *excluded_discovered_matches,
                     ):
-                        if not isinstance(raw_candidate, Mapping):
+                        if not isinstance(match, Mapping):
                             continue
-                        concept_id = str(raw_candidate.get("concept_id") or "").strip()
-                        if concept_id:
-                            excluded_candidate_ids.add(concept_id.lower())
-                    if (
-                        requested_candidate_workflow_id.lower()
-                        not in excluded_candidate_ids
-                    ):
-                        try:
-                            requested_probe = self._probe_workflow_launchability_for_inputs(
-                                requested_candidate_workflow_id,
-                                available_inputs=self._build_turn_launchability_probe_inputs(
-                                    prompt_text=(
-                                        str(data.get("prompt") or "").strip() or ""
-                                    ),
-                                    augmented_context=cast(
-                                        Sequence[Mapping[str, Any]],
-                                        augmented_context,
-                                    ),
-                                    workflow_discovery_result=workflow_discovery_result,
-                                    continuation_context=(
-                                        data.get("continuation_context")
-                                        if isinstance(
-                                            data.get("continuation_context"), Mapping
-                                        )
-                                        else None
-                                    ),
-                                    user_namespace=env.user_namespace,
-                                    user_concept_id=(
-                                        str(data.get("user_concept_id") or "").strip()
-                                        or None
-                                    ),
-                                    org_concept_id=(
-                                        str(data.get("org_concept_id") or "").strip()
-                                        or None
-                                    ),
-                                    gmail_profile=(
-                                        str(data.get("gmail_profile") or "").strip()
-                                        or None
-                                    ),
-                                    base_data=data if isinstance(data, Mapping) else None,
-                                ),
-                            )
-                        except Exception:
-                            requested_probe = None
-                        if isinstance(requested_probe, Mapping) and bool(
-                            requested_probe.get("launchable")
+                        match_id = match.get("concept_id")
+                        if (
+                            isinstance(match_id, str)
+                            and match_id.strip() == clean_workflow_id
                         ):
-                            selected_workflow_id = requested_candidate_workflow_id
-                            selector_reasoning = (
-                                "Workflow discovery timed out before surfacing the "
-                                "selector's requested workflow, so the requested "
-                                "workflow was launch-checked directly and selected."
-                            )
-                            selector_override_trace = {
-                                "type": "workflow_selector_override",
-                                "reason": (
-                                    "selector_unmatched_candidate_budget_timeout_recovered_to_requested_workflow"
-                                ),
-                                "selected_workflow_id": (
-                                    requested_candidate_workflow_id
-                                ),
-                                "prior_selected_workflow_id": (
-                                    CHAT_ASSISTANT_WORKFLOW_ID
-                                ),
-                                "prior_selector_verdict": selector_selection.verdict,
-                                "workflow_discovery_budget_exhausted": True,
-                                "launch_viability_probe": {
-                                    "requested_candidate_workflow": dict(
-                                        requested_probe
-                                    )
-                                },
-                                **selector_safe_general_fallback_payload,
-                            }
-                            budget_exhaustion_detail = str(
-                                workflow_discovery_result.get(
-                                    "budget_exhaustion_detail"
-                                )
-                                or ""
-                            ).strip()
-                            if budget_exhaustion_detail:
-                                selector_override_trace[
-                                    "workflow_discovery_budget_exhaustion_detail"
-                                ] = budget_exhaustion_detail
-                            aux_llm_calls.append(
-                                annotate_python_decision_event(
-                                    selector_override_trace,
-                                    stage="workflow_dispatch",
-                                    component="internal_mcp_orchestrator",
-                                    function="_action_turn_execution_route",
-                                    decision_class="workflow_selector_override",
-                                    decision_source="workflow_launchability_check",
-                                    changed_outcome=True,
-                                    reason_code=(
-                                        "selector_unmatched_candidate_budget_timeout_recovered_to_requested_workflow"
-                                    ),
-                                    possible_inappropriate_python_code_use=False,
-                                )
-                            )
-                            routing_info = WorkflowRoutingInfo(
-                                workflow_id=selected_workflow_id,
-                                verdict="rag_selected",
-                                prompt_id=selector_selection.prompt_id,
-                                discovered_workflow_ids=(
-                                    selector_selection.discovered_workflow_ids
-                                ),
-                                source="selector_override",
-                                confidence_score=selector_selection.confidence_score,
-                                reasoning=selector_reasoning,
-                                selection_rationale=_derive_workflow_selection_rationale(
-                                    selected_workflow_id=selected_workflow_id,
-                                    selector_verdict="rag_selected",
-                                    selector_source="selector_override",
-                                    candidate_workflow_ids=(
-                                        selector_selection.discovered_workflow_ids
-                                    ),
-                                    explicit_reasoning=selector_reasoning,
-                                ),
-                            )
-                            recovered_requested_workflow = True
-                if not recovered_requested_workflow:
-                    selected_workflow_id = TOOL_CALLING_WORKFLOW_ID
-                    selector_reasoning = (
-                        "Selector proposed a concrete non-default workflow that was "
-                        "not eligible from the current candidate set, so the safe "
-                        "general tool workflow was selected instead."
+                            match_name = match.get("name")
+                            if isinstance(match_name, str) and match_name.strip():
+                                return match_name.strip()
+                    pretty_name = clean_workflow_id
+                    if pretty_name.startswith("#V#"):
+                        pretty_name = pretty_name[3:]
+                    pretty_name = pretty_name.replace("_", " ").strip()
+                    return (
+                        pretty_name[:1].upper() + pretty_name[1:]
+                        if pretty_name
+                        else clean_workflow_id
                     )
-                    selector_override_trace = {
-                        "type": "workflow_selector_override",
-                        "reason": "selector_unmatched_candidate_requires_safe_general_fallback",
-                        "selected_workflow_id": TOOL_CALLING_WORKFLOW_ID,
-                        "prior_selected_workflow_id": CHAT_ASSISTANT_WORKFLOW_ID,
-                        "prior_selector_verdict": selector_selection.verdict,
-                        **selector_safe_general_fallback_payload,
+
+                def _record_action_turn_dispatch_prepare_note(
+                    *,
+                    step_id: str,
+                    step_label: str,
+                    status: str = "completed",
+                    duration_ms: int = 0,
+                    result_summary: str | None = None,
+                    workflow_id: str | None = None,
+                    workflow_name: str | None = None,
+                    reason_code: str | None = None,
+                    symbol: str | None = None,
+                    unresolved_required_inputs: Sequence[str] | None = None,
+                    error_class: str | None = None,
+                    error: str | None = None,
+                    launch_input_resolution_status: str | None = None,
+                ) -> None:
+                    payload: dict[str, Any] = {
+                        "type": "workflow_dispatch_prepare_step",
+                        "stage": self.PHASE_WORKFLOW_DISPATCH_PREPARE,
+                        "step_id": step_id,
+                        "step_label": step_label,
+                        "status": status,
+                        "duration_ms": int(max(0, duration_ms)),
                     }
-                    aux_llm_calls.append(
-                        annotate_python_decision_event(
-                            selector_override_trace,
-                            stage="workflow_dispatch",
-                            component="internal_mcp_orchestrator",
-                            function="_action_turn_execution_route",
-                            decision_class="workflow_selector_override",
-                            decision_source="workflow_launchability_check",
-                            changed_outcome=True,
-                            reason_code=(
-                                "selector_unmatched_candidate_requires_safe_general_fallback"
-                            ),
-                            possible_inappropriate_python_code_use=False,
-                        )
-                    )
-                    routing_info = WorkflowRoutingInfo(
-                        workflow_id=selected_workflow_id,
-                        verdict="tool_contract_override",
-                        prompt_id=selector_selection.prompt_id,
-                        discovered_workflow_ids=selector_selection.discovered_workflow_ids,
-                        source="selector_override",
-                        confidence_score=selector_selection.confidence_score,
-                        reasoning=selector_reasoning,
-                        selection_rationale=_derive_workflow_selection_rationale(
-                            selected_workflow_id=selected_workflow_id,
-                            selector_verdict="tool_contract_override",
-                            selector_source="selector_override",
-                            candidate_workflow_ids=selector_selection.discovered_workflow_ids,
-                            explicit_reasoning=selector_reasoning,
+                    for key, value in (
+                        ("result_summary", result_summary),
+                        ("workflow_id", workflow_id),
+                        ("workflow_name", workflow_name),
+                        ("reason_code", reason_code),
+                        ("symbol", symbol),
+                        ("error_class", error_class),
+                        ("error", error),
+                        (
+                            "workflow_launch_input_resolution_status",
+                            launch_input_resolution_status,
                         ),
+                    ):
+                        if isinstance(value, str) and value.strip():
+                            payload[key] = value.strip()
+                    cleaned_unresolved_inputs = [
+                        item.strip()
+                        for item in (unresolved_required_inputs or ())
+                        if isinstance(item, str) and item.strip()
+                    ]
+                    if cleaned_unresolved_inputs:
+                        payload["unresolved_required_inputs"] = (
+                            cleaned_unresolved_inputs
+                        )
+                    aux_llm_calls.append(payload)
+
+                def _emit_action_turn_dispatch_progress(
+                    payload: Mapping[str, Any],
+                ) -> None:
+                    if not callable(emit_progress):
+                        return
+                    try:
+                        cast(Callable[[Mapping[str, Any]], None], emit_progress)(
+                            payload
+                        )
+                    except Exception:
+                        return
+
+                def _build_action_turn_live_workflow_routing_payload() -> (
+                    Mapping[str, Any]
+                ):
+                    payload: dict[str, Any] = {}
+                    if isinstance(workflow_discovery_result, Mapping):
+                        payload["workflow_discovery"] = dict(workflow_discovery_result)
+                    if dispatch_selection_state.selected_workflow_id_text:
+                        payload["selected_workflow_id"] = (
+                            dispatch_selection_state.selected_workflow_id_text
+                        )
+                    return payload
+
+                def _build_action_turn_custom_workflow_dispatch_data(
+                    workflow_id_override: str | None = None,
+                ) -> Mapping[str, Any]:
+                    prompt_text = str(
+                        data.get("user_prompt") or data.get("prompt") or ""
+                    ).strip()
+                    payload = self._build_turn_launchability_probe_inputs(
+                        prompt_text=prompt_text,
+                        augmented_context=cast(
+                            Sequence[Mapping[str, Any]],
+                            augmented_context,
+                        ),
+                        workflow_discovery_result=workflow_discovery_result,
+                        continuation_context=(
+                            data.get("continuation_context")
+                            if isinstance(data.get("continuation_context"), Mapping)
+                            else None
+                        ),
+                        user_namespace=env.user_namespace,
+                        user_concept_id=(
+                            str(data.get("user_concept_id") or "").strip() or None
+                        ),
+                        org_concept_id=(
+                            str(data.get("org_concept_id") or "").strip() or None
+                        ),
+                        gmail_profile=(
+                            str(data.get("gmail_profile") or "").strip() or None
+                        ),
+                        base_data=data if isinstance(data, Mapping) else None,
                     )
+                    if (
+                        isinstance(workflow_id_override, str)
+                        and workflow_id_override.strip()
+                    ):
+                        payload["selected_workflow_id"] = workflow_id_override.strip()
+                    return payload
+
+                custom_workflow_dispatch_support = _CustomWorkflowDispatchSupport(
+                    orchestrator=self,
+                    prompt=str(
+                        data.get("user_prompt") or data.get("prompt") or ""
+                    ).strip(),
+                    discovered_matches=discovered_matches,
+                    aux_llm_calls=cast(list[Mapping[str, Any]], aux_llm_calls),
+                    trace_enabled=False,
+                    trace=None,
+                    build_live_workflow_routing_payload=(
+                        _build_action_turn_live_workflow_routing_payload
+                    ),
+                    build_custom_workflow_dispatch_data=(
+                        _build_action_turn_custom_workflow_dispatch_data
+                    ),
+                    resolve_selected_workflow_name=(_resolve_action_turn_workflow_name),
+                    record_dispatch_prepare_note=(
+                        _record_action_turn_dispatch_prepare_note
+                    ),
+                    emit_progress_local=_emit_action_turn_dispatch_progress,
+                )
+
+                recovered_requested_workflow = custom_workflow_dispatch_support.maybe_recover_selector_unmatched_candidate_after_discovery_timeout(
+                    dispatch_selection_state,
+                    selector_safe_general_fallback_payload=(
+                        selector_safe_general_fallback_payload
+                    ),
+                    workflow_discovery_result=workflow_discovery_result,
+                )
+                if not recovered_requested_workflow:
+                    custom_workflow_dispatch_support.force_tool_pipeline_routing(
+                        dispatch_selection_state,
+                        reason=(
+                            "selector_unmatched_candidate_requires_safe_general_fallback"
+                        ),
+                        excluded_selector_verdicts=[
+                            selector_selection.verdict or "rag_default"
+                        ],
+                        extra_payload=selector_safe_general_fallback_payload,
+                    )
+                selected_workflow_id = (
+                    dispatch_selection_state.selected_workflow_id_text
+                    or selected_workflow_id
+                )
+                routing_info = (
+                    dispatch_selection_state.routing_info or base_routing_info
+                )
+                selector_override_trace = (
+                    custom_workflow_dispatch_support.selector_override_trace
+                )
             elif selector_single_discovered_recovery_payload is not None:
                 selected_workflow_id = str(
                     selector_single_discovered_recovery_payload.get(
@@ -28562,8 +28508,8 @@ class InternalMCPChatOrchestrator:
                 },
             )
 
-        selected_workflow_trace_contract = self._build_turn_expected_outcome_contract_object(
-            data
+        selected_workflow_trace_contract = (
+            self._build_turn_expected_outcome_contract_object(data)
         )
         selected_workflow_trace_contract_payload = (
             selected_workflow_trace_contract.to_dict()
@@ -28643,8 +28589,8 @@ class InternalMCPChatOrchestrator:
             if isinstance(data.get("selected_workflow_trace"), Mapping)
             else {}
         )
-        selected_workflow_trace_contract = self._build_turn_expected_outcome_contract_object(
-            data
+        selected_workflow_trace_contract = (
+            self._build_turn_expected_outcome_contract_object(data)
         )
         if not selected_workflow_trace_contract.is_empty():
             selected_workflow_trace_payload.setdefault(
@@ -28676,9 +28622,11 @@ class InternalMCPChatOrchestrator:
         failure_detail: str | None = None
         child_result_snapshot: Mapping[str, Any] | None = None
         child_workflow_data = dict(data)
-        selected_workflow_policy_memory_state = build_selected_workflow_policy_memory_state(
-            selected_workflow_id=selected_workflow_id,
-            namespace=getattr(env, "user_namespace", None),
+        selected_workflow_policy_memory_state = (
+            build_selected_workflow_policy_memory_state(
+                selected_workflow_id=selected_workflow_id,
+                namespace=getattr(env, "user_namespace", None),
+            )
         )
         child_workflow_data["selected_workflow_policy_memory_state"] = dict(
             selected_workflow_policy_memory_state
@@ -30913,7 +30861,9 @@ class InternalMCPChatOrchestrator:
                 }
             )
         )
-        routing_explicit_required_tools = tuple(routing_prompt_requirements.required_tools)
+        routing_explicit_required_tools = tuple(
+            routing_prompt_requirements.required_tools
+        )
         routing_prompt_requirements = self._augment_prompt_requirements_with_turn_contract(
             evaluation=routing_prompt_requirements,
             turn_expected_outcome_contract=routing_turn_expected_outcome_contract_object,
@@ -36305,114 +36255,6 @@ class InternalMCPChatOrchestrator:
 
         assert selection_state is not None
         dispatch_selection_state = selection_state
-        custom_workflow_dispatch_support = _CustomWorkflowDispatchSupport(
-            orchestrator=self,
-            prompt=prompt,
-            discovered_matches=discovered_matches,
-            aux_llm_calls=aux_llm_calls,
-            trace_enabled=trace_enabled,
-            trace=trace,
-            build_live_workflow_routing_payload=_build_live_workflow_routing_payload,
-            build_custom_workflow_dispatch_data=(
-                lambda workflow_id_override=None: _build_custom_workflow_dispatch_data(
-                    workflow_id_override
-                )
-            ),
-            resolve_selected_workflow_name=_resolve_selected_workflow_name,
-            record_dispatch_prepare_note=_record_dispatch_prepare_note,
-            emit_progress_local=_emit_progress_local,
-        )
-
-        def _sync_selected_workflow_locals_from_state() -> None:
-            nonlocal selected_workflow_id
-            nonlocal selected_workflow_id_text
-            nonlocal selector_verdict
-            nonlocal selector_requests_narration
-            nonlocal selector_requests_custom_workflow
-            nonlocal selected_uses_narration_contract
-            nonlocal selected_prefers_direct_response
-            nonlocal routing_info
-            nonlocal selected_uses_tool_pipeline_contract
-
-            selected_workflow_id = dispatch_selection_state.selected_workflow_id
-            selected_workflow_id_text = dispatch_selection_state.selected_workflow_id_text
-            selector_verdict = dispatch_selection_state.selector_verdict
-            selector_requests_narration = (
-                dispatch_selection_state.selector_requests_narration
-            )
-            selector_requests_custom_workflow = (
-                dispatch_selection_state.selector_requests_custom_workflow
-            )
-            selected_uses_narration_contract = (
-                dispatch_selection_state.selected_uses_narration_contract
-            )
-            selected_prefers_direct_response = (
-                dispatch_selection_state.selected_prefers_direct_response
-            )
-            selected_uses_tool_pipeline_contract = (
-                dispatch_selection_state.selected_uses_tool_pipeline_contract
-            )
-            routing_info = dispatch_selection_state.routing_info
-
-        def _force_tool_pipeline_routing(
-            *,
-            reason: str,
-            excluded_selector_verdicts: Sequence[str],
-            extra_payload: Mapping[str, Any] | None = None,
-            reasoning_text: str | None = None,
-        ) -> None:
-            custom_workflow_dispatch_support.force_tool_pipeline_routing(
-                dispatch_selection_state,
-                reason=reason,
-                excluded_selector_verdicts=excluded_selector_verdicts,
-                extra_payload=extra_payload,
-                reasoning_text=reasoning_text,
-            )
-            _sync_selected_workflow_locals_from_state()
-
-        selector_safe_general_fallback_payload = (
-            _build_selector_safe_general_fallback_payload(
-                selected_workflow_id=selected_workflow_id_text,
-                selector_verdict=selector_verdict or None,
-                selection_metadata=selector_selection_metadata,
-            )
-        )
-        selector_single_discovered_recovery_payload: dict[str, Any] | None = None
-        if selector_safe_general_fallback_payload is not None:
-            recovered_requested_workflow = (
-                custom_workflow_dispatch_support.maybe_recover_selector_unmatched_candidate_after_discovery_timeout(
-                    dispatch_selection_state,
-                    selector_safe_general_fallback_payload=(
-                        selector_safe_general_fallback_payload
-                    ),
-                    workflow_discovery_result=workflow_discovery_result,
-                )
-            )
-            _sync_selected_workflow_locals_from_state()
-            if not recovered_requested_workflow:
-                _force_tool_pipeline_routing(
-                    reason="selector_unmatched_candidate_requires_safe_general_fallback",
-                    excluded_selector_verdicts=[selector_verdict or "rag_default"],
-                    extra_payload=selector_safe_general_fallback_payload,
-                )
-        else:
-            selector_single_discovered_recovery_payload = (
-                _build_selector_single_discovered_execution_recovery_payload(
-                    selected_workflow_id=selected_workflow_id_text,
-                    selector_verdict=selector_verdict or None,
-                    selection_metadata=selector_selection_metadata,
-                    discovered_matches=discovered_matches,
-                )
-            )
-
-        custom_workflow_dispatch_support.apply_turn_contract_dispatch_preflight(
-            dispatch_selection_state,
-            turn_expected_outcome_contract=routing_turn_expected_outcome_contract,
-            required_tools=routing_contract_required_tools,
-            required_surface_families=routing_contract_required_tool_surface_families,
-            external_surface_families=routing_contract_external_surface_families,
-        )
-        _sync_selected_workflow_locals_from_state()
         selected_workflow_policy_memory_state: dict[str, Any] = {}
 
         def _build_custom_workflow_dispatch_data(
@@ -36507,6 +36349,111 @@ class InternalMCPChatOrchestrator:
             )
 
             return workflow_dispatch_data
+
+        custom_workflow_dispatch_support = _CustomWorkflowDispatchSupport(
+            orchestrator=self,
+            prompt=prompt,
+            discovered_matches=discovered_matches,
+            aux_llm_calls=aux_llm_calls,
+            trace_enabled=trace_enabled,
+            trace=trace,
+            build_live_workflow_routing_payload=_build_live_workflow_routing_payload,
+            build_custom_workflow_dispatch_data=_build_custom_workflow_dispatch_data,
+            resolve_selected_workflow_name=_resolve_selected_workflow_name,
+            record_dispatch_prepare_note=_record_dispatch_prepare_note,
+            emit_progress_local=_emit_progress_local,
+        )
+
+        def _sync_selected_workflow_locals_from_state() -> None:
+            nonlocal selected_workflow_id
+            nonlocal selected_workflow_id_text
+            nonlocal selector_verdict
+            nonlocal selector_requests_narration
+            nonlocal selector_requests_custom_workflow
+            nonlocal selected_uses_narration_contract
+            nonlocal selected_prefers_direct_response
+            nonlocal routing_info
+            nonlocal selected_uses_tool_pipeline_contract
+
+            selected_workflow_id = dispatch_selection_state.selected_workflow_id
+            selected_workflow_id_text = (
+                dispatch_selection_state.selected_workflow_id_text
+            )
+            selector_verdict = dispatch_selection_state.selector_verdict
+            selector_requests_narration = (
+                dispatch_selection_state.selector_requests_narration
+            )
+            selector_requests_custom_workflow = (
+                dispatch_selection_state.selector_requests_custom_workflow
+            )
+            selected_uses_narration_contract = (
+                dispatch_selection_state.selected_uses_narration_contract
+            )
+            selected_prefers_direct_response = (
+                dispatch_selection_state.selected_prefers_direct_response
+            )
+            selected_uses_tool_pipeline_contract = (
+                dispatch_selection_state.selected_uses_tool_pipeline_contract
+            )
+            routing_info = dispatch_selection_state.routing_info
+
+        def _force_tool_pipeline_routing(
+            *,
+            reason: str,
+            excluded_selector_verdicts: Sequence[str],
+            extra_payload: Mapping[str, Any] | None = None,
+            reasoning_text: str | None = None,
+        ) -> None:
+            custom_workflow_dispatch_support.force_tool_pipeline_routing(
+                dispatch_selection_state,
+                reason=reason,
+                excluded_selector_verdicts=excluded_selector_verdicts,
+                extra_payload=extra_payload,
+                reasoning_text=reasoning_text,
+            )
+            _sync_selected_workflow_locals_from_state()
+
+        selector_safe_general_fallback_payload = (
+            _build_selector_safe_general_fallback_payload(
+                selected_workflow_id=selected_workflow_id_text,
+                selector_verdict=selector_verdict or None,
+                selection_metadata=selector_selection_metadata,
+            )
+        )
+        selector_single_discovered_recovery_payload: dict[str, Any] | None = None
+        if selector_safe_general_fallback_payload is not None:
+            recovered_requested_workflow = custom_workflow_dispatch_support.maybe_recover_selector_unmatched_candidate_after_discovery_timeout(
+                dispatch_selection_state,
+                selector_safe_general_fallback_payload=(
+                    selector_safe_general_fallback_payload
+                ),
+                workflow_discovery_result=workflow_discovery_result,
+            )
+            _sync_selected_workflow_locals_from_state()
+            if not recovered_requested_workflow:
+                _force_tool_pipeline_routing(
+                    reason="selector_unmatched_candidate_requires_safe_general_fallback",
+                    excluded_selector_verdicts=[selector_verdict or "rag_default"],
+                    extra_payload=selector_safe_general_fallback_payload,
+                )
+        else:
+            selector_single_discovered_recovery_payload = (
+                _build_selector_single_discovered_execution_recovery_payload(
+                    selected_workflow_id=selected_workflow_id_text,
+                    selector_verdict=selector_verdict or None,
+                    selection_metadata=selector_selection_metadata,
+                    discovered_matches=discovered_matches,
+                )
+            )
+
+        custom_workflow_dispatch_support.apply_turn_contract_dispatch_preflight(
+            dispatch_selection_state,
+            turn_expected_outcome_contract=routing_turn_expected_outcome_contract,
+            required_tools=routing_contract_required_tools,
+            required_surface_families=routing_contract_required_tool_surface_families,
+            external_surface_families=routing_contract_external_surface_families,
+        )
+        _sync_selected_workflow_locals_from_state()
 
         def _get_cached_custom_workflow_launchability_probe(
             workflow_id: str | None,
@@ -37017,7 +36964,9 @@ class InternalMCPChatOrchestrator:
                 extra=workflow_dispatch_progress,
             )
             plain_response_stage_messages: list[dict[str, str]] = []
-            current_turn_message = self._build_turn_current_request_stage_message(prompt)
+            current_turn_message = self._build_turn_current_request_stage_message(
+                prompt
+            )
             if isinstance(current_turn_message, dict):
                 plain_response_stage_messages.append(current_turn_message)
             plain_response_stage_messages.extend(

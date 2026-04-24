@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -88,6 +89,32 @@ def _stub_authoritative_base_prompt(monkeypatch):
             _TEST_BASE_PROMPT,
             "#V#test_base_prompt",
         ),
+    )
+
+
+def _stub_turn_current_request_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+    orchestrator: InternalMCPChatOrchestrator,
+) -> None:
+    def _render_authoritative_prompt(prompt_ids, **kwargs):
+        requested_prompt_ids = [
+            str(item).strip()
+            for item in (prompt_ids or ())
+            if isinstance(item, str) and str(item).strip()
+        ]
+        variables = dict(kwargs.get("variables") or {})
+        turn_text = str(variables.get("turn_text") or "").strip()
+        return SimpleNamespace(
+            text=f"Current turn request:\n{turn_text}",
+            prompt_id=requested_prompt_ids[0] if requested_prompt_ids else None,
+            variables=variables,
+            truncated=False,
+        )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_render_authoritative_prompt",
+        _render_authoritative_prompt,
     )
 
 
@@ -204,7 +231,7 @@ def test_instruction_message_requires_authoritative_base_prompt(monkeypatch):
         orchestrator._instruction_message(preferred_language="en")
 
 
-def test_instruction_message_does_not_emit_arxiv_family_labels(monkeypatch):
+def test_instruction_message_keeps_arxiv_family_labels_compact(monkeypatch):
     class _PaperGateway(_CapturingGateway):
         def describe_methods(self):
             return {
@@ -227,7 +254,8 @@ def test_instruction_message_does_not_emit_arxiv_family_labels(monkeypatch):
     instruction = orchestrator._instruction_message(preferred_language="en")
 
     assert "search_arxiv" in instruction
-    assert "- arxiv:" not in instruction.lower()
+    assert "- arxiv:" in instruction.lower()
+    assert "download_paper" in instruction
 
 
 def test_orchestrator_injects_deterministic_preflight_context(monkeypatch):
@@ -924,6 +952,7 @@ def test_annotation_candidates_surface_in_preflight_telemetry_and_prompt(monkeyp
     orchestrator = InternalMCPChatOrchestrator(
         gateway=gateway, max_tool_invocations=1, max_context_chars=80_000
     )
+    _stub_turn_current_request_prompt(monkeypatch, orchestrator)
     llm = _CapturingLLM(["ok"])
 
     result = orchestrator.run(
@@ -1500,6 +1529,7 @@ def test_rag_candidates_surface_in_preflight_telemetry_and_prompt(monkeypatch):
     orchestrator = InternalMCPChatOrchestrator(
         gateway=gateway, max_tool_invocations=1, max_context_chars=80_000
     )
+    _stub_turn_current_request_prompt(monkeypatch, orchestrator)
     llm = _CapturingLLM(["ok"])
 
     result = orchestrator.run(
@@ -1902,6 +1932,7 @@ def test_preflight_stage_authorities_classify_mechanical_stages_correctly(
     orchestrator = InternalMCPChatOrchestrator(
         gateway=gateway, max_tool_invocations=1, max_context_chars=80_000
     )
+    _stub_turn_current_request_prompt(monkeypatch, orchestrator)
 
     llm = _CapturingLLM(["ok"])
     result = orchestrator.run(
@@ -1989,6 +2020,7 @@ def test_run_derives_identity_components_from_namespace_for_model_selection(
         registry_snapshot,
         user_concept_id,
         org_concept_id,
+        **_kwargs,
     ):
         captured_model_contexts.append(
             {
@@ -2009,6 +2041,7 @@ def test_run_derives_identity_components_from_namespace_for_model_selection(
     orchestrator = InternalMCPChatOrchestrator(
         gateway=gateway, max_tool_invocations=1, max_context_chars=80_000
     )
+    _stub_turn_current_request_prompt(monkeypatch, orchestrator)
 
     llm = _CapturingLLM(["ok"])
     result = orchestrator.run(

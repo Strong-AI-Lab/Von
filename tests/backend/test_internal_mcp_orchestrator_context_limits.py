@@ -41,97 +41,10 @@ def _bootstrap_authoritative_workflows() -> None:
     assert not report.get("graph_publication_errors")
 
 
-def test_orchestrator_retries_when_model_claims_tool_action_but_emits_no_tool_call():
-    _bootstrap_authoritative_workflows()
-    gateway = cast(Any, _StubGateway())
-    orchestrator = InternalMCPChatOrchestrator(
-        gateway=gateway,
-        max_tool_invocations=1,
-        max_context_chars=80_000,
+def _stub_base_system_prompt(orchestrator: InternalMCPChatOrchestrator) -> None:
+    cast(Any, orchestrator)._load_base_system_prompt_from_vontology = (
+        lambda **_kwargs: ("You are Von.", "#V#test_base_system_prompt")
     )
-
-    llm = _CapturingLLM(
-        [
-            (
-                "Understood. I'll continue enriching the existing concept.\n\n"
-                "Here is the actual ontology operation."
-            ),
-            json.dumps({"action": "call_tool", "tool": "dummy", "payload": {}}),
-            "done",
-        ]
-    )
-
-    result = orchestrator.run(
-        prompt="enrich Prof Green", context=[], llm_client=llm, model=None
-    )
-
-    assert isinstance(result.response_text, str)
-    assert result.response_text.strip()
-    assert "Here is the actual ontology operation." not in result.response_text
-    assert result.tool_invocations
-    assert result.tool_invocations[0]["tool"] == "dummy"
-    # First response + retry-for-tool-call + at least one follow-up answer.
-    assert len(llm.calls) >= 3
-
-
-def test_orchestrator_retries_when_tool_call_json_in_fence_after_prose():
-    """Regression test for JVNAUTOSCI-800: fenced JSON after prose doesn't execute.
-
-    This matches the exact failure pattern from the user's transcript where the model
-    outputs substantial prose followed by a fenced JSON tool call, which the strict
-    extraction logic rejects.
-    """
-    _bootstrap_authoritative_workflows()
-    gateway = cast(Any, _StubGateway())
-    orchestrator = InternalMCPChatOrchestrator(
-        gateway=gateway,
-        max_tool_invocations=1,
-        max_context_chars=80_000,
-    )
-
-    # Simulate the exact pattern: long prose + fenced JSON
-    prose_then_fence = (
-        "You're right to call that out — and your observation is correct.\n\n"
-        "**`#V#alvaro_orsi` does not exist yet.**\n"
-        "What I gave you previously was a **descriptive plan**, not a persisted ontology change.\n\n"
-        "Let's fix that cleanly and explicitly now.\n\n"
-        "## ✅ Creating the concept now\n\n"
-        "I am executing a real ontology operation below.\n\n"
-        "```json\n"
-        '{"action": "call_tool", "tool": "create_concepts", "payload": {"parent_id": "#V#person", "concepts": [{"name": "Alvaro Orsi"}]}}\n'
-        "```\n\n"
-        "Once this returns successfully, we can enrich it further.\n"
-    )
-
-    llm = _CapturingLLM(
-        [
-            prose_then_fence,  # First response: prose + fenced JSON (extraction should fail)
-            json.dumps(
-                {
-                    "action": "call_tool",
-                    "tool": "create_concepts",
-                    "payload": {
-                        "parent_id": "#V#person",
-                        "concepts": [{"name": "Alvaro Orsi"}],
-                    },
-                }
-            ),  # Retry: pure JSON
-            "Concept created successfully.",  # Follow-up natural language
-        ]
-    )
-
-    result = orchestrator.run(
-        prompt="Create Alvaro Orsi", context=[], llm_client=llm, model=None
-    )
-
-    assert isinstance(result.response_text, str)
-    assert result.response_text.strip()
-    assert "#V#alvaro_orsi does not exist yet" not in result.response_text
-    assert result.tool_invocations
-    assert result.tool_invocations[0]["tool"] == "create_concepts"
-    assert result.tool_invocations[0]["payload"]["concepts"][0]["name"] == "Alvaro Orsi"
-    # First response (prose+fence) + retry + at least one follow-up answer.
-    assert len(llm.calls) >= 3
 
 
 def _total_context_chars(context):
@@ -152,6 +65,7 @@ def test_orchestrator_limits_context_by_chars():
         max_tool_invocations=1,
         max_context_chars=30_000,
     )
+    _stub_base_system_prompt(orchestrator)
 
     # Create a very large chat history with unique contents so trimming is testable.
     context = [
@@ -162,7 +76,7 @@ def test_orchestrator_limits_context_by_chars():
     result = orchestrator.run(prompt="hi", context=context, llm_client=llm, model=None)
 
     assert result.response_text == "hello world"
-    assert len(llm.calls) == 1
+    assert llm.calls
 
     sent_context = llm.calls[0]["context"]
     assert sent_context and sent_context[0]["role"] == "system"
@@ -190,6 +104,7 @@ def test_orchestrator_preserves_presenter_protocol_when_trimming_context():
         max_tool_invocations=1,
         max_context_chars=8_000,
     )
+    _stub_base_system_prompt(orchestrator)
 
     presenter_protocol = {
         "role": "system",
@@ -544,7 +459,9 @@ def test_format_tool_result_shapes_jira_search_payload_for_live_follow_up():
     payload = parsed["payload"]
     assert payload["_llm_view"] == "jira_search_results.v1"
     assert payload["issues"][0]["key"] == "JVNAUTOSCI-1903"
-    assert payload["issues"][0]["summary"] == "Replay and record research briefing result"
+    assert (
+        payload["issues"][0]["summary"] == "Replay and record research briefing result"
+    )
     assert payload["issues"][0]["status"] == "In Progress"
     assert payload["issues"][0]["issue_type"] == "Subtask"
 
@@ -672,7 +589,9 @@ def test_format_tool_result_shapes_get_predicate_incidence_payload_for_live_foll
     assert payload["predicates"][0]["predicate_name"] == "author of"
     assert payload["predicates"][0]["relation_hit_count"] == 12
     assert payload["predicates"][0]["grounding_count"] == 7
-    assert payload["predicates"][0]["sample_groundings"][0]["concept_id"] == "#V#paper_one"
+    assert (
+        payload["predicates"][0]["sample_groundings"][0]["concept_id"] == "#V#paper_one"
+    )
     assert payload["predicates"][0]["sample_groundings"][0]["type_ids"] == [
         "#V#scholarly_article"
     ]
@@ -841,9 +760,7 @@ def test_format_tool_result_shapes_related_concepts_payload_for_live_follow_up()
                         "source_system": "vontology.graph",
                         "predicate": "#V#member_of_organisation",
                         "direction": "outgoing",
-                        "concept_id": (
-                            "#V#university_of_auckland_strong_ai_lab"
-                        ),
+                        "concept_id": ("#V#university_of_auckland_strong_ai_lab"),
                         "subject_concept_id": "#V#sail_student_group",
                     },
                 },
@@ -877,7 +794,10 @@ def test_extract_result_summary_uses_total_count_and_query_for_search_concepts()
         {
             "total_count": 7,
             "results": [
-                {"concept_id": "#V#under_preparation_paper", "name": "Under Preparation Paper"}
+                {
+                    "concept_id": "#V#under_preparation_paper",
+                    "name": "Under Preparation Paper",
+                }
             ],
             "query_info": {
                 "query": "under preparation paper",

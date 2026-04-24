@@ -1,5 +1,7 @@
-import pytest
+from types import SimpleNamespace
 from typing import Any, Mapping
+
+import pytest
 
 from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
@@ -65,7 +67,9 @@ class _FileCopyPromptToolGateway(_DummyGateway):
 class _ScholarlyPromptToolGateway(_DummyGateway):
     def describe_methods(self):
         return {
-            "interpret_file_copy": {"description": "materialise scholarly representation"},
+            "interpret_file_copy": {
+                "description": "materialise scholarly representation"
+            },
             "read_file_copy": {"description": "read a file copy concept"},
         }
 
@@ -85,6 +89,42 @@ class _RecorderLLM:
         if not self.responses:
             raise RuntimeError("No responses left in _RecorderLLM")
         return self.responses.pop(0)
+
+
+_TEST_BASE_PROMPT = (
+    "You are Von.\n\n"
+    "{auth_status}\n\n"
+    "VERIFICATION & CONSISTENCY RULES:\n"
+    "- Use fetch_concept and search_concepts for concept existence checks.\n\n"
+    "Available tools:\n{listing}"
+)
+
+
+def _stub_base_system_prompt(orchestrator: InternalMCPChatOrchestrator) -> None:
+    orchestrator._load_base_system_prompt_from_vontology = (  # type: ignore[method-assign]
+        lambda preferred_language=None: (_TEST_BASE_PROMPT, "#V#test_base_prompt")
+    )
+
+
+def _stub_authoritative_prompt_renderer(
+    orchestrator: InternalMCPChatOrchestrator,
+    *,
+    prompt_text: str = "Retry the tool call and return executable JSON only.",
+) -> None:
+    def _render_authoritative_prompt(prompt_ids, **kwargs):
+        requested_prompt_ids = [
+            str(item).strip()
+            for item in (prompt_ids or ())
+            if isinstance(item, str) and str(item).strip()
+        ]
+        return SimpleNamespace(
+            prompt_id=requested_prompt_ids[0] if requested_prompt_ids else None,
+            text=prompt_text,
+            variables=dict(kwargs.get("variables") or {}),
+            truncated=False,
+        )
+
+    orchestrator._render_authoritative_prompt = _render_authoritative_prompt  # type: ignore[method-assign]
 
 
 def _make_tool_pipeline_orchestrator(monkeypatch, gateway, **kwargs):
@@ -213,6 +253,7 @@ def test_apply_vontology_template_create_concepts_uses_nested_concept_id_when_ne
 
 def test_instruction_message_requires_verification_tool_calls_for_concept_existence():
     orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    _stub_base_system_prompt(orchestrator)
     message = orchestrator._instruction_message(user_namespace="#V#user")
     assert "VERIFICATION & CONSISTENCY RULES" in message
     assert "fetch_concept" in message
@@ -511,7 +552,9 @@ def test_extract_tool_calls_recovers_tool_uses_from_corrupted_wrapper_and_cleans
     assert calls is not None
     assert len(calls) == 1
     assert calls[0]["tool"] == "add_relationship"
-    assert calls[0]["payload"]["source_id"] == "#V#salient_predicate_governance_workflow"
+    assert (
+        calls[0]["payload"]["source_id"] == "#V#salient_predicate_governance_workflow"
+    )
     assert calls[0]["payload"]["predicate"] == "#V#has_step"
     assert calls[0]["payload"]["target"] == "#V#salience_step_identify_type"
 
@@ -877,7 +920,10 @@ def test_missing_tool_retry_forces_explicitly_requested_workflow_tools():
         "workflow_list_definitions",
         "workflow_list_instances",
     ]
-    assert tool_calls[1]["payload"]["workflow_id"] == "#V#salient_predicate_governance_workflow"
+    assert (
+        tool_calls[1]["payload"]["workflow_id"]
+        == "#V#salient_predicate_governance_workflow"
+    )
     assert result.outputs["missing_tool_call_retry_success"] is True
 
 
@@ -1215,6 +1261,7 @@ def test_missing_tool_retry_recovers_from_invalid_tool_call_json():
     """
 
     orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    _stub_authoritative_prompt_renderer(orchestrator)
     request = _make_workflow_action_request(
         orchestrator,
         llm_client=_RecorderLLM(['{"action":"call_tool","tool":"test","payload":{}}']),
@@ -1254,6 +1301,7 @@ def test_missing_tool_retry_recovers_from_late_turn_invalid_tool_call_json():
     """
 
     orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    _stub_authoritative_prompt_renderer(orchestrator)
     request = _make_workflow_action_request(
         orchestrator,
         llm_client=_RecorderLLM(['{"action":"call_tool","tool":"test","payload":{}}']),
@@ -1372,7 +1420,9 @@ def test_missing_tool_retry_surfaces_parse_error_when_retry_also_invalid():
     orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
     request = _make_workflow_action_request(
         orchestrator,
-        llm_client=_RecorderLLM(['{"action":"call_tool","tool":"test","payload":{"x":"oops}']),
+        llm_client=_RecorderLLM(
+            ['{"action":"call_tool","tool":"test","payload":{"x":"oops}']
+        ),
         action_id="missing_tool_call.retry",
         data={
             "response_text": '{"action":"call_tool","tool":"test","payload":{"x":"oops}',
@@ -1431,7 +1481,10 @@ def test_missing_tool_retry_respects_retry_budget():
 
     assert result.outputs["missing_tool_call_retry_success"] is False
     assert result.outputs["missing_tool_call_retry_suppressed"] is True
-    assert result.outputs["missing_tool_call_retry_stop_reason"] == "retry_budget_exhausted"
+    assert (
+        result.outputs["missing_tool_call_retry_stop_reason"]
+        == "retry_budget_exhausted"
+    )
 
 
 def test_missing_tool_call_retry_stops_on_no_progress_guard_with_safe_response():
@@ -1442,6 +1495,7 @@ def test_missing_tool_call_retry_stops_on_no_progress_guard_with_safe_response()
         gateway=_DummyGateway(),  # type: ignore[arg-type]
         max_tool_invocations=1,
     )
+    _stub_authoritative_prompt_renderer(orchestrator)
 
     class _Env:
         def __init__(self, llm_client):
@@ -1502,8 +1556,7 @@ def test_missing_tool_call_retry_stops_on_no_progress_guard_with_safe_response()
     assert retry_guard_entries
     assert retry_guard_entries[-1].get("stage") == "tool_recovery"
     assert (
-        retry_guard_entries[-1].get("stop_reason")
-        == "no_state_change_guard_triggered"
+        retry_guard_entries[-1].get("stop_reason") == "no_state_change_guard_triggered"
     )
 
 
@@ -1561,14 +1614,18 @@ def test_sanitise_user_visible_action_output_rewrites_action_json_and_logs_reaso
     assert aux_log[0].get("source_stage") == "unit_test"
 
 
-def test_run_preserves_claim_like_response_without_python_completion_validation():
+def test_run_preserves_claim_like_response_without_python_completion_validation(
+    monkeypatch: pytest.MonkeyPatch,
+):
     llm = _RecorderLLM(
         [
             "I completed the task and merged the branch.",
         ]
     )
-    orchestrator = InternalMCPChatOrchestrator(
-        gateway=_DummyGateway(),  # type: ignore[arg-type]
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
+        gateway=_DummyGateway(),
+        selector_enabled=False,
         max_tool_invocations=1,
     )
 
@@ -1583,22 +1640,24 @@ def test_run_preserves_claim_like_response_without_python_completion_validation(
     assert result.response_text == "I completed the task and merged the branch."
 
     aux_types = {
-        entry.get("type")
-        for entry in result.aux_llm_calls
-        if isinstance(entry, dict)
+        entry.get("type") for entry in result.aux_llm_calls if isinstance(entry, dict)
     }
     assert "completion_claim_detection" not in aux_types
     assert "completion_claim_validation" not in aux_types
 
 
-def test_run_keeps_non_claim_responses_free_of_completion_validation_events():
+def test_run_keeps_non_claim_responses_free_of_completion_validation_events(
+    monkeypatch: pytest.MonkeyPatch,
+):
     llm = _RecorderLLM(
         [
             "Here are two options for next steps, and I can apply either approach.",
         ]
     )
-    orchestrator = InternalMCPChatOrchestrator(
-        gateway=_DummyGateway(),  # type: ignore[arg-type]
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
+        gateway=_DummyGateway(),
+        selector_enabled=False,
         max_tool_invocations=1,
     )
 
@@ -1615,9 +1674,7 @@ def test_run_keeps_non_claim_responses_free_of_completion_validation_events():
         == "Here are two options for next steps, and I can apply either approach."
     )
     aux_types = {
-        entry.get("type")
-        for entry in result.aux_llm_calls
-        if isinstance(entry, dict)
+        entry.get("type") for entry in result.aux_llm_calls if isinstance(entry, dict)
     }
     assert "completion_claim_detection" not in aux_types
     assert "completion_claim_validation" not in aux_types
