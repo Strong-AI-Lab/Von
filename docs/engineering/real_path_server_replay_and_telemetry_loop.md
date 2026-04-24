@@ -271,7 +271,14 @@ Before the first replay:
    - relevant KB concepts or predicates
    - any workflow publication/bootstrap surface that must already be current
 2. Run targeted automated checks for the files you already changed.
-3. Start Von locally on a known port.
+3. Start Von locally through the isolated agent-test launcher:
+   `.\run.ps1 restart -AgentTest -HealthTimeoutSec 180`.
+   Maintained live replay/testing scripts default to
+   `http://127.0.0.1:5010` and require `/health` to report
+   `agent_test_instance=true`, so they do not accidentally hit the
+   interactive/user-facing server on port 5000.
+   If you intentionally use a different `-AgentTest -Port`, set
+   `VON_AGENT_TEST_BASE_URL` or pass the matching `--base-url`.
 4. If the issue depends on authenticated state, use the browser-test login path
    or another canonical authenticated route rather than faking user context.
 5. If you are using a sampled prompt, record the prompt id, category, prompt
@@ -327,8 +334,11 @@ sampler harness when it fits the task:
 
 It already creates a fresh authenticated conversation, captures the response,
 resolves history location, fetches persisted debug telemetry, and emits a
-conservative verdict. Keep in mind that its verdict complements rather than
-replaces the expectation-first human judgement.
+conservative verdict. It defaults to the `JVNAUTOSCI-2070` isolated agent-test
+backend and will reject a non-agent-test server unless you pass
+`--allow-non-agent-test-server` for an explicitly interactive-server check.
+Keep in mind that its verdict complements rather than replaces the
+expectation-first human judgement.
 
 The sampler also supports controlled multi-arm model comparison. Use repeated
 `--compare-model` flags, and optionally `--include-active-model-arm`, when you

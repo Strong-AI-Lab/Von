@@ -2359,10 +2359,18 @@ def _build_health_check_response(app: Flask):
             public_ip = None
 
     version_info = get_runtime_code_version_info()
+    agent_test_instance = (
+        str(os.environ.get("VON_AGENT_TEST_INSTANCE") or "")
+        .strip()
+        .lower()
+        in {"1", "true", "yes", "on"}
+    )
     return jsonify(
         status="healthy",
         version=version_info.get("version"),
         version_details=version_info,
+        agent_test_instance=agent_test_instance,
+        agent_test_environment_marker="VON_AGENT_TEST_INSTANCE",
         pid=os.getpid(),
         start_time=app.config["SERVER_START_TIME"],
         local_ip=local_ip,

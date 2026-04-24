@@ -181,11 +181,16 @@ Isolated coding-agent replay backend:
   `.\run.ps1 restart -AgentTest -HealthTimeoutSec 180`
 - `-AgentTest` defaults to port `5010`, implies `-NoBrowser`, preserves other
   Von server processes, and skips shared background workers/startup maintenance.
-  Pair replay tools with `--base-url http://127.0.0.1:5010`.
+  Maintained live replay/testing tools default to `http://127.0.0.1:5010` and
+  check `/health` for `agent_test_instance=true` so accidental use of the
+  interactive server fails clearly.
 - If port `5010` is already deliberately in use, choose an explicit isolated
   port such as:
   `.\run.ps1 restart -AgentTest -Port 5011 -HealthTimeoutSec 180`
-  and pass the matching base URL to the replay tool.
+  and set `VON_AGENT_TEST_BASE_URL=http://127.0.0.1:5011` or pass the matching
+  `--base-url` to the replay tool.
+- Use replay-tool `--allow-non-agent-test-server` only when the test's purpose
+  is specifically to exercise the interactive/user-facing server.
 - Do not treat `-Port` alone as isolation. The isolated mode changes launcher
   ownership semantics so an automated run does not globally clean up or adopt
   unrelated local Von processes.

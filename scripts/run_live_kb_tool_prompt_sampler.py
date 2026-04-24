@@ -32,8 +32,19 @@ from typing import Any
 
 import requests
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-DEFAULT_BASE_URL = "http://127.0.0.1:5000"
+from scripts.live_test_server_defaults import (
+    DEFAULT_AGENT_TEST_BASE_URL,
+    AGENT_TEST_BASE_URL_ENV_VAR,
+    build_agent_test_server_requirement_error,
+    get_default_agent_test_base_url,
+    resolve_live_test_base_url,
+)
+
+DEFAULT_BASE_URL = DEFAULT_AGENT_TEST_BASE_URL
 DEFAULT_MODEL = "gemma4:26b"
 DEFAULT_USER_CONCEPT_ID = "#V#michael_witbrock"
 DEFAULT_ORGANISATION_CONCEPT_ID = "university_of_auckland_strong_ai_lab"
@@ -815,6 +826,7 @@ def _summarise_server_diag(diag_payload: Mapping[str, Any]) -> dict[str, Any]:
         "server_worker_running": durable_workflows.get("worker_running"),
         "server_scheduler_running": durable_workflows.get("scheduler_running"),
         "server_uptime_sec": diag_payload.get("uptime_sec"),
+        "server_agent_test_instance": diag_payload.get("agent_test_instance"),
     }
 
 
@@ -1856,7 +1868,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             "KB-grounded and then tool-augmented prompts."
         )
     )
-    parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    parser.add_argument(
+        "--base-url",
+        default=get_default_agent_test_base_url(),
+        help=(
+            "Live Von server base URL. Defaults to the JVNAUTOSCI-2070 "
+            f"isolated agent-test server ({DEFAULT_AGENT_TEST_BASE_URL}); set "
+            f"{AGENT_TEST_BASE_URL_ENV_VAR} or pass this flag when using a "
+            "different -AgentTest -Port value."
+        ),
+    )
+    parser.add_argument(
+        "--allow-non-agent-test-server",
+        action="store_true",
+        help=(
+            "Allow the replay to target a server whose /health response does "
+            "not report agent_test_instance=true. Use only when deliberately "
+            "testing the interactive/user-facing server."
+        ),
+    )
     parser.add_argument(
         "--model",
         default=DEFAULT_MODEL,
@@ -1968,7 +1998,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         allowed_complexity_classes=allowed_complexity_classes,
     )
 
-    base_url = _safe_text(args.base_url).rstrip("/") or DEFAULT_BASE_URL
+    base_url = resolve_live_test_base_url(args.base_url)
     requested_model = _safe_text(args.model) or None
     compare_models = [
         cleaned
@@ -2000,6 +2030,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         base_url=base_url,
         run_environment=run_environment,
     )
+    if not bool(args.allow_non_agent_test_server):
+        agent_test_error = build_agent_test_server_requirement_error(
+            run_environment,
+            base_url=base_url,
+        )
+        if agent_test_error:
+            raise RuntimeError(agent_test_error)
     run_environment = _augment_run_environment_with_active_llm_info(
         session=metadata_session,
         base_url=base_url,

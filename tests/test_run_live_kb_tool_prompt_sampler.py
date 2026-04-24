@@ -17,6 +17,10 @@ def test_default_model_override_is_ollama_gemma4() -> None:
     assert sampler.DEFAULT_MODEL == "gemma4:26b"
 
 
+def test_default_base_url_targets_agent_test_instance() -> None:
+    assert sampler.DEFAULT_BASE_URL == "http://127.0.0.1:5010"
+
+
 def test_evaluate_user_happiness_flags_dispatch_failure() -> None:
     evaluation = sampler._evaluate_user_happiness(
         prompt_entry={
@@ -787,6 +791,7 @@ def test_summarise_server_diag_extracts_relevant_server_fields() -> None:
                 "worker_running": False,
                 "scheduler_running": False,
             },
+            "agent_test_instance": True,
             "version_details": {
                 "git_branch": "jvnautosci-1894-replay-programme",
                 "git_commit": "abc123def456",
@@ -803,6 +808,7 @@ def test_summarise_server_diag_extracts_relevant_server_fields() -> None:
     assert summary["server_effective_user_concept_id"] == "#V#michael_witbrock"
     assert summary["server_durable_workflow_ready"] is True
     assert summary["server_worker_running"] is False
+    assert summary["server_agent_test_instance"] is True
 
 
 def test_augment_run_environment_with_server_diag_prefers_health_endpoint(
@@ -816,6 +822,7 @@ def test_augment_run_environment_with_server_diag_prefers_health_endpoint(
         if url.endswith("/health"):
             return {
                 "version": "v20250421_1015_backend+gabc123",
+                "agent_test_instance": True,
                 "version_details": {
                     "git_branch": "main",
                     "git_commit": "abc123",
@@ -1167,6 +1174,7 @@ def test_main_builds_multi_arm_comparison_from_one_prompt_selection(
         lambda **kwargs: {
             **kwargs["run_environment"],
             "server_reported_git_commit": "abc123",
+            "server_agent_test_instance": True,
         },
     )
     monkeypatch.setattr(
@@ -1223,6 +1231,8 @@ def test_main_builds_multi_arm_comparison_from_one_prompt_selection(
         for call in replay_calls
     )
     assert output["mode"] == "multi_arm_comparison"
+    assert output["environment"]["base_url"] == "http://127.0.0.1:5010"
+    assert output["environment"]["server_agent_test_instance"] is True
     assert output["comparison"]["arm_count"] == 3
     assert output["selection"]["requested_model_arms"] == [
         {
