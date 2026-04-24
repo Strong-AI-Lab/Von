@@ -22,6 +22,7 @@ import {
     __testOnly_applyWorkflowStatusUpdate,
     __testOnly_resetWorkflowCapabilityIndexState,
     __testOnly_setWorkflowCapabilityIndexPayload,
+    __testOnly_setWorkflowMonitorGloballyFurled,
     __testOnly_buildLlmDebugMetadata,
     __testOnly_extractImageFilesFromClipboardEvent,
     __testOnly_convertInlineQuotedStrongSegmentsToButtons,
@@ -386,6 +387,7 @@ describe('workflow monitor concept links', () => {
             <div id="workflowStatusBody"></div>
             <button id="workflowStatusRefresh"></button>
             <button id="workflowStatusToggleAvailable"></button>
+            <button id="workflowStatusFurlToggle"></button>
             <input id="workflowStatusShowDesigns" type="checkbox" />
         `;
         __testOnly_setWorkflowShowDesigns(false);
@@ -613,6 +615,7 @@ describe('workflow monitor capability-index warning cartouche', () => {
             startup_check: {
                 checked_at_utc: '2026-04-22T01:02:03Z'
             },
+            checked_at_utc: '2026-04-22T01:03:04Z',
             size: 0
         });
 
@@ -621,6 +624,8 @@ describe('workflow monitor capability-index warning cartouche', () => {
         const bodyText = document.getElementById('workflowStatusBody').textContent;
         expect(bodyText).toContain('Workflow capability index not ready');
         expect(bodyText).toContain('insufficient_quota');
+        expect(bodyText).toContain('Checked:');
+        expect(bodyText).toContain('Fetched:');
         const exportPayload = __testOnly_buildWorkflowMonitorExportPayload();
         expect(exportPayload.capability_index.ready).toBe(false);
         expect(exportPayload.monitor_state.capability_index_error).toBeNull();
@@ -648,6 +653,157 @@ describe('workflow monitor capability-index warning cartouche', () => {
         expect(bodyText).toContain('turn pipeline monitoring workflow');
         const exportPayload = __testOnly_buildWorkflowMonitorExportPayload();
         expect(exportPayload.capability_index.status).toBe('building');
+    });
+});
+
+describe('workflow monitor capability-index polling and global furl', () => {
+    async function flushMicrotasks() {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+    }
+
+    beforeEach(() => {
+        jest.useFakeTimers();
+        document.body.innerHTML = `
+            <div id="workflowStatusPanel"></div>
+            <div id="workflowStatusBody"></div>
+            <button id="workflowStatusRefresh"></button>
+            <button id="workflowStatusToggleAvailable"></button>
+            <button id="workflowStatusFurlToggle"></button>
+            <input id="workflowStatusShowDesigns" type="checkbox" />
+        `;
+        __testOnly_resetWorkflowDefinitionsState();
+        __testOnly_resetWorkflowStatusState();
+        __testOnly_resetWorkflowCapabilityIndexState();
+    });
+
+    afterEach(() => {
+        __testOnly_resetWorkflowDefinitionsState();
+        __testOnly_resetWorkflowStatusState();
+        __testOnly_resetWorkflowCapabilityIndexState();
+        delete global.fetch;
+        jest.useRealTimers();
+    });
+
+    test('polls a not-ready capability index once per minute and clears the warning after readiness', async () => {
+        global.fetch = jest.fn().mockResolvedValue({
+            ok: true,
+            status: 200,
+            json: async () => ({
+                ready: true,
+                status: 'ready',
+                summary: 'Workflow capability index ready.',
+                size: 62,
+                checked_at_utc: '2026-04-24T07:19:41.000Z'
+            })
+        });
+
+        __testOnly_setWorkflowCapabilityIndexPayload({
+            ready: false,
+            status: 'building',
+            summary: 'Workflow capability index still building.',
+            detail: 'Workflow discovery is waiting on the authoritative capability index to finish building.',
+            size: 62,
+            checked_at_utc: '2026-04-24T07:18:41.000Z'
+        });
+        __testOnly_renderWorkflowDefinitionsBody([]);
+
+        expect(document.getElementById('workflowStatusBody').textContent).toContain(
+            'Workflow capability index still building'
+        );
+        let exportPayload = __testOnly_buildWorkflowMonitorExportPayload();
+        expect(exportPayload.monitor_state.capability_index_poll_active).toBe(true);
+        expect(exportPayload.monitor_state.capability_index_poll_interval_ms).toBe(60000);
+
+        jest.advanceTimersByTime(60000);
+        await flushMicrotasks();
+
+        expect(global.fetch).toHaveBeenCalledTimes(1);
+        expect(global.fetch.mock.calls[0][0]).toBe('/api/workflows/capability-index/status');
+        expect(document.getElementById('workflowStatusBody').textContent).not.toContain(
+            'Workflow capability index still building'
+        );
+        exportPayload = __testOnly_buildWorkflowMonitorExportPayload();
+        expect(exportPayload.capability_index.ready).toBe(true);
+        expect(exportPayload.monitor_state.capability_index_poll_active).toBe(false);
+    });
+
+    test('global furl hides active groups and capability-index warning without polling while furled', async () => {
+        global.fetch = jest.fn().mockResolvedValue({
+            ok: true,
+            status: 200,
+            json: async () => ({ items: [] })
+        });
+
+        __testOnly_setWorkflowCapabilityIndexPayload({
+            ready: false,
+            status: 'building',
+            summary: 'Workflow capability index still building.',
+            detail: 'Workflow discovery is waiting on the authoritative capability index to finish building.',
+            size: 62
+        });
+        __testOnly_applyWorkflowStatusUpdate({
+            instance_id: 'wf-furl-1',
+            workflow_id: '#V#workflow_introspection_maintenance_workflow',
+            status: 'running',
+            current_state: 'diagnose',
+            progress: { current: 1, total: 7, updated_at: '2026-03-20T07:05:19.686Z' }
+        });
+        __testOnly_applyWorkflowStatusUpdate({
+            instance_id: 'wf-furl-2',
+            workflow_id: '#V#workflow_introspection_maintenance_workflow',
+            status: 'running',
+            current_state: 'diagnose',
+            progress: { current: 2, total: 7, updated_at: '2026-03-20T07:06:19.686Z' }
+        });
+
+        expect(document.getElementById('workflowStatusBody').textContent).toContain(
+            'Workflow capability index still building'
+        );
+        expect(document.querySelectorAll('.workflow-status-group')).toHaveLength(1);
+        expect(document.querySelector('.workflow-status-group-body').classList.contains('is-collapsed')).toBe(true);
+        let exportPayload = __testOnly_buildWorkflowMonitorExportPayload();
+        expect(exportPayload.monitor_state.active_live_refresh_timer_active).toBe(true);
+        expect(exportPayload.monitor_state.capability_index_poll_active).toBe(true);
+
+        __testOnly_setWorkflowMonitorGloballyFurled(true);
+
+        const furlButton = document.getElementById('workflowStatusFurlToggle');
+        expect(furlButton.textContent).toBe('Unfurl all');
+        expect(furlButton.getAttribute('aria-expanded')).toBe('false');
+        expect(document.getElementById('workflowStatusBody').textContent).not.toContain(
+            'Workflow capability index still building'
+        );
+        expect(document.querySelectorAll('.workflow-status-group')).toHaveLength(0);
+        exportPayload = __testOnly_buildWorkflowMonitorExportPayload();
+        expect(exportPayload.monitor_state.global_furled).toBe(true);
+        expect(exportPayload.monitor_state.active_live_refresh_timer_active).toBe(false);
+        expect(exportPayload.monitor_state.capability_index_poll_active).toBe(false);
+
+        jest.advanceTimersByTime(60000);
+        await flushMicrotasks();
+        expect(global.fetch).not.toHaveBeenCalled();
+
+        __testOnly_setWorkflowMonitorGloballyFurled(false);
+
+        expect(furlButton.textContent).toBe('Furl all');
+        expect(furlButton.getAttribute('aria-expanded')).toBe('true');
+        expect(document.getElementById('workflowStatusBody').textContent).toContain(
+            'Workflow capability index still building'
+        );
+        expect(document.querySelectorAll('.workflow-status-group')).toHaveLength(1);
+        expect(document.querySelector('.workflow-status-group-body').classList.contains('is-collapsed')).toBe(false);
+        exportPayload = __testOnly_buildWorkflowMonitorExportPayload();
+        expect(exportPayload.monitor_state.global_furled).toBe(false);
+        expect(exportPayload.monitor_state.active_live_refresh_timer_active).toBe(true);
+        expect(exportPayload.monitor_state.capability_index_poll_active).toBe(true);
+
+        jest.advanceTimersByTime(750);
+        await flushMicrotasks();
+        expect(global.fetch).toHaveBeenCalledTimes(1);
+        expect(global.fetch.mock.calls[0][0]).toContain('/api/workflows/instances?');
     });
 });
 

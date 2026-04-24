@@ -217,14 +217,17 @@ const workflowCapabilityIndexState = {
     loading: false,
     error: '',
     payload: null,
-    lastFetchedAt: 0
+    lastFetchedAt: 0,
+    pollTimeoutId: null
 };
 const workflowStatusGroupUiState = {
-    collapsedByWorkflowId: new Map()
+    collapsedByWorkflowId: new Map(),
+    globallyFurled: false
 };
 const WORKFLOW_DEFINITIONS_SILENT_REFRESH_COOLDOWN_MS = 15_000;
 const WORKFLOW_DEFINITIONS_FETCH_TIMEOUT_MS = 20_000;
 const WORKFLOW_CAPABILITY_INDEX_FETCH_TIMEOUT_MS = 8_000;
+const WORKFLOW_CAPABILITY_INDEX_POLL_INTERVAL_MS = 60_000;
 const WORKFLOW_DEFINITIONS_CONTENTION_RETRY_BASE_MS = 750;
 const WORKFLOW_DEFINITIONS_CONTENTION_RETRY_MAX_MS = 5000;
 const WORKFLOW_DEFINITIONS_CONTENTION_RETRY_MAX_ATTEMPTS = 3;
@@ -20293,6 +20296,7 @@ function getWorkflowStatusElements() {
         body: document.getElementById('workflowStatusBody'),
         refreshButton: document.getElementById('workflowStatusRefresh'),
         toggleAvailableButton: document.getElementById('workflowStatusToggleAvailable'),
+        furlToggleButton: document.getElementById('workflowStatusFurlToggle'),
         showDesignsCheckbox: document.getElementById('workflowStatusShowDesigns'),
         copyJsonButton: document.getElementById('workflowStatusCopyJson')
     };
@@ -20640,13 +20644,22 @@ async function openWorkflowEpisodesPopup(workflowId, workflowName) {
 
 function updateWorkflowStatusActionButtons() {
     const showAvailable = Boolean(workflowDefinitionsState.visible);
-    const { toggleAvailableButton, refreshButton } = getWorkflowStatusElements();
+    const { toggleAvailableButton, furlToggleButton, refreshButton } = getWorkflowStatusElements();
     if (toggleAvailableButton) {
         toggleAvailableButton.setAttribute('aria-pressed', showAvailable ? 'true' : 'false');
         toggleAvailableButton.textContent = showAvailable ? 'Show active' : 'Show available';
         toggleAvailableButton.title = showAvailable
             ? 'Show active workflow instances'
             : 'Show available workflows';
+    }
+    if (furlToggleButton) {
+        const furled = Boolean(workflowStatusGroupUiState.globallyFurled);
+        furlToggleButton.setAttribute('aria-pressed', furled ? 'true' : 'false');
+        furlToggleButton.setAttribute('aria-expanded', furled ? 'false' : 'true');
+        furlToggleButton.textContent = furled ? 'Unfurl all' : 'Furl all';
+        furlToggleButton.title = furled
+            ? 'Unfurl workflow monitor'
+            : 'Furl workflow monitor';
     }
     if (refreshButton) {
         const loading = showAvailable
@@ -20813,6 +20826,75 @@ function pruneWorkflowStatusGroupState(groups) {
             workflowStatusGroupUiState.collapsedByWorkflowId.delete(workflowId);
         }
     });
+}
+
+function getWorkflowMonitorRestoreDelayMs(payload, fallbackMs) {
+    const scheduledMs = Number(payload?.retry_scheduled_in_ms);
+    if (Number.isFinite(scheduledMs) && scheduledMs > 0) {
+        return scheduledMs;
+    }
+    return Math.max(50, Math.round(Number(fallbackMs) || 50));
+}
+
+function restoreWorkflowMonitorTimersAfterUnfurl() {
+    syncWorkflowCapabilityIndexPolling();
+
+    if (workflowDefinitionsState.visible) {
+        const definitionsPayload = (
+            workflowDefinitionsState.lastPayload && typeof workflowDefinitionsState.lastPayload === 'object'
+        ) ? workflowDefinitionsState.lastPayload : null;
+        if (definitionsPayload?.retryable === true) {
+            scheduleWorkflowDefinitionsRetry({
+                delayMs: getWorkflowMonitorRestoreDelayMs(
+                    definitionsPayload,
+                    WORKFLOW_DEFINITIONS_CONTENTION_RETRY_BASE_MS
+                ),
+                silent: true
+            });
+        }
+        return;
+    }
+
+    if (!shouldAutoRefreshWorkflowStatusSnapshot()) {
+        return;
+    }
+
+    const activeSnapshotPayload = (
+        workflowStatusStreamState.lastSnapshotPayload &&
+        typeof workflowStatusStreamState.lastSnapshotPayload === 'object'
+    ) ? workflowStatusStreamState.lastSnapshotPayload : null;
+    if (activeSnapshotPayload?.retryable === true) {
+        scheduleWorkflowStatusSnapshotRetry({
+            delayMs: getWorkflowMonitorRestoreDelayMs(
+                activeSnapshotPayload,
+                WORKFLOW_STATUS_SNAPSHOT_RETRY_BASE_MS
+            ),
+            silent: true
+        });
+        return;
+    }
+
+    scheduleWorkflowStatusLiveRefresh();
+}
+
+function setWorkflowMonitorGloballyFurled(furled) {
+    const nextFurled = Boolean(furled);
+    workflowStatusGroupUiState.globallyFurled = nextFurled;
+    if (nextFurled) {
+        clearWorkflowStatusLiveRefreshTimer();
+        clearWorkflowStatusSnapshotRetryTimer();
+        clearWorkflowDefinitionsRetryTimer();
+    }
+    if (!nextFurled) {
+        const groups = buildWorkflowStatusGroups(Array.from(workflowStatusStreamState.items.values()));
+        groups.forEach((group) => {
+            if (group?.workflowId) {
+                workflowStatusGroupUiState.collapsedByWorkflowId.set(group.workflowId, false);
+            }
+        });
+        restoreWorkflowMonitorTimersAfterUnfurl();
+    }
+    renderWorkflowStatusBody();
 }
 
 function renderWorkflowStatusItemCard(item) {
@@ -21014,6 +21096,7 @@ function applyWorkflowCapabilityIndexPayload(payload) {
     workflowCapabilityIndexState.payload = { ...payload };
     workflowCapabilityIndexState.error = '';
     workflowCapabilityIndexState.lastFetchedAt = Date.now();
+    syncWorkflowCapabilityIndexPolling();
 }
 
 function getWorkflowCapabilityIndexPayload() {
@@ -21028,6 +21111,45 @@ function getWorkflowCapabilityIndexPayload() {
         return capabilityPayload;
     }
     return null;
+}
+
+function clearWorkflowCapabilityIndexPollTimer() {
+    if (!workflowCapabilityIndexState.pollTimeoutId) {
+        return;
+    }
+    clearTimeout(workflowCapabilityIndexState.pollTimeoutId);
+    workflowCapabilityIndexState.pollTimeoutId = null;
+}
+
+function shouldPollWorkflowCapabilityIndex() {
+    if (workflowStatusGroupUiState.globallyFurled) {
+        return false;
+    }
+    const { panel } = getWorkflowStatusElements();
+    if (!panel) {
+        return false;
+    }
+    const payload = getWorkflowCapabilityIndexPayload();
+    return Boolean(payload && typeof payload === 'object' && payload.ready !== true);
+}
+
+function syncWorkflowCapabilityIndexPolling() {
+    if (!shouldPollWorkflowCapabilityIndex()) {
+        clearWorkflowCapabilityIndexPollTimer();
+        return;
+    }
+    if (workflowCapabilityIndexState.pollTimeoutId) {
+        return;
+    }
+    workflowCapabilityIndexState.pollTimeoutId = setTimeout(() => {
+        workflowCapabilityIndexState.pollTimeoutId = null;
+        if (!shouldPollWorkflowCapabilityIndex()) {
+            return;
+        }
+        void refreshWorkflowCapabilityIndexStatus({ silent: true }).finally(() => {
+            syncWorkflowCapabilityIndexPolling();
+        });
+    }, WORKFLOW_CAPABILITY_INDEX_POLL_INTERVAL_MS);
 }
 
 function buildWorkflowCapabilityIndexWarningHtml() {
@@ -21080,6 +21202,12 @@ function buildWorkflowCapabilityIndexWarningHtml() {
     }
     if (typeof payload.last_mode === 'string' && payload.last_mode.trim()) {
         metaBits.push(`Mode: ${payload.last_mode.trim()}`);
+    }
+    if (typeof payload.checked_at_utc === 'string' && payload.checked_at_utc.trim()) {
+        metaBits.push(`Checked: ${formatWorkflowEpisodeTimestamp(payload.checked_at_utc.trim())}`);
+    }
+    if (workflowCapabilityIndexState.lastFetchedAt) {
+        metaBits.push(`Fetched: ${formatWorkflowEpisodeTimestamp(new Date(workflowCapabilityIndexState.lastFetchedAt).toISOString())}`);
     }
     if (typeof payload.last_error === 'string' && payload.last_error.trim()) {
         metaBits.push(`Reason: ${payload.last_error.trim()}`);
@@ -21174,6 +21302,10 @@ function buildWorkflowMonitorExportPayload() {
             loading_available: Boolean(workflowDefinitionsState.loading),
             active_error: workflowStatusStreamState.snapshotError || null,
             active_notice: workflowStatusStreamState.snapshotNotice || null,
+            global_furled: Boolean(workflowStatusGroupUiState.globallyFurled),
+            active_live_refresh_timer_active: Boolean(workflowStatusStreamState.liveRefreshTimeoutId),
+            active_retry_timer_active: Boolean(workflowStatusStreamState.retryTimeoutId),
+            available_retry_timer_active: Boolean(workflowDefinitionsState.retryTimeoutId),
             active_last_snapshot_at: workflowStatusStreamState.lastSnapshotAt
                 ? new Date(workflowStatusStreamState.lastSnapshotAt).toISOString()
                 : null,
@@ -21181,6 +21313,8 @@ function buildWorkflowMonitorExportPayload() {
             available_notice: workflowDefinitionsState.notice || null,
             capability_index_loading: Boolean(workflowCapabilityIndexState.loading),
             capability_index_error: workflowCapabilityIndexState.error || null,
+            capability_index_poll_active: Boolean(workflowCapabilityIndexState.pollTimeoutId),
+            capability_index_poll_interval_ms: WORKFLOW_CAPABILITY_INDEX_POLL_INTERVAL_MS,
             capability_index_last_fetched_at: workflowCapabilityIndexState.lastFetchedAt
                 ? new Date(workflowCapabilityIndexState.lastFetchedAt).toISOString()
                 : null,
@@ -21484,11 +21618,20 @@ function bindWorkflowStatusConceptLinks() {
 function renderWorkflowStatusBody() {
     bindWorkflowStatusConceptLinks();
     updateWorkflowStatusActionButtons();
-    if (workflowDefinitionsState.visible) {
-        renderWorkflowDefinitionsList(workflowDefinitionsState.items);
+    if (workflowStatusGroupUiState.globallyFurled) {
+        const { body } = getWorkflowStatusElements();
+        if (body) {
+            body.innerHTML = '';
+        }
+        syncWorkflowCapabilityIndexPolling();
         return;
     }
-    renderWorkflowStatusList(Array.from(workflowStatusStreamState.items.values()));
+    if (workflowDefinitionsState.visible) {
+        renderWorkflowDefinitionsList(workflowDefinitionsState.items);
+    } else {
+        renderWorkflowStatusList(Array.from(workflowStatusStreamState.items.values()));
+    }
+    syncWorkflowCapabilityIndexPolling();
 }
 
 function mergeWorkflowStatusPayload(existingPayload, incomingPayload) {
@@ -21513,8 +21656,7 @@ function clearWorkflowStatusLiveRefreshTimer() {
 }
 
 function scheduleWorkflowStatusLiveRefresh() {
-    const { panel } = getWorkflowStatusElements();
-    if (!panel) {
+    if (!shouldAutoRefreshWorkflowStatusSnapshot()) {
         return;
     }
     clearWorkflowStatusLiveRefreshTimer();
@@ -21694,7 +21836,7 @@ function parseWorkflowStatusSnapshotRetryAfterSeconds(payload, response) {
 
 function shouldAutoRefreshWorkflowStatusSnapshot() {
     const { panel } = getWorkflowStatusElements();
-    if (!panel || workflowDefinitionsState.visible) return false;
+    if (!panel || workflowDefinitionsState.visible || workflowStatusGroupUiState.globallyFurled) return false;
     return isDocumentVisibleForRealtimeConnections();
 }
 
@@ -21801,6 +21943,10 @@ function clearWorkflowDefinitionsRetryTimer() {
 }
 
 function scheduleWorkflowDefinitionsRetry({ delayMs, silent = true } = {}) {
+    if (workflowStatusGroupUiState.globallyFurled) {
+        clearWorkflowDefinitionsRetryTimer();
+        return;
+    }
     clearWorkflowDefinitionsRetryTimer();
     const boundedDelay = Math.max(50, Math.round(Number(delayMs) || 0));
     workflowDefinitionsState.retryTimeoutId = setTimeout(() => {
@@ -21832,7 +21978,8 @@ function applyWorkflowDefinitionsRetryableState({
         boundedMaxDelayMs
     );
     const retryDelayMs = Math.max(exponentialDelayMs, retryAfterMs);
-    const shouldRetry = attempt <= Math.max(1, Math.round(Number(maxAttempts) || 1));
+    const retryEligible = attempt <= Math.max(1, Math.round(Number(maxAttempts) || 1));
+    const shouldRetry = retryEligible && !workflowStatusGroupUiState.globallyFurled;
     const retryDelaySecondsRounded = formatWorkflowDefinitionsRetryDelaySeconds(retryDelayMs);
 
     workflowDefinitionsState.retryAttempt = attempt;
@@ -21852,7 +21999,7 @@ function applyWorkflowDefinitionsRetryableState({
 
     workflowDefinitionsState.lastPayload = {
         ...(payload && typeof payload === 'object' ? payload : {}),
-        retryable: shouldRetry,
+        retryable: retryEligible,
         retry_attempt: attempt,
         retry_scheduled_in_ms: shouldRetry ? retryDelayMs : null
     };
@@ -22110,7 +22257,14 @@ function startWorkflowStatusStream() {
 }
 
 function initializeWorkflowStatusPanel() {
-    const { panel, refreshButton, toggleAvailableButton, showDesignsCheckbox, copyJsonButton } = getWorkflowStatusElements();
+    const {
+        panel,
+        refreshButton,
+        toggleAvailableButton,
+        furlToggleButton,
+        showDesignsCheckbox,
+        copyJsonButton
+    } = getWorkflowStatusElements();
     if (!panel) return;
     if (workflowStatusPanelInitialised) return;
     workflowStatusPanelInitialised = true;
@@ -22158,6 +22312,15 @@ function initializeWorkflowStatusPanel() {
             void refreshWorkflowStatusSnapshot();
         });
         refreshButton.dataset.bound = 'true';
+    }
+
+    if (furlToggleButton && furlToggleButton.dataset.bound !== 'true') {
+        furlToggleButton.addEventListener('click', () => {
+            setWorkflowMonitorGloballyFurled(
+                !workflowStatusGroupUiState.globallyFurled
+            );
+        });
+        furlToggleButton.dataset.bound = 'true';
     }
 
     if (copyJsonButton) {
@@ -26295,6 +26458,7 @@ export async function __testOnly_refreshWorkflowStatusSnapshot(options = {}) {
 export function __testOnly_resetWorkflowStatusState() {
     clearWorkflowStatusLiveRefreshTimer();
     clearWorkflowStatusSnapshotRetryTimer();
+    clearWorkflowCapabilityIndexPollTimer();
     workflowStatusStreamState.items.clear();
     workflowStatusStreamState.lastSnapshotAt = 0;
     workflowStatusStreamState.loading = false;
@@ -26303,11 +26467,14 @@ export function __testOnly_resetWorkflowStatusState() {
     workflowStatusStreamState.snapshotNotice = '';
     workflowStatusStreamState.lastSnapshotPayload = null;
     workflowStatusGroupUiState.collapsedByWorkflowId.clear();
+    workflowStatusGroupUiState.globallyFurled = false;
+    workflowStatusPanelInitialised = false;
 }
 export async function __testOnly_refreshWorkflowCapabilityIndexStatus(options = {}) {
     return refreshWorkflowCapabilityIndexStatus(options);
 }
 export function __testOnly_resetWorkflowCapabilityIndexState() {
+    clearWorkflowCapabilityIndexPollTimer();
     workflowCapabilityIndexState.loading = false;
     workflowCapabilityIndexState.error = '';
     workflowCapabilityIndexState.payload = null;
@@ -26322,6 +26489,10 @@ export function __testOnly_setWorkflowCapabilityIndexPayload(payload = null) {
         workflowCapabilityIndexState.lastFetchedAt = 0;
     }
     workflowCapabilityIndexState.error = '';
+    syncWorkflowCapabilityIndexPolling();
+}
+export function __testOnly_setWorkflowMonitorGloballyFurled(furled) {
+    setWorkflowMonitorGloballyFurled(furled);
 }
 export function __testOnly_applyWorkflowStatusUpdate(payload) {
     applyWorkflowStatusUpdate(payload);
