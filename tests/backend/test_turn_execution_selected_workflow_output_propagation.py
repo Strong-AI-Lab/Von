@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any, cast
 
 from src.backend.integrations.internal_mcp.orchestrator import (
@@ -9,6 +10,7 @@ from src.backend.integrations.internal_mcp.orchestrator import (
 )
 from src.backend.workflows.durable.turn_execution_runtime_support import (
     build_turn_execution_selected_workflow_outputs,
+    render_selected_workflow_user_response,
 )
 
 
@@ -205,4 +207,132 @@ def test_selected_workflow_outputs_preserve_child_telemetry_and_required_tools()
     assert (
         outputs["selected_workflow_trace"]["workflow_required_effects_contract_source"]
         == "definition_metadata"
+    )
+
+
+def _unsafe_missing_grounded_evidence_record() -> dict[str, Any]:
+    return {
+        "completion_gate": {
+            "decision": "escalation_required",
+            "decision_reason": (
+                "Required grounded entity-information evidence was not retrieved."
+            ),
+            "safe_to_claim_completion": False,
+            "requires_follow_up": True,
+            "blocking_effect_ids": ["grounded_entity_information_evidence"],
+            "blocking_failure_codes": ["entity_information_evidence_missing"],
+            "evidence_payload": {
+                "unresolved_preconditions": [
+                    {
+                        "effect_id": "grounded_entity_information_evidence",
+                        "effect_type": "grounded_evidence",
+                        "status": "not_executed",
+                        "status_reason": (
+                            "Required grounded entity-information evidence was not "
+                            "retrieved."
+                        ),
+                        "failure_codes": ["entity_information_evidence_missing"],
+                    }
+                ]
+            },
+        },
+        "required_effects": [
+            {
+                "effect_id": "grounded_entity_information_evidence",
+                "effect_type": "grounded_evidence",
+                "status": "not_executed",
+                "status_reason": (
+                    "Required grounded entity-information evidence was not retrieved."
+                ),
+                "failure_code": "entity_information_evidence_missing",
+            }
+        ],
+    }
+
+
+def test_selected_workflow_renderer_blocks_false_empty_answer_when_required_effects_unresolved() -> (
+    None
+):
+    response = render_selected_workflow_user_response(
+        selected_workflow_id="#V#entity_information_retrieval_workflow",
+        child_completed=True,
+        final_state="#V#workflow_step_entity_information_retrieval_workflow_completed",
+        failure_detail=None,
+        child_outputs={
+            "final_response": (
+                "I could not find any information regarding your identity, and no "
+                "papers were found associated with you."
+            ),
+            "turn_execution_record": _unsafe_missing_grounded_evidence_record(),
+        },
+        child_result_snapshot=None,
+    )
+
+    assert isinstance(response, str)
+    assert response.startswith(
+        "Execution status: required grounded evidence was not retrieved."
+    )
+    assert "entity_information_evidence_missing" in response
+    assert "could not find any information regarding your identity" not in response
+
+
+def test_custom_workflow_response_renderer_blocks_false_empty_answer_when_gate_is_unsafe() -> (
+    None
+):
+    response = InternalMCPChatOrchestrator._render_custom_workflow_response_text(
+        workflow_id="#V#entity_information_retrieval_workflow",
+        workflow_result=SimpleNamespace(
+            completed=True,
+            final_state="#V#workflow_step_entity_information_retrieval_workflow_completed",
+            error=None,
+            data={
+                "response_text": (
+                    "I could not find any information regarding your identity, and "
+                    "no papers were found associated with you."
+                ),
+                "turn_execution_record": _unsafe_missing_grounded_evidence_record(),
+            },
+        ),
+    )
+
+    assert isinstance(response, str)
+    assert response.startswith(
+        "Execution status: required grounded evidence was not retrieved."
+    )
+    assert "entity_information_evidence_missing" in response
+    assert "no papers were found associated with you" not in response
+
+
+def test_selected_workflow_renderer_preserves_grounded_success_response() -> None:
+    response = render_selected_workflow_user_response(
+        selected_workflow_id="#V#entity_information_retrieval_workflow",
+        child_completed=True,
+        final_state="#V#workflow_step_entity_information_retrieval_workflow_completed",
+        failure_detail=None,
+        child_outputs={
+            "final_response": (
+                "You are Michael Witbrock. Grounded papers: Learning to Tell Two "
+                "Spirals Apart."
+            ),
+            "turn_execution_record": {
+                "completion_gate": {
+                    "decision": "completed",
+                    "safe_to_claim_completion": True,
+                    "requires_follow_up": False,
+                },
+                "required_effects": [
+                    {
+                        "effect_id": "grounded_entity_information_evidence",
+                        "effect_type": "grounded_evidence",
+                        "status": "satisfied",
+                    }
+                ],
+            },
+        },
+        child_result_snapshot=None,
+    )
+
+    assert response == (
+        "You are Michael Witbrock. Grounded papers: Learning to Tell Two "
+        "Spirals Apart."
     )

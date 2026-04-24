@@ -309,7 +309,11 @@ def _bounded_snapshot(
         return bounded
 
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        items = list(value[:max_items]) if not isinstance(value, list) else value[:max_items]
+        items = (
+            list(value[:max_items])
+            if not isinstance(value, list)
+            else value[:max_items]
+        )
         bounded_items = [
             _bounded_snapshot(
                 item,
@@ -374,7 +378,9 @@ def _build_selected_workflow_trace_execution_summary(
     return summary or None
 
 
-def _resolve_turn_expected_outcome_contract(*sources: Any) -> TurnExpectedOutcomeContract:
+def _resolve_turn_expected_outcome_contract(
+    *sources: Any,
+) -> TurnExpectedOutcomeContract:
     resolved_sources: list[TurnExpectedOutcomeContract | Mapping[str, Any] | None] = []
     for source in sources:
         if isinstance(source, TurnExpectedOutcomeContract):
@@ -436,9 +442,7 @@ def _summarise_tool_batch_result_payload(payload: Any) -> str | None:
         items = payload.get("items")
         if isinstance(items, list):
             return (
-                f"{len(items)} item{'s' if len(items) != 1 else ''}"
-                if items
-                else None
+                f"{len(items)} item{'s' if len(items) != 1 else ''}" if items else None
             )
     if isinstance(payload, list):
         return (
@@ -520,6 +524,180 @@ def _render_tool_batch_message_content(
     return content[:1200] + "..." if len(content) > 1200 else content
 
 
+def _normalise_unresolved_required_preconditions(
+    *,
+    completion_gate_payload: Mapping[str, Any],
+    record: Mapping[str, Any],
+    fallback_payloads: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    evidence_payload = completion_gate_payload.get("evidence_payload")
+    evidence_payload_map = (
+        evidence_payload if isinstance(evidence_payload, Mapping) else {}
+    )
+
+    unresolved_preconditions: list[dict[str, Any]] = []
+    raw_unresolved = evidence_payload_map.get("unresolved_preconditions")
+    if isinstance(raw_unresolved, list):
+        for item in raw_unresolved:
+            if not isinstance(item, Mapping):
+                continue
+            unresolved_preconditions.append(
+                {
+                    "effect_id": _safe_str(item.get("effect_id")),
+                    "effect_type": _safe_str(item.get("effect_type")),
+                    "status": _safe_str(item.get("status")),
+                    "status_reason": _safe_str(item.get("status_reason")),
+                    "failure_codes": _normalise_string_list(item.get("failure_codes")),
+                }
+            )
+
+    if unresolved_preconditions:
+        return unresolved_preconditions
+
+    required_effect_sources: list[Any] = [record.get("required_effects")]
+    for payload in fallback_payloads:
+        required_effect_sources.append(payload.get("required_effects"))
+
+    for source in required_effect_sources:
+        if not isinstance(source, list):
+            continue
+        for effect in source:
+            if not isinstance(effect, Mapping):
+                continue
+            effect_status = _safe_str(effect.get("status")) or ""
+            if effect_status not in {"not_satisfied", "not_executed"}:
+                continue
+            failure_codes = _normalise_string_list(effect.get("failure_codes"))
+            single_failure_code = _safe_str(effect.get("failure_code"))
+            if single_failure_code and single_failure_code not in failure_codes:
+                failure_codes.append(single_failure_code)
+            unresolved_preconditions.append(
+                {
+                    "effect_id": _safe_str(effect.get("effect_id")),
+                    "effect_type": _safe_str(effect.get("effect_type")),
+                    "status": effect_status,
+                    "status_reason": _safe_str(effect.get("status_reason")),
+                    "failure_codes": failure_codes,
+                }
+            )
+        if unresolved_preconditions:
+            break
+
+    return unresolved_preconditions
+
+
+def _build_fail_closed_completion_gate_response(
+    *,
+    combined_data: Mapping[str, Any],
+    fallback_payloads: Sequence[Mapping[str, Any]],
+) -> str | None:
+    """Return a truthful response when completion-gate safety blocks the answer."""
+
+    record_raw = combined_data.get("turn_execution_record")
+    record = record_raw if isinstance(record_raw, Mapping) else {}
+    gate_raw = record.get("completion_gate")
+    gate = gate_raw if isinstance(gate_raw, Mapping) else {}
+
+    safe_to_claim = _coerce_bool(
+        gate.get(
+            "safe_to_claim_completion",
+            combined_data.get("completion_gate_safe_to_claim_completion"),
+        ),
+        default=True,
+    )
+    requires_follow_up = _coerce_bool(
+        gate.get(
+            "requires_follow_up",
+            combined_data.get("completion_gate_requires_follow_up"),
+        ),
+        default=False,
+    )
+    if safe_to_claim and not requires_follow_up:
+        return None
+
+    existing_response = _coerce_non_empty_text(
+        combined_data.get("final_response")
+        or combined_data.get("response_text")
+        or combined_data.get("current_response")
+    )
+    if existing_response and existing_response.startswith("Execution status:"):
+        return existing_response
+
+    unresolved_preconditions = _normalise_unresolved_required_preconditions(
+        completion_gate_payload=gate,
+        record=record,
+        fallback_payloads=fallback_payloads,
+    )
+
+    unresolved_effect_types = {
+        effect_type
+        for effect_type in (
+            _safe_str(unresolved.get("effect_type"))
+            for unresolved in unresolved_preconditions
+            if isinstance(unresolved, Mapping)
+        )
+        if effect_type
+    }
+
+    decision = _safe_str(gate.get("decision")) or _safe_str(
+        combined_data.get("completion_gate_decision")
+    )
+    decision_reason = _safe_str(gate.get("decision_reason")) or _safe_str(
+        combined_data.get("completion_gate_decision_reason")
+    )
+
+    if unresolved_effect_types == {"tool_execution"}:
+        if decision == "failed":
+            status_line = "Execution status: planned tool execution did not complete successfully."
+        else:
+            status_line = "Execution status: required tool execution was not completed."
+    elif unresolved_effect_types == {"workflow_execution"}:
+        status_line = "Execution status: selected workflow execution did not complete successfully."
+    elif unresolved_effect_types and all(
+        _is_evidence_effect_type(effect_type) for effect_type in unresolved_effect_types
+    ):
+        status_line = "Execution status: required grounded evidence was not retrieved."
+    elif decision == "failed":
+        status_line = "Execution status: requested mutation failed or was blocked."
+    elif decision == "escalation_required":
+        status_line = "Execution status: requested mutation was not executed."
+    elif decision == "partial":
+        status_line = (
+            "Execution status: mutation may have run but verification is inconclusive."
+        )
+    else:
+        status_line = "Execution status: follow-up verification is required."
+
+    if decision_reason:
+        status_line = f"{status_line} {decision_reason}"
+
+    blocking_effect_ids = _normalise_string_list(gate.get("blocking_effect_ids"))
+    if not blocking_effect_ids:
+        blocking_effect_ids = _normalise_string_list(
+            combined_data.get("completion_gate_blocking_effect_ids")
+        )
+    if blocking_effect_ids:
+        status_line = (
+            f"{status_line} Blocking effect IDs: {', '.join(blocking_effect_ids)}."
+        )
+
+    failure_codes = _normalise_string_list(gate.get("blocking_failure_codes"))
+    if not failure_codes:
+        failure_codes = _normalise_string_list(
+            combined_data.get("completion_gate_blocking_failure_codes")
+        )
+    for unresolved in unresolved_preconditions:
+        if not isinstance(unresolved, Mapping):
+            continue
+        for code in _normalise_string_list(unresolved.get("failure_codes")):
+            if code not in failure_codes:
+                failure_codes.append(code)
+    if failure_codes:
+        status_line = f"{status_line} Failure codes: {', '.join(failure_codes[:3])}."
+
+    return status_line
+
+
 def render_selected_workflow_user_response(
     *,
     selected_workflow_id: str | None,
@@ -572,7 +750,22 @@ def render_selected_workflow_user_response(
                     combined_data[key] = value
 
     artefact_lines = _render_selected_workflow_artefact_lines(combined_data)
-    failure_text = _coerce_non_empty_text(failure_detail) if not child_completed else None
+    fail_closed_response = _build_fail_closed_completion_gate_response(
+        combined_data=combined_data,
+        fallback_payloads=(
+            child_outputs_map,
+            completion_report_map,
+            workflow_execution_summary_map,
+            child_snapshot,
+            orchestrator_result_map,
+        ),
+    )
+    if fail_closed_response:
+        return fail_closed_response
+
+    failure_text = (
+        _coerce_non_empty_text(failure_detail) if not child_completed else None
+    )
     if failure_text and (
         any(char.isspace() for char in failure_text) or len(failure_text) > 120
     ):
@@ -951,7 +1144,9 @@ def build_turn_execution_selected_workflow_outputs(
         value = child_outputs_map.get(key)
         if isinstance(value, str) and value.strip():
             outputs[key] = value
-    if isinstance(child_outputs_map.get("prompt_requirements_preflight_completed"), bool):
+    if isinstance(
+        child_outputs_map.get("prompt_requirements_preflight_completed"), bool
+    ):
         outputs["prompt_requirements_preflight_completed"] = bool(
             child_outputs_map.get("prompt_requirements_preflight_completed")
         )
@@ -1075,28 +1270,16 @@ def build_turn_recovery_tool_batch_outputs(
         if isinstance(record, Mapping)
     ]
     combined_invocations = [
-        {
-            str(key): value
-            for key, value in item.items()
-            if isinstance(key, str)
-        }
+        {str(key): value for key, value in item.items() if isinstance(key, str)}
         for item in (existing_invocations or [])
         if isinstance(item, Mapping)
     ] + [
-        {
-            str(key): value
-            for key, value in item.items()
-            if isinstance(key, str)
-        }
+        {str(key): value for key, value in item.items() if isinstance(key, str)}
         for item in invocation_records
         if isinstance(item, Mapping)
     ]
     combined_tool_messages = [
-        {
-            str(key): value
-            for key, value in item.items()
-            if isinstance(key, str)
-        }
+        {str(key): value for key, value in item.items() if isinstance(key, str)}
         for item in (existing_tool_messages or [])
         if isinstance(item, Mapping)
     ] + batch_tool_messages
@@ -1225,9 +1408,7 @@ def run_turn_execution_critic(
                 else None
             )
             or (
-                data.get("selected_workflow_trace", {}).get(
-                    "expected_outcome_contract"
-                )
+                data.get("selected_workflow_trace", {}).get("expected_outcome_contract")
                 if isinstance(data.get("selected_workflow_trace"), Mapping)
                 else None
             )
@@ -1247,15 +1428,11 @@ def run_turn_execution_critic(
     gate_decision = None
     gate_safe_to_claim = True
     if isinstance(completion_gate, Mapping):
-        gate_requires_follow_up = bool(
-            completion_gate.get("requires_follow_up", False)
-        )
+        gate_requires_follow_up = bool(completion_gate.get("requires_follow_up", False))
         raw_gate_decision = completion_gate.get("decision")
         if isinstance(raw_gate_decision, str) and raw_gate_decision.strip():
             gate_decision = raw_gate_decision.strip()
-        gate_safe_to_claim = bool(
-            completion_gate.get("safe_to_claim_completion", True)
-        )
+        gate_safe_to_claim = bool(completion_gate.get("safe_to_claim_completion", True))
 
     critic_summary: Mapping[str, Any] = {}
     critic_payload = turn_execution_record.get("critic")
@@ -1544,9 +1721,7 @@ def run_turn_execution_completion_gate(
     safe_to_claim_completion = bool(
         completion_gate_payload.get("safe_to_claim_completion", True)
     )
-    requires_follow_up = bool(
-        completion_gate_payload.get("requires_follow_up", False)
-    )
+    requires_follow_up = bool(completion_gate_payload.get("requires_follow_up", False))
     repeat_eligible_default = False if execution_signal_blocker else requires_follow_up
     repeat_eligible = bool(
         completion_gate_payload.get("repeat_eligible", repeat_eligible_default)
@@ -1581,9 +1756,9 @@ def run_turn_execution_completion_gate(
         default=0,
         max_value=100_000,
     )
-    loop_last_blocking_signature = _safe_str(
-        data.get("completion_gate_loop_last_blocking_signature")
-    ) or ""
+    loop_last_blocking_signature = (
+        _safe_str(data.get("completion_gate_loop_last_blocking_signature")) or ""
+    )
     current_monotonic = time.monotonic()
     loop_started_monotonic_raw = data.get("completion_gate_loop_started_monotonic")
     if isinstance(loop_started_monotonic_raw, (int, float)):
@@ -1630,17 +1805,13 @@ def run_turn_execution_completion_gate(
         }
         if unresolved_effect_types == {"tool_execution"}:
             if decision == "failed":
-                status_line = (
-                    "Execution status: planned tool execution did not complete successfully."
-                )
+                status_line = "Execution status: planned tool execution did not complete successfully."
             else:
                 status_line = (
                     "Execution status: required tool execution was not completed."
                 )
         elif unresolved_effect_types == {"workflow_execution"}:
-            status_line = (
-                "Execution status: selected workflow execution did not complete successfully."
-            )
+            status_line = "Execution status: selected workflow execution did not complete successfully."
         elif unresolved_effect_types and all(
             _is_evidence_effect_type(effect_type)
             for effect_type in unresolved_effect_types
@@ -1653,9 +1824,7 @@ def run_turn_execution_completion_gate(
         elif decision == "escalation_required":
             status_line = "Execution status: requested mutation was not executed."
         elif decision == "partial":
-            status_line = (
-                "Execution status: mutation may have run but verification is inconclusive."
-            )
+            status_line = "Execution status: mutation may have run but verification is inconclusive."
         else:
             status_line = "Execution status: follow-up verification is required."
 
@@ -1805,7 +1974,9 @@ def run_turn_execution_completion_gate(
                     "Blocking effect IDs: " + ", ".join(blocking_effect_ids)
                 )
             loop_retry_reason = (
-                " ".join(reason_parts) if reason_parts else "Required effects unresolved."
+                " ".join(reason_parts)
+                if reason_parts
+                else "Required effects unresolved."
             )
 
     if repeat_iteration:
@@ -1876,9 +2047,9 @@ def run_turn_execution_completion_gate(
         and not repeat_iteration
         and not already_autotriggered
     ):
-        namespace = _safe_str(getattr(request.environment, "user_namespace", None)) or _safe_str(
-            data.get("namespace")
-        )
+        namespace = _safe_str(
+            getattr(request.environment, "user_namespace", None)
+        ) or _safe_str(data.get("namespace"))
         user_concept_id = _safe_str(data.get("user_concept_id")) or _safe_str(
             data.get("actor_concept_id")
         )
@@ -1901,7 +2072,9 @@ def run_turn_execution_completion_gate(
         request_id = _safe_str(data.get("turn_id"))
         conversation_session_id = _safe_str(data.get("conversation_session_id"))
         prompt_text = str(data.get("prompt") or "").strip()
-        incident_text = prompt_text[:500] if prompt_text else str(decision_reason or "")[:500]
+        incident_text = (
+            prompt_text[:500] if prompt_text else str(decision_reason or "")[:500]
+        )
         try:
             introspection_autotrigger = (
                 maybe_launch_episode_evaluation_for_turn_completion_gate(
@@ -1940,9 +2113,11 @@ def run_turn_execution_completion_gate(
             "reason": (
                 "repeat_iteration"
                 if repeat_iteration
-                else "already_autotriggered"
-                if already_autotriggered
-                else "no_follow_up_required"
+                else (
+                    "already_autotriggered"
+                    if already_autotriggered
+                    else "no_follow_up_required"
+                )
             ),
             "workflow_id": "#V#episode_evaluation_workflow",
         }
