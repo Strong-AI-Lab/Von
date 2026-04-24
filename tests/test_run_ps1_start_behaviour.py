@@ -79,7 +79,48 @@ $result = [ordered]@{{
     assert payload["call_order"] == ["browser:5111", "purity"]
 
 
-def test_run_ps1_apply_launcher_switch_compatibility_honours_double_dash_flags() -> None:
+def test_run_ps1_agent_test_follow_ups_skip_purity() -> None:
+    script = f"""
+$ErrorActionPreference = 'Stop'
+Set-Location {ps_quote(str(REPO_ROOT))}
+. {ps_quote(str(REPO_ROOT / 'run.ps1'))} help -NoBackupMigrate *> $null
+$script:CallOrder = New-Object System.Collections.Generic.List[string]
+$script:Logs = New-Object System.Collections.Generic.List[string]
+function global:Write-LauncherLog {{
+    param([string]$Msg)
+    $script:Logs.Add([string]$Msg) | Out-Null
+}}
+function global:Open-VonBrowserIfNeeded {{
+    param([int]$TargetPort = $Port)
+    $script:CallOrder.Add("browser:$TargetPort") | Out-Null
+    $true
+}}
+function global:Start-WorkflowPurityCheckNonBlocking {{
+    $script:CallOrder.Add('purity') | Out-Null
+    $true
+}}
+$script:AgentTest = $true
+$script:IsolatedTestInstance = $false
+$script:ForceBrowser = $false
+$script:NoBrowser = $false
+Apply-AgentTestLauncherDefaults -PortWasExplicitlyBound:$true
+$script:NoBrowser = $false
+Invoke-VonHealthyStartFollowUps -TargetPort 5111
+$result = [ordered]@{{
+    call_order = @($script:CallOrder)
+    logs = @($script:Logs)
+}}
+""".strip()
+
+    payload, _ = run_powershell_result(repo_root=REPO_ROOT, script=script)
+
+    assert payload["call_order"] == ["browser:5111"]
+    assert any("skipping workflow purity" in line for line in payload["logs"])
+
+
+def test_run_ps1_apply_launcher_switch_compatibility_honours_double_dash_flags() -> (
+    None
+):
     script = f"""
 $ErrorActionPreference = 'Stop'
 Set-Location {ps_quote(str(REPO_ROOT))}
@@ -87,11 +128,14 @@ Set-Location {ps_quote(str(REPO_ROOT))}
 $script:ForceBrowser = $false
 $script:NoBrowser = $false
 $script:ChromeBeta = $false
-Apply-LauncherSwitchCompatibility -RawInvocationLine './run.ps1 restart --ForceBrowser --ChromeBeta' -RemainingArgs @('--ForceBrowser', '--ChromeBeta')
+$script:AgentTest = $false
+$script:IsolatedTestInstance = $false
+Apply-LauncherSwitchCompatibility -RawInvocationLine './run.ps1 restart --ForceBrowser --ChromeBeta --AgentTest' -RemainingArgs @('--ForceBrowser', '--ChromeBeta', '--AgentTest')
 $result = [ordered]@{{
     force_browser = [bool]$script:ForceBrowser
     no_browser = [bool]$script:NoBrowser
     chrome_beta = [bool]$script:ChromeBeta
+    agent_test = [bool]$script:AgentTest
 }}
 """.strip()
 
@@ -100,6 +144,172 @@ $result = [ordered]@{{
     assert payload["force_browser"] is True
     assert payload["no_browser"] is False
     assert payload["chrome_beta"] is True
+    assert payload["agent_test"] is True
+
+
+def test_run_ps1_agent_test_defaults_to_isolated_port_and_no_browser() -> None:
+    script = f"""
+$ErrorActionPreference = 'Stop'
+Set-Location {ps_quote(str(REPO_ROOT))}
+. {ps_quote(str(REPO_ROOT / 'run.ps1'))} help -NoBackupMigrate *> $null
+[Environment]::SetEnvironmentVariable('VON_AGENT_TEST_INSTANCE', $null, 'Process')
+$script:AgentTest = $true
+$script:IsolatedTestInstance = $false
+$script:ForceBrowser = $false
+$script:NoBrowser = $false
+$script:Port = 5000
+Apply-AgentTestLauncherDefaults -PortWasExplicitlyBound:$false
+$result = [ordered]@{{
+    port = [int]$script:Port
+    no_browser = [bool]$script:NoBrowser
+    port_defaulted = [bool]$script:AgentTestPortDefaulted
+    env_marker = [Environment]::GetEnvironmentVariable('VON_AGENT_TEST_INSTANCE', 'Process')
+}}
+""".strip()
+
+    payload, _ = run_powershell_result(repo_root=REPO_ROOT, script=script)
+
+    assert payload == {
+        "port": 5010,
+        "no_browser": True,
+        "port_defaulted": True,
+        "env_marker": "1",
+    }
+
+
+def test_run_ps1_agent_test_respects_explicit_port_and_force_browser() -> None:
+    script = f"""
+$ErrorActionPreference = 'Stop'
+Set-Location {ps_quote(str(REPO_ROOT))}
+. {ps_quote(str(REPO_ROOT / 'run.ps1'))} help -NoBackupMigrate *> $null
+$script:AgentTest = $true
+$script:IsolatedTestInstance = $false
+$script:ForceBrowser = $true
+$script:NoBrowser = $false
+$script:Port = 5012
+Apply-AgentTestLauncherDefaults -PortWasExplicitlyBound:$true
+$result = [ordered]@{{
+    port = [int]$script:Port
+    no_browser = [bool]$script:NoBrowser
+    port_defaulted = [bool]$script:AgentTestPortDefaulted
+}}
+""".strip()
+
+    payload, _ = run_powershell_result(repo_root=REPO_ROOT, script=script)
+
+    assert payload == {
+        "port": 5012,
+        "no_browser": False,
+        "port_defaulted": False,
+    }
+
+
+def test_run_ps1_agent_test_preserves_global_server_processes() -> None:
+    script = f"""
+$ErrorActionPreference = 'Stop'
+Set-Location {ps_quote(str(REPO_ROOT))}
+. {ps_quote(str(REPO_ROOT / 'run.ps1'))} help -NoBackupMigrate *> $null
+$script:CleanupCalls = New-Object System.Collections.Generic.List[string]
+$script:Logs = New-Object System.Collections.Generic.List[string]
+function global:Write-LauncherLog {{
+    param([string]$Msg)
+    $script:Logs.Add([string]$Msg) | Out-Null
+}}
+function global:Stop-PythonProcessesByScript {{
+    param([string]$ScriptRelativePath, [string]$Label, [int]$ExcludePid = 0)
+    $script:CleanupCalls.Add("$Label|$ScriptRelativePath") | Out-Null
+}}
+$script:AgentTest = $true
+$script:IsolatedTestInstance = $false
+$script:ForceBrowser = $false
+$script:NoBrowser = $false
+Apply-AgentTestLauncherDefaults -PortWasExplicitlyBound:$true
+Invoke-VonServerStartProcessCleanup
+$agentCalls = @($script:CleanupCalls)
+$agentLogs = @($script:Logs)
+$script:AgentTest = $false
+$script:IsolatedTestInstance = $false
+$script:AgentTestInstance = $false
+Invoke-VonServerStartProcessCleanup
+$result = [ordered]@{{
+    agent_calls = @($agentCalls)
+    normal_calls = @($script:CleanupCalls)
+    agent_logs = @($agentLogs)
+}}
+""".strip()
+
+    payload, _ = run_powershell_result(repo_root=REPO_ROOT, script=script)
+
+    assert payload["agent_calls"] == []
+    assert payload["normal_calls"] == ["Von Server|src/workflows/von/main.py"]
+    assert any("preserving other Von server" in line for line in payload["agent_logs"])
+
+
+def test_run_ps1_agent_test_skips_shared_startup_background_services() -> None:
+    script = f"""
+$ErrorActionPreference = 'Stop'
+Set-Location {ps_quote(str(REPO_ROOT))}
+. {ps_quote(str(REPO_ROOT / 'run.ps1'))} help -NoBackupMigrate *> $null
+$script:Calls = New-Object System.Collections.Generic.List[string]
+$script:Logs = New-Object System.Collections.Generic.List[string]
+function global:Write-LauncherLog {{
+    param([string]$Msg)
+    $script:Logs.Add([string]$Msg) | Out-Null
+}}
+function global:Invoke-DailyBackupIfDue {{ $script:Calls.Add('backup') | Out-Null }}
+function global:Invoke-TestDbRefreshIfDue {{ $script:Calls.Add('test-db-refresh') | Out-Null }}
+function global:Invoke-AiChatSessionSyncIfDue {{ $script:Calls.Add('ai-chat-sync') | Out-Null }}
+function global:Start-RagWorker {{ $script:Calls.Add('rag') | Out-Null }}
+function global:Start-ConceptIndexWorker {{ $script:Calls.Add('concept-index') | Out-Null }}
+$script:AgentTest = $true
+$script:IsolatedTestInstance = $false
+Apply-AgentTestLauncherDefaults -PortWasExplicitlyBound:$true
+Invoke-VonStartupBackgroundServices
+$agentCalls = @($script:Calls)
+$agentLogs = @($script:Logs)
+$script:AgentTest = $false
+$script:IsolatedTestInstance = $false
+$script:AgentTestInstance = $false
+Invoke-VonStartupBackgroundServices
+$result = [ordered]@{{
+    agent_calls = @($agentCalls)
+    normal_calls = @($script:Calls)
+    agent_logs = @($agentLogs)
+}}
+""".strip()
+
+    payload, _ = run_powershell_result(repo_root=REPO_ROOT, script=script)
+
+    assert payload["agent_calls"] == []
+    assert payload["normal_calls"] == [
+        "backup",
+        "test-db-refresh",
+        "ai-chat-sync",
+        "rag",
+        "concept-index",
+    ]
+    assert any("skipping startup maintenance" in line for line in payload["agent_logs"])
+
+
+def test_run_ps1_help_documents_agent_test_mode() -> None:
+    script = f"""
+$ErrorActionPreference = 'Stop'
+Set-Location {ps_quote(str(REPO_ROOT))}
+$helpText = (& {{ . {ps_quote(str(REPO_ROOT / 'run.ps1'))} help -NoBackupMigrate }} *>&1) -join "`n"
+$result = [ordered]@{{
+    has_agent_test = $helpText.Contains('-AgentTest')
+    has_default_port = $helpText.Contains('5010')
+    has_example = $helpText.Contains('.\\run.ps1 restart -AgentTest -HealthTimeoutSec 180')
+}}
+""".strip()
+
+    payload, _ = run_powershell_result(repo_root=REPO_ROOT, script=script)
+
+    assert payload == {
+        "has_agent_test": True,
+        "has_default_port": True,
+        "has_example": True,
+    }
 
 
 def test_run_ps1_reports_previous_purity_failure_once(tmp_path: Path) -> None:
@@ -186,7 +396,7 @@ def test_run_ps1_stale_process_cleanup_uses_file_backed_helper(tmp_path: Path) -
         "\r\n".join(
             [
                 "@echo off",
-                f"> \"{arg_log}\" echo %*",
+                f'> "{arg_log}" echo %*',
                 "echo []",
             ]
         )

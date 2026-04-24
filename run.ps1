@@ -13,7 +13,9 @@
         help         Show help
 
     Flags:
-        -Port <int>              Port (reserved for future multi-instance) [TODO multi-instance]
+        -Port <int>              Server port (default 5000; -AgentTest defaults to 5010)
+        -AgentTest               Isolated coding-agent test instance mode
+        -IsolatedTestInstance    Alias for -AgentTest
         -NoBrowser               Do not auto-open browser on start
         -ForceBrowser            Force open browser even if already opened this session
         -ChromeBeta              Use Chrome Beta only (for MCP DevTools debugging)
@@ -22,13 +24,15 @@
         -LogRetention <n>        Keep last n log files (default 20)
         -AdminToken <token>      Explicit admin token (else auto-generate & persist)
 
-    TODO: Multi-instance support using per-port PID/log naming and concurrent starts.
+    TODO: Full multi-instance worker isolation for modes that require per-instance workers.
     TODO: Optional size-based log rollover.
 #>
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)] [string]$Action = 'start',
     [int]$Port = 5000,
+    [switch]$AgentTest,
+    [switch]$IsolatedTestInstance,
     [switch]$NoBrowser,
     [switch]$ForceBrowser,
     [switch]$ChromeBeta,
@@ -97,6 +101,37 @@ function Apply-LauncherSwitchCompatibility {
     if ((-not $script:ChromeBeta) -and (($RemainingArgs -contains '--ChromeBeta') -or ($RawInvocationLine -match '(^|\s)--ChromeBeta(?:\s|$)'))) {
         $script:ChromeBeta = $true
     }
+    if ((-not $script:AgentTest) -and (($RemainingArgs -contains '--AgentTest') -or ($RawInvocationLine -match '(^|\s)--AgentTest(?:\s|$)'))) {
+        $script:AgentTest = $true
+    }
+    if ((-not $script:IsolatedTestInstance) -and (($RemainingArgs -contains '--IsolatedTestInstance') -or ($RawInvocationLine -match '(^|\s)--IsolatedTestInstance(?:\s|$)'))) {
+        $script:IsolatedTestInstance = $true
+    }
+}
+
+function Test-AgentTestInstance {
+    return [bool]$script:AgentTestInstance
+}
+
+function Apply-AgentTestLauncherDefaults {
+    param([bool]$PortWasExplicitlyBound = $false)
+
+    $script:AgentTestDefaultPort = 5010
+    $script:AgentTestInstance = [bool]($script:AgentTest -or $script:IsolatedTestInstance)
+    $script:AgentTestPortDefaulted = $false
+    if (-not (Test-AgentTestInstance)) {
+        [Environment]::SetEnvironmentVariable('VON_AGENT_TEST_INSTANCE', $null, 'Process')
+        return
+    }
+
+    if (-not $PortWasExplicitlyBound) {
+        $script:Port = $script:AgentTestDefaultPort
+        $script:AgentTestPortDefaulted = $true
+    }
+    if (-not $script:ForceBrowser) {
+        $script:NoBrowser = $true
+    }
+    [Environment]::SetEnvironmentVariable('VON_AGENT_TEST_INSTANCE', '1', 'Process')
 }
 
 function ConvertTo-PowerShellSingleQuotedLiteral {
@@ -106,6 +141,7 @@ function ConvertTo-PowerShellSingleQuotedLiteral {
 }
 
 Apply-LauncherSwitchCompatibility
+Apply-AgentTestLauncherDefaults -PortWasExplicitlyBound:$($PSBoundParameters.ContainsKey('Port'))
 
 function Set-EnvFromDotEnv {
     param([string]$EnvPath)
@@ -142,6 +178,12 @@ function Set-EnvFromDotEnv {
 }
 
 Set-EnvFromDotEnv -EnvPath (Join-Path $Root '.env')
+if (Test-AgentTestInstance) {
+    [Environment]::SetEnvironmentVariable('VON_AGENT_TEST_INSTANCE', '1', 'Process')
+}
+else {
+    [Environment]::SetEnvironmentVariable('VON_AGENT_TEST_INSTANCE', $null, 'Process')
+}
 
 function Test-TruthySetting {
     param([object]$Value)
@@ -487,21 +529,27 @@ function Invoke-MigrateLocalBackupsToWDrive {
     catch { Write-LauncherLog "[backup-migrate] WARN down-sync scan failed: $($_.Exception.Message)" }
     Write-LauncherLog "[backup-migrate] summary moved=$moved copied=$copied"
 }
-if (-not $NoBackupMigrate) {
+if (Test-AgentTestInstance) {
+    Write-Host "[backup-migrate] disabled via -AgentTest"
+}
+elseif (-not $NoBackupMigrate) {
     Invoke-MigrateLocalBackupsToWDrive
 }
 else {
     Write-Host "[backup-migrate] disabled via -NoBackupMigrate"
 }
 
-# Sentinel file to ensure we open the browser only once automatically
-$BrowserSentinel = Join-Path $RunDir 'browser_opened_once'
+# Sentinel file to ensure we open the browser only once automatically. Agent
+# test instances are normally headless, but keep their forced-browser sentinel
+# separate so acceptance runs cannot suppress the user's next normal start.
+$BrowserSentinelName = if (Test-AgentTestInstance) { "browser_opened_once_${Port}" } else { 'browser_opened_once' }
+$BrowserSentinel = Join-Path $RunDir $BrowserSentinelName
 $WorkflowPurityPidFile = Join-Path $RunDir 'workflow_purity_check.pid'
 $WorkflowPurityResultFile = Join-Path $RunDir 'workflow_purity_check_last_result.json'
 $WorkflowPurityReportedFile = Join-Path $RunDir 'workflow_purity_check_last_reported.txt'
 $WorkflowPurityRunnerScript = Join-Path $RunDir 'workflow_purity_runner.ps1'
 
-# PID & log paths (port included for future multi-instance separation)
+# PID & log paths (port-scoped for isolated launcher instances)
 $PidFile = Join-Path $RunDir "von_${Port}.pid"
 $CurrentLog = Join-Path $LogsDir "von_${Port}_current.log"
 $Timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
@@ -2044,6 +2092,10 @@ function Invoke-VonHealthyStartFollowUps {
     if (-not $script:NoBrowser) {
         Open-VonBrowserIfNeeded -TargetPort $TargetPort | Out-Null
     }
+    if (Test-AgentTestInstance) {
+        Write-LauncherLog "Agent test mode: skipping workflow purity background check."
+        return
+    }
     Start-WorkflowPurityCheckNonBlocking | Out-Null
 }
 
@@ -2127,6 +2179,44 @@ function Stop-ConceptIndexWorker {
     Remove-Item $ConceptIndexPidFile -Force -ErrorAction SilentlyContinue
 }
 
+function Invoke-VonServerStartProcessCleanup {
+    if (Test-AgentTestInstance) {
+        Write-LauncherLog "Agent test mode: preserving other Von server processes; only port $Port is managed."
+        return
+    }
+    Stop-PythonProcessesByScript -ScriptRelativePath 'src/workflows/von/main.py' -Label 'Von Server'
+}
+
+function Invoke-VonStartupBackgroundServices {
+    if (Test-AgentTestInstance) {
+        Write-LauncherLog "Agent test mode: skipping startup maintenance, sync, and shared workers."
+        return
+    }
+
+    # Trigger daily backup (non-blocking) if due
+    try { Invoke-DailyBackupIfDue } catch { Write-LauncherLog "[daily-backup] ERROR (scheduling failed): $($_.Exception.Message)" }
+    # Trigger test DB refresh (non-blocking) if due
+    try { Invoke-TestDbRefreshIfDue } catch { Write-LauncherLog "[test-db-refresh] ERROR (scheduling failed): $($_.Exception.Message)" }
+    # Trigger AI chat-session sync (non-blocking) if due
+    try { Invoke-AiChatSessionSyncIfDue } catch { Write-LauncherLog "[ai-chat-session-sync] ERROR (scheduling failed): $($_.Exception.Message)" }
+
+    # Start RAG Worker
+    try { Start-RagWorker } catch { Write-LauncherLog "[rag-worker] ERROR: $($_.Exception.Message)" }
+
+    # Start Concept Index Worker
+    try { Start-ConceptIndexWorker } catch { Write-LauncherLog "[concept-index-worker] ERROR: $($_.Exception.Message)" }
+}
+
+function Stop-VonSharedWorkersForCurrentMode {
+    if (Test-AgentTestInstance) {
+        Write-LauncherLog "Agent test mode: preserving shared RAG and concept-index workers."
+        return
+    }
+
+    Stop-RagWorker
+    Stop-ConceptIndexWorker
+}
+
 function Sync-PidFileToListener {
     # Align PID file with actual port-owning python process if mismatch
     $listener = Get-ListeningProcessByPort -Port $Port
@@ -2188,6 +2278,10 @@ function Start-VonServer {
             if ($pidLine -match 'PID=([0-9]+)') { $currentPidInFile = [int]$Matches[1] }
         }
         if (-not $currentPidInFile) {
+            if ((Test-AgentTestInstance) -and -not (Test-IsVonMainProcess -ProcessId $listener.Id)) {
+                Write-LauncherLog ("Agent test mode: port {0} is owned by non-Von PID={1}; aborting instead of adopting it." -f $Port, $listener.Id)
+                return
+            }
             Write-LauncherLog ("Port {0} already in use by PID={1}; assuming server already running (untracked)." -f $Port, $listener.Id)
             Write-PidFile $listener.Id
             if (-not $script:NoBrowser) {
@@ -2196,6 +2290,10 @@ function Start-VonServer {
             return
         }
         elseif ($currentPidInFile -ne $listener.Id) {
+            if ((Test-AgentTestInstance) -and -not (Test-IsVonMainProcess -ProcessId $listener.Id)) {
+                Write-LauncherLog ("Agent test mode: port {0} is owned by non-Von PID={1}; refusing to replace PID file PID={2}." -f $Port, $listener.Id, $currentPidInFile)
+                return
+            }
             Write-LauncherLog ("Port {0} owned by PID={1} but PID file had PID={2}; updating PID file to listener." -f $Port, $listener.Id, $currentPidInFile)
             Write-PidFile $listener.Id
             if (-not $script:NoBrowser) {
@@ -2215,7 +2313,7 @@ function Start-VonServer {
     # Prevent Python main process from attempting to open an additional browser tab; launcher manages this.
     $env:VON_SKIP_BROWSER_LAUNCH = '1'
     # Clear stale server script processes so restart/start cannot accumulate orphaned wrappers.
-    Stop-PythonProcessesByScript -ScriptRelativePath 'src/workflows/von/main.py' -Label 'Von Server'
+    Invoke-VonServerStartProcessCleanup
 
     $pdm = if (Test-Path (Join-Path $Root '.venv\Scripts\pdm.exe')) { Join-Path $Root '.venv\Scripts\pdm.exe' } else { 'pdm' }
     $venvPython = Join-Path $Root '.venv\Scripts\python.exe'
@@ -2234,6 +2332,7 @@ function Start-VonServer {
     }
 
     # Launch background with explicit stdout/stderr redirection.
+    $requestedStartPort = $Port
     Write-LauncherLog "Starting Von server on port $Port (mode=$launchMode)..."
     $serverErrLog = "$NewLog.err"
     if (Test-Path $NewLog) { Remove-Item $NewLog -Force -ErrorAction SilentlyContinue }
@@ -2277,6 +2376,12 @@ function Start-VonServer {
                 $actualPort = Get-ActualServerPort -LogPath $CurrentLog -RequestedPort $Port
                 if ($actualPort -and $actualPort -ne $Port) {
                     $portFallbackDetected = $true
+                    if (Test-AgentTestInstance) {
+                        Write-LauncherLog ("ERROR: Agent test mode refused port fallback from {0} to {1}; stop the occupying process or pass an unused -Port." -f $requestedStartPort, $actualPort)
+                        try { Stop-ProcessTreeWithEscalation -ProcessId $proc.Id | Out-Null } catch { }
+                        Remove-PidFile
+                        return
+                    }
                     Write-Host ""
                     Write-Host "================================================================================" -ForegroundColor Yellow
                     Write-Host "  WARNING: Port $Port was in use! Server started on port $actualPort instead." -ForegroundColor Yellow
@@ -2406,18 +2511,7 @@ function Start-VonServer {
     if ($ShowRelationCoverage) {
         try { Invoke-RelationCoverageSummary } catch { Write-LauncherLog "[relation-coverage] ERROR: $($_.Exception.Message)" }
     }
-    # Trigger daily backup (non-blocking) if due
-    try { Invoke-DailyBackupIfDue } catch { Write-LauncherLog "[daily-backup] ERROR (scheduling failed): $($_.Exception.Message)" }
-    # Trigger test DB refresh (non-blocking) if due
-    try { Invoke-TestDbRefreshIfDue } catch { Write-LauncherLog "[test-db-refresh] ERROR (scheduling failed): $($_.Exception.Message)" }
-    # Trigger AI chat-session sync (non-blocking) if due
-    try { Invoke-AiChatSessionSyncIfDue } catch { Write-LauncherLog "[ai-chat-session-sync] ERROR (scheduling failed): $($_.Exception.Message)" }
-
-    # Start RAG Worker
-    try { Start-RagWorker } catch { Write-LauncherLog "[rag-worker] ERROR: $($_.Exception.Message)" }
-
-    # Start Concept Index Worker
-    try { Start-ConceptIndexWorker } catch { Write-LauncherLog "[concept-index-worker] ERROR: $($_.Exception.Message)" }
+    Invoke-VonStartupBackgroundServices
 }
 
 function Stop-VonServer {
@@ -2469,11 +2563,7 @@ function Stop-VonServer {
     }
     if ((Test-Path $PidFile) -and (Select-String -Path $PidFile -Pattern "PID=$targetPid" -Quiet)) { Remove-PidFile }
 
-    # Stop RAG Worker
-    Stop-RagWorker
-
-    # Stop Concept Index Worker
-    Stop-ConceptIndexWorker
+    Stop-VonSharedWorkersForCurrentMode
 }
 
 function Get-VonStatus {
@@ -3294,7 +3384,13 @@ Von Launcher Help
     Usage: .\run.ps1 [action] [options]
     Actions: start | foreground | stop | status | restart | logs | check | backup | restore-backup | autoupdate | rag-worker | help
     Options:
-        -Port <int>            (reserved future multi-instance)
+        -Port <int>            Server port (default 5000; -AgentTest defaults to 5010)
+        -AgentTest             Isolated coding-agent test instance mode:
+                               defaults to port 5010 unless -Port is supplied,
+                               implies -NoBrowser unless -ForceBrowser is supplied,
+                               preserves other Von servers, and skips shared
+                               background workers/startup maintenance.
+        -IsolatedTestInstance  Alias for -AgentTest
     -NoBrowser             Do not auto open browser
     -ForceBrowser          Force opening browser even if already opened once
         -LogRetention <n>      Keep last n logs (default 20)
@@ -3336,6 +3432,8 @@ Von Launcher Help
 
     Examples:
         .\run.ps1 start
+        .\run.ps1 restart -AgentTest -HealthTimeoutSec 180
+        .\run.ps1 restart -AgentTest -Port 5011 -HealthTimeoutSec 180
         .\run.ps1 status
         .\run.ps1 check          # returns exit code (0 healthy, 2 unhealthy, 3 not running)
         .\run.ps1 logs -Tail 200 -Follow

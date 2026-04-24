@@ -174,6 +174,22 @@ Canonical local Von restart:
   wrong branch or a stale process, stop/restart through `.\run.ps1` rather than
   leaving the old process alive and moving to another port.
 
+Isolated coding-agent replay backend:
+
+- For automated replay, live prompt sampling, or acceptance evidence that
+  should not disturb the user-facing local server, use:
+  `.\run.ps1 restart -AgentTest -HealthTimeoutSec 180`
+- `-AgentTest` defaults to port `5010`, implies `-NoBrowser`, preserves other
+  Von server processes, and skips shared background workers/startup maintenance.
+  Pair replay tools with `--base-url http://127.0.0.1:5010`.
+- If port `5010` is already deliberately in use, choose an explicit isolated
+  port such as:
+  `.\run.ps1 restart -AgentTest -Port 5011 -HealthTimeoutSec 180`
+  and pass the matching base URL to the replay tool.
+- Do not treat `-Port` alone as isolation. The isolated mode changes launcher
+  ownership semantics so an automated run does not globally clean up or adopt
+  unrelated local Von processes.
+
 If cleanup removes the obvious duplicates but memory pressure remains extreme,
 or kernel/pool counters stay abnormally high relative to process working sets,
 treat that as a broader host issue rather than endlessly restarting repo
