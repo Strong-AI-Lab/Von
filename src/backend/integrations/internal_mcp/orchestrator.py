@@ -11998,7 +11998,6 @@ class InternalMCPChatOrchestrator:
         base_message = self._inject_prompt_variable(
             base_message, key="listing", value=listing
         )
-        base_message = self._inject_instruction_grounding_guardrails(base_message)
         if identity_lines:
             base_message = f"{base_message.rstrip()}\n\n" + "\n".join(identity_lines)
 
@@ -12021,51 +12020,6 @@ class InternalMCPChatOrchestrator:
             )
 
         return base_message
-
-    @staticmethod
-    def _inject_instruction_grounding_guardrails(base_message: str) -> str:
-        """Append deterministic grounding guardrails without reviving prompt fallback."""
-
-        if not isinstance(base_message, str) or not base_message.strip():
-            return base_message
-
-        lowered_message = base_message.lower()
-        guardrail_lines: list[str] = []
-        if "list_papers is inventory-only" not in lowered_message:
-            guardrail_lines.append(
-                "- list_papers is inventory-only: it enumerates cached/stored PDFs "
-                "and does NOT by itself establish authorship, ownership, "
-                "provenance, or any user/entity relationship."
-            )
-        if "do not treat cache presence" not in lowered_message:
-            guardrail_lines.append(
-                "- Do NOT treat cache presence, file presence, storage inventory, "
-                "or generic listing tools as sufficient evidence that an artefact "
-                "belongs to, was authored by, or is otherwise related to a person "
-                "or entity."
-            )
-        if (
-            "prefer kb/concept/relation retrieval tools over inventory/listing tools"
-            not in lowered_message
-        ):
-            guardrail_lines.append(
-                "- For questions about papers, projects, collaborators, "
-                "affiliations, or other facts 'of mine', 'of ours', or 'of X', "
-                "prefer KB/concept/relation retrieval tools over inventory/listing "
-                "tools unless the user explicitly asked for inventory only."
-            )
-        if not guardrail_lines:
-            return base_message
-
-        guardrail_block = "\n".join(["GROUNDING GUARDRAILS:", *guardrail_lines])
-        marker = "Available tools:\n"
-        if marker in base_message:
-            return base_message.replace(
-                marker,
-                f"{guardrail_block}\n\n{marker}",
-                1,
-            )
-        return f"{base_message.rstrip()}\n\n{guardrail_block}"
 
     def _load_base_system_prompt_from_vontology(
         self, *, preferred_language: str | None = None

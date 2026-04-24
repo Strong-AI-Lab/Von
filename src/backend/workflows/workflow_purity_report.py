@@ -238,6 +238,18 @@ CORE_SUPPORT_POLICY_CONTRACTS = (
                 r"['\"]source['\"]\s*:\s*['\"]code_fallback['\"]",
                 re.IGNORECASE,
             ),
+            "python_authored_grounding_guardrail_heading": re.compile(
+                r"GROUNDING GUARDRAILS",
+                re.IGNORECASE,
+            ),
+            "python_authored_inventory_grounding_policy": re.compile(
+                r"list_papers\s+is\s+inventory-only",
+                re.IGNORECASE,
+            ),
+            "python_authored_cache_presence_grounding_policy": re.compile(
+                r"Do\s+NOT\s+treat\s+cache\s+presence",
+                re.IGNORECASE,
+            ),
         },
         "banned_symbol_names": ORCHESTRATOR_RETIRED_SUPPORT_SYMBOLS,
         "banned_symbol_patterns": ORCHESTRATOR_RETIRED_SUPPORT_SYMBOL_PATTERNS,

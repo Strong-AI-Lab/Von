@@ -57,6 +57,23 @@ _TEST_BASE_PROMPT = (
     "{listing}"
 )
 
+_TEST_BASE_PROMPT_WITH_GROUNDING_POLICY = (
+    "You have access to internal MCP tools.\n\n"
+    "{auth_status}\n"
+    "INTERNAL EXECUTION GUARDRAILS:\n"
+    "- Do NOT mention budgets, caps, or internal limits unless the user explicitly "
+    "asks for diagnostics.\n"
+    "GROUNDING GUARDRAILS:\n"
+    "- list_papers is inventory-only: it enumerates cached/stored PDFs and does "
+    "NOT by itself establish authorship, ownership, provenance, or any "
+    "user/entity relationship.\n"
+    "- Do NOT treat cache presence, file presence, storage inventory, or generic "
+    "listing tools as sufficient evidence that an artefact belongs to, was "
+    "authored by, or is otherwise related to a person or entity.\n"
+    "Available tools:\n"
+    "{listing}"
+)
+
 
 def _seed_authoritative_conversation_turn_registry(monkeypatch) -> None:
     def _build_registry(*, defer_parity_work: bool = True) -> WorkflowRegistry:
@@ -150,7 +167,40 @@ def test_orchestrator_constructor_uses_shared_runtime_registries(monkeypatch):
     assert orchestrator._action_registry.has_fallback_handler() is True
 
 
-def test_instruction_message_uses_internal_guardrail_wording_without_budget_leak(
+def test_instruction_message_preserves_authoritative_guardrail_wording_without_budget_leak(
+    monkeypatch,
+):
+    orchestrator = object.__new__(InternalMCPChatOrchestrator)
+    orchestrator._gateway = cast(Any, _CapturingGateway())
+    orchestrator._max_tool_invocations = 30
+    orchestrator._tool_batch_cap = 10
+    orchestrator._last_base_system_prompt_telemetry = None
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_load_base_system_prompt_from_vontology",
+        lambda preferred_language=None: (
+            _TEST_BASE_PROMPT_WITH_GROUNDING_POLICY,
+            "#V#test_base_prompt",
+        ),
+    )
+
+    instruction = orchestrator._instruction_message(preferred_language="en")
+
+    assert "Server limits:" not in instruction
+    assert "INTERNAL EXECUTION GUARDRAILS:" in instruction
+    assert "Do NOT mention budgets, caps, or internal limits" in instruction
+    assert "inventory-only" in instruction
+    assert "Do NOT treat cache presence" in instruction
+    assert orchestrator._last_base_system_prompt_telemetry == {
+        "type": "base_system_prompt",
+        "source": "vontology",
+        "prompt_type_id": "#V#von_chat_base_system_prompt",
+        "prompt_concept_id": "#V#test_base_prompt",
+    }
+
+
+def test_instruction_message_does_not_inject_grounding_policy_after_authoritative_prompt(
     monkeypatch,
 ):
     orchestrator = object.__new__(InternalMCPChatOrchestrator)
@@ -167,11 +217,9 @@ def test_instruction_message_uses_internal_guardrail_wording_without_budget_leak
 
     instruction = orchestrator._instruction_message(preferred_language="en")
 
-    assert "Server limits:" not in instruction
-    assert "INTERNAL EXECUTION GUARDRAILS:" in instruction
-    assert "Do NOT mention budgets, caps, or internal limits" in instruction
-    assert "inventory-only" in instruction
-    assert "Do NOT treat cache presence" in instruction
+    assert "GROUNDING GUARDRAILS:" not in instruction
+    assert "inventory-only" not in instruction
+    assert "Do NOT treat cache presence" not in instruction
 
 
 def test_instruction_message_keeps_tool_index_compact_for_large_catalogue(
