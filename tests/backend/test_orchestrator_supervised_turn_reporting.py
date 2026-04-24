@@ -34,11 +34,16 @@ class _DummyGateway:
         return {}
 
 
-def _stub_base_system_prompt(monkeypatch, orchestrator: InternalMCPChatOrchestrator) -> None:
+def _stub_base_system_prompt(
+    monkeypatch, orchestrator: InternalMCPChatOrchestrator
+) -> None:
     monkeypatch.setattr(
         orchestrator,
         "_load_base_system_prompt_from_vontology",
-        lambda preferred_language=None: ("Test base system prompt", "#V#test_base_prompt"),
+        lambda preferred_language=None: (
+            "Test base system prompt",
+            "#V#test_base_prompt",
+        ),
     )
 
 
@@ -137,8 +142,7 @@ def test_sanitise_user_visible_action_output_strips_internal_status_suffix() -> 
 
     assert result == "Grounded answer text."
     assert any(
-        entry.get("reason") == "internal_status_suffix_stripped"
-        for entry in aux_log
+        entry.get("reason") == "internal_status_suffix_stripped" for entry in aux_log
     )
 
 
@@ -1227,7 +1231,7 @@ def test_turn_execution_route_recovers_launchable_requested_workflow_after_disco
             '{"workflow_id":"#V#entity_information_retrieval_workflow",'
             '"confidence":0.98,'
             '"reasoning":"This is an authenticated self-relative entity '
-            'information request, so the entity-information retrieval workflow '
+            "information request, so the entity-information retrieval workflow "
             'is the best fit."}'
         )
     )
@@ -1313,6 +1317,16 @@ def test_turn_execution_route_recovers_launchable_requested_workflow_after_disco
     assert recovery_entry["selected_workflow_id"] == selected_workflow_id
     assert recovery_entry["requested_candidate_workflow_id"] == selected_workflow_id
     assert recovery_entry["workflow_discovery_budget_exhausted"] is True
+    assert recovery_entry["function"] == "_promote_selected_workflow_to_custom_dispatch"
+
+    recovery_prepare_step = next(
+        entry
+        for entry in aux_llm_calls
+        if isinstance(entry, dict)
+        and entry.get("type") == "workflow_dispatch_prepare_step"
+        and entry.get("step_id") == "selector_unmatched_candidate_recovery"
+    )
+    assert recovery_prepare_step["workflow_id"] == selected_workflow_id
 
 
 def test_turn_execution_route_recovers_single_discovered_execution_workflow_after_selector_default(

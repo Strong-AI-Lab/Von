@@ -57,7 +57,9 @@ from src.backend.workflows.definitions import (
 from src.backend.workflows.turn_expected_outcome_contract import (
     build_turn_expected_outcome_boundary_payload,
 )
-from src.backend.workflows.vontology_loader import load_workflow_definition_from_vontology
+from src.backend.workflows.vontology_loader import (
+    load_workflow_definition_from_vontology,
+)
 from src.backend.workflows.workflow_gap_workflow_contracts import (
     WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
 )
@@ -391,9 +393,7 @@ def test_renderer_applicability_can_enable_narration_when_flag_enabled(monkeypat
                             {"renderer_id": "#V#narration_renderer"}
                         ],
                         "rejected_preview": [],
-                        "selected_preview": [
-                            {"renderer_id": "#V#narration_renderer"}
-                        ],
+                        "selected_preview": [{"renderer_id": "#V#narration_renderer"}],
                     }
                 },
             }
@@ -436,10 +436,9 @@ def test_renderer_applicability_can_enable_narration_when_flag_enabled(monkeypat
     assert result.render_plan.get("render_mode") == "spoken+screen"
     assert result.render_plan.get("should_narrate") is True
     assert len(renderer_invocations) == 1
-    assert (
-        renderer_invocations[0]["payload"]["renderer_definition_concept_ids"]
-        == ["#V#narration_renderer"]
-    )
+    assert renderer_invocations[0]["payload"]["renderer_definition_concept_ids"] == [
+        "#V#narration_renderer"
+    ]
 
     renderer_entry = next(
         (
@@ -534,7 +533,9 @@ def test_renderer_applicability_flag_off_preserves_default_rendering(monkeypatch
     monkeypatch.delenv("VON_RENDERER_APPLICABILITY_DEFINITION_IDS", raising=False)
 
     def _invoke(_tool_name: str, _payload: Mapping[str, Any]):
-        raise AssertionError("Renderer applicability tool must not be invoked when disabled")
+        raise AssertionError(
+            "Renderer applicability tool must not be invoked when disabled"
+        )
 
     monkeypatch.setattr(orchestrator._gateway, "invoke", _invoke)
     _stub_execute_workflow_result(
@@ -568,7 +569,10 @@ def test_renderer_applicability_flag_off_preserves_default_rendering(monkeypatch
     assert result.render_plan is None
     assert len(llm.calls) == 1
     assert all(
-        not (isinstance(entry, dict) and entry.get("type") == "renderer_applicability_routing")
+        not (
+            isinstance(entry, dict)
+            and entry.get("type") == "renderer_applicability_routing"
+        )
         for entry in result.aux_llm_calls
     )
 
@@ -718,7 +722,9 @@ def test_renderer_applicability_uses_concept_backed_request_when_available(monke
     assert request_payload["concept_id"] == "#V#task_123"
     assert isinstance(result.render_plan, dict)
     assert result.render_plan.get("request_payload_object_kind") == "concept"
-    assert result.render_plan.get("request_payload_selected_concept_id") == "#V#task_123"
+    assert (
+        result.render_plan.get("request_payload_selected_concept_id") == "#V#task_123"
+    )
 
     renderer_entry = next(
         (
@@ -734,7 +740,9 @@ def test_renderer_applicability_uses_concept_backed_request_when_available(monke
     assert renderer_entry.get("request_payload_selected_concept_id") == "#V#task_123"
 
 
-def test_renderer_render_plan_includes_table_record_sets_from_tool_messages(monkeypatch):
+def test_renderer_render_plan_includes_table_record_sets_from_tool_messages(
+    monkeypatch,
+):
     """Render plan should carry task and predicate record sets derived from tool results."""
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
     monkeypatch.setenv("VON_RENDERER_APPLICABILITY_ROUTING_ENABLE", "1")
@@ -1090,7 +1098,10 @@ def test_renderer_selection_gates_screen_element_families(monkeypatch):
     )
 
     assert isinstance(result.render_plan, dict)
-    assert result.render_plan.get("screen_element_mapping_mode") == "selected_renderer_types"
+    assert (
+        result.render_plan.get("screen_element_mapping_mode")
+        == "selected_renderer_types"
+    )
     assert result.render_plan.get("screen_element_targets") == {
         "table": False,
         "workflow_view": True,
@@ -1106,9 +1117,8 @@ def test_renderer_selection_gates_screen_element_families(monkeypatch):
     }
     assert "screen_table_record_sets" not in result.render_plan
     assert result.render_plan.get("screen_workflow_element_count") == 1
-    assert (
-        "renderer_screen_elements:selected_renderer_types"
-        in result.render_plan.get("screen_element_reason_codes", [])
+    assert "renderer_screen_elements:selected_renderer_types" in result.render_plan.get(
+        "screen_element_reason_codes", []
     )
 
 
@@ -1156,8 +1166,14 @@ def test_renderer_selection_uses_profile_screen_families_for_custom_renderer_typ
                                 "duration_ms": 2.0,
                                 "payload": {
                                     "tasks": [
-                                        {"task_concept_id": "#V#task_alpha", "status": "todo"},
-                                        {"task_concept_id": "#V#task_beta", "status": "done"},
+                                        {
+                                            "task_concept_id": "#V#task_alpha",
+                                            "status": "todo",
+                                        },
+                                        {
+                                            "task_concept_id": "#V#task_beta",
+                                            "status": "done",
+                                        },
                                     ]
                                 },
                             }
@@ -1288,7 +1304,10 @@ def test_renderer_selection_emits_timeline_elements_for_timeline_renderer(monkey
     )
 
     assert isinstance(result.render_plan, dict)
-    assert result.render_plan.get("screen_element_mapping_mode") == "selected_renderer_types"
+    assert (
+        result.render_plan.get("screen_element_mapping_mode")
+        == "selected_renderer_types"
+    )
     assert result.render_plan.get("screen_element_targets") == {
         "table": False,
         "workflow_view": False,
@@ -1392,7 +1411,10 @@ def test_renderer_selection_emits_calendar_elements_for_calendar_renderer(monkey
     )
 
     assert isinstance(result.render_plan, dict)
-    assert result.render_plan.get("screen_element_mapping_mode") == "selected_renderer_types"
+    assert (
+        result.render_plan.get("screen_element_mapping_mode")
+        == "selected_renderer_types"
+    )
     assert result.render_plan.get("screen_element_targets") == {
         "table": False,
         "workflow_view": False,
@@ -1509,7 +1531,10 @@ def test_renderer_selection_emits_chart_elements_for_chart_renderer(monkeypatch)
     )
 
     assert isinstance(result.render_plan, dict)
-    assert result.render_plan.get("screen_element_mapping_mode") == "selected_renderer_types"
+    assert (
+        result.render_plan.get("screen_element_mapping_mode")
+        == "selected_renderer_types"
+    )
     assert result.render_plan.get("screen_element_targets") == {
         "table": False,
         "workflow_view": False,
@@ -1634,7 +1659,10 @@ def test_renderer_selection_emits_location_elements_for_location_renderer(monkey
     )
 
     assert isinstance(result.render_plan, dict)
-    assert result.render_plan.get("screen_element_mapping_mode") == "selected_renderer_types"
+    assert (
+        result.render_plan.get("screen_element_mapping_mode")
+        == "selected_renderer_types"
+    )
     assert result.render_plan.get("screen_element_targets") == {
         "table": False,
         "workflow_view": False,
@@ -1746,7 +1774,10 @@ def test_renderer_selection_emits_document_elements_for_document_renderer(monkey
     )
 
     assert isinstance(result.render_plan, dict)
-    assert result.render_plan.get("screen_element_mapping_mode") == "selected_renderer_types"
+    assert (
+        result.render_plan.get("screen_element_mapping_mode")
+        == "selected_renderer_types"
+    )
     assert result.render_plan.get("screen_element_targets") == {
         "table": False,
         "workflow_view": False,
@@ -1854,7 +1885,10 @@ def test_renderer_selection_emits_task_view_elements_for_task_renderer(monkeypat
     )
 
     assert isinstance(result.render_plan, dict)
-    assert result.render_plan.get("screen_element_mapping_mode") == "selected_renderer_types"
+    assert (
+        result.render_plan.get("screen_element_mapping_mode")
+        == "selected_renderer_types"
+    )
     assert result.render_plan.get("screen_element_targets") == {
         "table": False,
         "workflow_view": False,
@@ -1970,7 +2004,10 @@ def test_renderer_selection_emits_kanban_elements_for_kanban_renderer(monkeypatc
     )
 
     assert isinstance(result.render_plan, dict)
-    assert result.render_plan.get("screen_element_mapping_mode") == "selected_renderer_types"
+    assert (
+        result.render_plan.get("screen_element_mapping_mode")
+        == "selected_renderer_types"
+    )
     assert result.render_plan.get("screen_element_targets") == {
         "table": False,
         "workflow_view": False,
@@ -2003,7 +2040,9 @@ def test_renderer_selection_emits_kanban_elements_for_kanban_renderer(monkeypatc
     assert cards[0]["column_id"] == "pending"
 
 
-def test_renderer_selection_emits_relation_graph_elements_for_graph_renderer(monkeypatch):
+def test_renderer_selection_emits_relation_graph_elements_for_graph_renderer(
+    monkeypatch,
+):
     """Relation-graph renderer selection should emit relation graph elements only."""
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
     monkeypatch.setenv("VON_RENDERER_APPLICABILITY_ROUTING_ENABLE", "1")
@@ -2086,7 +2125,10 @@ def test_renderer_selection_emits_relation_graph_elements_for_graph_renderer(mon
     )
 
     assert isinstance(result.render_plan, dict)
-    assert result.render_plan.get("screen_element_mapping_mode") == "selected_renderer_types"
+    assert (
+        result.render_plan.get("screen_element_mapping_mode")
+        == "selected_renderer_types"
+    )
     assert result.render_plan.get("screen_element_targets") == {
         "table": False,
         "workflow_view": False,
@@ -2208,7 +2250,10 @@ def test_renderer_selection_skips_hierarchy_view_for_custom_relation_edges(monke
     )
 
     assert isinstance(result.render_plan, dict)
-    assert result.render_plan.get("screen_element_mapping_mode") == "selected_renderer_types"
+    assert (
+        result.render_plan.get("screen_element_mapping_mode")
+        == "selected_renderer_types"
+    )
     assert result.render_plan.get("screen_element_targets") == {
         "table": False,
         "workflow_view": False,
@@ -2463,7 +2508,10 @@ def test_renderer_selection_hierarchy_parser_tolerates_indented_root_rows(monkey
     )
 
     assert isinstance(result.render_plan, dict)
-    assert result.render_plan.get("screen_element_targets", {}).get("hierarchy_view") is True
+    assert (
+        result.render_plan.get("screen_element_targets", {}).get("hierarchy_view")
+        is True
+    )
     hierarchy_elements = result.render_plan.get("screen_hierarchy_elements")
     assert isinstance(hierarchy_elements, list)
     assert len(hierarchy_elements) == 1
@@ -2510,7 +2558,7 @@ def test_renderer_render_plan_skips_malformed_tool_messages_for_table_record_set
                     # Malformed/truncated JSON.
                     {
                         "role": "tool",
-                        "content": "{\"tool\":\"task_list\",\"status\":\"ok\",\"payload\":{\"tasks\":[{\"title\":\"A\"}]",
+                        "content": '{"tool":"task_list","status":"ok","payload":{"tasks":[{"title":"A"}]',
                     },
                     # Explicit tool error should be ignored.
                     {
@@ -2703,10 +2751,7 @@ def test_renderer_applicability_bootstrap_defaults_surface_resolver_error_detail
     assert result.response_text == "Here is the answer on screen."
     assert captured_payloads
     expected_ids = list(canonical_renderer_profile_concept_ids())
-    assert (
-        captured_payloads[0]["renderer_definition_concept_ids"]
-        == expected_ids
-    )
+    assert captured_payloads[0]["renderer_definition_concept_ids"] == expected_ids
 
     renderer_entry = next(
         (
@@ -2721,7 +2766,10 @@ def test_renderer_applicability_bootstrap_defaults_surface_resolver_error_detail
     assert renderer_entry.get("attempted") is True
     assert renderer_entry.get("success") is False
     assert renderer_entry.get("reason") == "resolver_unsuccessful"
-    assert renderer_entry.get("renderer_definition_source") == "canonical_bootstrap_defaults"
+    assert (
+        renderer_entry.get("renderer_definition_source")
+        == "canonical_bootstrap_defaults"
+    )
     assert renderer_entry.get("resolver_error_code") == "missing_parameter"
     assert isinstance(result.render_plan, dict)
     assert result.render_plan.get("resolver_error_code") == "missing_parameter"
@@ -2731,7 +2779,9 @@ def test_renderer_applicability_bootstrap_defaults_surface_resolver_error_detail
     assert loading.get("malformed_profile_concept_ids") == ["#V#workflow_renderer"]
 
 
-def test_renderer_applicability_multimodal_selection_sets_spoken_plus_screen(monkeypatch):
+def test_renderer_applicability_multimodal_selection_sets_spoken_plus_screen(
+    monkeypatch,
+):
     """Multimodal selection should expose screen+spoken render mode deterministically."""
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
     monkeypatch.setenv("VON_RENDERER_APPLICABILITY_ROUTING_ENABLE", "1")
@@ -3053,9 +3103,7 @@ def test_selector_unmatched_non_default_candidate_uses_safe_general_tool_fallbac
                     ),
                     "workflow_gap_final_extra_messages": [],
                     "workflow_gap_final_tool_invocations": [],
-                    "workflow_gap_recovery_outcome": (
-                        "candidate_retried_successfully"
-                    ),
+                    "workflow_gap_recovery_outcome": ("candidate_retried_successfully"),
                     "workflow_gap_candidate_workflow_id": excluded_workflow_id,
                 },
                 final_state="complete",
@@ -3174,6 +3222,110 @@ def test_selector_unmatched_non_default_candidate_uses_safe_general_tool_fallbac
         "tool_pipeline"
     )
 
+
+def test_selector_unmatched_budget_timeout_recovers_launchable_requested_workflow(
+    monkeypatch,
+):
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    selected_workflow_id = "#V#entity_information_retrieval_workflow"
+
+    _register_terminal_custom_workflow(
+        orchestrator,
+        workflow_id=selected_workflow_id,
+        purpose=(
+            "Canonical grounded retrieval workflow for authenticated "
+            "self-relative entity questions."
+        ),
+    )
+    _stub_execute_workflow_result(
+        monkeypatch,
+        orchestrator,
+        expected_workflow_id=selected_workflow_id,
+        data={
+            "final_response": (
+                "Recovered through the entity-information retrieval workflow."
+            ),
+            "tool_messages": [],
+            "invocations": [],
+        },
+    )
+
+    result = orchestrator.run(
+        prompt="What research interests of mine are explicitly represented here?",
+        context=[],
+        llm_client=_CapturingLLM(
+            [
+                json.dumps(
+                    {
+                        "workflow_id": selected_workflow_id,
+                        "confidence": 0.98,
+                        "reasoning": (
+                            "This is an authenticated self-relative entity "
+                            "information request."
+                        ),
+                    }
+                )
+            ]
+        ),
+        model=None,
+        user_namespace="#V#user",
+        workflow_discovery_result={
+            "requested_query": (
+                "What research interests of mine are explicitly represented here?"
+            ),
+            "query": "What research interests of mine are explicitly represented here?",
+            "discovery_query_input": (
+                "What research interests of mine are explicitly represented here?"
+            ),
+            "matches": [],
+            "candidates": [],
+            "routing_matches": [],
+            "match_count": 0,
+            "candidate_count": 0,
+            "excluded_candidate_ids": [],
+            "excluded_candidates": [],
+            "budget_exhausted": True,
+            "match_absence_reason": "workflow_discovery_budget_exhausted",
+            "budget_exhaustion_stage": "workflow_discovery_for_turn",
+            "budget_exhaustion_detail": (
+                "workflow_discovery_for_turn timed out after 10.000s during "
+                "workflow discovery"
+            ),
+        },
+    )
+
+    assert result.response_text == (
+        "Recovered through the entity-information retrieval workflow."
+    )
+    assert result.workflow_routing is not None
+    assert result.workflow_routing.workflow_id == selected_workflow_id
+    assert result.workflow_routing.verdict == "rag_selected"
+    assert result.workflow_routing.source == "selector_override"
+
+    recovery_entry = next(
+        entry
+        for entry in result.aux_llm_calls
+        if isinstance(entry, dict)
+        and entry.get("type") == "workflow_selector_override"
+        and entry.get("reason")
+        == (
+            "selector_unmatched_candidate_budget_timeout_recovered_to_requested_workflow"
+        )
+    )
+    assert recovery_entry["selected_workflow_id"] == selected_workflow_id
+    assert recovery_entry["requested_candidate_workflow_id"] == selected_workflow_id
+    assert recovery_entry["function"] == "_promote_selected_workflow_to_custom_dispatch"
+
+    recovery_prepare_step = next(
+        entry
+        for entry in result.aux_llm_calls
+        if isinstance(entry, dict)
+        and entry.get("type") == "workflow_dispatch_prepare_step"
+        and entry.get("step_id") == "selector_unmatched_candidate_recovery"
+    )
+    assert recovery_prepare_step["workflow_id"] == selected_workflow_id
+
+
 def test_selector_safe_general_fallback_finalises_selection_experience_with_override_truth(
     monkeypatch,
 ):
@@ -3217,9 +3369,7 @@ def test_selector_safe_general_fallback_finalises_selection_experience_with_over
                     ),
                     "workflow_gap_final_extra_messages": [],
                     "workflow_gap_final_tool_invocations": [],
-                    "workflow_gap_recovery_outcome": (
-                        "candidate_retried_successfully"
-                    ),
+                    "workflow_gap_recovery_outcome": ("candidate_retried_successfully"),
                     "workflow_gap_candidate_workflow_id": excluded_workflow_id,
                 },
                 final_state="complete",
@@ -3286,7 +3436,9 @@ def test_selector_safe_general_fallback_finalises_selection_experience_with_over
     assert captured_finalise["experience_id"] == "exp-selector-override"
     outcome_metadata = captured_finalise["outcome_metadata"]
     assert outcome_metadata["selected_workflow_id"] == TOOL_CALLING_WORKFLOW_ID
-    assert outcome_metadata["effective_dispatch_workflow_id"] == TOOL_CALLING_WORKFLOW_ID
+    assert (
+        outcome_metadata["effective_dispatch_workflow_id"] == TOOL_CALLING_WORKFLOW_ID
+    )
     assert outcome_metadata["selector_override_applied"] is True
     assert outcome_metadata["workflow_gap_recovery_applied"] is True
     assert outcome_metadata["selector_override"]["reason"] == (
@@ -3428,7 +3580,9 @@ def test_workflow_selector_emits_dispatch_progress_events(monkeypatch):
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
     llm = _CapturingLLM([TOOL_CALLING_WORKFLOW_ID, "Fallback response."])
     captured_progress: list[dict[str, Any]] = []
-    tracker = ProgressTracker(callback=lambda info: captured_progress.append(dict(info)))
+    tracker = ProgressTracker(
+        callback=lambda info: captured_progress.append(dict(info))
+    )
 
     discovery_result = {
         "matches": [
@@ -3464,7 +3618,9 @@ def test_workflow_selector_emits_dispatch_progress_events(monkeypatch):
     )
 
     workflow_dispatch_events = [
-        entry for entry in captured_progress if entry.get("stage") == "workflow_dispatch"
+        entry
+        for entry in captured_progress
+        if entry.get("stage") == "workflow_dispatch"
     ]
     assert workflow_dispatch_events
     assert any(
@@ -3473,12 +3629,10 @@ def test_workflow_selector_emits_dispatch_progress_events(monkeypatch):
         for entry in workflow_dispatch_events
     )
     assert any(
-        entry.get("status") == "llm_call_start"
-        for entry in workflow_dispatch_events
+        entry.get("status") == "llm_call_start" for entry in workflow_dispatch_events
     )
     assert any(
-        entry.get("status") == "llm_call_end"
-        and entry.get("success") is True
+        entry.get("status") == "llm_call_end" and entry.get("success") is True
         for entry in workflow_dispatch_events
     )
     selected_event = next(
@@ -3761,7 +3915,7 @@ def test_custom_workflow_run_applies_launch_contract_without_workflow_specific_g
     monkeypatch.setattr(orchestrator._workflow_executor, "run", _run_workflow)
 
     prompt = (
-        'Run a meeting-invitation test on this invitation text:\n\n'
+        "Run a meeting-invitation test on this invitation text:\n\n"
         '"Kia ora team, please join us on Tuesday at 2:00pm in Room 4 '
         'for a project planning meeting about the Q2 roadmap."'
     )
@@ -3920,7 +4074,7 @@ def test_custom_workflow_launchability_promotes_launchable_replacement_candidate
 
     result = orchestrator.run(
         prompt=(
-            'Run a meeting-invitation test on this invitation text:\n\n'
+            "Run a meeting-invitation test on this invitation text:\n\n"
             '"Kia ora team, please join us on Tuesday at 2:00pm in Room 4 '
             'for a project planning meeting about the Q2 roadmap."'
         ),
@@ -4022,7 +4176,9 @@ def test_custom_workflow_launchability_override_failure_preserves_selector_decis
                 states={
                     "normalise_inputs": WorkflowStateSpec(
                         state_id="normalise_inputs",
-                        actions=(WorkflowActionInvocation(action_id="tool.prepare_spec"),),
+                        actions=(
+                            WorkflowActionInvocation(action_id="tool.prepare_spec"),
+                        ),
                         terminal=True,
                         metadata={"reads_context_keys": ["file_copy_concept_id"]},
                     )
@@ -4136,7 +4292,9 @@ def test_custom_workflow_override_prefers_semantically_fit_execution_candidate(
                 states={
                     "prepare_spec": WorkflowStateSpec(
                         state_id="prepare_spec",
-                        actions=(WorkflowActionInvocation(action_id="tool.prepare_spec"),),
+                        actions=(
+                            WorkflowActionInvocation(action_id="tool.prepare_spec"),
+                        ),
                         terminal=True,
                         metadata={"reads_context_keys": ["target_workflow_ids"]},
                     )
@@ -4187,7 +4345,9 @@ def test_custom_workflow_override_prefers_semantically_fit_execution_candidate(
                 states={
                     "prepare_spec": WorkflowStateSpec(
                         state_id="prepare_spec",
-                        actions=(WorkflowActionInvocation(action_id="tool.prepare_spec"),),
+                        actions=(
+                            WorkflowActionInvocation(action_id="tool.prepare_spec"),
+                        ),
                         terminal=True,
                         metadata={"reads_context_keys": ["invitation_text"]},
                     )
@@ -4234,7 +4394,7 @@ def test_custom_workflow_override_prefers_semantically_fit_execution_candidate(
 
     result = orchestrator.run(
         prompt=(
-            'Run a meeting invitation test on this invitation text:\n\n'
+            "Run a meeting invitation test on this invitation text:\n\n"
             '"Kia ora team, please join us on Tuesday at 2:00pm in Room 4 '
             'for a project planning meeting about the Q2 roadmap."'
         ),
@@ -4361,7 +4521,9 @@ def test_launchability_replacement_declines_testing_workflow_for_conceptual_prom
                 states={
                     "normalise_inputs": WorkflowStateSpec(
                         state_id="normalise_inputs",
-                        actions=(WorkflowActionInvocation(action_id="tool.prepare_spec"),),
+                        actions=(
+                            WorkflowActionInvocation(action_id="tool.prepare_spec"),
+                        ),
                         terminal=True,
                         metadata={"reads_context_keys": ["file_copy_concept_id"]},
                     )
@@ -4540,7 +4702,8 @@ def test_launchability_replacement_declines_testing_workflow_for_conceptual_prom
         (
             entry
             for entry in result.aux_llm_calls
-            if isinstance(entry, dict) and entry.get("type") == "workflow_selector_prompt"
+            if isinstance(entry, dict)
+            and entry.get("type") == "workflow_selector_prompt"
         ),
         None,
     )
@@ -4574,7 +4737,9 @@ def test_launchability_replacement_declines_testing_workflow_for_conceptual_prom
         None,
     )
     assert override_entry is not None
-    assert override_entry.get("prior_selected_workflow_id") == CHAT_ASSISTANT_WORKFLOW_ID
+    assert (
+        override_entry.get("prior_selected_workflow_id") == CHAT_ASSISTANT_WORKFLOW_ID
+    )
     assert override_entry.get("selected_workflow_id") == TOOL_CALLING_WORKFLOW_ID
     assert override_entry.get("requested_candidate_workflow_id") == selected_workflow_id
     assert "launch_viability_probe" not in (override_entry or {})
@@ -4619,7 +4784,9 @@ def test_launchability_replacement_allows_testing_workflow_for_explicit_testing_
                 states={
                     "normalise_inputs": WorkflowStateSpec(
                         state_id="normalise_inputs",
-                        actions=(WorkflowActionInvocation(action_id="tool.prepare_spec"),),
+                        actions=(
+                            WorkflowActionInvocation(action_id="tool.prepare_spec"),
+                        ),
                         terminal=True,
                         metadata={"reads_context_keys": ["file_copy_concept_id"]},
                     )
@@ -4880,7 +5047,7 @@ def test_custom_workflow_first_step_failure_projects_terminal_locality_before_to
 
     result = orchestrator.run(
         prompt=(
-            'Run the meeting invitation testing workflow on this invitation:\n\n'
+            "Run the meeting invitation testing workflow on this invitation:\n\n"
             '"Kia ora team, please join us on Tuesday at 2:00pm in Room 4."'
         ),
         context=[],
@@ -4906,9 +5073,9 @@ def test_custom_workflow_first_step_failure_projects_terminal_locality_before_to
             ],
             "match_count": 1,
         },
-            conversation_session_id="chat-launch-failure",
-            turn_id="turn-launch-failure",
-        )
+        conversation_session_id="chat-launch-failure",
+        turn_id="turn-launch-failure",
+    )
 
     assert result.response_text == "Recovered through the general tool workflow."
     assert result.workflow_routing is not None
@@ -4971,7 +5138,9 @@ def test_custom_workflow_first_step_failure_projects_terminal_locality_before_to
     assert terminal_progress.get("workflow_selection_rationale")
 
 
-def test_custom_tool_pipeline_workflow_dispatches_without_id_special_casing(monkeypatch):
+def test_custom_tool_pipeline_workflow_dispatches_without_id_special_casing(
+    monkeypatch,
+):
     """Custom discovered workflows that satisfy the tool pipeline contract should
     execute through the tool workflow path without a workflow-ID allowlist.
     """
@@ -5426,7 +5595,9 @@ def test_workflow_selector_uses_provider_aware_classifier_fallback(monkeypatch):
     )
 
     captured_progress: list[dict[str, Any]] = []
-    tracker = ProgressTracker(callback=lambda info: captured_progress.append(dict(info)))
+    tracker = ProgressTracker(
+        callback=lambda info: captured_progress.append(dict(info))
+    )
 
     result = orchestrator.run(
         prompt="Hi there",
@@ -5444,7 +5615,9 @@ def test_workflow_selector_uses_provider_aware_classifier_fallback(monkeypatch):
     assert llm.calls[0]["prompt"] == "Hi there"
 
     workflow_dispatch_events = [
-        entry for entry in captured_progress if entry.get("stage") == "workflow_dispatch"
+        entry
+        for entry in captured_progress
+        if entry.get("stage") == "workflow_dispatch"
     ]
     failed_attempt = next(
         entry
@@ -5487,9 +5660,7 @@ def test_workflow_selector_uses_provider_aware_classifier_fallback(monkeypatch):
     assert selector_entry["prompt_provenance"]["prompt_mode"] == (
         "rag_first_candidate_selector"
     )
-    assert selector_entry["requested_prompt_ids"] == [
-        "#V#chat_turn_classifier_prompt"
-    ]
+    assert selector_entry["requested_prompt_ids"] == ["#V#chat_turn_classifier_prompt"]
     assert selector_entry["candidate_list"]["text"]
     assert selector_entry["selection_metadata"]["selection_resolution"] == (
         "candidate_label_exact_match"
@@ -5745,7 +5916,8 @@ def test_launchable_custom_workflow_is_not_python_overridden_from_mutative_wordi
     assert captured_execution == {}
     assert not any(
         isinstance(entry, dict)
-        and entry.get("type") in {"workflow_selector_override", "custom_workflow_override_policy"}
+        and entry.get("type")
+        in {"workflow_selector_override", "custom_workflow_override_policy"}
         for entry in result.aux_llm_calls
     )
 
@@ -5867,7 +6039,8 @@ def test_unrelated_execution_workflow_is_not_python_declined_or_promoted_from_pr
     assert execute_calls == []
     assert not any(
         isinstance(entry, dict)
-        and entry.get("type") in {"workflow_selector_override", "custom_workflow_override_policy"}
+        and entry.get("type")
+        in {"workflow_selector_override", "custom_workflow_override_policy"}
         for entry in result.aux_llm_calls
     )
 
@@ -5989,7 +6162,8 @@ def test_authoring_workflow_query_is_left_to_selector_without_python_semantic_ov
     assert execute_calls == []
     assert not any(
         isinstance(entry, dict)
-        and entry.get("type") in {"workflow_selector_override", "custom_workflow_override_policy"}
+        and entry.get("type")
+        in {"workflow_selector_override", "custom_workflow_override_policy"}
         for entry in result.aux_llm_calls
     )
 
@@ -6242,17 +6416,14 @@ def test_prepare_selector_discovered_matches_excludes_maintenance_profile_withou
     assert included == []
     assert len(excluded) == 1
     assert excluded[0]["routing_profile"]["role"] == "testing"
-    assert excluded[0]["routing_profile"][
-        "explicit_workflow_context_required"
-    ] is True
+    assert excluded[0]["routing_profile"]["explicit_workflow_context_required"] is True
     assert (
         excluded[0]["routing_exclusion_reason"]
         == "explicit_workflow_context_required_by_workflow_profile"
     )
     assert excluded[0]["routing_profile_role"] == "maintenance"
     assert (
-        excluded[0]["routing_policy_lexical_signals"]["workflow_query_intent"]
-        is False
+        excluded[0]["routing_policy_lexical_signals"]["workflow_query_intent"] is False
     )
 
 
@@ -6320,13 +6491,10 @@ def test_prepare_selector_discovered_matches_allows_maintenance_profile_for_expl
     assert excluded == []
     assert len(included) == 1
     assert included[0]["routing_profile"]["role"] == "testing"
-    assert included[0]["routing_profile"][
-        "explicit_workflow_context_required"
-    ] is True
+    assert included[0]["routing_profile"]["explicit_workflow_context_required"] is True
     assert included[0]["routing_eligible"] is True
     assert (
-        included[0]["routing_policy_lexical_signals"]["workflow_query_intent"]
-        is True
+        included[0]["routing_policy_lexical_signals"]["workflow_query_intent"] is True
     )
 
 
@@ -6618,9 +6786,10 @@ def test_multi_surface_turn_contract_overrides_selected_custom_workflow_to_tool_
         None,
     )
     assert prepare_step_entry is not None
-    assert "could not satisfy the multi-surface turn contract" in str(
-        prepare_step_entry.get("result_summary") or ""
-    ).lower()
+    assert (
+        "could not satisfy the multi-surface turn contract"
+        in str(prepare_step_entry.get("result_summary") or "").lower()
+    )
 
     override_entry = next(
         (
@@ -6825,9 +6994,10 @@ def test_multi_surface_turn_contract_records_satisfied_tool_pipeline_dispatch_ch
         None,
     )
     assert prepare_step_entry is not None
-    assert "satisfied the multi-surface turn contract" in str(
-        prepare_step_entry.get("result_summary") or ""
-    ).lower()
+    assert (
+        "satisfied the multi-surface turn contract"
+        in str(prepare_step_entry.get("result_summary") or "").lower()
+    )
 
 
 def test_turn_contract_dispatch_preflight_outcome_tracks_dispatch_surface_metadata(
@@ -7149,7 +7319,8 @@ def test_explicit_workflow_prompt_is_not_python_reinterpreted_into_custom_dispat
     assert captured_execution == {}
     assert not any(
         isinstance(entry, dict)
-        and entry.get("type") in {"workflow_selector_override", "custom_workflow_override_policy"}
+        and entry.get("type")
+        in {"workflow_selector_override", "custom_workflow_override_policy"}
         for entry in result.aux_llm_calls
     )
 
@@ -7253,7 +7424,9 @@ def test_explicit_arxiv_representation_request_selects_representation_workflow_o
         for entry in result.aux_llm_calls
         if isinstance(entry, dict) and entry.get("type") == "workflow_selector"
     )
-    candidate_list_text = str(selector_entry.get("candidate_list", {}).get("text") or "")
+    candidate_list_text = str(
+        selector_entry.get("candidate_list", {}).get("text") or ""
+    )
     assert selected_workflow_id in candidate_list_text
     assert TOOL_CALLING_WORKFLOW_ID in candidate_list_text
     assert "relevance 100%" in candidate_list_text
@@ -7756,7 +7929,9 @@ def test_bare_arxiv_url_selector_default_recovers_to_single_discovered_execution
     assert result.workflow_routing.workflow_id == selected_workflow_id
     assert result.workflow_routing.verdict == "rag_selected"
     assert result.workflow_routing.source == "selector"
-    assert result.response_text == "Executed via recovered arXiv representation workflow."
+    assert (
+        result.response_text == "Executed via recovered arXiv representation workflow."
+    )
     assert (
         "only eligible specialised candidate already present"
         in (result.workflow_routing.reasoning or "").lower()
@@ -8390,7 +8565,9 @@ def test_custom_workflow_dispatch_projects_launch_inputs_from_applied_continuati
                     "normalise_arxiv_source": WorkflowStateSpec(
                         state_id="normalise_arxiv_source",
                         actions=(
-                            WorkflowActionInvocation(action_id="arxiv.normalise_source"),
+                            WorkflowActionInvocation(
+                                action_id="arxiv.normalise_source"
+                            ),
                         ),
                         terminal=True,
                     )
@@ -8539,7 +8716,9 @@ def test_custom_workflow_dispatch_preserves_plural_launch_inputs_from_continuati
                     "normalise_arxiv_source": WorkflowStateSpec(
                         state_id="normalise_arxiv_source",
                         actions=(
-                            WorkflowActionInvocation(action_id="arxiv.normalise_source"),
+                            WorkflowActionInvocation(
+                                action_id="arxiv.normalise_source"
+                            ),
                         ),
                         terminal=True,
                     )
@@ -8959,9 +9138,12 @@ def test_tool_planner_skips_continuation_when_selected_workflow_is_not_executabl
     assert continuation_entry is not None
     assert continuation_entry.get("applied") is False
     assert continuation_entry.get("reason") == "selected_workflow_not_executable"
-    assert continuation_entry.get("context", {}).get(
-        "selected_workflow_executability_reason"
-    ) == "draft_not_published"
+    assert (
+        continuation_entry.get("context", {}).get(
+            "selected_workflow_executability_reason"
+        )
+        == "draft_not_published"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -9077,7 +9259,9 @@ def test_routing_duration_ms_in_aux_llm_calls(monkeypatch):
         step.get("step_id") == "selector_candidate_preparation"
         for step in prepare_steps
     )
-    assert all(step.get("stage") == "workflow_dispatch_prepare" for step in prepare_steps)
+    assert all(
+        step.get("stage") == "workflow_dispatch_prepare" for step in prepare_steps
+    )
     assert all(isinstance(step.get("duration_ms"), int) for step in prepare_steps)
 
 
@@ -9095,6 +9279,7 @@ def test_selector_enabled_by_default(monkeypatch):
         prompt_service=MagicMock(),
     )
     assert selector.enabled()
+
 
 def test_selector_ignores_legacy_disable_env(monkeypatch):
     """Legacy selector env toggles no longer affect runtime routing."""
@@ -9238,21 +9423,20 @@ def test_discovery_miss_invokes_gap_recovery_after_plain_fallback(monkeypatch):
     assert result.extra_messages == (
         {"role": "tool", "content": "gap recovery tool output"},
     )
-    assert result.tool_invocations == (
-        {"tool": "workflow_gap.execute_candidate"},
-    )
+    assert result.tool_invocations == ({"tool": "workflow_gap.execute_candidate"},)
     recovery_entry = next(
         (
             entry
             for entry in result.aux_llm_calls
-            if isinstance(entry, dict)
-            and entry.get("type") == "workflow_gap_recovery"
+            if isinstance(entry, dict) and entry.get("type") == "workflow_gap_recovery"
         ),
         None,
     )
     assert recovery_entry is not None
     assert recovery_entry.get("status") == "applied"
-    assert recovery_entry.get("candidate_workflow_id") == "#V#candidate_recovery_workflow"
+    assert (
+        recovery_entry.get("candidate_workflow_id") == "#V#candidate_recovery_workflow"
+    )
 
 
 def test_discovered_custom_workflow_failure_falls_through_to_tool_pipeline_before_gap_recovery(
@@ -9347,9 +9531,7 @@ def test_discovered_custom_workflow_failure_falls_through_to_tool_pipeline_befor
             "content": "general tool workflow inspected existing context",
         },
     )
-    assert result.tool_invocations == (
-        {"tool": "find_relations_with_argument"},
-    )
+    assert result.tool_invocations == ({"tool": "find_relations_with_argument"},)
     dispatch_boundaries = [
         entry
         for entry in result.aux_llm_calls
@@ -9371,11 +9553,11 @@ def test_discovered_custom_workflow_failure_falls_through_to_tool_pipeline_befor
         "#V#workflow_step_misaligned_specialised_workflow_failed"
     )
     assert terminal_boundary.get("reason") == "failed_terminal_state"
-    assert terminal_boundary.get("detail") == (
-        "Selected specialised workflow failed."
-    )
+    assert terminal_boundary.get("detail") == ("Selected specialised workflow failed.")
     assert terminal_boundary.get("continued_to_tool_pipeline") is True
-    assert terminal_boundary.get("fallback_tool_workflow_id") == TOOL_CALLING_WORKFLOW_ID
+    assert (
+        terminal_boundary.get("fallback_tool_workflow_id") == TOOL_CALLING_WORKFLOW_ID
+    )
     handoff_entry = next(
         (
             entry
@@ -9516,15 +9698,17 @@ def test_custom_workflow_fallback_handoff_preserves_turn_expected_outcome_contra
     assert contract_state["fields"] == expected_discovery_contract
     assert contract_state["field_count"] == len(expected_discovery_contract)
     assert "turn_expected_outcome_contract" in (contract_state.get("sources") or [])
-    assert handoff_data["turn_expected_outcome_summary"] == expected_discovery_contract[
-        "summary"
-    ]
+    assert (
+        handoff_data["turn_expected_outcome_summary"]
+        == expected_discovery_contract["summary"]
+    )
     assert handoff_data["turn_expected_grounding_requirement"] == (
         expected_discovery_contract["grounding_requirement"]
     )
-    assert handoff_data["turn_selector_guidance"] == expected_discovery_contract[
-        "selector_guidance"
-    ]
+    assert (
+        handoff_data["turn_selector_guidance"]
+        == expected_discovery_contract["selector_guidance"]
+    )
     assert "turn_expected_precision_policy" not in handoff_data
     assert "turn_answering_guidance" not in handoff_data
     assert "turn_expected_outcome_reasoning" not in handoff_data
