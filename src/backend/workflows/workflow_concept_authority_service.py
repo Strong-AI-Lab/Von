@@ -86,6 +86,8 @@ from .workflow_definition_identity_service import (
 )
 from .subworkflow_contracts import (
     WORKFLOW_SUBWORKFLOW_ACTION_ID,
+    WORKFLOW_SUBWORKFLOW_FAILURE_MODE_PROPAGATE,
+    build_subworkflow_contract,
     normalise_subworkflow_contract,
 )
 from .workflow_registry import WorkflowRegistry
@@ -1765,49 +1767,91 @@ def _build_publication_subworkflow_contract(
     *,
     invoked_workflow_id: str | None,
     action_inputs: Mapping[str, Any],
-    tool_output_mapping_specs: Sequence[
-        ParentSpecificityToolOutputMappingSpec
-        | WorkflowGapOutputMappingSpec
-        | _CanonicalToolOutputMappingSpec
-    ]
-    | None,
+    tool_output_mapping_specs: (
+        Sequence[
+            ParentSpecificityToolOutputMappingSpec
+            | WorkflowGapOutputMappingSpec
+            | _CanonicalToolOutputMappingSpec
+        ]
+        | None
+    ),
 ) -> dict[str, Any] | None:
     resolved_workflow_id = str(invoked_workflow_id or "").strip()
     workflow_id_context_key = ""
+    workflow_id_mapping_concept_id = ""
     workflow_id_input = action_inputs.get("workflow_id")
     if isinstance(workflow_id_input, Mapping):
         workflow_id_context_key = str(
             workflow_id_input.get("$context_key") or ""
         ).strip()
+        workflow_id_mapping_concept_id = str(
+            workflow_id_input.get("$mapping_concept_id") or ""
+        ).strip()
 
     if not resolved_workflow_id and not workflow_id_context_key:
         return None
 
-    provided_inputs = [
-        str(key).strip()
-        for key in action_inputs.keys()
-        if isinstance(key, str)
-        and str(key).strip()
-        and not str(key).strip().startswith("__parent_")
-    ]
-    mapped_outputs = [
-        item.tool_output_field[len("result.") :].strip()
-        for item in (tool_output_mapping_specs or ())
-        if isinstance(item.tool_output_field, str)
-        and item.tool_output_field.startswith("result.")
-        and item.tool_output_field[len("result.") :].strip()
-    ]
+    input_mappings: list[dict[str, str]] = []
+    static_input_keys: list[str] = []
+    for key, raw_value in action_inputs.items():
+        key_text = str(key or "").strip() if isinstance(key, str) else ""
+        if not key_text:
+            continue
+        if key_text.startswith("__") or key_text.startswith("workflow_step_"):
+            continue
+        if key_text in {"failure_mode", "__failure_mode"}:
+            continue
+        if key_text == "workflow_id" and resolved_workflow_id:
+            continue
+        if isinstance(raw_value, Mapping):
+            parent_context_key = str(raw_value.get("$context_key") or "").strip()
+            if not parent_context_key:
+                continue
+            mapping: dict[str, str] = {
+                "child_input_key": key_text,
+                "parent_context_key": parent_context_key,
+            }
+            mapping_concept_id = str(raw_value.get("$mapping_concept_id") or "").strip()
+            if mapping_concept_id:
+                mapping["mapping_concept_id"] = mapping_concept_id
+            input_mappings.append(mapping)
+            continue
+        static_input_keys.append(key_text)
 
-    contract: dict[str, Any] = {
-        "workflow_id": resolved_workflow_id,
-    }
-    if workflow_id_context_key:
-        contract["workflow_id_context_key"] = workflow_id_context_key
-    if provided_inputs:
-        contract["provided_inputs"] = list(dict.fromkeys(provided_inputs))
-    if mapped_outputs:
-        contract["mapped_outputs"] = list(dict.fromkeys(mapped_outputs))
-    return contract
+    output_mappings: list[dict[str, str]] = []
+    for item in tool_output_mapping_specs or ():
+        tool_output_field = str(getattr(item, "tool_output_field", "") or "").strip()
+        if tool_output_field.startswith("result."):
+            child_output_field = tool_output_field[len("result.") :].strip()
+        else:
+            child_output_field = str(
+                getattr(item, "child_output_field", "") or ""
+            ).strip()
+        parent_context_key = str(getattr(item, "context_key", "") or "").strip()
+        if not child_output_field or not parent_context_key:
+            continue
+        mapping = {
+            "child_output_field": child_output_field,
+            "parent_context_key": parent_context_key,
+        }
+        mapping_concept_id = str(getattr(item, "concept_id", "") or "").strip()
+        if mapping_concept_id:
+            mapping["mapping_concept_id"] = mapping_concept_id
+        output_mappings.append(mapping)
+
+    failure_mode = str(
+        action_inputs.get("failure_mode") or action_inputs.get("__failure_mode") or ""
+    ).strip()
+
+    return build_subworkflow_contract(
+        workflow_id=resolved_workflow_id or None,
+        workflow_id_context_key=workflow_id_context_key or None,
+        workflow_id_mapping_concept_id=workflow_id_mapping_concept_id or None,
+        input_mappings=input_mappings,
+        output_mappings=output_mappings,
+        static_input_keys=list(dict.fromkeys(static_input_keys)),
+        failure_mode=failure_mode or WORKFLOW_SUBWORKFLOW_FAILURE_MODE_PROPAGATE,
+    )
 
 
 def _terminal_effect_id(*, workflow_id: str, state_id: str) -> str:
@@ -2490,6 +2534,7 @@ def _merge_workflow_text_relations(
         for workflow_id, relation_specs in (base_relations or {}).items()
         if isinstance(workflow_id, str) and str(workflow_id).strip()
     }
+
     for workflow_id, relation_specs in (incoming_relations or {}).items():
         workflow_id_text = str(workflow_id).strip() if isinstance(workflow_id, str) else ""
         if not workflow_id_text:
@@ -3852,4 +3897,3 @@ def build_workflow_concept_authority_report(
         "lookup_errors_by_workflow_id": lookup_errors,
         "valid_workflow_ids": valid,
     }
-

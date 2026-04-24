@@ -666,6 +666,39 @@ def _built_action_inputs_match(*, loaded_state: Any, built_state: Any) -> bool:
     return True
 
 
+def test_publication_definition_keeps_fixed_subworkflow_id_out_of_provided_inputs():
+    spec = authority_service._CanonicalWorkflowPublicationSpec(
+        initial_state="invoke_child",
+        steps=(
+            authority_service._CanonicalStepPublicationSpec(
+                state_id="invoke_child",
+                action_id=authority_service.WORKFLOW_SUBWORKFLOW_ACTION_ID,
+                execution_mode="subworkflow",
+                invoked_workflow_id="#V#child_workflow",
+                static_input_bindings=(("verification_profile", "strict"),),
+                tool_output_mapping_specs=(
+                    authority_service._CanonicalToolOutputMappingSpec(
+                        concept_id="#V#workflow_mapping_child_result_answer",
+                        tool_output_field="result.answer",
+                        context_key="answer",
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    definition = authority_service._build_definition_from_publication_spec(
+        workflow_id="#V#parent_workflow",
+        spec=spec,
+    )
+
+    contract = definition.states["invoke_child"].metadata["subworkflow_contract"]
+    assert contract["workflow_id"] == "#V#child_workflow"
+    assert "workflow_id" not in contract.get("provided_inputs", [])
+    assert contract["provided_inputs"] == ["verification_profile"]
+    assert contract["mapped_outputs"] == ["answer"]
+
+
 def _graph_step_control_flow_conditions(
     *,
     graph: dict[str, Any],
