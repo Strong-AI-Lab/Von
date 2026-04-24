@@ -262,6 +262,7 @@ Tasks that consist only of a summary sentence and acceptance criteria without th
 - When the user asks for "recently closed" `JVNAUTOSCI` issues, interpret that by default as `project = JVNAUTOSCI AND statusCategory = Done AND resolved >= -48h ORDER BY resolved DESC` unless they explicitly ask for a narrower terminal status such as `Closed`.
 - Use workflow MCP tools as the default control surface for workflow behaviour.
 - Use host-neutral, PowerShell-first, bounded shell commands unless the environment clearly requires otherwise.
+- For local Von backend restarts, use the repo launcher path (`.\run.ps1 restart -NoBrowser -HealthTimeoutSec 180`) rather than manually spawning `src/workflows/von/main.py`.
 - When adding credential or service-critical environment variables, register them in `_apply_dotenv_overrides()` (`src/workflows/von/main.py`), verify `.env` provides them, and emit clear resolution diagnostics.
 - Where tool friction is discovered, improve Von's own tooling path and document the gap.
 

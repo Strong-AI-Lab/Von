@@ -159,6 +159,21 @@ Cleanup expectations:
 - after cleanup, re-check RAM and listeners so the session notes say whether
   the pressure actually improved.
 
+Canonical local Von restart:
+
+- Restart the local backend through the repository launcher:
+  `.\run.ps1 restart -NoBrowser -HealthTimeoutSec 180`
+- Do not manually restart the backend with `Start-Process`,
+  `python src/workflows/von/main.py`, or another direct process spawn. Those
+  paths can bypass launcher setup such as `.env` loading, import-path setup,
+  admin/shutdown handling, logs, and health/version checks.
+- After restart, verify the process with `.\run.ps1 status -NoBrowser` and
+  `/health`. Confirm the reported branch and commit match the checkout you are
+  testing before running replay or acceptance evidence.
+- If there is already a listener on port 5000, inspect it first. If it is the
+  wrong branch or a stale process, stop/restart through `.\run.ps1` rather than
+  leaving the old process alive and moving to another port.
+
 If cleanup removes the obvious duplicates but memory pressure remains extreme,
 or kernel/pool counters stay abnormally high relative to process working sets,
 treat that as a broader host issue rather than endlessly restarting repo
