@@ -407,6 +407,7 @@ class TestCreateChatSessionUsesWindowContext:
             created_sessions[0].get("organisation_concept_id")
             == "university_of_auckland_strong_ai_lab"
         )
+        assert created_sessions[0].get("is_agent_created") is None
         window_ctx = wscs.get_window_context(window_a)
         assert window_ctx is not None
         assert window_ctx.chat_session_id == payload["session_id"]
@@ -430,7 +431,8 @@ class TestCreateChatSessionUsesWindowContext:
         monkeypatch.setattr(
             chat_history_service,
             "has_chat_history_session",
-            lambda user_id, session_id, namespace=None: session_id == payload["session_id"],
+            lambda user_id, session_id, namespace=None: session_id
+            == payload["session_id"],
         )
 
         import src.backend.services.shared_conversation_service as shared_conversation_service
@@ -459,6 +461,51 @@ class TestCreateChatSessionUsesWindowContext:
         assert history_resp.status_code == 200
         history_payload = history_resp.get_json()
         assert history_payload["active_session_id"] == payload["session_id"]
+
+    def test_create_session_marks_browser_test_fixture_sessions(
+        self, monkeypatch, app_client
+    ):
+        _, client = app_client
+        created_sessions: list[dict] = []
+
+        import src.backend.services.chat_history_service as chat_history_service
+
+        def capture_create(*args, **kwargs):
+            created_sessions.append(kwargs.copy())
+            return {
+                "session_id": kwargs.get("session_id", "new_session"),
+                "session_name": kwargs.get("session_name", "New Session"),
+                "origin_kind": kwargs.get("origin_kind"),
+                "created_by_actor_concept_id": kwargs.get(
+                    "created_by_actor_concept_id"
+                ),
+                "created_by_actor_type": kwargs.get("created_by_actor_type"),
+                "is_agent_created": kwargs.get("is_agent_created"),
+                "test_artifact_kind": kwargs.get("test_artifact_kind"),
+            }
+
+        monkeypatch.setattr(chat_history_service, "create_chat_session", capture_create)
+
+        with client.session_transaction() as sess:
+            sess["user_id"] = "browser_test_fixture"
+            sess["user_concept_id"] = "#V#codex_browser_fixture"
+            sess["auth_provider"] = "browser_test_fixture"
+            sess["browser_test_fixture_id"] = "browser_user_view.v1"
+
+        resp = client.post(
+            "/von/api/session/create_chat_session",
+            json={"session_name": "Browser fixture chat"},
+        )
+
+        assert resp.status_code == 200
+        payload = resp.get_json()
+        assert created_sessions[0]["origin_kind"] == "browser_test_fixture"
+        assert created_sessions[0]["is_agent_created"] is True
+        assert (
+            created_sessions[0]["test_artifact_kind"]
+            == "browser_test_authenticated_chat_session"
+        )
+        assert payload["is_agent_created"] is True
 
 
 class TestChatSessionLinksUsesWindowContext:

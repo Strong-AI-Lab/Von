@@ -44,7 +44,9 @@ class _NoHistoryReadCollection(_BaseFakeCollection):
         if isinstance(projection, dict) and (
             "history" in projection or "history_tail" in projection
         ):
-            raise AssertionError("history field should not be read in metadata-only mode")
+            raise AssertionError(
+                "history field should not be read in metadata-only mode"
+            )
         return super().find(query, projection)
 
 
@@ -64,6 +66,9 @@ def test_light_session_summaries_use_metadata_only_projection(monkeypatch):
             "namespace": "#V#u@org",
             "created_at": _utc("2026-02-22T00:00:00Z"),
             "updated_at": _utc("2026-02-22T00:02:00Z"),
+            "origin_kind": "browser_test_fixture",
+            "is_agent_created": True,
+            "test_artifact_kind": "browser_test_fixture_chat_session",
             "history": [{"role": "user", "content": "x"}],
         },
         {
@@ -94,6 +99,10 @@ def test_light_session_summaries_use_metadata_only_projection(monkeypatch):
     assert all(s["message_count"] is None for s in summaries)
     assert all(s["preview"] is None for s in summaries)
     assert all(s["is_completed"] is False for s in summaries)
+    assert summaries[0]["origin_kind"] == "browser_test_fixture"
+    assert summaries[0]["is_agent_created"] is True
+    assert summaries[0]["test_artifact_kind"] == "browser_test_fixture_chat_session"
+    assert summaries[1]["is_agent_created"] is False
 
 
 def test_full_session_summaries_fall_back_when_history_read_times_out(monkeypatch):
@@ -105,6 +114,7 @@ def test_full_session_summaries_fall_back_when_history_read_times_out(monkeypatc
             "namespace": "#V#u@org",
             "created_at": _utc("2026-02-21T00:00:00Z"),
             "updated_at": _utc("2026-02-21T00:01:00Z"),
+            "origin_kind": "benchmark_harness",
             "history": [{"role": "user", "content": "message"}],
         }
     ]
@@ -128,3 +138,5 @@ def test_full_session_summaries_fall_back_when_history_read_times_out(monkeypatc
     assert summary["message_count"] is None
     assert summary["preview"] is None
     assert summary["is_completed"] is False
+    assert summary["origin_kind"] == "benchmark_harness"
+    assert summary["is_agent_created"] is True

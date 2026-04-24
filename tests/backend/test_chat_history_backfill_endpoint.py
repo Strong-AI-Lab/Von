@@ -98,6 +98,18 @@ def test_chat_history_backfill_requires_authentication(app_client):
     assert resp.get_json()["error"] == "Not authenticated"
 
 
+def test_agent_provenance_backfill_requires_authentication(app_client):
+    _, client = app_client
+
+    resp = client.post(
+        "/admin/chat_history_agent_provenance_backfill",
+        json={"dry_run": True},
+    )
+
+    assert resp.status_code == 401
+    assert resp.get_json()["error"] == "Not authenticated"
+
+
 def test_chat_history_backfill_calls_service_when_logged_in(app_client, monkeypatch):
     _, client = app_client
 
@@ -139,4 +151,45 @@ def test_chat_history_backfill_calls_service_when_logged_in(app_client, monkeypa
     assert called["organisation_concept_id"] == "university_of_auckland_strong_ai_lab"
     assert called["max_sessions"] == 1
     assert called["max_messages"] == 2
+    assert called["dry_run"] is True
+
+
+def test_agent_provenance_backfill_defaults_to_dry_run(app_client, monkeypatch):
+    _, client = app_client
+
+    called = {}
+
+    def _fake_backfill(**kwargs):
+        called.update(kwargs)
+        return {
+            "status": "ok",
+            "dry_run": kwargs["dry_run"],
+            "reliable_candidate_count": 2,
+            "sessions_marked": 0,
+        }
+
+    monkeypatch.setattr(
+        "src.backend.services.chat_history_service.backfill_agent_created_chat_session_provenance",
+        _fake_backfill,
+    )
+
+    with client.session_transaction() as sess:
+        sess["user_email"] = "michael_witbrock@example.com"
+        sess["user_concept_id"] = "#V#michael_witbrock"
+        sess["organisation_concept_id"] = "#V#university_of_auckland_strong_ai_lab"
+
+    resp = client.post(
+        "/admin/chat_history_agent_provenance_backfill",
+        json={"max_sessions": 25},
+    )
+
+    assert resp.status_code == 200
+    assert resp.get_json()["dry_run"] is True
+    assert called["user_concept_id"] == "#V#michael_witbrock"
+    assert (
+        called["namespace"]
+        == "#V#michael_witbrock@university_of_auckland_strong_ai_lab"
+    )
+    assert called["include_legacy"] is False
+    assert called["max_sessions"] == 25
     assert called["dry_run"] is True

@@ -93,4 +93,23 @@ describe('chatSessionViewModel', () => {
             topic_member_count: 12
         });
     });
+
+    test('normalises agent-created conversation provenance', () => {
+        const session = normaliseConversationSessionViewModel({
+            session_id: 'browser-fixture-1',
+            origin_kind: 'Browser Test Fixture',
+            created_by_actor_concept_id: '#V#von_system',
+            created_by_actor_type: '#V#coding_agent',
+            test_artifact_kind: 'Browser Test Fixture Chat Session'
+        });
+
+        expect(session).toMatchObject({
+            session_id: 'browser-fixture-1',
+            origin_kind: 'browser_test_fixture',
+            created_by_actor_concept_id: '#V#von_system',
+            created_by_actor_type: '#V#coding_agent',
+            is_agent_created: true,
+            test_artifact_kind: 'browser_test_fixture_chat_session'
+        });
+    });
 });

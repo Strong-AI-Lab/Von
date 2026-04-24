@@ -621,15 +621,30 @@ const HISTORY_TAIL_SEGMENT_SIZE = 30;
 const LS_HIDDEN_CHAT_SESSIONS_PREFIX = 'von:hiddenChatSessionIds';
 const LS_PINNED_CHAT_SESSIONS_PREFIX = 'von:pinnedChatSessionIds';
 const LS_CHAT_SESSION_LAST_ACCESSED_PREFIX = 'von:chatSessionLastAccessed';
+const LS_AGENT_CREATED_CHAT_SESSIONS_VISIBLE_PREFIX = 'von:showAgentCreatedChatSessions';
 const MAX_DELETABLE_TURNS = 4;
+const AGENT_CREATED_CHAT_SESSION_ORIGIN_KINDS = new Set([
+    'browser_test_fixture',
+    'benchmark_harness',
+    'coding_agent_test',
+    'coding_agent',
+    'agent_test'
+]);
 let hiddenChatSessionIds = new Set();
 let pinnedChatSessionIds = new Set();
 let showHiddenSessions = false;
+let showAgentCreatedSessions = false;
 let _hiddenSessionsUserKey = null; // Track current user's localStorage key
 let _pinnedSessionsUserKey = null; // Track current user's localStorage key
+let _agentCreatedSessionsVisibleUserKey = null;
 let chatSessionLastAccessedMap = new Map();
 let _chatSessionLastAccessedUserKey = null;
 let showAllConversationHistoryMatches = false;
+let agentCreatedSessionVisibilityState = {
+    totalCount: 0,
+    hiddenCount: 0,
+    newestVisibleSessionId: null
+};
 
 /**
  * Get the user-scoped localStorage key for hidden sessions.
@@ -654,6 +669,10 @@ function getHiddenSessionsStorageKey() {
 
 function getPinnedSessionsStorageKey() {
     return buildUserScopedStorageKey(LS_PINNED_CHAT_SESSIONS_PREFIX);
+}
+
+function getAgentCreatedSessionsVisibleStorageKey() {
+    return buildUserScopedStorageKey(LS_AGENT_CREATED_CHAT_SESSIONS_VISIBLE_PREFIX);
 }
 
 function loadHiddenChatSessionIds() {
@@ -713,6 +732,26 @@ function savePinnedChatSessionIds() {
         localStorage.setItem(storageKey, JSON.stringify([...pinnedChatSessionIds]));
     } catch (e) {
         console.warn('[chatTab] Failed to save pinned session IDs to localStorage:', e);
+    }
+}
+
+function loadAgentCreatedSessionsVisibilityPreference() {
+    const storageKey = getAgentCreatedSessionsVisibleStorageKey();
+    _agentCreatedSessionsVisibleUserKey = storageKey;
+    try {
+        showAgentCreatedSessions = localStorage.getItem(storageKey) === 'true';
+    } catch (e) {
+        console.warn('[chatTab] Failed to load agent-created session visibility from localStorage:', e);
+        showAgentCreatedSessions = false;
+    }
+}
+
+function saveAgentCreatedSessionsVisibilityPreference() {
+    const storageKey = _agentCreatedSessionsVisibleUserKey || getAgentCreatedSessionsVisibleStorageKey();
+    try {
+        localStorage.setItem(storageKey, showAgentCreatedSessions ? 'true' : 'false');
+    } catch (e) {
+        console.warn('[chatTab] Failed to save agent-created session visibility to localStorage:', e);
     }
 }
 
@@ -800,6 +839,88 @@ function getConversationHistoryAccessLookup(sessions) {
     return lookup;
 }
 
+function normaliseChatSessionOriginKind(value) {
+    return (typeof value === 'string' && value.trim())
+        ? value.trim().toLowerCase().replace(/[-\s]+/g, '_')
+        : '';
+}
+
+function isAgentCreatedConversation(session) {
+    const originKind = normaliseChatSessionOriginKind(session?.origin_kind);
+    return Boolean(
+        session?.is_agent_created === true
+        || AGENT_CREATED_CHAT_SESSION_ORIGIN_KINDS.has(originKind)
+        || (typeof session?.test_artifact_kind === 'string' && session.test_artifact_kind.trim())
+    );
+}
+
+function getConversationRecencyMs(session) {
+    const candidates = [
+        session?.recency_timestamp,
+        session?.last_message_at,
+        session?.updated_at,
+        session?.created_at,
+        session?.shared_accepted_at
+    ];
+    for (const candidate of candidates) {
+        const parsed = parseIsoTimestampMs(candidate);
+        if (parsed !== null) {
+            return parsed;
+        }
+    }
+    return 0;
+}
+
+function filterAgentCreatedSessionsForDefaultView(sessions) {
+    const source = Array.isArray(sessions) ? sessions : [];
+    const agentSessions = source.filter(isAgentCreatedConversation);
+    if (agentSessions.length === 0) {
+        return {
+            sessions: source,
+            newestVisibleSession: null,
+            totalCount: 0,
+            hiddenCount: 0
+        };
+    }
+
+    if (showAgentCreatedSessions) {
+        return {
+            sessions: source,
+            newestVisibleSession: null,
+            totalCount: agentSessions.length,
+            hiddenCount: 0
+        };
+    }
+
+    const newestVisibleSession = agentSessions.reduce((best, session) => {
+        if (!best) {
+            return session;
+        }
+        const currentMs = getConversationRecencyMs(session);
+        const bestMs = getConversationRecencyMs(best);
+        return currentMs > bestMs ? session : best;
+    }, null);
+    const newestVisibleSessionId = (
+        typeof newestVisibleSession?.session_id === 'string'
+        ? newestVisibleSession.session_id.trim()
+        : ''
+    );
+    const filtered = source.filter((session) => {
+        if (!isAgentCreatedConversation(session)) {
+            return true;
+        }
+        const sid = (typeof session?.session_id === 'string') ? session.session_id.trim() : '';
+        return sid && sid === newestVisibleSessionId;
+    });
+
+    return {
+        sessions: filtered,
+        newestVisibleSession,
+        totalCount: agentSessions.length,
+        hiddenCount: Math.max(0, agentSessions.length - (newestVisibleSessionId ? 1 : 0))
+    };
+}
+
 function hideConversation(sessionId) {
     if (!sessionId) return;
     hiddenChatSessionIds.add(sessionId);
@@ -858,6 +979,14 @@ function toggleConversationPinned(sessionId) {
 function toggleShowHiddenSessions() {
     showHiddenSessions = !showHiddenSessions;
     // Re-render tabs to show/hide hidden conversations
+    if (Array.isArray(sessionTabsCache)) {
+        renderChatSessionTabs(sessionTabsCache, activeChatSessionId);
+    }
+}
+
+function toggleShowAgentCreatedSessions() {
+    showAgentCreatedSessions = !showAgentCreatedSessions;
+    saveAgentCreatedSessionsVisibilityPreference();
     if (Array.isArray(sessionTabsCache)) {
         renderChatSessionTabs(sessionTabsCache, activeChatSessionId);
     }
@@ -16940,18 +17069,51 @@ function renderChatSessionTabs(sessions, activeSessionId) {
     const sessionsAfterHiddenFilter = showHiddenSessions
         ? canonicalSessions
         : canonicalSessions.filter(s => !isConversationHidden(s?.session_id));
+    const agentFilterResult = filterAgentCreatedSessionsForDefaultView(sessionsAfterHiddenFilter);
+    const sessionsAfterAgentFilter = agentFilterResult.sessions;
+    agentCreatedSessionVisibilityState = {
+        totalCount: agentFilterResult.totalCount,
+        hiddenCount: agentFilterResult.hiddenCount,
+        newestVisibleSessionId: (
+            typeof agentFilterResult.newestVisibleSession?.session_id === 'string'
+            ? agentFilterResult.newestVisibleSession.session_id.trim()
+            : null
+        )
+    };
 
     const conversationHistorySettings = loadConversationHistorySettings((key) => safeLocalStorageGet(key));
     const filteredResult = selectConversationHistorySessions({
-        sessions: sessionsAfterHiddenFilter,
-        accessTimestampBySessionId: getConversationHistoryAccessLookup(sessionsAfterHiddenFilter),
+        sessions: sessionsAfterAgentFilter,
+        accessTimestampBySessionId: getConversationHistoryAccessLookup(sessionsAfterAgentFilter),
         recentLimit: conversationHistorySettings.recentLimit,
         recentWindowDays: conversationHistorySettings.recentWindowDays,
         showAll: showAllConversationHistoryMatches
     });
-    const visibleSessions = Array.isArray(filteredResult.sessionsToRender)
+    let visibleSessions = Array.isArray(filteredResult.sessionsToRender)
         ? filteredResult.sessionsToRender
         : [];
+    const newestAgentSessionId = agentCreatedSessionVisibilityState.newestVisibleSessionId;
+    const visibleSessionIds = new Set(
+        visibleSessions
+            .map((session) => (typeof session?.session_id === 'string' ? session.session_id.trim() : ''))
+            .filter(Boolean)
+    );
+    if (showAgentCreatedSessions) {
+        const extraAgentSessions = sessionsAfterAgentFilter.filter((session) => {
+            if (!isAgentCreatedConversation(session)) {
+                return false;
+            }
+            const sid = (typeof session?.session_id === 'string') ? session.session_id.trim() : '';
+            return sid && !visibleSessionIds.has(sid);
+        });
+        if (extraAgentSessions.length > 0) {
+            visibleSessions = [...visibleSessions, ...extraAgentSessions];
+        }
+    } else if (newestAgentSessionId) {
+        if (!visibleSessionIds.has(newestAgentSessionId) && agentFilterResult.newestVisibleSession) {
+            visibleSessions = [...visibleSessions, agentFilterResult.newestVisibleSession];
+        }
+    }
 
     // Pinned sessions are user-prioritised and remain visible at the top even when
     // they would otherwise be hidden by recency window/limit filtering.
@@ -16971,7 +17133,7 @@ function renderChatSessionTabs(sessions, activeSessionId) {
         unpinnedSessions.push(session);
     });
 
-    sessionsAfterHiddenFilter.forEach((session) => {
+    sessionsAfterAgentFilter.forEach((session) => {
         const sid = (typeof session?.session_id === 'string') ? session.session_id.trim() : '';
         if (!sid || !isConversationPinned(sid) || pinnedSessionMap.has(sid)) {
             return;
@@ -17007,11 +17169,18 @@ function renderChatSessionTabs(sessions, activeSessionId) {
     const newTab = document.createElement('button');
     newTab.type = 'button';
     newTab.className = 'chat-session-tab chat-session-tab-new';
-    newTab.title = 'New chat';
+    newTab.title = agentCreatedSessionVisibilityState.hiddenCount > 0
+        ? 'New chat. Right-click to show test conversations.'
+        : 'New chat';
     newTab.setAttribute('aria-label', 'New chat');
     newTab.textContent = '+';
     newTab.addEventListener('click', () => {
         void promptAndCreateChatSession();
+    });
+    newTab.addEventListener('contextmenu', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        openChatSessionMenu(event.clientX, event.clientY, buildNewChatContextMenuItems());
     });
     fragment.appendChild(newTab);
 
@@ -17089,6 +17258,11 @@ function renderChatSessionTabs(sessions, activeSessionId) {
             tab.classList.add('is-pinned');
         }
 
+        const isAgentCreated = isAgentCreatedConversation(session);
+        if (isAgentCreated) {
+            tab.classList.add('is-agent-created');
+        }
+
         if (session?.shared_with_me || session?.shared_from_user_id || session?.invite_id) {
             tab.classList.add('is-shared');
         }
@@ -17110,6 +17284,10 @@ function renderChatSessionTabs(sessions, activeSessionId) {
 
         if (isPinned) {
             tab.title = `${tab.title} • Pinned`;
+        }
+
+        if (isAgentCreated) {
+            tab.title = `${tab.title} • Test conversation`;
         }
 
         if (session?.shared_with_me || session?.shared_from_user_id || session?.invite_id) {
@@ -17193,7 +17371,17 @@ function renderChatSessionTabs(sessions, activeSessionId) {
 
         const meta = document.createElement('span');
         meta.className = 'chat-session-tab-meta';
-        meta.textContent = timestampLabel;
+        if (isAgentCreated) {
+            const agentMarker = document.createElement('span');
+            agentMarker.className = 'chat-session-agent-marker';
+            agentMarker.textContent = 'von';
+            agentMarker.title = 'Test conversation';
+            agentMarker.setAttribute('aria-label', 'Test conversation');
+            agentMarker.setAttribute('data-keep-title', 'true');
+            meta.appendChild(agentMarker);
+            meta.appendChild(document.createTextNode(' '));
+        }
+        meta.appendChild(document.createTextNode(timestampLabel));
         setUnambiguousTimestampTooltip(meta, timestampSource);
 
         const previewText = formatChatSessionPreview(session?.preview);
@@ -17312,17 +17500,32 @@ function renderChatSessionTabs(sessions, activeSessionId) {
     container.addEventListener('contextmenu', handleContainerContextMenu);
 }
 
-function handleContainerContextMenu(event) {
-    // Only show menu if clicking on the container itself or whitespace (not on a tab)
-    if (event.target.closest('.chat-session-tab')) {
-        return;
-    }
-    event.preventDefault();
-    const hiddenCount = hiddenChatSessionIds.size;
-    const menuItems = [];
+function buildNewChatContextMenuItems() {
+    const items = [
+        {
+            label: 'New chat',
+            onClick: () => {
+                void promptAndCreateChatSession();
+            }
+        }
+    ];
 
+    const agentTotalCount = agentCreatedSessionVisibilityState.totalCount || 0;
+    const hiddenAgentCount = agentCreatedSessionVisibilityState.hiddenCount || 0;
+    if (hiddenAgentCount > 0 || showAgentCreatedSessions) {
+        items.push({
+            label: showAgentCreatedSessions
+                ? `Hide test conversations (${agentTotalCount})`
+                : `Show test conversations (${hiddenAgentCount} hidden)`,
+            onClick: () => {
+                toggleShowAgentCreatedSessions();
+            }
+        });
+    }
+
+    const hiddenCount = hiddenChatSessionIds.size;
     if (hiddenCount > 0) {
-        menuItems.push({
+        items.push({
             label: showHiddenSessions ? `Hide hidden (${hiddenCount})` : `Show hidden (${hiddenCount})`,
             onClick: () => {
                 toggleShowHiddenSessions();
@@ -17330,16 +17533,16 @@ function handleContainerContextMenu(event) {
         });
     }
 
-    menuItems.push({
-        label: 'New chat',
-        onClick: () => {
-            void promptAndCreateChatSession();
-        }
-    });
+    return items;
+}
 
-    if (menuItems.length > 0) {
-        openChatSessionMenu(event.clientX, event.clientY, menuItems);
+function handleContainerContextMenu(event) {
+    // Only show menu if clicking on the container itself or whitespace (not on a tab)
+    if (event.target.closest('.chat-session-tab')) {
+        return;
     }
+    event.preventDefault();
+    openChatSessionMenu(event.clientX, event.clientY, buildNewChatContextMenuItems());
 }
 
 function shouldShowChatTabMenu() {
@@ -17429,14 +17632,7 @@ function setupChatTabContextMenu() {
             return;
         }
         event.preventDefault();
-        openChatSessionMenu(event.clientX, event.clientY, [
-            {
-                label: 'New chat',
-                onClick: () => {
-                    void promptAndCreateChatSession();
-                }
-            }
-        ]);
+        openChatSessionMenu(event.clientX, event.clientY, buildNewChatContextMenuItems());
     });
 }
 
@@ -22007,6 +22203,7 @@ try {
 function handleAuthStatusChangeForChatTab(detail) {
     loadHiddenChatSessionIds();
     loadPinnedChatSessionIds();
+    loadAgentCreatedSessionsVisibilityPreference();
     loadChatSessionLastAccessedMap();
     showAllConversationHistoryMatches = false;
 
@@ -22058,6 +22255,7 @@ export function initializeChatTab() {
     // JVNAUTOSCI-1014: Load hidden session IDs from localStorage (user-scoped)
     loadHiddenChatSessionIds();
     loadPinnedChatSessionIds();
+    loadAgentCreatedSessionsVisibilityPreference();
     loadChatSessionLastAccessedMap();
 
     // Reload hidden sessions when user changes (settings change event)
@@ -22065,6 +22263,7 @@ export function initializeChatTab() {
         document.addEventListener('von:settingsChanged', () => {
             const newHiddenKey = getHiddenSessionsStorageKey();
             const newPinnedKey = getPinnedSessionsStorageKey();
+            const newAgentCreatedVisibilityKey = getAgentCreatedSessionsVisibleStorageKey();
             const newAccessKey = getChatSessionLastAccessedStorageKey();
             let shouldRerenderTabs = false;
 
@@ -22084,6 +22283,12 @@ export function initializeChatTab() {
             if (newPinnedKey !== _pinnedSessionsUserKey) {
                 console.log(`[chatTab] User changed, reloading pinned sessions (${_pinnedSessionsUserKey} -> ${newPinnedKey})`);
                 loadPinnedChatSessionIds();
+                shouldRerenderTabs = true;
+            }
+
+            if (newAgentCreatedVisibilityKey !== _agentCreatedSessionsVisibleUserKey) {
+                console.log(`[chatTab] User changed, reloading test conversation visibility (${_agentCreatedSessionsVisibleUserKey} -> ${newAgentCreatedVisibilityKey})`);
+                loadAgentCreatedSessionsVisibilityPreference();
                 shouldRerenderTabs = true;
             }
 

@@ -6153,6 +6153,23 @@ footer {
     box-shadow: inset 0 -2px 0 #1d4ed8;
 }
 
+.chat-session-tab.is-agent-created {
+    background: #f5fbf7;
+    border-color: #bbf7d0;
+    color: #166534;
+}
+
+.chat-session-tab.is-agent-created:hover {
+    background: #eef9f1;
+    border-color: #86efac;
+}
+
+.chat-session-tab.is-agent-created.is-active {
+    background: #e8f8ee;
+    border-color: #4ade80;
+    box-shadow: inset 0 -2px 0 #22c55e;
+}
+
 .chat-session-tab.is-shared-highlight {
     box-shadow: 0 0 0 2px rgba(250, 204, 21, 0.45), inset 0 -2px 0 #ca8a04;
 }
@@ -6215,6 +6232,22 @@ footer {
 .chat-session-tab.has-background-request .chat-session-tab-activity {
     background: rgba(13, 148, 136, 0.16);
     color: #115e59;
+}
+
+.chat-session-agent-marker {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 18px;
+    height: 14px;
+    padding: 0 4px;
+    border-radius: 6px;
+    background: rgba(22, 101, 52, 0.1);
+    color: #166534;
+    font-size: 9px;
+    font-weight: 700;
+    line-height: 1;
+    text-transform: lowercase;
 }
 
 .chat-session-tab-new {

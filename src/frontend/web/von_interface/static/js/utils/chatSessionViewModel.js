@@ -10,6 +10,27 @@ function normaliseNullableString(value) {
     return trimmed || null;
 }
 
+const AGENT_CREATED_ORIGIN_KINDS = new Set([
+    'browser_test_fixture',
+    'benchmark_harness',
+    'coding_agent_test',
+    'coding_agent',
+    'agent_test'
+]);
+
+function normaliseIdentifier(value) {
+    const trimmed = normaliseString(value);
+    return trimmed ? trimmed.toLowerCase().replace(/[-\s]+/g, '_') : null;
+}
+
+function deriveAgentCreatedState({ originKind, isAgentCreated, testArtifactKind }) {
+    return Boolean(
+        isAgentCreated === true
+        || AGENT_CREATED_ORIGIN_KINDS.has(originKind)
+        || testArtifactKind
+    );
+}
+
 function normaliseIsoTimestamp(value) {
     const trimmed = normaliseString(value);
     if (!trimmed) {
@@ -109,6 +130,15 @@ export function normaliseConversationSessionViewModel(rawSession) {
     const createdAt = normaliseIsoTimestamp(session?.created_at);
     const lastMessageAt = normaliseIsoTimestamp(session?.last_message_at);
     const completedAt = normaliseIsoTimestamp(session?.completed_at);
+    const originKind = normaliseIdentifier(session?.origin_kind);
+    const createdByActorConceptId = normaliseNullableString(session?.created_by_actor_concept_id);
+    const createdByActorType = normaliseNullableString(session?.created_by_actor_type);
+    const testArtifactKind = normaliseIdentifier(session?.test_artifact_kind);
+    const isAgentCreated = deriveAgentCreatedState({
+        originKind,
+        isAgentCreated: session?.is_agent_created,
+        testArtifactKind
+    });
     const recencyTimestamp = deriveRecencyTimestamp({
         lastMessageAt,
         createdAt,
@@ -145,6 +175,11 @@ export function normaliseConversationSessionViewModel(rawSession) {
         topic_group_id: topicGroupId,
         topic_member_count: topicMemberCount,
         has_topic_context: Boolean(topicGroupId),
+        origin_kind: originKind,
+        created_by_actor_concept_id: createdByActorConceptId,
+        created_by_actor_type: createdByActorType,
+        is_agent_created: isAgentCreated,
+        test_artifact_kind: testArtifactKind,
         recency_timestamp: recencyTimestamp
     };
 }

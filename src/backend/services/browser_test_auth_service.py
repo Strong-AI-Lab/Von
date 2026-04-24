@@ -50,7 +50,7 @@ from ..services.window_session_context_service import (
     set_window_chat_session,
     set_window_organisation,
 )
-from .coding_agent_identity_bootstrap_service import VON_SYSTEM_ID
+from .coding_agent_identity_bootstrap_service import CODING_AGENT_TYPE_ID, VON_SYSTEM_ID
 
 _BROWSER_TEST_FIXTURE_ID = "browser_user_view.v1"
 _LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
@@ -202,7 +202,14 @@ def browser_test_auth_allowed_for_request() -> tuple[bool, str | None]:
 
     host = str(getattr(request, "host", "") or "").split(":", 1)[0].strip("[]").lower()
     remote_addr = str(getattr(request, "remote_addr", "") or "").strip("[]").lower()
-    forwarded_host = str(request.headers.get("X-Forwarded-Host") or "").split(",", 1)[0].strip().split(":", 1)[0].strip("[]").lower()
+    forwarded_host = (
+        str(request.headers.get("X-Forwarded-Host") or "")
+        .split(",", 1)[0]
+        .strip()
+        .split(":", 1)[0]
+        .strip("[]")
+        .lower()
+    )
     if host not in _LOOPBACK_HOSTS:
         return False, "Browser-test auth is available only on localhost"
     if forwarded_host and forwarded_host not in _LOOPBACK_HOSTS:
@@ -405,7 +412,10 @@ def _link_fixture_message_metadata(
 ) -> None:
     if not isinstance(metadata, Mapping):
         return
-    if str(metadata.get("delivery_channel") or "").strip() != "paper_recommendation_message":
+    if (
+        str(metadata.get("delivery_channel") or "").strip()
+        != "paper_recommendation_message"
+    ):
         return
     assertion_ids = metadata.get("recommendation_assertion_ids")
     if not isinstance(assertion_ids, list):
@@ -450,7 +460,9 @@ def _ensure_fixture_recommendation_paper(*, concept_id: str) -> dict[str, Any]:
                 fixture_surface="paper_recommendation_message",
             ),
         )
-        return concept_doc if isinstance(concept_doc, dict) else {"concept_id": concept_id}
+        return (
+            concept_doc if isinstance(concept_doc, dict) else {"concept_id": concept_id}
+        )
 
 
 def _paper_recommendation_fixture_spec(
@@ -510,7 +522,9 @@ def _paper_recommendation_fixture_spec(
     )
     assertion_id = str(assertion.get("assertion_concept_id") or "").strip()
     if not assertion_id:
-        raise RuntimeError("Browser-test recommendation fixture failed to create an assertion")
+        raise RuntimeError(
+            "Browser-test recommendation fixture failed to create an assertion"
+        )
 
     return {
         "key": "paper-recommendation",
@@ -671,7 +685,9 @@ def _ensure_fixture_message(
     metadata = _build_fixture_message_metadata(spec=spec)
     query = {
         "relationships.is_an_instance_of": MESSAGE_TYPE_CONCEPT_ID,
-        "concept_data.metadata.browser_test_fixture_id": metadata["browser_test_fixture_id"],
+        "concept_data.metadata.browser_test_fixture_id": metadata[
+            "browser_test_fixture_id"
+        ],
         "concept_data.metadata.browser_test_message_key": key,
     }
     target_user_concept_id = str(
@@ -754,11 +770,18 @@ def _ensure_fixture_chat_session(
         namespace=namespace,
         organisation_concept_id=organisation_concept_id,
         role_in_org=role_in_org,
+        origin_kind=chat_history_service.CHAT_SESSION_ORIGIN_KIND_BROWSER_TEST_FIXTURE,
+        created_by_actor_concept_id=VON_SYSTEM_ID,
+        created_by_actor_type=CODING_AGENT_TYPE_ID,
+        is_agent_created=True,
+        test_artifact_kind="browser_test_fixture_chat_session",
     )
 
     coll = chat_history_service.get_chat_history_collection_service()
     if coll is None:
-        raise RuntimeError("Chat history collection unavailable for browser-test fixture")
+        raise RuntimeError(
+            "Chat history collection unavailable for browser-test fixture"
+        )
 
     with bypass_access_control():
         doc = coll.find_one(
@@ -769,7 +792,9 @@ def _ensure_fixture_chat_session(
     existing_ids: set[str] = set()
     if isinstance(doc, dict):
         for entry in doc.get("history") or []:
-            fixture_entry_id = entry.get("fixture_entry_id") if isinstance(entry, dict) else None
+            fixture_entry_id = (
+                entry.get("fixture_entry_id") if isinstance(entry, dict) else None
+            )
             if isinstance(fixture_entry_id, str) and fixture_entry_id.strip():
                 existing_ids.add(fixture_entry_id.strip())
 
@@ -931,7 +956,9 @@ def login_browser_test_user(
 
     created_message_count = sum(1 for item in message_results if item.get("created"))
     reused_message_count = len(message_results) - created_message_count
-    created_history_entries = sum(int(item.get("created_entries") or 0) for item in chat_results)
+    created_history_entries = sum(
+        int(item.get("created_entries") or 0) for item in chat_results
+    )
 
     return {
         "user": {

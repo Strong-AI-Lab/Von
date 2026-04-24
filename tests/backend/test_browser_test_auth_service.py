@@ -30,10 +30,12 @@ class _FakeConceptCollection:
                 },
             }
         for doc in self.docs.values():
-            metadata = ((doc.get("concept_data") or {}).get("metadata") or {})
+            metadata = (doc.get("concept_data") or {}).get("metadata") or {}
             matches = True
             for key, value in query.items():
-                if not isinstance(key, str) or not key.startswith("concept_data.metadata."):
+                if not isinstance(key, str) or not key.startswith(
+                    "concept_data.metadata."
+                ):
                     continue
                 metadata_key = key.split(".", 2)[2]
                 if metadata.get(metadata_key) != value:
@@ -119,11 +121,15 @@ def test_ensure_fixture_message_reuses_existing_message(monkeypatch):
     }
 
     first = service._ensure_fixture_message(spec=spec)
-    fake_coll.docs[first["concept_id"]]["concept_data"]["read_by"] = ["#V#zhan_von_witbrock"]
-    fake_coll.docs[first["concept_id"]]["concept_data"]["metadata"]["intent"] = "review_request"
-    fake_coll.docs[first["concept_id"]]["concept_data"]["metadata"]["delivery_channel"] = (
-        "interuser_message"
-    )
+    fake_coll.docs[first["concept_id"]]["concept_data"]["read_by"] = [
+        "#V#zhan_von_witbrock"
+    ]
+    fake_coll.docs[first["concept_id"]]["concept_data"]["metadata"][
+        "intent"
+    ] = "review_request"
+    fake_coll.docs[first["concept_id"]]["concept_data"]["metadata"][
+        "delivery_channel"
+    ] = "interuser_message"
     second = service._ensure_fixture_message(spec=spec)
 
     assert first["created"] is True
@@ -131,7 +137,9 @@ def test_ensure_fixture_message_reuses_existing_message(monkeypatch):
     assert len(create_calls) == 1
     assert fake_coll.docs[first["concept_id"]]["concept_data"]["read_by"] == []
     assert (
-        fake_coll.docs[first["concept_id"]]["concept_data"]["metadata"]["delivery_channel"]
+        fake_coll.docs[first["concept_id"]]["concept_data"]["metadata"][
+            "delivery_channel"
+        ]
         == "paper_recommendation_message"
     )
     assert (
@@ -155,7 +163,9 @@ def test_ensure_fixture_message_reuses_existing_message(monkeypatch):
     ]
 
 
-def test_ensure_fixture_message_creates_new_message_for_different_target_user(monkeypatch):
+def test_ensure_fixture_message_creates_new_message_for_different_target_user(
+    monkeypatch,
+):
     fake_coll = _FakeConceptCollection()
     create_calls: list[str] = []
 
@@ -199,7 +209,10 @@ def test_ensure_fixture_message_creates_new_message_for_different_target_user(mo
         "recipient_ids": ["#V#codex_browser_fixture"],
         "subject": "Workflow preview needs a sanity check",
         "content": "Long browser-testing message content",
-        "metadata": {"intent": "review_request", "delivery_channel": "interuser_message"},
+        "metadata": {
+            "intent": "review_request",
+            "delivery_channel": "interuser_message",
+        },
         "mark_unread_for": "#V#codex_browser_fixture",
         "org_id": "#V#university_of_auckland_strong_ai_lab",
         "target_user_concept_id": "#V#codex_browser_fixture",
@@ -209,9 +222,12 @@ def test_ensure_fixture_message_creates_new_message_for_different_target_user(mo
 
     assert result["created"] is True
     assert create_calls == ["#V#message_1"]
-    assert fake_coll.docs["#V#message_existing"]["concept_data"]["metadata"][
-        "browser_test_target_user_concept_id"
-    ] == "#V#zhan_von_witbrock"
+    assert (
+        fake_coll.docs["#V#message_existing"]["concept_data"]["metadata"][
+            "browser_test_target_user_concept_id"
+        ]
+        == "#V#zhan_von_witbrock"
+    )
 
 
 def test_ensure_fixture_chat_session_skips_duplicate_history_entries(monkeypatch):
@@ -227,6 +243,7 @@ def test_ensure_fixture_chat_session_skips_duplicate_history_entries(monkeypatch
         namespace=None,
         organisation_concept_id=None,
         role_in_org=None,
+        **provenance_kwargs,
     ):
         key = (user_id, session_id)
         fake_coll.docs.setdefault(
@@ -239,9 +256,14 @@ def test_ensure_fixture_chat_session_skips_duplicate_history_entries(monkeypatch
                 "namespace": namespace,
                 "organisation_concept_id": organisation_concept_id,
                 "role_in_org": role_in_org,
+                **provenance_kwargs,
             },
         )
-        return {"session_id": session_id, "session_name": session_name, "namespace": namespace}
+        return {
+            "session_id": session_id,
+            "session_name": session_name,
+            "namespace": namespace,
+        }
 
     def _fake_add_message_to_history(
         *,
@@ -314,6 +336,12 @@ def test_ensure_fixture_chat_session_skips_duplicate_history_entries(monkeypatch
     assert second["created_entries"] == 0
     assert added_entries == ["entry-1", "entry-2"]
     assert skip_rag_indexing_flags == [True, True]
+    stored_doc = fake_coll.docs[
+        ("#V#zhan_von_witbrock", "browser-fixture-user-view-state")
+    ]
+    assert stored_doc["origin_kind"] == "browser_test_fixture"
+    assert stored_doc["is_agent_created"] is True
+    assert stored_doc["test_artifact_kind"] == "browser_test_fixture_chat_session"
 
 
 def test_login_browser_test_user_handles_existing_counterpart_name_variants(
@@ -411,7 +439,10 @@ def test_login_browser_test_user_handles_existing_counterpart_name_variants(
     ]
     assert len(recommendation_specs) == 1
     assert recommendation_specs[0]["target_user_concept_id"] == "#V#zhan_von_witbrock"
-    assert result["fixture"]["counterparts"][0]["name"] == "Workflow Reviewer Existing Alias"
+    assert (
+        result["fixture"]["counterparts"][0]["name"]
+        == "Workflow Reviewer Existing Alias"
+    )
     assert result["fixture"]["counterparts"][1]["name"] == "Paper Scout Existing Alias"
 
 
@@ -479,6 +510,9 @@ def test_describe_browser_test_mode_surfaces_configured_identity_and_availabilit
     assert payload["uses_default_identity"] is False
     assert payload["display_name"] == "Codex Browser Test"
     assert payload["email"] == "codex-browser-fixture@strongailab.invalid"
-    assert payload["identity_label"] == "Codex Browser Test <codex-browser-fixture@strongailab.invalid>"
+    assert (
+        payload["identity_label"]
+        == "Codex Browser Test <codex-browser-fixture@strongailab.invalid>"
+    )
     assert "Browser Test Login" in payload["setup_hint"]
     assert payload["enabled_env_present"] is True

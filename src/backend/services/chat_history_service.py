@@ -22,6 +22,11 @@ from .turn_execution_record_service import (
     upsert_turn_execution_record_projection,
 )
 from .episode_critique_memory_service import upsert_episode_critique_memory_from_turn
+from .coding_agent_identity_bootstrap_service import (
+    CODING_AGENT_TYPE_ID,
+    GITHUB_COPILOT_INSTANCE_ID,
+    VON_SYSTEM_ID,
+)
 
 # Try to import RAG service, but don't fail if it's not available (circular imports etc)
 try:
@@ -39,6 +44,27 @@ _CHAT_HISTORY_INDEXES_LOCK = threading.Lock()
 _CHAT_HISTORY_READ_CIRCUIT_LOCK = threading.Lock()
 _CHAT_HISTORY_READ_CIRCUIT_UNTIL_MONOTONIC = 0.0
 _CHAT_HISTORY_READ_CIRCUIT_LAST_ERROR: Optional[str] = None
+CHAT_SESSION_ORIGIN_KIND_BROWSER_TEST_FIXTURE = "browser_test_fixture"
+CHAT_SESSION_ORIGIN_KIND_BENCHMARK_HARNESS = "benchmark_harness"
+CHAT_SESSION_ORIGIN_KIND_CODING_AGENT_TEST = "coding_agent_test"
+CHAT_SESSION_AGENT_CREATED_ORIGIN_KINDS = frozenset(
+    {
+        CHAT_SESSION_ORIGIN_KIND_BROWSER_TEST_FIXTURE,
+        CHAT_SESSION_ORIGIN_KIND_BENCHMARK_HARNESS,
+        CHAT_SESSION_ORIGIN_KIND_CODING_AGENT_TEST,
+        "coding_agent",
+        "agent_test",
+    }
+)
+CHAT_SESSION_PROVENANCE_FIELDS = (
+    "origin_kind",
+    "created_by_actor_concept_id",
+    "created_by_actor_type",
+    "is_agent_created",
+    "test_artifact_kind",
+)
+_BROWSER_TEST_SESSION_ID_PREFIX = "browser-fixture-"
+_BENCHMARK_SESSION_NAME_PREFIX = "Benchmark session "
 
 
 def _parse_bool_env(name: str, default: bool) -> bool:
@@ -91,9 +117,7 @@ def _is_transient_chat_history_error(exc: Exception) -> bool:
     if is_transient_mongo_error(exc):
         return True
     message = str(exc).lower()
-    transient_markers = (
-        "read circuit open",
-    )
+    transient_markers = ("read circuit open",)
     return any(marker in message for marker in transient_markers)
 
 
@@ -165,7 +189,11 @@ def _record_chat_history_read_success() -> None:
         _CHAT_HISTORY_READ_CIRCUIT_LAST_ERROR = None
 
 
-def _read_find_one(chat_history_coll, query: Dict[str, Any], projection: Optional[Dict[str, Any]] = None):
+def _read_find_one(
+    chat_history_coll,
+    query: Dict[str, Any],
+    projection: Optional[Dict[str, Any]] = None,
+):
     max_time_ms = _chat_history_read_max_time_ms()
     kwargs: Dict[str, Any] = {}
     if max_time_ms > 0:
@@ -177,7 +205,11 @@ def _read_find_one(chat_history_coll, query: Dict[str, Any], projection: Optiona
         return chat_history_coll.find_one(query, projection)
 
 
-def _read_find(chat_history_coll, query: Dict[str, Any], projection: Optional[Dict[str, Any]] = None):
+def _read_find(
+    chat_history_coll,
+    query: Dict[str, Any],
+    projection: Optional[Dict[str, Any]] = None,
+):
     cursor = chat_history_coll.find(query, projection)
     max_time_ms = _chat_history_read_max_time_ms()
     if max_time_ms > 0:
@@ -250,6 +282,132 @@ def _normalise_session_name(value: Any) -> Optional[str]:
     if len(name) > _SESSION_NAME_MAX_LEN:
         name = name[: _SESSION_NAME_MAX_LEN - 3].rstrip() + "..."
     return name
+
+
+def _normalise_session_provenance_text(
+    value: Any,
+    *,
+    max_len: int = 160,
+    identifier: bool = False,
+) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    if identifier:
+        cleaned = cleaned.lower().replace("-", "_").replace(" ", "_")
+    if len(cleaned) > max_len:
+        cleaned = cleaned[:max_len].rstrip()
+    return cleaned or None
+
+
+def _normalise_session_agent_created_flag(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        cleaned = value.strip().lower()
+        if cleaned in {"1", "true", "yes", "on", "y"}:
+            return True
+        if cleaned in {"0", "false", "no", "off", "n"}:
+            return False
+    return None
+
+
+def _normalise_chat_session_provenance_fields(
+    *,
+    origin_kind: Any = None,
+    created_by_actor_concept_id: Any = None,
+    created_by_actor_type: Any = None,
+    is_agent_created: Any = None,
+    test_artifact_kind: Any = None,
+) -> Dict[str, Any]:
+    """Normalise durable conversation-origin fields for session metadata."""
+
+    normalised_origin = _normalise_session_provenance_text(
+        origin_kind,
+        max_len=80,
+        identifier=True,
+    )
+    normalised_actor_id = _normalise_session_provenance_text(
+        created_by_actor_concept_id,
+        max_len=160,
+    )
+    normalised_actor_type = _normalise_session_provenance_text(
+        created_by_actor_type,
+        max_len=160,
+    )
+    normalised_test_kind = _normalise_session_provenance_text(
+        test_artifact_kind,
+        max_len=100,
+        identifier=True,
+    )
+    explicit_agent_flag = _normalise_session_agent_created_flag(is_agent_created)
+
+    inferred_agent_created = bool(
+        normalised_origin in CHAT_SESSION_AGENT_CREATED_ORIGIN_KINDS
+        or normalised_test_kind
+    )
+    agent_created = (
+        explicit_agent_flag
+        if explicit_agent_flag is not None
+        else inferred_agent_created
+    )
+
+    fields: Dict[str, Any] = {}
+    if normalised_origin:
+        fields["origin_kind"] = normalised_origin
+    if normalised_actor_id:
+        fields["created_by_actor_concept_id"] = normalised_actor_id
+    if normalised_actor_type:
+        fields["created_by_actor_type"] = normalised_actor_type
+    if normalised_test_kind:
+        fields["test_artifact_kind"] = normalised_test_kind
+    if agent_created:
+        fields["is_agent_created"] = True
+    return fields
+
+
+def _session_provenance_from_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
+    origin_kind = _normalise_session_provenance_text(
+        doc.get("origin_kind"),
+        max_len=80,
+        identifier=True,
+    )
+    actor_id = _normalise_session_provenance_text(
+        doc.get("created_by_actor_concept_id"),
+        max_len=160,
+    )
+    actor_type = _normalise_session_provenance_text(
+        doc.get("created_by_actor_type"),
+        max_len=160,
+    )
+    test_kind = _normalise_session_provenance_text(
+        doc.get("test_artifact_kind"),
+        max_len=100,
+        identifier=True,
+    )
+    agent_flag = _normalise_session_agent_created_flag(doc.get("is_agent_created"))
+    is_agent_created = bool(
+        agent_flag is True
+        or origin_kind in CHAT_SESSION_AGENT_CREATED_ORIGIN_KINDS
+        or test_kind
+    )
+    return {
+        "origin_kind": origin_kind,
+        "created_by_actor_concept_id": actor_id,
+        "created_by_actor_type": actor_type,
+        "is_agent_created": is_agent_created,
+        "test_artifact_kind": test_kind,
+    }
+
+
+def _add_chat_session_provenance_projection(
+    projection: Dict[str, Any],
+) -> Dict[str, Any]:
+    for field_name in CHAT_SESSION_PROVENANCE_FIELDS:
+        projection[field_name] = 1
+    return projection
 
 
 def _default_session_name(now: Optional[datetime] = None) -> str:
@@ -1378,10 +1536,7 @@ def add_message_to_history(
 
         if isinstance(namespace, str) and namespace.strip():
             effective_session_context["namespace"] = namespace.strip()
-        if (
-            isinstance(organisation_concept_id, str)
-            and organisation_concept_id.strip()
-        ):
+        if isinstance(organisation_concept_id, str) and organisation_concept_id.strip():
             org_value = organisation_concept_id.strip()
             effective_session_context["organisation_concept_id"] = org_value
             effective_session_context["org_id"] = org_value
@@ -1868,7 +2023,13 @@ def get_chat_history_session_count(
                     },
                     "has_name": {
                         "$gt": [
-                            {"$strLenCP": {"$trim": {"input": {"$ifNull": ["$session_name", ""]}}}},
+                            {
+                                "$strLenCP": {
+                                    "$trim": {
+                                        "input": {"$ifNull": ["$session_name", ""]}
+                                    }
+                                }
+                            },
                             0,
                         ]
                     },
@@ -1926,6 +2087,7 @@ def _build_session_summary_from_metadata(
     if not session_name and last_ts is None and created_ts is None:
         return None
 
+    provenance = _session_provenance_from_doc(doc)
     return {
         "session_id": session_id,
         "session_name": session_name,
@@ -1937,6 +2099,7 @@ def _build_session_summary_from_metadata(
         "namespace": doc.get("namespace"),
         "organisation_concept_id": doc.get("organisation_concept_id"),
         "preview": None,
+        **provenance,
     }
 
 
@@ -1946,14 +2109,16 @@ def _get_chat_history_session_summaries_metadata_only(
     query: Dict[str, Any],
     safe_limit: int,
 ) -> List[Dict[str, Any]]:
-    projection: Dict[str, Any] = {
-        "session_id": 1,
-        "session_name": 1,
-        "created_at": 1,
-        "updated_at": 1,
-        "namespace": 1,
-        "organisation_concept_id": 1,
-    }
+    projection: Dict[str, Any] = _add_chat_session_provenance_projection(
+        {
+            "session_id": 1,
+            "session_name": 1,
+            "created_at": 1,
+            "updated_at": 1,
+            "namespace": 1,
+            "organisation_concept_id": 1,
+        }
+    )
     docs = list(_read_find(chat_history_coll, query, projection))
 
     summaries: List[Dict[str, Any]] = []
@@ -2013,9 +2178,7 @@ def get_chat_history_session_summaries(
             _record_chat_history_read_success()
             return summaries
         except PyMongoError as e:
-            _record_chat_history_read_failure(
-                "get_chat_history_session_summaries", e
-            )
+            _record_chat_history_read_failure("get_chat_history_session_summaries", e)
             logger.error(
                 "Error retrieving metadata-only chat history session summaries: %s",
                 e,
@@ -2026,15 +2189,17 @@ def get_chat_history_session_summaries(
             ) from e
 
     try:
-        projection: Dict[str, Any] = {
-            "session_id": 1,
-            "history": 1,
-            "created_at": 1,
-            "updated_at": 1,
-            "namespace": 1,
-            "organisation_concept_id": 1,
-            "session_name": 1,
-        }
+        projection: Dict[str, Any] = _add_chat_session_provenance_projection(
+            {
+                "session_id": 1,
+                "history": 1,
+                "created_at": 1,
+                "updated_at": 1,
+                "namespace": 1,
+                "organisation_concept_id": 1,
+                "session_name": 1,
+            }
+        )
         docs = list(_read_find(chat_history_coll, query, projection))
     except PyMongoError as e:
         _record_chat_history_read_failure("get_chat_history_session_summaries", e)
@@ -2108,6 +2273,7 @@ def get_chat_history_session_summaries(
             if isinstance(preview, str) and len(preview) > 140:
                 preview = preview[:140] + "."
 
+            provenance = _session_provenance_from_doc(doc)
             summaries.append(
                 {
                     "session_id": session_id,
@@ -2122,6 +2288,7 @@ def get_chat_history_session_summaries(
                     "namespace": doc.get("namespace"),
                     "organisation_concept_id": doc.get("organisation_concept_id"),
                     "preview": preview,
+                    **provenance,
                 }
             )
 
@@ -2170,7 +2337,9 @@ def has_chat_history_session(
         return result
     except PyMongoError as e:
         _record_chat_history_read_failure("has_chat_history_session", e)
-        raise ChatHistoryServiceError(f"Could not check chat history session: {e}") from e
+        raise ChatHistoryServiceError(
+            f"Could not check chat history session: {e}"
+        ) from e
 
 
 def get_chat_history_session_summary(
@@ -2193,14 +2362,16 @@ def get_chat_history_session_summary(
     mode = summary_mode.strip().lower() if isinstance(summary_mode, str) else "full"
     light_mode = mode in ("light", "minimal", "summary")
 
-    metadata_projection: Dict[str, Any] = {
-        "session_id": 1,
-        "session_name": 1,
-        "created_at": 1,
-        "updated_at": 1,
-        "namespace": 1,
-        "organisation_concept_id": 1,
-    }
+    metadata_projection: Dict[str, Any] = _add_chat_session_provenance_projection(
+        {
+            "session_id": 1,
+            "session_name": 1,
+            "created_at": 1,
+            "updated_at": 1,
+            "namespace": 1,
+            "organisation_concept_id": 1,
+        }
+    )
     if light_mode:
         try:
             metadata_doc = None
@@ -2234,15 +2405,17 @@ def get_chat_history_session_summary(
         _record_chat_history_read_success()
         return summary
 
-    projection: Dict[str, Any] = {
-        "session_id": 1,
-        "history": 1,
-        "created_at": 1,
-        "updated_at": 1,
-        "namespace": 1,
-        "organisation_concept_id": 1,
-        "session_name": 1,
-    }
+    projection: Dict[str, Any] = _add_chat_session_provenance_projection(
+        {
+            "session_id": 1,
+            "history": 1,
+            "created_at": 1,
+            "updated_at": 1,
+            "namespace": 1,
+            "organisation_concept_id": 1,
+            "session_name": 1,
+        }
+    )
     try:
         doc = None
         for session_query in _build_chat_history_session_read_queries(
@@ -2336,6 +2509,7 @@ def get_chat_history_session_summary(
     if isinstance(preview, str) and len(preview) > 140:
         preview = preview[:140] + "."
 
+    provenance = _session_provenance_from_doc(doc)
     summary = {
         "session_id": session_id,
         "session_name": session_name,
@@ -2347,6 +2521,7 @@ def get_chat_history_session_summary(
         "namespace": doc.get("namespace"),
         "organisation_concept_id": doc.get("organisation_concept_id"),
         "preview": preview,
+        **provenance,
     }
     _record_chat_history_read_success()
     return summary
@@ -2360,6 +2535,11 @@ def create_chat_session(
     namespace: Optional[str] = None,
     organisation_concept_id: Optional[str] = None,
     role_in_org: Optional[str] = None,
+    origin_kind: Optional[str] = None,
+    created_by_actor_concept_id: Optional[str] = None,
+    created_by_actor_type: Optional[str] = None,
+    is_agent_created: Optional[bool] = None,
+    test_artifact_kind: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Create a new chat session document if it does not already exist.
 
@@ -2370,6 +2550,11 @@ def create_chat_session(
         namespace: Optional explicit namespace (e.g., from window session context)
         organisation_concept_id: Optional explicit org ID (e.g., from window session context)
         role_in_org: Optional explicit role (e.g., from window session context)
+        origin_kind: Optional durable provenance kind for non-human/test sessions
+        created_by_actor_concept_id: Optional Vontology actor concept attribution
+        created_by_actor_type: Optional actor type concept, such as #V#coding_agent
+        is_agent_created: Optional explicit test/agent-created flag
+        test_artifact_kind: Optional test/benchmark fixture class
 
     If namespace/org/role not provided, falls back to Flask session context.
     """
@@ -2413,22 +2598,40 @@ def create_chat_session(
     if isinstance(effective_role, str) and effective_role.strip():
         set_on_insert["role_in_org"] = effective_role.strip()
 
+    provenance_fields = _normalise_chat_session_provenance_fields(
+        origin_kind=origin_kind,
+        created_by_actor_concept_id=created_by_actor_concept_id,
+        created_by_actor_type=created_by_actor_type,
+        is_agent_created=is_agent_created,
+        test_artifact_kind=test_artifact_kind,
+    )
+    update_payload: Dict[str, Any] = {"$setOnInsert": set_on_insert}
+    if provenance_fields:
+        # Provenance is intentionally safe to repair on an existing session
+        # without changing updated_at or recency ordering.
+        update_payload["$set"] = provenance_fields
+
     try:
         chat_history_coll.update_one(
             {"user_id": user_id, "session_id": session_id},
-            {"$setOnInsert": set_on_insert},
+            update_payload,
             upsert=True,
+        )
+        projection = _add_chat_session_provenance_projection(
+            {"session_name": 1, "namespace": 1}
         )
         doc = chat_history_coll.find_one(
             {"user_id": user_id, "session_id": session_id},
-            {"session_name": 1, "namespace": 1},
+            projection,
         )
+        stored_provenance = _session_provenance_from_doc(doc or {})
         return {
             "session_id": session_id,
             "session_name": _normalise_session_name(
                 (doc or {}).get("session_name") or name
             ),
             "namespace": (doc or {}).get("namespace") or ns,
+            **stored_provenance,
         }
     except PyMongoError as e:
         logger.error(f"Error creating chat session: {e}", exc_info=True)
@@ -2634,6 +2837,177 @@ def set_chat_session_links(
     except PyMongoError as e:
         logger.error(f"Error setting chat session links: {e}", exc_info=True)
         raise ChatHistoryServiceError(f"Could not set session links: {e}") from e
+
+
+def _agent_created_backfill_identity_query(doc: Dict[str, Any]) -> Dict[str, Any]:
+    if doc.get("_id") is not None:
+        return {"_id": doc["_id"]}
+    return {
+        "user_id": doc.get("user_id"),
+        "session_id": doc.get("session_id"),
+    }
+
+
+def _agent_created_backfill_candidate(doc: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    session_id = doc.get("session_id")
+    session_name = _normalise_session_name(doc.get("session_name")) or ""
+    if not isinstance(session_id, str) or not session_id.strip():
+        return None
+
+    sid = session_id.strip()
+    if sid.startswith(_BROWSER_TEST_SESSION_ID_PREFIX):
+        return {
+            "reason": "browser_fixture_session_id",
+            "fields": _normalise_chat_session_provenance_fields(
+                origin_kind=CHAT_SESSION_ORIGIN_KIND_BROWSER_TEST_FIXTURE,
+                created_by_actor_concept_id=VON_SYSTEM_ID,
+                created_by_actor_type=CODING_AGENT_TYPE_ID,
+                is_agent_created=True,
+                test_artifact_kind="browser_test_fixture_chat_session",
+            ),
+        }
+
+    if session_name.startswith(_BENCHMARK_SESSION_NAME_PREFIX):
+        return {
+            "reason": "benchmark_session_name",
+            "fields": _normalise_chat_session_provenance_fields(
+                origin_kind=CHAT_SESSION_ORIGIN_KIND_BENCHMARK_HARNESS,
+                created_by_actor_concept_id=GITHUB_COPILOT_INSTANCE_ID,
+                created_by_actor_type=CODING_AGENT_TYPE_ID,
+                is_agent_created=True,
+                test_artifact_kind="kb_clone_benchmark_chat_session",
+            ),
+        }
+
+    return None
+
+
+def backfill_agent_created_chat_session_provenance(
+    *,
+    user_concept_id: str,
+    namespace: Optional[str] = None,
+    include_legacy: bool = False,
+    max_sessions: int = 500,
+    dry_run: bool = True,
+) -> Dict[str, Any]:
+    """Mark reliable historical test/agent-created conversations.
+
+    Only deterministic browser-test fixture session IDs and benchmark harness
+    names are mutated. Ambiguous historical conversations remain untouched.
+    """
+
+    if not isinstance(user_concept_id, str) or not user_concept_id:
+        raise ChatHistoryServiceError("user_concept_id is required")
+
+    chat_history_coll = get_chat_history_collection_service()
+    if chat_history_coll is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+
+    safe_max_sessions = 500
+    if isinstance(max_sessions, int) and max_sessions > 0:
+        safe_max_sessions = min(max_sessions, 10000)
+
+    query = build_chat_history_query(
+        user_id=user_concept_id,
+        namespace=namespace,
+        include_legacy=include_legacy,
+    )
+    projection = _add_chat_session_provenance_projection(
+        {
+            "_id": 1,
+            "user_id": 1,
+            "session_id": 1,
+            "session_name": 1,
+            "namespace": 1,
+        }
+    )
+
+    sessions_examined = 0
+    reliable_candidates: List[Dict[str, Any]] = []
+    sessions_marked = 0
+    already_marked = 0
+    errors: List[Dict[str, Any]] = []
+
+    try:
+        cursor = chat_history_coll.find(query, projection)
+        for doc in cursor:
+            if sessions_examined >= safe_max_sessions:
+                break
+            if not isinstance(doc, dict):
+                continue
+            sessions_examined += 1
+
+            session_id = doc.get("session_id")
+            if not isinstance(session_id, str) or not session_id.strip():
+                continue
+
+            current_provenance = _session_provenance_from_doc(doc)
+            if current_provenance.get("is_agent_created") is True:
+                already_marked += 1
+                continue
+
+            candidate = _agent_created_backfill_candidate(doc)
+            if not isinstance(candidate, dict):
+                continue
+
+            fields = candidate.get("fields")
+            if not isinstance(fields, dict) or not fields:
+                continue
+
+            candidate_report = {
+                "session_id": session_id,
+                "session_name": _normalise_session_name(doc.get("session_name")),
+                "reason": candidate.get("reason"),
+                "proposed_fields": dict(fields),
+            }
+            reliable_candidates.append(candidate_report)
+
+            if dry_run:
+                continue
+
+            set_fields = dict(fields)
+            set_fields["agent_created_provenance_backfilled_at"] = datetime.now(
+                timezone.utc
+            )
+            try:
+                chat_history_coll.update_one(
+                    _agent_created_backfill_identity_query(doc),
+                    {"$set": set_fields},
+                )
+                sessions_marked += 1
+            except Exception as exc:
+                errors.append(
+                    {
+                        "type": "update_failed",
+                        "session_id": session_id,
+                        "error": str(exc),
+                    }
+                )
+
+        return {
+            "status": "ok",
+            "user_concept_id": user_concept_id,
+            "namespace": namespace,
+            "include_legacy": include_legacy,
+            "dry_run": bool(dry_run),
+            "sessions_examined": sessions_examined,
+            "reliable_candidate_count": len(reliable_candidates),
+            "sessions_marked": sessions_marked,
+            "already_marked": already_marked,
+            "uncertain_candidate_count": 0,
+            "uncertain_candidates": [],
+            "reliable_candidates": reliable_candidates[:50],
+            "errors": errors,
+        }
+    except PyMongoError as e:
+        logger.error(
+            "Error backfilling agent-created chat session provenance: %s",
+            e,
+            exc_info=True,
+        )
+        raise ChatHistoryServiceError(
+            f"Could not backfill agent-created chat session provenance: {e}"
+        ) from e
 
 
 def backfill_chat_history_for_user(

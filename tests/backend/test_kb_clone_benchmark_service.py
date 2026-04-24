@@ -57,11 +57,17 @@ def _seed_source_db(source_db_name: str):
             },
             {
                 "concept_id": "#V#person",
-                "relationships": {"is_a_type_of": ["#V#thing"], "is_an_instance_of": []},
+                "relationships": {
+                    "is_a_type_of": ["#V#thing"],
+                    "is_an_instance_of": [],
+                },
             },
             {
                 "concept_id": "#V#organisation",
-                "relationships": {"is_a_type_of": ["#V#thing"], "is_an_instance_of": []},
+                "relationships": {
+                    "is_a_type_of": ["#V#thing"],
+                    "is_an_instance_of": [],
+                },
             },
         ]
     )
@@ -105,6 +111,59 @@ def _scenario(source_db_name: str) -> dict[str, Any]:
     }
 
 
+def test_configure_session_context_marks_benchmark_chat_session() -> None:
+    calls: list[tuple[str, dict[str, Any] | None]] = []
+    flask_session: dict[str, Any] = {}
+
+    class _Response:
+        def __init__(
+            self, status_code: int = 200, payload: dict[str, Any] | None = None
+        ):
+            self.status_code = status_code
+            self._payload = payload or {}
+
+        def get_data(self, as_text: bool = False):
+            return str(self._payload)
+
+        def get_json(self, silent: bool = False):
+            return dict(self._payload)
+
+    class _SessionTransaction:
+        def __enter__(self):
+            return flask_session
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _ApiClient:
+        def session_transaction(self):
+            return _SessionTransaction()
+
+        def post(self, path: str, json: dict[str, Any] | None = None):
+            calls.append((path, json))
+            if path == "/von/api/session/create_chat_session":
+                return _Response(200, {"session_id": "benchmark-session-id"})
+            return _Response(200, {"status": "ok"})
+
+    session_id = benchmark_service._configure_session_context(
+        api_client=_ApiClient(),
+        user_concept_id="#V#benchmark_user",
+        organisation_concept_id="#V#benchmark_org",
+    )
+
+    assert session_id == "benchmark-session-id"
+    create_call = [
+        payload
+        for path, payload in calls
+        if path == "/von/api/session/create_chat_session"
+    ][0]
+    assert create_call is not None
+    assert str(create_call["session_name"]).startswith("Benchmark session ")
+    assert create_call["origin_kind"] == "benchmark_harness"
+    assert create_call["is_agent_created"] is True
+    assert create_call["test_artifact_kind"] == "kb_clone_benchmark_chat_session"
+
+
 def test_clone_database_ontology_slice_excludes_non_ontology_collections() -> None:
     source_db_name = "test_von_db_slice_source"
     clone_db_name = "test_von_db_slice_clone"
@@ -136,9 +195,9 @@ def test_clone_database_ontology_slice_excludes_non_ontology_collections() -> No
     clone_collections = set(clone_db.list_collection_names())
     assert "interaction_sessions" not in clone_collections
     assert "chat_history" not in clone_collections
-    assert clone_db["concepts"].count_documents({}) == source_db["concepts"].count_documents(
-        {}
-    )
+    assert clone_db["concepts"].count_documents({}) == source_db[
+        "concepts"
+    ].count_documents({})
     assert clone_db["text_relations"].count_documents({}) == source_db[
         "text_relations"
     ].count_documents({})

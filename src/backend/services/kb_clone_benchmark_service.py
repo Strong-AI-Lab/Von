@@ -42,6 +42,11 @@ from ..integrations.internal_mcp import (
 )
 from ..languagemodels.llm_interface import get_llm_client
 from ..server.utils_flask import create_flask_app
+from . import chat_history_service
+from .coding_agent_identity_bootstrap_service import (
+    CODING_AGENT_TYPE_ID,
+    GITHUB_COPILOT_INSTANCE_ID,
+)
 from .namespace_service import derive_namespace
 
 _SNAPSHOT_SCHEMA_VERSION = "kb_snapshot_archive.v1"
@@ -487,7 +492,14 @@ def _configure_session_context(
 
     create_session_resp = api_client.post(
         "/von/api/session/create_chat_session",
-        json={"session_name": f"Benchmark session {uuid.uuid4().hex[:8]}"},
+        json={
+            "session_name": f"Benchmark session {uuid.uuid4().hex[:8]}",
+            "origin_kind": chat_history_service.CHAT_SESSION_ORIGIN_KIND_BENCHMARK_HARNESS,
+            "created_by_actor_concept_id": GITHUB_COPILOT_INSTANCE_ID,
+            "created_by_actor_type": CODING_AGENT_TYPE_ID,
+            "is_agent_created": True,
+            "test_artifact_kind": "kb_clone_benchmark_chat_session",
+        },
     )
     if create_session_resp.status_code != 200:
         raise BenchmarkHarnessError(
@@ -844,7 +856,10 @@ def run_kb_clone_benchmark(
                 identity_cfg = {}
 
             user_parent_candidates = identity_cfg.get("user_parent_candidates")
-            if not isinstance(user_parent_candidates, list) or not user_parent_candidates:
+            if (
+                not isinstance(user_parent_candidates, list)
+                or not user_parent_candidates
+            ):
                 user_parent_candidates = list(_DEFAULT_USER_PARENT_CANDIDATES)
 
             org_parent_candidates = identity_cfg.get("organisation_parent_candidates")

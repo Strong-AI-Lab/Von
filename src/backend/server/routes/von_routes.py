@@ -35,6 +35,10 @@ from ...languagemodels.llm_interface import (
 from ...integrations.internal_mcp import ProgressTracker, ToolCallParsingError
 from ...services import chat_history_service
 from ...services.background_task_service import background_task_registry
+from ...services.coding_agent_identity_bootstrap_service import (
+    CODING_AGENT_TYPE_ID,
+    VON_SYSTEM_ID,
+)
 from ...services.window_session_context_service import (
     set_window_organisation,
     clear_window_organisation,
@@ -2616,7 +2620,9 @@ def _normalise_tool_progress_scope_keys(
     if isinstance(scope_keys, str):
         raw_scope_keys = [scope_keys]
     elif isinstance(scope_keys, Sequence):
-        raw_scope_keys = [str(item) if isinstance(item, str) else None for item in scope_keys]
+        raw_scope_keys = [
+            str(item) if isinstance(item, str) else None for item in scope_keys
+        ]
     else:
         raw_scope_keys = []
 
@@ -2829,7 +2835,10 @@ def _register_tool_progress_scope_aliases(
         window_session_id=window_session_id,
         anonymous_session_id=anonymous_session_id,
     ):
-        if candidate_scope_key == primary_scope or candidate_scope_key in mirror_scope_keys:
+        if (
+            candidate_scope_key == primary_scope
+            or candidate_scope_key in mirror_scope_keys
+        ):
             continue
         mirror_scope_keys.append(candidate_scope_key)
         if isinstance(current_state, dict):
@@ -6694,6 +6703,46 @@ def _set_active_chat_session_for_request(
     session.modified = True
 
 
+def _normalise_create_chat_session_provenance(
+    data: Mapping[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """Return safe session provenance kwargs for test/agent-created conversations."""
+
+    body = data if isinstance(data, Mapping) else {}
+    provenance: Dict[str, Any] = {}
+    for key in (
+        "origin_kind",
+        "created_by_actor_concept_id",
+        "created_by_actor_type",
+        "is_agent_created",
+        "test_artifact_kind",
+    ):
+        if key in body:
+            provenance[key] = body.get(key)
+
+    is_browser_test_session = session.get(
+        "auth_provider"
+    ) == "browser_test_fixture" or bool(session.get("browser_test_fixture_id"))
+    if is_browser_test_session:
+        provenance["origin_kind"] = (
+            provenance.get("origin_kind")
+            or chat_history_service.CHAT_SESSION_ORIGIN_KIND_BROWSER_TEST_FIXTURE
+        )
+        provenance["created_by_actor_concept_id"] = (
+            provenance.get("created_by_actor_concept_id") or VON_SYSTEM_ID
+        )
+        provenance["created_by_actor_type"] = (
+            provenance.get("created_by_actor_type") or CODING_AGENT_TYPE_ID
+        )
+        provenance["is_agent_created"] = True
+        provenance["test_artifact_kind"] = (
+            provenance.get("test_artifact_kind")
+            or "browser_test_authenticated_chat_session"
+        )
+
+    return provenance
+
+
 def _ensure_generate_conversation_session(
     *,
     request_conversation_session_id: str | None,
@@ -6735,6 +6784,7 @@ def _ensure_generate_conversation_session(
             namespace=user_namespace,
             organisation_concept_id=org_concept_id,
             role_in_org=role_in_org,
+            **_normalise_create_chat_session_provenance(),
         )
         _set_active_chat_session_for_request(
             session_id=created_session_id,
@@ -13501,6 +13551,7 @@ def create_chat_session():
             namespace=effective.get("namespace"),
             organisation_concept_id=effective.get("organisation_id"),
             role_in_org=effective.get("role"),
+            **_normalise_create_chat_session_provenance(data),
         )
 
         _set_active_chat_session_for_request(
@@ -13521,6 +13572,13 @@ def create_chat_session():
                     "session_id": session_id,
                     "session_name": result.get("session_name"),
                     "history": [],
+                    "origin_kind": result.get("origin_kind"),
+                    "created_by_actor_concept_id": result.get(
+                        "created_by_actor_concept_id"
+                    ),
+                    "created_by_actor_type": result.get("created_by_actor_type"),
+                    "is_agent_created": result.get("is_agent_created") is True,
+                    "test_artifact_kind": result.get("test_artifact_kind"),
                 }
             ),
             200,

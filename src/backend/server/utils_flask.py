@@ -574,9 +574,7 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
                 entity_workflow_bootstrap_report,
             )
         if not bool(
-            entity_information_retrieval_workflow_bootstrap_report.get(
-                "success", False
-            )
+            entity_information_retrieval_workflow_bootstrap_report.get("success", False)
         ):
             app_logger.warning(
                 "[durable_workflows] entity-information retrieval workflow bootstrap failed: %s",
@@ -1718,6 +1716,15 @@ def create_flask_app(
         """
         return _handle_admin_chat_history_backfill_request()
 
+    @app.route("/admin/chat_history_agent_provenance_backfill", methods=["POST"])
+    def admin_chat_history_agent_provenance_backfill():
+        """Mark reliable historical test/agent-created chat sessions.
+
+        Defaults to dry-run mode and only mutates deterministic browser-test
+        fixtures and benchmark-harness sessions.
+        """
+        return _handle_admin_chat_history_agent_provenance_backfill_request()
+
     @app.route("/admin/chat_history_reindex", methods=["POST"])
     def admin_chat_history_reindex():
         """Reindex chat history messages for the current user/namespace into RAG.
@@ -2025,7 +2032,9 @@ def _configure_internal_mcp_orchestrator_startup(app: Flask, gateway_instance) -
 
     from ..integrations.internal_mcp import InternalMCPChatOrchestrator
 
-    orchestrator_logger = app.logger.getChild("mcp_orchestrator") if app.logger else None
+    orchestrator_logger = (
+        app.logger.getChild("mcp_orchestrator") if app.logger else None
+    )
     blocking_orchestrator_start = os.getenv(
         "VON_INTERNAL_MCP_ORCHESTRATOR_BLOCKING_STARTUP", "0"
     ).strip().lower() in {"1", "true", "yes", "on"}
@@ -2596,6 +2605,32 @@ def _handle_admin_chat_history_backfill_request():
         return jsonify(error="unexpected", detail=str(exc)), 500
 
 
+def _handle_admin_chat_history_agent_provenance_backfill_request():
+    try:
+        from flask import session as flask_session
+        from src.backend.services import chat_history_service
+
+        context, error = _resolve_chat_history_admin_context(
+            flask_session,
+            enforce_namespace_match=False,
+        )
+        if error is not None:
+            return error
+        assert context is not None
+
+        body = request.get_json(silent=True) or {}
+        result = chat_history_service.backfill_agent_created_chat_session_provenance(
+            user_concept_id=context["user_concept_id"],
+            namespace=context["target_namespace"],
+            include_legacy=bool(body.get("include_legacy", False)),
+            max_sessions=int(body.get("max_sessions", 500)),
+            dry_run=bool(body.get("dry_run", True)),
+        )
+        return jsonify(result)
+    except Exception as exc:
+        return jsonify(error="unexpected", detail=str(exc)), 500
+
+
 def _handle_admin_chat_history_reindex_request(app: Flask):
     try:
         from flask import session as flask_session
@@ -2800,7 +2835,9 @@ def _handle_admin_rag_integrity_request():
             session_id = item.get("session_id")
             if session_id is None:
                 continue
-            session_doc = sessions_coll.find_one({"_id": session_id}, {"indexing_status": 1})
+            session_doc = sessions_coll.find_one(
+                {"_id": session_id}, {"indexing_status": 1}
+            )
             if not session_doc or session_doc.get("indexing_status") not in (
                 "pending",
                 "indexed",
@@ -2906,13 +2943,17 @@ def _build_diagnostics_response(app: Flask):
                 ts, payload, build_secs, alloc_kb, hits = record
                 node_count = None
                 try:
-                    if isinstance(payload, dict) and isinstance(payload.get("tree"), list):
+                    if isinstance(payload, dict) and isinstance(
+                        payload.get("tree"), list
+                    ):
                         stack = list(payload["tree"])
                         count = 0
                         while stack:
                             node = stack.pop()
                             count += 1
-                            children = node.get("children") if isinstance(node, dict) else None
+                            children = (
+                                node.get("children") if isinstance(node, dict) else None
+                            )
                             if isinstance(children, list):
                                 stack.extend(children)
                         node_count = count
@@ -2942,7 +2983,11 @@ def _build_diagnostics_response(app: Flask):
         )
 
         ttl_env = os.getenv("VONTOLOGY_COUNTS_TTL")
-        size = len(_INSTANCE_COUNTS_CACHE) if isinstance(_INSTANCE_COUNTS_CACHE, dict) else None
+        size = (
+            len(_INSTANCE_COUNTS_CACHE)
+            if isinstance(_INSTANCE_COUNTS_CACHE, dict)
+            else None
+        )
         counts_cache = {
             "size": size,
             "ttl_sec": int(ttl_env) if ttl_env and ttl_env.isdigit() else None,
@@ -2982,9 +3027,7 @@ def _build_diagnostics_response(app: Flask):
                         (scope_payload.get("predicate_origins") or {}).keys()
                     ),
                     "raw_scope_counts": {
-                        key: len(value)
-                        if isinstance(value, (list, set, tuple))
-                        else 0
+                        key: len(value) if isinstance(value, (list, set, tuple)) else 0
                         for key, value in raw_map.items()
                     },
                 }
@@ -3061,9 +3104,9 @@ def _build_diagnostics_response(app: Flask):
 
         session_user = flask_session.get("user_concept_id")
         try:
-            header_user = request.headers.get("X-User-Concept-ID") or request.headers.get(
-                "X-User-Client-ID"
-            )
+            header_user = request.headers.get(
+                "X-User-Concept-ID"
+            ) or request.headers.get("X-User-Client-ID")
         except Exception:
             header_user = None
         effective_user = get_effective_user_concept_id()
@@ -3201,9 +3244,7 @@ def _build_diagnostics_response(app: Flask):
     diag["internal_mcp_orchestrator_startup"] = app.config.get(
         "INTERNAL_MCP_ORCHESTRATOR_STATUS"
     )
-    diag["durable_workflow_startup"] = app.config.get(
-        "DURABLE_WORKFLOW_STARTUP_STATUS"
-    )
+    diag["durable_workflow_startup"] = app.config.get("DURABLE_WORKFLOW_STARTUP_STATUS")
 
     try:
         from ..services.annotation_extraction_service import (
@@ -3231,7 +3272,9 @@ def _build_diagnostics_response(app: Flask):
     try:
         from ...vontology.utils_vontology import _ACCESSOR_STATS  # type: ignore
 
-        diag["accessor_stats"] = {key: dict(value) for key, value in _ACCESSOR_STATS.items()}
+        diag["accessor_stats"] = {
+            key: dict(value) for key, value in _ACCESSOR_STATS.items()
+        }
     except Exception:
         pass
 
@@ -3289,7 +3332,9 @@ def _handle_admin_shutdown_request(app: Flask):
         app.logger,
         werkzeug_shutdown=werkzeug_shutdown if callable(werkzeug_shutdown) else None,
     )
-    status = "shutting_down" if callable(werkzeug_shutdown) else "shutting_down_fallback"
+    status = (
+        "shutting_down" if callable(werkzeug_shutdown) else "shutting_down_fallback"
+    )
     return jsonify(success=True, status=status), 202
 
 
@@ -3299,7 +3344,9 @@ def _build_instance_counts_alias_response():
 
 def _handle_admin_policy_comparison_request():
     try:
-        from ..services.workflow_policy_graph_service import compare_policy_json_vs_graph
+        from ..services.workflow_policy_graph_service import (
+            compare_policy_json_vs_graph,
+        )
 
         policy_id = request.args.get("policy_id", "#V#default_workflow_model_policy")
         report = compare_policy_json_vs_graph(policy_id)
@@ -3310,9 +3357,12 @@ def _handle_admin_policy_comparison_request():
 
 def _start_prewarm(app: Flask) -> None:
     try:
-        if os.getenv("VON_PREWARM_DISABLE") in {"1", "true", "TRUE", "True"} or app.config.get(
-            "PREWARM_DISABLE"
-        ):
+        if os.getenv("VON_PREWARM_DISABLE") in {
+            "1",
+            "true",
+            "TRUE",
+            "True",
+        } or app.config.get("PREWARM_DISABLE"):
             app.logger.info("Prewarm disabled by VON_PREWARM_DISABLE/ config flag.")
             return
 
