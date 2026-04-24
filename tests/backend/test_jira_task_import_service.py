@@ -173,6 +173,51 @@ def test_import_jira_issues_idempotent_rerun_updates_existing(monkeypatch):
     assert update_calls["count"] >= 2
 
 
+def test_import_jira_issues_marks_bulk_migration_collection_when_requested(monkeypatch):
+    captured_fields: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        import_service,
+        "find_task_by_external_reference",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        import_service,
+        "create_task",
+        lambda **_kwargs: {"task_concept_id": "#V#task_imported_1"},
+    )
+    monkeypatch.setattr(
+        import_service,
+        "upsert_task_external_reference",
+        lambda *_args, **_kwargs: {"task_concept_id": "#V#task_imported_1"},
+    )
+
+    def _fake_update_task_fields(*_args, **kwargs):
+        captured_fields.append(dict(kwargs.get("fields") or {}))
+        return {"task": {"task_concept_id": "#V#task_imported_1"}}
+
+    monkeypatch.setattr(import_service, "update_task_fields", _fake_update_task_fields)
+    monkeypatch.setattr(import_service, "set_task_parent", lambda *_a, **_k: {})
+    monkeypatch.setattr(import_service, "set_task_epic", lambda *_a, **_k: {})
+    monkeypatch.setattr(import_service, "link_tasks", lambda *_a, **_k: {})
+
+    report = import_service.import_jira_issues_to_tasks(
+        issues=[_jira_issue("JVNAUTOSCI-2028")],
+        dry_run=False,
+        mark_bulk_migration_collection=True,
+    )
+
+    assert report["success"] is True
+    assert captured_fields
+    bulk_collections = captured_fields[0].get("bulk_task_collections")
+    assert isinstance(bulk_collections, list)
+    assert bulk_collections[0]["collection_id"] == (
+        "#V#jira_task_migration_bulk_collection"
+    )
+    assert bulk_collections[0]["hidden_by_default"] is True
+    assert "bulk_task_collection:jira_migration" in report["issues"][0]["mapped_fields"]
+
+
 def test_import_jira_issues_maps_parent_and_links_when_targets_available(monkeypatch):
     created_ids = iter(["#V#task_parent", "#V#task_child"])
     mappings: dict[str, str] = {}

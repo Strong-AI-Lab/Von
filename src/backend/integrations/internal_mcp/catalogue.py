@@ -23099,6 +23099,10 @@ def _task_search(**kwargs):
             updated_to=kwargs.get("updated_to"),
             dependency_state=kwargs.get("dependency_state"),
             organisation_concept_id=kwargs.get("organisation_concept_id"),
+            bulk_visibility=kwargs.get("bulk_visibility")
+            or kwargs.get("bulk_task_visibility"),
+            bulk_collection_ids=kwargs.get("bulk_collection_ids")
+            or kwargs.get("bulk_collection_id"),
             limit=kwargs.get("limit", 50),
             offset=kwargs.get("offset", 0),
         )
@@ -23417,6 +23421,10 @@ def _task_import_jira_issues(**kwargs):
         kwargs.get("source_migrated_label"),
         default="migrated",
     )
+    mark_bulk_migration_collection = _coerce_bool_input(
+        kwargs.get("mark_bulk_migration_collection"),
+        default=bool(backfill_existing_imports),
+    )
     include_watchers = _coerce_bool_input(kwargs.get("include_watchers"), default=True)
     auto_map_namespace_to_jira_user = _coerce_bool_input(
         kwargs.get("auto_map_namespace_to_jira_user"),
@@ -23691,6 +23699,7 @@ def _task_import_jira_issues(**kwargs):
         ),
         auto_resolve_participants=auto_resolve_participants,
         create_missing_participant_concepts=create_missing_participant_concepts,
+        mark_bulk_migration_collection=mark_bulk_migration_collection,
     )
     if not isinstance(report, dict):
         return make_error_response(
@@ -23938,6 +23947,7 @@ def _task_import_jira_issues(**kwargs):
             else []
         ),
         "backfill_existing_imports": bool(backfill_existing_imports),
+        "mark_bulk_migration_collection": bool(mark_bulk_migration_collection),
         "backfill_discovered_issue_count": (
             int(fetch_payload.get("backfill_discovered_count", 0))
             if isinstance(fetch_payload, dict)
@@ -28658,6 +28668,10 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                     "updated_to": (str, type(None)),
                     "dependency_state": (str, type(None)),
                     "organisation_concept_id": (str, type(None)),
+                    "bulk_visibility": (str, type(None)),
+                    "bulk_task_visibility": (str, type(None)),
+                    "bulk_collection_id": (str, list, type(None)),
+                    "bulk_collection_ids": (str, list, type(None)),
                     "limit": (int, type(None)),
                     "offset": (int, type(None)),
                 },
@@ -28687,6 +28701,7 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                     "backfill_limit": (int, type(None)),
                     "sync_source_labels": (bool, type(None)),
                     "source_migrated_label": (str, type(None)),
+                    "mark_bulk_migration_collection": (bool, type(None)),
                     "include_watchers": (bool, type(None)),
                     "auto_map_namespace_to_jira_user": (bool, type(None)),
                     "auto_resolve_participants": (bool, type(None)),
@@ -28702,7 +28717,9 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                     "Set backfill_existing_imports=true to reprocess previously imported Jira-linked tasks. "
                     "Dry-run is enabled by default for preview-safe execution. "
                     "When dry_run=false, source Jira labels are synchronised with "
-                    "'migrated' by default (configurable)."
+                    "'migrated' by default (configurable). "
+                    "mark_bulk_migration_collection records hidden-by-default "
+                    "bulk collection metadata on imported Von tasks."
                 ),
             ),
             output_schema=task_import_jira_issues_output_schema,

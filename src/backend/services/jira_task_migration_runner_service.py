@@ -84,6 +84,7 @@ class JiraTaskMigrationOptions:
     import_referenced_targets: bool = False
     sync_source_labels: bool = False
     source_migrated_label: str = DEFAULT_JIRA_TASK_MIGRATION_SOURCE_MIGRATED_LABEL
+    mark_bulk_migration_collection: bool = True
     report_path: Path | None = DEFAULT_JIRA_TASK_MIGRATION_REPORT_PATH
     updated_within_hours: int | None = None
     include_done: bool = False
@@ -193,6 +194,7 @@ def normalise_jira_task_migration_options(
         import_referenced_targets=bool(options.import_referenced_targets),
         sync_source_labels=bool(options.sync_source_labels),
         source_migrated_label=source_migrated_label,
+        mark_bulk_migration_collection=bool(options.mark_bulk_migration_collection),
         report_path=report_path,
         updated_within_hours=updated_within_hours,
         include_done=bool(options.include_done),
@@ -330,6 +332,10 @@ def _run_import_batches(
                 "create_missing_participant_concepts": True,
                 "sync_source_labels": options.sync_source_labels,
                 "source_migrated_label": options.source_migrated_label,
+                "mark_bulk_migration_collection": bool(
+                    options.mark_bulk_migration_collection
+                    and options.updated_within_hours is None
+                ),
             }
             result = gateway.invoke("task_import_jira_issues", payload).payload
             if not isinstance(result, dict) or result.get("success") is not True:
@@ -397,6 +403,7 @@ def _options_to_report_dict(
         "import_referenced_targets": options.import_referenced_targets,
         "sync_source_labels": options.sync_source_labels,
         "source_migrated_label": options.source_migrated_label,
+        "mark_bulk_migration_collection": options.mark_bulk_migration_collection,
         "report_path": str(options.report_path) if options.report_path else None,
         "updated_within_hours": options.updated_within_hours,
         "include_done": options.include_done,

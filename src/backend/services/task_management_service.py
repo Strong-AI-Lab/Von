@@ -137,6 +137,23 @@ TASK_METADATA_KEY_ATTACHMENTS = "attachments"
 TASK_METADATA_KEY_WORKLOG = "worklog"
 TASK_METADATA_KEY_HISTORY = "task_history"
 TASK_METADATA_KEY_EXTERNAL_REFERENCES = "external_references"
+TASK_METADATA_KEY_BULK_TASK_COLLECTIONS = "bulk_task_collections"
+
+# Bulk task collection metadata is an explicit visibility marker. Jira-origin
+# tasks are not hidden merely because they came from Jira.
+BULK_TASK_VISIBILITY_EXCLUDE = "exclude"
+BULK_TASK_VISIBILITY_INCLUDE = "include"
+BULK_TASK_VISIBILITY_ONLY = "only"
+VALID_BULK_TASK_VISIBILITY_VALUES = {
+    BULK_TASK_VISIBILITY_EXCLUDE,
+    BULK_TASK_VISIBILITY_INCLUDE,
+    BULK_TASK_VISIBILITY_ONLY,
+}
+JIRA_MIGRATION_BULK_COLLECTION_ID = "#V#jira_task_migration_bulk_collection"
+JIRA_MIGRATION_BULK_COLLECTION_KIND = "jira_migration"
+JIRA_MIGRATION_BULK_COLLECTION_LABEL = "Jira migration backlog"
+JIRA_MIGRATION_BULK_COLLECTION_REASON = "jira_migration_bulk_collection"
+JIRA_MIGRATION_LABEL_CANDIDATES = ("migrated", "jira-migration", "jira_migration")
 
 # Valid task statuses
 TASK_STATUS_PENDING = "pending"
@@ -532,6 +549,232 @@ def _metadata_string_list(value: Any) -> list[str]:
         seen.add(lowered)
         result.append(cleaned)
     return result
+
+
+def _clean_metadata_string(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _derive_concept_label(concept_id: str) -> str:
+    cleaned = str(concept_id or "").strip()
+    if cleaned.startswith("#V#"):
+        cleaned = cleaned[3:]
+    label = " ".join(part for part in cleaned.replace("-", "_").split("_") if part)
+    return label.title() if label else str(concept_id or "")
+
+
+def build_jira_migration_bulk_task_collection(
+    *,
+    label: str | None = None,
+    hidden_by_default: bool = True,
+) -> Dict[str, Any]:
+    """Return the canonical Jira-migration bulk task collection descriptor."""
+
+    return {
+        "collection_id": JIRA_MIGRATION_BULK_COLLECTION_ID,
+        "label": label or JIRA_MIGRATION_BULK_COLLECTION_LABEL,
+        "kind": JIRA_MIGRATION_BULK_COLLECTION_KIND,
+        "hidden_by_default": bool(hidden_by_default),
+        "reason": JIRA_MIGRATION_BULK_COLLECTION_REASON,
+        "task_source_id": JIRA_IMPORTED_TASK_SOURCE_ID,
+    }
+
+
+def _normalise_bulk_task_collection_entry(value: Any) -> Dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+
+    collection_id = _clean_metadata_string(
+        value.get("collection_id") or value.get("id")
+    )
+    if not collection_id:
+        return None
+
+    label = _clean_metadata_string(value.get("label")) or _derive_concept_label(
+        collection_id
+    )
+    kind = _clean_metadata_string(value.get("kind")) or "bulk_task_collection"
+    reason = _clean_metadata_string(value.get("reason"))
+    task_source_id = _clean_metadata_string(
+        value.get("task_source_id") or value.get("source_id")
+    )
+
+    normalised: Dict[str, Any] = {
+        "collection_id": collection_id,
+        "label": label,
+        "kind": kind,
+        "hidden_by_default": bool(value.get("hidden_by_default")),
+    }
+    if reason:
+        normalised["reason"] = reason
+    if task_source_id:
+        normalised["task_source_id"] = task_source_id
+    return normalised
+
+
+def normalise_bulk_task_collections(value: Any) -> list[Dict[str, Any]]:
+    """Normalise persisted bulk-task collection metadata."""
+
+    if isinstance(value, Mapping):
+        raw_entries: list[Any] = [value]
+    elif isinstance(value, list):
+        raw_entries = list(value)
+    elif value is None:
+        raw_entries = []
+    else:
+        raw_entries = []
+
+    seen: set[str] = set()
+    collections: list[Dict[str, Any]] = []
+    for raw_entry in raw_entries:
+        entry = _normalise_bulk_task_collection_entry(raw_entry)
+        if not entry:
+            continue
+        collection_id = str(entry["collection_id"])
+        if collection_id in seen:
+            continue
+        seen.add(collection_id)
+        collections.append(entry)
+    return collections
+
+
+def _normalise_bulk_task_collection_ids(values: Any) -> set[str]:
+    if values is None:
+        return set()
+    if isinstance(values, str):
+        raw_values: Iterable[Any] = [values]
+    elif isinstance(values, Iterable):
+        raw_values = values
+    else:
+        raw_values = [values]
+
+    collection_ids: set[str] = set()
+    for raw_value in raw_values:
+        cleaned = _clean_metadata_string(raw_value)
+        if cleaned:
+            collection_ids.add(cleaned)
+    return collection_ids
+
+
+def _normalise_bulk_task_visibility(value: Any) -> str:
+    cleaned = _clean_metadata_string(value) or BULK_TASK_VISIBILITY_INCLUDE
+    cleaned = cleaned.lower()
+    if cleaned not in VALID_BULK_TASK_VISIBILITY_VALUES:
+        raise InvalidTaskDataError(
+            "bulk_visibility must be one of: "
+            f"{sorted(VALID_BULK_TASK_VISIBILITY_VALUES)}"
+        )
+    return cleaned
+
+
+def _hidden_bulk_collections_for_task(
+    task: Mapping[str, Any],
+    *,
+    collection_ids: set[str] | None = None,
+) -> list[Dict[str, Any]]:
+    collections = normalise_bulk_task_collections(
+        task.get("bulk_task_collections")
+        or task.get("hidden_by_default_bulk_task_collections")
+    )
+    filtered: list[Dict[str, Any]] = []
+    for collection in collections:
+        if not bool(collection.get("hidden_by_default")):
+            continue
+        collection_id = str(collection.get("collection_id") or "")
+        if collection_ids and collection_id not in collection_ids:
+            continue
+        filtered.append(collection)
+    return filtered
+
+
+def _build_bulk_task_collection_summaries(
+    tasks: Iterable[Mapping[str, Any]],
+    *,
+    collection_ids: set[str] | None = None,
+) -> list[Dict[str, Any]]:
+    summaries: dict[str, Dict[str, Any]] = {}
+    for task in tasks:
+        task_id = _clean_metadata_string(task.get("task_concept_id"))
+        for collection in _hidden_bulk_collections_for_task(
+            task,
+            collection_ids=collection_ids,
+        ):
+            collection_id = str(collection.get("collection_id") or "")
+            if not collection_id:
+                continue
+            summary = summaries.setdefault(
+                collection_id,
+                {
+                    "collection_id": collection_id,
+                    "label": collection.get("label") or _derive_concept_label(collection_id),
+                    "kind": collection.get("kind") or "bulk_task_collection",
+                    "hidden_by_default": True,
+                    "reason": collection.get("reason"),
+                    "task_source_id": collection.get("task_source_id"),
+                    "count": 0,
+                    "sample_task_concept_ids": [],
+                },
+            )
+            summary["count"] = int(summary.get("count") or 0) + 1
+            samples = summary.get("sample_task_concept_ids")
+            if isinstance(samples, list) and task_id and len(samples) < 10:
+                samples.append(task_id)
+
+    return sorted(
+        summaries.values(),
+        key=lambda item: (
+            str(item.get("label") or "").casefold(),
+            str(item.get("collection_id") or ""),
+        ),
+    )
+
+
+def apply_bulk_task_visibility(
+    tasks: Iterable[Mapping[str, Any]],
+    *,
+    bulk_visibility: str | None = BULK_TASK_VISIBILITY_INCLUDE,
+    bulk_collection_ids: Iterable[str] | str | None = None,
+) -> Dict[str, Any]:
+    """Apply hidden-by-default bulk collection visibility to an already-filtered task list."""
+
+    visibility = _normalise_bulk_task_visibility(bulk_visibility)
+    collection_ids = _normalise_bulk_task_collection_ids(bulk_collection_ids)
+    task_list = [dict(task) for task in tasks if isinstance(task, Mapping)]
+
+    hidden_task_ids: set[str] = set()
+    hidden_tasks: list[Dict[str, Any]] = []
+    visible_tasks: list[Dict[str, Any]] = []
+    for task in task_list:
+        task_id = str(task.get("task_concept_id") or "")
+        hidden_collections = _hidden_bulk_collections_for_task(
+            task,
+            collection_ids=collection_ids,
+        )
+        is_hidden_bulk_task = bool(hidden_collections)
+        if is_hidden_bulk_task and task_id not in hidden_task_ids:
+            hidden_task_ids.add(task_id)
+            hidden_tasks.append(task)
+
+        if visibility == BULK_TASK_VISIBILITY_EXCLUDE and is_hidden_bulk_task:
+            continue
+        if visibility == BULK_TASK_VISIBILITY_ONLY and not is_hidden_bulk_task:
+            continue
+        visible_tasks.append(task)
+
+    summaries = _build_bulk_task_collection_summaries(
+        task_list,
+        collection_ids=collection_ids,
+    )
+    return {
+        "tasks": visible_tasks,
+        "bulk_visibility": visibility,
+        "bulk_collection_ids": sorted(collection_ids),
+        "hidden_bulk_task_total": len(hidden_tasks),
+        "hidden_bulk_task_collections": summaries,
+    }
 
 
 def _normalise_optional_string(value: Any, *, field_name: str) -> str | None:
@@ -1042,6 +1285,7 @@ def create_task(
             TASK_METADATA_KEY_WORKLOG: [],
             TASK_METADATA_KEY_HISTORY: [],
             TASK_METADATA_KEY_EXTERNAL_REFERENCES: {},
+            TASK_METADATA_KEY_BULK_TASK_COLLECTIONS: [],
         },
     }
 
@@ -1371,6 +1615,14 @@ def _build_task_response(doc: Dict[str, Any]) -> Dict[str, Any]:
     external_references = (
         raw_external_references if isinstance(raw_external_references, dict) else {}
     )
+    bulk_task_collections = normalise_bulk_task_collections(
+        metadata.get(TASK_METADATA_KEY_BULK_TASK_COLLECTIONS)
+    )
+    hidden_by_default_bulk_task_collections = [
+        collection
+        for collection in bulk_task_collections
+        if bool(collection.get("hidden_by_default"))
+    ]
     explicit_task_source = _first_relationship_value_from_aliases(
         relationships,
         TASK_SOURCE_RELATIONSHIP_PREDICATES,
@@ -1485,6 +1737,13 @@ def _build_task_response(doc: Dict[str, Any]) -> Dict[str, Any]:
         "worklog_total_minutes": worklog_total_minutes,
         "history_count": len(history),
         "external_references": external_references,
+        "bulk_task_collections": bulk_task_collections,
+        "hidden_by_default_bulk_task_collections": (
+            hidden_by_default_bulk_task_collections
+        ),
+        "is_hidden_by_default_bulk_task": bool(
+            hidden_by_default_bulk_task_collections
+        ),
         "created_at": doc.get("created_at"),
         "updated_at": doc.get("updated_at"),
     }
@@ -1788,7 +2047,7 @@ def list_tasks(
     priority_filter: Optional[str] = None,
     task_type_ids: list[str] | str | None = None,
     task_source_ids: list[str] | str | None = None,
-    limit: int = 50,
+    limit: int | None = 50,
 ) -> List[Dict[str, Any]]:
     """List tasks with optional filters.
 
@@ -1814,7 +2073,6 @@ def list_tasks(
     cursor = ConceptsRepository.find(
         query,
         sort=[("updated_at", -1), ("created_at", -1), ("concept_id", 1)],
-        limit=limit,
     )
     tasks = [_build_task_response(doc) for doc in cursor]
 
@@ -1855,6 +2113,13 @@ def list_tasks(
                 if task.get("task_source_id") in normalised_source_ids
             ]
 
+    if limit is not None:
+        try:
+            limit_value = max(1, int(limit))
+        except (TypeError, ValueError):
+            limit_value = 50
+        tasks = tasks[:limit_value]
+
     return tasks
 
 
@@ -1890,6 +2155,8 @@ def search_tasks(
     updated_to: str | None = None,
     dependency_state: str | None = None,
     organisation_concept_id: str | None = None,
+    bulk_visibility: str | None = BULK_TASK_VISIBILITY_INCLUDE,
+    bulk_collection_ids: list[str] | str | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> Dict[str, Any]:
@@ -2268,6 +2535,12 @@ def search_tasks(
         reverse=True,
     )
 
+    visibility_payload = apply_bulk_task_visibility(
+        tasks,
+        bulk_visibility=bulk_visibility,
+        bulk_collection_ids=bulk_collection_ids,
+    )
+    tasks = visibility_payload["tasks"]
     total = len(tasks)
     paged = tasks[offset : offset + limit]
     return {
@@ -2276,6 +2549,12 @@ def search_tasks(
         "count": len(paged),
         "offset": offset,
         "limit": limit,
+        "bulk_visibility": visibility_payload["bulk_visibility"],
+        "bulk_collection_ids": visibility_payload["bulk_collection_ids"],
+        "hidden_bulk_task_total": visibility_payload["hidden_bulk_task_total"],
+        "hidden_bulk_task_collections": visibility_payload[
+            "hidden_bulk_task_collections"
+        ],
     }
 
 
@@ -3482,6 +3761,17 @@ def update_task_fields(
             )
         changed_fields.append("epic_task_concept_id")
 
+    if "bulk_task_collections" in fields:
+        bulk_collections = normalise_bulk_task_collections(
+            fields.get("bulk_task_collections")
+        )
+        _replace_task_metadata_list(
+            task_concept_id=task_concept_id,
+            metadata_key=TASK_METADATA_KEY_BULK_TASK_COLLECTIONS,
+            entries=bulk_collections,
+        )
+        changed_fields.append("bulk_task_collections")
+
     unknown_keys = sorted(
         key
         for key in fields.keys()
@@ -3520,6 +3810,7 @@ def update_task_fields(
             "watchers_concept_ids",
             "parent_task_concept_id",
             "epic_task_concept_id",
+            "bulk_task_collections",
         }
     )
     if unknown_keys:
@@ -3662,6 +3953,191 @@ def upsert_task_external_reference(
     return get_task(task_concept_id)
 
 
+def _task_doc_task_source_id(doc: Mapping[str, Any]) -> str:
+    relationships = doc.get("relationships")
+    metadata = doc.get("metadata")
+    if not isinstance(relationships, Mapping):
+        relationships = {}
+    if not isinstance(metadata, Mapping):
+        metadata = {}
+    external_references = metadata.get(TASK_METADATA_KEY_EXTERNAL_REFERENCES)
+    explicit_task_source = _first_relationship_value_from_aliases(
+        relationships,
+        TASK_SOURCE_RELATIONSHIP_PREDICATES,
+    )
+    return _infer_task_source_id(
+        explicit_source_id=explicit_task_source,
+        external_references=(
+            external_references if isinstance(external_references, Mapping) else {}
+        ),
+    )
+
+
+def _task_doc_has_migration_label(
+    doc: Mapping[str, Any],
+    *,
+    label_candidates: set[str],
+) -> bool:
+    metadata = doc.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return False
+    labels = _metadata_string_list(metadata.get(TASK_METADATA_KEY_LABELS))
+    label_values = {label.casefold() for label in labels}
+    return bool(label_values.intersection(label_candidates))
+
+
+def _task_doc_bulk_collections(doc: Mapping[str, Any]) -> list[Dict[str, Any]]:
+    metadata = doc.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return []
+    return normalise_bulk_task_collections(
+        metadata.get(TASK_METADATA_KEY_BULK_TASK_COLLECTIONS)
+    )
+
+
+def _task_doc_has_bulk_collection(
+    doc: Mapping[str, Any],
+    *,
+    collection_id: str,
+) -> bool:
+    return any(
+        collection.get("collection_id") == collection_id
+        for collection in _task_doc_bulk_collections(doc)
+    )
+
+
+def backfill_jira_migration_bulk_task_collections(
+    *,
+    dry_run: bool = True,
+    actor_concept_id: str | None = None,
+    organisation_concept_id: str | None = None,
+    label_candidates: Iterable[str] | None = None,
+    include_unlabelled_imported: bool = False,
+    limit: int | None = None,
+) -> Dict[str, Any]:
+    """Preview or mark Jira-migration imported tasks as a hidden bulk collection."""
+
+    collection = build_jira_migration_bulk_task_collection()
+    collection_id = collection["collection_id"]
+    normalised_label_candidates = {
+        str(label).strip().casefold()
+        for label in (label_candidates or JIRA_MIGRATION_LABEL_CANDIDATES)
+        if str(label).strip()
+    }
+
+    query: Dict[str, Any] = {
+        "relationships.is_an_instance_of": TASK_SPECIFICATION_TYPE_ID,
+    }
+    org_id = _normalise_optional_concept_id(organisation_concept_id)
+    if organisation_concept_id and not org_id:
+        raise InvalidTaskDataError(
+            f"Invalid organisation_concept_id: {organisation_concept_id}"
+        )
+    if org_id:
+        query[f"metadata.{TASK_METADATA_KEY_ORGANISATION}"] = org_id
+
+    max_docs: int | None = None
+    if limit is not None:
+        try:
+            max_docs = max(1, int(limit))
+        except (TypeError, ValueError):
+            raise InvalidTaskDataError("limit must be an integer") from None
+
+    docs = ConceptsRepository.find(
+        query,
+        sort=[("updated_at", -1), ("created_at", -1), ("concept_id", 1)],
+        limit=max_docs or 0,
+    )
+
+    inspected_count = 0
+    imported_jira_count = 0
+    candidate_count = 0
+    already_marked_count = 0
+    updated_count = 0
+    sample_task_concept_ids: list[str] = []
+    actor_id = _normalise_optional_concept_id(actor_concept_id)
+
+    for doc in docs:
+        if not isinstance(doc, Mapping):
+            continue
+        inspected_count += 1
+        task_concept_id = _clean_metadata_string(doc.get("concept_id"))
+        if not task_concept_id:
+            continue
+        task_source_id = _task_doc_task_source_id(doc)
+        if task_source_id != JIRA_IMPORTED_TASK_SOURCE_ID:
+            continue
+        imported_jira_count += 1
+
+        has_migration_label = _task_doc_has_migration_label(
+            doc,
+            label_candidates=normalised_label_candidates,
+        )
+        if not has_migration_label and not include_unlabelled_imported:
+            continue
+
+        if _task_doc_has_bulk_collection(doc, collection_id=collection_id):
+            already_marked_count += 1
+            continue
+
+        candidate_count += 1
+        if len(sample_task_concept_ids) < 20:
+            sample_task_concept_ids.append(task_concept_id)
+
+        if dry_run:
+            continue
+
+        next_collections = _task_doc_bulk_collections(doc) + [collection]
+        ConceptsRepository.update_one(
+            {"concept_id": task_concept_id},
+            {
+                "$set": {
+                    f"metadata.{TASK_METADATA_KEY_BULK_TASK_COLLECTIONS}": (
+                        next_collections
+                    ),
+                    "updated_at": _now(),
+                }
+            },
+        )
+        updated_count += 1
+        try:
+            _append_task_history_event(
+                task_concept_id=task_concept_id,
+                event_type="task_bulk_collection_marked",
+                actor_concept_id=actor_id,
+                details={
+                    "collection_id": collection_id,
+                    "reason": JIRA_MIGRATION_BULK_COLLECTION_REASON,
+                },
+                touch_updated_at=False,
+            )
+        except Exception as exc:
+            logger.debug(
+                "Failed to append bulk-collection backfill history for %s: %s",
+                task_concept_id,
+                exc,
+            )
+
+    return {
+        "success": True,
+        "dry_run": bool(dry_run),
+        "collection": collection,
+        "selection": {
+            "task_source_id": JIRA_IMPORTED_TASK_SOURCE_ID,
+            "label_candidates": sorted(normalised_label_candidates),
+            "include_unlabelled_imported": bool(include_unlabelled_imported),
+            "organisation_concept_id": org_id,
+            "limit": max_docs,
+        },
+        "inspected_count": inspected_count,
+        "imported_jira_count": imported_jira_count,
+        "candidate_count": candidate_count,
+        "already_marked_count": already_marked_count,
+        "updated_count": updated_count,
+        "sample_task_concept_ids": sample_task_concept_ids,
+    }
+
+
 def bulk_update_tasks(
     task_concept_ids: Iterable[str],
     *,
@@ -3768,6 +4244,13 @@ __all__ = [
     "PRIORITY_HIGH",
     "PRIORITY_CRITICAL",
     "VALID_PRIORITIES",
+    "TASK_METADATA_KEY_BULK_TASK_COLLECTIONS",
+    "BULK_TASK_VISIBILITY_EXCLUDE",
+    "BULK_TASK_VISIBILITY_INCLUDE",
+    "BULK_TASK_VISIBILITY_ONLY",
+    "JIRA_MIGRATION_BULK_COLLECTION_ID",
+    "JIRA_MIGRATION_BULK_COLLECTION_KIND",
+    "JIRA_MIGRATION_BULK_COLLECTION_LABEL",
     "TaskManagementError",
     "TaskNotFoundError",
     "InvalidTaskDataError",
@@ -3799,6 +4282,10 @@ __all__ = [
     "update_task_fields",
     "find_task_by_external_reference",
     "upsert_task_external_reference",
+    "build_jira_migration_bulk_task_collection",
+    "normalise_bulk_task_collections",
+    "apply_bulk_task_visibility",
+    "backfill_jira_migration_bulk_task_collections",
     "bulk_update_tasks",
     "delete_task",
 ]

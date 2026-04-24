@@ -28,6 +28,10 @@ let _filterTaskSourceId = 'all';
 let _isGlobalTabMode = false;  // True when rendering into global tasks tab
 let _taskDetailState = {};  // taskId -> detail panel state
 let _selectedTaskId = '';
+let _globalBulkTaskVisibility = 'exclude';
+let _globalBulkTaskCollectionId = '';
+let _hiddenBulkTaskTotal = 0;
+let _hiddenBulkTaskCollections = [];
 let _taskTaxonomy = {
     task_types: [],
     task_sources: [],
@@ -125,6 +129,60 @@ function getTaskSourceSummary(task) {
         label: task.task_source_label || deriveConceptNameFromId(conceptId),
         slug: task.task_source_slug || '',
     };
+}
+
+function getHiddenBulkTaskCollections(task) {
+    const collections = Array.isArray(task?.hidden_by_default_bulk_task_collections)
+        ? task.hidden_by_default_bulk_task_collections
+        : [];
+    return collections.filter((collection) => (
+        collection
+        && typeof collection === 'object'
+        && collection.hidden_by_default !== false
+        && typeof collection.collection_id === 'string'
+        && collection.collection_id.trim()
+    ));
+}
+
+function normaliseBulkTaskCollectionSummary(collection) {
+    if (!collection || typeof collection !== 'object') return null;
+    const collectionId = typeof collection.collection_id === 'string'
+        ? collection.collection_id.trim()
+        : '';
+    if (!collectionId) return null;
+    const label = typeof collection.label === 'string' && collection.label.trim()
+        ? collection.label.trim()
+        : deriveConceptNameFromId(collectionId);
+    const count = Number.isFinite(Number(collection.count))
+        ? Math.max(0, Number(collection.count))
+        : 0;
+    return {
+        collection_id: collectionId,
+        label,
+        kind: typeof collection.kind === 'string' ? collection.kind : '',
+        count,
+    };
+}
+
+function setBulkTaskVisibilitySummary(response) {
+    _hiddenBulkTaskTotal = Number.isFinite(Number(response?.hidden_bulk_task_total))
+        ? Math.max(0, Number(response.hidden_bulk_task_total))
+        : 0;
+    _hiddenBulkTaskCollections = Array.isArray(response?.hidden_bulk_task_collections)
+        ? response.hidden_bulk_task_collections
+            .map(normaliseBulkTaskCollectionSummary)
+            .filter(Boolean)
+        : [];
+}
+
+function buildGlobalTasksUrl() {
+    const params = new URLSearchParams();
+    params.set('limit', '500');
+    params.set('bulk_visibility', _globalBulkTaskVisibility || 'exclude');
+    if (_globalBulkTaskVisibility === 'only' && _globalBulkTaskCollectionId) {
+        params.set('bulk_collection_id', _globalBulkTaskCollectionId);
+    }
+    return `/api/tasks/?${params.toString()}`;
 }
 
 async function ensureTaskTaxonomyLoaded() {
@@ -400,6 +458,7 @@ function renderGlobalTasksTabContent() {
                 </div>
             </div>
             <div id="globalTaskSummary" class="global-task-summary" aria-live="polite"></div>
+            <div id="globalBulkTaskVisibilityControl" class="bulk-task-visibility-control hidden" aria-live="polite"></div>
             <div class="global-tasks-create">
                 <input type="text" id="globalNewTaskTitle" class="task-input" placeholder="Task title...">
                 <textarea id="globalNewTaskDescription" class="task-textarea" placeholder="Task description..." rows="2"></textarea>
@@ -509,6 +568,7 @@ function renderGlobalTasksTabContent() {
     _taskListEl = _globalTasksContainer.querySelector('#globalTaskList');
     renderTaskGroupFilterControls();
     renderGlobalTaskSummary();
+    renderGlobalBulkTaskVisibilityControl();
     renderGlobalTaskInspector();
 }
 
@@ -673,8 +733,9 @@ async function loadGlobalTasks() {
     updateLoadingState(true);
 
     try {
-        const response = await getJson('/api/tasks/?limit=500');
+        const response = await getJson(buildGlobalTasksUrl());
         _tasks = response.tasks || [];
+        setBulkTaskVisibilitySummary(response);
         pruneTaskDetailState();
         refreshTaskGroupOptions();
         ensureSelectedTaskStillValid();
@@ -790,8 +851,73 @@ function renderGlobalTaskSummary(filteredTasks = getFilteredTasks()) {
         <span class="task-summary-chip"><strong>${activeCount}</strong> active</span>
         <span class="task-summary-chip"><strong>${typedCount}</strong> typed</span>
         <span class="task-summary-chip"><strong>${sourcedCount}</strong> sourced</span>
+        ${_hiddenBulkTaskTotal > 0 ? `<span class="task-summary-chip task-summary-chip-bulk"><strong>${_hiddenBulkTaskTotal}</strong> bulk hidden</span>` : ''}
         <span class="task-summary-chip task-summary-chip-soft">${escapeHtml(selectedTask?.title || 'No task selected')}</span>
     `;
+}
+
+function renderGlobalBulkTaskVisibilityControl() {
+    const controlEl = _globalTasksContainer?.querySelector('#globalBulkTaskVisibilityControl');
+    if (!controlEl) return;
+
+    if (_hiddenBulkTaskTotal <= 0 && _hiddenBulkTaskCollections.length === 0) {
+        controlEl.classList.add('hidden');
+        controlEl.innerHTML = '';
+        return;
+    }
+
+    const selectedCollection = _hiddenBulkTaskCollections.find(
+        (collection) => collection.collection_id === _globalBulkTaskCollectionId,
+    );
+    const modeLabel = _globalBulkTaskVisibility === 'only'
+        ? `Showing ${selectedCollection?.label || 'bulk collection'} only`
+        : (_globalBulkTaskVisibility === 'include' ? 'Bulk collections shown' : 'Bulk collections hidden');
+    const collectionButtons = _hiddenBulkTaskCollections.map((collection) => `
+        <button type="button"
+            class="bulk-task-visibility-btn ${_globalBulkTaskVisibility === 'only' && _globalBulkTaskCollectionId === collection.collection_id ? 'active' : ''}"
+            data-bulk-action="only"
+            data-bulk-collection-id="${escapeHtml(collection.collection_id)}"
+            title="Show only ${escapeHtml(collection.label)}">
+            ${escapeHtml(collection.label)}
+            <span class="task-group-filter-count">${collection.count}</span>
+        </button>
+    `).join('');
+    const primaryAction = _globalBulkTaskVisibility === 'exclude'
+        ? '<button type="button" class="bulk-task-visibility-btn" data-bulk-action="include">Show hidden</button>'
+        : '<button type="button" class="bulk-task-visibility-btn" data-bulk-action="exclude">Hide bulk</button>';
+    const showAllAction = _globalBulkTaskVisibility === 'only'
+        ? '<button type="button" class="bulk-task-visibility-btn" data-bulk-action="include">Show all visible</button>'
+        : '';
+
+    controlEl.classList.remove('hidden');
+    controlEl.innerHTML = `
+        <span class="bulk-task-visibility-summary">
+            <strong>${_hiddenBulkTaskTotal}</strong> hidden-by-default bulk tasks
+            <span>${escapeHtml(modeLabel)}</span>
+        </span>
+        <div class="bulk-task-visibility-actions">
+            ${primaryAction}
+            ${showAllAction}
+            ${collectionButtons}
+        </div>
+    `;
+
+    controlEl.querySelectorAll('[data-bulk-action]').forEach((button) => {
+        button.addEventListener('click', async (event) => {
+            const action = event.currentTarget?.dataset?.bulkAction || 'exclude';
+            if (action === 'only') {
+                _globalBulkTaskVisibility = 'only';
+                _globalBulkTaskCollectionId = event.currentTarget?.dataset?.bulkCollectionId || '';
+            } else if (action === 'include') {
+                _globalBulkTaskVisibility = 'include';
+                _globalBulkTaskCollectionId = '';
+            } else {
+                _globalBulkTaskVisibility = 'exclude';
+                _globalBulkTaskCollectionId = '';
+            }
+            await loadGlobalTasks();
+        });
+    });
 }
 
 /**
@@ -803,14 +929,21 @@ function renderTaskList() {
     const filteredTasks = getFilteredTasks();
     ensureSelectedTaskStillValid(filteredTasks);
     renderGlobalTaskSummary(filteredTasks);
+    renderGlobalBulkTaskVisibilityControl();
 
     if (filteredTasks.length === 0) {
         const hasGroupFilter = _selectedTaskGroupIds.size > 0;
+        const hasHiddenBulkTasks = _isGlobalTabMode
+            && _globalBulkTaskVisibility === 'exclude'
+            && _hiddenBulkTaskTotal > 0;
+        const emptyHint = hasHiddenBulkTasks
+            ? 'Show hidden bulk collections to include Jira migration tasks'
+            : (hasGroupFilter ? 'Adjust selected task groups to broaden the list' : 'Create a task using the form above');
         _taskListEl.innerHTML = `
             <div class="task-empty-state">
                 <span class="task-empty-icon">📋</span>
                 <p>No tasks match the active filters</p>
-                <p class="task-empty-hint">${hasGroupFilter ? 'Adjust selected task groups to broaden the list' : 'Create a task using the form above'}</p>
+                <p class="task-empty-hint">${escapeHtml(emptyHint)}</p>
             </div>
         `;
         renderGlobalTaskInspector();
@@ -1762,6 +1895,7 @@ function renderTaskItem(task) {
     const detailState = getTaskDetailState(taskId);
     const primaryType = getTaskPrimaryType(task);
     const sourceSummary = getTaskSourceSummary(task);
+    const hiddenBulkCollections = getHiddenBulkTaskCollections(task);
     const isSelected = _isGlobalTabMode && taskId === _selectedTaskId;
 
     // Escape HTML in title/description
@@ -1819,6 +1953,13 @@ function renderTaskItem(task) {
     const typeChipsHtml = primaryType
         ? `<div class="task-meta-chip-row"><span class="task-type-chip">${escapeHtml(primaryType.label || 'Typed')}</span>${sourceSummary ? `<span class="task-source-chip">${escapeHtml(sourceSummary.label || 'Sourced')}</span>` : ''}</div>`
         : (sourceSummary ? `<div class="task-meta-chip-row"><span class="task-source-chip">${escapeHtml(sourceSummary.label || 'Sourced')}</span></div>` : '');
+    const bulkCollectionChipsHtml = hiddenBulkCollections.length > 0
+        ? `<div class="task-meta-chip-row">${hiddenBulkCollections.map((collection) => `
+            <span class="task-bulk-collection-chip" title="Hidden by default bulk collection">
+                ${escapeHtml(collection.label || deriveConceptNameFromId(collection.collection_id))}
+            </span>
+        `).join('')}</div>`
+        : '';
     const parentChipHtml = task.parent_task_concept_id
         ? renderTaskConceptLink({
             conceptId: task.parent_task_concept_id,
@@ -1840,7 +1981,7 @@ function renderTaskItem(task) {
         : '';
 
     return `
-        <div class="task-item ${_isGlobalTabMode ? 'task-item-selectable' : ''} ${isSelected ? 'is-selected' : ''}" data-task-id="${taskId}" ${_isGlobalTabMode ? 'tabindex="0" role="button"' : ''}>
+        <div class="task-item ${_isGlobalTabMode ? 'task-item-selectable' : ''} ${isSelected ? 'is-selected' : ''} ${hiddenBulkCollections.length > 0 ? 'task-item-bulk-hidden' : ''}" data-task-id="${taskId}" ${_isGlobalTabMode ? 'tabindex="0" role="button"' : ''}>
             <div class="task-item-header">
                 <span class="task-priority" title="Priority: ${priorityInfo.label}">${priorityInfo.icon}</span>
                 ${referenceCodeHtml}
@@ -1850,6 +1991,7 @@ function renderTaskItem(task) {
             <div class="task-item-body">
                 <p class="task-description">${truncatedDescription}</p>
                 ${typeChipsHtml}
+                ${bulkCollectionChipsHtml}
                 ${labelsHtml}
                 ${componentsHtml}
                 ${hierarchyHtml}

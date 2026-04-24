@@ -36,6 +36,7 @@ from .task_management_service import (
     add_task_attachment,
     add_task_comment,
     add_task_worklog,
+    build_jira_migration_bulk_task_collection,
     create_task,
     find_task_by_external_reference,
     link_tasks,
@@ -1877,6 +1878,7 @@ def import_jira_issues_to_tasks(
     update_existing: bool = True,
     auto_resolve_participants: bool = True,
     create_missing_participant_concepts: bool = True,
+    mark_bulk_migration_collection: bool = False,
 ) -> Dict[str, Any]:
     """Import Jira issues into Von tasks.
 
@@ -1896,6 +1898,8 @@ def import_jira_issues_to_tasks(
             concept resolution from Jira accountId/email/display name.
         create_missing_participant_concepts: When True, create #V#person concepts
             for unresolved Jira participants when dry_run is False.
+        mark_bulk_migration_collection: When True, mark imported/updated tasks
+            as members of Von's hidden-by-default Jira migration bulk collection.
     """
 
     participant_map: Dict[str, str] = {}
@@ -2256,6 +2260,11 @@ def import_jira_issues_to_tasks(
             "task_source_id": JIRA_IMPORTED_TASK_SOURCE_ID,
             "reference_code": issue_key,
         }
+        if mark_bulk_migration_collection:
+            update_fields_payload["bulk_task_collections"] = [
+                build_jira_migration_bulk_task_collection()
+            ]
+            mapped_fields.append("bulk_task_collection:jira_migration")
         if organisation_concept_id is not None:
             update_fields_payload["organisation_concept_id"] = organisation_concept_id
         if due_date is not None:

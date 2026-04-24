@@ -195,6 +195,75 @@ def test_search_tasks_route_supports_start_and_epic_filters(monkeypatch):
     assert captured["report_to_concept_id"] == "#V#user_manager"
 
 
+def test_list_tasks_route_applies_bulk_visibility_before_limit(monkeypatch):
+    client = _build_client()
+    collection = {
+        "collection_id": "#V#jira_task_migration_bulk_collection",
+        "label": "Jira migration backlog",
+        "kind": "jira_migration",
+        "hidden_by_default": True,
+    }
+
+    def _fake_list_tasks(**kwargs):
+        assert kwargs["limit"] is None
+        return [
+            {"task_concept_id": "#V#task_native", "title": "Native"},
+            {
+                "task_concept_id": "#V#task_migrated",
+                "title": "Migrated",
+                "bulk_task_collections": [collection],
+            },
+        ]
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.task_routes.list_tasks",
+        _fake_list_tasks,
+    )
+
+    response = client.get("/api/tasks/?bulk_visibility=exclude&limit=10")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert [task["task_concept_id"] for task in payload["tasks"]] == [
+        "#V#task_native"
+    ]
+    assert payload["hidden_bulk_task_total"] == 1
+    assert payload["hidden_bulk_task_collections"][0]["label"] == (
+        "Jira migration backlog"
+    )
+
+
+def test_jira_migration_bulk_backfill_route_defaults_to_dry_run(monkeypatch):
+    client = _build_client()
+    captured: dict = {}
+
+    def _fake_backfill(**kwargs):
+        captured.update(kwargs)
+        return {
+            "success": True,
+            "dry_run": kwargs["dry_run"],
+            "candidate_count": 3,
+            "updated_count": 0,
+        }
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.task_routes.backfill_jira_migration_bulk_task_collections",
+        _fake_backfill,
+    )
+
+    with client.session_transaction() as sess:
+        sess["user_concept_id"] = "#V#user_alice"
+        sess["org_id"] = "#V#org_1"
+
+    response = client.post("/api/tasks/bulk-collections/jira-migration/backfill", json={})
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["dry_run"] is True
+    assert captured["actor_concept_id"] == "#V#user_alice"
+    assert captured["organisation_concept_id"] == "#V#org_1"
+
+
 def test_get_task_taxonomy_route_returns_service_result(monkeypatch):
     client = _build_client()
 

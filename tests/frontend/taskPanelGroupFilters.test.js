@@ -62,7 +62,7 @@ describe('task panel ontology-backed groups', () => {
             if (url === '/api/tasks/taxonomy') {
                 return Promise.resolve(buildTaxonomyResponse());
             }
-            if (url === '/api/tasks/?limit=500') {
+            if (typeof url === 'string' && url.startsWith('/api/tasks/?') && url.includes('limit=500')) {
                 return Promise.resolve({
                     tasks: [
                         {
@@ -156,7 +156,7 @@ describe('task panel ontology-backed groups', () => {
             if (url === '/api/tasks/taxonomy') {
                 return Promise.resolve(buildTaxonomyResponse());
             }
-            if (url === '/api/tasks/?limit=500') {
+            if (typeof url === 'string' && url.startsWith('/api/tasks/?') && url.includes('limit=500')) {
                 return Promise.resolve({
                     tasks: [
                         {
@@ -220,7 +220,7 @@ describe('task panel ontology-backed groups', () => {
             if (url === '/api/tasks/taxonomy') {
                 return Promise.resolve(buildTaxonomyResponse());
             }
-            if (url === '/api/tasks/?limit=500') {
+            if (typeof url === 'string' && url.startsWith('/api/tasks/?') && url.includes('limit=500')) {
                 return Promise.resolve({
                     tasks: [
                         {
@@ -266,5 +266,90 @@ describe('task panel ontology-backed groups', () => {
             document.querySelectorAll('.task-item .task-title'),
         ).map((el) => (el.textContent || '').trim());
         expect(visibleTitles).toEqual(['Jira delegated']);
+    });
+
+    test('hides bulk task collections by default and reveals them explicitly', async () => {
+        const { getJson } = require(apiServiceModulePath);
+        const taskUrls = [];
+        const bulkSummary = {
+            collection_id: '#V#jira_task_migration_bulk_collection',
+            label: 'Jira migration backlog',
+            kind: 'jira_migration',
+            hidden_by_default: true,
+            count: 1,
+        };
+        const nativeTask = {
+            task_concept_id: '#V#task_native',
+            title: 'Native task',
+            description: '',
+            status: 'pending',
+            priority: 'medium',
+            task_type_ids: ['#V#one_off_task_specification'],
+            task_source_id: '#V#von_native_task_source',
+        };
+        const migratedTask = {
+            task_concept_id: '#V#task_migrated',
+            title: 'Migrated backlog task',
+            description: '',
+            status: 'pending',
+            priority: 'medium',
+            task_type_ids: ['#V#one_off_task_specification'],
+            task_source_id: '#V#jira_imported_task_source',
+            hidden_by_default_bulk_task_collections: [bulkSummary],
+        };
+
+        getJson.mockImplementation((url) => {
+            if (url === '/api/tasks/taxonomy') {
+                return Promise.resolve(buildTaxonomyResponse());
+            }
+            if (typeof url === 'string' && url.startsWith('/api/tasks/?')) {
+                taskUrls.push(url);
+                if (url.includes('bulk_visibility=include')) {
+                    return Promise.resolve({
+                        tasks: [nativeTask, migratedTask],
+                        hidden_bulk_task_total: 1,
+                        hidden_bulk_task_collections: [bulkSummary],
+                    });
+                }
+                return Promise.resolve({
+                    tasks: [nativeTask],
+                    hidden_bulk_task_total: 1,
+                    hidden_bulk_task_collections: [bulkSummary],
+                });
+            }
+            return Promise.resolve({});
+        });
+
+        const { showGlobalTasks } = require(taskPanelModulePath);
+        await showGlobalTasks();
+        await flushRenderQueue();
+
+        expect(taskUrls[0]).toContain('bulk_visibility=exclude');
+        let visibleTitles = Array.from(
+            document.querySelectorAll('.task-item .task-title'),
+        ).map((el) => (el.textContent || '').trim());
+        expect(visibleTitles).toEqual(['Native task']);
+
+        const control = document.querySelector('#globalBulkTaskVisibilityControl');
+        expect(control).toBeTruthy();
+        expect(control.textContent).toContain('1 hidden-by-default bulk tasks');
+        expect(control.textContent).toContain('Jira migration backlog');
+
+        const showButton = Array.from(control.querySelectorAll('button'))
+            .find((button) => (button.textContent || '').includes('Show hidden'));
+        expect(showButton).toBeTruthy();
+        showButton.click();
+        await flushRenderQueue();
+
+        expect(taskUrls.some((url) => url.includes('bulk_visibility=include'))).toBe(true);
+        visibleTitles = Array.from(
+            document.querySelectorAll('.task-item .task-title'),
+        ).map((el) => (el.textContent || '').trim());
+        expect(visibleTitles).toEqual(expect.arrayContaining([
+            'Native task',
+            'Migrated backlog task',
+        ]));
+        expect(document.querySelector('.task-bulk-collection-chip')?.textContent || '')
+            .toContain('Jira migration backlog');
     });
 });

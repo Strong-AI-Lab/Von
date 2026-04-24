@@ -20,8 +20,12 @@ from src.backend.services.task_management_service import (
     VALID_TASK_STATUSES,
     VALID_PRIORITIES,
     PRIORITY_MEDIUM,
+    JIRA_MIGRATION_BULK_COLLECTION_ID,
     TaskNotFoundError,
     InvalidTaskDataError,
+    apply_bulk_task_visibility,
+    backfill_jira_migration_bulk_task_collections,
+    build_jira_migration_bulk_task_collection,
     create_task,
     get_task,
     find_task_by_external_reference,
@@ -534,6 +538,119 @@ class TestListTasks:
         result = list_tasks()
 
         assert len(result) == 2
+
+
+class TestBulkTaskCollections:
+    """Tests for hidden-by-default bulk task collection support."""
+
+    def test_apply_bulk_task_visibility_hides_marked_tasks(self) -> None:
+        collection = build_jira_migration_bulk_task_collection()
+        result = apply_bulk_task_visibility(
+            [
+                {"task_concept_id": "#V#task_native", "title": "Native"},
+                {
+                    "task_concept_id": "#V#task_migrated",
+                    "title": "Migrated",
+                    "bulk_task_collections": [collection],
+                },
+            ],
+            bulk_visibility="exclude",
+        )
+
+        assert [task["task_concept_id"] for task in result["tasks"]] == [
+            "#V#task_native"
+        ]
+        assert result["hidden_bulk_task_total"] == 1
+        assert result["hidden_bulk_task_collections"][0]["collection_id"] == (
+            JIRA_MIGRATION_BULK_COLLECTION_ID
+        )
+
+    @patch("src.backend.services.task_management_service.ConceptsRepository")
+    @patch("src.backend.services.task_management_service.get_texts_for_concept")
+    def test_search_tasks_excludes_bulk_collection_before_pagination(
+        self,
+        mock_get_texts: MagicMock,
+        mock_repo: MagicMock,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        collection = build_jira_migration_bulk_task_collection()
+        mock_repo.find.return_value = [
+            {
+                "concept_id": "#V#task_migrated",
+                "relationships": {
+                    "is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID],
+                    PREDICATE_HAS_TASK_SOURCE: [JIRA_IMPORTED_TASK_SOURCE_ID],
+                },
+                "metadata": {"bulk_task_collections": [collection]},
+                "created_at": now,
+                "updated_at": now,
+            },
+            {
+                "concept_id": "#V#task_native",
+                "relationships": {"is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID]},
+                "metadata": {},
+                "created_at": now,
+                "updated_at": now,
+            },
+        ]
+        mock_get_texts.return_value = [
+            {"predicate": "#V#hasName", "text": "Task"},
+            {"predicate": "#V#hasTaskStatus", "text": "pending"},
+        ]
+
+        result = search_tasks(bulk_visibility="exclude", limit=10)
+
+        assert result["count"] == 1
+        assert result["tasks"][0]["task_concept_id"] == "#V#task_native"
+        assert result["hidden_bulk_task_total"] == 1
+        assert result["hidden_bulk_task_collections"][0]["label"] == (
+            "Jira migration backlog"
+        )
+
+    @patch("src.backend.services.task_management_service.ConceptsRepository")
+    def test_backfill_jira_migration_bulk_task_collections_dry_run_marks_only_labelled_imports(
+        self,
+        mock_repo: MagicMock,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        mock_repo.find.return_value = [
+            {
+                "concept_id": "#V#task_labelled_import",
+                "relationships": {
+                    "is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID],
+                    PREDICATE_HAS_TASK_SOURCE: [JIRA_IMPORTED_TASK_SOURCE_ID],
+                },
+                "metadata": {"labels": ["migrated"]},
+                "created_at": now,
+                "updated_at": now,
+            },
+            {
+                "concept_id": "#V#task_unlabelled_import",
+                "relationships": {
+                    "is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID],
+                    PREDICATE_HAS_TASK_SOURCE: [JIRA_IMPORTED_TASK_SOURCE_ID],
+                },
+                "metadata": {"labels": []},
+                "created_at": now,
+                "updated_at": now,
+            },
+            {
+                "concept_id": "#V#task_native",
+                "relationships": {"is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID]},
+                "metadata": {"labels": ["migrated"]},
+                "created_at": now,
+                "updated_at": now,
+            },
+        ]
+
+        result = backfill_jira_migration_bulk_task_collections(dry_run=True)
+
+        assert result["inspected_count"] == 3
+        assert result["imported_jira_count"] == 2
+        assert result["candidate_count"] == 1
+        assert result["updated_count"] == 0
+        assert result["sample_task_concept_ids"] == ["#V#task_labelled_import"]
+        mock_repo.update_one.assert_not_called()
 
 
 class TestDeleteTask:

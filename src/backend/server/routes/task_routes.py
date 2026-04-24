@@ -19,6 +19,8 @@ from ...services.task_management_service import (
     get_tasks_for_conversation,
     list_tasks,
     search_tasks,
+    apply_bulk_task_visibility,
+    backfill_jira_migration_bulk_task_collections,
     delete_task,
     add_task_comment,
     list_task_comments,
@@ -77,6 +79,15 @@ def _parse_csv_param(raw_value: str | None) -> list[str] | None:
     if raw_value is None:
         return None
     values = [item.strip() for item in raw_value.split(",") if item.strip()]
+    return values or None
+
+
+def _parse_bulk_collection_ids() -> list[str] | None:
+    values = (
+        request.args.getlist("bulk_collection_id")
+        or request.args.getlist("bulk_collection_ids")
+        or _parse_csv_param(request.args.get("bulk_collection_ids"))
+    )
     return values or None
 
 
@@ -307,7 +318,11 @@ def list_tasks_route() -> ResponseReturnValue:
             or request.args.getlist("task_source_ids")
             or _parse_csv_param(request.args.get("task_source_ids"))
         )
-        limit = _parse_int_param(request.args.get("limit"), 50)
+        limit = max(1, _parse_int_param(request.args.get("limit"), 50))
+        bulk_visibility = request.args.get("bulk_visibility") or request.args.get(
+            "bulk_task_visibility"
+        )
+        bulk_collection_ids = _parse_bulk_collection_ids()
 
         # If filtering by user, use get_tasks_for_user
         if user_concept_id:
@@ -334,7 +349,6 @@ def list_tasks_route() -> ResponseReturnValue:
                     for task in tasks
                     if task.get("task_source_id") in task_source_set
                 ]
-            tasks = tasks[:limit]
         # If filtering by session, use get_tasks_for_conversation
         elif session_id:
             tasks = get_tasks_for_conversation(session_id=session_id)
@@ -345,11 +359,37 @@ def list_tasks_route() -> ResponseReturnValue:
                 priority_filter=priority_filter,
                 task_type_ids=task_type_ids,
                 task_source_ids=task_source_ids,
-                limit=limit,
+                limit=None,
             )
 
-        return jsonify({"tasks": tasks, "count": len(tasks)}), 200
+        visibility_payload = apply_bulk_task_visibility(
+            tasks,
+            bulk_visibility=bulk_visibility,
+            bulk_collection_ids=bulk_collection_ids,
+        )
+        visible_tasks = visibility_payload["tasks"]
+        paged_tasks = visible_tasks[:limit]
+        return (
+            jsonify(
+                {
+                    "tasks": paged_tasks,
+                    "count": len(paged_tasks),
+                    "total_matching_count": len(visible_tasks),
+                    "bulk_visibility": visibility_payload["bulk_visibility"],
+                    "bulk_collection_ids": visibility_payload["bulk_collection_ids"],
+                    "hidden_bulk_task_total": visibility_payload[
+                        "hidden_bulk_task_total"
+                    ],
+                    "hidden_bulk_task_collections": visibility_payload[
+                        "hidden_bulk_task_collections"
+                    ],
+                }
+            ),
+            200,
+        )
 
+    except InvalidTaskDataError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         logger.error(f"Unexpected error listing tasks: {e}")
         return jsonify({"error": "Internal server error"}), 500
@@ -438,6 +478,9 @@ def search_tasks_route() -> ResponseReturnValue:
             dependency_state=request.args.get("dependency_state"),
             organisation_concept_id=request.args.get("organisation_concept_id")
             or _get_current_org_concept_id(),
+            bulk_visibility=request.args.get("bulk_visibility")
+            or request.args.get("bulk_task_visibility"),
+            bulk_collection_ids=_parse_bulk_collection_ids(),
             limit=_parse_int_param(request.args.get("limit"), 50),
             offset=_parse_int_param(request.args.get("offset"), 0),
         )
@@ -478,6 +521,71 @@ def my_tasks_route() -> ResponseReturnValue:
 
     except Exception as e:
         logger.error(f"Unexpected error listing my tasks: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@task_bp.route("/bulk-collections/jira-migration/backfill", methods=["POST"])
+def backfill_jira_migration_bulk_collection_route() -> ResponseReturnValue:
+    """Preview or mark migrated Jira-imported tasks as a hidden bulk collection."""
+    try:
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            data = {}
+
+        dry_run_raw = data.get("dry_run", request.args.get("dry_run"))
+        if isinstance(dry_run_raw, bool):
+            dry_run = dry_run_raw
+        elif dry_run_raw is None:
+            dry_run = True
+        else:
+            dry_run = _parse_optional_bool(str(dry_run_raw), "dry_run")
+            dry_run = True if dry_run is None else dry_run
+
+        include_unlabelled_raw = data.get(
+            "include_unlabelled_imported",
+            request.args.get("include_unlabelled_imported"),
+        )
+        if isinstance(include_unlabelled_raw, bool):
+            include_unlabelled_imported = include_unlabelled_raw
+        elif include_unlabelled_raw is None:
+            include_unlabelled_imported = False
+        else:
+            parsed_include = _parse_optional_bool(
+                str(include_unlabelled_raw),
+                "include_unlabelled_imported",
+            )
+            include_unlabelled_imported = bool(parsed_include)
+
+        labels = data.get("label_candidates")
+        if labels is None:
+            labels = (
+                request.args.getlist("label_candidate")
+                or request.args.getlist("label_candidates")
+                or _parse_csv_param(request.args.get("label_candidates"))
+            )
+        limit_value = data.get("limit", request.args.get("limit"))
+        limit = None
+        if limit_value is not None:
+            limit = _parse_int_param(str(limit_value), 0)
+
+        result = backfill_jira_migration_bulk_task_collections(
+            dry_run=dry_run,
+            actor_concept_id=_get_current_user_concept_id(),
+            organisation_concept_id=request.args.get("organisation_concept_id")
+            or data.get("organisation_concept_id")
+            or _get_current_org_concept_id(),
+            label_candidates=labels if isinstance(labels, list) else None,
+            include_unlabelled_imported=include_unlabelled_imported,
+            limit=limit,
+        )
+        return jsonify(result), 200
+    except InvalidTaskDataError as e:
+        return jsonify({"error": str(e)}), 400
+    except TaskManagementError as e:
+        logger.error(f"Failed to backfill Jira migration bulk collection: {e}")
+        return jsonify({"error": str(e)}), 500
+    except Exception as e:
+        logger.error(f"Unexpected error backfilling Jira migration bulk collection: {e}")
         return jsonify({"error": "Internal server error"}), 500
 
 
