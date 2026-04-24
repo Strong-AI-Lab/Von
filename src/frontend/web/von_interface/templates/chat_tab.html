@@ -47,12 +47,15 @@
 
     <div id="workflowStatusPanel" class="workflow-status-panel" aria-live="polite" aria-label="Workflow status">
       <div class="workflow-status-header">
-        <span class="workflow-status-title">Workflow Monitor</span>
+        <div class="workflow-status-titlebar">
+          <button id="workflowStatusFurlToggle" class="workflow-status-furl-toggle" type="button"
+            title="Furl workflow monitor" aria-label="Furl workflow monitor" aria-pressed="false" aria-expanded="true"><span
+              class="workflow-status-furl-icon" aria-hidden="true"></span></button>
+          <span class="workflow-status-title">Workflow Monitor</span>
+        </div>
         <div class="workflow-status-actions">
           <button id="workflowStatusToggleAvailable" class="btn-mini" type="button" title="Show available workflows"
             aria-pressed="false">Show available</button>
-          <button id="workflowStatusFurlToggle" class="btn-mini" type="button" title="Furl workflow monitor"
-            aria-pressed="false" aria-expanded="true">Furl all</button>
           <button id="workflowStatusRefresh" class="btn-mini" type="button" title="Refresh workflows">Refresh</button>
           <label class="workflow-status-checkbox-label" title="Show non-executable design artefacts in the available workflows list">
             <input id="workflowStatusShowDesigns" type="checkbox" />

@@ -771,7 +771,8 @@ describe('workflow monitor capability-index polling and global furl', () => {
         __testOnly_setWorkflowMonitorGloballyFurled(true);
 
         const furlButton = document.getElementById('workflowStatusFurlToggle');
-        expect(furlButton.textContent).toBe('Unfurl all');
+        expect(furlButton.getAttribute('aria-label')).toBe('Unfurl workflow monitor');
+        expect(furlButton.textContent).toBe('');
         expect(furlButton.getAttribute('aria-expanded')).toBe('false');
         expect(document.getElementById('workflowStatusBody').textContent).not.toContain(
             'Workflow capability index still building'
@@ -788,13 +789,14 @@ describe('workflow monitor capability-index polling and global furl', () => {
 
         __testOnly_setWorkflowMonitorGloballyFurled(false);
 
-        expect(furlButton.textContent).toBe('Furl all');
+        expect(furlButton.getAttribute('aria-label')).toBe('Furl workflow monitor');
+        expect(furlButton.textContent).toBe('');
         expect(furlButton.getAttribute('aria-expanded')).toBe('true');
         expect(document.getElementById('workflowStatusBody').textContent).toContain(
             'Workflow capability index still building'
         );
         expect(document.querySelectorAll('.workflow-status-group')).toHaveLength(1);
-        expect(document.querySelector('.workflow-status-group-body').classList.contains('is-collapsed')).toBe(false);
+        expect(document.querySelector('.workflow-status-group-body').classList.contains('is-collapsed')).toBe(true);
         exportPayload = __testOnly_buildWorkflowMonitorExportPayload();
         expect(exportPayload.monitor_state.global_furled).toBe(false);
         expect(exportPayload.monitor_state.active_live_refresh_timer_active).toBe(true);

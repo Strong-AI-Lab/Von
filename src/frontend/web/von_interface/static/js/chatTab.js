@@ -20654,9 +20654,19 @@ function updateWorkflowStatusActionButtons() {
     }
     if (furlToggleButton) {
         const furled = Boolean(workflowStatusGroupUiState.globallyFurled);
+        if (!furlToggleButton.querySelector('.workflow-status-furl-icon')) {
+            furlToggleButton.textContent = '';
+            const icon = document.createElement('span');
+            icon.className = 'workflow-status-furl-icon';
+            icon.setAttribute('aria-hidden', 'true');
+            furlToggleButton.appendChild(icon);
+        }
         furlToggleButton.setAttribute('aria-pressed', furled ? 'true' : 'false');
         furlToggleButton.setAttribute('aria-expanded', furled ? 'false' : 'true');
-        furlToggleButton.textContent = furled ? 'Unfurl all' : 'Furl all';
+        furlToggleButton.setAttribute(
+            'aria-label',
+            furled ? 'Unfurl workflow monitor' : 'Furl workflow monitor'
+        );
         furlToggleButton.title = furled
             ? 'Unfurl workflow monitor'
             : 'Furl workflow monitor';
@@ -20886,12 +20896,6 @@ function setWorkflowMonitorGloballyFurled(furled) {
         clearWorkflowDefinitionsRetryTimer();
     }
     if (!nextFurled) {
-        const groups = buildWorkflowStatusGroups(Array.from(workflowStatusStreamState.items.values()));
-        groups.forEach((group) => {
-            if (group?.workflowId) {
-                workflowStatusGroupUiState.collapsedByWorkflowId.set(group.workflowId, false);
-            }
-        });
         restoreWorkflowMonitorTimersAfterUnfurl();
     }
     renderWorkflowStatusBody();
