@@ -600,6 +600,80 @@ def test_runtime_selected_workflow_trace_required_evidence_contract_blocks_missi
     )
 
 
+def test_custom_workflow_actions_do_not_make_missing_required_evidence_tools_expected() -> (
+    None
+):
+    contract = _entity_information_workflow_required_effects_contract()
+
+    record = _build_record(
+        prompt_text="Who am I?",
+        response_text="No explicit profile information was found.",
+        workflow_routing={
+            "workflow_id": "#V#entity_information_retrieval_workflow",
+            "verdict": "rag_selected",
+            "source": "selector",
+        },
+        selected_workflow_trace={
+            "selected_workflow_id": "#V#entity_information_retrieval_workflow",
+            "selected_execution_mode": "custom_workflow",
+            "workflow_required_effects_contract": contract,
+            "workflow_required_effects_contract_source": "definition_metadata",
+        },
+        aux_llm_calls=[
+            {
+                "type": "workflow_execution",
+                "workflow_id": "#V#entity_information_retrieval_workflow",
+                "completed": True,
+                "execution_summary": {
+                    "schema_version": "workflow_execution_summary.v1",
+                    "workflow_id": "#V#entity_information_retrieval_workflow",
+                    "completed": True,
+                    "terminal_status": "completed",
+                    "final_state": "completed",
+                    "step_result_envelope_count": 2,
+                    "action_started_count": 2,
+                    "action_completed_count": 2,
+                    "action_success_count": 2,
+                    "action_failure_count": 0,
+                    "action_unknown_count": 0,
+                    "terminal_effect_count": 1,
+                    "terminal_effects": [],
+                    "durable_side_effect_count": 0,
+                    "durable_side_effects": [],
+                },
+            }
+        ],
+        tool_invocations=[],
+    )
+
+    execution = record.get("execution")
+    assert isinstance(execution, dict)
+    summary = execution.get("summary")
+    assert isinstance(summary, dict)
+    assert summary.get("zero_tools_executed") is True
+    assert summary.get("zero_tool_execution_expected") is False
+    assert summary.get("zero_tool_reason_code") == "required_effect_tools_missing"
+    assert summary.get("required_effects_missing_required_tools") == [
+        "get_predicate_incidence",
+        "find_relations_with_argument",
+    ]
+
+    routing_diagnostics = record.get("workflow_routing_diagnostics")
+    assert isinstance(routing_diagnostics, dict)
+    dispatch = routing_diagnostics.get("dispatch")
+    assert isinstance(dispatch, dict)
+    assert dispatch.get("zero_tool_execution_expected") is False
+    assert dispatch.get("zero_tool_reason_code") == "required_effect_tools_missing"
+    assert dispatch.get("required_effects_missing_required_tool_count") == 2
+
+    completion_gate = record.get("completion_gate") or {}
+    assert completion_gate.get("decision") == "escalation_required"
+    assert completion_gate.get("safe_to_claim_completion") is False
+    assert "entity_information_evidence_missing" in (
+        completion_gate.get("blocking_failure_codes") or []
+    )
+
+
 def test_prompt_required_evidence_contract_blocks_missing_surface() -> None:
     record = _build_record(
         prompt_text=(

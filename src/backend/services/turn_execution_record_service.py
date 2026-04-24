@@ -1823,6 +1823,128 @@ def _derive_zero_tool_execution_reason(
     }
 
 
+def _observed_invocation_tool_names(
+    serialised_invocations: Sequence[Mapping[str, Any]],
+) -> list[str]:
+    observed: list[str] = []
+    seen: set[str] = set()
+    for invocation in serialised_invocations:
+        if not isinstance(invocation, Mapping):
+            continue
+        tool_name = _safe_str(invocation.get("tool")) or _safe_str(
+            invocation.get("method")
+        )
+        if not tool_name:
+            continue
+        lowered = tool_name.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        observed.append(tool_name)
+    return observed
+
+
+def _required_effect_tool_obligation_summary(
+    *,
+    required_effects: Sequence[Mapping[str, Any]],
+    serialised_invocations: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    observed_tool_names = _observed_invocation_tool_names(serialised_invocations)
+    observed_lookup = {tool.lower() for tool in observed_tool_names}
+
+    required_tools: list[str] = []
+    missing_tools: list[str] = []
+    unresolved_effect_ids: list[str] = []
+    unresolved_effect_types: list[str] = []
+    required_tool_seen: set[str] = set()
+    missing_tool_seen: set[str] = set()
+    unresolved_effect_seen: set[str] = set()
+    unresolved_type_seen: set[str] = set()
+
+    for effect in required_effects:
+        if not isinstance(effect, Mapping):
+            continue
+        effect_required_tools = _dedupe_string_sequence(
+            effect.get("required_tools") or []
+        )
+        for tool_name in effect_required_tools:
+            lowered_tool = tool_name.lower()
+            if lowered_tool not in required_tool_seen:
+                required_tool_seen.add(lowered_tool)
+                required_tools.append(tool_name)
+
+        effect_status = (_safe_str(effect.get("status")) or "").lower()
+        if effect_status not in {"not_executed", "not_satisfied"}:
+            continue
+
+        effect_id = _safe_str(effect.get("effect_id"))
+        if effect_id and effect_id.lower() not in unresolved_effect_seen:
+            unresolved_effect_seen.add(effect_id.lower())
+            unresolved_effect_ids.append(effect_id)
+        effect_type = _safe_str(effect.get("effect_type"))
+        if effect_type and effect_type.lower() not in unresolved_type_seen:
+            unresolved_type_seen.add(effect_type.lower())
+            unresolved_effect_types.append(effect_type)
+
+        for tool_name in effect_required_tools:
+            lowered_tool = tool_name.lower()
+            if lowered_tool in observed_lookup or lowered_tool in missing_tool_seen:
+                continue
+            missing_tool_seen.add(lowered_tool)
+            missing_tools.append(tool_name)
+
+    return {
+        "required_effects_observed_tool_names": observed_tool_names,
+        "required_effects_required_tools": required_tools,
+        "required_effects_required_tool_count": len(required_tools),
+        "required_effects_missing_required_tools": missing_tools,
+        "required_effects_missing_required_tool_count": len(missing_tools),
+        "required_effects_unresolved_effect_ids": unresolved_effect_ids,
+        "required_effects_unresolved_effect_types": unresolved_effect_types,
+    }
+
+
+def _apply_required_effect_tool_obligations_to_execution_summary(
+    *,
+    execution_summary: Mapping[str, Any],
+    required_effects: Sequence[Mapping[str, Any]],
+    serialised_invocations: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    summary = dict(execution_summary)
+    obligation_summary = _required_effect_tool_obligation_summary(
+        required_effects=required_effects,
+        serialised_invocations=serialised_invocations,
+    )
+    if obligation_summary["required_effects_required_tool_count"] <= 0:
+        return summary
+
+    summary.update(obligation_summary)
+    tool_execution_raw = summary.get("tool_execution")
+    tool_execution = (
+        dict(tool_execution_raw) if isinstance(tool_execution_raw, Mapping) else {}
+    )
+    tool_execution.update(obligation_summary)
+    summary["tool_execution"] = tool_execution
+
+    missing_tool_count = int(
+        obligation_summary["required_effects_missing_required_tool_count"]
+    )
+    zero_tools_executed = bool(summary.get("zero_tools_executed"))
+    if missing_tool_count > 0 and zero_tools_executed:
+        summary["zero_tool_execution_expected"] = False
+        summary["zero_tool_reason_code"] = "required_effect_tools_missing"
+        summary["zero_tool_reason"] = (
+            "Required effect tools were declared but matching tool execution "
+            "was not observed."
+        )
+        tool_execution["zero_tools_executed"] = True
+        tool_execution["zero_tool_execution_expected"] = False
+        tool_execution["zero_tool_reason_code"] = summary["zero_tool_reason_code"]
+        tool_execution["zero_tool_reason"] = summary["zero_tool_reason"]
+
+    return summary
+
+
 def _normalise_prompt_provenance(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, Mapping):
         return None
@@ -2725,6 +2847,31 @@ def build_workflow_routing_diagnostics(
                     bool,
                 )
                 else None
+            ),
+            "required_effects_required_tools": _dedupe_string_sequence(
+                execution_summary_payload.get("required_effects_required_tools") or []
+            ),
+            "required_effects_required_tool_count": _safe_non_negative_int(
+                execution_summary_payload.get("required_effects_required_tool_count")
+            ),
+            "required_effects_missing_required_tools": _dedupe_string_sequence(
+                execution_summary_payload.get("required_effects_missing_required_tools")
+                or []
+            ),
+            "required_effects_missing_required_tool_count": _safe_non_negative_int(
+                execution_summary_payload.get(
+                    "required_effects_missing_required_tool_count"
+                )
+            ),
+            "required_effects_unresolved_effect_ids": _dedupe_string_sequence(
+                execution_summary_payload.get("required_effects_unresolved_effect_ids")
+                or []
+            ),
+            "required_effects_unresolved_effect_types": _dedupe_string_sequence(
+                execution_summary_payload.get(
+                    "required_effects_unresolved_effect_types"
+                )
+                or []
             ),
             "failure_codes": dispatch_failure_codes,
             "zero_execution_primary_failure_code": dispatch_primary_failure_code,
@@ -5871,23 +6018,6 @@ def build_turn_execution_record(
         serialised_invocations=serialised_invocations,
         selected_workflow_trace=selected_workflow_trace_payload,
     )
-    workflow_routing_diagnostics = build_workflow_routing_diagnostics(
-        workflow_discovery=workflow_discovery,
-        workflow_routing=workflow_routing,
-        turn_execution_diagnostics=(
-            turn_execution_diagnostics
-            if isinstance(turn_execution_diagnostics, Mapping)
-            else None
-        ),
-        aux_llm_calls=aux_llm_calls,
-        turn_expected_outcome_contract=(
-            resolved_turn_expected_outcome_contract.to_state_payload()
-            if turn_expected_outcome_contract_payload
-            else None
-        ),
-        execution_summary=execution_summary,
-    )
-
     representation_effects_contract = _build_representation_required_effects_contract(
         aux_llm_calls=aux_llm_calls,
     )
@@ -5972,6 +6102,28 @@ def build_turn_execution_record(
         )
         if custom_workflow_effect is not None:
             required_effects.append(custom_workflow_effect)
+
+    execution_summary = _apply_required_effect_tool_obligations_to_execution_summary(
+        execution_summary=execution_summary,
+        required_effects=required_effects,
+        serialised_invocations=serialised_invocations,
+    )
+    workflow_routing_diagnostics = build_workflow_routing_diagnostics(
+        workflow_discovery=workflow_discovery,
+        workflow_routing=workflow_routing,
+        turn_execution_diagnostics=(
+            turn_execution_diagnostics
+            if isinstance(turn_execution_diagnostics, Mapping)
+            else None
+        ),
+        aux_llm_calls=aux_llm_calls,
+        turn_expected_outcome_contract=(
+            resolved_turn_expected_outcome_contract.to_state_payload()
+            if turn_expected_outcome_contract_payload
+            else None
+        ),
+        execution_summary=execution_summary,
+    )
 
     postcondition_checks = _build_postcondition_checks(
         required_effects=required_effects,
