@@ -315,6 +315,154 @@ def test_execute_llm_step_tool_mode_filters_turn_contract_tools_to_allowed_workf
     assert captured["workflow_discovery_timeout_seconds"] == 5.0
 
 
+def test_execute_llm_step_tool_mode_infers_predicate_incidence_from_alias_contract(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _StubGateway:
+        def describe_methods(self) -> dict[str, object]:
+            return {
+                "search_concepts": {},
+                "fetch_concept": {},
+                "get_predicate_incidence": {},
+            }
+
+    class _StubOrchestrator:
+        @staticmethod
+        def _infer_turn_contract_required_tools(**_kwargs):
+            return (
+                "search_concepts",
+                "fetch_concept",
+                "get_predicate_incidence",
+            )
+
+        def __init__(self, **_kwargs):
+            captured["max_tool_invocations"] = _kwargs.get("max_tool_invocations")
+
+        def _load_workflow_model_policy(self, _preferred_language):
+            return object(), {}
+
+        def _select_model_for_stage(self, **kwargs):
+            return kwargs.get("default_model")
+
+        def _action_tool_calling_plan(self, request):
+            captured["required_prompt_tools"] = request.data.get(
+                "required_prompt_tools"
+            )
+            return type(
+                "_Result",
+                (),
+                {
+                    "status": "success",
+                    "outputs": {
+                        "tool_calls_present": False,
+                        "orchestrator_result": {"response_text": '{"ok": true}'},
+                    },
+                },
+            )()
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.orchestrator.InternalMCPChatOrchestrator",
+        _StubOrchestrator,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.model_registry_service.get_model_registry_snapshot",
+        lambda: {},
+    )
+
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=MagicMock(),
+            gateway=_StubGateway(),
+            model="gemma4:26b",
+        ),
+        data={
+            "turn_expected_outcome_contract_state": {
+                "schema_version": "turn_expected_outcome_contract.v1",
+                "fields": {
+                    "summary": "List the key predicates for scientific papers.",
+                    "grounding_requirement": (
+                        "Every predicate listed must be verified against the "
+                        "actual Vontology schema using ontology inspection tools."
+                    ),
+                },
+                "required_tools": [
+                    "vontology_concept_search",
+                    "fetch_concept",
+                ],
+            }
+        },
+        prompt_contract={"prompt_text": "Call tools."},
+        llm_policy={
+            "tool_mode": "allowed",
+            "allowed_tools": [
+                "search_concepts",
+                "fetch_concept",
+                "get_predicate_incidence",
+            ],
+        },
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "success"
+    assert captured["required_prompt_tools"] == [
+        "search_concepts",
+        "fetch_concept",
+        "get_predicate_incidence",
+    ]
+    assert captured["max_tool_invocations"] == 4
+
+
+def test_execute_llm_step_skips_completion_report_narration_when_tools_missing(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "src.backend.workflows.llm_step_executor._build_gateway_runtime",
+        lambda request: (_ for _ in ()).throw(
+            AssertionError("narration should not call the LLM gateway")
+        ),
+    )
+
+    request = WorkflowActionRequest(
+        action_id="llm.action",
+        inputs={},
+        environment=WorkflowEnvironment(
+            llm_client=MagicMock(),
+            gateway=object(),
+            model="gemma4:26b",
+        ),
+        data={
+            "completion_report": {
+                "missing_prompt_tools": [
+                    "vontology_concept_search",
+                    "fetch_concept",
+                ],
+            },
+            "aux_llm_calls": [],
+        },
+        workflow_state_id="narration",
+        prompt_contract={"prompt_text": "Narrate the completion report."},
+    )
+
+    result = execute_llm_step(request)
+
+    assert result.status == "success"
+    assert result.outputs["final_response"] == ""
+    envelope = result.outputs["llm_step_envelope"]
+    assert envelope["completion_reason"] == "skipped_missing_required_prompt_tools"
+    assert envelope["missing_prompt_tools"] == [
+        "vontology_concept_search",
+        "fetch_concept",
+    ]
+    assert result.outputs["aux_llm_calls"][-1]["reason"] == (
+        "completion_report_missing_required_prompt_tools"
+    )
+
+
 def test_execute_llm_step_emits_phase_transition_for_conversation_turn_stage(
     monkeypatch,
 ) -> None:
@@ -450,10 +598,7 @@ def test_execute_llm_step_uses_default_conversation_turn_timeout_when_env_missin
     result = execute_llm_step(request)
 
     assert result.status == "success"
-    assert (
-        captured["timeout_override_sec"]
-        == DEFAULT_CONVERSATION_TURN_LLM_TIMEOUT_SEC
-    )
+    assert captured["timeout_override_sec"] == DEFAULT_CONVERSATION_TURN_LLM_TIMEOUT_SEC
 
 
 def test_execute_llm_step_returns_failed_result_on_gateway_llm_timeout(

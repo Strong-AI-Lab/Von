@@ -163,7 +163,9 @@ def _patch_representation_profiles(monkeypatch):
     patch_representation_profile_loader(monkeypatch)
 
 
-def test_prompt_text_only_representation_request_does_not_emit_required_effects_contract() -> None:
+def test_prompt_text_only_representation_request_does_not_emit_required_effects_contract() -> (
+    None
+):
     record = _build_record(
         prompt_text="Fully represent the corresponding paper from #V#uploaded_file_copy_abc123."
     )
@@ -179,7 +181,9 @@ def test_prompt_text_only_representation_request_does_not_emit_required_effects_
     )
 
 
-def test_structured_scholarly_prompt_requirement_emits_required_effects_contract() -> None:
+def test_structured_scholarly_prompt_requirement_emits_required_effects_contract() -> (
+    None
+):
     record = _build_record(
         aux_llm_calls=[
             {
@@ -205,7 +209,9 @@ def test_structured_scholarly_prompt_requirement_emits_required_effects_contract
     assert required_effects[0].get("targets") == ["#V#uploaded_file_copy_abc123"]
 
 
-def test_prompt_text_only_person_representation_request_does_not_emit_required_effects_contract() -> None:
+def test_prompt_text_only_person_representation_request_does_not_emit_required_effects_contract() -> (
+    None
+):
     record = _build_record(
         prompt_text="Represent this person profile from this CV file #V#uploaded_file_copy_person_1.",
     )
@@ -221,7 +227,9 @@ def test_prompt_text_only_person_representation_request_does_not_emit_required_e
     )
 
 
-def test_prompt_arxiv_list_does_not_emit_representation_contract_without_authority_surface() -> None:
+def test_prompt_arxiv_list_does_not_emit_representation_contract_without_authority_surface() -> (
+    None
+):
     record = _build_record(
         prompt_text=(
             "eprint version: https://arxiv.org/abs/2310.03714\n"
@@ -241,7 +249,9 @@ def test_prompt_arxiv_list_does_not_emit_representation_contract_without_authori
     )
 
 
-def test_structured_generic_representation_target_fails_closed_without_profile_binding() -> None:
+def test_structured_generic_representation_target_fails_closed_without_profile_binding() -> (
+    None
+):
     record = _build_record(
         aux_llm_calls=[
             {
@@ -264,7 +274,10 @@ def test_structured_generic_representation_target_fails_closed_without_profile_b
     ]
     profile_resolution = contract.get("profile_resolution") or {}
     assert profile_resolution.get("fail_closed") is True
-    assert profile_resolution.get("fail_closed_reason") == "representation_profile_unmatched"
+    assert (
+        profile_resolution.get("fail_closed_reason")
+        == "representation_profile_unmatched"
+    )
 
     required_effects = record.get("required_effects") or []
     assert len(required_effects) == 1
@@ -314,7 +327,9 @@ def test_continuation_context_reuses_representation_contract() -> None:
     assert completion_gate.get("safe_to_claim_completion") is False
 
 
-def test_continuation_context_representation_contract_can_be_satisfied_by_matching_tool_execution() -> None:
+def test_continuation_context_representation_contract_can_be_satisfied_by_matching_tool_execution() -> (
+    None
+):
     prior_contract = _paper_continuation_contract()
     record = _build_record(
         prompt_text="Please proceed.",
@@ -359,7 +374,9 @@ def test_continuation_context_representation_contract_can_be_satisfied_by_matchi
     assert completion_gate.get("safe_to_claim_completion") is True
 
 
-def test_observed_write_tool_activity_emits_generic_kb_mutation_effect_without_prompt_semantics() -> None:
+def test_observed_write_tool_activity_emits_generic_kb_mutation_effect_without_prompt_semantics() -> (
+    None
+):
     """When a write tool invocation carries payload metadata (concept_id etc.),
     the effect should be *tool-authored* rather than a coarse generic fallback."""
     record = _build_record(
@@ -391,7 +408,9 @@ def test_observed_write_tool_activity_emits_generic_kb_mutation_effect_without_p
     assert "#V#concept_123" in (effect.get("targets") or [])
 
 
-def test_observed_failed_write_tool_activity_marks_generic_kb_mutation_unresolved() -> None:
+def test_observed_failed_write_tool_activity_marks_generic_kb_mutation_unresolved() -> (
+    None
+):
     """Failed write tool invocations produce tool-authored effects with
     not_satisfied status and tool-specific failure codes."""
     record = _build_record(
@@ -714,7 +733,10 @@ def test_prompt_required_evidence_contract_blocks_missing_surface() -> None:
         if effect.get("required_tools") == ["jira_search"]
     )
     assert jira_effect.get("status") == "not_executed"
-    assert jira_effect.get("failure_code") == "prompt_required_evidence_jira_search_missing"
+    assert (
+        jira_effect.get("failure_code")
+        == "prompt_required_evidence_jira_search_missing"
+    )
 
     completion_gate = record.get("completion_gate") or {}
     assert completion_gate.get("decision") == "escalation_required"
@@ -722,6 +744,245 @@ def test_prompt_required_evidence_contract_blocks_missing_surface() -> None:
     assert "prompt_required_evidence_jira_search_missing" in (
         completion_gate.get("blocking_failure_codes") or []
     )
+
+
+def test_turn_contract_required_tools_block_when_preflight_state_omitted() -> None:
+    record = _build_record(
+        prompt_text="What are key predicates for scientific papers in Vontology?",
+        response_text="Loaded: michael_witbrock",
+        turn_expected_outcome_contract={
+            "summary": "Identify key predicates for scientific papers.",
+            "required_tools": [
+                "resolve_concept_by_name",
+                "get_predicate_incidence",
+            ],
+        },
+        completion_report={
+            "response_text": "Loaded: michael_witbrock",
+            "required_prompt_tools": [
+                "resolve_concept_by_name",
+                "get_predicate_incidence",
+            ],
+            "missing_prompt_tools": ["resolve_concept_by_name"],
+        },
+        selected_workflow_trace={
+            "selected_workflow_id": "#V#tool_calling_workflow",
+            "required_prompt_tools": [
+                "resolve_concept_by_name",
+                "get_predicate_incidence",
+            ],
+            "missing_prompt_tools": ["resolve_concept_by_name"],
+        },
+        tool_invocations=[
+            {"tool": "get_predicate_incidence", "payload": {"success": True}}
+        ],
+    )
+
+    execution = record.get("execution")
+    assert isinstance(execution, dict)
+    assert execution.get("required_prompt_tools") == [
+        "resolve_concept_by_name",
+        "get_predicate_incidence",
+    ]
+    assert execution.get("missing_prompt_tools") == [
+        "resolve_concept_by_name",
+        "get_predicate_incidence",
+    ]
+
+    required_effects = record.get("required_effects")
+    assert isinstance(required_effects, list)
+    resolve_effect = next(
+        effect
+        for effect in required_effects
+        if effect.get("required_tools") == ["resolve_concept_by_name"]
+    )
+    assert resolve_effect.get("status") == "not_executed"
+    assert (
+        resolve_effect.get("failure_code")
+        == "prompt_required_evidence_resolve_concept_by_name_missing"
+    )
+    incidence_effect = next(
+        effect
+        for effect in required_effects
+        if effect.get("required_tools") == ["get_predicate_incidence"]
+    )
+    assert incidence_effect.get("status") == "not_executed"
+    assert (
+        incidence_effect.get("failure_code")
+        == "prompt_required_evidence_get_predicate_incidence_missing"
+    )
+
+    completion_gate = record.get("completion_gate") or {}
+    assert completion_gate.get("decision") == "escalation_required"
+    assert completion_gate.get("safe_to_claim_completion") is False
+    assert "prompt_required_evidence_resolve_concept_by_name_missing" in (
+        completion_gate.get("blocking_failure_codes") or []
+    )
+
+
+def test_turn_contract_search_bound_predicate_incidence_requires_searched_target() -> (
+    None
+):
+    record = _build_record(
+        prompt_text="What are key predicates for scientific papers in Vontology?",
+        response_text="Loaded: michael_witbrock",
+        turn_expected_outcome_contract={
+            "summary": "Identify key predicates for scientific papers.",
+            "required_tools": [
+                "search_concepts",
+                "get_predicate_incidence",
+            ],
+        },
+        tool_invocations=[
+            {
+                "tool": "search_concepts",
+                "payload": {
+                    "success": True,
+                    "results": [
+                        {
+                            "concept_id": "#V#scientific_paper",
+                            "name": "scientific paper",
+                            "kind": "type",
+                        }
+                    ],
+                },
+            },
+            {
+                "tool": "get_predicate_incidence",
+                "arguments": {"concept_id": "#V#michael_witbrock"},
+                "payload": {"success": True},
+            },
+        ],
+    )
+
+    execution = record.get("execution")
+    assert isinstance(execution, dict)
+    assert execution.get("required_prompt_tools") == [
+        "search_concepts",
+        "get_predicate_incidence",
+    ]
+    assert execution.get("missing_prompt_tools") == ["get_predicate_incidence"]
+
+    required_effects = record.get("required_effects")
+    assert isinstance(required_effects, list)
+    search_effect = next(
+        effect
+        for effect in required_effects
+        if effect.get("required_tools") == ["search_concepts"]
+    )
+    assert search_effect.get("status") == "satisfied"
+    incidence_effect = next(
+        effect
+        for effect in required_effects
+        if effect.get("required_tools") == ["get_predicate_incidence"]
+    )
+    assert incidence_effect.get("status") == "not_executed"
+    assert (
+        incidence_effect.get("failure_code")
+        == "prompt_required_evidence_get_predicate_incidence_missing"
+    )
+
+    completion_gate = record.get("completion_gate") or {}
+    assert completion_gate.get("decision") == "escalation_required"
+    assert completion_gate.get("safe_to_claim_completion") is False
+    assert "prompt_required_evidence_get_predicate_incidence_missing" in (
+        completion_gate.get("blocking_failure_codes") or []
+    )
+
+
+def test_turn_contract_fetch_bound_predicate_incidence_requires_fetched_target() -> (
+    None
+):
+    record = _build_record(
+        prompt_text="What are key predicates for scientific papers in Vontology?",
+        response_text="Loaded: michael_witbrock",
+        turn_expected_outcome_contract={
+            "summary": "Identify key predicates for scientific papers.",
+            "required_tools": [
+                "search_concepts",
+                "fetch_concept",
+                "get_predicate_incidence",
+            ],
+        },
+        tool_invocations=[
+            {
+                "tool": "search_concepts",
+                "arguments": {"query": "scientific paper"},
+                "payload": {"success": True},
+            },
+            {
+                "tool": "fetch_concept",
+                "arguments": {"concept_id": "#V#paper_on_arxiv_2603_01896"},
+                "payload": {"success": True},
+            },
+            {
+                "tool": "get_predicate_incidence",
+                "arguments": {"concept_id": "#V#michael_witbrock"},
+                "payload": {"success": True},
+            },
+        ],
+    )
+
+    execution = record.get("execution")
+    assert isinstance(execution, dict)
+    assert execution.get("missing_prompt_tools") == ["get_predicate_incidence"]
+
+    required_effects = record.get("required_effects")
+    assert isinstance(required_effects, list)
+    incidence_effect = next(
+        effect
+        for effect in required_effects
+        if effect.get("required_tools") == ["get_predicate_incidence"]
+    )
+    assert incidence_effect.get("status") == "not_executed"
+
+
+def test_turn_contract_treats_vontology_search_as_search_concepts_alias() -> None:
+    record = _build_record(
+        prompt_text="What are key predicates for scientific papers in Vontology?",
+        response_text="I still need relation summary evidence.",
+        turn_expected_outcome_contract={
+            "summary": "Identify key predicates for scientific papers.",
+            "required_tools": [
+                "search_concepts",
+                "get_text_relations_summary",
+            ],
+        },
+        tool_invocations=[
+            {
+                "tool": "vontology_concept_search",
+                "payload": {
+                    "success": True,
+                    "results": [
+                        {
+                            "concept_id": "#V#scientific_paper",
+                            "name": "scientific paper",
+                            "kind": "type",
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+
+    execution = record.get("execution")
+    assert isinstance(execution, dict)
+    assert execution.get("missing_prompt_tools") == ["get_text_relations_summary"]
+
+    required_effects = record.get("required_effects")
+    assert isinstance(required_effects, list)
+    search_effect = next(
+        effect
+        for effect in required_effects
+        if effect.get("required_tools") == ["search_concepts"]
+    )
+    assert search_effect.get("status") == "satisfied"
+    relation_summary_effect = next(
+        effect
+        for effect in required_effects
+        if effect.get("required_tools") == ["get_text_relations_summary"]
+    )
+    assert relation_summary_effect.get("status") == "not_executed"
 
 
 def test_prompt_required_evidence_contract_uses_metadata_authority_for_unknown_tool(
@@ -752,7 +1013,9 @@ def test_prompt_required_evidence_contract_uses_metadata_authority_for_unknown_t
     )
 
 
-def test_prompt_required_evidence_contract_does_not_block_false_empty_jira_answer_without_authoritative_critic_verdict() -> None:
+def test_prompt_required_evidence_contract_does_not_block_false_empty_jira_answer_without_authoritative_critic_verdict() -> (
+    None
+):
     record = _build_record(
         prompt_text=(
             "Which of my open Jira tasks seem most closely connected to the papers "
@@ -788,12 +1051,14 @@ def test_prompt_required_evidence_contract_does_not_block_false_empty_jira_answe
 
     execution = record.get("execution")
     assert isinstance(execution, dict)
-    assert execution.get("summary", {}).get(
-        "required_evidence_answer_consistency_blocked"
-    ) is False
-    assert execution.get("summary", {}).get(
-        "required_evidence_answer_consistency_source"
-    ) is None
+    assert (
+        execution.get("summary", {}).get("required_evidence_answer_consistency_blocked")
+        is False
+    )
+    assert (
+        execution.get("summary", {}).get("required_evidence_answer_consistency_source")
+        is None
+    )
 
     completion_gate = record.get("completion_gate") or {}
     assert (
@@ -812,7 +1077,9 @@ def test_prompt_required_evidence_contract_does_not_block_false_empty_jira_answe
     )
 
 
-def test_prompt_required_evidence_contract_does_not_block_without_authoritative_critic_verdict() -> None:
+def test_prompt_required_evidence_contract_does_not_block_without_authoritative_critic_verdict() -> (
+    None
+):
     record = _build_record(
         prompt_text="List grounded represented records linked to the current user.",
         response_text="2 results",
@@ -838,12 +1105,14 @@ def test_prompt_required_evidence_contract_does_not_block_without_authoritative_
 
     execution = record.get("execution")
     assert isinstance(execution, dict)
-    assert execution.get("summary", {}).get(
-        "required_evidence_answer_consistency_blocked"
-    ) is False
-    assert execution.get("summary", {}).get(
-        "required_evidence_answer_consistency_source"
-    ) is None
+    assert (
+        execution.get("summary", {}).get("required_evidence_answer_consistency_blocked")
+        is False
+    )
+    assert (
+        execution.get("summary", {}).get("required_evidence_answer_consistency_source")
+        is None
+    )
 
     completion_gate = record.get("completion_gate") or {}
     assert (
@@ -851,12 +1120,9 @@ def test_prompt_required_evidence_contract_does_not_block_without_authoritative_
         not in (completion_gate.get("blocking_failure_codes") or [])
     )
 
-    blocker = (
-        (completion_gate.get("evidence_payload") or {}).get(
-            "required_evidence_answer_consistency_blocker"
-        )
-        or {}
-    )
+    blocker = (completion_gate.get("evidence_payload") or {}).get(
+        "required_evidence_answer_consistency_blocker"
+    ) or {}
     assert blocker == {}
 
 
@@ -906,12 +1172,14 @@ def test_prompt_required_evidence_contract_prefers_authoritative_critic_blocker(
 
     execution = record.get("execution")
     assert isinstance(execution, dict)
-    assert execution.get("summary", {}).get(
-        "required_evidence_answer_consistency_blocked"
-    ) is True
-    assert execution.get("summary", {}).get(
-        "required_evidence_answer_consistency_source"
-    ) == "critic_verdict"
+    assert (
+        execution.get("summary", {}).get("required_evidence_answer_consistency_blocked")
+        is True
+    )
+    assert (
+        execution.get("summary", {}).get("required_evidence_answer_consistency_source")
+        == "critic_verdict"
+    )
 
     completion_gate = record.get("completion_gate") or {}
     assert completion_gate.get("decision") == "partial"
@@ -921,19 +1189,18 @@ def test_prompt_required_evidence_contract_prefers_authoritative_critic_blocker(
         completion_gate.get("blocking_failure_codes") or []
     )
 
-    blocker = (
-        (completion_gate.get("evidence_payload") or {}).get(
-            "required_evidence_answer_consistency_blocker"
-        )
-        or {}
-    )
+    blocker = (completion_gate.get("evidence_payload") or {}).get(
+        "required_evidence_answer_consistency_blocker"
+    ) or {}
     assert blocker.get("blocker_source") == "critic_verdict"
     assert blocker.get("status_reason") == (
         "Authoritative critic marked the answer as inconsistent with the retrieved evidence."
     )
 
 
-def test_prompt_required_evidence_contract_does_not_block_degraded_retrieval_without_authoritative_critic_verdict() -> None:
+def test_prompt_required_evidence_contract_does_not_block_degraded_retrieval_without_authoritative_critic_verdict() -> (
+    None
+):
     record = _build_record(
         prompt_text="List grounded represented records linked to the current user.",
         response_text="I couldn't find any grounded represented links.",
@@ -956,12 +1223,14 @@ def test_prompt_required_evidence_contract_does_not_block_degraded_retrieval_wit
 
     execution = record.get("execution")
     assert isinstance(execution, dict)
-    assert execution.get("summary", {}).get(
-        "required_evidence_answer_consistency_blocked"
-    ) is False
-    assert execution.get("summary", {}).get(
-        "required_evidence_answer_consistency_source"
-    ) is None
+    assert (
+        execution.get("summary", {}).get("required_evidence_answer_consistency_blocked")
+        is False
+    )
+    assert (
+        execution.get("summary", {}).get("required_evidence_answer_consistency_source")
+        is None
+    )
 
     completion_gate = record.get("completion_gate") or {}
     assert (
@@ -969,12 +1238,9 @@ def test_prompt_required_evidence_contract_does_not_block_degraded_retrieval_wit
         not in (completion_gate.get("blocking_failure_codes") or [])
     )
 
-    blocker = (
-        (completion_gate.get("evidence_payload") or {}).get(
-            "required_evidence_answer_consistency_blocker"
-        )
-        or {}
-    )
+    blocker = (completion_gate.get("evidence_payload") or {}).get(
+        "required_evidence_answer_consistency_blocker"
+    ) or {}
     assert blocker == {}
 
 
@@ -1025,7 +1291,9 @@ def test_prompt_required_mutation_contract_blocks_missing_task_create() -> None:
     )
 
 
-def test_prompt_required_mutation_contract_is_satisfied_by_task_create_execution() -> None:
+def test_prompt_required_mutation_contract_is_satisfied_by_task_create_execution() -> (
+    None
+):
     record = _build_record(
         prompt_text="Create a Von task for me titled 'Review replay results'.",
         response_text="Review replay results (#V#task_123).",
@@ -1207,7 +1475,7 @@ def test_incidental_read_tool_failure_outside_required_evidence_contract_does_no
                 "error": "lookup_failed",
                 "result_summary": "Search failed",
                 "payload": {"success": False},
-            }
+            },
         ],
     )
 

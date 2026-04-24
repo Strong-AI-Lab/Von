@@ -60,7 +60,9 @@ def test_build_concept_relations_payload_defaults_to_asserted_only() -> None:
     assert payload["uncertainty_diagnostics"]["mode"] == "asserted_only"
 
 
-def test_build_concept_relations_payload_includes_uncertain_rows_when_requested() -> None:
+def test_build_concept_relations_payload_includes_uncertain_rows_when_requested() -> (
+    None
+):
     from src.backend.db.repositories.concepts_repository import ConceptsRepository
     from src.backend.services.concept_relation_service import (
         build_concept_relations_payload,
@@ -177,9 +179,7 @@ def test_get_predicate_incidence_entity_mode_groups_distinct_predicates() -> Non
     assert payload["mode"] == "entity"
     assert payload["concept_id"] == "#V#michael_witbrock"
     assert payload["total_predicates"] == 2
-    rows = {
-        row["predicate_concept_id"]: row for row in payload.get("predicates") or []
-    }
+    rows = {row["predicate_concept_id"]: row for row in payload.get("predicates") or []}
     assert rows["#V#author_of"]["relation_hit_count"] == 2
     assert rows["#V#author_of"]["grounding_count"] == 2
     assert rows["#V#author_of"]["binary_relation_hit_count"] == 2
@@ -190,7 +190,63 @@ def test_get_predicate_incidence_entity_mode_groups_distinct_predicates() -> Non
     assert rows["#V#task_assigned_to"]["grounding_count"] == 3
 
 
-def test_relation_previews_and_predicate_incidence_groundings_include_type_ids() -> None:
+def test_get_predicate_incidence_rejects_plain_text_concept_identifier() -> None:
+    from src.backend.services.concept_relation_service import get_predicate_incidence
+
+    with pytest.raises(ValueError, match="use search_concepts first"):
+        get_predicate_incidence(concept_id="paper")
+
+
+def test_get_predicate_incidence_default_avoids_text_object_scan(monkeypatch) -> None:
+    from src.backend.services import concept_relation_service as service
+
+    calls = []
+
+    def fake_find_relations_with_argument(*_args, **kwargs):
+        calls.append((kwargs.get("relation_kind"), kwargs.get("argument_index")))
+        return {
+            "hits": [],
+            "paging": {"limit": 500, "offset": 0, "returned": 0, "total_available": 0},
+            "uncertainty_diagnostics": {
+                "mode": "asserted_only",
+                "include_uncertain": False,
+                "statuses": None,
+            },
+        }
+
+    monkeypatch.setattr(
+        service,
+        "find_relations_with_argument",
+        fake_find_relations_with_argument,
+    )
+
+    service.get_predicate_incidence(
+        concept_id="#V#paper",
+        include_concept_preview=False,
+    )
+    assert calls == [("binary", 1), ("text", 1)]
+
+    calls.clear()
+    service.get_predicate_incidence(
+        concept_id="#V#paper",
+        argument_index="any",
+        include_concept_preview=False,
+    )
+    assert calls == [("binary", "any"), ("text", 1)]
+
+    calls.clear()
+    service.get_predicate_incidence(
+        concept_id="#V#paper",
+        argument_index="object",
+        relation_kind="text",
+        include_concept_preview=False,
+    )
+    assert calls == [("text", "object")]
+
+
+def test_relation_previews_and_predicate_incidence_groundings_include_type_ids() -> (
+    None
+):
     from src.backend.db.repositories.concepts_repository import ConceptsRepository
     from src.backend.services.concept_relation_service import (
         find_relations_with_argument,
@@ -321,16 +377,19 @@ def test_get_predicate_incidence_counts_other_argument_types() -> None:
     } == {"#V#paper_one", "#V#paper_two"}
     assert counts[("object", "#V#diary_entry")]["relation_hit_count"] == 1
     assert row["literal_argument_count"] == 1
-    assert payload["typed_predicate_incidence_diagnostics"][
-        "type_count_mode"
-    ] == "direct_asserted"
+    assert (
+        payload["typed_predicate_incidence_diagnostics"]["type_count_mode"]
+        == "direct_asserted"
+    )
 
 
 def test_get_predicate_incidence_role_expands_reified_neighbour_roles() -> None:
     from src.backend.db.repositories.concepts_repository import ConceptsRepository
     from src.backend.services.concept_relation_service import get_predicate_incidence
 
-    ConceptsRepository.insert_one({"concept_id": "#V#michael_witbrock", "relationships": {}})
+    ConceptsRepository.insert_one(
+        {"concept_id": "#V#michael_witbrock", "relationships": {}}
+    )
     ConceptsRepository.insert_one(
         {
             "concept_id": "#V#authorship_event_one",
@@ -389,14 +448,15 @@ def test_get_predicate_incidence_role_expands_reified_neighbour_roles() -> None:
         (entry["role_predicate_concept_id"], entry["type_concept_id"]): entry
         for entry in expansion.get("role_filler_type_counts") or []
     }
-    assert filler_counts[("#V#has_work", "#V#scholarly_article")][
-        "relation_hit_count"
-    ] == 1
-    assert filler_counts[("#V#has_evidence", "#V#file_copy")][
-        "relation_hit_count"
-    ] == 1
+    assert (
+        filler_counts[("#V#has_work", "#V#scholarly_article")]["relation_hit_count"]
+        == 1
+    )
+    assert filler_counts[("#V#has_evidence", "#V#file_copy")]["relation_hit_count"] == 1
     assert expansion["literal_filler_count"] == 1
-    assert payload["role_expansions"][0]["anchor_predicate_concept_id"] == "#V#has_author"
+    assert (
+        payload["role_expansions"][0]["anchor_predicate_concept_id"] == "#V#has_author"
+    )
 
     auto_payload = get_predicate_incidence(
         concept_id="#V#michael_witbrock",
@@ -405,9 +465,10 @@ def test_get_predicate_incidence_role_expands_reified_neighbour_roles() -> None:
         role_expansion_mode="auto",
     )
     assert auto_payload["role_expansions"] == []
-    assert auto_payload["typed_predicate_incidence_diagnostics"][
-        "role_expansion_status"
-    ] == "metadata_unavailable"
+    assert (
+        auto_payload["typed_predicate_incidence_diagnostics"]["role_expansion_status"]
+        == "metadata_unavailable"
+    )
 
 
 def test_get_predicate_incidence_type_mode_counts_instances_and_groundings() -> None:
@@ -450,9 +511,7 @@ def test_get_predicate_incidence_type_mode_counts_instances_and_groundings() -> 
     assert payload["type_ids_considered"] == ["#V#sail_student"]
     assert payload["instance_count_considered"] == 2
     assert payload["total_predicates"] == 2
-    rows = {
-        row["predicate_concept_id"]: row for row in payload.get("predicates") or []
-    }
+    rows = {row["predicate_concept_id"]: row for row in payload.get("predicates") or []}
     assert rows["#V#member_of_organisation"]["relation_hit_count"] == 2
     assert rows["#V#member_of_organisation"]["grounding_count"] == 1
     assert rows["#V#member_of_organisation"]["grounded_instance_count"] == 2
@@ -461,7 +520,9 @@ def test_get_predicate_incidence_type_mode_counts_instances_and_groundings() -> 
     assert rows["#V#has_phd_supervisor"]["grounded_instance_count"] == 2
 
 
-def test_subject_relation_retrieval_filters_hidden_targets_under_access_control() -> None:
+def test_subject_relation_retrieval_filters_hidden_targets_under_access_control() -> (
+    None
+):
     from src.backend.db.repositories.concepts_repository import ConceptsRepository
     from src.backend.services.concept_relation_service import (
         find_relations_with_argument,
@@ -490,7 +551,9 @@ def test_subject_relation_retrieval_filters_hidden_targets_under_access_control(
             "relationships": {"specific_to_user": ["#V#other_user"]},
         }
     )
-    ConceptsRepository.insert_one({"concept_id": "#V#scholarly_article", "relationships": {}})
+    ConceptsRepository.insert_one(
+        {"concept_id": "#V#scholarly_article", "relationships": {}}
+    )
     ConceptsRepository.insert_one(
         {
             "concept_id": "#V#secret_type",
@@ -523,8 +586,11 @@ def test_subject_relation_retrieval_filters_hidden_targets_under_access_control(
         )
         predicates = incidence_payload.get("predicates") or []
         author_row = next(
-            row for row in predicates if row.get("predicate_concept_id") == "#V#author_of"
+            row
+            for row in predicates
+            if row.get("predicate_concept_id") == "#V#author_of"
         )
         groundings = author_row.get("sample_groundings") or []
-        assert [grounding.get("concept_id") for grounding in groundings] == ["#V#paper_public"]
-
+        assert [grounding.get("concept_id") for grounding in groundings] == [
+            "#V#paper_public"
+        ]

@@ -1850,7 +1850,7 @@ def _required_effect_tool_obligation_summary(
     serialised_invocations: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
     observed_tool_names = _observed_invocation_tool_names(serialised_invocations)
-    observed_lookup = {tool.lower() for tool in observed_tool_names}
+    observed_lookup = {_tool_requirement_key(tool) for tool in observed_tool_names}
 
     required_tools: list[str] = []
     missing_tools: list[str] = []
@@ -1868,7 +1868,7 @@ def _required_effect_tool_obligation_summary(
             effect.get("required_tools") or []
         )
         for tool_name in effect_required_tools:
-            lowered_tool = tool_name.lower()
+            lowered_tool = _tool_requirement_key(tool_name)
             if lowered_tool not in required_tool_seen:
                 required_tool_seen.add(lowered_tool)
                 required_tools.append(tool_name)
@@ -1887,7 +1887,7 @@ def _required_effect_tool_obligation_summary(
             unresolved_effect_types.append(effect_type)
 
         for tool_name in effect_required_tools:
-            lowered_tool = tool_name.lower()
+            lowered_tool = _tool_requirement_key(tool_name)
             if lowered_tool in observed_lookup or lowered_tool in missing_tool_seen:
                 continue
             missing_tool_seen.add(lowered_tool)
@@ -3949,6 +3949,271 @@ def _dedupe_string_sequence(values: Sequence[Any]) -> list[str]:
     return cleaned_values
 
 
+def _tool_requirement_key(tool_name: Any) -> str:
+    cleaned = _safe_str(tool_name)
+    lowered = cleaned.lower() if cleaned else ""
+    if lowered in {"search_concepts", "vontology_concept_search"}:
+        return "concept_search"
+    return lowered
+
+
+def _extract_string_sequence_from_mapping(
+    payload: Mapping[str, Any] | None,
+    key: str,
+) -> list[str]:
+    if not isinstance(payload, Mapping):
+        return []
+    value = payload.get(key)
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return []
+    return _dedupe_string_sequence(value)
+
+
+def _extract_invocation_concept_argument(invocation: Mapping[str, Any]) -> str | None:
+    for field_name in (
+        "effective_arguments",
+        "arguments",
+        "effective_payload",
+        "payload",
+    ):
+        value = invocation.get(field_name)
+        if not isinstance(value, Mapping):
+            continue
+        concept_id = _safe_str(value.get("concept_id"))
+        if concept_id:
+            return concept_id
+    return None
+
+
+def _extract_resolved_concept_ids_from_invocations(
+    tool_invocations: Sequence[Mapping[str, Any]] | None,
+) -> list[str]:
+    concept_ids: list[str] = []
+    seen: set[str] = set()
+
+    def _append(raw_value: Any) -> None:
+        concept_id = _safe_str(raw_value)
+        if not concept_id:
+            return
+        lowered = concept_id.lower()
+        if lowered in seen:
+            return
+        seen.add(lowered)
+        concept_ids.append(concept_id)
+
+    for invocation in tool_invocations or ():
+        if not isinstance(invocation, Mapping):
+            continue
+        tool_name = _safe_str(invocation.get("tool")) or _safe_str(
+            invocation.get("method")
+        )
+        if not tool_name or tool_name.lower() != "resolve_concept_by_name":
+            continue
+        payload = invocation.get("effective_payload")
+        if not isinstance(payload, Mapping):
+            payload = invocation.get("payload")
+        if not isinstance(payload, Mapping):
+            continue
+        if (
+            _classify_tool_invocation_status(invocation=invocation, payload=payload)
+            != "ok"
+        ):
+            continue
+
+        _append(payload.get("resolved_concept_id"))
+        _append(payload.get("concept_id"))
+        match = payload.get("match")
+        if isinstance(match, Mapping):
+            _append(match.get("concept_id"))
+            _append(match.get("resolved_concept_id"))
+
+    return concept_ids
+
+
+def _search_concepts_row_is_follow_up_concept(row: Mapping[str, Any]) -> bool:
+    concept_id = _safe_str(row.get("concept_id"))
+    if not concept_id:
+        return False
+    lowered_concept_id = concept_id.lower()
+    if lowered_concept_id.startswith("#v#uploaded_file_copy_"):
+        return False
+
+    predicate_meta_ids = {
+        "#v#predicate",
+        "#v#binary_predicate",
+        "#v#ternary_predicate",
+        "#v#nary_predicate",
+    }
+    if lowered_concept_id in predicate_meta_ids:
+        return False
+
+    kind = _safe_str(row.get("kind"))
+    if kind and kind.lower() == "predicate":
+        return False
+
+    instance_of = _safe_str(row.get("instance_of"))
+    if instance_of and instance_of.lower() in predicate_meta_ids:
+        return False
+
+    hierarchy = row.get("hierarchy")
+    if isinstance(hierarchy, Mapping):
+        primary_path = hierarchy.get("primary_path")
+        if isinstance(primary_path, Sequence) and not isinstance(
+            primary_path,
+            (str, bytes, bytearray),
+        ):
+            lowered_path = {
+                str(item).strip().lower()
+                for item in primary_path
+                if isinstance(item, str) and str(item).strip()
+            }
+            if lowered_path & predicate_meta_ids:
+                return False
+
+    return True
+
+
+def _extract_search_concept_ids_from_invocations(
+    tool_invocations: Sequence[Mapping[str, Any]] | None,
+) -> list[str]:
+    concept_ids: list[str] = []
+    seen: set[str] = set()
+
+    for invocation in tool_invocations or ():
+        if not isinstance(invocation, Mapping):
+            continue
+        tool_name = _safe_str(invocation.get("tool")) or _safe_str(
+            invocation.get("method")
+        )
+        if not tool_name or tool_name.lower() not in {
+            "search_concepts",
+            "vontology_concept_search",
+        }:
+            continue
+        payload = invocation.get("effective_payload")
+        if not isinstance(payload, Mapping):
+            payload = invocation.get("payload")
+        if not isinstance(payload, Mapping):
+            continue
+        if (
+            _classify_tool_invocation_status(invocation=invocation, payload=payload)
+            != "ok"
+        ):
+            continue
+
+        results = payload.get("results")
+        if not isinstance(results, Sequence) or isinstance(
+            results,
+            (str, bytes, bytearray),
+        ):
+            continue
+        for row in results:
+            if not isinstance(row, Mapping):
+                continue
+            if not _search_concepts_row_is_follow_up_concept(row):
+                continue
+            concept_id = _safe_str(row.get("concept_id"))
+            if not concept_id:
+                continue
+            lowered = concept_id.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            concept_ids.append(concept_id)
+
+    return concept_ids
+
+
+def _extract_fetch_concept_ids_from_invocations(
+    tool_invocations: Sequence[Mapping[str, Any]] | None,
+) -> list[str]:
+    concept_ids: list[str] = []
+    seen: set[str] = set()
+
+    for invocation in tool_invocations or ():
+        if not isinstance(invocation, Mapping):
+            continue
+        tool_name = _safe_str(invocation.get("tool")) or _safe_str(
+            invocation.get("method")
+        )
+        if not tool_name or tool_name.lower() != "fetch_concept":
+            continue
+        payload = invocation.get("effective_payload")
+        if not isinstance(payload, Mapping):
+            payload = invocation.get("payload")
+        if not isinstance(payload, Mapping):
+            payload = {}
+        if (
+            _classify_tool_invocation_status(invocation=invocation, payload=payload)
+            != "ok"
+        ):
+            continue
+        concept_id = _extract_invocation_concept_argument(invocation)
+        if not concept_id:
+            continue
+        lowered = concept_id.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        concept_ids.append(concept_id)
+
+    return concept_ids
+
+
+def _target_bound_missing_prompt_tools(
+    *,
+    required_tools: Sequence[str],
+    tool_invocations: Sequence[Mapping[str, Any]] | None,
+) -> list[str]:
+    required_lookup = {
+        tool_name.lower()
+        for tool_name in required_tools
+        if isinstance(tool_name, str) and tool_name.strip()
+    }
+    if "get_predicate_incidence" not in required_lookup:
+        return []
+    if not (
+        {"resolve_concept_by_name", "search_concepts", "vontology_concept_search"}
+        & required_lookup
+    ):
+        return []
+
+    target_concept_ids = _dedupe_string_sequence(
+        [
+            *_extract_resolved_concept_ids_from_invocations(tool_invocations),
+            *_extract_search_concept_ids_from_invocations(tool_invocations),
+            *_extract_fetch_concept_ids_from_invocations(tool_invocations),
+        ]
+    )
+    target_lookup = {concept_id.lower() for concept_id in target_concept_ids}
+    targeted_incidence_observed = False
+    if target_lookup:
+        for invocation in tool_invocations or ():
+            if not isinstance(invocation, Mapping):
+                continue
+            tool_name = _safe_str(invocation.get("tool")) or _safe_str(
+                invocation.get("method")
+            )
+            if not tool_name or tool_name.lower() != "get_predicate_incidence":
+                continue
+            payload = invocation.get("effective_payload")
+            if not isinstance(payload, Mapping):
+                payload = invocation.get("payload")
+            if not isinstance(payload, Mapping):
+                payload = {}
+            if (
+                _classify_tool_invocation_status(invocation=invocation, payload=payload)
+                != "ok"
+            ):
+                continue
+            concept_id = _extract_invocation_concept_argument(invocation)
+            if concept_id and concept_id.lower() in target_lookup:
+                targeted_incidence_observed = True
+                break
+
+    return [] if targeted_incidence_observed else ["get_predicate_incidence"]
+
+
 def _extract_sequence_values_from_aux(
     aux_llm_calls: Sequence[Mapping[str, Any]] | None,
     *,
@@ -4841,7 +5106,7 @@ def _tools_match_mode_satisfied(
     match_mode: str,
 ) -> bool:
     cleaned_required = [
-        tool.lower().strip()
+        _tool_requirement_key(tool)
         for tool in required_tools
         if isinstance(tool, str) and tool.strip()
     ]
@@ -5097,10 +5362,16 @@ def _materialise_required_effects_from_contract(
         return []
 
     successful_lookup = {
-        name.lower() for name in successful_tools if isinstance(name, str)
+        _tool_requirement_key(name)
+        for name in successful_tools
+        if isinstance(name, str)
     }
-    failed_lookup = {name.lower() for name in failed_tools if isinstance(name, str)}
-    blocked_lookup = {name.lower() for name in blocked_tools if isinstance(name, str)}
+    failed_lookup = {
+        _tool_requirement_key(name) for name in failed_tools if isinstance(name, str)
+    }
+    blocked_lookup = {
+        _tool_requirement_key(name) for name in blocked_tools if isinstance(name, str)
+    }
     observed_lookup = successful_lookup.union(failed_lookup).union(blocked_lookup)
 
     contract_schema_version = _safe_str(contract.get("schema_version")) or ""
@@ -5198,7 +5469,7 @@ def _materialise_required_effects_from_contract(
         successful_other_target = False
         successful_required_tools: list[str] = []
         for tool_name in required_tools:
-            if tool_name.lower() not in successful_lookup:
+            if _tool_requirement_key(tool_name) not in successful_lookup:
                 continue
             payloads, successful_count = _collect_successful_tool_payloads(
                 tool_invocations=tool_invocations,
@@ -5246,7 +5517,8 @@ def _materialise_required_effects_from_contract(
                 failure_codes = []
         else:
             has_failed_required_tool = any(
-                tool.lower() in failed_lookup or tool.lower() in blocked_lookup
+                _tool_requirement_key(tool) in failed_lookup
+                or _tool_requirement_key(tool) in blocked_lookup
                 for tool in required_tools
             )
             if has_failed_required_tool:
@@ -6007,6 +6279,48 @@ def build_turn_execution_record(
         selected_workflow_trace_payload["expected_outcome_contract_state"] = (
             resolved_turn_expected_outcome_contract.to_state_payload()
         )
+    completion_report_payload = (
+        dict(completion_report) if isinstance(completion_report, Mapping) else None
+    )
+    effective_required_prompt_tools = _dedupe_string_sequence(
+        [
+            *(required_prompt_tools or ()),
+            *resolved_turn_expected_outcome_contract.required_tools,
+            *_extract_string_sequence_from_mapping(
+                selected_workflow_trace_payload,
+                "required_prompt_tools",
+            ),
+            *_extract_string_sequence_from_mapping(
+                completion_report_payload,
+                "required_prompt_tools",
+            ),
+        ]
+    )
+    target_bound_missing_prompt_tools = _target_bound_missing_prompt_tools(
+        required_tools=effective_required_prompt_tools,
+        tool_invocations=tool_invocations,
+    )
+    target_bound_missing_lookup = {
+        _tool_requirement_key(tool_name)
+        for tool_name in target_bound_missing_prompt_tools
+        if isinstance(tool_name, str) and tool_name.strip()
+    }
+    successful_tool_lookup = {
+        _tool_requirement_key(tool_name)
+        for tool_name in successful_tools
+        if isinstance(tool_name, str) and tool_name.strip()
+    }
+    effective_missing_prompt_tools = [
+        tool_name
+        for tool_name in effective_required_prompt_tools
+        if _tool_requirement_key(tool_name) not in successful_tool_lookup
+        or _tool_requirement_key(tool_name) in target_bound_missing_lookup
+    ]
+    prompt_required_successful_tools = [
+        tool_name
+        for tool_name in successful_tools
+        if _tool_requirement_key(tool_name) not in target_bound_missing_lookup
+    ]
     execution_summary = _summarise_tool_execution_context(
         workflow_routing=workflow_routing,
         turn_execution_diagnostics=(
@@ -6027,13 +6341,13 @@ def build_turn_execution_record(
         else _build_prompt_required_mutation_contract(
             prompt_text=prompt_text,
             aux_llm_calls=aux_llm_calls,
-            required_prompt_tools=required_prompt_tools,
+            required_prompt_tools=effective_required_prompt_tools,
         )
     )
     prompt_required_evidence_contract = _build_prompt_required_evidence_contract(
         prompt_text=prompt_text,
         aux_llm_calls=aux_llm_calls,
-        required_prompt_tools=required_prompt_tools,
+        required_prompt_tools=effective_required_prompt_tools,
     )
     workflow_required_effects_contract, workflow_required_effects_contract_source = (
         _resolve_workflow_required_effects_contract(
@@ -6051,14 +6365,14 @@ def build_turn_execution_record(
     )
     prompt_required_mutation_effects = _materialise_required_effects_from_contract(
         contract=prompt_required_mutation_contract,
-        successful_tools=successful_tools,
+        successful_tools=prompt_required_successful_tools,
         failed_tools=failed_tools,
         blocked_tools=blocked_tools,
         tool_invocations=tool_invocations,
     )
     prompt_required_evidence_effects = _materialise_required_effects_from_contract(
         contract=prompt_required_evidence_contract,
-        successful_tools=successful_tools,
+        successful_tools=prompt_required_successful_tools,
         failed_tools=failed_tools,
         blocked_tools=blocked_tools,
         tool_invocations=tool_invocations,
@@ -6311,6 +6625,13 @@ def build_turn_execution_record(
     execution_summary_with_contract["required_evidence_answer_consistency_source"] = (
         prompt_required_evidence_answer_consistency_source
     )
+    if effective_required_prompt_tools:
+        execution_summary_with_contract["required_prompt_tools"] = list(
+            effective_required_prompt_tools
+        )
+        execution_summary_with_contract["missing_prompt_tools"] = list(
+            effective_missing_prompt_tools
+        )
 
     record_payload = {
         "schema_version": TURN_EXECUTION_RECORD_SCHEMA_VERSION,
@@ -6366,6 +6687,16 @@ def build_turn_execution_record(
             "required_effects_contract": primary_required_effects_contract,
             "prompt_required_mutation_contract": prompt_required_mutation_contract,
             "workflow_required_effects_contract": workflow_required_effects_contract,
+            "required_prompt_tools": (
+                list(effective_required_prompt_tools)
+                if effective_required_prompt_tools
+                else None
+            ),
+            "missing_prompt_tools": (
+                list(effective_missing_prompt_tools)
+                if effective_required_prompt_tools
+                else None
+            ),
             "diagnostic_events": diagnostic_events,
             "retry": retry,
             "workflow_stage_model": build_conversation_turn_stage_model_snapshot(),

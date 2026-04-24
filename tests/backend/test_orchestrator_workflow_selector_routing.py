@@ -7053,8 +7053,11 @@ def test_turn_contract_dispatch_preflight_outcome_tracks_dispatch_surface_metada
             data={
                 "final_response": "Custom workflow stayed selected.",
                 "tool_messages": [],
-                "invocations": [],
-                "iteration_count": 1,
+                "invocations": [
+                    {"tool": "search_knowledge_base", "payload": {"success": True}},
+                    {"tool": "jira_search", "payload": {"success": True}},
+                ],
+                "iteration_count": 2,
             },
             final_state="complete",
             completed=True,
@@ -7137,6 +7140,177 @@ def test_turn_contract_dispatch_preflight_outcome_tracks_dispatch_surface_metada
         == "selected_custom_workflow_cannot_satisfy_multi_surface_turn_contract"
         for entry in result.aux_llm_calls
     )
+
+
+def test_completed_custom_workflow_missing_required_tools_recovers_to_tool_pipeline(
+    monkeypatch,
+):
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    selected_workflow_id = "#V#concept_search_instance_retrieval_workflow"
+    structured_contract = _build_structured_turn_contract_payload(
+        summary="List predicates for scientific papers.",
+        grounding_requirement=(
+            "Predicates must come from predicate incidence for the resolved concept."
+        ),
+        selector_guidance=(
+            "Resolve the scientific paper concept, then inspect predicate incidence."
+        ),
+        required_tools=("search_concepts", "get_predicate_incidence"),
+    )
+
+    _register_terminal_custom_workflow(
+        orchestrator,
+        workflow_id=selected_workflow_id,
+        purpose="Retrieve grounded concept profiles from Vontology.",
+    )
+    monkeypatch.setattr(
+        orchestrator._gateway,
+        "describe_methods",
+        lambda: {
+            "search_concepts": {"category": "read"},
+            "get_predicate_incidence": {"category": "read"},
+        },
+    )
+
+    execute_calls: list[str] = []
+    tool_pipeline_payload: dict[str, Any] = {}
+
+    def _execute_workflow(workflow_id: str, **kwargs: Any):
+        execute_calls.append(workflow_id)
+        if workflow_id == selected_workflow_id:
+            return SimpleNamespace(
+                data={
+                    "final_response": (
+                        "The specific predicates were not included in the provided "
+                        "execution results."
+                    ),
+                    "tool_messages": [],
+                    "invocations": [],
+                    "iteration_count": 0,
+                },
+                final_state="complete",
+                completed=True,
+            )
+        if workflow_id == TOOL_CALLING_WORKFLOW_ID:
+            tool_pipeline_payload.update(dict(kwargs))
+            return SimpleNamespace(
+                data={
+                    "final_response": "Recovered with predicate-incidence evidence.",
+                    "tool_messages": [],
+                    "invocations": [
+                        {"tool": "search_concepts", "payload": {"success": True}},
+                        {
+                            "tool": "get_predicate_incidence",
+                            "payload": {"success": True},
+                        },
+                    ],
+                    "iteration_count": 2,
+                },
+                final_state="complete",
+                completed=True,
+            )
+        raise AssertionError(f"Unexpected workflow execution: {workflow_id}")
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
+
+    result = orchestrator.run(
+        prompt="What are key predicates for scientific papers in Vontology?",
+        context=[],
+        llm_client=_CapturingLLM(
+            [
+                json.dumps(
+                    {
+                        "workflow_id": selected_workflow_id,
+                        "confidence": 0.95,
+                        "reasoning": (
+                            "The specialised represented-retrieval workflow fits."
+                        ),
+                    }
+                )
+            ]
+        ),
+        model=None,
+        user_namespace="#V#user@org",
+        workflow_discovery_result={
+            "matches": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Concept Search Instance Retrieval Workflow",
+                    "description": "Retrieve grounded concept profiles.",
+                    "routing_eligible": True,
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "candidate_source": "workflow_discovery",
+                    "relevance_score": 0.99,
+                    "confidence_score": 0.99,
+                }
+            ],
+            "candidates": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Concept Search Instance Retrieval Workflow",
+                    "description": "Retrieve grounded concept profiles.",
+                    "routing_eligible": True,
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "candidate_source": "workflow_discovery",
+                    "relevance_score": 0.99,
+                    "confidence_score": 0.99,
+                }
+            ],
+            "match_count": 1,
+            **structured_contract,
+        },
+    )
+
+    assert execute_calls == [selected_workflow_id, TOOL_CALLING_WORKFLOW_ID]
+    assert result.response_text == "Recovered with predicate-incidence evidence."
+    assert tool_pipeline_payload["data"]["prior_failed_selected_workflow"] == {
+        "workflow_id": selected_workflow_id,
+        "completed": True,
+        "tool_progress_detected": False,
+        "missing_required_tools": [
+            "search_concepts",
+            "get_predicate_incidence",
+        ],
+        "recovery_reason": "custom_workflow_missing_required_prompt_tools",
+        "final_state": "complete",
+    }
+
+    handoff = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "workflow_recovery_handoff"
+        ),
+        None,
+    )
+    assert handoff is not None
+    assert handoff.get("reason") == "custom_workflow_missing_required_prompt_tools"
+    assert handoff.get("missing_required_tools") == [
+        "search_concepts",
+        "get_predicate_incidence",
+    ]
+
+    terminal_boundary = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "workflow_dispatch_boundary"
+            and entry.get("boundary") == "workflow_terminal"
+            and entry.get("selected_execution_mode") == "custom_workflow"
+        ),
+        None,
+    )
+    assert terminal_boundary is not None
+    assert terminal_boundary.get("status") == "follow_up_required"
+    assert terminal_boundary.get("continued_to_tool_pipeline") is True
+    assert terminal_boundary.get("missing_required_tools") == [
+        "search_concepts",
+        "get_predicate_incidence",
+    ]
 
 
 def test_url_read_prompt_stays_selector_owned_without_python_url_preselection(

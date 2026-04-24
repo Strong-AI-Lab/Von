@@ -89,6 +89,105 @@ def _normalise_string_list(raw_values: Any) -> list[str]:
     return normalised
 
 
+def _dedupe_string_sequence(raw_values: Any) -> list[str]:
+    if not isinstance(raw_values, Sequence) or isinstance(
+        raw_values, (str, bytes, bytearray)
+    ):
+        return []
+
+    normalised: list[str] = []
+    seen: set[str] = set()
+    for item in raw_values:
+        cleaned = _safe_str(item)
+        if not cleaned:
+            continue
+        lowered = cleaned.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        normalised.append(cleaned)
+    return normalised
+
+
+def _is_mapping_sequence(value: Any) -> bool:
+    return isinstance(value, Sequence) and not isinstance(
+        value, (str, bytes, bytearray)
+    )
+
+
+def _copy_mapping_sequence(value: Any) -> list[dict[str, Any]]:
+    if not _is_mapping_sequence(value):
+        return []
+    return [dict(item) for item in value if isinstance(item, Mapping)]
+
+
+def _merge_mapping_sequences(
+    *values: Any,
+) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    for value in values:
+        for item in _copy_mapping_sequence(value):
+            if item in merged:
+                continue
+            merged.append(item)
+    return merged
+
+
+def _tool_invocation_completed_successfully(invocation: Mapping[str, Any]) -> bool:
+    if bool(invocation.get("blocked")):
+        return False
+    if (
+        isinstance(invocation.get("error"), str)
+        and str(invocation.get("error")).strip()
+    ):
+        return False
+
+    status = invocation.get("status")
+    if isinstance(status, str) and status.strip().lower() in {
+        "error",
+        "failed",
+        "failure",
+    }:
+        return False
+
+    payload = invocation.get("effective_payload")
+    if not isinstance(payload, Mapping):
+        payload = invocation.get("payload")
+    if isinstance(payload, Mapping):
+        status_value = str(payload.get("status") or "").strip().lower()
+        if status_value in {"error", "failed", "failure"}:
+            return False
+        if payload.get("success") is False:
+            return False
+    return True
+
+
+def _missing_required_tools_from_invocations(
+    *,
+    required_tools: Sequence[str],
+    invocations: Sequence[Mapping[str, Any]] | None,
+) -> list[str]:
+    required = _dedupe_string_sequence(list(required_tools))
+    if not required:
+        return []
+
+    successful_tools: set[str] = set()
+    for invocation in invocations or ():
+        if not isinstance(invocation, Mapping):
+            continue
+        if not _tool_invocation_completed_successfully(invocation):
+            continue
+        raw_tool = invocation.get("tool")
+        if isinstance(raw_tool, str) and raw_tool.strip():
+            successful_tools.add(raw_tool.strip().lower())
+
+    return [
+        tool_name
+        for tool_name in required
+        if tool_name.strip().lower() not in successful_tools
+    ]
+
+
 def _coerce_non_empty_text(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
@@ -891,6 +990,8 @@ def build_turn_execution_selected_workflow_outputs(
     turn_expected_outcome_contract: Mapping[str, Any] | None = None,
     workflow_routing: Mapping[str, Any] | None = None,
     workflow_discovery: Mapping[str, Any] | None = None,
+    parent_aux_llm_calls: Sequence[Mapping[str, Any]] | None = None,
+    parent_llm_calls: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build the master-turn context payload for one selected workflow outcome.
 
@@ -1096,19 +1197,34 @@ def build_turn_execution_selected_workflow_outputs(
     child_invocations = child_outputs_map.get("invocations")
     if isinstance(child_invocations, list):
         outputs["invocations"] = list(child_invocations)
+    contract_required_tools = _dedupe_string_sequence(
+        resolved_turn_expected_outcome_contract.required_tools
+    )
+    contract_missing_tools = _missing_required_tools_from_invocations(
+        required_tools=contract_required_tools,
+        invocations=(
+            [item for item in child_invocations if isinstance(item, Mapping)]
+            if isinstance(child_invocations, list)
+            else []
+        ),
+    )
     child_tool_messages = child_outputs_map.get("tool_messages")
     if isinstance(child_tool_messages, list):
         outputs["tool_messages"] = list(child_tool_messages)
     child_aux_llm_calls = child_outputs_map.get("aux_llm_calls")
-    if isinstance(child_aux_llm_calls, list):
-        outputs["aux_llm_calls"] = [
-            dict(item) for item in child_aux_llm_calls if isinstance(item, Mapping)
-        ]
+    if _is_mapping_sequence(parent_aux_llm_calls) or _is_mapping_sequence(
+        child_aux_llm_calls
+    ):
+        outputs["aux_llm_calls"] = _merge_mapping_sequences(
+            parent_aux_llm_calls,
+            child_aux_llm_calls,
+        )
     child_llm_calls = child_outputs_map.get("llm_calls")
-    if isinstance(child_llm_calls, list):
-        outputs["llm_calls"] = [
-            dict(item) for item in child_llm_calls if isinstance(item, Mapping)
-        ]
+    if _is_mapping_sequence(parent_llm_calls) or _is_mapping_sequence(child_llm_calls):
+        outputs["llm_calls"] = _merge_mapping_sequences(
+            parent_llm_calls,
+            child_llm_calls,
+        )
     for key in (
         "required_prompt_tools",
         "required_prompt_fetch_concept_ids",
@@ -1123,6 +1239,53 @@ def build_turn_execution_selected_workflow_outputs(
         value = child_outputs_map.get(key)
         if isinstance(value, list):
             outputs[key] = list(value)
+    if contract_required_tools:
+        existing_required_prompt_tools = outputs.get("required_prompt_tools")
+        existing_missing_prompt_tools = outputs.get("missing_prompt_tools")
+        outputs["required_prompt_tools"] = _dedupe_string_sequence(
+            [
+                *(existing_required_prompt_tools or []),
+                *contract_required_tools,
+            ]
+            if isinstance(existing_required_prompt_tools, list)
+            else contract_required_tools
+        )
+        derived_missing_prompt_tools = _dedupe_string_sequence(
+            [
+                *(existing_missing_prompt_tools or []),
+                *contract_missing_tools,
+            ]
+            if isinstance(existing_missing_prompt_tools, list)
+            else contract_missing_tools
+        )
+        outputs["missing_prompt_tools"] = derived_missing_prompt_tools
+        if derived_missing_prompt_tools and not _safe_str(
+            outputs.get("missing_tool_call_retry_reason_override")
+        ):
+            outputs["missing_tool_call_retry_reason_override"] = (
+                "turn contract required tool(s) not yet invoked successfully: "
+                + ", ".join(derived_missing_prompt_tools)
+            )
+        completion_report_map["required_prompt_tools"] = list(
+            outputs["required_prompt_tools"]
+        )
+        completion_report_map["missing_prompt_tools"] = list(
+            outputs["missing_prompt_tools"]
+        )
+        selected_workflow_trace_payload["required_prompt_tools"] = list(
+            outputs["required_prompt_tools"]
+        )
+        selected_workflow_trace_payload["missing_prompt_tools"] = list(
+            outputs["missing_prompt_tools"]
+        )
+        selected_workflow_trace_map = outputs.get("selected_workflow_trace")
+        if isinstance(selected_workflow_trace_map, dict):
+            selected_workflow_trace_map["required_prompt_tools"] = list(
+                outputs["required_prompt_tools"]
+            )
+            selected_workflow_trace_map["missing_prompt_tools"] = list(
+                outputs["missing_prompt_tools"]
+            )
     for key in (
         "prompt_requirement_url_policy",
         "tool_plan_context_lineage",

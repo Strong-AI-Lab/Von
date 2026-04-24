@@ -210,6 +210,129 @@ def test_selected_workflow_outputs_preserve_child_telemetry_and_required_tools()
     )
 
 
+def test_selected_workflow_outputs_preserve_parent_dispatch_telemetry() -> None:
+    parent_aux = [
+        {
+            "type": "workflow_dispatch_boundary",
+            "boundary": "workflow_handoff",
+            "status": "started",
+            "selected_execution_mode": "tool_pipeline",
+            "selected_workflow_id": "#V#tool_calling_workflow",
+        },
+        {
+            "type": "workflow_dispatch_boundary",
+            "boundary": "workflow_terminal",
+            "status": "failed",
+            "selected_execution_mode": "tool_pipeline",
+            "selected_workflow_id": "#V#tool_calling_workflow",
+            "error": (
+                "workflow_required_effects_tools_unavailable:"
+                "conversation_telemetry_get_locator"
+            ),
+        },
+    ]
+    outputs = build_turn_execution_selected_workflow_outputs(
+        selected_workflow_id="#V#tool_calling_workflow",
+        child_completed=False,
+        final_state="preflight_requirements",
+        failure_detail=(
+            "workflow_required_effects_tools_unavailable:"
+            "conversation_telemetry_get_locator"
+        ),
+        child_outputs={
+            "response_text": "Workflow could not start.",
+            "workflow_required_effects_tool_policy": {
+                "ok": False,
+                "unavailable_required_tools": ["conversation_telemetry_get_locator"],
+            },
+        },
+        rendered_child_response_text="Workflow could not start.",
+        child_result_snapshot={"response_text": "Workflow could not start."},
+        parent_aux_llm_calls=parent_aux,
+    )
+
+    assert outputs["aux_llm_calls"] == parent_aux
+
+
+def test_selected_workflow_outputs_merge_parent_and_child_telemetry() -> None:
+    parent_aux = [
+        {
+            "type": "workflow_dispatch_boundary",
+            "boundary": "workflow_handoff",
+            "status": "started",
+        }
+    ]
+    child_aux = [
+        {
+            "type": "tool_call_plan",
+            "planned_count": 1,
+        }
+    ]
+
+    outputs = build_turn_execution_selected_workflow_outputs(
+        selected_workflow_id="#V#tool_calling_workflow",
+        child_completed=True,
+        final_state="completed",
+        failure_detail=None,
+        child_outputs={
+            "response_text": "Grounded answer.",
+            "aux_llm_calls": child_aux,
+        },
+        rendered_child_response_text="Grounded answer.",
+        child_result_snapshot={"response_text": "Grounded answer."},
+        parent_aux_llm_calls=parent_aux,
+    )
+
+    assert outputs["aux_llm_calls"] == [*parent_aux, *child_aux]
+
+
+def test_selected_workflow_outputs_derives_missing_tools_from_turn_contract() -> None:
+    outputs = build_turn_execution_selected_workflow_outputs(
+        selected_workflow_id="#V#tool_calling_workflow",
+        child_completed=True,
+        final_state="completed",
+        failure_detail=None,
+        child_outputs={
+            "response_text": "I found matching concepts.",
+            "invocations": [
+                {
+                    "tool": "search_concepts",
+                    "status": "ok",
+                    "effective_payload": {
+                        "success": True,
+                        "results": [{"concept_id": "#V#scientific_paper"}],
+                    },
+                }
+            ],
+        },
+        rendered_child_response_text="I found matching concepts.",
+        turn_expected_outcome_contract={
+            "required_tools": ["search_concepts", "fetch_concept"],
+        },
+    )
+
+    assert outputs["required_prompt_tools"] == [
+        "search_concepts",
+        "fetch_concept",
+    ]
+    assert outputs["missing_prompt_tools"] == ["fetch_concept"]
+    assert outputs["missing_tool_call_retry_reason_override"] == (
+        "turn contract required tool(s) not yet invoked successfully: fetch_concept"
+    )
+    assert outputs["completion_report"]["required_prompt_tools"] == [
+        "search_concepts",
+        "fetch_concept",
+    ]
+    assert outputs["completion_report"]["missing_prompt_tools"] == ["fetch_concept"]
+    assert outputs["selected_workflow_trace"]["required_prompt_tools"] == [
+        "search_concepts",
+        "fetch_concept",
+    ]
+    assert outputs["selected_workflow_trace"]["missing_prompt_tools"] == [
+        "fetch_concept"
+    ]
+
+
 def _unsafe_missing_grounded_evidence_record() -> dict[str, Any]:
     return {
         "completion_gate": {

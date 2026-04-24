@@ -176,6 +176,12 @@ _TURN_EXECUTION_TOOL_PIPELINE_ACTION_IDS = frozenset(
         "turn_execution.completion_gate",
     }
 )
+_REQUIRED_EFFECTS_UNRESTRICTED_TOOL_SURFACE_ACTION_IDS = frozenset(
+    {
+        "tool_calling.respond",
+        "tool_calling.execute",
+    }
+)
 _TURN_EXECUTION_NARRATION_ACTION_IDS = frozenset(
     {
         "narration.classify",
@@ -1664,6 +1670,7 @@ def _evaluate_workflow_required_effects_tool_policy(
     allowed_tools: set[str] = set()
     direct_action_tools: set[str] = set()
     has_unrestricted_llm_tool_step = False
+    unrestricted_tool_pipeline_actions: set[str] = set()
     states = getattr(workflow_def, "states", None)
     if isinstance(states, Mapping):
         for state in states.values():
@@ -1673,7 +1680,13 @@ def _evaluate_workflow_required_effects_tool_policy(
             for action in actions:
                 action_id = getattr(action, "action_id", None)
                 if isinstance(action_id, str) and action_id.strip():
-                    direct_action_tools.add(action_id.strip().lower())
+                    cleaned_action_id = action_id.strip().lower()
+                    direct_action_tools.add(cleaned_action_id)
+                    if (
+                        cleaned_action_id
+                        in _REQUIRED_EFFECTS_UNRESTRICTED_TOOL_SURFACE_ACTION_IDS
+                    ):
+                        unrestricted_tool_pipeline_actions.add(cleaned_action_id)
                 if not bool(getattr(action, "is_llm_step", False)):
                     continue
                 llm_policy = getattr(action, "llm_policy", None)
@@ -1688,7 +1701,8 @@ def _evaluate_workflow_required_effects_tool_policy(
                 else:
                     has_unrestricted_llm_tool_step = True
 
-    if has_unrestricted_llm_tool_step:
+    has_unrestricted_tool_pipeline_step = bool(unrestricted_tool_pipeline_actions)
+    if has_unrestricted_llm_tool_step or has_unrestricted_tool_pipeline_step:
         unavailable_required_tools: list[str] = []
     else:
         available_lower = set(allowed_tools)
@@ -1705,6 +1719,10 @@ def _evaluate_workflow_required_effects_tool_policy(
         "allowed_tools": sorted(allowed_tools),
         "direct_action_tools": sorted(direct_action_tools),
         "unrestricted_llm_tool_step": bool(has_unrestricted_llm_tool_step),
+        "unrestricted_tool_pipeline_step": has_unrestricted_tool_pipeline_step,
+        "unrestricted_tool_pipeline_actions": sorted(
+            unrestricted_tool_pipeline_actions
+        ),
         "unavailable_required_tools": list(unavailable_required_tools),
         "reason_code": ("ok" if ok else "workflow_required_effect_tool_not_allowed"),
     }
@@ -4899,16 +4917,17 @@ class InternalMCPChatOrchestrator:
         data = request.data
         aux_log = data.setdefault("aux_llm_calls", [])
         augmented_context = data.get("augmented_context") or []
+        tool_invocation_sequence = cast(
+            Sequence[Mapping[str, Any]] | None,
+            (
+                data.get("invocations")
+                if isinstance(data.get("invocations"), Sequence)
+                and not isinstance(data.get("invocations"), (str, bytes, bytearray))
+                else None
+            ),
+        )
         successful_tool_names = self._extract_successful_tool_names(
-            cast(
-                Sequence[Mapping[str, Any]] | None,
-                (
-                    data.get("invocations")
-                    if isinstance(data.get("invocations"), Sequence)
-                    and not isinstance(data.get("invocations"), (str, bytes, bytearray))
-                    else None
-                ),
-            )
+            tool_invocation_sequence
         )
         missing_required_tools = data.get("missing_prompt_tools")
         if not isinstance(missing_required_tools, list):
@@ -5145,7 +5164,7 @@ class InternalMCPChatOrchestrator:
             ]
 
         forced = self._infer_missing_tool_call_retry_tool_calls(
-            augmented_context,
+            retry_context,
             user_prompt=data.get("user_prompt"),
             turn_expected_outcome_contract=turn_expected_outcome_contract,
             missing_required_tools=missing_required_tools,
@@ -5154,6 +5173,7 @@ class InternalMCPChatOrchestrator:
             missing_required_scholarly_representation_file_copy_ids=missing_required_scholarly_file_copy_ids,
             required_create_type_name=required_create_type_name,
             required_url_extraction_url=required_url_extraction_url,
+            tool_invocations=tool_invocation_sequence,
             invoked_tool_names=successful_tool_names,
             user_concept_id=(
                 data.get("user_concept_id")
@@ -9299,6 +9319,114 @@ class InternalMCPChatOrchestrator:
                     semantic_retry_reason_override = semantic_assessment.retry_reason
 
             if recovery_reason is not None:
+                if has_unmet_prompt_requirements:
+                    parent_forced_tool_calls = (
+                        self._infer_missing_tool_call_retry_tool_calls(
+                            follow_up_context,
+                            user_prompt=(
+                                prompt_for_requirements
+                                if isinstance(prompt_for_requirements, str)
+                                else (
+                                    data.get("prompt")
+                                    if isinstance(data.get("prompt"), str)
+                                    else ""
+                                )
+                            ),
+                            turn_expected_outcome_contract=(
+                                self._build_turn_expected_outcome_contract(data)
+                            ),
+                            missing_required_tools=missing_prompt_tools,
+                            missing_required_fetch_concept_ids=(
+                                missing_prompt_fetch_concept_ids
+                            ),
+                            missing_required_read_file_copy_ids=(
+                                missing_prompt_read_file_copy_ids
+                            ),
+                            missing_required_scholarly_representation_file_copy_ids=(
+                                missing_prompt_scholarly_representation_file_copy_ids
+                            ),
+                            required_create_type_name=required_prompt_create_type_name,
+                            required_url_extraction_url=(
+                                prompt_requirements.required_url_extraction_url
+                            ),
+                            tool_invocations=invocations_for_requirements,
+                            invoked_tool_names=(
+                                self._extract_successful_tool_names(
+                                    invocations_for_requirements
+                                )
+                            ),
+                            user_concept_id=(
+                                str(data.get("user_concept_id")).strip()
+                                if isinstance(data.get("user_concept_id"), str)
+                                and str(data.get("user_concept_id")).strip()
+                                else None
+                            ),
+                        )
+                    )
+                    if parent_forced_tool_calls:
+                        import json
+
+                        current_response = (
+                            json.dumps(parent_forced_tool_calls[0])
+                            if len(parent_forced_tool_calls) == 1
+                            else json.dumps(parent_forced_tool_calls)
+                        )
+                        missing_tool_call_retry_suppressed = False
+                        missing_tool_call_retry_stop_reason = None
+                        missing_tool_call_recovery_outcome = (
+                            "retry_succeeded_parent_fallback"
+                        )
+                        if isinstance(aux_llm_calls, list):
+                            try:
+                                aux_llm_calls.append(
+                                    annotate_python_decision_event(
+                                        {
+                                            "type": "missing_tool_call_retry",
+                                            "path": "legacy",
+                                            "mechanism": "structured_parent_fallback",
+                                            "stage": "backfill",
+                                            "retry_reason": (
+                                                data.get(
+                                                    "missing_tool_call_retry_reason"
+                                                )
+                                                or ""
+                                            ),
+                                            "response_preview": current_response[:800],
+                                        },
+                                        stage="missing_tool_recovery",
+                                        component="internal_mcp_orchestrator",
+                                        function="_action_tool_calling_backfill",
+                                        decision_class="missing_tool_call_retry",
+                                        decision_source="structured_retry_parent_fallback",
+                                        changed_outcome=True,
+                                        reason_code="structured_tool_call_replayed_before_recovery_llm",
+                                        possible_inappropriate_python_code_use=False,
+                                    )
+                                )
+                            except Exception:
+                                pass
+                        return WorkflowActionResult(
+                            outputs={
+                                "more_tool_calls": True,
+                                "tool_calls_present": True,
+                                "tool_calls_validated": False,
+                                "tool_calls": parent_forced_tool_calls,
+                                "current_response": current_response,
+                                "remaining_tool_calls": [],
+                                "missing_tool_call_retry_attempts": missing_tool_call_retry_attempts,
+                                "missing_tool_call_retry_budget": missing_tool_call_retry_budget,
+                                "missing_tool_call_retry_remaining": max(
+                                    0,
+                                    missing_tool_call_retry_budget
+                                    - missing_tool_call_retry_attempts,
+                                ),
+                                "missing_tool_call_retry_suppressed": missing_tool_call_retry_suppressed,
+                                "missing_tool_call_retry_stop_reason": missing_tool_call_retry_stop_reason,
+                                "missing_tool_call_recovery_outcome": missing_tool_call_recovery_outcome,
+                                "result": True,
+                            }
+                        )
+
                 recovery_inputs: Mapping[str, Any] = data
                 if semantic_retry_reason_override and not has_override_retry_reason:
                     recovery_inputs = dict(data)
@@ -12338,20 +12466,26 @@ class InternalMCPChatOrchestrator:
         if not required_tools:
             return []
 
+        def _tool_requirement_key(tool_name: str) -> str:
+            lowered = tool_name.strip().lower()
+            if lowered in {"search_concepts", "vontology_concept_search"}:
+                return "concept_search"
+            return lowered
+
         observed_tools: set[str] = set()
         for invocation in tool_invocations:
             if not isinstance(invocation, Mapping):
                 continue
             raw_tool = invocation.get("tool")
             if isinstance(raw_tool, str) and raw_tool.strip():
-                observed_tools.add(raw_tool.strip().lower())
+                observed_tools.add(_tool_requirement_key(raw_tool))
 
         return [
             tool_name
             for tool_name in required_tools
             if isinstance(tool_name, str)
             and tool_name.strip()
-            and tool_name.strip().lower() not in observed_tools
+            and _tool_requirement_key(tool_name) not in observed_tools
         ]
 
     @classmethod
@@ -12373,14 +12507,24 @@ class InternalMCPChatOrchestrator:
                 or raw_tool.strip().lower() != "fetch_concept"
             ):
                 continue
-
-            payload = invocation.get("effective_payload")
-            if not isinstance(payload, Mapping):
-                payload = invocation.get("payload")
-            if not isinstance(payload, Mapping):
+            if not cls._tool_invocation_completed_successfully(invocation):
                 continue
 
-            concept_id = cls._normalise_concept_id_candidate(payload.get("concept_id"))
+            concept_id: str | None = None
+            for field_name in (
+                "effective_payload",
+                "payload",
+                "effective_arguments",
+                "arguments",
+            ):
+                payload = invocation.get(field_name)
+                if not isinstance(payload, Mapping):
+                    continue
+                concept_id = cls._normalise_concept_id_candidate(
+                    payload.get("concept_id")
+                )
+                if concept_id:
+                    break
             if not concept_id:
                 continue
             key = concept_id.lower()
@@ -12390,6 +12534,147 @@ class InternalMCPChatOrchestrator:
             concept_ids.append(concept_id)
 
         return concept_ids
+
+    @classmethod
+    def _extract_resolved_concept_ids_from_invocations(
+        cls,
+        tool_invocations: Sequence[Mapping[str, Any]] | None,
+        *,
+        max_concept_ids: int = 3,
+    ) -> list[str]:
+        """Collect concept IDs produced by successful resolve_concept_by_name calls."""
+
+        if not tool_invocations or max_concept_ids <= 0:
+            return []
+
+        concept_ids: list[str] = []
+        seen: set[str] = set()
+
+        def _append(raw_value: Any) -> None:
+            concept_id = cls._normalise_concept_id_candidate(raw_value)
+            if not concept_id:
+                return
+            lowered = concept_id.lower()
+            if lowered in seen:
+                return
+            seen.add(lowered)
+            concept_ids.append(concept_id)
+
+        for invocation in tool_invocations:
+            if len(concept_ids) >= max_concept_ids:
+                break
+            if not isinstance(invocation, Mapping):
+                continue
+            raw_tool = invocation.get("tool")
+            if (
+                not isinstance(raw_tool, str)
+                or raw_tool.strip().lower() != "resolve_concept_by_name"
+            ):
+                continue
+            if not cls._tool_invocation_completed_successfully(invocation):
+                continue
+
+            payload = invocation.get("effective_payload")
+            if not isinstance(payload, Mapping):
+                payload = invocation.get("payload")
+            if not isinstance(payload, Mapping):
+                continue
+
+            _append(payload.get("resolved_concept_id"))
+            _append(payload.get("concept_id"))
+
+            match = payload.get("match")
+            if isinstance(match, Mapping):
+                _append(match.get("concept_id"))
+                _append(match.get("resolved_concept_id"))
+
+            candidates = payload.get("candidates")
+            if isinstance(candidates, list):
+                for candidate in candidates:
+                    if len(concept_ids) >= max_concept_ids:
+                        break
+                    if isinstance(candidate, Mapping):
+                        _append(candidate.get("concept_id"))
+                        _append(candidate.get("resolved_concept_id"))
+
+        return concept_ids[:max_concept_ids]
+
+    @classmethod
+    def _extract_invocation_concept_argument(
+        cls,
+        invocation: Mapping[str, Any],
+    ) -> str | None:
+        for field_name in (
+            "effective_arguments",
+            "arguments",
+            "effective_payload",
+            "payload",
+        ):
+            value = invocation.get(field_name)
+            if not isinstance(value, Mapping):
+                continue
+            concept_id = cls._normalise_concept_id_candidate(value.get("concept_id"))
+            if concept_id:
+                return concept_id
+        return None
+
+    @classmethod
+    def _target_bound_missing_prompt_tools(
+        cls,
+        *,
+        required_tools: Sequence[str],
+        tool_invocations: Sequence[Mapping[str, Any]],
+    ) -> list[str]:
+        """Detect required follow-up tools that ran before their resolved target."""
+
+        required_lookup = {
+            str(tool_name).strip().lower()
+            for tool_name in required_tools
+            if isinstance(tool_name, str) and str(tool_name).strip()
+        }
+        if "get_predicate_incidence" not in required_lookup:
+            return []
+        if not (
+            {"resolve_concept_by_name", "search_concepts", "vontology_concept_search"}
+            & required_lookup
+        ):
+            return []
+
+        target_concept_ids = cls._dedupe_preserving_order(
+            [
+                *cls._extract_resolved_concept_ids_from_invocations(
+                    tool_invocations,
+                    max_concept_ids=5,
+                ),
+                *cls._extract_search_concepts_follow_up_concept_ids(
+                    tool_invocations,
+                    max_concept_ids=5,
+                ),
+                *cls._extract_fetch_concept_ids_from_invocations(tool_invocations)[:5],
+            ]
+        )
+        target_lookup = {concept_id.lower() for concept_id in target_concept_ids}
+        targeted_incidence_observed = False
+        if target_lookup:
+            for invocation in tool_invocations:
+                if not isinstance(invocation, Mapping):
+                    continue
+                raw_tool = invocation.get("tool")
+                if (
+                    not isinstance(raw_tool, str)
+                    or raw_tool.strip().lower() != "get_predicate_incidence"
+                ):
+                    continue
+                if not cls._tool_invocation_completed_successfully(invocation):
+                    continue
+                concept_id = cls._extract_invocation_concept_argument(invocation)
+                if concept_id and concept_id.lower() in target_lookup:
+                    targeted_incidence_observed = True
+                    break
+
+        if targeted_incidence_observed:
+            return []
+        return ["get_predicate_incidence"]
 
     @classmethod
     def _extract_read_file_copy_ids_from_invocations(
@@ -12618,6 +12903,22 @@ class InternalMCPChatOrchestrator:
             required_tools=required_tools,
             tool_invocations=tool_invocations,
         )
+        target_bound_missing_tools = cls._target_bound_missing_prompt_tools(
+            required_tools=required_tools,
+            tool_invocations=tool_invocations,
+        )
+        if target_bound_missing_tools:
+            missing_lookup = {
+                tool_name.lower()
+                for tool_name in missing_tools
+                if isinstance(tool_name, str) and tool_name.strip()
+            }
+            for tool_name in target_bound_missing_tools:
+                lowered = tool_name.lower()
+                if lowered in missing_lookup:
+                    continue
+                missing_lookup.add(lowered)
+                missing_tools.append(tool_name)
 
         missing_fetch_concept_ids: list[str] = []
         if required_fetch_concept_ids:
@@ -12935,18 +13236,79 @@ class InternalMCPChatOrchestrator:
         seen: set[str] = set()
 
         def _add_tool(tool_name: str) -> None:
-            lowered = tool_name.strip().lower()
-            if not lowered or lowered in seen:
+            raw_tool_name = tool_name.strip()
+            lowered = raw_tool_name.lower()
+            if not lowered:
                 return
-            if available_tools and lowered not in available_tools:
+            candidate_names = (raw_tool_name,)
+            if lowered == "vontology_concept_search":
+                candidate_names = (raw_tool_name, "search_concepts")
+            elif lowered == "search_concepts":
+                candidate_names = (raw_tool_name, "vontology_concept_search")
+
+            for candidate_tool_name in candidate_names:
+                candidate_tool_name = candidate_tool_name.strip()
+                candidate_lowered = candidate_tool_name.lower()
+                if not candidate_tool_name or candidate_lowered in seen:
+                    return
+                if available_tools and candidate_lowered not in available_tools:
+                    continue
+                if (
+                    allowed_tool_names is not None
+                    and candidate_lowered not in allowed_tool_names
+                ):
+                    continue
+                seen.add(candidate_lowered)
+                required_tools.append(candidate_tool_name)
                 return
-            if allowed_tool_names is not None and lowered not in allowed_tool_names:
-                return
-            seen.add(lowered)
-            required_tools.append(tool_name)
 
         for tool_name in contract_object.required_tools:
             _add_tool(str(tool_name).strip())
+
+        required_lookup = {
+            str(tool_name).strip().lower()
+            for tool_name in required_tools
+            if isinstance(tool_name, str) and str(tool_name).strip()
+        }
+        concept_resolution_required = bool(
+            required_lookup
+            & {
+                "search_concepts",
+                "vontology_concept_search",
+                "resolve_concept_by_name",
+                "fetch_concept",
+            }
+        )
+        predicate_inspection_required = bool(
+            required_lookup
+            & {
+                "get_predicate_incidence",
+                "get_predicate_extent",
+                "find_relations_with_argument",
+                "get_text_relations_summary",
+                "get_related_concepts",
+            }
+        )
+        contract_text = " ".join(
+            value
+            for value in (
+                contract_object.summary,
+                contract_object.selector_guidance,
+                contract_object.grounding_requirement,
+                contract_object.reasoning,
+                contract_object.answering_guidance,
+                contract_object.precision_policy,
+            )
+            if isinstance(value, str) and value.strip()
+        ).lower()
+        if (
+            concept_resolution_required
+            and not predicate_inspection_required
+            and re.search(
+                r"\b(?:predicate|predicates|incidence|extent)\b", contract_text
+            )
+        ):
+            _add_tool("get_predicate_incidence")
 
         return tuple(required_tools)
 
@@ -23558,11 +23920,77 @@ class InternalMCPChatOrchestrator:
             concept_ids.append(cid)
         return concept_ids
 
+    @staticmethod
+    def _extract_quoted_concept_name_candidates(text: str | None) -> list[str]:
+        if not isinstance(text, str) or not text.strip():
+            return []
+        candidates: list[str] = []
+        seen: set[str] = set()
+        for match in re.finditer(r"['\"`]([^'\"`]{2,120})['\"`]", text):
+            candidate = str(match.group(1) or "").strip()
+            if not candidate or "#V#" in candidate:
+                continue
+            lowered = candidate.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            candidates.append(candidate)
+        return candidates
+
+    @staticmethod
+    def _dedupe_preserving_order(values: Sequence[str]) -> list[str]:
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            if not isinstance(value, str) or not value.strip():
+                continue
+            cleaned = value.strip()
+            lowered = cleaned.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            deduped.append(cleaned)
+        return deduped
+
+    @classmethod
+    def _extract_concept_name_required_for_resolution(
+        cls,
+        *,
+        turn_expected_outcome_contract: (
+            TurnExpectedOutcomeContract | Mapping[str, Any] | None
+        ),
+        user_text: str | None,
+    ) -> str | None:
+        contract_object = (
+            turn_expected_outcome_contract
+            if isinstance(turn_expected_outcome_contract, TurnExpectedOutcomeContract)
+            else TurnExpectedOutcomeContract.from_mapping(
+                turn_expected_outcome_contract
+            )
+        )
+        contract_fields = [
+            contract_object.selector_guidance,
+            contract_object.grounding_requirement,
+            contract_object.reasoning,
+            contract_object.summary,
+            contract_object.answering_guidance,
+            contract_object.precision_policy,
+        ]
+        for field_text in contract_fields:
+            candidates = cls._extract_quoted_concept_name_candidates(field_text)
+            if candidates:
+                return candidates[0]
+        user_candidates = cls._extract_quoted_concept_name_candidates(user_text)
+        return user_candidates[0] if user_candidates else None
+
     def _infer_required_prompt_tool_retry_tool_calls(
         self,
         *,
         user_text: str,
         context_messages: Sequence[Mapping[str, Any]] | None = None,
+        turn_expected_outcome_contract: (
+            TurnExpectedOutcomeContract | Mapping[str, Any] | None
+        ) = None,
         missing_required_tools: Sequence[str],
         user_concept_id: str | None = None,
         tool_invocations: Sequence[Mapping[str, Any]] | None = None,
@@ -23604,10 +24032,26 @@ class InternalMCPChatOrchestrator:
         pure_ontology_follow_up = self._missing_tools_are_pure_ontology_follow_up(
             missing_required_tools
         )
-        ontology_follow_up_concept_ids = (
-            self._extract_search_concepts_follow_up_concept_ids(
+        resolved_follow_up_concept_ids = (
+            self._extract_resolved_concept_ids_from_invocations(
                 tool_invocations,
                 max_concept_ids=2,
+            )
+            if pure_ontology_follow_up
+            else []
+        )
+        ontology_follow_up_concept_ids = (
+            self._dedupe_preserving_order(
+                [
+                    *resolved_follow_up_concept_ids,
+                    *self._extract_search_concepts_follow_up_concept_ids(
+                        tool_invocations,
+                        max_concept_ids=2,
+                    ),
+                    *self._extract_fetch_concept_ids_from_invocations(
+                        list(tool_invocations or ())
+                    )[:2],
+                ]
             )
             if pure_ontology_follow_up
             else []
@@ -23689,6 +24133,42 @@ class InternalMCPChatOrchestrator:
                 )
                 continue
 
+            if name == "resolve_concept_by_name":
+                concept_name = self._extract_concept_name_required_for_resolution(
+                    turn_expected_outcome_contract=turn_expected_outcome_contract,
+                    user_text=user_text,
+                )
+                if not concept_name:
+                    continue
+                forced_calls.append(
+                    {
+                        "action": "call_tool",
+                        "tool": name,
+                        "payload": {"name": concept_name, "max_results": 5},
+                    }
+                )
+                continue
+
+            if name in {"search_concepts", "vontology_concept_search"}:
+                search_query = self._extract_structural_retry_search_query(
+                    tool_invocations,
+                )
+                if not search_query:
+                    search_query = self._extract_concept_name_required_for_resolution(
+                        turn_expected_outcome_contract=turn_expected_outcome_contract,
+                        user_text=user_text,
+                    )
+                if not search_query:
+                    continue
+                forced_calls.append(
+                    {
+                        "action": "call_tool",
+                        "tool": name,
+                        "payload": {"query": search_query},
+                    }
+                )
+                continue
+
             if name == "search_knowledge_base":
                 search_query = self._extract_structural_retry_search_query(
                     tool_invocations,
@@ -23708,6 +24188,55 @@ class InternalMCPChatOrchestrator:
                 continue
 
             if name == "get_predicate_incidence":
+                missing_tool_lookup = {
+                    str(item).strip().lower()
+                    for item in missing_required_tools
+                    if isinstance(item, str) and str(item).strip()
+                }
+                structural_search_query = (
+                    self._extract_structural_retry_search_query(tool_invocations)
+                    if pure_ontology_follow_up
+                    else None
+                )
+                if (
+                    pure_ontology_follow_up
+                    and structural_search_query
+                    and not ontology_follow_up_concept_ids
+                ):
+                    canonical_query_concept_id = (
+                        self._canonicalise_literal_value_to_concept_id(
+                            structural_search_query
+                        )
+                    )
+                    if canonical_query_concept_id:
+                        forced_calls.append(
+                            {
+                                "action": "call_tool",
+                                "tool": "fetch_concept",
+                                "payload": {"concept_id": canonical_query_concept_id},
+                            }
+                        )
+                        continue
+                if pure_ontology_follow_up and not (
+                    ontology_follow_up_concept_ids or ontology_follow_up_predicate_ids
+                ):
+                    search_query = self._extract_structural_retry_search_query(
+                        tool_invocations,
+                    )
+                    canonical_query_concept_id = (
+                        self._canonicalise_literal_value_to_concept_id(search_query)
+                        if search_query
+                        else None
+                    )
+                    if canonical_query_concept_id:
+                        forced_calls.append(
+                            {
+                                "action": "call_tool",
+                                "tool": "fetch_concept",
+                                "payload": {"concept_id": canonical_query_concept_id},
+                            }
+                        )
+                        continue
                 if retry_actor_concept_id and ontology_follow_up_predicate_ids:
                     forced_calls.append(
                         {
@@ -23731,6 +24260,12 @@ class InternalMCPChatOrchestrator:
                         )
                     continue
                 if pure_ontology_follow_up and retry_actor_concept_id:
+                    if missing_tool_lookup & {
+                        "resolve_concept_by_name",
+                        "search_concepts",
+                        "vontology_concept_search",
+                    }:
+                        continue
                     forced_calls.append(
                         {
                             "action": "call_tool",
@@ -23832,6 +24367,8 @@ class InternalMCPChatOrchestrator:
 
             if name == "fetch_concept":
                 fetch_concept_ids = list(missing_required_fetch_concept_ids)
+                if not fetch_concept_ids and ontology_follow_up_concept_ids:
+                    fetch_concept_ids = list(ontology_follow_up_concept_ids)
                 for concept_id in fetch_concept_ids:
                     forced_calls.append(
                         {
@@ -23894,9 +24431,8 @@ class InternalMCPChatOrchestrator:
             if not isinstance(invocation, Mapping):
                 continue
             raw_tool = invocation.get("tool")
-            if (
-                not isinstance(raw_tool, str)
-                or raw_tool.strip().lower() != "search_concepts"
+            if not isinstance(raw_tool, str) or not cls._is_concept_search_tool_name(
+                raw_tool
             ):
                 continue
             if not cls._tool_invocation_completed_successfully(invocation):
@@ -23917,6 +24453,8 @@ class InternalMCPChatOrchestrator:
                     continue
                 concept_id = cls._normalise_concept_id_candidate(row.get("concept_id"))
                 if not concept_id:
+                    continue
+                if cls._search_concepts_row_is_predicate(row):
                     continue
                 lowered = concept_id.lower()
                 if lowered in seen:
@@ -23949,9 +24487,8 @@ class InternalMCPChatOrchestrator:
             if not isinstance(invocation, Mapping):
                 continue
             raw_tool = invocation.get("tool")
-            if (
-                not isinstance(raw_tool, str)
-                or raw_tool.strip().lower() != "search_concepts"
+            if not isinstance(raw_tool, str) or not cls._is_concept_search_tool_name(
+                raw_tool
             ):
                 continue
             if not cls._tool_invocation_completed_successfully(invocation):
@@ -24269,6 +24806,15 @@ class InternalMCPChatOrchestrator:
         return False
 
     @classmethod
+    def _is_concept_search_tool_name(cls, tool_name: str | None) -> bool:
+        if not isinstance(tool_name, str):
+            return False
+        return tool_name.strip().lower() in {
+            "search_concepts",
+            "vontology_concept_search",
+        }
+
+    @classmethod
     def _extract_structural_retry_search_query(
         cls,
         tool_invocations: Sequence[Mapping[str, Any]] | None,
@@ -24279,19 +24825,25 @@ class InternalMCPChatOrchestrator:
             if not isinstance(invocation, Mapping):
                 continue
             raw_tool = invocation.get("tool")
-            if not isinstance(raw_tool, str) or raw_tool.strip().lower() not in {
-                "search_knowledge_base",
-                "search_concepts",
-            }:
+            if not isinstance(raw_tool, str):
                 continue
-            payload = invocation.get("effective_payload")
-            if not isinstance(payload, Mapping):
-                payload = invocation.get("payload")
-            if not isinstance(payload, Mapping):
+            tool_name = raw_tool.strip().lower()
+            if tool_name != "search_knowledge_base" and not (
+                cls._is_concept_search_tool_name(tool_name)
+            ):
                 continue
-            query = payload.get("query")
-            if isinstance(query, str) and query.strip():
-                return query.strip()
+            for field_name in (
+                "effective_payload",
+                "payload",
+                "effective_arguments",
+                "arguments",
+            ):
+                payload = invocation.get(field_name)
+                if not isinstance(payload, Mapping):
+                    continue
+                query = payload.get("query")
+                if isinstance(query, str) and query.strip():
+                    return query.strip()
         return None
 
     @classmethod
@@ -24323,21 +24875,29 @@ class InternalMCPChatOrchestrator:
             in {
                 "get_predicate_incidence",
                 "search_concepts",
+                "vontology_concept_search",
                 "get_text_relations_summary",
                 "get_related_concepts",
                 "find_relations_with_argument",
+                "fetch_concept",
+                "resolve_concept_by_name",
             }
             for tool_name in missing_tools
         ):
             return None
 
+        concept_search_tool: str | None = None
         if "search_concepts" in missing_tools:
+            concept_search_tool = "search_concepts"
+        if "vontology_concept_search" in missing_tools:
+            concept_search_tool = "vontology_concept_search"
+        if concept_search_tool:
             search_query = cls._extract_structural_retry_search_query(tool_invocations)
             if search_query:
                 return [
                     {
                         "action": "call_tool",
-                        "tool": "search_concepts",
+                        "tool": concept_search_tool,
                         "payload": {"query": search_query},
                     }
                 ]
@@ -24346,11 +24906,24 @@ class InternalMCPChatOrchestrator:
             tool_invocations,
             max_predicates=2,
         )
-        concept_ids = cls._extract_search_concepts_follow_up_concept_ids(
-            tool_invocations,
-            max_concept_ids=(
-                2 if "find_relations_with_argument" in missing_tools else 1
-            ),
+        concept_ids = cls._dedupe_preserving_order(
+            [
+                *cls._extract_resolved_concept_ids_from_invocations(
+                    tool_invocations,
+                    max_concept_ids=(
+                        2 if "find_relations_with_argument" in missing_tools else 1
+                    ),
+                ),
+                *cls._extract_search_concepts_follow_up_concept_ids(
+                    tool_invocations,
+                    max_concept_ids=(
+                        2 if "find_relations_with_argument" in missing_tools else 1
+                    ),
+                ),
+                *cls._extract_fetch_concept_ids_from_invocations(
+                    list(tool_invocations or ())
+                )[: (2 if "find_relations_with_argument" in missing_tools else 1)],
+            ]
         )
         if not concept_ids:
             return None
@@ -24407,6 +24980,14 @@ class InternalMCPChatOrchestrator:
                             },
                         }
                     )
+            elif tool_name == "fetch_concept":
+                forced_calls.append(
+                    {
+                        "action": "call_tool",
+                        "tool": tool_name,
+                        "payload": {"concept_id": primary_concept_id},
+                    }
+                )
 
         if (
             any(
@@ -24450,9 +25031,12 @@ class InternalMCPChatOrchestrator:
         return tool_names <= {
             "get_predicate_incidence",
             "search_concepts",
+            "vontology_concept_search",
             "get_text_relations_summary",
             "get_related_concepts",
             "find_relations_with_argument",
+            "fetch_concept",
+            "resolve_concept_by_name",
         }
 
     def _infer_missing_tool_call_retry_tool_calls(
@@ -24503,6 +25087,7 @@ class InternalMCPChatOrchestrator:
         required_forced = self._infer_required_prompt_tool_retry_tool_calls(
             user_text=last_user_text,
             context_messages=augmented_context,
+            turn_expected_outcome_contract=turn_expected_outcome_contract,
             missing_required_tools=(
                 list(missing_required_tools) if missing_required_tools else []
             ),
@@ -29591,6 +30176,14 @@ class InternalMCPChatOrchestrator:
                 data.get("workflow_discovery_result")
                 if isinstance(data.get("workflow_discovery_result"), Mapping)
                 else data.get("workflow_discovery")
+            ),
+            parent_aux_llm_calls=(
+                aux_llm_calls if isinstance(aux_llm_calls, list) else None
+            ),
+            parent_llm_calls=(
+                data.get("llm_calls")
+                if isinstance(data.get("llm_calls"), list)
+                else None
             ),
         )
         return WorkflowActionResult(outputs=outputs)
@@ -36763,6 +37356,128 @@ class InternalMCPChatOrchestrator:
 
             return extra_payload
 
+        def _workflow_result_tool_invocations(result: Any) -> list[Mapping[str, Any]]:
+            result_data = getattr(result, "data", None)
+            if not isinstance(result_data, Mapping):
+                return []
+
+            invocations: list[Mapping[str, Any]] = []
+            seen_signatures: set[str] = set()
+            for key in ("tool_invocations", "invocations"):
+                values = result_data.get(key)
+                if not isinstance(values, Sequence) or isinstance(
+                    values, (str, bytes, bytearray)
+                ):
+                    continue
+                for value in values:
+                    if not isinstance(value, Mapping):
+                        continue
+                    signature = repr(
+                        sorted(value.items(), key=lambda item: str(item[0]))
+                    )
+                    if signature in seen_signatures:
+                        continue
+                    seen_signatures.add(signature)
+                    invocations.append(value)
+            return invocations
+
+        def _custom_workflow_missing_required_prompt_tools(
+            result: Any,
+        ) -> list[str]:
+            result_data = getattr(result, "data", None)
+            if isinstance(result_data, Mapping):
+                for candidate in (
+                    result_data,
+                    result_data.get("completion_report"),
+                    result_data.get("workflow_execution_summary"),
+                    result_data.get("selected_workflow_trace"),
+                ):
+                    if not isinstance(candidate, Mapping):
+                        continue
+                    explicit_missing = _normalise_tool_name_sequence(
+                        candidate.get("missing_prompt_tools")
+                    )
+                    if explicit_missing:
+                        return explicit_missing
+
+            required_tools = _normalise_tool_name_sequence(
+                routing_prompt_requirements.required_tools
+            )
+            if not required_tools and isinstance(result_data, Mapping):
+                for candidate in (
+                    result_data,
+                    result_data.get("completion_report"),
+                    result_data.get("workflow_execution_summary"),
+                    result_data.get("selected_workflow_trace"),
+                ):
+                    if not isinstance(candidate, Mapping):
+                        continue
+                    required_tools = _normalise_tool_name_sequence(
+                        candidate.get("required_prompt_tools")
+                    )
+                    if required_tools:
+                        break
+            if not required_tools:
+                return []
+            invocations = _workflow_result_tool_invocations(result)
+            (
+                missing_tools,
+                _missing_fetch_ids,
+                _missing_read_ids,
+                _missing_scholarly_ids,
+            ) = self._derive_missing_prompt_requirements(
+                required_tools=required_tools,
+                required_fetch_concept_ids=(
+                    routing_prompt_requirements.required_fetch_concept_ids
+                ),
+                required_read_file_copy_ids=(
+                    routing_prompt_requirements.required_read_file_copy_ids
+                ),
+                required_scholarly_representation_for_file_copy_ids=(
+                    routing_prompt_requirements.required_scholarly_representation_file_copy_ids
+                ),
+                tool_invocations=invocations,
+            )
+            return _normalise_tool_name_sequence(missing_tools)
+
+        def _build_custom_workflow_missing_required_tools_snapshot(
+            *,
+            workflow_id: str | None,
+            workflow_result: Any,
+            missing_required_tools: Sequence[str],
+        ) -> dict[str, Any] | None:
+            cleaned_workflow_id = (
+                workflow_id.strip()
+                if isinstance(workflow_id, str) and workflow_id.strip()
+                else None
+            )
+            missing_tools = _normalise_tool_name_sequence(missing_required_tools)
+            if not cleaned_workflow_id or not missing_tools:
+                return None
+
+            snapshot: dict[str, Any] = {
+                "workflow_id": cleaned_workflow_id,
+                "completed": bool(getattr(workflow_result, "completed", False)),
+                "tool_progress_detected": _workflow_result_contains_tool_progress(
+                    workflow_result
+                ),
+                "missing_required_tools": list(missing_tools),
+                "recovery_reason": "custom_workflow_missing_required_prompt_tools",
+            }
+            final_state = _workflow_execution_summary_text(
+                getattr(workflow_result, "final_state", None)
+            )
+            if final_state:
+                snapshot["final_state"] = final_state
+            result_data = getattr(workflow_result, "data", None)
+            if isinstance(result_data, Mapping):
+                user_visible_text = _workflow_execution_summary_text(
+                    result_data.get("response_text")
+                ) or _workflow_execution_summary_text(result_data.get("summary"))
+                if user_visible_text:
+                    snapshot["user_visible_response_text"] = user_visible_text[:800]
+            return snapshot
+
         prior_failed_selected_workflow_snapshot: dict[str, Any] | None = None
 
         # ----------------------------------------------------------------
@@ -37692,9 +38407,22 @@ class InternalMCPChatOrchestrator:
                         wf_result
                     )
                     continue_to_tool_pipeline = False
+                    continue_to_tool_pipeline_reason: str | None = None
+                    missing_required_prompt_tools = (
+                        _custom_workflow_missing_required_prompt_tools(wf_result)
+                    )
                     if _should_continue_failed_custom_workflow_into_tool_pipeline(
                         wf_result
                     ):
+                        continue_to_tool_pipeline_reason = (
+                            "failed_custom_workflow_before_tool_progress"
+                        )
+                    elif missing_required_prompt_tools:
+                        continue_to_tool_pipeline_reason = (
+                            "custom_workflow_missing_required_prompt_tools"
+                        )
+
+                    if continue_to_tool_pipeline_reason:
                         fallback_tool_workflow_id = self._resolve_workflow_id_for_action_contract(
                             required_action_ids=_TURN_EXECUTION_TOOL_PIPELINE_ACTION_IDS,
                             preferred_workflow_id=selected_workflow_id_text,
@@ -37705,20 +38433,42 @@ class InternalMCPChatOrchestrator:
                         )
                         continue_to_tool_pipeline = bool(fallback_tool_workflow_id)
                         if continue_to_tool_pipeline:
-                            prior_failed_selected_workflow_snapshot = (
-                                _build_failed_custom_workflow_snapshot(
+                            if (
+                                continue_to_tool_pipeline_reason
+                                == "failed_custom_workflow_before_tool_progress"
+                            ):
+                                prior_failed_selected_workflow_snapshot = (
+                                    _build_failed_custom_workflow_snapshot(
+                                        workflow_id=selected_workflow_id_text,
+                                        workflow_result=wf_result,
+                                    )
+                                )
+                            else:
+                                prior_failed_selected_workflow_snapshot = _build_custom_workflow_missing_required_tools_snapshot(
                                     workflow_id=selected_workflow_id_text,
                                     workflow_result=wf_result,
+                                    missing_required_tools=missing_required_prompt_tools,
                                 )
-                            )
                             custom_failure_extra = {
                                 **custom_failure_extra,
                                 "continued_to_tool_pipeline": True,
                                 "fallback_tool_workflow_id": fallback_tool_workflow_id,
+                                "reason": continue_to_tool_pipeline_reason,
                             }
+                            if missing_required_prompt_tools:
+                                custom_failure_extra["missing_required_tools"] = list(
+                                    missing_required_prompt_tools
+                                )
+                    terminal_boundary_status = (
+                        "follow_up_required"
+                        if continue_to_tool_pipeline
+                        and continue_to_tool_pipeline_reason
+                        == "custom_workflow_missing_required_prompt_tools"
+                        else "completed" if wf_completed else "failed"
+                    )
                     _emit_dispatch_boundary(
                         boundary="workflow_terminal",
-                        status="completed" if wf_completed else "failed",
+                        status=terminal_boundary_status,
                         selected_execution_mode="custom_workflow",
                         selected_workflow_id=selected_workflow_id_text,
                         dispatch_workflow_id=selected_workflow_id_text,
@@ -37732,17 +38482,29 @@ class InternalMCPChatOrchestrator:
                             "from_execution_mode": "custom_workflow",
                             "to_execution_mode": "tool_pipeline",
                             "selected_workflow_id": selected_workflow_id_text,
-                            "reason": "failed_custom_workflow_before_tool_progress",
+                            "reason": continue_to_tool_pipeline_reason,
                         }
                         if isinstance(prior_failed_selected_workflow_snapshot, Mapping):
-                            recovery_handoff_payload["failed_workflow_snapshot"] = dict(
-                                prior_failed_selected_workflow_snapshot
+                            recovery_handoff_payload["selected_workflow_snapshot"] = (
+                                dict(prior_failed_selected_workflow_snapshot)
+                            )
+                            if (
+                                continue_to_tool_pipeline_reason
+                                == "failed_custom_workflow_before_tool_progress"
+                            ):
+                                recovery_handoff_payload["failed_workflow_snapshot"] = (
+                                    dict(prior_failed_selected_workflow_snapshot)
+                                )
+                        if missing_required_prompt_tools:
+                            recovery_handoff_payload["missing_required_tools"] = list(
+                                missing_required_prompt_tools
                             )
                         aux_llm_calls.append(recovery_handoff_payload)
                         self._logger.info(
-                            "[mcp_orchestrator] Selected workflow %s failed without "
-                            "tool progress; continuing into tool pipeline.",
+                            "[mcp_orchestrator] Selected workflow %s is "
+                            "continuing into tool pipeline (%s).",
                             selected_workflow_id_text,
+                            continue_to_tool_pipeline_reason,
                         )
                     else:
                         result = _maybe_apply_workflow_gap_recovery(

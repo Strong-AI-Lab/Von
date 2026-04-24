@@ -41,6 +41,9 @@ _CONVERSATION_TURN_LLM_TIMEOUT_CONTEXT_KEY = (
     "conversation_turn_llm_timeout_override_sec"
 )
 _DEFAULT_WORKFLOW_TOOL_INVOCATION_CAP = 4
+_COMPLETION_REPORT_NARRATION_PROMPT_IDS = frozenset(
+    {"#V#prompt_turn_execution_narrate_completion_report"}
+)
 
 
 def _context_string(value: Any) -> str:
@@ -251,6 +254,102 @@ def _conversation_turn_llm_timeout_override_sec(
     return default_conversation_turn_llm_timeout_sec(
         os.getenv("VON_CONVERSATION_TURN_LLM_TIMEOUT_SEC")
     )
+
+
+def _missing_prompt_tools_for_completion_report_narration(
+    request: WorkflowActionRequest,
+    *,
+    prompt_id: str | None,
+) -> list[str]:
+    workflow_state_id = _context_string(request.workflow_state_id)
+    clean_prompt_id = _context_string(prompt_id)
+    if (
+        workflow_state_id != "narration"
+        and clean_prompt_id not in _COMPLETION_REPORT_NARRATION_PROMPT_IDS
+    ):
+        return []
+
+    missing_tools: list[str] = []
+    seen: set[str] = set()
+    for source in (
+        request.data,
+        request.data.get("completion_report"),
+        request.data.get("selected_workflow_trace"),
+    ):
+        if not isinstance(source, Mapping):
+            continue
+        for tool_name in _coerce_tool_name_list(source.get("missing_prompt_tools")):
+            lowered = tool_name.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            missing_tools.append(tool_name)
+    return missing_tools
+
+
+def _build_skipped_completion_report_narration_result(
+    *,
+    request: WorkflowActionRequest,
+    stage: str,
+    prompt_id: str | None,
+    prompt_source: str | None,
+    rendered_variables: Mapping[str, Any],
+    llm_policy_map: Mapping[str, Any],
+    validation_policy_map: Mapping[str, Any],
+    missing_prompt_tools: Sequence[str],
+) -> WorkflowActionResult:
+    raw_aux_llm_calls = request.data.get("aux_llm_calls")
+    aux_llm_calls: list[Mapping[str, Any]] = (
+        [
+            {str(key): value for key, value in item.items() if isinstance(key, str)}
+            for item in raw_aux_llm_calls
+            if isinstance(item, Mapping)
+        ]
+        if isinstance(raw_aux_llm_calls, list)
+        else []
+    )
+    aux_llm_calls.append(
+        {
+            "type": "llm_step_skipped",
+            "stage": stage,
+            "workflow_state_id": _context_string(request.workflow_state_id),
+            "prompt_id": _context_string(prompt_id),
+            "reason": "completion_report_missing_required_prompt_tools",
+            "missing_prompt_tools": list(missing_prompt_tools),
+        }
+    )
+    raw_llm_calls = request.data.get("llm_calls")
+    llm_calls: list[Mapping[str, Any]] = (
+        [
+            {str(key): value for key, value in item.items() if isinstance(key, str)}
+            for item in raw_llm_calls
+            if isinstance(item, Mapping)
+        ]
+        if isinstance(raw_llm_calls, list)
+        else []
+    )
+    result = _build_result(
+        request=request,
+        response_text="",
+        prompt_id=prompt_id,
+        prompt_source=prompt_source,
+        rendered_variables=rendered_variables,
+        llm_policy_map=llm_policy_map,
+        validation_policy_map=validation_policy_map,
+        selected_model=request.environment.model,
+        selected_candidate=None,
+        tool_invocations=(),
+        tool_messages=(),
+        llm_calls=llm_calls,
+        aux_llm_calls=aux_llm_calls,
+    )
+    envelope = result.outputs.get("llm_step_envelope")
+    if isinstance(envelope, MutableMapping):
+        envelope["completion_reason"] = "skipped_missing_required_prompt_tools"
+        envelope["skipped"] = True
+        envelope["skip_reason"] = "completion_report_missing_required_prompt_tools"
+        envelope["missing_prompt_tools"] = list(missing_prompt_tools)
+    return result
 
 
 def _resolve_user_context_ids(
@@ -1071,6 +1170,22 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
         )
 
     stage = _llm_stage(llm_policy_map, request)
+    missing_narration_tools = _missing_prompt_tools_for_completion_report_narration(
+        request,
+        prompt_id=prompt_id,
+    )
+    if missing_narration_tools:
+        return _build_skipped_completion_report_narration_result(
+            request=request,
+            stage=stage,
+            prompt_id=prompt_id,
+            prompt_source=prompt_source,
+            rendered_variables=rendered_variables,
+            llm_policy_map=llm_policy_map,
+            validation_policy_map=validation_policy_map,
+            missing_prompt_tools=missing_narration_tools,
+        )
+
     emit_phase_transition = (
         request.data.get("emit_phase_transition")
         if callable(request.data.get("emit_phase_transition"))
@@ -1125,11 +1240,32 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
     turn_expected_outcome_contract = _resolve_turn_expected_outcome_contract(
         request.data
     )
+    method_catalogue = request.environment.gateway.describe_methods()
+
+    from ..integrations.internal_mcp.orchestrator import InternalMCPChatOrchestrator
+    from ..services.model_registry_service import get_model_registry_snapshot
+
+    infer_turn_contract_required_tools = getattr(
+        InternalMCPChatOrchestrator,
+        "_infer_turn_contract_required_tools",
+        None,
+    )
+    contract_required_tools = (
+        infer_turn_contract_required_tools(
+            turn_expected_outcome_contract=turn_expected_outcome_contract,
+            method_catalogue=(
+                method_catalogue if isinstance(method_catalogue, Mapping) else None
+            ),
+            allowed_tools=allowed_tools,
+        )
+        if callable(infer_turn_contract_required_tools)
+        else turn_expected_outcome_contract.required_tools
+    )
     required_prompt_tools = _filter_tool_names_to_allowed_set(
         _merge_required_prompt_tools(
             request.data.get("required_prompt_tools"),
             llm_policy_map.get("required_tools"),
-            turn_expected_outcome_contract.required_tools,
+            contract_required_tools or turn_expected_outcome_contract.required_tools,
         ),
         allowed_tools,
     )
@@ -1138,9 +1274,6 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
         llm_policy=llm_policy_map,
         required_prompt_tools=required_prompt_tools,
     )
-
-    from ..integrations.internal_mcp.orchestrator import InternalMCPChatOrchestrator
-    from ..services.model_registry_service import get_model_registry_snapshot
 
     orchestrator = InternalMCPChatOrchestrator(
         gateway=request.environment.gateway,
@@ -1246,7 +1379,6 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
             "details": dict(payload),
         }
 
-    method_catalogue = request.environment.gateway.describe_methods()
     shared_data: dict[str, Any] = {
         str(key): value for key, value in request.data.items() if isinstance(key, str)
     }

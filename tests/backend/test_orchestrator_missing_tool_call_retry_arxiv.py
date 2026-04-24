@@ -4,6 +4,8 @@ import logging
 from types import SimpleNamespace
 from typing import Any, Mapping, Optional, Sequence, cast
 
+import pytest
+
 from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
     MISSING_TOOL_CALL_WORKFLOW_ID,
@@ -52,6 +54,10 @@ class _Gateway:
     def describe_methods() -> dict[str, Any]:
         return {
             "search_concepts": {
+                "category": "read",
+                "description": "Search represented concepts by name and description",
+            },
+            "vontology_concept_search": {
                 "category": "read",
                 "description": "Search represented concepts by name and description",
             },
@@ -305,6 +311,545 @@ def test_missing_tool_call_retry_chains_related_concepts_after_search_concepts()
             "payload": {"concept_id": "#V#sail_student_group", "limit": 20},
         },
     ]
+
+
+def test_missing_tool_call_retry_chains_fetch_concept_after_search_concepts():
+    orchestrator = _build_orchestrator_stub()
+
+    forced = orchestrator._infer_missing_tool_call_retry_tool_calls(
+        [],
+        user_prompt="What predicates are represented for scientific papers?",
+        missing_required_tools=["fetch_concept"],
+        tool_invocations=[
+            {
+                "tool": "search_concepts",
+                "status": "ok",
+                "effective_payload": {
+                    "success": True,
+                    "results": [
+                        {
+                            "concept_id": "#V#scientific_paper",
+                            "name": "scientific paper",
+                            "kind": "type",
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+
+    assert forced == [
+        {
+            "action": "call_tool",
+            "tool": "fetch_concept",
+            "payload": {"concept_id": "#V#scientific_paper"},
+        }
+    ]
+
+
+def test_missing_tool_call_retry_chains_predicate_incidence_after_search_concepts():
+    orchestrator = _build_orchestrator_stub()
+
+    forced = orchestrator._infer_missing_tool_call_retry_tool_calls(
+        [],
+        user_prompt="What predicates are represented for scientific papers?",
+        missing_required_tools=["get_predicate_incidence"],
+        tool_invocations=[
+            {
+                "tool": "search_concepts",
+                "status": "ok",
+                "effective_payload": {
+                    "success": True,
+                    "results": [
+                        {
+                            "concept_id": "#V#scientific_paper",
+                            "name": "scientific paper",
+                            "kind": "type",
+                        }
+                    ],
+                },
+            },
+            {
+                "tool": "get_predicate_incidence",
+                "status": "ok",
+                "arguments": {"concept_id": "#V#michael_witbrock"},
+                "effective_payload": {"success": True},
+            },
+        ],
+    )
+
+    assert forced == [
+        {
+            "action": "call_tool",
+            "tool": "get_predicate_incidence",
+            "payload": {"concept_id": "#V#scientific_paper"},
+        }
+    ]
+
+
+def test_missing_tool_call_retry_chains_predicate_incidence_after_fetch_concept():
+    orchestrator = _build_orchestrator_stub()
+
+    forced = orchestrator._infer_missing_tool_call_retry_tool_calls(
+        [],
+        user_prompt="What are key predicates for scientific papers in Vontology?",
+        missing_required_tools=["get_predicate_incidence"],
+        tool_invocations=[
+            {
+                "tool": "fetch_concept",
+                "status": "ok",
+                "arguments": {"concept_id": "#V#paper_on_arxiv_2603_01896"},
+            },
+            {
+                "tool": "get_predicate_incidence",
+                "status": "ok",
+                "arguments": {"concept_id": "#V#michael_witbrock"},
+                "effective_payload": {"success": True},
+            },
+        ],
+        user_concept_id="#V#michael_witbrock",
+    )
+
+    assert forced == [
+        {
+            "action": "call_tool",
+            "tool": "get_predicate_incidence",
+            "payload": {"concept_id": "#V#paper_on_arxiv_2603_01896"},
+        }
+    ]
+
+
+def test_missing_tool_call_retry_fetches_canonical_search_query_before_actor_incidence():
+    orchestrator = _build_orchestrator_stub()
+
+    forced = orchestrator._infer_missing_tool_call_retry_tool_calls(
+        [],
+        user_prompt="What are key predicates for papers in Vontology?",
+        missing_required_tools=["get_predicate_incidence"],
+        tool_invocations=[
+            {
+                "tool": "search_concepts",
+                "status": "ok",
+                "arguments": {"query": "paper"},
+            },
+            {
+                "tool": "get_predicate_incidence",
+                "status": "ok",
+                "arguments": {"concept_id": "#V#michael_witbrock"},
+                "effective_payload": {"success": True},
+            },
+        ],
+        user_concept_id="#V#michael_witbrock",
+    )
+
+    assert forced == [
+        {
+            "action": "call_tool",
+            "tool": "fetch_concept",
+            "payload": {"concept_id": "#V#paper"},
+        }
+    ]
+
+
+def test_missing_tool_call_retry_fetches_search_query_before_actor_predicate_filter():
+    orchestrator = _build_orchestrator_stub()
+
+    forced = orchestrator._infer_missing_tool_call_retry_tool_calls(
+        [],
+        user_prompt="What are key predicates for scientific papers in Vontology?",
+        missing_required_tools=["get_predicate_incidence"],
+        tool_invocations=[
+            {
+                "tool": "search_concepts",
+                "status": "ok",
+                "effective_payload": {
+                    "success": True,
+                    "query": "scientific paper",
+                    "results": [
+                        {
+                            "concept_id": "#V#has_paper_recommendation_assertion",
+                            "name": "Has Paper Recommendation Assertion",
+                            "kind": "predicate",
+                        }
+                    ],
+                },
+            },
+            {
+                "tool": "get_predicate_incidence",
+                "status": "ok",
+                "arguments": {
+                    "concept_id": "#V#michael_witbrock",
+                    "predicate_filter": ["#V#has_paper_recommendation_assertion"],
+                },
+                "effective_payload": {"success": True},
+            },
+        ],
+        user_concept_id="#V#michael_witbrock",
+    )
+
+    assert forced == [
+        {
+            "action": "call_tool",
+            "tool": "fetch_concept",
+            "payload": {"concept_id": "#V#scientific_paper"},
+        }
+    ]
+
+
+def test_missing_tool_call_retry_chains_relation_summary_after_vontology_search_alias():
+    orchestrator = _build_orchestrator_stub()
+
+    forced = orchestrator._infer_missing_tool_call_retry_tool_calls(
+        [],
+        user_prompt="What are key predicates for scientific papers in Vontology?",
+        missing_required_tools=["get_text_relations_summary"],
+        tool_invocations=[
+            {
+                "tool": "vontology_concept_search",
+                "status": "ok",
+                "effective_payload": {
+                    "success": True,
+                    "query": "scientific paper",
+                    "results": [
+                        {
+                            "concept_id": "#V#scientific_paper",
+                            "name": "scientific paper",
+                            "kind": "type",
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+
+    assert forced == [
+        {
+            "action": "call_tool",
+            "tool": "get_text_relations_summary",
+            "payload": {"concept_id": "#V#scientific_paper"},
+        },
+        {
+            "action": "call_tool",
+            "tool": "find_relations_with_argument",
+            "payload": {"concept_id": "#V#scientific_paper", "limit": 20},
+        },
+    ]
+
+
+def test_missing_tool_requirements_treat_vontology_search_as_search_concepts_alias():
+    missing_tools, _, _, _ = (
+        InternalMCPChatOrchestrator._derive_missing_prompt_requirements(
+            required_tools=["search_concepts", "get_text_relations_summary"],
+            required_fetch_concept_ids=[],
+            tool_invocations=[
+                {
+                    "tool": "vontology_concept_search",
+                    "status": "ok",
+                    "effective_payload": {
+                        "success": True,
+                        "results": [
+                            {
+                                "concept_id": "#V#scientific_paper",
+                                "name": "scientific paper",
+                                "kind": "type",
+                            }
+                        ],
+                    },
+                }
+            ],
+        )
+    )
+
+    assert missing_tools == ["get_text_relations_summary"]
+
+
+def test_missing_tool_call_retry_forces_search_before_actor_predicate_incidence():
+    orchestrator = _build_orchestrator_stub()
+
+    forced = orchestrator._infer_missing_tool_call_retry_tool_calls(
+        [],
+        user_prompt="What are key predicates for scientific papers in Vontology?",
+        turn_expected_outcome_contract={
+            "selector_guidance": (
+                "First identify the concept ID for 'scientific paper', then inspect "
+                "predicate incidence."
+            ),
+            "required_tools": ["search_concepts", "get_predicate_incidence"],
+        },
+        missing_required_tools=["search_concepts", "get_predicate_incidence"],
+        tool_invocations=[
+            {
+                "tool": "get_predicate_incidence",
+                "status": "ok",
+                "arguments": {"concept_id": "#V#michael_witbrock"},
+                "effective_payload": {"success": True},
+            }
+        ],
+        user_concept_id="#V#michael_witbrock",
+    )
+
+    assert forced == [
+        {
+            "action": "call_tool",
+            "tool": "search_concepts",
+            "payload": {"query": "scientific paper"},
+        }
+    ]
+
+
+def test_missing_tool_call_retry_forces_resolve_from_quoted_turn_contract():
+    orchestrator = _build_orchestrator_stub()
+
+    forced = orchestrator._infer_missing_tool_call_retry_tool_calls(
+        [],
+        user_prompt="What are key predicates for scientific papers in Vontology?",
+        turn_expected_outcome_contract={
+            "selector_guidance": (
+                "Resolve the 'scientific paper' concept before predicate lookup."
+            ),
+            "required_tools": [
+                "resolve_concept_by_name",
+                "get_predicate_incidence",
+            ],
+        },
+        missing_required_tools=["resolve_concept_by_name", "get_predicate_incidence"],
+        tool_invocations=[
+            {
+                "tool": "get_predicate_incidence",
+                "status": "ok",
+                "arguments": {"concept_id": "#V#michael_witbrock"},
+                "effective_payload": {"success": True},
+            }
+        ],
+        user_concept_id="#V#michael_witbrock",
+    )
+
+    assert forced == [
+        {
+            "action": "call_tool",
+            "tool": "resolve_concept_by_name",
+            "payload": {"name": "scientific paper", "max_results": 5},
+        }
+    ]
+
+
+def test_missing_tool_call_retry_chains_predicate_incidence_after_resolution():
+    orchestrator = _build_orchestrator_stub()
+
+    forced = orchestrator._infer_missing_tool_call_retry_tool_calls(
+        [],
+        user_prompt="What are key predicates for scientific papers in Vontology?",
+        turn_expected_outcome_contract={
+            "required_tools": [
+                "resolve_concept_by_name",
+                "get_predicate_incidence",
+            ],
+        },
+        missing_required_tools=["get_predicate_incidence"],
+        tool_invocations=[
+            {
+                "tool": "resolve_concept_by_name",
+                "status": "ok",
+                "effective_payload": {
+                    "success": True,
+                    "status": "resolved",
+                    "resolved_concept_id": "#V#scientific_paper",
+                },
+            }
+        ],
+        user_concept_id="#V#michael_witbrock",
+    )
+
+    assert forced == [
+        {
+            "action": "call_tool",
+            "tool": "get_predicate_incidence",
+            "payload": {"concept_id": "#V#scientific_paper"},
+        }
+    ]
+
+
+def test_missing_tool_requirements_keep_targeted_incidence_missing_until_resolved():
+    missing_tools, _, _, _ = (
+        InternalMCPChatOrchestrator._derive_missing_prompt_requirements(
+            required_tools=["resolve_concept_by_name", "get_predicate_incidence"],
+            required_fetch_concept_ids=[],
+            tool_invocations=[
+                {
+                    "tool": "get_predicate_incidence",
+                    "status": "ok",
+                    "arguments": {"concept_id": "#V#michael_witbrock"},
+                }
+            ],
+        )
+    )
+    assert missing_tools == ["resolve_concept_by_name", "get_predicate_incidence"]
+
+    missing_tools, _, _, _ = (
+        InternalMCPChatOrchestrator._derive_missing_prompt_requirements(
+            required_tools=["resolve_concept_by_name", "get_predicate_incidence"],
+            required_fetch_concept_ids=[],
+            tool_invocations=[
+                {
+                    "tool": "resolve_concept_by_name",
+                    "status": "ok",
+                    "effective_payload": {
+                        "success": True,
+                        "resolved_concept_id": "#V#scientific_paper",
+                    },
+                },
+                {
+                    "tool": "get_predicate_incidence",
+                    "status": "ok",
+                    "arguments": {"concept_id": "#V#michael_witbrock"},
+                },
+            ],
+        )
+    )
+    assert missing_tools == ["get_predicate_incidence"]
+
+    missing_tools, _, _, _ = (
+        InternalMCPChatOrchestrator._derive_missing_prompt_requirements(
+            required_tools=["resolve_concept_by_name", "get_predicate_incidence"],
+            required_fetch_concept_ids=[],
+            tool_invocations=[
+                {
+                    "tool": "resolve_concept_by_name",
+                    "status": "ok",
+                    "effective_payload": {
+                        "success": True,
+                        "resolved_concept_id": "#V#scientific_paper",
+                    },
+                },
+                {
+                    "tool": "get_predicate_incidence",
+                    "status": "ok",
+                    "arguments": {"concept_id": "#V#scientific_paper"},
+                },
+            ],
+        )
+    )
+    assert missing_tools == []
+
+
+def test_missing_tool_requirements_keep_search_bound_incidence_missing_until_targeted():
+    missing_tools, _, _, _ = (
+        InternalMCPChatOrchestrator._derive_missing_prompt_requirements(
+            required_tools=["search_concepts", "get_predicate_incidence"],
+            required_fetch_concept_ids=[],
+            tool_invocations=[
+                {
+                    "tool": "search_concepts",
+                    "status": "ok",
+                    "effective_payload": {
+                        "success": True,
+                        "results": [
+                            {
+                                "concept_id": "#V#scientific_paper",
+                                "name": "scientific paper",
+                                "kind": "type",
+                            }
+                        ],
+                    },
+                },
+                {
+                    "tool": "get_predicate_incidence",
+                    "status": "ok",
+                    "arguments": {"concept_id": "#V#michael_witbrock"},
+                },
+            ],
+        )
+    )
+    assert missing_tools == ["get_predicate_incidence"]
+
+    missing_tools, _, _, _ = (
+        InternalMCPChatOrchestrator._derive_missing_prompt_requirements(
+            required_tools=["search_concepts", "get_predicate_incidence"],
+            required_fetch_concept_ids=[],
+            tool_invocations=[
+                {
+                    "tool": "search_concepts",
+                    "status": "ok",
+                    "effective_payload": {
+                        "success": True,
+                        "results": [
+                            {
+                                "concept_id": "#V#scientific_paper",
+                                "name": "scientific paper",
+                                "kind": "type",
+                            }
+                        ],
+                    },
+                },
+                {
+                    "tool": "get_predicate_incidence",
+                    "status": "ok",
+                    "arguments": {"concept_id": "#V#scientific_paper"},
+                },
+            ],
+        )
+    )
+    assert missing_tools == []
+
+
+def test_missing_tool_requirements_keep_fetch_bound_incidence_missing_until_targeted():
+    missing_tools, _, _, _ = (
+        InternalMCPChatOrchestrator._derive_missing_prompt_requirements(
+            required_tools=[
+                "search_concepts",
+                "fetch_concept",
+                "get_predicate_incidence",
+            ],
+            required_fetch_concept_ids=[],
+            tool_invocations=[
+                {
+                    "tool": "search_concepts",
+                    "status": "ok",
+                    "arguments": {"query": "scientific paper"},
+                },
+                {
+                    "tool": "fetch_concept",
+                    "status": "ok",
+                    "arguments": {"concept_id": "#V#paper_on_arxiv_2603_01896"},
+                },
+                {
+                    "tool": "get_predicate_incidence",
+                    "status": "ok",
+                    "arguments": {"concept_id": "#V#michael_witbrock"},
+                },
+            ],
+        )
+    )
+    assert missing_tools == ["get_predicate_incidence"]
+
+    missing_tools, _, _, _ = (
+        InternalMCPChatOrchestrator._derive_missing_prompt_requirements(
+            required_tools=[
+                "search_concepts",
+                "fetch_concept",
+                "get_predicate_incidence",
+            ],
+            required_fetch_concept_ids=[],
+            tool_invocations=[
+                {
+                    "tool": "search_concepts",
+                    "status": "ok",
+                    "arguments": {"query": "scientific paper"},
+                },
+                {
+                    "tool": "fetch_concept",
+                    "status": "ok",
+                    "arguments": {"concept_id": "#V#paper_on_arxiv_2603_01896"},
+                },
+                {
+                    "tool": "get_predicate_incidence",
+                    "status": "ok",
+                    "arguments": {"concept_id": "#V#paper_on_arxiv_2603_01896"},
+                },
+            ],
+        )
+    )
+    assert missing_tools == []
 
 
 def test_missing_tool_call_retry_skips_file_copy_result_for_ontology_follow_up():
@@ -813,10 +1358,74 @@ def test_missing_tool_call_retry_injects_retry_context_for_missing_jira_surface(
     retry_context = llm.calls[0]["context"]
     assert isinstance(retry_context, list) and retry_context
     assert retry_context[0]["role"] == "system"
-    assert "jira retrieval step required by the turn contract" in retry_context[0][
-        "content"
-    ].lower()
-    assert "already invoked successfully this turn" in retry_context[0]["content"].lower()
+    assert (
+        "jira retrieval step required by the turn contract"
+        in retry_context[0]["content"].lower()
+    )
+    assert (
+        "already invoked successfully this turn" in retry_context[0]["content"].lower()
+    )
+
+
+def test_missing_tool_call_retry_action_uses_prior_invocations_for_fetch_follow_up():
+    orchestrator = _build_orchestrator_stub()
+
+    request = SimpleNamespace(
+        data={
+            "aux_llm_calls": [],
+            "augmented_context": [],
+            "user_prompt": "What predicates are represented for scientific papers?",
+            "response_text": "I found matching concepts.",
+            "missing_prompt_tools": ["fetch_concept"],
+            "invocations": [
+                {
+                    "tool": "search_concepts",
+                    "status": "ok",
+                    "effective_payload": {
+                        "success": True,
+                        "results": [
+                            {
+                                "concept_id": "#V#scientific_paper",
+                                "name": "scientific paper",
+                                "kind": "type",
+                            }
+                        ],
+                    },
+                }
+            ],
+            "tool_calls": None,
+            "tool_call_parse_error": None,
+            "record_llm_call": None,
+            "policy_state": None,
+            "default_model": "gemma4:26b",
+            "registry_snapshot": {},
+            "missing_tool_call_retry_attempts": 0,
+            "missing_tool_call_retry_budget": 2,
+            "prefer_default_model": False,
+            "emit_progress": None,
+        },
+        environment=SimpleNamespace(
+            llm_client=object(),
+            model="gemma4:26b",
+            user_namespace="#V#michael_witbrock@university_of_auckland_strong_ai_lab",
+            auxiliary_system_prompt=None,
+        ),
+        trace=None,
+    )
+
+    result = orchestrator._action_missing_tool_call_retry(cast(Any, request))
+
+    assert result.outputs["missing_tool_call_retry_success"] is True
+    assert result.outputs["tool_calls"] == [
+        {
+            "action": "call_tool",
+            "tool": "fetch_concept",
+            "payload": {"concept_id": "#V#scientific_paper"},
+        }
+    ]
+    assert result.outputs["missing_tool_call_recovery_outcome"] == (
+        "retry_succeeded_forced"
+    )
 
 
 def test_tool_calling_plan_does_not_force_parent_guided_retry_without_explicit_missing_requirements():
@@ -956,7 +1565,9 @@ def test_tool_calling_backfill_applies_parent_guided_retry_fallback_when_require
         missing_fetch_concept_ids: list[str] = []
         missing_read_file_copy_ids: list[str] = []
         missing_scholarly_representation_file_copy_ids: list[str] = []
-        missing_retry_reason: str | None = "Required tools still missing after initial retrieval."
+        missing_retry_reason: str | None = (
+            "Required tools still missing after initial retrieval."
+        )
 
     orchestrator._evaluate_prompt_requirements = cast(
         Any, lambda **kwargs: _PromptRequirements()
@@ -1173,6 +1784,122 @@ def test_tool_calling_backfill_chains_ontology_follow_up_after_search_concepts()
                 "concept_id": "#V#sail_student_group",
                 "limit": 20,
             },
+        },
+    ]
+
+
+def test_tool_calling_backfill_prefers_structural_retry_over_bad_recovery_llm_call():
+    orchestrator = _build_orchestrator_stub()
+
+    orchestrator._build_follow_up_llm_context = cast(
+        Any, lambda augmented_context, max_chars=4000: list(augmented_context or [])
+    )
+    orchestrator._build_stage_llm_context = cast(
+        Any, lambda **kwargs: (list(kwargs.get("base_context") or []), {})
+    )
+    orchestrator._run_llm_with_fallbacks = cast(
+        Any,
+        lambda **kwargs: (
+            'The ontology inspection identified 194 concepts related to "paper."',
+            "gemma4:26b",
+            None,
+        ),
+    )
+    orchestrator._run_missing_tool_call_recovery_workflow = cast(
+        Any,
+        lambda **kwargs: pytest.fail(
+            "structural retry should run before the recovery LLM"
+        ),
+    )
+    orchestrator._store_prompt_requirement_evaluation = cast(
+        Any, lambda data, prompt_requirements: None
+    )
+    orchestrator._augment_prompt_requirements_with_turn_contract = cast(
+        Any, lambda **kwargs: kwargs["evaluation"]
+    )
+
+    class _PromptRequirements:
+        required_tools = [
+            "vontology_concept_search",
+            "get_predicate_incidence",
+        ]
+        required_fetch_concept_ids: list[str] = []
+        required_read_file_copy_ids: list[str] = []
+        required_scholarly_representation_file_copy_ids: list[str] = []
+        required_create_type_name: str | None = None
+        required_url_extraction_tool: str | None = None
+        required_url_extraction_url: str | None = None
+        missing_tools = ["get_predicate_incidence"]
+        missing_fetch_concept_ids: list[str] = []
+        missing_read_file_copy_ids: list[str] = []
+        missing_scholarly_representation_file_copy_ids: list[str] = []
+        missing_retry_reason: str | None = (
+            "Predicate incidence must target the resolved paper concept."
+        )
+
+    orchestrator._evaluate_prompt_requirements = cast(
+        Any, lambda **kwargs: _PromptRequirements()
+    )
+
+    request = SimpleNamespace(
+        data={
+            "prompt": "What are key predicates for scientific papers in Vontology?",
+            "augmented_context": [],
+            "policy_state": SimpleNamespace(enabled=False, policy=None),
+            "registry_snapshot": {},
+            "user_concept_id": "#V#michael_witbrock",
+            "org_concept_id": "#V#sail",
+            "model_for_stage": lambda stage: "gemma4:26b",
+            "record_llm_call": lambda **kwargs: None,
+            "aux_llm_calls": [],
+            "llm_calls": [],
+            "emit_progress": None,
+            "iteration_count": 2,
+            "remaining_tool_calls": [],
+            "invocations": [
+                {
+                    "tool": "vontology_concept_search",
+                    "status": "ok",
+                    "arguments": {"query": "paper"},
+                },
+                {
+                    "tool": "get_predicate_incidence",
+                    "status": "ok",
+                    "arguments": {"concept_id": "#V#michael_witbrock"},
+                },
+            ],
+            "prompt_requirement_url_policy": {},
+            "missing_tool_call_retry_reason_override": (
+                "Predicate incidence must target the resolved paper concept."
+            ),
+            "missing_tool_call_retry_attempts": 0,
+            "missing_tool_call_retry_budget": 2,
+            "prefer_default_model": False,
+        },
+        environment=SimpleNamespace(
+            llm_client=object(),
+            model="gemma4:26b",
+            max_tool_invocations=8,
+        ),
+        trace=None,
+        workflow_id="#V#tool_calling_workflow",
+        workflow_state_id="backfill",
+        workflow_state_metadata={},
+        action_id="tool_calling.backfill",
+    )
+
+    result = orchestrator._action_tool_calling_backfill(cast(Any, request))
+
+    assert result.outputs["more_tool_calls"] is True
+    assert result.outputs["tool_calls_present"] is True
+    assert result.outputs["missing_tool_call_recovery_outcome"] == (
+        "retry_succeeded_parent_fallback"
+    )
+    assert result.outputs["tool_calls"] == [
+        {
+            "action": "call_tool",
+            "tool": "fetch_concept",
+            "payload": {"concept_id": "#V#paper"},
         }
     ]
 
@@ -1438,6 +2165,59 @@ def test_turn_contract_with_member_entity_guidance_requires_relation_argument_re
     assert "get_text_relations_summary" in required_tools
     assert "get_predicate_incidence" in required_tools
     assert "find_relations_with_argument" in required_tools
+
+
+def test_turn_contract_expands_concept_search_only_predicate_contract():
+    required_tools = InternalMCPChatOrchestrator._infer_turn_contract_required_tools(
+        turn_expected_outcome_contract={
+            "required_tools": ["vontology_concept_search"],
+            "summary": (
+                "A structured list of the primary predicates used within Vontology "
+                "to characterize scientific papers."
+            ),
+            "grounding_requirement": (
+                "The response must be grounded in actual predicates defined within "
+                "the Vontology schema."
+            ),
+            "selector_guidance": (
+                "First resolve the 'scientific paper' concept, then identify "
+                "predicates that have an incidence or extent involving that concept."
+            ),
+        },
+        method_catalogue=_Gateway.describe_methods(),
+    )
+
+    assert "vontology_concept_search" in required_tools
+    assert "get_predicate_incidence" in required_tools
+
+
+def test_turn_contract_maps_vontology_search_alias_to_allowed_search_concepts():
+    required_tools = InternalMCPChatOrchestrator._infer_turn_contract_required_tools(
+        turn_expected_outcome_contract={
+            "required_tools": ["vontology_concept_search", "fetch_concept"],
+            "summary": "List key predicates for scientific papers.",
+            "grounding_requirement": (
+                "Every predicate listed must be verified against actual "
+                "Vontology schema inspection."
+            ),
+        },
+        method_catalogue={
+            "search_concepts": {},
+            "fetch_concept": {},
+            "get_predicate_incidence": {},
+        },
+        allowed_tools=[
+            "search_concepts",
+            "fetch_concept",
+            "get_predicate_incidence",
+        ],
+    )
+
+    assert required_tools == (
+        "search_concepts",
+        "fetch_concept",
+        "get_predicate_incidence",
+    )
 
 
 def test_turn_contract_preferring_kb_over_general_web_search_does_not_require_search_web():
@@ -1727,7 +2507,10 @@ def test_build_turn_expected_outcome_contract_object_ignores_prose_required_tool
     )
 
     assert contract.required_tools == ("search_knowledge_base",)
-    assert contract.summary == "List grounded represented records linked to the current user."
+    assert (
+        contract.summary
+        == "List grounded represented records linked to the current user."
+    )
 
 
 def test_tool_calling_backfill_recovers_search_concepts_from_structured_discovery_contract():

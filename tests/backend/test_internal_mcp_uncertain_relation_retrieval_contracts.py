@@ -67,7 +67,9 @@ def test_fetch_concept_relations_exposes_uncertainty_metadata() -> None:
     ).payload
 
     relations = ((payload or {}).get("relations") or {}).get("relations") or []
-    uncertain_rows = [row for row in relations if row.get("relation_state") == "uncertain"]
+    uncertain_rows = [
+        row for row in relations if row.get("relation_state") == "uncertain"
+    ]
     assert uncertain_rows
     assert uncertain_rows[0]["uncertainty"]["assertion_id"] == "u1"
     assert uncertain_rows[0]["is_asserted"] is False
@@ -150,12 +152,17 @@ def test_get_predicate_incidence_supports_type_mode_via_gateway() -> None:
     assert payload["mode"] == "type"
     assert payload["instance_of"] == "#V#sail_student"
     assert payload["instance_count_considered"] == 2
-    rows = {
-        row["predicate_concept_id"]: row for row in payload.get("predicates") or []
-    }
+    rows = {row["predicate_concept_id"]: row for row in payload.get("predicates") or []}
     assert rows["#V#member_of_organisation"]["relation_hit_count"] == 2
     assert rows["#V#member_of_organisation"]["grounded_instance_count"] == 2
     assert rows["#V#has_phd_supervisor"]["relation_hit_count"] == 1
+
+
+def test_get_predicate_incidence_gateway_rejects_plain_text_identifier() -> None:
+    gateway = _gateway()
+
+    with pytest.raises(ValueError, match="use search_concepts first"):
+        gateway.invoke("get_predicate_incidence", {"concept_id": "paper"})
 
 
 def test_get_predicate_incidence_typed_counts_work_through_gateway() -> None:
@@ -201,7 +208,7 @@ def test_get_predicate_incidence_typed_counts_work_through_gateway() -> None:
         entry.get("type_concept_id") for entry in row.get("argument_type_counts") or []
     }
     assert type_ids == {"#V#scholarly_article", "#V#diary_entry"}
-    assert payload["typed_predicate_incidence_diagnostics"][
-        "include_argument_type_counts"
-    ] is True
-
+    assert (
+        payload["typed_predicate_incidence_diagnostics"]["include_argument_type_counts"]
+        is True
+    )

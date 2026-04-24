@@ -368,6 +368,16 @@ def _build_turn_execution_execute_selected_handler() -> Any:
                     )
                     else request.data.get("workflow_discovery")
                 ),
+                parent_aux_llm_calls=(
+                    request.data.get("aux_llm_calls")
+                    if isinstance(request.data.get("aux_llm_calls"), list)
+                    else None
+                ),
+                parent_llm_calls=(
+                    request.data.get("llm_calls")
+                    if isinstance(request.data.get("llm_calls"), list)
+                    else None
+                ),
             )
             return WorkflowActionResult(outputs=outputs)
 
@@ -481,6 +491,16 @@ def _build_turn_execution_execute_selected_handler() -> Any:
                 request.data.get("workflow_discovery_result")
                 if isinstance(request.data.get("workflow_discovery_result"), Mapping)
                 else request.data.get("workflow_discovery")
+            ),
+            parent_aux_llm_calls=(
+                request.data.get("aux_llm_calls")
+                if isinstance(request.data.get("aux_llm_calls"), list)
+                else None
+            ),
+            parent_llm_calls=(
+                request.data.get("llm_calls")
+                if isinstance(request.data.get("llm_calls"), list)
+                else None
             ),
         )
         raw_existing_invocations = request.data.get("invocations")
