@@ -19,6 +19,7 @@ from ..engine import WorkflowDefinition
 from ..action_registry import ActionRegistry
 from .instance_manager import WorkflowInstanceManager
 from .durable_executor import DurableWorkflowExecutor, DurableWorkflowResult
+from .failed_output_diagnostics import build_failed_workflow_outputs
 from .models import WorkflowInstance
 
 logger = logging.getLogger(__name__)
@@ -256,6 +257,7 @@ class DurableWorkflowWorker:
             error: str,
             error_step: str | None = None,
             increment_retry: bool = True,
+            outputs: dict[str, Any] | None = None,
             execution_trace_id: str | None = None,
         ) -> None:
             try:
@@ -264,6 +266,7 @@ class DurableWorkflowWorker:
                     error=error,
                     error_step=error_step,
                     increment_retry=increment_retry,
+                    outputs=outputs,
                     execution_trace_id=execution_trace_id,
                 )
             except Exception:
@@ -338,9 +341,15 @@ class DurableWorkflowWorker:
                 logger.info("[durable_worker] Instance %s was cancelled", instance_id)
 
             else:
+                failed_outputs = build_failed_workflow_outputs(
+                    result.data,
+                    error=result.error or "unknown_error",
+                    error_step=result.final_state,
+                )
                 _best_effort_mark_failed(
                     error=result.error or "unknown_error",
                     error_step=result.final_state,
+                    outputs=failed_outputs,
                     execution_trace_id=result.execution_trace_id,
                 )
                 if self._on_instance_failed:

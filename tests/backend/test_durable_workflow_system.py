@@ -611,6 +611,7 @@ class TestWorkflowInstanceManager:
             instance_id,
             error="Something went wrong",
             error_step="action_3",
+            outputs={"schema_version": "workflow_failed_outputs.v1"},
             execution_trace_id="trace-failed-1",
         )
 
@@ -621,6 +622,7 @@ class TestWorkflowInstanceManager:
         assert instance.status == WorkflowInstanceStatus.FAILED
         assert instance.error == "Something went wrong"
         assert instance.error_step == "action_3"
+        assert instance.outputs == {"schema_version": "workflow_failed_outputs.v1"}
         assert instance.execution_trace_id == "trace-failed-1"
         assert instance.retry_count == 1
 
@@ -1723,4 +1725,3 @@ class TestWorkflowScheduler:
         assert metrics["due_schedules_seen_total"] == 0
         assert metrics["due_count"] == 0
         assert metrics["triggered_count"] == 0
-

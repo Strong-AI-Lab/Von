@@ -327,6 +327,7 @@ class _StubWorkflowManager:
         error: str = "failed",
         error_step: str | None = None,
         increment_retry: bool = False,
+        outputs: dict[str, object] | None = None,
     ) -> bool:
         instance = self.instances.get(instance_id)
         if instance is None:
@@ -334,6 +335,8 @@ class _StubWorkflowManager:
         instance.status = WorkflowInstanceStatus.FAILED
         instance.error = error
         instance.error_step = error_step
+        if outputs is not None:
+            instance.outputs = dict(outputs)
         if increment_retry:
             instance.retry_count += 1
         return True
@@ -549,6 +552,7 @@ class _InMemoryScheduleWorkflowManager:
         error: str = "failed",
         error_step: str | None = None,
         increment_retry: bool = False,
+        outputs: dict[str, object] | None = None,
     ) -> bool:
         instance = self._instance_lookup.get(instance_id)
         if instance is None:
@@ -556,6 +560,8 @@ class _InMemoryScheduleWorkflowManager:
         instance.status = WorkflowInstanceStatus.FAILED
         instance.error = error
         instance.error_step = error_step
+        if outputs is not None:
+            instance.outputs = dict(outputs)
         if increment_retry:
             instance.retry_count += 1
         return True
@@ -1012,6 +1018,50 @@ def test_workflow_create_list_get_instance_gateway_paths(monkeypatch):
     assert detail.get("workflow_id") == workflow_id
     assert detail.get("namespace") == "#V#user@org"
     assert detail.get("inputs") == {"seed": "value"}
+
+
+def test_workflow_get_instance_exposes_failed_outputs(monkeypatch):
+    manager = _StubWorkflowManager()
+    _patch_submit_verified_instance_success(monkeypatch)
+    workflow_id = "#V#enrichment_workflow"
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: manager,
+    )
+    gateway = _build_gateway()
+
+    created = gateway.invoke(
+        "workflow_create_instance",
+        {
+            "workflow_id": workflow_id,
+            "user_id": "#V#user",
+            "org_id": "#V#org",
+            "inputs": {"seed": "value"},
+        },
+    ).payload
+    instance_id = created.get("instance_id")
+    assert isinstance(instance_id, str)
+
+    assert manager.mark_failed(
+        instance_id,
+        error="metadata_validation_failed",
+        error_step="infer_expected_outcome",
+        outputs={
+            "schema_version": "workflow_failed_outputs.v1",
+            "failed_action_diagnostics": {"action_id": "llm.action"},
+        },
+    )
+
+    detail = gateway.invoke(
+        "workflow_get_instance",
+        {"instance_id": instance_id},
+    ).payload
+    assert detail.get("success") is True
+    assert detail.get("status") == "failed"
+    assert detail.get("outputs") == {
+        "schema_version": "workflow_failed_outputs.v1",
+        "failed_action_diagnostics": {"action_id": "llm.action"},
+    }
 
 
 def test_workflow_list_instances_supports_turn_and_date_filters(monkeypatch):

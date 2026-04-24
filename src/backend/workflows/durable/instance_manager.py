@@ -1204,6 +1204,7 @@ class WorkflowInstanceManager:
         error: str,
         error_step: str | None = None,
         increment_retry: bool = True,
+        outputs: dict[str, Any] | None = None,
         execution_trace_id: str | None = None,
     ) -> bool:
         """Mark an instance as failed.
@@ -1213,6 +1214,7 @@ class WorkflowInstanceManager:
             error: Error message.
             error_step: Optional step where failure occurred.
             increment_retry: Whether to increment retry count.
+            outputs: Optional bounded diagnostic outputs for the failed run.
 
         Returns:
             True if status was updated.
@@ -1231,6 +1233,8 @@ class WorkflowInstanceManager:
         }
         if error_step:
             update["$set"]["error_step"] = error_step
+        if outputs is not None:
+            update["$set"]["outputs"] = outputs
         if execution_trace_id is not None:
             update["$set"]["execution_trace_id"] = execution_trace_id
         if increment_retry:
@@ -1273,6 +1277,7 @@ class WorkflowInstanceManager:
                     if increment_retry
                     else instance_before.retry_count
                 ),
+                outputs=outputs if outputs is not None else instance_before.outputs,
                 execution_trace_id=(
                     execution_trace_id
                     if execution_trace_id is not None

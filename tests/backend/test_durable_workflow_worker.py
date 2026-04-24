@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 from src.backend.workflows.action_registry import ActionRegistry
+from src.backend.workflows.durable.durable_executor import DurableWorkflowResult
 from src.backend.workflows.durable.models import (
     WorkflowInstance,
     WorkflowInstanceStatus,
@@ -96,3 +97,101 @@ def test_worker_swallows_mark_failed_errors_during_exception_path() -> None:
     assert manager.release_lock_calls == [(instance.instance_id, "worker-1548")]
     assert manager.mark_failed_calls
     assert manager.mark_failed_calls[0]["error"].startswith("worker_exception:")
+
+
+def test_worker_persists_bounded_failed_outputs_from_result_context() -> None:
+    manager = _WorkerManagerStub()
+    worker = DurableWorkflowWorker(
+        worker_id="worker-1548",
+        instance_manager=manager,  # type: ignore[arg-type]
+        registry=ActionRegistry(),
+        definition_loader=cast(
+            Any,
+            lambda _workflow_id: SimpleNamespace(workflow_id=_workflow_id),
+        ),
+    )
+    instance = _build_instance()
+    worker._current_instances[instance.instance_id] = Thread()
+    raw_response = "{" + ("x" * 3000)
+    worker._executor = cast(
+        Any,
+        SimpleNamespace(
+            run_durable=lambda *args, **kwargs: DurableWorkflowResult(
+                instance_id=instance.instance_id,
+                data={
+                    "last_metadata_validation": {
+                        "state_id": "infer_expected_outcome",
+                        "ok": False,
+                        "reason_code": "metadata_write_context_key_missing",
+                        "details": {"symbol": "turn_expected_grounding_requirement"},
+                    },
+                    "workflow_metadata_validation_events": [
+                        {"state_id": "infer_expected_outcome", "ok": False}
+                    ],
+                    "workflow_step_result_envelopes": [
+                        {
+                            "state_id": "infer_expected_outcome",
+                            "action_id": "llm.action",
+                            "action_status": "failed",
+                            "action_outcome": "failure",
+                            "diagnostics": {"error": "json_parse_failed:unparsed"},
+                            "output_payload": {
+                                "llm_step_response": raw_response,
+                                "validated_json_raw_response": raw_response,
+                                "prompt": "do not persist the full prompt",
+                                "api_token": "secret-token-value",
+                            },
+                        }
+                    ],
+                    "last_workflow_step_result_envelope": {
+                        "state_id": "infer_expected_outcome",
+                        "action_id": "llm.action",
+                        "action_status": "failed",
+                        "action_outcome": "failure",
+                        "diagnostics": {"error": "json_parse_failed:unparsed"},
+                        "output_payload": {
+                            "llm_step_response": raw_response,
+                            "validated_json_raw_response": raw_response,
+                            "prompt": "do not persist the full prompt",
+                            "api_token": "secret-token-value",
+                        },
+                    },
+                },
+                completed=False,
+                final_state="infer_expected_outcome",
+                error=(
+                    "metadata_validation_failed:"
+                    "metadata_write_context_key_missing:"
+                    "infer_expected_outcome:"
+                    "turn_expected_grounding_requirement"
+                ),
+                execution_trace_id="trace-failed-1",
+            )
+        ),
+    )
+
+    worker._process_instance(instance)
+
+    assert manager.mark_failed_calls
+    outputs = manager.mark_failed_calls[0]["outputs"]
+    assert outputs["schema_version"] == "workflow_failed_outputs.v1"
+    assert outputs["error_step"] == "infer_expected_outcome"
+    diagnostics = outputs["failed_action_diagnostics"]
+    assert diagnostics["state_id"] == "infer_expected_outcome"
+    assert diagnostics["action_id"] == "llm.action"
+    assert diagnostics["output_keys"] == [
+        "api_token",
+        "llm_step_response",
+        "prompt",
+        "validated_json_raw_response",
+    ]
+    compact_payload = diagnostics["output_payload"]
+    assert compact_payload["llm_step_response"]["truncated"] is True
+    assert compact_payload["llm_step_response"]["char_count"] == len(raw_response)
+    assert len(compact_payload["llm_step_response"]["text_preview"]) == 2000
+    assert compact_payload["api_token"] == "[redacted]"
+    assert compact_payload["prompt"]["suppressed"] is True
+    assert (
+        outputs["metadata_validation"]["last_event"]["reason_code"]
+        == "metadata_write_context_key_missing"
+    )
