@@ -146,6 +146,21 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "evidence_surface_family": "knowledge_base",
         "external_surface": False,
     },
+    "list_uncertain_relationship_assertions": {
+        "salience": "medium",
+        "category": "vontology",
+        "display_template": "{count} uncertain relationship assertion(s)",
+        "planner_hint": (
+            "Use with source_id set to the focal concept when a request asks "
+            "for uncertain, inferred, or fact-vs-inference relationship evidence."
+        ),
+        "dispatch_surface_family": "knowledge_base",
+        "evidence_surface_family": "knowledge_base",
+        "external_surface": False,
+        "operation_category": "read",
+        "evidence_role": "verification",
+        "evidence_kind": "relation_bearing",
+    },
     "add_relationship": {
         "salience": "high",
         "category": "vontology",
@@ -1029,6 +1044,7 @@ _DEFAULT_VERIFICATION_READ_TOOL_NAMES = {
     "jira_get_myself",
     "jira_get_transitions",
     "jira_search",
+    "list_uncertain_relationship_assertions",
     "list_my_tasks",
     "list_pull_requests",
     "resolve_concept_by_name",
@@ -1267,8 +1283,10 @@ def _refresh_cache_if_needed() -> None:
                         metadata.operation_category
                         or default_metadata.operation_category
                     ),
-                    evidence_role=metadata.evidence_role or default_metadata.evidence_role,
-                    evidence_kind=metadata.evidence_kind or default_metadata.evidence_kind,
+                    evidence_role=metadata.evidence_role
+                    or default_metadata.evidence_role,
+                    evidence_kind=metadata.evidence_kind
+                    or default_metadata.evidence_kind,
                     expose_in_vontology_stdio=(
                         metadata.expose_in_vontology_stdio
                         if metadata.expose_in_vontology_stdio is not None
@@ -1338,7 +1356,9 @@ def get_display_template(tool_name: str) -> str | None:
     return get_tool_metadata(tool_name).display_template
 
 
-def get_tool_description(tool_name: str, *, fallback_description: str | None = None) -> str | None:
+def get_tool_description(
+    tool_name: str, *, fallback_description: str | None = None
+) -> str | None:
     """Get the authoritative tool description when available."""
     metadata = get_tool_metadata(tool_name)
     description = str(metadata.description or "").strip()
@@ -1404,7 +1424,9 @@ def get_tool_family(
     if fallback and fallback not in _NON_FAMILY_TOOL_CATEGORIES:
         return fallback
 
-    contract = _resolve_registry_contract(tool_name) if allow_registry_fallback else None
+    contract = (
+        _resolve_registry_contract(tool_name) if allow_registry_fallback else None
+    )
 
     family = str(getattr(contract, "family", "") or "").strip().lower()
     if family:
@@ -1449,7 +1471,9 @@ def get_tool_operation_category(
     if fallback is not None:
         return fallback
 
-    contract = _resolve_registry_contract(tool_name) if allow_registry_fallback else None
+    contract = (
+        _resolve_registry_contract(tool_name) if allow_registry_fallback else None
+    )
     return _normalise_operation_category(getattr(contract, "category", None))
 
 
@@ -1601,7 +1625,9 @@ def get_tool_surface_exposure_metadata(
             expose_in_jira_family_server=bool(explicit_values[3]),
         )
 
-    contract = _resolve_registry_contract(tool_name) if allow_registry_fallback else None
+    contract = (
+        _resolve_registry_contract(tool_name) if allow_registry_fallback else None
+    )
     exposure = getattr(contract, "exposure", None)
     if exposure is not None:
         return ToolSurfaceExposureMetadata(
@@ -1641,7 +1667,9 @@ def get_tool_dispatch_surface_metadata(
     explicit_external = _coerce_optional_bool(metadata.external_surface)
 
     if explicit_surface:
-        default_surface_metadata = _DEFAULT_DISPATCH_SURFACE_METADATA.get(explicit_surface)
+        default_surface_metadata = _DEFAULT_DISPATCH_SURFACE_METADATA.get(
+            explicit_surface
+        )
         return ToolDispatchSurfaceMetadata(
             surface_family=explicit_surface,
             evidence_surface_family=(

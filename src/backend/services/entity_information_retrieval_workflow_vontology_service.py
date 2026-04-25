@@ -20,7 +20,7 @@ ENTITY_INFORMATION_RETRIEVAL_PROMPT_CONCEPT_ID = (
 )
 
 _MANAGED_BY = "entity_information_retrieval_workflow_vontology_service"
-_SOURCE_TAG = "JVNAUTOSCI-1978"
+_SOURCE_TAG = "JVNAUTOSCI-2079"
 _REPO_SEED_ASSET_PATH = (
     Path(__file__).resolve().parents[1]
     / "workflows"

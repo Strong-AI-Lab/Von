@@ -21,8 +21,10 @@ def _required_effects_contract() -> dict[str, object]:
                 "effect_id": "grounded_entity_information_evidence",
                 "effect_type": "grounded_evidence",
                 "required_tools": [
+                    "fetch_concept",
                     "get_predicate_incidence",
                     "find_relations_with_argument",
+                    "list_uncertain_relationship_assertions",
                 ],
                 "required_tools_match": "all",
             }
@@ -144,15 +146,22 @@ def test_launchability_blocks_required_effect_tools_missing_from_llm_allowlist()
     policy = probe["required_effects_tool_policy"]
     assert policy["reason_code"] == "workflow_required_effect_tool_not_allowed"
     assert policy["unavailable_required_tools"] == [
+        "fetch_concept",
         "get_predicate_incidence",
         "find_relations_with_argument",
+        "list_uncertain_relationship_assertions",
     ]
 
 
 def test_launchability_accepts_required_effect_tools_allowed_by_llm_step() -> None:
     orchestrator = _orchestrator_for_definition(
         _workflow_definition(
-            allowed_tools=["get_predicate_incidence", "find_relations_with_argument"]
+            allowed_tools=[
+                "fetch_concept",
+                "get_predicate_incidence",
+                "find_relations_with_argument",
+                "list_uncertain_relationship_assertions",
+            ]
         )
     )
 

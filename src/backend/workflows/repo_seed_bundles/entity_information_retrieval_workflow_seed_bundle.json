@@ -2,8 +2,8 @@
   "family_id": "entity_information_retrieval_workflow_seed_bundle",
   "managed_by": "entity_information_retrieval_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "1",
-  "source_tag": "JVNAUTOSCI-1978",
+  "seed_version": "2",
+  "source_tag": "JVNAUTOSCI-2079",
   "supported_action_ids": [
     "llm.action"
   ],
@@ -50,7 +50,7 @@
         },
         {
           "predicate": "#V#hasWorkflowRequiredEffectsContractJson",
-          "text": "{\"schema_version\":\"workflow_required_effects_contract.v1\",\"contract_id\":\"grounded_entity_information_retrieval_evidence\",\"required_effects\":[{\"effect_id\":\"grounded_entity_information_evidence\",\"effect_type\":\"grounded_evidence\",\"description\":\"The workflow must inspect predicate incidence and then retrieve grounded relation evidence before claiming a grounded entity-information answer.\",\"required_tools\":[\"get_predicate_incidence\",\"find_relations_with_argument\"],\"required_tools_match\":\"all\",\"missing_failure_code\":\"entity_information_evidence_missing\",\"failed_failure_code\":\"entity_information_evidence_failed\",\"not_executed_reason\":\"Required grounded entity-information evidence was not retrieved.\",\"not_satisfied_reason\":\"Grounded entity-information retrieval failed or produced insufficient evidence.\"}]}",
+          "text": "{\"schema_version\":\"workflow_required_effects_contract.v1\",\"contract_id\":\"grounded_entity_information_retrieval_evidence\",\"required_effects\":[{\"effect_id\":\"grounded_entity_information_evidence\",\"effect_type\":\"grounded_evidence\",\"description\":\"The workflow must inspect the focal entity, inspect predicate incidence, retrieve grounded relation evidence, and check uncertainty-bearing relationship assertions before claiming a grounded entity-information answer.\",\"required_tools\":[\"fetch_concept\",\"get_predicate_incidence\",\"find_relations_with_argument\",\"list_uncertain_relationship_assertions\"],\"required_tools_match\":\"all\",\"missing_failure_code\":\"entity_information_evidence_missing\",\"failed_failure_code\":\"entity_information_evidence_failed\",\"not_executed_reason\":\"Required grounded entity-information evidence was not retrieved.\",\"not_satisfied_reason\":\"Grounded entity-information retrieval failed or produced insufficient evidence.\"}]}",
           "lang": "en-NZ"
         }
       ],
@@ -71,13 +71,16 @@
                 "get_predicate_incidence",
                 "find_relations_with_argument",
                 "search_concepts",
-                "fetch_concept"
+                "fetch_concept",
+                "list_uncertain_relationship_assertions"
               ],
               "required_tools": [
+                "fetch_concept",
                 "get_predicate_incidence",
-                "find_relations_with_argument"
+                "find_relations_with_argument",
+                "list_uncertain_relationship_assertions"
               ],
-              "max_tool_invocations": 5,
+              "max_tool_invocations": 8,
               "tool_argument_defaults": {
                 "get_predicate_incidence": {
                   "argument_index": "subject",
@@ -93,10 +96,13 @@
                     "enabled": true,
                     "max_predicates": 2
                   }
+                },
+                "list_uncertain_relationship_assertions": {
+                  "include_legacy": true
                 }
               },
               "context_messages_context_key": "augmented_context",
-              "response_contract_text": "Answer the user directly from grounded represented evidence. For papers, authorship, ownership, affiliation, role, and other entity-relative relation questions, inspect predicate incidence first with argument type counts, then retrieve narrowed relation evidence, then filter the resulting extent by the requested type before answering. If predicate incidence for a paper request exposes #V#author_of or #V#owner_of with paper-like type counts or sample groundings, the next relation lookup must use find_relations_with_argument with a predicate_filter containing those exact predicate IDs; do not use an unfiltered relation page first. If predicate incidence exposes role-expansion summaries for reified/event/claim neighbours, use role-filler type counts to choose the follow-up extent and do not treat the reified neighbour itself as the answer entity. Do not claim that no matching results exist unless the relation-bearing evidence in this turn supports that negative conclusion. If grounded evidence is insufficient, say that clearly instead of guessing.",
+              "response_contract_text": "Answer the user directly from grounded represented evidence. For broad self-profile, represented-self, authorship, ownership, affiliation, role, and other entity-relative relation questions, first fetch the focal entity concept, inspect predicate incidence with argument type counts, retrieve narrowed relation evidence, and check uncertainty-bearing relationship assertions for the same focal entity. When the user asks to separate established facts from likely inferences, report asserted relation/focal-concept evidence separately from uncertain or proposed relationship assertions; do not merge those categories. For papers, inspect predicate incidence before relation paging, then filter the resulting extent by the requested type before answering. If predicate incidence for a paper request exposes #V#author_of or #V#owner_of with paper-like type counts or sample groundings, the next relation lookup must use find_relations_with_argument with a predicate_filter containing those exact predicate IDs; do not use an unfiltered relation page first. If predicate incidence exposes role-expansion summaries for reified/event/claim neighbours, use role-filler type counts to choose the follow-up extent and do not treat the reified neighbour itself as the answer entity. Do not claim that no matching results exist unless the relation-bearing and uncertainty-bearing evidence in this turn supports that negative conclusion. If grounded evidence is insufficient, say that clearly instead of guessing.",
               "context_fields": [
                 {
                   "context_key": "prompt",

@@ -14,7 +14,9 @@ from src.backend.services.text_value_service import get_texts_for_concept
 from src.backend.services.workflow_discovery_service import (
     invalidate_workflow_discovery_executability_caches,
 )
-from src.backend.workflows import workflow_concept_authority_service as authority_service
+from src.backend.workflows import (
+    workflow_concept_authority_service as authority_service,
+)
 from src.backend.workflows.vontology_loader import (
     load_workflow_definition_from_vontology,
     resolve_workflow_discovery_exemplars,
@@ -70,9 +72,7 @@ def test_bootstrap_materialises_entity_information_retrieval_workflow(
     )
     assert isinstance(discovery_exemplars, dict)
     assert discovery_source.startswith("text_relation:")
-    assert "who am i and list my papers" in (
-        discovery_exemplars.get("keywords") or []
-    )
+    assert "who am i and list my papers" in (discovery_exemplars.get("keywords") or [])
 
     launch_contract, launch_source = resolve_workflow_launch_input_contract(
         ENTITY_INFORMATION_RETRIEVAL_WORKFLOW_ID
@@ -88,8 +88,10 @@ def test_bootstrap_materialises_entity_information_retrieval_workflow(
     assert required_effects[0]["effect_id"] == "grounded_entity_information_evidence"
     assert required_effects[0]["effect_type"] == "grounded_evidence"
     assert required_effects[0]["required_tools"] == [
+        "fetch_concept",
         "get_predicate_incidence",
         "find_relations_with_argument",
+        "list_uncertain_relationship_assertions",
     ]
     assert required_effects[0]["required_tools_match"] == "all"
     assert (
@@ -110,12 +112,15 @@ def test_bootstrap_materialises_entity_information_retrieval_workflow(
         "find_relations_with_argument",
         "search_concepts",
         "fetch_concept",
+        "list_uncertain_relationship_assertions",
     ]
     assert llm_policy.get("required_tools") == [
+        "fetch_concept",
         "get_predicate_incidence",
         "find_relations_with_argument",
+        "list_uncertain_relationship_assertions",
     ]
-    assert llm_policy.get("max_tool_invocations") == 5
+    assert llm_policy.get("max_tool_invocations") == 8
     assert llm_policy.get("tool_argument_defaults") == {
         "get_predicate_incidence": {
             "argument_index": "subject",
@@ -131,6 +136,9 @@ def test_bootstrap_materialises_entity_information_retrieval_workflow(
                 "enabled": True,
                 "max_predicates": 2,
             },
+        },
+        "list_uncertain_relationship_assertions": {
+            "include_legacy": True,
         },
     }
     assert any(
@@ -179,6 +187,8 @@ def test_entity_information_retrieval_prompt_support_seeds_content_from_repo_ass
     prompt_text_lower = prompt_text.lower()
     assert "Do not use `list_papers`" in prompt_text
     assert "Use `get_predicate_incidence`" in prompt_text
+    assert "list_uncertain_relationship_assertions" in prompt_text
+    assert "established facts versus likely inferences" in prompt_text
     assert "you must call a represented-knowledge" in prompt_text_lower
     assert "retrieval tool in this turn before answering" in prompt_text_lower
     assert "do not conclude that no papers" in prompt_text_lower
@@ -188,7 +198,10 @@ def test_entity_information_retrieval_prompt_support_seeds_content_from_repo_ass
     assert "preserve the full `#v#" in prompt_text_lower
     assert "must include a `predicate_filter`" in prompt_text_lower
     assert "before any broader relation paging" in prompt_text_lower
-    assert "do not use an unfiltered `find_relations_with_argument` call" in prompt_text_lower
+    assert (
+        "do not use an unfiltered `find_relations_with_argument` call"
+        in prompt_text_lower
+    )
     assert "do not stop at incidence alone" in prompt_text_lower
     assert "do not assume missing tool results" in prompt_text_lower
     assert "filter the grounded targets by type" in prompt_text_lower

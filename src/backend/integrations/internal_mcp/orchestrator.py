@@ -11016,8 +11016,7 @@ class InternalMCPChatOrchestrator:
         included_lookup: set[str] = set()
         excluded_reasons: dict[str, str] = {}
         relation_grounding_requested = profile == "planner" and any(
-            is_tool_relation_bearing_evidence(tool_name)
-            for tool_name in required_tools
+            is_tool_relation_bearing_evidence(tool_name) for tool_name in required_tools
         )
 
         def _is_inventory_only_tool(tool_name: str) -> bool:
@@ -24290,6 +24289,42 @@ class InternalMCPChatOrchestrator:
         )
         if retry_actor_concept_id is None and predicate_incidence_follow_up_concept_ids:
             retry_actor_concept_id = predicate_incidence_follow_up_concept_ids[0]
+        contract_target_concept_ids: list[str] = []
+        try:
+            contract_object = (
+                turn_expected_outcome_contract
+                if isinstance(
+                    turn_expected_outcome_contract, TurnExpectedOutcomeContract
+                )
+                else TurnExpectedOutcomeContract.from_mapping(
+                    turn_expected_outcome_contract
+                )
+            )
+            contract_target_concept_ids = self._dedupe_preserving_order(
+                [
+                    str(item).strip()
+                    for item in (contract_object.target_concept_ids or ())
+                    if isinstance(item, str) and str(item).strip()
+                ]
+            )
+        except Exception:
+            contract_target_concept_ids = []
+        explicit_uncertainty_source_ids = self._dedupe_preserving_order(
+            [
+                *contract_target_concept_ids,
+                *missing_required_fetch_concept_ids,
+            ]
+        )
+        fallback_uncertainty_source_ids = self._dedupe_preserving_order(
+            [
+                *([retry_actor_concept_id] if retry_actor_concept_id else []),
+                *predicate_incidence_follow_up_concept_ids,
+                *ontology_follow_up_concept_ids,
+            ]
+        )
+        uncertainty_source_concept_ids = (
+            explicit_uncertainty_source_ids or fallback_uncertainty_source_ids
+        )
 
         forced_calls: list[_ToolCallRequest] = []
         for tool_name in missing_required_tools:
@@ -24586,6 +24621,20 @@ class InternalMCPChatOrchestrator:
                 )
                 continue
 
+            if name == "list_uncertain_relationship_assertions":
+                for source_id in uncertainty_source_concept_ids[:2]:
+                    forced_calls.append(
+                        {
+                            "action": "call_tool",
+                            "tool": name,
+                            "payload": {
+                                "source_id": source_id,
+                                "include_legacy": True,
+                            },
+                        }
+                    )
+                continue
+
             if name == "jira_search":
                 continue
 
@@ -24596,6 +24645,8 @@ class InternalMCPChatOrchestrator:
                 fetch_concept_ids = list(missing_required_fetch_concept_ids)
                 if not fetch_concept_ids and ontology_follow_up_concept_ids:
                     fetch_concept_ids = list(ontology_follow_up_concept_ids)
+                if not fetch_concept_ids:
+                    fetch_concept_ids = list(uncertainty_source_concept_ids[:2])
                 for concept_id in fetch_concept_ids:
                     forced_calls.append(
                         {
@@ -25146,6 +25197,7 @@ class InternalMCPChatOrchestrator:
                 "get_related_concepts",
                 "find_relations_with_argument",
                 "fetch_concept",
+                "list_uncertain_relationship_assertions",
                 "resolve_concept_by_name",
             }
             for tool_name in missing_tools
@@ -25252,6 +25304,17 @@ class InternalMCPChatOrchestrator:
                         "payload": {"concept_id": primary_concept_id},
                     }
                 )
+            elif tool_name == "list_uncertain_relationship_assertions":
+                forced_calls.append(
+                    {
+                        "action": "call_tool",
+                        "tool": tool_name,
+                        "payload": {
+                            "source_id": primary_concept_id,
+                            "include_legacy": True,
+                        },
+                    }
+                )
 
         if (
             any(
@@ -25300,6 +25363,7 @@ class InternalMCPChatOrchestrator:
             "get_related_concepts",
             "find_relations_with_argument",
             "fetch_concept",
+            "list_uncertain_relationship_assertions",
             "resolve_concept_by_name",
         }
 

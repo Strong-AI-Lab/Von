@@ -83,8 +83,10 @@ def _entity_information_workflow_required_effects_contract() -> dict[str, object
                 "effect_id": "grounded_entity_information_evidence",
                 "effect_type": "grounded_evidence",
                 "required_tools": [
+                    "fetch_concept",
                     "get_predicate_incidence",
                     "find_relations_with_argument",
+                    "list_uncertain_relationship_assertions",
                 ],
                 "required_tools_match": "all",
                 "missing_failure_code": "entity_information_evidence_missing",
@@ -673,8 +675,10 @@ def test_custom_workflow_actions_do_not_make_missing_required_evidence_tools_exp
     assert summary.get("zero_tool_execution_expected") is False
     assert summary.get("zero_tool_reason_code") == "required_effect_tools_missing"
     assert summary.get("required_effects_missing_required_tools") == [
+        "fetch_concept",
         "get_predicate_incidence",
         "find_relations_with_argument",
+        "list_uncertain_relationship_assertions",
     ]
 
     routing_diagnostics = record.get("workflow_routing_diagnostics")
@@ -683,7 +687,7 @@ def test_custom_workflow_actions_do_not_make_missing_required_evidence_tools_exp
     assert isinstance(dispatch, dict)
     assert dispatch.get("zero_tool_execution_expected") is False
     assert dispatch.get("zero_tool_reason_code") == "required_effect_tools_missing"
-    assert dispatch.get("required_effects_missing_required_tool_count") == 2
+    assert dispatch.get("required_effects_missing_required_tool_count") == 4
 
     completion_gate = record.get("completion_gate") or {}
     assert completion_gate.get("decision") == "escalation_required"

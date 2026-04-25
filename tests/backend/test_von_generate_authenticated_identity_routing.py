@@ -24,9 +24,7 @@ from src.backend.services.workflow_capability_service import (
 SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID = (
     "#V#scholarly_paper_representation_workflow"
 )
-ENTITY_INFORMATION_RETRIEVAL_WORKFLOW_ID = (
-    "#V#entity_information_retrieval_workflow"
-)
+ENTITY_INFORMATION_RETRIEVAL_WORKFLOW_ID = "#V#entity_information_retrieval_workflow"
 _TEST_BASE_PROMPT = (
     "You have access to internal MCP tools.\n\n"
     "{auth_status}\n"
@@ -88,12 +86,15 @@ class _LiveWorkflowDiscoveryRetrievalBackend:
         rows: list[dict[str, Any]] = []
         for doc in self.docs_by_namespace.get(namespace_key, {}).values():
             metadata = dict(doc.get("metadata") or {})
-            requested_type = str(
-                (permissions_context or {}).get("type") or ""
-            ).strip()
-            if requested_type and str(metadata.get("type") or "").strip() != requested_type:
+            requested_type = str((permissions_context or {}).get("type") or "").strip()
+            if (
+                requested_type
+                and str(metadata.get("type") or "").strip() != requested_type
+            ):
                 continue
-            text_tokens = set(self._TOKEN_RE.findall(str(doc.get("text") or "").lower()))
+            text_tokens = set(
+                self._TOKEN_RE.findall(str(doc.get("text") or "").lower())
+            )
             overlap = len(query_tokens & text_tokens)
             if overlap <= 0:
                 continue
@@ -144,7 +145,9 @@ def _build_discovery_result(
     }
 
 
-def _tool_calling_discovery(prompt_text: str, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+def _tool_calling_discovery(
+    prompt_text: str, *_args: Any, **_kwargs: Any
+) -> dict[str, Any]:
     return _build_discovery_result(
         prompt_text=prompt_text,
         workflow_id=TOOL_CALLING_WORKFLOW_ID,
@@ -318,7 +321,7 @@ class _GroundedKbLookupGatewayStub:
                         "query": {"type": "string"},
                     },
                 },
-            }
+            },
         }
 
     def invoke(self, tool_name: str, payload: dict[str, Any]):
@@ -655,7 +658,8 @@ class _MixedGroundedEvidenceLLM:
                 positive_index != -1
                 and zero_index != -1
                 and positive_index < zero_index
-                and "Treat zero-result notes as query-specific misses only." in context_text
+                and "Treat zero-result notes as query-specific misses only."
+                in context_text
                 and "Relation-bearing evidence excerpts" in context_text
                 and "Example Record" in context_text
             ):
@@ -718,7 +722,7 @@ class _FalseNegativeGroundedEvidenceLLM:
                 '"blocker_source":"critic_verdict",'
                 '"response_surface_kind":"insufficiency_claim",'
                 '"observed_result_signals":["positive_relation_hits"]'
-                '},'
+                "},"
                 '"recommendations":["Revise the answer to reflect the grounded relation evidence instead of claiming no grounded links were found."]}'
             )
         if prompt == "List grounded represented records linked to the current user.":
@@ -829,10 +833,55 @@ class _PredicateExtentRoutingGatewayStub:
                     },
                 },
             },
+            "fetch_concept": {
+                "description": "Fetch full details of one specific concept by ID.",
+                "category": "read",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "concept_id": {"type": "string"},
+                    },
+                    "required": ["concept_id"],
+                },
+            },
+            "list_uncertain_relationship_assertions": {
+                "description": (
+                    "List uncertain relationship assertions for a focal concept."
+                ),
+                "category": "read",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "source_id": {"type": "string"},
+                        "include_legacy": {"type": "boolean"},
+                    },
+                    "required": ["source_id"],
+                },
+            },
         }
 
     def invoke(self, tool_name: str, payload: dict[str, Any]):
         self.invocations.append({"tool": tool_name, "payload": dict(payload)})
+        if tool_name == "fetch_concept":
+            return SimpleNamespace(
+                payload={
+                    "concept_id": payload.get("concept_id"),
+                    "name": "Test User",
+                    "kind": "individual",
+                    "relationships": {"is_an_instance_of": ["#V#von_user"]},
+                },
+                duration_ms=5,
+            )
+        if tool_name == "list_uncertain_relationship_assertions":
+            return SimpleNamespace(
+                payload={
+                    "success": True,
+                    "source_id": payload.get("source_id"),
+                    "count": 0,
+                    "assertions": [],
+                },
+                duration_ms=5,
+            )
         if tool_name == "get_predicate_incidence":
             return SimpleNamespace(
                 payload={
@@ -952,6 +1001,26 @@ class _NoisyPredicateExtentRoutingGatewayStub:
 
     def invoke(self, tool_name: str, payload: dict[str, Any]):
         self.invocations.append({"tool": tool_name, "payload": dict(payload)})
+        if tool_name == "fetch_concept":
+            return SimpleNamespace(
+                payload={
+                    "concept_id": payload.get("concept_id"),
+                    "name": "Test User",
+                    "kind": "individual",
+                    "relationships": {"is_an_instance_of": ["#V#von_user"]},
+                },
+                duration_ms=5,
+            )
+        if tool_name == "list_uncertain_relationship_assertions":
+            return SimpleNamespace(
+                payload={
+                    "success": True,
+                    "source_id": payload.get("source_id"),
+                    "count": 0,
+                    "assertions": [],
+                },
+                duration_ms=5,
+            )
         if tool_name == "get_predicate_incidence":
             return SimpleNamespace(
                 payload={
@@ -1933,7 +2002,9 @@ def test_generate_grounded_kb_lookup_preserves_turn_context_into_payload_and_sum
     client = app.test_client()
     response = client.post(
         "/von/generate",
-        json={"prompt": "List grounded represented records linked to the current user."},
+        json={
+            "prompt": "List grounded represented records linked to the current user."
+        },
     )
     assert response.status_code == 200
 
@@ -1979,7 +2050,9 @@ def test_generate_grounded_kb_lookup_preserves_turn_context_into_payload_and_sum
     execution = turn_record.get("execution") or {}
     selected_workflow_trace = execution.get("selected_workflow_trace") or {}
     assert selected_workflow_trace.get("selected_execution_mode") == "tool_pipeline"
-    contract_state = selected_workflow_trace.get("expected_outcome_contract_state") or {}
+    contract_state = (
+        selected_workflow_trace.get("expected_outcome_contract_state") or {}
+    )
     assert contract_state.get("schema_version") == "turn_expected_outcome_contract.v1"
     assert contract_state.get("fields", {}).get("summary") == (
         "List grounded represented records linked to the current user."
@@ -1991,11 +2064,8 @@ def test_generate_grounded_kb_lookup_preserves_turn_context_into_payload_and_sum
         "List grounded represented records linked to the current user."
     )
     routing_contract_state = (
-        (turn_record.get("workflow_routing_diagnostics") or {}).get(
-            "turn_expected_outcome_contract_state"
-        )
-        or {}
-    )
+        turn_record.get("workflow_routing_diagnostics") or {}
+    ).get("turn_expected_outcome_contract_state") or {}
     assert routing_contract_state.get("fields", {}).get("summary") == (
         "List grounded represented records linked to the current user."
     )
@@ -2017,7 +2087,9 @@ def test_generate_grounded_follow_up_prefers_positive_relation_evidence_over_zer
     client = app.test_client()
     response = client.post(
         "/von/generate",
-        json={"prompt": "List grounded represented records linked to the current user."},
+        json={
+            "prompt": "List grounded represented records linked to the current user."
+        },
     )
     assert response.status_code == 200
 
@@ -2053,11 +2125,10 @@ def test_generate_grounded_follow_up_prefers_positive_relation_evidence_over_zer
         "Zero-result or inconclusive retrieval surfaces for this turn:"
         in final_summariser_context_text
     )
-    assert (
-        final_summariser_context_text.find("Positive retrieval signals for this turn:")
-        < final_summariser_context_text.find(
-            "Zero-result or inconclusive retrieval surfaces for this turn:"
-        )
+    assert final_summariser_context_text.find(
+        "Positive retrieval signals for this turn:"
+    ) < final_summariser_context_text.find(
+        "Zero-result or inconclusive retrieval surfaces for this turn:"
     )
     assert (
         "Treat zero-result notes as query-specific misses only."
@@ -2085,7 +2156,9 @@ def test_generate_grounded_false_negative_turn_is_recorded_as_false_success(
     client = app.test_client()
     response = client.post(
         "/von/generate",
-        json={"prompt": "List grounded represented records linked to the current user."},
+        json={
+            "prompt": "List grounded represented records linked to the current user."
+        },
     )
     assert response.status_code == 200
 
@@ -2110,12 +2183,9 @@ def test_generate_grounded_false_negative_turn_is_recorded_as_false_success(
         "prompt_required_evidence_positive_results_contradict_low_information_answer"
         in (completion_gate.get("blocking_failure_codes") or [])
     )
-    blocker = (
-        (completion_gate.get("evidence_payload") or {}).get(
-            "required_evidence_answer_consistency_blocker"
-        )
-        or {}
-    )
+    blocker = (completion_gate.get("evidence_payload") or {}).get(
+        "required_evidence_answer_consistency_blocker"
+    ) or {}
     assert blocker.get("response_surface_kind") == "insufficiency_claim"
 
 
@@ -2424,7 +2494,7 @@ def test_generate_authenticated_entity_information_turn_routes_to_specialised_wo
         llm=llm,
         gateway_override=gateway,
         discovery_override=_entity_information_retrieval_discovery,
-        max_tool_invocations=3,
+        max_tool_invocations=6,
     )
 
     client = app.test_client()
@@ -2447,9 +2517,7 @@ def test_generate_authenticated_entity_information_turn_routes_to_specialised_wo
     if len(gateway.invocations) > 1:
         assert gateway.invocations[1]["tool"] == "find_relations_with_argument"
         assert gateway.invocations[1]["payload"]["concept_id"] == "#V#test_user"
-        assert gateway.invocations[1]["payload"]["predicate_filter"] == [
-            "#V#author_of"
-        ]
+        assert gateway.invocations[1]["payload"]["predicate_filter"] == ["#V#author_of"]
 
     llm_debug = body.get("llm_debug") or {}
     workflow_routing = llm_debug.get("workflow_routing") or {}
@@ -2492,7 +2560,7 @@ def test_generate_authenticated_entity_information_turn_forces_relation_follow_u
         llm=llm,
         gateway_override=gateway,
         discovery_override=_entity_information_retrieval_discovery,
-        max_tool_invocations=3,
+        max_tool_invocations=6,
     )
 
     client = app.test_client()
@@ -2510,9 +2578,16 @@ def test_generate_authenticated_entity_information_turn_forces_relation_follow_u
     assert gateway.invocations
     assert gateway.invocations[0]["tool"] == "get_predicate_incidence"
     assert gateway.invocations[0]["payload"]["concept_id"] == "#V#test_user"
-    assert gateway.invocations[1]["tool"] == "find_relations_with_argument"
-    assert gateway.invocations[1]["payload"]["concept_id"] == "#V#test_user"
-    assert gateway.invocations[1]["payload"]["predicate_filter"] == ["#V#author_of"]
+    invoked_tools = [entry["tool"] for entry in gateway.invocations]
+    assert "fetch_concept" in invoked_tools
+    assert "list_uncertain_relationship_assertions" in invoked_tools
+    relation_invocation = next(
+        entry
+        for entry in gateway.invocations
+        if entry["tool"] == "find_relations_with_argument"
+    )
+    assert relation_invocation["payload"]["concept_id"] == "#V#test_user"
+    assert relation_invocation["payload"]["predicate_filter"] == ["#V#author_of"]
 
     llm_debug = body.get("llm_debug") or {}
     tool_invocations = llm_debug.get("tool_invocations") or []
@@ -2523,6 +2598,8 @@ def test_generate_authenticated_entity_information_turn_forces_relation_follow_u
     ]
     assert recorded_tools.count("get_predicate_incidence") == 1
     assert recorded_tools.count("find_relations_with_argument") == 1
+    assert recorded_tools.count("fetch_concept") == 1
+    assert recorded_tools.count("list_uncertain_relationship_assertions") == 1
 
 
 def test_generate_authenticated_profile_turn_forces_broad_relation_follow_up_after_predicate_incidence(
@@ -2535,7 +2612,7 @@ def test_generate_authenticated_profile_turn_forces_broad_relation_follow_up_aft
         llm=llm,
         gateway_override=gateway,
         discovery_override=_entity_information_retrieval_discovery,
-        max_tool_invocations=3,
+        max_tool_invocations=6,
     )
 
     client = app.test_client()
@@ -2552,9 +2629,16 @@ def test_generate_authenticated_profile_turn_forces_broad_relation_follow_up_aft
     assert gateway.invocations
     assert gateway.invocations[0]["tool"] == "get_predicate_incidence"
     assert gateway.invocations[0]["payload"]["concept_id"] == "#V#test_user"
-    assert gateway.invocations[1]["tool"] == "find_relations_with_argument"
-    assert gateway.invocations[1]["payload"]["concept_id"] == "#V#test_user"
-    assert "predicate_filter" not in gateway.invocations[1]["payload"]
+    invoked_tools = [entry["tool"] for entry in gateway.invocations]
+    assert "fetch_concept" in invoked_tools
+    assert "list_uncertain_relationship_assertions" in invoked_tools
+    relation_invocation = next(
+        entry
+        for entry in gateway.invocations
+        if entry["tool"] == "find_relations_with_argument"
+    )
+    assert relation_invocation["payload"]["concept_id"] == "#V#test_user"
+    assert "predicate_filter" not in relation_invocation["payload"]
 
     llm_debug = body.get("llm_debug") or {}
     tool_invocations = llm_debug.get("tool_invocations") or []
@@ -2565,6 +2649,8 @@ def test_generate_authenticated_profile_turn_forces_broad_relation_follow_up_aft
     ]
     assert recorded_tools.count("get_predicate_incidence") == 1
     assert recorded_tools.count("find_relations_with_argument") == 1
+    assert recorded_tools.count("fetch_concept") == 1
+    assert recorded_tools.count("list_uncertain_relationship_assertions") == 1
 
 
 def test_generate_authenticated_profile_turn_forces_seed_incidence_when_model_answers_without_tools(
@@ -2579,7 +2665,7 @@ def test_generate_authenticated_profile_turn_forces_seed_incidence_when_model_an
         llm=llm,
         gateway_override=gateway,
         discovery_override=_entity_information_retrieval_discovery,
-        max_tool_invocations=3,
+        max_tool_invocations=6,
     )
 
     client = app.test_client()
@@ -2593,13 +2679,26 @@ def test_generate_authenticated_profile_turn_forces_seed_incidence_when_model_an
         "relations from you to Test Paper One and Test Paper Two."
     )
 
-    assert [entry["tool"] for entry in gateway.invocations] == [
+    invoked_tools = [entry["tool"] for entry in gateway.invocations]
+    assert invoked_tools == [
+        "fetch_concept",
         "get_predicate_incidence",
+        "list_uncertain_relationship_assertions",
         "find_relations_with_argument",
     ]
-    assert gateway.invocations[0]["payload"]["concept_id"] == "#V#test_user"
-    assert gateway.invocations[1]["payload"]["concept_id"] == "#V#test_user"
-    assert "predicate_filter" not in gateway.invocations[1]["payload"]
+    incidence_invocation = next(
+        entry
+        for entry in gateway.invocations
+        if entry["tool"] == "get_predicate_incidence"
+    )
+    relation_invocation = next(
+        entry
+        for entry in gateway.invocations
+        if entry["tool"] == "find_relations_with_argument"
+    )
+    assert incidence_invocation["payload"]["concept_id"] == "#V#test_user"
+    assert relation_invocation["payload"]["concept_id"] == "#V#test_user"
+    assert "predicate_filter" not in relation_invocation["payload"]
 
     llm_debug = body.get("llm_debug") or {}
     tool_invocations = llm_debug.get("tool_invocations") or []
@@ -2610,6 +2709,8 @@ def test_generate_authenticated_profile_turn_forces_seed_incidence_when_model_an
     ]
     assert recorded_tools.count("get_predicate_incidence") == 1
     assert recorded_tools.count("find_relations_with_argument") == 1
+    assert recorded_tools.count("fetch_concept") == 1
+    assert recorded_tools.count("list_uncertain_relationship_assertions") == 1
 
 
 def test_generate_authenticated_entity_information_turn_enriches_unfiltered_relation_lookup_from_recent_predicate_incidence(
@@ -2622,7 +2723,7 @@ def test_generate_authenticated_entity_information_turn_enriches_unfiltered_rela
         llm=llm,
         gateway_override=gateway,
         discovery_override=_entity_information_retrieval_discovery,
-        max_tool_invocations=3,
+        max_tool_invocations=6,
     )
 
     client = app.test_client()

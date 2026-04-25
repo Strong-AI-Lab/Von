@@ -1058,6 +1058,53 @@ def test_infer_required_prompt_tool_retry_tool_calls_forces_url_extraction():
     ]
 
 
+def test_infer_required_prompt_tool_retry_tool_calls_forces_uncertainty_evidence_from_target():
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=_DummyGateway()  # type: ignore[arg-type]
+    )
+
+    forced_calls = orchestrator._infer_required_prompt_tool_retry_tool_calls(
+        user_text="Tell me about myself as represented here.",
+        turn_expected_outcome_contract={
+            "schema_version": "turn_expected_outcome_contract.v1",
+            "target_concept_ids": ["#V#michael_witbrock"],
+        },
+        missing_required_tools=["list_uncertain_relationship_assertions"],
+        user_concept_id="#V#authenticated_user_should_not_win",
+    )
+
+    assert forced_calls == [
+        {
+            "action": "call_tool",
+            "tool": "list_uncertain_relationship_assertions",
+            "payload": {
+                "source_id": "#V#michael_witbrock",
+                "include_legacy": True,
+            },
+        }
+    ]
+
+
+def test_infer_required_prompt_tool_retry_tool_calls_forces_fetch_from_authenticated_actor():
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=_DummyGateway()  # type: ignore[arg-type]
+    )
+
+    forced_calls = orchestrator._infer_required_prompt_tool_retry_tool_calls(
+        user_text="Tell me about myself as represented here.",
+        missing_required_tools=["fetch_concept"],
+        user_concept_id="#V#michael_witbrock",
+    )
+
+    assert forced_calls == [
+        {
+            "action": "call_tool",
+            "tool": "fetch_concept",
+            "payload": {"concept_id": "#V#michael_witbrock"},
+        }
+    ]
+
+
 def test_derive_missing_prompt_requirements_tracks_missing_fetch_targets():
     orchestrator = InternalMCPChatOrchestrator(
         gateway=_ChecklistPromptToolGateway()  # type: ignore[arg-type]
