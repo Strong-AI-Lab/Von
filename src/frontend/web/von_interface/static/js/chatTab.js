@@ -89,6 +89,9 @@ const TURN_LIVE_PROGRESS_LOCATOR_SCHEMA_VERSION = 'turn_live_progress_locator.v1
 const WORKFLOW_USE_EPISODES_LOCATOR_SCHEMA_VERSION = 'workflow_use_episodes_locator.v1';
 const WORKFLOW_DEFINITION_LOCATOR_SCHEMA_VERSION = 'workflow_definition_locator.v1';
 const WORKFLOW_MONITOR_LOCATOR_SCHEMA_VERSION = 'workflow_monitor_locator.v1';
+const LLM_DEBUG_BUTTON_COPY_AVAILABLE_CLASS = 'llm-debug-button-copy-available';
+const LLM_DEBUG_BUTTON_COPIED_CLASS = 'llm-debug-button-copied';
+const LLM_DEBUG_BUTTON_COPY_FAILED_CLASS = 'llm-debug-button-copy-failed';
 // Track conversation turns for Markdown export and state resets
 const transcriptTurns = [];
 // JVNAUTOSCI-1043: Track user edits to assistant messages
@@ -24764,12 +24767,16 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
                 const llmDebugButton = document.createElement('button');
                 llmDebugButton.className = 'btn-mini llm-debug-button';
                 llmDebugButton.textContent = 'LLM ℹ';
-                llmDebugButton.title = hasPayload
-                    ? 'Show LLM interaction details'
-                    : 'Load LLM interaction details';
                 llmDebugButton.dataset.turnId = turnId;
-                llmDebugButton.addEventListener('click', () => {
-                    void showLlmDebugPopup(turnId, { button: llmDebugButton });
+                setLlmDebugButtonCopyState(llmDebugButton, 'available');
+                llmDebugButton.addEventListener('click', (event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    if (event.shiftKey) {
+                        void showLlmDebugPopup(turnId, { button: llmDebugButton });
+                        return;
+                    }
+                    void copyLlmDebugJsonForTurn(turnId, llmDebugButton);
                 });
                 messageHeader.appendChild(llmDebugButton);
 
@@ -25060,10 +25067,16 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
                 const llmDebugButton = document.createElement('button');
                 llmDebugButton.className = 'btn-mini llm-debug-button';
                 llmDebugButton.textContent = 'LLM ℹ';
-                llmDebugButton.title = 'Show what was sent to LLM before error';
                 llmDebugButton.dataset.turnId = turnId;
-                llmDebugButton.addEventListener('click', () => {
-                    void showLlmDebugPopup(turnId, { button: llmDebugButton });
+                setLlmDebugButtonCopyState(llmDebugButton, 'available');
+                llmDebugButton.addEventListener('click', (event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    if (event.shiftKey) {
+                        void showLlmDebugPopup(turnId, { button: llmDebugButton });
+                        return;
+                    }
+                    void copyLlmDebugJsonForTurn(turnId, llmDebugButton);
                 });
                 messageHeader.appendChild(llmDebugButton);
 
@@ -25161,6 +25174,34 @@ function appendResetNotice(scrollableField) {
     resetMessage.className = 'reset-notice';
     resetMessage.textContent = 'Context reset successfully. You can start a new conversation.';
     scrollableField.appendChild(resetMessage);
+}
+
+function setLlmDebugButtonCopyState(button, state) {
+    if (!(button instanceof HTMLButtonElement)) {
+        return;
+    }
+    button.classList.remove(
+        LLM_DEBUG_BUTTON_COPY_AVAILABLE_CLASS,
+        LLM_DEBUG_BUTTON_COPIED_CLASS,
+        LLM_DEBUG_BUTTON_COPY_FAILED_CLASS
+    );
+
+    if (state === 'copied') {
+        button.classList.add(LLM_DEBUG_BUTTON_COPIED_CLASS);
+        button.setAttribute('title', 'Copied LLM JSON to clipboard. Shift-click to open details.');
+        button.setAttribute('aria-label', 'LLM JSON copied. Shift-click to open details.');
+        return;
+    }
+    if (state === 'failed') {
+        button.classList.add(LLM_DEBUG_BUTTON_COPY_FAILED_CLASS);
+        button.setAttribute('title', 'Copy failed. Shift-click to open LLM details.');
+        button.setAttribute('aria-label', 'Copy LLM JSON failed. Shift-click to open details.');
+        return;
+    }
+
+    button.classList.add(LLM_DEBUG_BUTTON_COPY_AVAILABLE_CLASS);
+    button.setAttribute('title', 'Copy LLM JSON. Shift-click to open details.');
+    button.setAttribute('aria-label', 'Copy LLM JSON. Shift-click to open details.');
 }
 
 // Initialize LLM debug popup handlers
@@ -25381,6 +25422,14 @@ export function __testOnly_buildLlmDebugMetadata(debugData) {
     return buildLlmDebugMetadata(debugData);
 }
 
+export async function __testOnly_buildLlmDebugClipboardJsonForTurn(turnId, options = {}) {
+    return buildLlmDebugClipboardJsonForTurn(turnId, options);
+}
+
+export async function __testOnly_copyLlmDebugJsonForTurn(turnId, button) {
+    return copyLlmDebugJsonForTurn(turnId, button);
+}
+
 function hasLlmDebugPayload(debugData) {
     if (!debugData || typeof debugData !== 'object') {
         return false;
@@ -25494,6 +25543,51 @@ async function loadLlmDebugDataForTurn(turnId, options = {}) {
         llmDebugFetchInFlight.delete(turnId);
     });
     return fetchPromise;
+}
+
+async function buildLlmDebugClipboardJsonForTurn(turnId, options = {}) {
+    let debugDataRaw = llmDebugData.get(turnId);
+    if (!hasLlmDebugPayload(debugDataRaw)) {
+        debugDataRaw = await loadLlmDebugDataForTurn(turnId, options);
+    }
+    if (!hasLlmDebugPayload(debugDataRaw)) {
+        return null;
+    }
+
+    const debugData = await hydrateTurnHistoryLocationFromConversationLocator(turnId, debugDataRaw);
+    const metadata = buildLlmDebugMetadata(debugData);
+    const workflowExecutionTelemetry = _getWorkflowExecutionTelemetry(debugData);
+    const copyPayload = buildLlmDebugLocatorPayload({
+        turnId,
+        debugData,
+        metadata,
+        workflowExecutionTelemetry
+    });
+    if (!copyPayload) {
+        return null;
+    }
+    return JSON.stringify(copyPayload, null, 2);
+}
+
+async function copyLlmDebugJsonForTurn(turnId, button) {
+    if (!turnId) {
+        setLlmDebugButtonCopyState(button, 'failed');
+        return false;
+    }
+
+    const jsonText = await buildLlmDebugClipboardJsonForTurn(turnId, { button });
+    if (!jsonText) {
+        setLlmDebugButtonCopyState(button, 'failed');
+        showToast('No LLM debug data stored for this turn.');
+        return false;
+    }
+
+    const copied = await copyTextWithClipboardFallback(jsonText);
+    setLlmDebugButtonCopyState(button, copied ? 'copied' : 'failed');
+    if (!copied) {
+        showToast('Unable to copy LLM JSON.');
+    }
+    return copied;
 }
 
 // Show LLM debug popup for a specific turn
@@ -25682,13 +25776,7 @@ async function showLlmDebugPopup(turnId, options = {}) {
     }
 
     // Prefer turn_execution_diagnostics for parity with active-turn Copy diagnostics.
-    const copyPayload = buildLlmDebugLocatorPayload({
-        turnId,
-        debugData,
-        metadata,
-        workflowExecutionTelemetry
-    });
-    popup.dataset.currentDebugData = JSON.stringify(copyPayload, null, 2);
+    popup.dataset.currentDebugData = await buildLlmDebugClipboardJsonForTurn(turnId, options) || '';
 
     // Show popup - update aria-hidden BEFORE showing to avoid accessibility warning
     popup.setAttribute('aria-hidden', 'false');

@@ -2,6 +2,10 @@
 
 const chatTabModulePath = '../../src/frontend/web/von_interface/static/js/chatTab.js';
 
+function flushAsyncClickHandler() {
+    return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 jest.mock('../../src/frontend/web/von_interface/static/js/apiService.js', () => ({
     annotateTurn: jest.fn(),
     getUserContext: jest.fn(),
@@ -28,6 +32,7 @@ jest.mock('../../src/frontend/web/von_interface/static/js/utils/textDecorator.js
 describe('LLM debug popup workflow execution hook', () => {
     beforeEach(() => {
         document.body.innerHTML = `
+            <div id="scrollableField"></div>
             <div id="chatLlmDebugPopup" class="hidden" aria-hidden="true"></div>
             <div id="chatLlmDebugMeta"></div>
             <pre id="chatLlmDebugMessages"></pre>
@@ -41,6 +46,84 @@ describe('LLM debug popup workflow execution hook', () => {
 
             <button id="closeChatLlmDebug"></button>
         `;
+    });
+
+    test('conversation turn LLM button copies locator JSON on plain click and marks copied', async () => {
+        const {
+            __testOnly_appendMessage,
+            setLlmDebugDataForTurn
+        } = require(chatTabModulePath);
+        const writeText = jest.fn().mockResolvedValue(undefined);
+        Object.assign(navigator, {
+            clipboard: { writeText }
+        });
+
+        setLlmDebugDataForTurn('assistant-copy', {
+            model: 'gpt-5.2-test',
+            messages: [{ role: 'user', content: 'hello' }],
+            response: 'ok',
+            turn_execution_diagnostics: {
+                request_id: 'req-copy',
+                prompt_preview: 'hello'
+            }
+        });
+
+        __testOnly_appendMessage('Von', 'Done', 'assistant-copy', true);
+
+        const popup = document.getElementById('chatLlmDebugPopup');
+        const button = document.querySelector('.llm-debug-button');
+        expect(button).not.toBeNull();
+        expect(button.classList.contains('llm-debug-button-copy-available')).toBe(true);
+
+        button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        await Promise.resolve();
+        await Promise.resolve();
+        await flushAsyncClickHandler();
+
+        expect(writeText).toHaveBeenCalledTimes(1);
+        const copiedPayload = JSON.parse(writeText.mock.calls[0][0]);
+        expect(copiedPayload.schema_version).toBe('turn_telemetry_locator.v1');
+        expect(copiedPayload.request_id).toBe('req-copy');
+        expect(copiedPayload.prompt_preview).toBe('hello');
+        expect(button.classList.contains('llm-debug-button-copied')).toBe(true);
+        expect(button.getAttribute('title')).toContain('Copied LLM JSON');
+        expect(popup.classList.contains('hidden')).toBe(true);
+    });
+
+    test('conversation turn LLM button keeps popup behaviour on shift-click', async () => {
+        const {
+            __testOnly_appendMessage,
+            setLlmDebugDataForTurn
+        } = require(chatTabModulePath);
+        const writeText = jest.fn().mockResolvedValue(undefined);
+        Object.assign(navigator, {
+            clipboard: { writeText }
+        });
+
+        setLlmDebugDataForTurn('assistant-popup', {
+            model: 'gpt-5.2-test',
+            messages: [],
+            response: 'ok',
+            turn_execution_diagnostics: {
+                request_id: 'req-popup',
+                prompt_preview: 'open details'
+            }
+        });
+
+        __testOnly_appendMessage('Von', 'Done', 'assistant-popup', true);
+
+        const popup = document.getElementById('chatLlmDebugPopup');
+        const button = document.querySelector('.llm-debug-button');
+        button.dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: true }));
+        await Promise.resolve();
+        await Promise.resolve();
+        await flushAsyncClickHandler();
+
+        expect(writeText).not.toHaveBeenCalled();
+        expect(popup.classList.contains('hidden')).toBe(false);
+        expect(popup.getAttribute('aria-hidden')).toBe('false');
+        const payload = JSON.parse(popup.dataset.currentDebugData || '{}');
+        expect(payload.request_id).toBe('req-popup');
     });
 
     test('surfaces execution traces and prefers the selected-workflow trace', async () => {

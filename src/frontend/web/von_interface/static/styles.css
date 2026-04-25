@@ -2027,17 +2027,39 @@ body {
 .llm-debug-button {
     font-size: 0.75rem;
     padding: 2px 6px;
-    background: #007bff;
-    color: white;
-    border: 1px solid #0056b3;
+    background: #dcfce7;
+    color: #14532d;
+    border: 1px solid #86efac;
     border-radius: 4px;
     cursor: pointer;
     transition: all 0.15s ease;
 }
 
 .llm-debug-button:hover {
-    background: #0056b3;
-    border-color: #004085;
+    background: #bbf7d0;
+    border-color: #4ade80;
+}
+
+.llm-debug-button.llm-debug-button-copied {
+    background: #ffffff;
+    color: #111827;
+    border-color: #d1d5db;
+}
+
+.llm-debug-button.llm-debug-button-copied:hover {
+    background: #f8fafc;
+    border-color: #cbd5e1;
+}
+
+.llm-debug-button.llm-debug-button-copy-failed {
+    background: #fee2e2;
+    color: #991b1b;
+    border-color: #fca5a5;
+}
+
+.llm-debug-button.llm-debug-button-copy-failed:hover {
+    background: #fecaca;
+    border-color: #f87171;
 }
 
 .chat-error-copy-diagnostics-btn {
