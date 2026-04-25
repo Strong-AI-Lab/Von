@@ -7791,8 +7791,12 @@ footer {
     display: flex;
     flex-direction: column;
     justify-content: center;
-    align-items: center;
-    margin-bottom: 10px;
+    align-items: stretch;
+    width: 100%;
+    margin: 8px 0 10px;
+    padding-left: clamp(18px, 4vw, 72px);
+    padding-right: clamp(12px, 2vw, 32px);
+    box-sizing: border-box;
     opacity: 0;
     transition: opacity 0.2s ease;
 }
@@ -7809,7 +7813,8 @@ footer {
     background-color: #f8fafc;
     border: 1px solid #e2e8f0;
     border-radius: 12px;
-    width: min(100%, 90vw, 760px);
+    width: 100%;
+    max-width: none;
     box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06), 0 1px 2px rgba(15, 23, 42, 0.04);
     overflow: hidden;
 }
@@ -8125,6 +8130,7 @@ footer {
 
 .retained-thinking-card {
     margin-top: 4px;
+    padding-left: clamp(24px, 4vw, 64px);
     padding-top: 10px;
     border-top: 1px solid #e2e8f0;
 }
@@ -8153,6 +8159,15 @@ footer {
     overscroll-behaviour: contain;
 }
 
+.thinking-card-wrapper.is-active-turn.thinking-card-mode-expert.has-tools.is-expanded .thinking-card-body {
+    height: auto !important;
+    min-height: 0;
+    max-height: none;
+    overflow: visible;
+    overscroll-behaviour: auto;
+    resize: none;
+}
+
 .thinking-card-body:empty {
     height: 0;
     max-height: 0;
@@ -8164,6 +8179,10 @@ footer {
 @media (pointer: fine) {
     .thinking-card-wrapper.has-tools.is-expanded .thinking-card-body {
         resize: vertical;
+    }
+
+    .thinking-card-wrapper.is-active-turn.thinking-card-mode-expert.has-tools.is-expanded .thinking-card-body {
+        resize: none;
     }
 }
 
@@ -8451,6 +8470,12 @@ footer {
 }
 
 @media (max-width: 640px) {
+    .thinking-card-wrapper,
+    .retained-thinking-card {
+        padding-left: 0;
+        padding-right: 0;
+    }
+
     .thinking-card-header {
         flex-wrap: wrap;
     }

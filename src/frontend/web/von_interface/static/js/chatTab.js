@@ -1186,6 +1186,12 @@ const THINKING_CARD_MODES = new Set([
     THINKING_CARD_MODE_EXPERT,
     THINKING_CARD_MODE_DEBUG
 ]);
+const THINKING_CARD_MODE_STORAGE_KEY = 'von:thinkingCardMode';
+const THINKING_CARD_MODE_CLASS_NAMES = new Set([
+    `thinking-card-mode-${THINKING_CARD_MODE_DEFAULT}`,
+    `thinking-card-mode-${THINKING_CARD_MODE_EXPERT}`,
+    `thinking-card-mode-${THINKING_CARD_MODE_DEBUG}`
+]);
 const THINKING_CARD_PROGRESS_VIEW_MODEL_SCHEMA = 'thinking_card_progress_view_model.v1';
 const THINKING_CARD_PROGRESS_VIEW_MODEL_SOURCE_EXPLICIT = 'explicit_turn_state';
 const THINKING_CARD_PROGRESS_VIEW_MODEL_SOURCE_DERIVED = 'derived_from_live_telemetry';
@@ -1317,18 +1323,53 @@ function normaliseThinkingCardMode(mode) {
     return THINKING_CARD_MODES.has(cleanMode) ? cleanMode : THINKING_CARD_MODE_DEFAULT;
 }
 
+function loadStoredThinkingCardMode() {
+    return normaliseThinkingCardMode(safeLocalStorageGet(THINKING_CARD_MODE_STORAGE_KEY));
+}
+
+function saveStoredThinkingCardMode(mode) {
+    const nextMode = normaliseThinkingCardMode(mode);
+    safeLocalStorageSet(THINKING_CARD_MODE_STORAGE_KEY, nextMode);
+    return nextMode;
+}
+
 function getThinkingCardMode(request = getThinkingCardDisplayRequest(), options = {}) {
     if (options && Object.prototype.hasOwnProperty.call(options, 'mode')) {
         return normaliseThinkingCardMode(options.mode);
     }
-    return normaliseThinkingCardMode(request?.thinkingCardMode);
+    if (
+        request
+        && typeof request === 'object'
+        && Object.prototype.hasOwnProperty.call(request, 'thinkingCardMode')
+    ) {
+        return normaliseThinkingCardMode(request.thinkingCardMode);
+    }
+    return loadStoredThinkingCardMode();
+}
+
+function syncThinkingCardModeClass(wrapper, mode) {
+    if (!(wrapper instanceof HTMLElement)) {
+        return;
+    }
+    const nextMode = normaliseThinkingCardMode(mode);
+    THINKING_CARD_MODE_CLASS_NAMES.forEach((className) => wrapper.classList.remove(className));
+    wrapper.classList.add(`thinking-card-mode-${nextMode}`);
+    wrapper.classList.toggle('is-expert-mode', nextMode === THINKING_CARD_MODE_EXPERT);
+}
+
+function isThinkingCardFreeHeightMode(request = getThinkingCardDisplayRequest(), cardRoot = null) {
+    const wrapper = getThinkingCardWrapperEl(cardRoot);
+    return !!wrapper
+        && wrapper.classList.contains('is-active-turn')
+        && getThinkingCardMode(request) === THINKING_CARD_MODE_EXPERT;
 }
 
 function setThinkingCardMode(request = getThinkingCardDisplayRequest(), mode = THINKING_CARD_MODE_DEFAULT, cardRoot = null) {
+    const nextMode = saveStoredThinkingCardMode(mode);
     if (!request || typeof request !== 'object') {
-        return THINKING_CARD_MODE_DEFAULT;
+        updateThinkingCardModeControls(request, cardRoot);
+        return nextMode;
     }
-    const nextMode = normaliseThinkingCardMode(mode);
     request.thinkingCardMode = nextMode;
     refreshThinkingCardProgressUi(request, cardRoot);
     return nextMode;
@@ -1337,12 +1378,13 @@ function setThinkingCardMode(request = getThinkingCardDisplayRequest(), mode = T
 function updateThinkingCardModeControls(request = getThinkingCardDisplayRequest(), cardRoot = null) {
     const wrapper = getThinkingCardWrapperEl(cardRoot);
     const buttons = getThinkingCardModeButtons(cardRoot);
+    const activeMode = getThinkingCardMode(request);
+    syncThinkingCardModeClass(wrapper, activeMode);
     if (buttons.length === 0) {
         return;
     }
 
     const visible = !!wrapper && wrapper.getAttribute('aria-hidden') !== 'true';
-    const activeMode = getThinkingCardMode(request);
     buttons.forEach((button) => {
         if (!(button instanceof HTMLButtonElement)) {
             return;
@@ -2064,6 +2106,12 @@ function persistThinkingCardBodyHeightFromDom(request = getThinkingCardDisplayRe
             ? clampThinkingCardBodyHeightPx(request.thinkingCardBodyHeightPx)
             : null;
     }
+    if (isThinkingCardFreeHeightMode(request, cardRoot)) {
+        detailEl.style.height = '';
+        return Number.isFinite(request.thinkingCardBodyHeightPx)
+            ? clampThinkingCardBodyHeightPx(request.thinkingCardBodyHeightPx)
+            : null;
+    }
 
     const measuredHeightPx = resolveThinkingCardBodyHeightPxFromDom(detailEl);
     if (!Number.isFinite(measuredHeightPx)) {
@@ -2088,6 +2136,11 @@ function syncThinkingCardBodyHeightToDom(request = getThinkingCardDisplayRequest
         }
         return;
     }
+    if (isThinkingCardFreeHeightMode(request, cardRoot)) {
+        detailEl.style.height = '';
+        updateThinkingCardResizeControls(request, cardRoot);
+        return;
+    }
 
     const nextHeightPx = ensureThinkingCardBodyHeightPx(request, detailEl);
     applyThinkingCardBodyHeightPx(nextHeightPx, request, cardRoot);
@@ -2108,7 +2161,8 @@ function updateThinkingCardResizeControls(request = getThinkingCardDisplayReques
         && !!wrapper
         && wrapper.classList.contains('has-tools')
         && state.expanded !== false
-        && detailEl instanceof HTMLElement;
+        && detailEl instanceof HTMLElement
+        && !isThinkingCardFreeHeightMode(request, cardRoot);
     const currentHeight = enabled
         ? clampThinkingCardBodyHeightPx(
             Number.parseFloat(detailEl.style.height)
@@ -2136,6 +2190,11 @@ function updateThinkingCardResizeControls(request = getThinkingCardDisplayReques
 function adjustThinkingCardBodyHeight(request = getThinkingCardDisplayRequest(), deltaPx = 0, cardRoot = null) {
     const detailEl = getLoadingIndicatorDetailEl(cardRoot);
     if (!(detailEl instanceof HTMLElement)) {
+        return;
+    }
+    if (isThinkingCardFreeHeightMode(request, cardRoot)) {
+        detailEl.style.height = '';
+        updateThinkingCardResizeControls(request, cardRoot);
         return;
     }
 
@@ -2682,7 +2741,7 @@ function buildRetainedThinkingCardDetailId(turnId) {
 function createRetainedThinkingCardWrapper(turnId) {
     const detailId = buildRetainedThinkingCardDetailId(turnId);
     const wrapper = document.createElement('div');
-    wrapper.className = 'thinking-card-wrapper retained-thinking-card';
+    wrapper.className = 'thinking-card-wrapper retained-thinking-card is-retained-turn';
     wrapper.setAttribute('aria-hidden', 'false');
     wrapper.innerHTML = `
         <div class="thinking-card" role="group" aria-label="Thinking details for this turn">
@@ -2753,6 +2812,8 @@ function renderRetainedThinkingCardForTurn(request, turnId) {
     }
 
     wrapper._thinkingCardRequest = request;
+    wrapper.classList.add('is-retained-turn');
+    wrapper.classList.remove('is-active-turn');
     bindThinkingCardControls(wrapper, {
         requestResolver: () => wrapper._thinkingCardRequest
     });
@@ -3388,6 +3449,10 @@ export function __testOnly_refreshThinkingCardProgressUi(request, cardRoot = nul
 
 export function __testOnly_setThinkingCardMode(request = null, mode = THINKING_CARD_MODE_DEFAULT, cardRoot = null) {
     return setThinkingCardMode(request || getThinkingCardDisplayRequest(), mode, cardRoot);
+}
+
+export function __testOnly_getThinkingCardMode(request = null, options = {}) {
+    return getThinkingCardMode(request || getThinkingCardDisplayRequest(), options);
 }
 
 export function __testOnly_bindConceptSelectionClicks(container, options = {}) {
@@ -24454,10 +24519,15 @@ function setThinkingState(isThinking, request = activeChatRequest, options = {})
             wrapper.setAttribute('aria-hidden', 'true');
         }
 
+        wrapper.classList.toggle('is-active-turn', !!isThinking);
+        wrapper.classList.toggle('is-retained-turn', !isThinking && preserveFinishedCard);
+
         if (!isThinking && !preserveFinishedCard) {
             wrapper.classList.remove('has-tools');
             wrapper.classList.remove('is-collapsed');
             wrapper.classList.remove('is-expanded');
+            wrapper.classList.remove('is-active-turn');
+            wrapper.classList.remove('is-retained-turn');
         }
     }
 
@@ -25311,6 +25381,7 @@ async function handleSendPrompt(options = {}) {
         phaseHistory: [],
         stageDiagnostics: [],
         turnOutcome: null,
+        thinkingCardMode: loadStoredThinkingCardMode(),
         thinkingCardDisplayState: reduceThinkingCardDisplayState(null, { type: 'reset_for_active' })
     };
     setFinishedThinkingCardForSession(targetSessionId, null);

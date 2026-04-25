@@ -53,6 +53,7 @@ import {
     __testOnly_normaliseThinkingActivityHistory,
     __testOnly_renderThinkingCardBodyHTML,
     __testOnly_refreshThinkingCardProgressUi,
+    __testOnly_getThinkingCardMode,
     __testOnly_bindConceptSelectionClicks,
     __testOnly_bindThinkingCardControls,
     __testOnly_updateThinkingCardMeta,
@@ -3748,6 +3749,7 @@ describe('thinking card toggle accessibility', () => {
     afterEach(() => {
         jest.restoreAllMocks();
         delete global.fetch;
+        window.localStorage.removeItem('von:thinkingCardMode');
     });
 
     function getRetainedThinkingCardElements() {
@@ -3818,6 +3820,78 @@ describe('thinking card toggle accessibility', () => {
         expect(debugButton.getAttribute('aria-pressed')).toBe('true');
         expect(detail.innerHTML).toContain('Prepared prompt preview');
         expect(detail.innerHTML).toContain('LLM provider');
+    });
+
+    test('persists the selected thinking-card mode for new cards', () => {
+        const firstRequest = {
+            thinkingStartedAtMs: Date.now() - 1000,
+            latestProgress: {
+                status: 'pending',
+                phase: 'workflow_dispatch',
+                phase_label: 'Preparing workflow dispatch'
+            }
+        };
+        const nextRequest = {
+            thinkingStartedAtMs: Date.now(),
+            latestProgress: {
+                status: 'pending',
+                phase: 'selector_decision',
+                phase_label: 'Selecting workflow'
+            }
+        };
+
+        __testOnly_setThinkingCardRequests(firstRequest, null);
+        __testOnly_refreshThinkingCardProgressUi(firstRequest);
+        __testOnly_bindThinkingCardControls();
+
+        document.querySelector('[data-thinking-mode="expert"]').click();
+
+        expect(firstRequest.thinkingCardMode).toBe('expert');
+        expect(window.localStorage.getItem('von:thinkingCardMode')).toBe('expert');
+        expect(__testOnly_getThinkingCardMode(nextRequest)).toBe('expert');
+
+        __testOnly_setThinkingCardRequests(nextRequest, null);
+        __testOnly_refreshThinkingCardProgressUi(nextRequest);
+
+        expect(document.querySelector('[data-thinking-mode="expert"]').getAttribute('aria-pressed')).toBe('true');
+        expect(document.getElementById('thinkingCardWrapper').classList.contains('thinking-card-mode-expert')).toBe(true);
+    });
+
+    test('marks active expert cards as free-height and disables manual size controls', () => {
+        const request = {
+            thinkingCardMode: 'expert',
+            thinkingStartedAtMs: Date.now() - 1000,
+            latestProgress: {
+                status: 'pending',
+                phase: 'tool_execute',
+                phase_label: 'Executing tools'
+            },
+            activityHistory: [{
+                sequenceNo: 1,
+                label: 'Tool call: search_knowledge_base',
+                detail: 'Searching indexed knowledge',
+                state: 'pending',
+                status: 'tool_call_start',
+                stage: 'tool_execute',
+                eventKind: 'tool_call_start',
+                groupCount: 1
+            }]
+        };
+
+        __testOnly_setThinkingCardRequests(request, null);
+        __testOnly_setThinkingState(true, request);
+        __testOnly_refreshThinkingCardProgressUi(request);
+
+        const wrapper = document.getElementById('thinkingCardWrapper');
+        const detail = document.getElementById('loadingIndicatorDetail');
+        const sizeDecreaseButton = document.querySelector('[data-thinking-role="size-decrease"]');
+        const sizeIncreaseButton = document.querySelector('[data-thinking-role="size-increase"]');
+
+        expect(wrapper.classList.contains('is-active-turn')).toBe(true);
+        expect(wrapper.classList.contains('thinking-card-mode-expert')).toBe(true);
+        expect(detail.style.height).toBe('');
+        expect(sizeDecreaseButton.disabled).toBe(true);
+        expect(sizeIncreaseButton.disabled).toBe(true);
     });
 
     test('keeps card expanded while active and disables collapse toggle', async () => {
