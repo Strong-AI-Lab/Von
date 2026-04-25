@@ -39,6 +39,7 @@ from src.backend.services.task_management_service import (
     assign_task,
     get_tasks_for_user,
     list_tasks,
+    list_tasks_with_visibility,
     search_tasks,
     delete_task,
 )
@@ -115,7 +116,9 @@ class TestCreateTask:
 
     @patch("src.backend.services.task_management_service.ConceptsRepository")
     @patch("src.backend.services.task_management_service.upsert_text_for_concept")
-    @patch("src.backend.services.conversation_concept_service.get_or_create_conversation_concept")
+    @patch(
+        "src.backend.services.conversation_concept_service.get_or_create_conversation_concept"
+    )
     @patch(
         "src.backend.services.task_management_service.maybe_launch_task_created_workflow"
     )
@@ -163,7 +166,9 @@ class TestCreateTask:
         assert result["evidence"] == "Printed document"
         assert result["notes"] == "Needs a coloured copy"
         assert result["reference_code"] == "TASK-001"
-        stored_predicates = {call.kwargs.get("predicate") for call in mock_upsert.call_args_list}
+        stored_predicates = {
+            call.kwargs.get("predicate") for call in mock_upsert.call_args_list
+        }
         assert PREDICATE_HAS_TASK_ROLE in stored_predicates
         assert PREDICATE_HAS_NEXT_CHECKPOINT in stored_predicates
         assert PREDICATE_HAS_PROGRESS_SIGNAL in stored_predicates
@@ -608,6 +613,67 @@ class TestBulkTaskCollections:
         )
 
     @patch("src.backend.services.task_management_service.ConceptsRepository")
+    @patch("src.backend.services.task_management_service.get_texts_for_concept")
+    def test_list_tasks_with_visibility_excludes_hidden_bulk_docs_in_query(
+        self,
+        mock_get_texts: MagicMock,
+        mock_repo: MagicMock,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        collection = build_jira_migration_bulk_task_collection()
+        hidden_doc = {
+            "concept_id": "#V#task_hidden_bulk",
+            "relationships": {
+                "is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID],
+                "#V#hasAssignee": ["#V#user_alice"],
+            },
+            "metadata": {"bulk_task_collections": [collection]},
+            "created_at": now,
+            "updated_at": now,
+        }
+        visible_doc = {
+            "concept_id": "#V#task_visible",
+            "relationships": {
+                "is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID],
+                "#V#hasAssignee": ["#V#user_alice"],
+            },
+            "metadata": {},
+            "created_at": now,
+            "updated_at": now,
+        }
+
+        def _find_side_effect(*args, **kwargs):
+            if kwargs.get("projection"):
+                return [hidden_doc]
+            return [visible_doc]
+
+        mock_repo.find.side_effect = _find_side_effect
+        mock_repo.count_documents.return_value = 1
+        mock_get_texts.return_value = [
+            {"predicate": "#V#hasName", "text": "Visible task"},
+            {"predicate": "#V#hasTaskStatus", "text": "pending"},
+        ]
+
+        result = list_tasks_with_visibility(
+            assignee_concept_id="#V#user_alice",
+            bulk_visibility="exclude",
+            limit=10,
+        )
+
+        assert result["count"] == 1
+        assert result["tasks"][0]["task_concept_id"] == "#V#task_visible"
+        assert result["hidden_bulk_task_total"] == 1
+        assert result["hidden_bulk_task_collections"][0]["collection_id"] == (
+            JIRA_MIGRATION_BULK_COLLECTION_ID
+        )
+        assert mock_get_texts.call_count == 1
+        visible_query = mock_repo.find.call_args_list[1].args[0]
+        assert "$nor" in visible_query["$and"][-1]
+        assert {"relationships.#V#hasAssignee": "#V#user_alice"} in visible_query[
+            "$and"
+        ]
+
+    @patch("src.backend.services.task_management_service.ConceptsRepository")
     def test_backfill_jira_migration_bulk_task_collections_dry_run_marks_only_labelled_imports(
         self,
         mock_repo: MagicMock,
@@ -722,10 +788,10 @@ class TestTaskParityDatesAndEpic:
         assert result["due_date"] == "2026-03-05T10:00:00+00:00"
         assert result["epic_task_concept_id"] == "#V#task_epic_1"
         inserted_doc = mock_repo.insert_one.call_args.args[0]
-        assert (
-            inserted_doc["relationships"]["#V#hasEpicTask"] == ["#V#task_epic_1"]
-        )
-        predicates = [call.kwargs.get("predicate") for call in mock_upsert.call_args_list]
+        assert inserted_doc["relationships"]["#V#hasEpicTask"] == ["#V#task_epic_1"]
+        predicates = [
+            call.kwargs.get("predicate") for call in mock_upsert.call_args_list
+        ]
         assert "#V#hasStartDate" in predicates
         assert "#V#hasDueDate" in predicates
         mock_launch_workflow.assert_called_once()
@@ -765,7 +831,9 @@ class TestTaskParityDatesAndEpic:
             "metadata": {},
         }
 
-        def _fake_find_one(query: Dict[str, Any], projection: Optional[Dict[str, Any]] = None):
+        def _fake_find_one(
+            query: Dict[str, Any], projection: Optional[Dict[str, Any]] = None
+        ):
             concept_id = query.get("concept_id")
             if concept_id == "#V#task_epic_1":
                 return epic_doc
@@ -798,7 +866,8 @@ class TestTaskParityDatesAndEpic:
             for call in mock_upsert.call_args_list
         )
         assert any(
-            call.kwargs.get("kind") == "#V#hasEpicTask" and call.kwargs.get("action") == "add"
+            call.kwargs.get("kind") == "#V#hasEpicTask"
+            and call.kwargs.get("action") == "add"
             for call in mock_repo.mutate_relationship_edge.call_args_list
         )
 
@@ -931,7 +1000,9 @@ class TestTaskParityDatesAndEpic:
             and call.kwargs.get("action") == "add"
             for call in mock_repo.mutate_relationship_edge.call_args_list
         )
-        stored_predicates = {call.kwargs.get("predicate") for call in mock_upsert.call_args_list}
+        stored_predicates = {
+            call.kwargs.get("predicate") for call in mock_upsert.call_args_list
+        }
         assert PREDICATE_HAS_TASK_ROLE in stored_predicates
         assert PREDICATE_HAS_NEXT_CHECKPOINT in stored_predicates
         assert PREDICATE_HAS_PROGRESS_SIGNAL in stored_predicates
@@ -966,7 +1037,9 @@ class TestTaskParityDatesAndEpic:
             "#V#sail_org",
         }
 
-        def _fake_find_one(query: Dict[str, Any], projection: Optional[Dict[str, Any]] = None):
+        def _fake_find_one(
+            query: Dict[str, Any], projection: Optional[Dict[str, Any]] = None
+        ):
             concept_id = query.get("concept_id")
             if concept_id == "#V#task_1":
                 return task_doc
@@ -1113,11 +1186,16 @@ class TestTaskParityDatesAndEpic:
             },
         ]
 
-        def _fake_get_texts(concept_id: str, *args: Any, **kwargs: Any) -> list[dict[str, str]]:
+        def _fake_get_texts(
+            concept_id: str, *args: Any, **kwargs: Any
+        ) -> list[dict[str, str]]:
             if concept_id == "#V#task_1":
                 return [
                     {"predicate": "#V#hasName", "text": "Task 1"},
-                    {"predicate": "#V#hasStartDate", "text": "2026-03-02T00:00:00+00:00"},
+                    {
+                        "predicate": "#V#hasStartDate",
+                        "text": "2026-03-02T00:00:00+00:00",
+                    },
                     {"predicate": "#V#hasTaskStatus", "text": "pending"},
                 ]
             return [
@@ -1173,7 +1251,9 @@ class TestTaskParityDatesAndEpic:
             },
         ]
 
-        def _fake_get_texts(concept_id: str, *args: Any, **kwargs: Any) -> list[dict[str, str]]:
+        def _fake_get_texts(
+            concept_id: str, *args: Any, **kwargs: Any
+        ) -> list[dict[str, str]]:
             return [
                 {"predicate": "#V#hasName", "text": concept_id},
                 {"predicate": "#V#hasTaskStatus", "text": "pending"},
@@ -1204,7 +1284,10 @@ class TestTaskParityDatesAndEpic:
             {
                 "concept_id": "#V#task_1",
                 "relationships": {
-                    "is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID, "#V#delegated_task_specification"],
+                    "is_an_instance_of": [
+                        TASK_SPECIFICATION_TYPE_ID,
+                        "#V#delegated_task_specification",
+                    ],
                     "#V#hasCreatedBy": ["#V#user_creator"],
                     PREDICATE_HAS_TASK_SOURCE: [JIRA_IMPORTED_TASK_SOURCE_ID],
                     PREDICATE_REPORTS_TO: ["#V#user_manager"],
@@ -1216,7 +1299,10 @@ class TestTaskParityDatesAndEpic:
             {
                 "concept_id": "#V#task_2",
                 "relationships": {
-                    "is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID, DEFAULT_TASK_TYPE_ID],
+                    "is_an_instance_of": [
+                        TASK_SPECIFICATION_TYPE_ID,
+                        DEFAULT_TASK_TYPE_ID,
+                    ],
                     "#V#hasCreatedBy": ["#V#other_user"],
                     PREDICATE_HAS_TASK_SOURCE: [DEFAULT_TASK_SOURCE_ID],
                     PREDICATE_REPORTS_TO: ["#V#user_other_manager"],
@@ -1227,7 +1313,9 @@ class TestTaskParityDatesAndEpic:
             },
         ]
 
-        def _fake_get_texts(concept_id: str, *args: Any, **kwargs: Any) -> list[dict[str, str]]:
+        def _fake_get_texts(
+            concept_id: str, *args: Any, **kwargs: Any
+        ) -> list[dict[str, str]]:
             return [
                 {"predicate": "#V#hasName", "text": concept_id},
                 {"predicate": "#V#hasTaskStatus", "text": "pending"},
@@ -1282,9 +1370,7 @@ class TestTaskExternalReferences:
         assert result is not None
         assert result["task_concept_id"] == "#V#task_imported_1"
         assert (
-            result.get("external_references", {})
-            .get("jira", {})
-            .get("external_id")
+            result.get("external_references", {}).get("jira", {}).get("external_id")
             == "JVNAUTOSCI-777"
         )
 
@@ -1419,17 +1505,18 @@ class TestImportedTaskActivity:
             if isinstance(payload.get("$push"), dict)
         ]
         assert any(
-            entry.get("metadata.comments", {}).get("source", {}).get("external_id") == "10001"
+            entry.get("metadata.comments", {}).get("source", {}).get("external_id")
+            == "10001"
             for entry in pushed_entries
         )
         assert any(
-            entry.get("metadata.attachments", {})
-            .get("file_copy_concept_id")
+            entry.get("metadata.attachments", {}).get("file_copy_concept_id")
             == "#V#computer_file_copy_1"
             for entry in pushed_entries
         )
         assert any(
-            entry.get("metadata.worklog", {}).get("source", {}).get("external_id") == "30001"
+            entry.get("metadata.worklog", {}).get("source", {}).get("external_id")
+            == "30001"
             for entry in pushed_entries
         )
         assert any(

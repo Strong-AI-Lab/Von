@@ -709,7 +709,8 @@ def _build_bulk_task_collection_summaries(
                 collection_id,
                 {
                     "collection_id": collection_id,
-                    "label": collection.get("label") or _derive_concept_label(collection_id),
+                    "label": collection.get("label")
+                    or _derive_concept_label(collection_id),
                     "kind": collection.get("kind") or "bulk_task_collection",
                     "hidden_by_default": True,
                     "reason": collection.get("reason"),
@@ -823,7 +824,9 @@ def _append_task_history_event(
         "actor_concept_id": _normalise_optional_concept_id(actor_concept_id),
         "details": details or {},
     }
-    update_doc: Dict[str, Any] = {"$push": {f"metadata.{TASK_METADATA_KEY_HISTORY}": event}}
+    update_doc: Dict[str, Any] = {
+        "$push": {f"metadata.{TASK_METADATA_KEY_HISTORY}": event}
+    }
     if touch_updated_at:
         update_doc.setdefault("$set", {})
         update_doc["$set"]["updated_at"] = _now()
@@ -1193,7 +1196,9 @@ def create_task(
     try:
         ensure_effort_unit_ontology()
     except Exception as exc:
-        logger.debug("Effort-unit ontology bootstrap skipped during task create: %s", exc)
+        logger.debug(
+            "Effort-unit ontology bootstrap skipped during task create: %s", exc
+        )
     try:
         ensure_task_ontology()
     except Exception as exc:
@@ -1415,12 +1420,12 @@ def create_task(
         "organisation_concept_id": organisation_concept_id,
         "task_type_ids": canonical_task_type_ids,
         "task_types": task_type_payload,
-        "primary_task_type_id": canonical_task_type_ids[0]
-        if canonical_task_type_ids
-        else None,
-        "primary_task_type_label": task_type_payload[0]["label"]
-        if task_type_payload
-        else None,
+        "primary_task_type_id": (
+            canonical_task_type_ids[0] if canonical_task_type_ids else None
+        ),
+        "primary_task_type_label": (
+            task_type_payload[0]["label"] if task_type_payload else None
+        ),
         "task_source_id": canonical_task_source_id,
         "task_source_label": (
             source_definition.get("label")
@@ -1597,7 +1602,9 @@ def _build_task_response(doc: Dict[str, Any]) -> Dict[str, Any]:
     )
     reporter_raw = metadata.get(TASK_METADATA_KEY_JIRA_REPORTER_CONCEPT_ID)
     reporter_concept_id = (
-        _normalise_optional_concept_id(reporter_raw) if reporter_raw is not None else None
+        _normalise_optional_concept_id(reporter_raw)
+        if reporter_raw is not None
+        else None
     )
     watcher_concept_ids_raw = metadata.get(TASK_METADATA_KEY_JIRA_WATCHER_CONCEPT_IDS)
     watcher_concept_ids: list[str] = []
@@ -1741,9 +1748,7 @@ def _build_task_response(doc: Dict[str, Any]) -> Dict[str, Any]:
         "hidden_by_default_bulk_task_collections": (
             hidden_by_default_bulk_task_collections
         ),
-        "is_hidden_by_default_bulk_task": bool(
-            hidden_by_default_bulk_task_collections
-        ),
+        "is_hidden_by_default_bulk_task": bool(hidden_by_default_bulk_task_collections),
         "created_at": doc.get("created_at"),
         "updated_at": doc.get("updated_at"),
     }
@@ -1861,7 +1866,9 @@ def update_task_status(task_concept_id: str, status: str) -> Dict[str, Any]:
     try:
         workflow_event_launch = maybe_launch_task_status_workflow(
             task_concept_id=task_concept_id,
-            previous_status=previous_status if isinstance(previous_status, str) else None,
+            previous_status=(
+                previous_status if isinstance(previous_status, str) else None
+            ),
             new_status=status,
             updated_at_iso=updated_at_iso,
             created_by_concept_id=updated_task.get("created_by_concept_id"),
@@ -2123,6 +2130,313 @@ def list_tasks(
     return tasks
 
 
+def _and_query_clauses(*clauses: Mapping[str, Any] | None) -> Dict[str, Any]:
+    active_clauses: list[Dict[str, Any]] = []
+    for clause in clauses:
+        if not clause:
+            continue
+        if set(clause.keys()) == {"$and"} and isinstance(clause.get("$and"), list):
+            active_clauses.extend(
+                dict(nested_clause)
+                for nested_clause in clause["$and"]
+                if isinstance(nested_clause, Mapping) and nested_clause
+            )
+            continue
+        active_clauses.append(dict(clause))
+    if not active_clauses:
+        return {}
+    if len(active_clauses) == 1:
+        return active_clauses[0]
+    return {"$and": active_clauses}
+
+
+def _hidden_bulk_collection_query(
+    collection_ids: set[str],
+) -> Dict[str, Any]:
+    elem_match: Dict[str, Any] = {"hidden_by_default": True}
+    if collection_ids:
+        elem_match["collection_id"] = {"$in": sorted(collection_ids)}
+    return {
+        f"metadata.{TASK_METADATA_KEY_BULK_TASK_COLLECTIONS}": {
+            "$elemMatch": elem_match,
+        }
+    }
+
+
+def _apply_bulk_visibility_query_filter(
+    base_query: Mapping[str, Any],
+    *,
+    bulk_visibility: str,
+    collection_ids: set[str],
+) -> Dict[str, Any]:
+    hidden_clause = _hidden_bulk_collection_query(collection_ids)
+    if bulk_visibility == BULK_TASK_VISIBILITY_ONLY:
+        return _and_query_clauses(base_query, hidden_clause)
+    if bulk_visibility == BULK_TASK_VISIBILITY_EXCLUDE:
+        return _and_query_clauses(base_query, {"$nor": [hidden_clause]})
+    return dict(base_query)
+
+
+def _has_nonempty_filter_values(value: list[str] | str | None) -> bool:
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, list):
+        return any(isinstance(item, str) and bool(item.strip()) for item in value)
+    return False
+
+
+def _build_task_listing_query(
+    *,
+    organisation_concept_id: str | None = None,
+    user_concept_id: str | None = None,
+    include_created: bool = False,
+    assignee_concept_id: str | None = None,
+    created_by_concept_id: str | None = None,
+) -> Dict[str, Any]:
+    base_query: Dict[str, Any] = {
+        "relationships.is_an_instance_of": TASK_SPECIFICATION_TYPE_ID,
+    }
+
+    if organisation_concept_id:
+        organisation_id = _normalise_optional_concept_id(organisation_concept_id)
+        if not organisation_id:
+            raise InvalidTaskDataError(
+                f"Invalid organisation_concept_id: {organisation_concept_id}"
+            )
+        base_query[f"metadata.{TASK_METADATA_KEY_ORGANISATION}"] = organisation_id
+
+    clauses: list[Mapping[str, Any]] = [base_query]
+
+    if user_concept_id:
+        user_id = _normalise_optional_concept_id(user_concept_id)
+        if not user_id:
+            raise InvalidTaskDataError(f"Invalid user_concept_id: {user_concept_id}")
+        if include_created:
+            clauses.append(
+                {
+                    "$or": [
+                        {f"relationships.{PREDICATE_HAS_ASSIGNEE}": user_id},
+                        {f"relationships.{PREDICATE_HAS_CREATED_BY}": user_id},
+                    ]
+                }
+            )
+        else:
+            clauses.append({f"relationships.{PREDICATE_HAS_ASSIGNEE}": user_id})
+
+    if assignee_concept_id is not None:
+        assignee_id = _normalise_optional_concept_id(assignee_concept_id)
+        if not assignee_id:
+            raise InvalidTaskDataError(
+                f"Invalid assignee_concept_id: {assignee_concept_id}"
+            )
+        clauses.append({f"relationships.{PREDICATE_HAS_ASSIGNEE}": assignee_id})
+
+    if created_by_concept_id is not None:
+        creator_id = _normalise_optional_concept_id(created_by_concept_id)
+        if not creator_id:
+            raise InvalidTaskDataError(
+                f"Invalid created_by_concept_id: {created_by_concept_id}"
+            )
+        clauses.append({f"relationships.{PREDICATE_HAS_CREATED_BY}": creator_id})
+
+    return _and_query_clauses(*clauses)
+
+
+def _build_bulk_visibility_summary_for_query(
+    base_query: Mapping[str, Any],
+    *,
+    collection_ids: set[str],
+) -> Dict[str, Any]:
+    hidden_query = _and_query_clauses(
+        base_query,
+        _hidden_bulk_collection_query(collection_ids),
+    )
+    projection = {
+        "concept_id": 1,
+        f"metadata.{TASK_METADATA_KEY_BULK_TASK_COLLECTIONS}": 1,
+    }
+    hidden_task_stubs: list[Dict[str, Any]] = []
+    for doc in ConceptsRepository.find(hidden_query, projection=projection):
+        if not isinstance(doc, Mapping):
+            continue
+        metadata_raw = doc.get("metadata")
+        metadata: Mapping[str, Any] = (
+            metadata_raw if isinstance(metadata_raw, Mapping) else {}
+        )
+        hidden_task_stubs.append(
+            {
+                "task_concept_id": doc.get("concept_id"),
+                "bulk_task_collections": metadata.get(
+                    TASK_METADATA_KEY_BULK_TASK_COLLECTIONS
+                ),
+            }
+        )
+    return {
+        "hidden_bulk_task_total": len(hidden_task_stubs),
+        "hidden_bulk_task_collections": _build_bulk_task_collection_summaries(
+            hidden_task_stubs,
+            collection_ids=collection_ids,
+        ),
+    }
+
+
+def _filter_task_response_list(
+    tasks: Iterable[Dict[str, Any]],
+    *,
+    status_filter: str | None = None,
+    priority_filter: str | None = None,
+    task_type_ids: list[str] | str | None = None,
+    task_source_ids: list[str] | str | None = None,
+) -> list[Dict[str, Any]]:
+    filtered_tasks = list(tasks)
+
+    if status_filter:
+        filtered_tasks = [
+            task for task in filtered_tasks if task.get("status") == status_filter
+        ]
+    if priority_filter:
+        filtered_tasks = [
+            task for task in filtered_tasks if task.get("priority") == priority_filter
+        ]
+    if task_type_ids is not None:
+        try:
+            required_type_ids = set(normalise_task_type_ids(task_type_ids))
+        except ValueError as exc:
+            raise InvalidTaskDataError(str(exc)) from exc
+        if required_type_ids:
+            filtered_tasks = [
+                task
+                for task in filtered_tasks
+                if required_type_ids.intersection(set(task.get("task_type_ids") or []))
+            ]
+    if task_source_ids is not None:
+        raw_source_values = (
+            [task_source_ids]
+            if isinstance(task_source_ids, str)
+            else (task_source_ids or [])
+        )
+        normalised_source_ids: set[str] = set()
+        for raw_value in raw_source_values:
+            try:
+                source_id = normalise_task_source_id(raw_value)
+            except ValueError as exc:
+                raise InvalidTaskDataError(str(exc)) from exc
+            if source_id:
+                normalised_source_ids.add(source_id)
+        if normalised_source_ids:
+            filtered_tasks = [
+                task
+                for task in filtered_tasks
+                if task.get("task_source_id") in normalised_source_ids
+            ]
+
+    return filtered_tasks
+
+
+def list_tasks_with_visibility(
+    *,
+    organisation_concept_id: str | None = None,
+    user_concept_id: str | None = None,
+    include_created: bool = False,
+    assignee_concept_id: str | None = None,
+    created_by_concept_id: str | None = None,
+    status_filter: str | None = None,
+    priority_filter: str | None = None,
+    task_type_ids: list[str] | str | None = None,
+    task_source_ids: list[str] | str | None = None,
+    bulk_visibility: str | None = BULK_TASK_VISIBILITY_INCLUDE,
+    bulk_collection_ids: list[str] | str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> Dict[str, Any]:
+    """List tasks with repository-level user-scope and bulk-visibility filters.
+
+    This keeps All Tasks from building responses for hidden bulk collections
+    before it has selected the page the UI actually needs.
+    """
+
+    try:
+        limit = max(1, min(int(limit), 500))
+    except (TypeError, ValueError):
+        limit = 50
+    try:
+        offset = max(0, int(offset))
+    except (TypeError, ValueError):
+        offset = 0
+
+    visibility = _normalise_bulk_task_visibility(bulk_visibility)
+    collection_ids = _normalise_bulk_task_collection_ids(bulk_collection_ids)
+    base_query = _build_task_listing_query(
+        organisation_concept_id=organisation_concept_id,
+        user_concept_id=user_concept_id,
+        include_created=include_created,
+        assignee_concept_id=assignee_concept_id,
+        created_by_concept_id=created_by_concept_id,
+    )
+    visibility_query = _apply_bulk_visibility_query_filter(
+        base_query,
+        bulk_visibility=visibility,
+        collection_ids=collection_ids,
+    )
+    visibility_summary = _build_bulk_visibility_summary_for_query(
+        base_query,
+        collection_ids=collection_ids,
+    )
+    sort_spec = [("updated_at", -1), ("created_at", -1), ("concept_id", 1)]
+    requires_post_filter = any(
+        (
+            bool(status_filter),
+            bool(priority_filter),
+            _has_nonempty_filter_values(task_type_ids),
+            _has_nonempty_filter_values(task_source_ids),
+        )
+    )
+
+    if requires_post_filter:
+        docs = ConceptsRepository.find(
+            visibility_query,
+            sort=sort_spec,
+        )
+        tasks = [_build_task_response(doc) for doc in docs]
+        tasks = _filter_task_response_list(
+            tasks,
+            status_filter=status_filter,
+            priority_filter=priority_filter,
+            task_type_ids=task_type_ids,
+            task_source_ids=task_source_ids,
+        )
+        total = len(tasks)
+        paged_tasks = tasks[offset : offset + limit]
+    else:
+        try:
+            total = int(ConceptsRepository.count_documents(visibility_query) or 0)
+        except Exception:
+            total = 0
+        docs = ConceptsRepository.find(
+            visibility_query,
+            sort=sort_spec,
+            skip=offset,
+            limit=limit,
+        )
+        paged_tasks = [_build_task_response(doc) for doc in docs]
+        if not total:
+            total = len(paged_tasks)
+
+    return {
+        "tasks": paged_tasks,
+        "total": total,
+        "count": len(paged_tasks),
+        "offset": offset,
+        "limit": limit,
+        "bulk_visibility": visibility,
+        "bulk_collection_ids": sorted(collection_ids),
+        "hidden_bulk_task_total": visibility_summary["hidden_bulk_task_total"],
+        "hidden_bulk_task_collections": visibility_summary[
+            "hidden_bulk_task_collections"
+        ],
+    }
+
+
 def search_tasks(
     *,
     query: str | None = None,
@@ -2226,7 +2540,9 @@ def search_tasks(
         raw_source_values.append(task_source_ids)
     elif isinstance(task_source_ids, list):
         raw_source_values.extend(
-            value for value in task_source_ids if isinstance(value, str) and value.strip()
+            value
+            for value in task_source_ids
+            if isinstance(value, str) and value.strip()
         )
     if raw_source_values:
         source_filters: set[str] = set()
@@ -2249,9 +2565,7 @@ def search_tasks(
                 f"Invalid assignee_concept_id: {assignee_concept_id}"
             )
         tasks = [
-            task
-            for task in tasks
-            if task.get("assignee_concept_id") == assignee_id
+            task for task in tasks if task.get("assignee_concept_id") == assignee_id
         ]
 
     if created_by_concept_id is not None:
@@ -2384,9 +2698,7 @@ def search_tasks(
                 f"Invalid parent_task_concept_id: {parent_task_concept_id}"
             )
         tasks = [
-            task
-            for task in tasks
-            if task.get("parent_task_concept_id") == parent_id
+            task for task in tasks if task.get("parent_task_concept_id") == parent_id
         ]
 
     if epic_task_concept_id is not None:
@@ -3102,7 +3414,9 @@ def add_task_attachment(
     }
     if isinstance(source, Mapping):
         attachment["source"] = dict(source)
-    normalised_file_copy_concept_id = _normalise_optional_concept_id(file_copy_concept_id)
+    normalised_file_copy_concept_id = _normalise_optional_concept_id(
+        file_copy_concept_id
+    )
     if isinstance(normalised_file_copy_concept_id, str):
         attachment["file_copy_concept_id"] = normalised_file_copy_concept_id
     _append_task_metadata_entry(
@@ -3176,7 +3490,9 @@ def add_task_worklog(
         "worklog_id": f"worklog_{uuid.uuid4().hex[:12]}",
         "time_spent_minutes": time_spent_minutes,
         "author_concept_id": _normalise_optional_concept_id(author_concept_id),
-        "comment": comment.strip() if isinstance(comment, str) and comment.strip() else None,
+        "comment": (
+            comment.strip() if isinstance(comment, str) and comment.strip() else None
+        ),
         "started_at": _isoformat(started) or _now().isoformat(),
         "created_at": created_at_value,
     }
@@ -3327,7 +3643,9 @@ def update_task_fields(
         else:
             next_due = _parse_datetime(raw_due)
             if next_due is None:
-                raise InvalidTaskDataError("due_date must be an ISO 8601 datetime string")
+                raise InvalidTaskDataError(
+                    "due_date must be an ISO 8601 datetime string"
+                )
 
     if next_start is not None and next_due is not None and next_start > next_due:
         raise InvalidTaskDataError("start_date must be before or equal to due_date")
@@ -3352,9 +3670,11 @@ def update_task_fields(
         "created_by_concept_id" in fields or "creator_concept_id" in fields
     )
     if created_by_field_present:
-        raw_created_by = fields.get("created_by_concept_id", fields.get("creator_concept_id"))
-        existing_created_by_raw = (
-            (task_doc.get("relationships") or {}).get(PREDICATE_HAS_CREATED_BY, [])
+        raw_created_by = fields.get(
+            "created_by_concept_id", fields.get("creator_concept_id")
+        )
+        existing_created_by_raw = (task_doc.get("relationships") or {}).get(
+            PREDICATE_HAS_CREATED_BY, []
         )
         if isinstance(existing_created_by_raw, str):
             existing_created_by = [existing_created_by_raw]
@@ -3493,7 +3813,9 @@ def update_task_fields(
         )
         changed_fields.append("task_source_id")
 
-    report_to_field_present = "report_to_concept_id" in fields or "reports_to_concept_id" in fields
+    report_to_field_present = (
+        "report_to_concept_id" in fields or "reports_to_concept_id" in fields
+    )
     if report_to_field_present:
         report_to_raw = fields.get(
             "report_to_concept_id",
@@ -3501,9 +3823,7 @@ def update_task_fields(
         )
         report_to_concept_id = _normalise_optional_concept_id(report_to_raw)
         if report_to_raw not in (None, "") and report_to_concept_id is None:
-            raise InvalidTaskDataError(
-                f"Invalid report_to_concept_id: {report_to_raw}"
-            )
+            raise InvalidTaskDataError(f"Invalid report_to_concept_id: {report_to_raw}")
         _replace_single_relationship_target(
             task_concept_id=task_concept_id,
             predicate=PREDICATE_REPORTS_TO,
@@ -3550,7 +3870,9 @@ def update_task_fields(
         else:
             parsed_due = _parse_datetime(due_value)
             if not parsed_due:
-                raise InvalidTaskDataError("due_date must be an ISO 8601 datetime string")
+                raise InvalidTaskDataError(
+                    "due_date must be an ISO 8601 datetime string"
+                )
             upsert_text_for_concept(
                 subject_concept_id=task_concept_id,
                 predicate=PREDICATE_HAS_DUE_DATE,
@@ -3739,7 +4061,9 @@ def update_task_fields(
 
     if "parent_task_concept_id" in fields:
         parent_raw = fields.get("parent_task_concept_id")
-        if parent_raw is None or (isinstance(parent_raw, str) and not parent_raw.strip()):
+        if parent_raw is None or (
+            isinstance(parent_raw, str) and not parent_raw.strip()
+        ):
             set_task_parent(task_concept_id, None, actor_concept_id=actor_concept_id)
         else:
             set_task_parent(
@@ -4262,6 +4586,7 @@ __all__ = [
     "get_tasks_for_user",
     "get_tasks_for_conversation",
     "list_tasks",
+    "list_tasks_with_visibility",
     "search_tasks",
     "get_task_taxonomy",
     "get_task_transitions",

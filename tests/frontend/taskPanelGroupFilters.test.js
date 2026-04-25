@@ -352,4 +352,58 @@ describe('task panel ontology-backed groups', () => {
         expect(document.querySelector('.task-bulk-collection-chip')?.textContent || '')
             .toContain('Jira migration backlog');
     });
+
+    test('reloads global task scope filters through the backend query', async () => {
+        const { getJson } = require(apiServiceModulePath);
+        const taskUrls = [];
+        const visibleTask = {
+            task_concept_id: '#V#task_visible',
+            title: 'Scoped task',
+            description: '',
+            status: 'pending',
+            priority: 'medium',
+            assignee_concept_id: '#V#group_user',
+            created_by_concept_id: '#V#group_user',
+            task_type_ids: ['#V#one_off_task_specification'],
+            task_source_id: '#V#von_native_task_source',
+        };
+
+        getJson.mockImplementation((url) => {
+            if (url === '/api/tasks/taxonomy') {
+                return Promise.resolve(buildTaxonomyResponse());
+            }
+            if (typeof url === 'string' && url.startsWith('/api/tasks/?')) {
+                taskUrls.push(url);
+                return Promise.resolve({
+                    tasks: [visibleTask],
+                    hidden_bulk_task_total: 0,
+                    hidden_bulk_task_collections: [],
+                });
+            }
+            return Promise.resolve({});
+        });
+
+        const { showGlobalTasks } = require(taskPanelModulePath);
+        await showGlobalTasks();
+        await flushRenderQueue();
+
+        const scopeFilter = document.querySelector('#globalTaskScopeFilter');
+        expect(scopeFilter).toBeTruthy();
+
+        scopeFilter.value = 'assigned_to_me';
+        scopeFilter.dispatchEvent(new Event('change', { bubbles: true }));
+        await flushRenderQueue();
+
+        expect(taskUrls[taskUrls.length - 1]).toContain(
+            'assignee_concept_id=%23V%23group_user',
+        );
+
+        scopeFilter.value = 'created_by_me';
+        scopeFilter.dispatchEvent(new Event('change', { bubbles: true }));
+        await flushRenderQueue();
+
+        expect(taskUrls[taskUrls.length - 1]).toContain(
+            'created_by_concept_id=%23V%23group_user',
+        );
+    });
 });

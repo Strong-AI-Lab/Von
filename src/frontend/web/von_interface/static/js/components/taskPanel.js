@@ -182,6 +182,12 @@ function buildGlobalTasksUrl() {
     if (_globalBulkTaskVisibility === 'only' && _globalBulkTaskCollectionId) {
         params.set('bulk_collection_id', _globalBulkTaskCollectionId);
     }
+    const currentUserId = getCurrentUserConceptId();
+    if (_globalTaskScope === 'assigned_to_me' && currentUserId) {
+        params.set('assignee_concept_id', currentUserId);
+    } else if (_globalTaskScope === 'created_by_me' && currentUserId) {
+        params.set('created_by_concept_id', currentUserId);
+    }
     return `/api/tasks/?${params.toString()}`;
 }
 
@@ -494,9 +500,9 @@ function renderGlobalTasksTabContent() {
     const scopeFilter = _globalTasksContainer.querySelector('#globalTaskScopeFilter');
     if (scopeFilter) {
         scopeFilter.value = _globalTaskScope;
-        scopeFilter.addEventListener('change', (e) => {
+        scopeFilter.addEventListener('change', async (e) => {
             _globalTaskScope = e.target.value || 'accessible';
-            renderTaskList();
+            await loadGlobalTasks();
         });
     }
 

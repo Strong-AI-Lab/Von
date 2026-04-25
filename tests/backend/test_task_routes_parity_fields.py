@@ -25,10 +25,12 @@ def test_create_task_route_parses_start_and_due_dates(monkeypatch):
             "task_concept_id": "#V#task_1",
             "title": kwargs["title"],
             "description": kwargs["description"],
-            "start_date": kwargs["start_date"].isoformat()
-            if kwargs.get("start_date")
-            else None,
-            "due_date": kwargs["due_date"].isoformat() if kwargs.get("due_date") else None,
+            "start_date": (
+                kwargs["start_date"].isoformat() if kwargs.get("start_date") else None
+            ),
+            "due_date": (
+                kwargs["due_date"].isoformat() if kwargs.get("due_date") else None
+            ),
             "epic_task_concept_id": kwargs.get("epic_task_concept_id"),
             "components": kwargs.get("components"),
             "fix_versions": kwargs.get("fix_versions"),
@@ -101,11 +103,16 @@ def test_update_task_route_uses_update_task_fields(monkeypatch):
     client = _build_client()
     captured: dict = {}
 
-    def _fake_update_task_fields(task_concept_id: str, *, fields: dict, actor_concept_id=None):
+    def _fake_update_task_fields(
+        task_concept_id: str, *, fields: dict, actor_concept_id=None
+    ):
         captured["task_concept_id"] = task_concept_id
         captured["fields"] = fields
         captured["actor_concept_id"] = actor_concept_id
-        return {"task": {"task_concept_id": task_concept_id}, "changed_fields": list(fields)}
+        return {
+            "task": {"task_concept_id": task_concept_id},
+            "changed_fields": list(fields),
+        }
 
     monkeypatch.setattr(
         "src.backend.server.routes.task_routes.update_task_fields",
@@ -195,42 +202,54 @@ def test_search_tasks_route_supports_start_and_epic_filters(monkeypatch):
     assert captured["report_to_concept_id"] == "#V#user_manager"
 
 
-def test_list_tasks_route_applies_bulk_visibility_before_limit(monkeypatch):
+def test_list_tasks_route_forwards_bulk_visibility_and_user_scope(monkeypatch):
     client = _build_client()
-    collection = {
-        "collection_id": "#V#jira_task_migration_bulk_collection",
-        "label": "Jira migration backlog",
-        "kind": "jira_migration",
-        "hidden_by_default": True,
-    }
+    captured: dict = {}
 
-    def _fake_list_tasks(**kwargs):
-        assert kwargs["limit"] is None
-        return [
-            {"task_concept_id": "#V#task_native", "title": "Native"},
-            {
-                "task_concept_id": "#V#task_migrated",
-                "title": "Migrated",
-                "bulk_task_collections": [collection],
-            },
-        ]
+    def _fake_list_tasks_with_visibility(**kwargs):
+        captured.update(kwargs)
+        return {
+            "tasks": [{"task_concept_id": "#V#task_native", "title": "Native"}],
+            "count": 1,
+            "total": 1,
+            "offset": kwargs["offset"],
+            "limit": kwargs["limit"],
+            "bulk_visibility": kwargs["bulk_visibility"],
+            "bulk_collection_ids": ["#V#jira_task_migration_bulk_collection"],
+            "hidden_bulk_task_total": 42,
+            "hidden_bulk_task_collections": [
+                {
+                    "collection_id": "#V#jira_task_migration_bulk_collection",
+                    "label": "Jira migration backlog",
+                    "count": 42,
+                }
+            ],
+        }
 
     monkeypatch.setattr(
-        "src.backend.server.routes.task_routes.list_tasks",
-        _fake_list_tasks,
+        "src.backend.server.routes.task_routes.list_tasks_with_visibility",
+        _fake_list_tasks_with_visibility,
     )
 
-    response = client.get("/api/tasks/?bulk_visibility=exclude&limit=10")
+    response = client.get(
+        "/api/tasks/?bulk_visibility=exclude&limit=10&offset=5"
+        "&assignee_concept_id=%23V%23user_alice"
+        "&bulk_collection_id=%23V%23jira_task_migration_bulk_collection"
+    )
 
     assert response.status_code == 200
     payload = response.get_json()
-    assert [task["task_concept_id"] for task in payload["tasks"]] == [
-        "#V#task_native"
-    ]
-    assert payload["hidden_bulk_task_total"] == 1
+    assert [task["task_concept_id"] for task in payload["tasks"]] == ["#V#task_native"]
+    assert payload["hidden_bulk_task_total"] == 42
+    assert payload["total_matching_count"] == 1
     assert payload["hidden_bulk_task_collections"][0]["label"] == (
         "Jira migration backlog"
     )
+    assert captured["assignee_concept_id"] == "#V#user_alice"
+    assert captured["bulk_visibility"] == "exclude"
+    assert captured["bulk_collection_ids"] == ["#V#jira_task_migration_bulk_collection"]
+    assert captured["limit"] == 10
+    assert captured["offset"] == 5
 
 
 def test_jira_migration_bulk_backfill_route_defaults_to_dry_run(monkeypatch):
@@ -255,7 +274,9 @@ def test_jira_migration_bulk_backfill_route_defaults_to_dry_run(monkeypatch):
         sess["user_concept_id"] = "#V#user_alice"
         sess["org_id"] = "#V#org_1"
 
-    response = client.post("/api/tasks/bulk-collections/jira-migration/backfill", json={})
+    response = client.post(
+        "/api/tasks/bulk-collections/jira-migration/backfill", json={}
+    )
 
     assert response.status_code == 200
     payload = response.get_json()
@@ -270,8 +291,12 @@ def test_get_task_taxonomy_route_returns_service_result(monkeypatch):
     monkeypatch.setattr(
         "src.backend.server.routes.task_routes.get_task_taxonomy",
         lambda: {
-            "task_types": [{"concept_id": "#V#one_off_task_specification", "label": "One-off"}],
-            "task_sources": [{"concept_id": "#V#von_native_task_source", "label": "Von native"}],
+            "task_types": [
+                {"concept_id": "#V#one_off_task_specification", "label": "One-off"}
+            ],
+            "task_sources": [
+                {"concept_id": "#V#von_native_task_source", "label": "Von native"}
+            ],
             "defaults": {
                 "task_type_id": "#V#one_off_task_specification",
                 "task_source_id": "#V#von_native_task_source",

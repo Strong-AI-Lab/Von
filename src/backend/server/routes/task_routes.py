@@ -17,7 +17,7 @@ from ...services.task_management_service import (
     update_task_fields,
     get_tasks_for_user,
     get_tasks_for_conversation,
-    list_tasks,
+    list_tasks_with_visibility,
     search_tasks,
     apply_bulk_task_visibility,
     backfill_jira_migration_bulk_task_collections,
@@ -160,7 +160,9 @@ def create_task_route() -> ResponseReturnValue:
         # Get creator from session
         creator_concept_id = _get_current_user_concept_id()
         organisation_concept_id = _get_current_org_concept_id()
-        parsed_start_date = _parse_optional_datetime(data.get("start_date"), "start_date")
+        parsed_start_date = _parse_optional_datetime(
+            data.get("start_date"), "start_date"
+        )
         parsed_due_date = _parse_optional_datetime(data.get("due_date"), "due_date")
 
         result = create_task(
@@ -308,6 +310,12 @@ def list_tasks_route() -> ResponseReturnValue:
         session_id = request.args.get("session_id")
         priority_filter = request.args.get("priority")
         include_created = request.args.get("include_created", "false").lower() == "true"
+        assignee_concept_id = request.args.get(
+            "assignee_concept_id"
+        ) or request.args.get("assignee_id")
+        created_by_concept_id = request.args.get(
+            "created_by_concept_id"
+        ) or request.args.get("creator_concept_id")
         task_type_ids = (
             request.args.getlist("task_type_id")
             or request.args.getlist("task_type_ids")
@@ -319,74 +327,54 @@ def list_tasks_route() -> ResponseReturnValue:
             or _parse_csv_param(request.args.get("task_source_ids"))
         )
         limit = max(1, _parse_int_param(request.args.get("limit"), 50))
+        offset = max(0, _parse_int_param(request.args.get("offset"), 0))
         bulk_visibility = request.args.get("bulk_visibility") or request.args.get(
             "bulk_task_visibility"
         )
         bulk_collection_ids = _parse_bulk_collection_ids()
 
-        # If filtering by user, use get_tasks_for_user
-        if user_concept_id:
-            tasks = get_tasks_for_user(
-                user_concept_id=user_concept_id,
-                status_filter=status_filter,
-                include_created=include_created,
-            )
-            if priority_filter:
-                tasks = [
-                    task for task in tasks if task.get("priority") == priority_filter
-                ]
-            if task_type_ids:
-                task_type_set = set(task_type_ids)
-                tasks = [
-                    task
-                    for task in tasks
-                    if task_type_set.intersection(set(task.get("task_type_ids") or []))
-                ]
-            if task_source_ids:
-                task_source_set = set(task_source_ids)
-                tasks = [
-                    task
-                    for task in tasks
-                    if task.get("task_source_id") in task_source_set
-                ]
         # If filtering by session, use get_tasks_for_conversation
-        elif session_id:
+        if session_id:
             tasks = get_tasks_for_conversation(session_id=session_id)
+            visibility_payload = apply_bulk_task_visibility(
+                tasks,
+                bulk_visibility=bulk_visibility,
+                bulk_collection_ids=bulk_collection_ids,
+            )
+            visible_tasks = visibility_payload["tasks"]
+            paged_tasks = visible_tasks[offset : offset + limit]
+            payload = {
+                "tasks": paged_tasks,
+                "count": len(paged_tasks),
+                "total": len(visible_tasks),
+                "total_matching_count": len(visible_tasks),
+                "offset": offset,
+                "limit": limit,
+                "bulk_visibility": visibility_payload["bulk_visibility"],
+                "bulk_collection_ids": visibility_payload["bulk_collection_ids"],
+                "hidden_bulk_task_total": visibility_payload["hidden_bulk_task_total"],
+                "hidden_bulk_task_collections": visibility_payload[
+                    "hidden_bulk_task_collections"
+                ],
+            }
         else:
-            # General list with optional filters
-            tasks = list_tasks(
+            payload = list_tasks_with_visibility(
+                user_concept_id=user_concept_id,
+                include_created=include_created,
+                assignee_concept_id=assignee_concept_id,
+                created_by_concept_id=created_by_concept_id,
                 status_filter=status_filter,
                 priority_filter=priority_filter,
                 task_type_ids=task_type_ids,
                 task_source_ids=task_source_ids,
-                limit=None,
+                bulk_visibility=bulk_visibility,
+                bulk_collection_ids=bulk_collection_ids,
+                limit=limit,
+                offset=offset,
             )
+            payload["total_matching_count"] = payload["total"]
 
-        visibility_payload = apply_bulk_task_visibility(
-            tasks,
-            bulk_visibility=bulk_visibility,
-            bulk_collection_ids=bulk_collection_ids,
-        )
-        visible_tasks = visibility_payload["tasks"]
-        paged_tasks = visible_tasks[:limit]
-        return (
-            jsonify(
-                {
-                    "tasks": paged_tasks,
-                    "count": len(paged_tasks),
-                    "total_matching_count": len(visible_tasks),
-                    "bulk_visibility": visibility_payload["bulk_visibility"],
-                    "bulk_collection_ids": visibility_payload["bulk_collection_ids"],
-                    "hidden_bulk_task_total": visibility_payload[
-                        "hidden_bulk_task_total"
-                    ],
-                    "hidden_bulk_task_collections": visibility_payload[
-                        "hidden_bulk_task_collections"
-                    ],
-                }
-            ),
-            200,
-        )
+        return jsonify(payload), 200
 
     except InvalidTaskDataError as e:
         return jsonify({"error": str(e)}), 400
@@ -458,7 +446,9 @@ def search_tasks_route() -> ResponseReturnValue:
             backlog_rank=request.args.get("backlog_rank"),
             parent_task_concept_id=request.args.get("parent_task_concept_id"),
             epic_task_concept_id=request.args.get("epic_task_concept_id"),
-            has_parent=_parse_optional_bool(request.args.get("has_parent"), "has_parent"),
+            has_parent=_parse_optional_bool(
+                request.args.get("has_parent"), "has_parent"
+            ),
             has_subtasks=_parse_optional_bool(
                 request.args.get("has_subtasks"), "has_subtasks"
             ),
@@ -585,7 +575,9 @@ def backfill_jira_migration_bulk_collection_route() -> ResponseReturnValue:
         logger.error(f"Failed to backfill Jira migration bulk collection: {e}")
         return jsonify({"error": str(e)}), 500
     except Exception as e:
-        logger.error(f"Unexpected error backfilling Jira migration bulk collection: {e}")
+        logger.error(
+            f"Unexpected error backfilling Jira migration bulk collection: {e}"
+        )
         return jsonify({"error": "Internal server error"}), 500
 
 
@@ -738,7 +730,10 @@ def add_task_link_route(task_concept_id: str) -> ResponseReturnValue:
         data = request.get_json() or {}
         target_task_concept_id = data.get("target_task_concept_id")
         link_type = data.get("link_type")
-        if not isinstance(target_task_concept_id, str) or not target_task_concept_id.strip():
+        if (
+            not isinstance(target_task_concept_id, str)
+            or not target_task_concept_id.strip()
+        ):
             return jsonify({"error": "target_task_concept_id is required"}), 400
         if not isinstance(link_type, str) or not link_type.strip():
             return jsonify({"error": "link_type is required"}), 400
@@ -769,7 +764,10 @@ def remove_task_link_route(task_concept_id: str) -> ResponseReturnValue:
         data = request.get_json() or {}
         target_task_concept_id = data.get("target_task_concept_id")
         link_type = data.get("link_type")
-        if not isinstance(target_task_concept_id, str) or not target_task_concept_id.strip():
+        if (
+            not isinstance(target_task_concept_id, str)
+            or not target_task_concept_id.strip()
+        ):
             return jsonify({"error": "target_task_concept_id is required"}), 400
         if not isinstance(link_type, str) or not link_type.strip():
             return jsonify({"error": "link_type is required"}), 400
