@@ -23,6 +23,7 @@ import json
 from pathlib import Path
 import platform
 import random
+import re
 import subprocess
 import sys
 import time
@@ -145,6 +146,29 @@ RELATIONSHIP_CLAIM_MARKERS = (
     "papers of yours",
     "my papers",
     "our papers",
+)
+VONTOLOGY_CONCEPT_ID_RE = re.compile(r"#V#[-A-Za-z0-9_./:]+")
+TERMINAL_CONCEPT_ID_PUNCTUATION = ".,;:!?"
+CONSERVATIVE_CANONICAL_ID_NEAR_MISS_DISTANCE = 2
+EXPLICIT_CANONICAL_CONCEPT_ID_KEYS = (
+    "canonical_concept_id",
+    "canonical_subject_concept_id",
+    "expected_canonical_concept_id",
+    "expected_subject_concept_id",
+    "expected_concept_id",
+)
+EXPLICIT_CANONICAL_CONCEPT_IDS_KEYS = (
+    "canonical_concept_ids",
+    "canonical_subject_concept_ids",
+    "expected_canonical_concept_ids",
+    "expected_subject_concept_ids",
+    "expected_concept_ids",
+)
+AUTHENTICATED_USER_CONCEPT_ID_KEYS = (
+    "authenticated_user_concept_id",
+    "server_effective_user_concept_id",
+    "server_header_user_concept_id",
+    "server_session_user_concept_id",
 )
 DIAGNOSTIC_EVIDENCE_EFFECT_TYPE = "diagnostic_evidence"
 DIAGNOSTIC_EVIDENCE_KNOWLEDGE_SURFACES = frozenset(
@@ -697,6 +721,152 @@ def _optional_bool(value: Any) -> bool | None:
     return None
 
 
+def _normalise_concept_id(value: Any) -> str | None:
+    text = _safe_text(value)
+    if not text:
+        return None
+    text = text.rstrip(TERMINAL_CONCEPT_ID_PUNCTUATION)
+    if text.startswith("#v#"):
+        text = f"#V#{text[3:]}"
+    elif text.startswith("V#") or text.startswith("v#"):
+        text = f"#V#{text[2:]}"
+    if not text.startswith("#V#"):
+        return None
+    if VONTOLOGY_CONCEPT_ID_RE.fullmatch(text) is None:
+        return None
+    return text
+
+
+def _append_unique_concept_id(target: list[str], value: Any) -> None:
+    concept_id = _normalise_concept_id(value)
+    if concept_id and concept_id not in target:
+        target.append(concept_id)
+
+
+def _collect_expected_canonical_concept_ids(
+    *,
+    prompt_entry: Mapping[str, Any],
+    run_environment: Mapping[str, Any] | None,
+    llm_debug_data: Mapping[str, Any],
+) -> list[str]:
+    expected_ids: list[str] = []
+
+    for key in EXPLICIT_CANONICAL_CONCEPT_ID_KEYS:
+        _append_unique_concept_id(expected_ids, prompt_entry.get(key))
+    for key in EXPLICIT_CANONICAL_CONCEPT_IDS_KEYS:
+        for value in _as_list(prompt_entry.get(key)):
+            _append_unique_concept_id(expected_ids, value)
+
+    environment = _as_mapping(run_environment)
+    for key in AUTHENTICATED_USER_CONCEPT_ID_KEYS:
+        _append_unique_concept_id(expected_ids, environment.get(key))
+
+    namespace_context = _as_mapping(llm_debug_data.get("namespace_context"))
+    _append_unique_concept_id(expected_ids, namespace_context.get("user_id"))
+
+    for key in (
+        "authenticated_user_concept_id",
+        "effective_user_concept_id",
+        "user_concept_id",
+    ):
+        _append_unique_concept_id(expected_ids, llm_debug_data.get(key))
+
+    return expected_ids
+
+
+def _extract_vontology_concept_ids(text: str) -> list[str]:
+    concept_ids: list[str] = []
+    for match in VONTOLOGY_CONCEPT_ID_RE.finditer(text or ""):
+        concept_id = _normalise_concept_id(match.group(0))
+        if concept_id and concept_id not in concept_ids:
+            concept_ids.append(concept_id)
+    return concept_ids
+
+
+def _bounded_edit_distance(left: str, right: str, max_distance: int) -> int:
+    if abs(len(left) - len(right)) > max_distance:
+        return max_distance + 1
+    previous = list(range(len(right) + 1))
+    for left_index, left_char in enumerate(left, start=1):
+        current = [left_index]
+        row_min = current[0]
+        for right_index, right_char in enumerate(right, start=1):
+            substitution_cost = 0 if left_char == right_char else 1
+            value = min(
+                previous[right_index] + 1,
+                current[right_index - 1] + 1,
+                previous[right_index - 1] + substitution_cost,
+            )
+            current.append(value)
+            row_min = min(row_min, value)
+        if row_min > max_distance:
+            return max_distance + 1
+        previous = current
+    return previous[-1]
+
+
+def _concept_id_near_miss_distance(expected_id: str, observed_id: str) -> int | None:
+    if expected_id == observed_id:
+        return None
+    expected_slug = expected_id[3:] if expected_id.startswith("#V#") else expected_id
+    observed_slug = observed_id[3:] if observed_id.startswith("#V#") else observed_id
+    distance = _bounded_edit_distance(
+        expected_slug,
+        observed_slug,
+        CONSERVATIVE_CANONICAL_ID_NEAR_MISS_DISTANCE,
+    )
+    if 0 < distance <= CONSERVATIVE_CANONICAL_ID_NEAR_MISS_DISTANCE:
+        return distance
+    return None
+
+
+def _evaluate_canonical_concept_id_fidelity(
+    *,
+    prompt_entry: Mapping[str, Any],
+    response_text: str,
+    run_environment: Mapping[str, Any] | None,
+    llm_debug_data: Mapping[str, Any],
+) -> dict[str, Any]:
+    expected_ids = _collect_expected_canonical_concept_ids(
+        prompt_entry=prompt_entry,
+        run_environment=run_environment,
+        llm_debug_data=llm_debug_data,
+    )
+    observed_ids = _extract_vontology_concept_ids(response_text)
+    findings: list[dict[str, Any]] = []
+
+    if expected_ids and observed_ids:
+        for expected_id in expected_ids:
+            if expected_id in observed_ids:
+                continue
+            for observed_id in observed_ids:
+                distance = _concept_id_near_miss_distance(expected_id, observed_id)
+                if distance is None:
+                    continue
+                findings.append(
+                    {
+                        "reason_code": "canonical_concept_id_mismatch",
+                        "severity": "failed",
+                        "expected_concept_id": expected_id,
+                        "observed_concept_id": observed_id,
+                        "edit_distance": distance,
+                        "message": (
+                            "Response displayed a near-miss Vontology concept ID "
+                            f"{observed_id} where canonical ID {expected_id} was "
+                            "the expected grounded subject."
+                        ),
+                    }
+                )
+
+    status = "failed" if findings else "passed" if expected_ids else "not_applicable"
+    return {
+        "status": status,
+        "expected_concept_ids": expected_ids,
+        "observed_concept_ids": observed_ids,
+        "findings": findings,
+    }
+
+
 def _assert(condition: bool, message: str) -> None:
     if not condition:
         raise RuntimeError(message)
@@ -759,6 +929,16 @@ def _load_prompt_bank() -> dict[str, Any]:
             "Update both copies together."
         )
     return json.loads(json.dumps(PROMPT_BANK_PAYLOAD))
+
+
+def _write_json_output(output_json: str, payload: Mapping[str, Any]) -> None:
+    output_path = Path(output_json)
+    if output_path.parent != Path("."):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _git_capture(*args: str) -> str | None:
@@ -1291,6 +1471,7 @@ def _evaluate_user_happiness(
     prompt_entry: Mapping[str, Any],
     generate_payload: Mapping[str, Any],
     llm_debug_data: Mapping[str, Any],
+    run_environment: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     reasons: list[str] = []
     diagnostic_evidence_reasons: list[str] = []
@@ -1469,6 +1650,23 @@ def _evaluate_user_happiness(
             "Response made a relationship or ownership claim using inventory-only tool evidence."
         )
 
+    canonical_concept_id_fidelity = _evaluate_canonical_concept_id_fidelity(
+        prompt_entry=prompt_entry,
+        response_text=response_text,
+        run_environment=run_environment,
+        llm_debug_data=llm_debug_data,
+    )
+    for finding in _as_list(canonical_concept_id_fidelity.get("findings")):
+        if not isinstance(finding, Mapping):
+            continue
+        expected_id = _safe_text(finding.get("expected_concept_id"))
+        observed_id = _safe_text(finding.get("observed_concept_id"))
+        if expected_id and observed_id:
+            reasons.append(
+                "Canonical concept ID mismatch: expected "
+                f"{expected_id} but response displayed near-miss {observed_id}."
+            )
+
     should_user_be_happy = not reasons
     verdict = "happy" if should_user_be_happy else "unhappy"
     missing_answer_evidence = [
@@ -1500,6 +1698,7 @@ def _evaluate_user_happiness(
         "missing_evidence": missing_evidence,
         "missing_answer_evidence": missing_answer_evidence,
         "missing_diagnostic_evidence": missing_diagnostic_evidence,
+        "canonical_concept_id_fidelity": canonical_concept_id_fidelity,
         "positive_evidence": positive_evidence,
         "response_length": len(response_text),
         "response_preview": response_text[:400],
@@ -1700,6 +1899,12 @@ def _build_model_portfolio_arm_evaluation(
         llm_debug_data,
         final_response_text=response_text,
     )
+    canonical_concept_id_fidelity = _as_mapping(
+        evaluation.get("canonical_concept_id_fidelity")
+    )
+    canonical_concept_id_findings = _as_list(
+        canonical_concept_id_fidelity.get("findings")
+    )
     missing_answer_evidence = _as_list(evaluation.get("missing_answer_evidence"))
     missing_evidence = _as_list(evaluation.get("missing_evidence"))
     tool_history = _as_list(telemetry.get("tool_history"))
@@ -1722,6 +1927,17 @@ def _build_model_portfolio_arm_evaluation(
         "missing_evidence_count": len(missing_evidence),
         "missing_answer_evidence_count": len(missing_answer_evidence),
         "empty_success_suspect_count": len(empty_success_suspects),
+        "canonical_concept_id_fidelity_status": (
+            _safe_text(canonical_concept_id_fidelity.get("status"))
+            or "not_applicable"
+        ),
+        "canonical_concept_id_mismatch_count": len(canonical_concept_id_findings),
+        "canonical_expected_concept_id_count": len(
+            _as_list(canonical_concept_id_fidelity.get("expected_concept_ids"))
+        ),
+        "canonical_observed_concept_id_count": len(
+            _as_list(canonical_concept_id_fidelity.get("observed_concept_ids"))
+        ),
         "completion_gate_status": (
             _safe_text(
                 completion_gate.get("status")
@@ -1785,6 +2001,7 @@ def _build_model_portfolio_arm_evaluation(
             "conversation": conversation,
             "response_preview": response_text[:400],
             "empty_success_suspects": empty_success_suspects,
+            "canonical_concept_id_fidelity": canonical_concept_id_fidelity,
         },
         promotion_blockers=promotion_blockers,
     )
@@ -2141,6 +2358,7 @@ def _run_prompt_replay_arm(
         prompt_entry=prompt_entry,
         generate_payload=generate_payload,
         llm_debug_data=llm_debug_data,
+        run_environment=run_environment,
     )
     return _build_summary(
         prompt_entry=prompt_entry,
@@ -2475,10 +2693,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     output_json = _safe_text(args.output_json)
     if output_json:
-        Path(output_json).write_text(
-            json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+        _write_json_output(output_json, summary)
     print(json.dumps(summary, ensure_ascii=True, indent=2, sort_keys=True))
     return 0 if should_user_be_happy else 1
 

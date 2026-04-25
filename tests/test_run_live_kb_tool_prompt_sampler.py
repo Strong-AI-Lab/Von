@@ -13,6 +13,14 @@ def test_prompt_bank_file_matches_embedded_payload() -> None:
     assert file_payload == sampler.PROMPT_BANK_PAYLOAD
 
 
+def test_write_json_output_creates_parent_directories(tmp_path) -> None:
+    output_path = tmp_path / "nested" / "replay" / "summary.json"
+
+    sampler._write_json_output(str(output_path), {"status": "ok"})
+
+    assert json.loads(output_path.read_text(encoding="utf-8")) == {"status": "ok"}
+
+
 def test_default_model_override_is_ollama_gemma4() -> None:
     assert sampler.DEFAULT_MODEL == "gemma4:26b"
 
@@ -137,6 +145,154 @@ def test_evaluate_user_happiness_accepts_grounded_tool_answer() -> None:
         "search_arxiv",
         "jira_search",
     ]
+
+
+def test_evaluate_user_happiness_flags_canonical_concept_id_near_miss() -> None:
+    evaluation = sampler._evaluate_user_happiness(
+        prompt_entry={
+            "id": "represented_self_facts_vs_inferences",
+            "category": "epistemic_summary",
+            "complexity_class": "vontology_grounded",
+            "prompt": (
+                "Tell me about myself as represented here, but separate "
+                "established facts from likely inferences."
+            ),
+            "knowledge_surfaces": ["kb"],
+            "likely_tools": ["fetch_concept", "get_predicate_incidence"],
+        },
+        generate_payload={
+            "response": (
+                "Based on the Vontology, here is a self-representation audit "
+                "for **#V#michael_switbrock** with established facts and likely "
+                "inferences separated below."
+            )
+        },
+        llm_debug_data={
+            "turn_execution_diagnostics": {
+                "workflow_routing_diagnostics": {
+                    "dispatch": {
+                        "selected_execution_mode": "custom_workflow",
+                        "dispatch_workflow_id": "#V#entity_information_retrieval_workflow",
+                    }
+                },
+                "tool_history": [
+                    {"tool": "fetch_concept", "success": True},
+                    {"tool": "get_predicate_incidence", "success": True},
+                ],
+            }
+        },
+        run_environment={
+            "authenticated_user_concept_id": "#V#michael_witbrock",
+        },
+    )
+
+    assert evaluation["should_user_be_happy"] is False
+    assert evaluation["verdict"] == "unhappy"
+    assert any(
+        "Canonical concept ID mismatch" in reason
+        and "#V#michael_switbrock" in reason
+        for reason in evaluation["reasons"]
+    )
+    fidelity = evaluation["canonical_concept_id_fidelity"]
+    assert fidelity["status"] == "failed"
+    assert fidelity["expected_concept_ids"] == ["#V#michael_witbrock"]
+    assert fidelity["observed_concept_ids"] == ["#V#michael_switbrock"]
+    assert fidelity["findings"] == [
+        {
+            "reason_code": "canonical_concept_id_mismatch",
+            "severity": "failed",
+            "expected_concept_id": "#V#michael_witbrock",
+            "observed_concept_id": "#V#michael_switbrock",
+            "edit_distance": 1,
+            "message": (
+                "Response displayed a near-miss Vontology concept ID "
+                "#V#michael_switbrock where canonical ID "
+                "#V#michael_witbrock was the expected grounded subject."
+            ),
+        }
+    ]
+
+
+def test_evaluate_user_happiness_accepts_exact_canonical_concept_id() -> None:
+    evaluation = sampler._evaluate_user_happiness(
+        prompt_entry={
+            "id": "represented_self_facts_vs_inferences",
+            "category": "epistemic_summary",
+            "complexity_class": "vontology_grounded",
+            "prompt": "Tell me about myself as represented here.",
+            "knowledge_surfaces": ["kb"],
+            "likely_tools": ["fetch_concept"],
+        },
+        generate_payload={
+            "response": (
+                "The represented subject is #V#michael_witbrock: with related "
+                "paper evidence such as #V#learning_to_tell_two_spirals_apart."
+            )
+        },
+        llm_debug_data={
+            "turn_execution_diagnostics": {
+                "workflow_routing_diagnostics": {
+                    "dispatch": {
+                        "selected_execution_mode": "custom_workflow",
+                    }
+                },
+                "tool_history": [{"tool": "fetch_concept", "success": True}],
+            }
+        },
+        run_environment={
+            "authenticated_user_concept_id": "#V#michael_witbrock",
+        },
+    )
+
+    assert evaluation["should_user_be_happy"] is True
+    assert evaluation["canonical_concept_id_fidelity"]["status"] == "passed"
+    assert evaluation["canonical_concept_id_fidelity"]["observed_concept_ids"] == [
+        "#V#michael_witbrock",
+        "#V#learning_to_tell_two_spirals_apart",
+    ]
+    assert evaluation["canonical_concept_id_fidelity"]["findings"] == []
+
+
+def test_evaluate_user_happiness_accepts_unrelated_retrieved_concept_id() -> None:
+    evaluation = sampler._evaluate_user_happiness(
+        prompt_entry={
+            "id": "represented_self_facts_vs_inferences",
+            "category": "epistemic_summary",
+            "complexity_class": "vontology_grounded",
+            "prompt": "Tell me about myself as represented here.",
+            "knowledge_surfaces": ["kb"],
+            "likely_tools": ["fetch_concept"],
+        },
+        generate_payload={
+            "response": (
+                "The answer cites represented evidence from "
+                "#V#learning_to_tell_two_spirals_apart and avoids fabricating a "
+                "subject identifier."
+            )
+        },
+        llm_debug_data={
+            "turn_execution_diagnostics": {
+                "workflow_routing_diagnostics": {
+                    "dispatch": {
+                        "selected_execution_mode": "custom_workflow",
+                    }
+                },
+                "tool_history": [{"tool": "fetch_concept", "success": True}],
+            }
+        },
+        run_environment={
+            "authenticated_user_concept_id": "#V#michael_witbrock",
+        },
+    )
+
+    assert evaluation["should_user_be_happy"] is True
+    fidelity = evaluation["canonical_concept_id_fidelity"]
+    assert fidelity["status"] == "passed"
+    assert fidelity["expected_concept_ids"] == ["#V#michael_witbrock"]
+    assert fidelity["observed_concept_ids"] == [
+        "#V#learning_to_tell_two_spirals_apart"
+    ]
+    assert fidelity["findings"] == []
 
 
 def test_evaluate_user_happiness_accepts_short_direct_answer() -> None:
@@ -1080,6 +1236,78 @@ def test_build_summary_flags_empty_success_llm_output_as_suspect() -> None:
     assert "single_prompt_replay_evidence_only" in answer_evidence[
         "promotion_blockers"
     ]
+
+
+def test_build_summary_records_canonical_concept_id_mismatch_evidence() -> None:
+    prompt_entry = {
+        "id": "represented_self_facts_vs_inferences",
+        "category": "epistemic_summary",
+        "complexity_class": "vontology_grounded",
+        "prompt": "Tell me about myself as represented here.",
+        "knowledge_surfaces": ["kb"],
+        "likely_tools": ["fetch_concept", "get_predicate_incidence"],
+    }
+    generate_payload = {
+        "response": (
+            "Based on the current Vontology, this is a self-representation "
+            "audit for #V#michael_switbrock."
+        )
+    }
+    llm_debug_data = {
+        "model": "gemma4:26b",
+        "turn_execution_diagnostics": {
+            "workflow_routing_diagnostics": {
+                "dispatch": {
+                    "dispatch_workflow_id": "#V#entity_information_retrieval_workflow",
+                    "selected_execution_mode": "custom_workflow",
+                }
+            },
+            "tool_history": [
+                {"tool": "fetch_concept", "success": True},
+                {"tool": "get_predicate_incidence", "success": True},
+            ],
+        },
+    }
+    run_environment = {
+        "base_url": "http://127.0.0.1:5010",
+        "authenticated_user_concept_id": "#V#michael_witbrock",
+    }
+    evaluation = sampler._evaluate_user_happiness(
+        prompt_entry=prompt_entry,
+        generate_payload=generate_payload,
+        llm_debug_data=llm_debug_data,
+        run_environment=run_environment,
+    )
+
+    summary = sampler._build_summary(
+        prompt_entry=prompt_entry,
+        task_id="task-canonical",
+        session_id="session-canonical",
+        request_id="request-canonical",
+        history_location={"history_index": 2, "session_id": "session-canonical"},
+        generate_payload=generate_payload,
+        llm_debug_data=llm_debug_data,
+        evaluation=evaluation,
+        prompt_bank_schema_version="live_kb_tool_prompt_bank.v3",
+        requested_complexity_classes=["vontology_grounded"],
+        seed=17,
+        requested_model="gemma4:26b",
+        run_environment=run_environment,
+    )
+
+    answer_evidence = summary["model_portfolio_evaluation"]["stage_evidence"][1]
+    assert answer_evidence["workflow_stage"] == "turn_answer"
+    assert answer_evidence["verdict"] == "failed"
+    assert (
+        answer_evidence["metrics"]["canonical_concept_id_fidelity_status"]
+        == "failed"
+    )
+    assert answer_evidence["metrics"]["canonical_concept_id_mismatch_count"] == 1
+    artifact = answer_evidence["evidence_artifact"]
+    assert artifact["canonical_concept_id_fidelity"]["findings"][0][
+        "reason_code"
+    ] == "canonical_concept_id_mismatch"
+    assert "#V#michael_switbrock" in (answer_evidence["rationale"] or "")
 
 
 def test_build_multi_arm_summary_reports_requested_arms_and_comparison() -> None:
