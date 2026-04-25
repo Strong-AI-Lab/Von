@@ -8175,6 +8175,43 @@ footer {
     padding: 4px 0;
 }
 
+.thinking-card-synopsis {
+    display: grid;
+    gap: 7px;
+    padding: 2px 0 8px;
+}
+
+.thinking-card-synopsis:not(:last-child) {
+    border-bottom: 1px solid #e2e8f0;
+    margin-bottom: 8px;
+}
+
+.thinking-card-synopsis-item {
+    display: grid;
+    grid-template-columns: minmax(88px, 132px) minmax(0, 1fr);
+    gap: 8px;
+    align-items: baseline;
+}
+
+.thinking-card-synopsis-label {
+    color: #475569;
+    font-size: 0.72rem;
+    font-weight: 700;
+}
+
+.thinking-card-synopsis-value {
+    color: #1f2937;
+    font-size: 0.82rem;
+    line-height: 1.35;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.thinking-card-synopsis-item.is-warning .thinking-card-synopsis-label,
+.thinking-card-synopsis-item.is-warning .thinking-card-synopsis-value {
+    color: #92400e;
+}
+
 .thinking-card-tool:not(:last-child) {
     border-bottom: 1px solid #f1f5f9;
 }

@@ -1,5 +1,6 @@
 import {
     __testOnly_buildThinkingProgressPresentation,
+    __testOnly_buildThinkingCardProgressViewModel,
     __testOnly_buildThinkingDiagnosticsPayload,
     __testOnly_buildDiagnosticsExportRequestPayload,
     __testOnly_buildWorkflowMonitorExportPayload,
@@ -2618,7 +2619,9 @@ describe('thinking activity history normalisation', () => {
         const defaultHtml = __testOnly_renderThinkingCardBodyHTML(createModeRequest('default'));
         const defaultContainer = document.createElement('div');
         defaultContainer.innerHTML = defaultHtml;
-        expect(defaultHtml).toContain('Select workflow');
+        expect(defaultHtml).toContain('thinking-card-synopsis');
+        expect(defaultHtml).toContain('Objective');
+        expect(defaultHtml).toContain('LLM input');
         expect(defaultContainer.textContent).toContain('Selected Tool calling workflow');
         expect(defaultHtml).not.toContain('Stage id');
         expect(defaultHtml).not.toContain('Prepared prompt preview');
@@ -2641,8 +2644,207 @@ describe('thinking activity history normalisation', () => {
         expect(debugHtml).toContain('LLM provider');
     });
 
+    test('builds a canonical progress view model from explicit turn state', () => {
+        const viewModel = __testOnly_buildThinkingCardProgressViewModel({
+            latestProgress: {
+                thinking_card_view_model: {
+                    objective_summary: 'Find represented papers connected to the authenticated user.',
+                    object_or_target_summary: 'Represented paper and author memory.',
+                    route_summary: 'Answer from Vontology profile memory.',
+                    evidence_context_summary: 'Using represented papers, author links, and recent conversation context.',
+                    current_activity: 'Preparing the grounded paper answer.',
+                    llm_input_lifecycle: {
+                        state: 'sent',
+                        prompt_preview: {
+                            text: 'Summarise the represented papers connected to the current user.'
+                        },
+                        context_message_count: 5,
+                        tool_definition_count: 2,
+                        model: 'gpt-5-mini'
+                    },
+                    wait_state: {
+                        state: 'waiting',
+                        label: 'Waiting for model output'
+                    },
+                    confirmation_requirement: 'No external action will be taken without confirmation.',
+                    missing_telemetry: ['No model output has been reported yet.']
+                }
+            }
+        });
+
+        expect(viewModel).toEqual(expect.objectContaining({
+            schema_version: 'thinking_card_progress_view_model.v1',
+            source_authority: 'explicit_turn_state',
+            objective_summary: 'Find represented papers connected to the authenticated user.',
+            object_or_target_summary: 'Represented paper and author memory.',
+            route_summary: 'Answer from Vontology profile memory.',
+            confirmation_requirement: 'No external action will be taken without confirmation.',
+            missing_telemetry: ['No model output has been reported yet.']
+        }));
+        expect(viewModel.llm_input_lifecycle).toEqual(expect.objectContaining({
+            state: 'sent',
+            model: 'gpt-5-mini',
+            context_message_count: 5,
+            tool_definition_count: 2
+        }));
+    });
+
+    test('renders default paper-memory synopsis without foregrounding debug noise', () => {
+        const request = {
+            clientRequestId: 'req-paper-default',
+            promptRaw: 'what papers of mine do you know about?',
+            latestProgress: {
+                status: 'llm_call_start',
+                phase: 'workflow_dispatch_prepare',
+                stage: 'workflow_dispatch_prepare',
+                objective_summary: 'Looking for represented papers connected to the current user.',
+                working_object_summary: 'Represented paper, author, and project memory.',
+                evidence_context_summary: 'Using Vontology profile memory and recent conversation context.',
+                confirmation_requirement: 'No external action will be taken without confirmation.',
+                selected_workflow_id: '#V#scholarly_paper_representation_workflow',
+                selected_workflow_name: 'Scholarly paper representation workflow',
+                workflow_selector_verdict: 'rag_selected',
+                workflow_selector_source: 'selector',
+                model: 'gpt-5-mini',
+                provider: 'openai',
+                llm_request_state: 'sent',
+                llm_request: {
+                    prompt: {
+                        text: 'Answer with represented paper records and cite uncertainty.'
+                    },
+                    context_summary: {
+                        message_count: 4,
+                        total_content_chars: 900
+                    }
+                }
+            },
+            workflowStagePath: {
+                path: [
+                    { stage_id: 'workflow_dispatch_prepare', stage_label: 'Workflow dispatch preparation' }
+                ]
+            }
+        };
+
+        const html = __testOnly_renderThinkingCardBodyHTML(request);
+        const container = document.createElement('div');
+        container.innerHTML = html;
+        const text = container.textContent;
+
+        expect(html).toContain('thinking-card-synopsis');
+        expect(text).toContain('Looking for represented papers connected to the current user.');
+        expect(text).toContain('Represented paper, author, and project memory.');
+        expect(text).toContain('Scholarly paper representation workflow');
+        expect(text).toContain('Using Vontology profile memory and recent conversation context.');
+        expect(text).toContain('LLM input sent; waiting for model output');
+        expect(text).toContain('Answer with represented paper records and cite uncertainty.');
+        expect(text).toContain('No external action will be taken without confirmation.');
+        expect(html).not.toContain('data-thinking-diagnostic-key');
+        expect(html).not.toContain('Stage id');
+        expect(html).not.toContain('LLM provider');
+        expect(html).not.toContain('openai');
+        expect(html).not.toContain('req-paper-default');
+    });
+
+    test('renders default conference-planning synopsis with constraints and confirmation boundary', () => {
+        const html = __testOnly_renderThinkingCardBodyHTML({
+            promptRaw: 'help me plan what to do before the ICML deadline',
+            latestProgress: {
+                status: 'llm_request_prepared',
+                phase: 'workflow_dispatch_prepare',
+                stage: 'workflow_dispatch_prepare',
+                objective_summary: 'Identify the conference-planning objective and next actions.',
+                target_summary: 'ICML deadline, submission tasks, collaborators, and planning constraints.',
+                route_summary: 'Draft a planning response from represented commitments and conversation context.',
+                evidence_summary: 'Checking represented commitments, papers, deadline notes, and recent turns.',
+                confirmation_requirement: 'Any booking, submission, or message would require confirmation first.',
+                model: 'gpt-5-mini',
+                llm_request_state: 'prepared',
+                llm_request: {
+                    prompt: {
+                        text: 'Draft a conference-planning response and flag actions requiring approval.'
+                    },
+                    context_message_count: 6,
+                    tool_count: 3
+                }
+            }
+        });
+        const container = document.createElement('div');
+        container.innerHTML = html;
+        const text = container.textContent;
+
+        expect(text).toContain('Identify the conference-planning objective and next actions.');
+        expect(text).toContain('ICML deadline, submission tasks, collaborators, and planning constraints.');
+        expect(text).toContain('Checking represented commitments, papers, deadline notes, and recent turns.');
+        expect(text).toContain('Any booking, submission, or message would require confirmation first.');
+        expect(text).toContain('LLM input prepared');
+        expect(text).toContain('Draft a conference-planning response and flag actions requiring approval.');
+        expect(html).not.toContain('{');
+        expect(html).not.toContain('workflow_dispatch_prepare');
+    });
+
+    test('shows missing live telemetry as an explicit default synopsis gap', () => {
+        const html = __testOnly_renderThinkingCardBodyHTML({
+            promptRaw: 'tell me about the current user',
+            latestProgress: {
+                status: 'heartbeat',
+                phase: 'workflow_dispatch_prepare',
+                stage: 'workflow_dispatch_prepare',
+                phase_label: 'Preparing workflow dispatch',
+                liveness_state: 'waiting'
+            }
+        });
+
+        const container = document.createElement('div');
+        container.innerHTML = html;
+        expect(container.textContent).toContain('Telemetry gap');
+        expect(container.textContent).toContain('Prepared LLM input has not been reported for the current stage yet.');
+        expect(container.textContent).toContain('Waiting at Preparing workflow dispatch');
+    });
+
+    test('copies progress view model in thinking and keyboard diagnostic exports', () => {
+        const request = {
+            clientRequestId: 'req-view-model-export',
+            thinkingCardMode: 'expert',
+            promptRaw: 'which route are you using?',
+            latestProgress: {
+                objective_summary: 'Explain the selected answer route.',
+                selected_workflow_id: '#V#tool_calling_workflow',
+                selected_workflow_name: 'Tool calling workflow',
+                llm_request_state: 'sent',
+                llm_request: {
+                    prompt: { text: 'Explain route provenance.' },
+                    context_message_count: 2
+                }
+            }
+        };
+
+        const diagnosticsPayload = __testOnly_buildThinkingDiagnosticsPayload(request);
+        expect(diagnosticsPayload.progress_view_model).toEqual(expect.objectContaining({
+            schema_version: 'thinking_card_progress_view_model.v1',
+            objective_summary: 'Explain the selected answer route.',
+            source_authority: 'derived_from_live_telemetry'
+        }));
+        expect(diagnosticsPayload.progress_view_model.llm_input_lifecycle).toEqual(
+            expect.objectContaining({
+                state: 'sent',
+                prompt_preview: expect.objectContaining({ text: 'Explain route provenance.' })
+            })
+        );
+
+        __testOnly_setThinkingCardRequests(request, null);
+        const exportPayload = __testOnly_buildDiagnosticsExportRequestPayload();
+        expect(exportPayload.thinking_card_mode).toBe('expert');
+        expect(exportPayload.thinking_card_progress_view_model).toEqual(
+            expect.objectContaining({
+                schema_version: 'thinking_card_progress_view_model.v1',
+                objective_summary: 'Explain the selected answer route.'
+            })
+        );
+    });
+
     test('renders preserved stage diagnostics when workflow stage path is absent', () => {
         const html = __testOnly_renderThinkingCardBodyHTML({
+            thinkingCardMode: 'debug',
             latestProgress: {
                 status: 'heartbeat',
                 stage: 'response_finalising'
@@ -2978,6 +3180,7 @@ describe('thinking activity history normalisation', () => {
 
     test('renders preserved earlier stage summaries even when latest progress is only finalising', () => {
         const html = __testOnly_renderThinkingCardBodyHTML({
+            thinkingCardMode: 'debug',
             workflowStagePath: {
                 path: [
                     { stage_id: 'context_build', stage_label: 'Build context' },
@@ -3184,6 +3387,7 @@ describe('thinking activity history normalisation', () => {
 
     test('renders workflow candidates as a successful discovery row when routing is excluded', () => {
         const html = __testOnly_renderThinkingCardBodyHTML({
+            thinkingCardMode: 'debug',
             workflowStagePath: {
                 path: [
                     { stage_id: 'workflow_discovery', stage_label: 'Workflow discovery' }
@@ -3659,7 +3863,7 @@ describe('thinking card toggle accessibility', () => {
         expect(toggleButton.getAttribute('aria-label')).toBe('Collapse thinking details');
         expect(toggleButton.getAttribute('title')).toBe('Collapse thinking details');
         expect(wrapper.classList.contains('is-collapsed')).toBe(false);
-        expect(detail.getAttribute('aria-hidden')).toBe('true');
+        expect(detail.getAttribute('aria-hidden')).toBe('false');
 
         document.getElementById('abortButton').click();
         await new Promise((r) => setTimeout(r, 0));
@@ -3803,7 +4007,8 @@ describe('thinking card toggle accessibility', () => {
             const indicatorText = document.querySelector('.loading-indicator-text');
             expect(indicatorText.textContent).toContain('Preparing response');
             expect(indicatorText.textContent).toContain('request setup');
-            expect(document.getElementById('loadingIndicatorDetail').innerHTML).toBe('');
+            expect(document.getElementById('loadingIndicatorDetail').innerHTML)
+                .toContain('No live progress has been received yet.');
 
             jest.advanceTimersByTime(2_100);
             await Promise.resolve();
@@ -3811,7 +4016,8 @@ describe('thinking card toggle accessibility', () => {
 
             expect(indicatorText.textContent).toContain('Preparing response');
             expect(indicatorText.textContent).not.toContain('Retrying live progress');
-            expect(document.getElementById('loadingIndicatorDetail').innerHTML).toBe('');
+            expect(document.getElementById('loadingIndicatorDetail').innerHTML)
+                .toContain('No live progress has been received yet.');
             expect(document.getElementById('loadingIndicatorDetail').innerHTML)
                 .not.toContain('timed out after');
 
