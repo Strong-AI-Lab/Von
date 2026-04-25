@@ -2961,7 +2961,6 @@ def test_openai_model():
                         {"role": "user", "content": "OK"},
                     ],
                     max_completion_tokens=8,
-                    temperature=0,
                 )
             except Exception as completion_exc:
                 failure_kind, reason = _classify_openai_probe_exception(completion_exc)
