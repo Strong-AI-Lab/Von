@@ -20,6 +20,7 @@ from pymongo.errors import OperationFailure, PyMongoError
 
 from ..db.mongo_client import get_db
 from .arxiv_paper_link_service import extract_arxiv_id_candidates
+from .debug_payload_store import compact_debug_payload_for_storage
 from .representation_contract_vontology_service import (
     canonical_representation_profile_concept_ids,
     ensure_canonical_representation_contract_profiles,
@@ -6987,6 +6988,18 @@ def upsert_turn_execution_record_projection(
         payload.setdefault("org_id", _safe_str(org_id))
     payload.setdefault("schema_version", TURN_EXECUTION_RECORD_SCHEMA_VERSION)
     payload.setdefault("created_at_utc", _iso_utc(now))
+    payload["updated_at_utc"] = _iso_utc(now)
+    compacted_payload = compact_debug_payload_for_storage(
+        payload,
+        root_kind="turn_execution_record",
+        namespace=_safe_str(namespace),
+        request_id=request_id,
+        fail_soft=True,
+    )
+    if isinstance(compacted_payload.payload, Mapping):
+        payload = dict(compacted_payload.payload)
+    payload["request_id"] = request_id
+    payload.setdefault("schema_version", TURN_EXECUTION_RECORD_SCHEMA_VERSION)
     payload["updated_at_utc"] = _iso_utc(now)
 
     try:

@@ -1,6 +1,35 @@
 from unittest.mock import MagicMock, patch
 
 from src.backend.services import chat_history_service
+from src.backend.services.blob_store import BlobRef
+
+
+class _FakeBlobStore:
+    def __init__(self) -> None:
+        self.writes = []
+
+    def put_bytes(self, key, data, *, content_type=None, metadata=None):
+        self.writes.append({"key": key, "data": data, "metadata": dict(metadata or {})})
+        return BlobRef(
+            backend="local",
+            key=key,
+            uri=f"local://{key}",
+            content_type=content_type,
+            size_bytes=len(data),
+            metadata=dict(metadata or {}),
+        )
+
+    def get_bytes(self, key):
+        raise KeyError(key)
+
+    def exists(self, key):
+        return False
+
+    def delete(self, key):
+        return None
+
+    def list(self, prefix=""):
+        return []
 
 
 def _session_context() -> dict[str, str]:
@@ -113,6 +142,51 @@ def test_add_message_to_history_synthesises_turn_execution_projection_without_re
     assert isinstance(stored_debug, dict)
     assert isinstance(stored_debug.get("turn_execution_record"), dict)
     assert stored_debug["turn_execution_record"]["request_id"] == "req-turn-2"
+
+
+def test_add_message_to_history_offloads_oversized_debug_fields(monkeypatch) -> None:
+    mock_coll = MagicMock()
+    store = _FakeBlobStore()
+    monkeypatch.setenv("VON_DEBUG_PAYLOAD_BLOB_THRESHOLD_BYTES", "512")
+    monkeypatch.setattr(
+        "src.backend.services.blob_store.get_blob_store_from_env",
+        lambda: store,
+    )
+
+    with (
+        patch(
+            "src.backend.services.chat_history_service.get_chat_history_collection_service",
+            return_value=mock_coll,
+        ),
+        patch(
+            "src.backend.services.chat_history_service.get_session_context",
+            return_value=_session_context(),
+        ),
+        patch("src.backend.services.chat_history_service.get_rag_service", None),
+        patch(
+            "src.backend.services.chat_history_service.upsert_turn_execution_record_projection",
+            return_value={"updated": True, "request_id": "req-turn-offload"},
+        ),
+        patch(
+            "src.backend.services.chat_history_service.build_turn_execution_record",
+            return_value={"request_id": "req-turn-offload"},
+        ),
+    ):
+        chat_history_service.add_message_to_history(
+            user_id="#V#michael_witbrock",
+            session_id="session-blob",
+            message={"role": "assistant", "content": "Done."},
+            llm_debug_data={
+                "request_id": "req-turn-offload",
+                "messages": [{"role": "tool", "content": "x" * 2000}],
+            },
+        )
+
+    stored_message = mock_coll.update_one.call_args.args[1]["$push"]["history"]
+    stored_debug = stored_message["llm_debug_data"]
+    assert stored_debug["messages"]["schema_version"] == "debug_payload_blob_ref.v1"
+    assert stored_debug["messages"]["summary"]["item_count"] == 1
+    assert store.writes
 
 
 def test_add_message_to_history_synthesis_infers_workflow_selection() -> None:

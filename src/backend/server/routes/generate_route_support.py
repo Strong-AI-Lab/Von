@@ -4,6 +4,11 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
+from src.backend.services.debug_payload_store import (
+    compact_debug_payload_for_storage,
+    default_tool_message_threshold_bytes,
+)
+
 from ...workflows import CONVERSATION_TURN_EXECUTION_WORKFLOW_ID
 
 
@@ -431,8 +436,30 @@ def _persist_generate_turn_messages(
         tool_messages, max_tool_content_chars=5000
     )
     llm_debug_payload = dict(llm_debug_info)
+    request_id = (
+        str(llm_debug_payload.get("request_id")).strip()
+        if llm_debug_payload.get("request_id")
+        else None
+    )
+    storage_tool_messages: list[dict[str, Any]] = []
+    for tool_msg in truncated_tool_messages:
+        if not isinstance(tool_msg, Mapping):
+            continue
+        compacted = compact_debug_payload_for_storage(
+            dict(tool_msg),
+            root_kind="chat_history.tool_message",
+            namespace=user_namespace,
+            request_id=request_id,
+            threshold_bytes=default_tool_message_threshold_bytes(),
+            fail_soft=True,
+        )
+        storage_tool_messages.append(
+            compacted.payload if isinstance(compacted.payload, dict) else dict(tool_msg)
+        )
     updated_context = [
-        dict(message) for message in (current_context or []) if isinstance(message, Mapping)
+        dict(message)
+        for message in (current_context or [])
+        if isinstance(message, Mapping)
     ]
 
     if history_user_id:
@@ -450,7 +477,7 @@ def _persist_generate_turn_messages(
                 role_in_org=role_in_org,
                 skip_rag_indexing=True,
             )
-        for tool_msg in truncated_tool_messages:
+        for tool_msg in storage_tool_messages:
             add_chat_history_message_fn(
                 user_id=history_user_id,
                 session_id=session_id,
@@ -472,7 +499,7 @@ def _persist_generate_turn_messages(
         )
     else:
         updated_context.append({"role": "user", "content": prompt_text})
-        updated_context.extend(truncated_tool_messages)
+        updated_context.extend(storage_tool_messages)
         updated_context.append({"role": "assistant", "content": response_text})
 
     return limit_context_size_fn(updated_context, max_messages=20)

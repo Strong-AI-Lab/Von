@@ -27,6 +27,7 @@ from .coding_agent_identity_bootstrap_service import (
     GITHUB_COPILOT_INSTANCE_ID,
     VON_SYSTEM_ID,
 )
+from .debug_payload_store import compact_debug_payload_for_storage
 
 # Try to import RAG service, but don't fail if it's not available (circular imports etc)
 try:
@@ -1715,7 +1716,20 @@ def add_message_to_history(
             interaction_timestamp_utc=message_with_timestamp["timestamp"].isoformat(),
         )
         if llm_debug_data:
-            message_with_timestamp["llm_debug_data"] = llm_debug_payload
+            request_id_value = (
+                str(llm_debug_payload.get("request_id")).strip()
+                if isinstance(llm_debug_payload, dict)
+                and llm_debug_payload.get("request_id")
+                else None
+            )
+            compacted_debug = compact_debug_payload_for_storage(
+                llm_debug_payload,
+                root_kind="chat_history.llm_debug_data",
+                namespace=ns.strip() if isinstance(ns, str) and ns.strip() else None,
+                request_id=request_id_value,
+                fail_soft=True,
+            )
+            message_with_timestamp["llm_debug_data"] = compacted_debug.payload
 
         set_fields: Dict[str, Any] = {"updated_at": datetime.now(timezone.utc)}
         # NOTE: namespace is intentionally NOT in $set - it should only be set
