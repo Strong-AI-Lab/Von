@@ -1,0 +1,137 @@
+{
+  "schema_version": "paper_topic_salience_fixture.v1",
+  "fixture_kind": "synthetic_sail_style_publication",
+  "note": "Synthetic sample for JVNAUTOSCI-150. It is not a claim about a real SAIL publication.",
+  "request": {
+    "user_prompt": "Analyse this SAIL paper and describe the research topics it is salient to.",
+    "analysis_profile": "full_text_topic_salience",
+    "namespace": "#V#michael_witbrock@university_of_auckland_strong_ai_lab"
+  },
+  "publication": {
+    "paper_concept_id": "#V#synthetic_paper_neuro_symbolic_workflow_layer",
+    "title": "A Neuro-Symbolic Workflow Layer for Research-Team Scientific Assistance",
+    "authors": [
+      "A. Researcher",
+      "B. Engineer"
+    ],
+    "source_type": "synthetic_internal_draft",
+    "abstract": "The paper proposes a Vontology-authored workflow layer for research-team assistants. It argues that persistent knowledge, prompt authority, and workflow telemetry should govern task execution while Python supplies support surfaces. The evaluation studies paper ingestion, topic representation, and user-facing completion reports across repeated research-support tasks.",
+    "metadata_topic_labels": [
+      "neuro-symbolic AI",
+      "knowledge representation",
+      "workflow orchestration"
+    ]
+  },
+  "evidence_spans": [
+    {
+      "span_id": "abstract:1",
+      "section": "abstract",
+      "text": "The paper proposes a Vontology-authored workflow layer for research-team assistants."
+    },
+    {
+      "span_id": "abstract:2",
+      "section": "abstract",
+      "text": "It argues that persistent knowledge, prompt authority, and workflow telemetry should govern task execution while Python supplies support surfaces."
+    },
+    {
+      "span_id": "abstract:3",
+      "section": "abstract",
+      "text": "The evaluation studies paper ingestion, topic representation, and user-facing completion reports across repeated research-support tasks."
+    },
+    {
+      "span_id": "methods:1",
+      "section": "methods",
+      "text": "The workflow engine loads represented process graphs from Vontology, validates context mappings, and records turn execution telemetry for replay."
+    },
+    {
+      "span_id": "discussion:1",
+      "section": "discussion",
+      "text": "The same representation substrate could later support paper recommendation, meeting preparation, and project memory, but those are downstream uses rather than the central contribution."
+    }
+  ],
+  "expected_topic_salience_report": {
+    "schema_version": "paper_topic_salience_report.v1",
+    "paper_concept_id": "#V#synthetic_paper_neuro_symbolic_workflow_layer",
+    "analysis_basis": "synthetic_full_text_excerpt",
+    "topics": [
+      {
+        "rank": 1,
+        "topic_label": "Neuro-symbolic workflow control",
+        "topic_concept_id": "#V#research_topic_neuro_symbolic_workflow_control",
+        "salience_score": 0.94,
+        "salience_role": "primary",
+        "confidence": "high",
+        "evidence_span_ids": [
+          "abstract:1",
+          "methods:1"
+        ],
+        "rationale": "The paper's main contribution is a represented workflow layer for agentic research assistance, so workflow control is central rather than incidental."
+      },
+      {
+        "rank": 2,
+        "topic_label": "Vontology and knowledge representation",
+        "topic_concept_id": "#V#research_topic_vontology_knowledge_representation",
+        "salience_score": 0.88,
+        "salience_role": "primary",
+        "confidence": "high",
+        "evidence_span_ids": [
+          "abstract:1",
+          "abstract:2"
+        ],
+        "rationale": "The paper explicitly makes persistent represented knowledge and Vontology-authored artefacts part of the execution authority."
+      },
+      {
+        "rank": 3,
+        "topic_label": "Agent evaluation and telemetry",
+        "topic_concept_id": "#V#research_topic_agent_evaluation_telemetry",
+        "salience_score": 0.73,
+        "salience_role": "secondary",
+        "confidence": "medium",
+        "evidence_span_ids": [
+          "abstract:3",
+          "methods:1"
+        ],
+        "rationale": "Evaluation and telemetry are substantial validation mechanisms, but they support the workflow-control contribution rather than replacing it."
+      },
+      {
+        "rank": 4,
+        "topic_label": "Research-team assistance",
+        "topic_concept_id": "#V#research_topic_research_team_assistance",
+        "salience_score": 0.66,
+        "salience_role": "application",
+        "confidence": "medium",
+        "evidence_span_ids": [
+          "abstract:1",
+          "abstract:3"
+        ],
+        "rationale": "The application domain is research-team support, but the technical contribution is broader than that one use setting."
+      }
+    ],
+    "proposed_topics": [],
+    "unsupported_candidates": [
+      {
+        "topic_label": "Paper recommendation",
+        "reason": "Mentioned only as a downstream use case in discussion, not as a central paper contribution.",
+        "evidence_span_ids": [
+          "discussion:1"
+        ]
+      }
+    ],
+    "review_required": false,
+    "confidence_summary": "High confidence for primary workflow and representation topics. Medium confidence for evaluation and application topics because the fixture provides only short excerpts."
+  },
+  "evaluation_fixture": {
+    "expert_primary_topics": [
+      "Neuro-symbolic workflow control",
+      "Vontology and knowledge representation"
+    ],
+    "expert_secondary_topics": [
+      "Agent evaluation and telemetry",
+      "Research-team assistance"
+    ],
+    "expected_rejections": [
+      "Paper recommendation"
+    ],
+    "must_have_evidence_for_each_accepted_topic": true
+  }
+}
