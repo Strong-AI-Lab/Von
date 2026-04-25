@@ -792,6 +792,32 @@ def test_prompt_bank_includes_operational_task_and_message_cases() -> None:
     assert by_id["count_my_unread_von_messages"]["allows_grounded_empty_result"] is True
 
 
+def test_prompt_bank_includes_jira_replay_regressions() -> None:
+    prompts = sampler.PROMPT_BANK_PAYLOAD["prompts"]
+    by_id = {
+        prompt["id"]: prompt
+        for prompt in prompts
+        if isinstance(prompt, dict) and isinstance(prompt.get("id"), str)
+    }
+
+    direct_issue = by_id["tell_me_about_jvnautosci_150_in_jira"]
+    assert direct_issue["prompt"] == "Tell me about JVNAUTOSCI-150 in JIRA"
+    assert direct_issue["likely_tools"] == ["jira_get_issue"]
+    assert direct_issue["requires_tool_use"] is True
+
+    parent_subtasks = by_id["parent_and_subtasks_for_jvnautosci_150"]
+    assert parent_subtasks["likely_tools"] == ["jira_get_issue"]
+    assert parent_subtasks["category"] == "single_tool_jira_summary"
+
+    repair_task = by_id["summarise_jvnautosci_2097_tool_plan_repair_task"]
+    assert repair_task["likely_tools"] == ["jira_get_issue"]
+    assert "tool-calling failure" in repair_task["prompt"]
+
+    repair_search = by_id["which_jira_task_tracks_tool_call_repair_critic"]
+    assert repair_search["likely_tools"] == ["jira_search"]
+    assert repair_search["category"] == "single_tool_jira_search"
+
+
 def test_run_generate_background_omits_model_when_not_requested(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

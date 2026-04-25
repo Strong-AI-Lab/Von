@@ -272,10 +272,66 @@
       "requires_tool_use": true
     },
     {
+      "id": "tell_me_about_jvnautosci_150_in_jira",
+      "category": "single_tool_jira_summary",
+      "complexity_class": "vontology_plus_single_tool",
+      "prompt": "Tell me about JVNAUTOSCI-150 in JIRA",
+      "knowledge_surfaces": [
+        "turn_context",
+        "jira"
+      ],
+      "likely_tools": [
+        "jira_get_issue"
+      ],
+      "requires_tool_use": true
+    },
+    {
+      "id": "parent_and_subtasks_for_jvnautosci_150",
+      "category": "single_tool_jira_summary",
+      "complexity_class": "vontology_plus_single_tool",
+      "prompt": "What parent and subtasks are recorded for JVNAUTOSCI-150?",
+      "knowledge_surfaces": [
+        "turn_context",
+        "jira"
+      ],
+      "likely_tools": [
+        "jira_get_issue"
+      ],
+      "requires_tool_use": true
+    },
+    {
+      "id": "summarise_jvnautosci_2097_tool_plan_repair_task",
+      "category": "single_tool_jira_summary",
+      "complexity_class": "vontology_plus_single_tool",
+      "prompt": "Summarise JVNAUTOSCI-2097 and explain the tool-calling failure it asks us to fix.",
+      "knowledge_surfaces": [
+        "turn_context",
+        "jira"
+      ],
+      "likely_tools": [
+        "jira_get_issue"
+      ],
+      "requires_tool_use": true
+    },
+    {
       "id": "which_open_jira_issue_is_the_parent_replay_programme",
       "category": "single_tool_jira_search",
       "complexity_class": "vontology_plus_single_tool",
       "prompt": "Which open Jira issue is the parent replay programme for these KB and tool stability subtasks?",
+      "knowledge_surfaces": [
+        "turn_context",
+        "jira"
+      ],
+      "likely_tools": [
+        "jira_search"
+      ],
+      "requires_tool_use": true
+    },
+    {
+      "id": "which_jira_task_tracks_tool_call_repair_critic",
+      "category": "single_tool_jira_search",
+      "complexity_class": "vontology_plus_single_tool",
+      "prompt": "Which Jira task tracks adding a one-shot tool-call repair critic for malformed required tool plans?",
       "knowledge_surfaces": [
         "turn_context",
         "jira"

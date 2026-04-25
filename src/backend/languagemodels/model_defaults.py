@@ -15,7 +15,7 @@ DEFAULT_OLLAMA_MODEL: str = os.getenv("VON_DEFAULT_OLLAMA_MODEL", "gemma4:26b")
 # ---------------------------------------------------------------------------
 # OpenAI
 # ---------------------------------------------------------------------------
-DEFAULT_OPENAI_MODEL: str = os.getenv("VON_DEFAULT_OPENAI_MODEL", "gpt-4.1-mini")
+DEFAULT_OPENAI_MODEL: str = os.getenv("VON_DEFAULT_OPENAI_MODEL", "gpt-5.5")
 
 # ---------------------------------------------------------------------------
 # Gemini

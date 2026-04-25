@@ -87,6 +87,23 @@ def _normalise_key(key: str) -> str:
     return key
 
 
+def _normalise_s3_metadata(metadata: Mapping[str, str] | None) -> dict[str, str]:
+    if not metadata:
+        return {}
+
+    wire_metadata: dict[str, str] = {}
+    for key, value in metadata.items():
+        wire_key = str(key).strip().replace("_", "-")
+        if not wire_key:
+            raise ValueError("S3 metadata key must not be empty")
+        if wire_key in wire_metadata:
+            raise ValueError(
+                f"S3 metadata keys collide after normalisation: {wire_key!r}"
+            )
+        wire_metadata[wire_key] = str(value)
+    return wire_metadata
+
+
 def _exception_http_status(exc: Exception) -> int | None:
     for attr in ("http_status", "status_code", "status"):
         value = getattr(exc, attr, None)
@@ -837,7 +854,7 @@ class S3BlobStore:
         if content_type:
             put_kwargs["ContentType"] = content_type
         if metadata:
-            put_kwargs["Metadata"] = dict(metadata)
+            put_kwargs["Metadata"] = _normalise_s3_metadata(metadata)
 
         self._client.put_object(**put_kwargs)
 

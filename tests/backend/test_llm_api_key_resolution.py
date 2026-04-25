@@ -36,7 +36,7 @@ def test_gemini_client_accepts_legacy_google_api_key(monkeypatch):
 
     assert client.api_key == "legacy-key"
     assert configured["api_key"] == "legacy-key"
-    assert configured["model_name"] == "gemini-pro"
+    assert configured["model_name"] == "gemini-2.0-flash"
 
 
 def test_describe_image_with_gemini_accepts_legacy_google_api_key(monkeypatch):
@@ -82,3 +82,46 @@ def test_describe_image_with_gemini_accepts_legacy_google_api_key(monkeypatch):
     assert configured["model_name"] == "gemini-2.0-flash"
     assert result["method"] == "gemini_vision"
     assert result["description"] == "A labelled diagram of a research workflow."
+
+
+def test_describe_image_with_openai_uses_central_default_model(monkeypatch):
+    from src.backend.services import file_copy_interpretation_service as service
+
+    openai_mod = types.ModuleType("openai")
+    captured = {}
+
+    def _create(**kwargs):
+        captured.update(kwargs)
+        return types.SimpleNamespace(
+            choices=[
+                types.SimpleNamespace(
+                    message=types.SimpleNamespace(
+                        content="A labelled diagram of a research workflow."
+                    )
+                )
+            ]
+        )
+
+    class _Client:
+        def __init__(self, *, api_key):
+            captured["api_key"] = api_key
+            self.chat = types.SimpleNamespace(
+                completions=types.SimpleNamespace(create=_create)
+            )
+
+    setattr(openai_mod, "OpenAI", _Client)
+
+    monkeypatch.setitem(sys.modules, "openai", openai_mod)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+
+    result = service._describe_image_with_openai(
+        data_bytes=b"png-data",
+        content_type="image/png",
+        model=None,
+        prompt="Describe the image.",
+    )
+
+    assert captured["api_key"] == "test-openai-key"
+    assert captured["model"] == "gpt-5.5"
+    assert result["method"] == "openai_vision"
+    assert result["model"] == "gpt-5.5"

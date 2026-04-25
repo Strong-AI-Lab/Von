@@ -15,6 +15,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
+from ..languagemodels.model_defaults import DEFAULT_OPENAI_MODEL
 from .llm_api_key_resolution import get_gemini_api_key
 
 logger = logging.getLogger(__name__)
@@ -1028,7 +1029,7 @@ def _describe_image_with_openai(
             "model": model,
         }
 
-    target_model = model or "gpt-4.1-mini"
+    target_model = model or DEFAULT_OPENAI_MODEL
     mime = _normalise_optional_text(content_type) or "image/png"
     image_b64 = base64.b64encode(bytes(data_bytes)).decode("ascii")
     data_url = f"data:{mime};base64,{image_b64}"

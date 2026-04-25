@@ -84,7 +84,7 @@ environment variables (see `src/backend/languagemodels/model_defaults.py`):
 | Variable | Fallback |
 |---|---|
 | `VON_DEFAULT_OLLAMA_MODEL` | `gemma4:26b` |
-| `VON_DEFAULT_OPENAI_MODEL` | `gpt-4.1-mini` |
+| `VON_DEFAULT_OPENAI_MODEL` | `gpt-5.5` |
 | `VON_DEFAULT_GEMINI_MODEL` | `gemini-2.0-flash` |
 
 When writing policy JSON, prefer `active_llm` for stages that should follow

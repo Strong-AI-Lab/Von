@@ -341,6 +341,8 @@ def test_swift_blob_store_cloud_not_found_falls_back_to_envvars(
     monkeypatch.setenv("OS_PROJECT_NAME", "demo-project")
     monkeypatch.setenv("OS_USER_DOMAIN_NAME", "Default")
     monkeypatch.setenv("OS_PROJECT_DOMAIN_NAME", "Default")
+    monkeypatch.delenv("OS_APPLICATION_CREDENTIAL_ID", raising=False)
+    monkeypatch.delenv("OS_APPLICATION_CREDENTIAL_SECRET", raising=False)
 
     store = SwiftBlobStore(container="demo-container", cloud="catalystcloud")
     assert isinstance(store._conn, _DummyConnection)
@@ -526,6 +528,40 @@ def test_s3_blob_store_methods_use_s3_client_signatures():
     assert store.list() == ["alpha.txt", "nested/beta.txt"]
 
 
+def test_s3_blob_store_normalises_metadata_keys_for_wire():
+    class _DummyClient:
+        def __init__(self):
+            self.put_calls = []
+
+        def put_object(self, **kwargs):
+            self.put_calls.append(kwargs)
+
+    store = S3BlobStore.__new__(S3BlobStore)
+    store._bucket = "demo-bucket"
+    store._endpoint_url = "https://object-storage.nz-por-1.catalystcloud.io"
+    store._prefix = ""
+    store._public_base_url = None
+    store._region_name = "nz-por-1"
+    store._access_key_id = "key"
+    store._secret_access_key = "secret"
+    store._session_token = None
+    store._addressing_style = "path"
+    store._client = _DummyClient()
+
+    metadata = {"size_bytes": "5", "sha256": "abc123"}
+    ref = store.put_bytes("alpha.txt", b"hello", metadata=metadata)
+
+    assert store._client.put_calls == [
+        {
+            "Bucket": "demo-bucket",
+            "Key": "alpha.txt",
+            "Body": b"hello",
+            "Metadata": {"size-bytes": "5", "sha256": "abc123"},
+        }
+    ]
+    assert ref.metadata == metadata
+
+
 def test_s3_blob_store_exists_returns_false_for_missing_object():
     class _MissingObject(Exception):
         def __init__(self):
@@ -591,6 +627,9 @@ def test_get_blob_store_from_env_s3_supports_swift_container_fallback(
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "demo-secret")
     monkeypatch.setenv("OS_REGION_NAME", "nz-por-1")
     monkeypatch.setenv("VON_SWIFT_PREFIX", "von")
+    monkeypatch.delenv("VON_S3_REGION_NAME", raising=False)
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
 
     store = get_blob_store_from_env()
     assert isinstance(store, S3BlobStore)
