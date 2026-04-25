@@ -459,6 +459,18 @@ PROMPT_BANK_PAYLOAD: dict[str, Any] = {
             "requires_tool_use": True,
         },
         {
+            "id": "list_last_ten_zhan_gmail_messages",
+            "category": "single_tool_gmail_listing",
+            "complexity_class": "tool_augmented",
+            "prompt": (
+                "List the last ten email messages received by "
+                "zhanvonwitbrock@gmail.com the zhan-gmail identity"
+            ),
+            "knowledge_surfaces": ["turn_context", "gmail"],
+            "likely_tools": ["gmail_list_messages", "gmail_get_message"],
+            "requires_tool_use": True,
+        },
+        {
             "id": "what_research_interests_of_mine_are_explicitly_represented_here",
             "category": "single_tool_rag_lookup",
             "complexity_class": "vontology_plus_single_tool",

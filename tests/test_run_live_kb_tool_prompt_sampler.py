@@ -817,6 +817,15 @@ def test_prompt_bank_includes_jira_replay_regressions() -> None:
     assert repair_search["likely_tools"] == ["jira_search"]
     assert repair_search["category"] == "single_tool_jira_search"
 
+    gmail_listing = by_id["list_last_ten_zhan_gmail_messages"]
+    assert gmail_listing["category"] == "single_tool_gmail_listing"
+    assert gmail_listing["complexity_class"] == "tool_augmented"
+    assert gmail_listing["likely_tools"] == [
+        "gmail_list_messages",
+        "gmail_get_message",
+    ]
+    assert gmail_listing["requires_tool_use"] is True
+
 
 def test_run_generate_background_omits_model_when_not_requested(
     monkeypatch: pytest.MonkeyPatch,
