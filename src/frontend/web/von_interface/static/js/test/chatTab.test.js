@@ -7,6 +7,7 @@ import {
     __testOnly_loadChatHistory,
     __testOnly_refreshChatSessionTabs,
     __testOnly_refreshAvailableWorkflowDefinitions,
+    __testOnly_refreshWorkflowCapabilityIndexStatus,
     __testOnly_refreshWorkflowStatusSnapshot,
     __testOnly_resetHistoryUiState,
     __testOnly_resetWorkflowDefinitionsState,
@@ -773,6 +774,30 @@ describe('workflow monitor capability-index polling and global furl', () => {
         exportPayload = __testOnly_buildWorkflowMonitorExportPayload();
         expect(exportPayload.capability_index.ready).toBe(true);
         expect(exportPayload.monitor_state.capability_index_poll_active).toBe(false);
+    });
+
+    test('renders capability-index status fetch timeouts without exposing the raw abort message', async () => {
+        global.fetch = jest.fn((_url, options = {}) => new Promise((_resolve, reject) => {
+            const signal = options.signal;
+            if (signal && typeof signal.addEventListener === 'function') {
+                signal.addEventListener('abort', () => {
+                    const err = new Error('signal is aborted without reason');
+                    err.name = 'AbortError';
+                    reject(err);
+                }, { once: true });
+            }
+        }));
+
+        const refreshPromise = __testOnly_refreshWorkflowCapabilityIndexStatus();
+        jest.advanceTimersByTime(8000);
+        await refreshPromise;
+
+        const bodyText = document.getElementById('workflowStatusBody').textContent;
+        expect(bodyText).toContain('Capability index status unavailable');
+        expect(bodyText).toContain('request timed out after 8s');
+        expect(bodyText).not.toContain('signal is aborted without reason');
+        const exportPayload = __testOnly_buildWorkflowMonitorExportPayload();
+        expect(exportPayload.monitor_state.capability_index_error).toContain('request timed out after 8s');
     });
 
     test('global furl hides active groups and capability-index warning without polling while furled', async () => {

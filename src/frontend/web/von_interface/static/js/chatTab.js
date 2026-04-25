@@ -22629,6 +22629,17 @@ function buildWorkflowCapabilityIndexWarningHtml() {
     `;
 }
 
+function describeWorkflowCapabilityIndexStatusFetchError(err) {
+    if (err && typeof err === 'object' && err.vonTimeout) {
+        const timeoutSeconds = Math.round(WORKFLOW_CAPABILITY_INDEX_FETCH_TIMEOUT_MS / 1000);
+        return `request timed out after ${timeoutSeconds}s`;
+    }
+    if (err && typeof err === 'object' && err.name === 'AbortError') {
+        return 'request was cancelled before the status response arrived';
+    }
+    return err instanceof Error ? err.message : String(err || 'unknown_error');
+}
+
 async function refreshWorkflowCapabilityIndexStatus({ silent = false } = {}) {
     const { panel } = getWorkflowStatusElements();
     if (!panel) return;
@@ -22657,7 +22668,7 @@ async function refreshWorkflowCapabilityIndexStatus({ silent = false } = {}) {
         }
         applyWorkflowCapabilityIndexPayload(responsePayload);
     } catch (err) {
-        const message = err instanceof Error ? err.message : String(err || 'unknown_error');
+        const message = describeWorkflowCapabilityIndexStatusFetchError(err);
         workflowCapabilityIndexState.error = `Could not load capability index status: ${message}`;
         if (!silent) {
             console.warn('[workflowStatus] Capability index status fetch failed', err);
