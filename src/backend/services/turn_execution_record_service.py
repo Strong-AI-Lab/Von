@@ -20,7 +20,10 @@ from pymongo.errors import OperationFailure, PyMongoError
 
 from ..db.mongo_client import get_db
 from .arxiv_paper_link_service import extract_arxiv_id_candidates
-from .debug_payload_store import compact_debug_payload_for_storage
+from .debug_payload_store import (
+    compact_debug_payload_for_storage,
+    hydrate_debug_payload_blob_refs,
+)
 from .representation_contract_vontology_service import (
     canonical_representation_profile_concept_ids,
     ensure_canonical_representation_contract_profiles,
@@ -7064,7 +7067,12 @@ def get_latest_turn_execution_record_projection(
         sort=[("created_at_utc", DESCENDING), ("updated_at_utc", DESCENDING)],
     )
     if isinstance(doc, Mapping):
-        return dict(doc)
+        hydrated = hydrate_debug_payload_blob_refs(doc, fail_soft=True)
+        return (
+            dict(hydrated.payload)
+            if isinstance(hydrated.payload, Mapping)
+            else dict(doc)
+        )
 
     # Older projections may be missing namespace/user_id even when session_id is
     # stable, so fall back to session-scoped lookup before giving up.
@@ -7075,7 +7083,12 @@ def get_latest_turn_execution_record_projection(
             sort=[("created_at_utc", DESCENDING), ("updated_at_utc", DESCENDING)],
         )
         if isinstance(doc, Mapping):
-            return dict(doc)
+            hydrated = hydrate_debug_payload_blob_refs(doc, fail_soft=True)
+            return (
+                dict(hydrated.payload)
+                if isinstance(hydrated.payload, Mapping)
+                else dict(doc)
+            )
 
     return None
 

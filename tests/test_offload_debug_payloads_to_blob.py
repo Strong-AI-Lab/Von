@@ -22,8 +22,23 @@ class _Collection:
         for doc in self.docs:
             if doc.get("_id") == query.get("_id"):
                 for key, value in update.get("$set", {}).items():
-                    doc[key] = value
+                    _apply_dotted_set(doc, key, value)
         return None
+
+
+def _apply_dotted_set(doc, key, value):
+    parts = str(key).split(".")
+    current = doc
+    for part in parts[:-1]:
+        if isinstance(current, list):
+            current = current[int(part)]
+        else:
+            current = current.setdefault(part, {})
+    final = parts[-1]
+    if isinstance(current, list):
+        current[int(final)] = value
+    else:
+        current[final] = value
 
 
 class _FakeBlobStore:
@@ -42,6 +57,9 @@ class _FakeBlobStore:
         )
 
     def get_bytes(self, key):
+        for write in self.writes:
+            if write["key"] == key:
+                return write["data"]
         raise KeyError(key)
 
     def exists(self, key):
@@ -178,3 +196,46 @@ def test_turn_execution_record_offload_apply_rewrites_large_diagnostics(
     stored_events = coll.docs[0]["execution"]["diagnostic_events"]
     assert stored_events["schema_version"] == "debug_payload_blob_ref.v1"
     assert coll.docs[0]["debug_payload_offload_migration"]["status"] == "applied"
+
+
+def test_chat_history_apply_does_not_update_when_blob_store_fails(monkeypatch) -> None:
+    class _FailingBlobStore:
+        def put_bytes(self, *args, **kwargs):
+            raise RuntimeError("blob store unavailable")
+
+    monkeypatch.setattr(
+        "src.backend.services.blob_store.get_blob_store_from_env",
+        lambda: _FailingBlobStore(),
+    )
+    original_debug = {
+        "request_id": "req-migrate",
+        "messages": [{"role": "tool", "content": "x" * 2000}],
+    }
+    coll = _Collection(
+        [
+            {
+                "_id": "chat-1",
+                "namespace": "#V#michael@org",
+                "history": [
+                    {
+                        "role": "assistant",
+                        "content": "ok",
+                        "llm_debug_data": dict(original_debug),
+                    }
+                ],
+            }
+        ]
+    )
+
+    stats = script._scan_chat_history(
+        coll=coll,
+        apply=True,
+        limit=None,
+        threshold_bytes=512,
+        tool_threshold_bytes=512,
+    )
+
+    assert stats.errors == 1
+    assert stats.updated == 0
+    assert not coll.updates
+    assert coll.docs[0]["history"][0]["llm_debug_data"] == original_debug

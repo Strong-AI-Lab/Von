@@ -27,7 +27,10 @@ from .coding_agent_identity_bootstrap_service import (
     GITHUB_COPILOT_INSTANCE_ID,
     VON_SYSTEM_ID,
 )
-from .debug_payload_store import compact_debug_payload_for_storage
+from .debug_payload_store import (
+    compact_debug_payload_for_storage,
+    hydrate_debug_payload_blob_refs,
+)
 
 # Try to import RAG service, but don't fail if it's not available (circular imports etc)
 try:
@@ -1325,6 +1328,7 @@ def get_chat_history_debug_entry(
     history_index: int,
     namespace: Optional[str] = None,
     include_legacy: bool = True,
+    hydrate_blob_refs: bool = True,
 ) -> Optional[Dict[str, Any]]:
     """Return stored llm_debug_data for a specific history entry."""
     if not isinstance(user_id, str) or not user_id:
@@ -1367,6 +1371,13 @@ def get_chat_history_debug_entry(
         if not isinstance(debug_data, dict):
             _record_chat_history_read_success()
             return None
+        if hydrate_blob_refs:
+            hydrated = hydrate_debug_payload_blob_refs(debug_data, fail_soft=True)
+            debug_data = (
+                hydrated.payload
+                if isinstance(hydrated.payload, dict)
+                else debug_data
+            )
         _record_chat_history_read_success()
         return debug_data
     except PyMongoError as e:

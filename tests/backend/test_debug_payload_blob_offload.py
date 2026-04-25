@@ -6,6 +6,7 @@ from typing import Any, Mapping
 from src.backend.services.blob_store import BlobRef
 from src.backend.services.debug_payload_store import (
     compact_debug_payload_for_storage,
+    hydrate_debug_payload_blob_refs,
     load_debug_payload_blob_ref,
 )
 
@@ -115,3 +116,31 @@ def test_compact_debug_payload_degrades_without_reinlining_on_blob_failure(
     assert degraded["schema_version"] == "debug_payload_offload_degraded.v1"
     assert degraded["reason"] == "blob_upload_failed"
     assert "x" * 1000 not in json.dumps(degraded)
+
+
+def test_hydrate_debug_payload_blob_refs_restores_nested_payload(monkeypatch) -> None:
+    store = _FakeBlobStore()
+    monkeypatch.setattr(
+        "src.backend.services.blob_store.get_blob_store_from_env",
+        lambda: store,
+    )
+
+    payload = {
+        "request_id": "req-blob-2",
+        "turn_execution_diagnostics": {
+            "stage_diagnostics": [{"detail": "x" * 2000}]
+        },
+    }
+    compacted = compact_debug_payload_for_storage(
+        payload,
+        root_kind="chat_history.llm_debug_data",
+        namespace="#V#michael@org",
+        request_id="req-blob-2",
+        threshold_bytes=512,
+    )
+
+    hydrated = hydrate_debug_payload_blob_refs(compacted.payload, fail_soft=False)
+
+    assert hydrated.hydrated_count == 1
+    assert hydrated.error_count == 0
+    assert hydrated.payload == payload

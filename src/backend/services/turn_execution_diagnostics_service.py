@@ -11,6 +11,7 @@ from .conversation_scope_binding_service import (
     build_conversation_scope_binding,
     build_history_location_binding,
 )
+from .debug_payload_store import hydrate_debug_payload_blob_refs
 from .turn_execution_record_service import get_turn_execution_records_collection
 from ..workflows.conversation_turn_stage_model import (
     build_conversation_turn_stage_model_snapshot,
@@ -163,7 +164,12 @@ def _resolve_history_context(
             continue
         target_index = index
         target_message = dict(raw_message)
-        target_llm_debug = dict(llm_debug)
+        hydrated_debug = hydrate_debug_payload_blob_refs(llm_debug, fail_soft=True)
+        target_llm_debug = (
+            dict(hydrated_debug.payload)
+            if isinstance(hydrated_debug.payload, Mapping)
+            else dict(llm_debug)
+        )
         break
 
     if target_message is None or target_llm_debug is None:

@@ -6,7 +6,10 @@ These tests use a fake collection so they don't require Mongo.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Any, Mapping
 
+from src.backend.services.blob_store import BlobRef
+from src.backend.services.debug_payload_store import compact_debug_payload_for_storage
 
 
 class _FakeCollection:
@@ -126,6 +129,46 @@ class _FakeCollection:
                 docs = projected
                 continue
         return iter(docs)
+
+
+class _FakeBlobStore:
+    def __init__(self) -> None:
+        self.writes: list[dict[str, Any]] = []
+
+    def put_bytes(
+        self,
+        key: str,
+        data: bytes,
+        *,
+        content_type: str | None = None,
+        metadata: Mapping[str, str] | None = None,
+    ) -> BlobRef:
+        self.writes.append({"key": key, "data": data, "metadata": dict(metadata or {})})
+        return BlobRef(
+            backend="local",
+            key=key,
+            uri=f"local://{key}",
+            content_type=content_type,
+            size_bytes=len(data),
+            metadata=dict(metadata or {}),
+        )
+
+    def get_bytes(self, key: str) -> bytes:
+        for write in self.writes:
+            if write["key"] == key:
+                return write["data"]
+        raise KeyError(key)
+
+    def exists(self, key: str) -> bool:
+        return any(write["key"] == key for write in self.writes)
+
+    def delete(self, key: str) -> None:
+        self.writes = [write for write in self.writes if write["key"] != key]
+
+    def list(self, prefix: str = "") -> list[str]:
+        return [
+            write["key"] for write in self.writes if write["key"].startswith(prefix)
+        ]
 
 
 def test_get_chat_history_segments_skips_empty_segments(monkeypatch):
@@ -284,6 +327,55 @@ def test_get_chat_history_segments_strips_debug_when_requested(monkeypatch):
     assert len(segments) == 1
     assert len(segments[0]) == 1
     assert "llm_debug_data" not in segments[0][0]
+
+
+def test_get_chat_history_debug_entry_hydrates_blob_refs(monkeypatch):
+    from src.backend.services import chat_history_service
+
+    store = _FakeBlobStore()
+    monkeypatch.setattr(
+        "src.backend.services.blob_store.get_blob_store_from_env",
+        lambda: store,
+    )
+    original_debug = {
+        "request_id": "req-hydrate",
+        "messages": [{"role": "tool", "content": "x" * 2000}],
+    }
+    compacted = compact_debug_payload_for_storage(
+        original_debug,
+        root_kind="chat_history.llm_debug_data",
+        namespace="#V#u",
+        request_id="req-hydrate",
+        threshold_bytes=512,
+    )
+    docs = [
+        {
+            "_id": "1",
+            "user_id": "#V#u",
+            "session_id": "s1",
+            "history": [
+                {
+                    "role": "assistant",
+                    "content": "ok",
+                    "llm_debug_data": compacted.payload,
+                }
+            ],
+        }
+    ]
+
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_collection_service",
+        lambda **kwargs: _FakeCollection(docs),
+    )
+
+    debug = chat_history_service.get_chat_history_debug_entry(
+        user_id="#V#u",
+        session_id="s1",
+        history_index=0,
+    )
+
+    assert debug == original_debug
 
 
 def test_get_chat_history_segments_reports_truncation(monkeypatch):

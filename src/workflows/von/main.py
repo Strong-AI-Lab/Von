@@ -142,6 +142,9 @@ _apply_dotenv_overrides(
         # Windows because launcher/session inheritance is inconsistent across
         # local runs, and missing these keys changes the failure mode.
         "VON_BLOB_STORE_BACKEND",
+        "VON_BLOB_STORE_LOCAL_ROOT",
+        "VON_DEBUG_PAYLOAD_BLOB_THRESHOLD_BYTES",
+        "VON_DEBUG_TOOL_MESSAGE_BLOB_THRESHOLD_BYTES",
         "VON_SWIFT_CONTAINER",
         "VON_SWIFT_PREFIX",
         "VON_SWIFT_PUBLIC_BASE_URL",

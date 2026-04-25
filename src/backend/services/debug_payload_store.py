@@ -57,6 +57,13 @@ class DebugPayloadOffloadResult:
     stored_size_bytes: int = 0
 
 
+@dataclass(frozen=True)
+class DebugPayloadHydrationResult:
+    payload: Any
+    hydrated_count: int = 0
+    error_count: int = 0
+
+
 def _env_int(name: str, *, default: int) -> int:
     value = os.environ.get(name)
     if not isinstance(value, str) or not value.strip():
@@ -94,6 +101,12 @@ def _json_bytes(value: Any) -> bytes:
 
 def estimate_payload_size_bytes(value: Any) -> int:
     return len(_json_bytes(value))
+
+
+def debug_payload_sha256(value: Any) -> str:
+    """Return the canonical JSON SHA-256 used for debug blob verification."""
+
+    return hashlib.sha256(_json_bytes(value)).hexdigest()
 
 
 def _utcnow_iso() -> str:
@@ -158,6 +171,12 @@ def _is_blob_ref_payload(value: Any) -> bool:
     )
 
 
+def is_debug_payload_blob_ref(value: Any) -> bool:
+    """Return True when *value* is a compact debug payload blob reference."""
+
+    return _is_blob_ref_payload(value)
+
+
 def load_debug_payload_blob_ref(
     ref_payload: Mapping[str, Any],
     *,
@@ -197,6 +216,57 @@ def load_debug_payload_blob_ref(
         raise ValueError("Debug payload blob raw SHA-256 mismatch")
 
     return json.loads(raw_bytes.decode("utf-8"))
+
+
+def hydrate_debug_payload_blob_refs(
+    payload: Any,
+    *,
+    fail_soft: bool = True,
+) -> DebugPayloadHydrationResult:
+    """Recursively replace compact debug blob refs with their original values.
+
+    Diagnostic readers use this to preserve the historical "exact debug payload"
+    contract while allowing MongoDB to store only compact references.  When
+    ``fail_soft`` is true, an unavailable blob leaves a small error marker next
+    to the original reference rather than failing the entire debug view.
+    """
+
+    hydrated_count = 0
+    error_count = 0
+
+    def _walk(value: Any) -> Any:
+        nonlocal hydrated_count, error_count
+
+        if _is_blob_ref_payload(value):
+            try:
+                hydrated = load_debug_payload_blob_ref(value)
+            except Exception as exc:
+                error_count += 1
+                if not fail_soft:
+                    raise
+                replacement = dict(value)
+                replacement["hydration_error"] = {
+                    "schema_version": "debug_payload_blob_hydration_error.v1",
+                    "error": str(exc),
+                    "error_class": type(exc).__name__,
+                    "created_at_utc": _utcnow_iso(),
+                }
+                return replacement
+            hydrated_count += 1
+            return hydrated
+
+        if isinstance(value, Mapping):
+            return {str(key): _walk(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [_walk(item) for item in value]
+        return value
+
+    hydrated_payload = _walk(payload)
+    return DebugPayloadHydrationResult(
+        payload=hydrated_payload,
+        hydrated_count=hydrated_count,
+        error_count=error_count,
+    )
 
 
 def _should_offload(
