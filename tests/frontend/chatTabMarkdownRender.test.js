@@ -102,6 +102,11 @@ describe('chat markdown rendering (assistant)', () => {
             '',
             'Grounding: #V#michael_witbrock #V#author_of #V#learning_to_tell_two_spirals_apart',
             '',
+            'Standalone predicates: member_of_organisation and member_of_faculty relations.',
+            'You have author_of links to represented works.',
+            'Inline aliases: `preferred_language`, `homeresearchorganisation`, and `not_a_concept`.',
+            'Unresolved alias: unresolved_relation.',
+            '',
             '```',
             '#V#person',
             '```',
@@ -123,6 +128,10 @@ describe('chat markdown rendering (assistant)', () => {
             '<p><a href="https://example.com" target="_blank" rel="noopener noreferrer">good</a></p>',
             '<p>See #V#person</p>',
             '<p>Grounding: #V#michael_witbrock #V#author_of #V#learning_to_tell_two_spirals_apart</p>',
+            '<p>Standalone predicates: member_of_organisation and member_of_faculty relations.</p>',
+            '<p>You have author_of links to represented works.</p>',
+            '<p>Inline aliases: <code>preferred_language</code>, <code>homeresearchorganisation</code>, and <code>not_a_concept</code>.</p>',
+            '<p>Unresolved alias: unresolved_relation.</p>',
             '<pre><code>#V#person</code></pre>',
             '<pre><code>#V#person\n#V#thing</code></pre>',
             '<p>bad</p>'
@@ -164,9 +173,66 @@ describe('chat markdown rendering (assistant)', () => {
                         json: async () => ({ display_name: 'Learning To Tell Two Spirals Apart', kind: 'individual' })
                     });
                 }
+                if (url.includes('identifier=%23V%23member_of_organisation')) {
+                    return Promise.resolve({
+                        ok: true,
+                        json: async () => ({ display_name: 'Member of organisation', kind: 'predicate' })
+                    });
+                }
+                if (url.includes('identifier=%23V%23member_of_faculty')) {
+                    return Promise.resolve({
+                        ok: true,
+                        json: async () => ({ display_name: 'Member of faculty', kind: 'predicate' })
+                    });
+                }
+                if (url.includes('identifier=%23V%23preferred_language')) {
+                    return Promise.resolve({
+                        ok: true,
+                        json: async () => ({ display_name: 'Preferred language', kind: 'predicate' })
+                    });
+                }
+                if (url.includes('identifier=%23V%23home_research_organisation')) {
+                    return Promise.resolve({
+                        ok: true,
+                        json: async () => ({ display_name: 'Home research organisation', kind: 'predicate' })
+                    });
+                }
+                if (
+                    url.includes('identifier=%23V%23homeresearchorganisation')
+                    || url.includes('identifier=%23V%23not_a_concept')
+                    || url.includes('identifier=%23V%23unresolved_relation')
+                ) {
+                    return Promise.resolve({
+                        ok: true,
+                        json: async () => ({ not_found: true })
+                    });
+                }
                 return Promise.resolve({
                     ok: true,
                     json: async () => ({ display_name: 'Person', kind: 'type' })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/vontology/api/vontology/search')) {
+                const parsed = new URL(url, 'http://localhost');
+                const q = parsed.searchParams.get('q') || '';
+                if (q === 'homeresearchorganisation') {
+                    return Promise.resolve({
+                        ok: true,
+                        json: async () => ({
+                            results: [
+                                {
+                                    id: '#V#home_research_organisation',
+                                    name: 'HomeResearchOrganisation',
+                                    kind: 'predicate'
+                                }
+                            ]
+                        })
+                    });
+                }
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ results: [] })
                 });
             }
 
@@ -258,6 +324,8 @@ describe('chat markdown rendering (assistant)', () => {
 
         // Allow async hydration to resolve (fetch + microtasks).
         await new Promise((resolve) => setTimeout(resolve, 0));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        await new Promise((resolve) => setTimeout(resolve, 0));
 
         expect(cartouche.textContent).toContain('Person');
         expect(cartouche.textContent).toContain('#V#person');
@@ -266,6 +334,23 @@ describe('chat markdown rendering (assistant)', () => {
         expect(assertionCartouches[1].textContent).toContain('Predicate');
 
         expect(codeCartouche.textContent).toContain('#V#yejin_choi');
+
+        const memberOfOrganisation = assistantMarkdown.querySelector('.vontology-inline-alias-cartouche[data-full-concept-id="#V#member_of_organisation"]');
+        const memberOfFaculty = assistantMarkdown.querySelector('.vontology-inline-alias-cartouche[data-full-concept-id="#V#member_of_faculty"]');
+        const standaloneAuthorOf = assistantMarkdown.querySelector('.vontology-inline-alias-cartouche[data-full-concept-id="#V#author_of"]');
+        const preferredLanguage = assistantMarkdown.querySelector('.vontology-inline-alias-cartouche[data-full-concept-id="#V#preferred_language"]');
+        const homeResearchOrganisation = assistantMarkdown.querySelector('.vontology-inline-alias-cartouche[data-full-concept-id="#V#home_research_organisation"]');
+        expect(memberOfOrganisation).not.toBeNull();
+        expect(memberOfFaculty).not.toBeNull();
+        expect(standaloneAuthorOf).not.toBeNull();
+        expect(preferredLanguage).not.toBeNull();
+        expect(homeResearchOrganisation).not.toBeNull();
+        expect(memberOfOrganisation.textContent).toContain('Predicate');
+        expect(preferredLanguage.textContent).toContain('Preferred language');
+        expect(homeResearchOrganisation.dataset.aliasText).toBe('homeresearchorganisation');
+        expect(assistantMarkdown.querySelector('.vontology-cartouche[data-full-concept-id="#V#not_a_concept"]')).toBeNull();
+        expect(assistantMarkdown.querySelector('code')?.textContent).toBe('not_a_concept');
+        expect(assistantMarkdown.textContent).toContain('unresolved_relation');
 
         // A fenced code block containing only a single concept ID becomes a cartouche.
         const codeBlockCartouche = assistantMarkdown.querySelector('.vontology-cartouche-block .vontology-cartouche[data-full-concept-id="#V#person"]');

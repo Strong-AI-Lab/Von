@@ -17,7 +17,12 @@ jest.mock('../../src/frontend/web/von_interface/static/js/domUtils.js', () => ({
 
 jest.mock('../../src/frontend/web/von_interface/static/js/utils/textDecorator.js', () => ({
     cartouchifyElementText: jest.fn(),
-    cartouchifyVontologyTokensInElement: jest.fn()
+    cartouchifyVontologyTokensInElement: jest.fn(),
+    createVontologyAliasCartouche: jest.fn(),
+    findPotentialConceptAliasMatches: jest.fn(() => []),
+    normalisePotentialConceptAlias: jest.fn((value) => value),
+    normalisePotentialConceptId: jest.fn((value) => value),
+    replaceTextNodeWithVontologyAliasCartouches: jest.fn(() => [])
 }));
 
 describe('LLM debug popup workflow execution hook', () => {

@@ -71,6 +71,77 @@ export function normalisePotentialConceptId(text) {
 	return `#V#${slug}`;
 }
 
+const BARE_CONCEPT_ALIAS_RE = /^[A-Za-z][A-Za-z0-9_./:–—-]*$/;
+
+function hasDistinctiveBareAliasSyntax(value) {
+	const text = String(value ?? '');
+	return text.includes('_')
+		|| text.includes('/')
+		|| text.includes(':')
+		|| /[a-z][A-Z]/.test(text);
+}
+
+export function normalisePotentialConceptAlias(text, options = {}) {
+	let raw = String(text ?? '').trim();
+	if (!raw) return '';
+
+	if (
+		(raw.startsWith('`') && raw.endsWith('`'))
+		|| (raw.startsWith('"') && raw.endsWith('"'))
+		|| (raw.startsWith("'") && raw.endsWith("'"))
+	) {
+		raw = raw.slice(1, -1).trim();
+	}
+	if (!raw) return '';
+
+	const explicitId = normalisePotentialConceptId(raw);
+	if (explicitId) {
+		return explicitId.slice(3);
+	}
+
+	if (raw.includes('#')) return '';
+
+	while (raw.length > 1 && TRAILING_CONCEPT_ID_PUNCTUATION.has(raw[raw.length - 1])) {
+		raw = raw.slice(0, -1);
+	}
+	if (raw.length < 2 || !BARE_CONCEPT_ALIAS_RE.test(raw)) {
+		return '';
+	}
+
+	const requireDistinctiveSyntax = options?.requireDistinctiveSyntax !== false;
+	if (requireDistinctiveSyntax && !hasDistinctiveBareAliasSyntax(raw)) {
+		return '';
+	}
+
+	return raw;
+}
+
+export function findPotentialConceptAliasMatches(text, options = {}) {
+	const input = String(text ?? '');
+	if (!input) return [];
+
+	const matches = [];
+	const tokenRe = /(^|[^#A-Za-z0-9_./:–—-])([A-Za-z][A-Za-z0-9_./:–—-]*)(?=[^A-Za-z0-9_./:–—-]|$)/g;
+	let match;
+	while ((match = tokenRe.exec(input)) !== null) {
+		const prefix = match[1] || '';
+		const raw = match[2] || '';
+		const start = match.index + prefix.length;
+		const alias = normalisePotentialConceptAlias(raw, options);
+		if (!alias) {
+			continue;
+		}
+		matches.push({
+			start,
+			end: start + raw.length,
+			text: raw,
+			alias
+		});
+	}
+
+	return matches;
+}
+
 /**
  * Create a safe DocumentFragment with anchors for Vontology tokens.
  * The anchors dispatch a custom event 'von:selectConceptById' when clicked,
@@ -446,6 +517,82 @@ export function createVontologyInlineAssertion(subjectId, predicateId, objectId,
 	assertion.appendChild(objectCartouche);
 
 	return assertion;
+}
+
+export function createVontologyAliasCartouche(conceptId, aliasText, meta = null) {
+	const cartouche = createVontologyCartouche(conceptId, {
+		name: meta?.name || meta?.bestName || meta?.shortestName || undefined,
+		kind: meta?.kind || undefined,
+		title: 'Open represented concept',
+		ariaLabel: `Open represented concept ${conceptId}`
+	});
+	cartouche.classList.add('vontology-inline-alias-cartouche');
+	if (aliasText) {
+		cartouche.dataset.aliasText = String(aliasText);
+	}
+	return cartouche;
+}
+
+export function replaceTextNodeWithVontologyAliasCartouches(textNode, resolvedMatches) {
+	if (!textNode || textNode.nodeType !== 3 || !textNode.parentNode) {
+		return [];
+	}
+
+	const value = String(textNode.nodeValue ?? '');
+	if (!value || !Array.isArray(resolvedMatches) || resolvedMatches.length === 0) {
+		return [];
+	}
+
+	const matches = resolvedMatches
+		.map((entry) => ({
+			start: Number(entry?.start),
+			end: Number(entry?.end),
+			text: String(entry?.text ?? ''),
+			alias: String(entry?.alias ?? ''),
+			fullId: normalisePotentialConceptId(entry?.fullId || entry?.conceptId || ''),
+			meta: entry?.meta || null
+		}))
+		.filter((entry) => (
+			Number.isInteger(entry.start)
+			&& Number.isInteger(entry.end)
+			&& entry.start >= 0
+			&& entry.end > entry.start
+			&& entry.end <= value.length
+			&& entry.fullId
+		))
+		.sort((a, b) => a.start - b.start);
+
+	const nonOverlapping = [];
+	let lastEnd = 0;
+	for (const entry of matches) {
+		if (entry.start < lastEnd) {
+			continue;
+		}
+		nonOverlapping.push(entry);
+		lastEnd = entry.end;
+	}
+	if (nonOverlapping.length === 0) {
+		return [];
+	}
+
+	const frag = document.createDocumentFragment();
+	const cartouches = [];
+	let cursor = 0;
+	for (const entry of nonOverlapping) {
+		if (entry.start > cursor) {
+			frag.appendChild(document.createTextNode(value.slice(cursor, entry.start)));
+		}
+		const cartouche = createVontologyAliasCartouche(entry.fullId, entry.text || entry.alias, entry.meta);
+		cartouches.push(cartouche);
+		frag.appendChild(cartouche);
+		cursor = entry.end;
+	}
+	if (cursor < value.length) {
+		frag.appendChild(document.createTextNode(value.slice(cursor)));
+	}
+
+	textNode.parentNode.replaceChild(frag, textNode);
+	return cartouches;
 }
 
 function isInlineAssertionSeparator(segment) {

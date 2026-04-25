@@ -65,6 +65,54 @@ describe('Vontology token boundaries', () => {
         expect(cartouches[0].dataset.fullConceptId).toBe('#V#person');
     });
 
+    test('finds distinctive bare concept aliases without treating ordinary prose as concepts', () => {
+        const {
+            findPotentialConceptAliasMatches,
+            normalisePotentialConceptAlias
+        } = require(modulePath);
+
+        const matches = findPotentialConceptAliasMatches(
+            'Grounding: member_of_organisation and member_of_faculty relations. You have author_of links.'
+        );
+
+        expect(matches.map((match) => match.alias)).toEqual([
+            'member_of_organisation',
+            'member_of_faculty',
+            'author_of'
+        ]);
+        expect(normalisePotentialConceptAlias('plainword')).toBe('');
+        expect(normalisePotentialConceptAlias('homeresearchorganisation', { requireDistinctiveSyntax: false }))
+            .toBe('homeresearchorganisation');
+    });
+
+    test('replaces only resolved bare aliases with standard cartouches', () => {
+        const {
+            findPotentialConceptAliasMatches,
+            replaceTextNodeWithVontologyAliasCartouches
+        } = require(modulePath);
+
+        const root = document.getElementById('root');
+        root.textContent = 'You have author_of links and unresolved_relation text.';
+        const textNode = root.firstChild;
+        const matches = findPotentialConceptAliasMatches(textNode.nodeValue);
+        const resolvedMatches = matches
+            .filter((match) => match.alias === 'author_of')
+            .map((match) => ({
+                ...match,
+                fullId: '#V#author_of',
+                meta: { name: 'Author of', kind: 'predicate' }
+            }));
+
+        const cartouches = replaceTextNodeWithVontologyAliasCartouches(textNode, resolvedMatches);
+
+        expect(cartouches).toHaveLength(1);
+        expect(cartouches[0].dataset.fullConceptId).toBe('#V#author_of');
+        expect(cartouches[0].dataset.aliasText).toBe('author_of');
+        expect(cartouches[0].querySelector('.vontology-cartouche-kind')?.textContent).toBe('Predicate');
+        expect(root.textContent).toContain('unresolved_relation');
+        expect(root.querySelectorAll('.vontology-cartouche')).toHaveLength(1);
+    });
+
     test('cartouchifies #V# tokens inside parentheses at sentence boundaries', () => {
         const { cartouchifyVontologyTokensInElement } = require(modulePath);
 

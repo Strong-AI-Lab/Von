@@ -18,10 +18,14 @@ jest.mock('../../src/frontend/web/von_interface/static/js/utils/textDecorator.js
     applyCartoucheAppearance: jest.fn(),
     cartouchifyElementText: jest.fn(),
     cartouchifyVontologyTokensInElement: jest.fn(),
+    createVontologyAliasCartouche: jest.fn(),
     createVontologyCartouche: jest.fn(),
+    findPotentialConceptAliasMatches: jest.fn(() => []),
     getCartoucheAppearanceSettings: jest.fn(() => ({})),
     linkifyVontologyTokensInElement: jest.fn(),
-    normalisePotentialConceptId: jest.fn((value) => value)
+    normalisePotentialConceptAlias: jest.fn((value) => value),
+    normalisePotentialConceptId: jest.fn((value) => value),
+    replaceTextNodeWithVontologyAliasCartouches: jest.fn(() => [])
 }));
 
 function flushMicrotasks() {

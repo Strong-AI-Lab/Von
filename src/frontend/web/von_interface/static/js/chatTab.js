@@ -45,9 +45,13 @@ import {
     applyCartoucheAppearance,
     cartouchifyElementText,
     cartouchifyVontologyTokensInElement,
+    createVontologyAliasCartouche,
     createVontologyCartouche,
+    findPotentialConceptAliasMatches,
     getCartoucheAppearanceSettings,
     linkifyVontologyTokensInElement,
+    normalisePotentialConceptAlias,
+    replaceTextNodeWithVontologyAliasCartouches,
     normalisePotentialConceptId
 } from './utils/textDecorator.js';
 import { openSettingsTabAndFocus } from './utils/settingsNavigation.js';
@@ -13703,6 +13707,15 @@ const chatConceptMetaPending = new Map();
 const CHAT_CONCEPT_META_MAX_RETRIES = 3;
 const chatConceptMetaRetryCounts = new Map();
 const chatConceptMetaRetryTimers = new Map();
+const CHAT_INLINE_ALIAS_MAX_CANDIDATES = 80;
+const CHAT_INLINE_ALIAS_TEXT_SKIP_SELECTORS = [
+    'pre',
+    'code',
+    'a',
+    'button',
+    '.vontology-cartouche',
+    '.vontology-inline-assertion'
+];
 
 function shouldRenderMarkdownForAssistant(message, _debugData) {
     const text = String(message ?? '');
@@ -13775,6 +13788,7 @@ async function renderChatMarkdownIntoContainer(container, text) {
     cartouchifyVontologyTokensInElement(container, { skipSelectors: ['pre', 'code', 'a'], allowStandaloneCodeTokens: true, allowStandaloneCodeBlockTokens: true });
     linkifyVontologyTokensInElement(container, { skipSelectors: ['a', '.vontology-cartouche', 'button'], plain: true });
     hydrateChatConceptCartouches(container);
+    await resolveInlineVontologyAliasesInElement(container, { expectedRenderMode: 'rendered' });
 }
 
 function setVonMessageRenderMode(messageTextEl, mode, originalText, _debugData) {
@@ -13820,6 +13834,7 @@ function setVonMessageRenderMode(messageTextEl, mode, originalText, _debugData) 
         cartouchifyVontologyTokensInElement(messageTextEl, { skipSelectors: ['pre', 'code', 'a'], allowStandaloneCodeTokens: true, allowStandaloneCodeBlockTokens: true });
         linkifyVontologyTokensInElement(messageTextEl, { skipSelectors: ['a', '.vontology-cartouche', 'button'], plain: true });
         hydrateChatConceptCartouches(messageTextEl);
+        void resolveInlineVontologyAliasesInElement(messageTextEl, { expectedRenderMode: 'rendered' });
         renderTableDisplayElementsIntoContainer(messageTextEl, _debugData);
         return;
     }
@@ -14167,6 +14182,7 @@ function renderAssistantMessageContent(container, message, debugData) {
         container.style.whiteSpace = 'pre-wrap';
         cartouchifyElementText(container, text);
         hydrateChatConceptCartouches(container);
+        void resolveInlineVontologyAliasesInElement(container, { expectedRenderMode: 'text' });
         renderTableDisplayElementsIntoContainer(container, debugData);
         return;
     }
@@ -14330,6 +14346,358 @@ async function fetchConceptMetaForChatNodeOnly(fullId) {
         console.debug('[chatTab] fetchConceptMetaForChatNodeOnly failed', err);
         return null;
     }
+}
+
+async function fetchAndCacheConceptMetaForChat(fullId) {
+    const conceptId = normalisePotentialConceptId(fullId);
+    if (!conceptId) {
+        return null;
+    }
+
+    if (chatConceptMetaCache.has(conceptId)) {
+        return chatConceptMetaCache.get(conceptId);
+    }
+
+    if (!chatConceptMetaPending.has(conceptId)) {
+        const p = fetchConceptMetaForChat(conceptId).then((meta) => {
+            chatConceptMetaPending.delete(conceptId);
+            if (meta) {
+                chatConceptMetaCache.set(conceptId, meta);
+            }
+            return meta;
+        });
+        chatConceptMetaPending.set(conceptId, p);
+    }
+
+    try {
+        return await chatConceptMetaPending.get(conceptId);
+    } catch (_) {
+        chatConceptMetaPending.delete(conceptId);
+        return null;
+    }
+}
+
+function normaliseAliasComparisonText(value) {
+    let text = String(value ?? '').trim().toLowerCase();
+    if (!text) return '';
+    if (text.startsWith('#v#')) {
+        text = text.slice(3);
+    }
+    text = text.replace(/[\s-]+/g, '_');
+    text = text.replace(/[^a-z0-9_./:–—]/g, '');
+    return text;
+}
+
+function buildAliasComparisonKeys(value) {
+    const base = normaliseAliasComparisonText(value);
+    if (!base) {
+        return new Set();
+    }
+    const keys = new Set([base]);
+    const compact = base.replace(/[_\s-]+/g, '');
+    if (compact) {
+        keys.add(compact);
+    }
+    return keys;
+}
+
+function aliasSearchResultConceptId(row) {
+    const rawId = row?.id || row?.concept_id || row?.conceptId || '';
+    return normalisePotentialConceptId(rawId);
+}
+
+function scoreAliasSearchResult(row, alias) {
+    const aliasKeys = buildAliasComparisonKeys(alias);
+    if (aliasKeys.size === 0) {
+        return 0;
+    }
+
+    let score = 0;
+    const consider = (value, baseScore) => {
+        const keys = buildAliasComparisonKeys(value);
+        for (const key of keys) {
+            if (aliasKeys.has(key)) {
+                score = Math.max(score, baseScore);
+            }
+        }
+    };
+
+    const conceptId = aliasSearchResultConceptId(row);
+    if (conceptId) {
+        consider(conceptId.slice(3), 100);
+        consider(conceptId, 95);
+    }
+    consider(row?.display_name, 80);
+    consider(row?.name, 75);
+    consider(row?.label, 70);
+
+    if (score > 0 && String(row?.kind || '').toLowerCase() === 'predicate') {
+        score += 5;
+    }
+
+    return score;
+}
+
+async function searchConceptMetaForChatAlias(alias) {
+    const params = new URLSearchParams();
+    params.set('q', alias);
+    params.set('limit', '8');
+    params.set('include_individuals', '1');
+
+    try {
+        const res = await fetch(`/vontology/api/vontology/search?${params.toString()}`, { cache: 'no-store' });
+        if (!res.ok) {
+            return null;
+        }
+        const data = await res.json();
+        const results = Array.isArray(data?.results) ? data.results : [];
+        const scored = results
+            .map((row) => ({
+                row,
+                fullId: aliasSearchResultConceptId(row),
+                score: scoreAliasSearchResult(row, alias)
+            }))
+            .filter((entry) => entry.fullId && entry.score > 0)
+            .sort((a, b) => b.score - a.score);
+
+        if (scored.length === 0) {
+            return null;
+        }
+
+        const selected = scored[0];
+        const meta = await fetchAndCacheConceptMetaForChat(selected.fullId);
+        if (meta) {
+            return {
+                fullId: selected.fullId,
+                meta
+            };
+        }
+
+        const fallbackName = selected.row?.display_name || selected.row?.name || selected.fullId;
+        const fallbackMeta = {
+            name: String(fallbackName),
+            bestName: String(fallbackName),
+            shortestName: String(fallbackName),
+            kind: selected.row?.kind || 'type',
+            source: 'alias_search',
+            provisional: true
+        };
+        chatConceptMetaCache.set(selected.fullId, fallbackMeta);
+        return {
+            fullId: selected.fullId,
+            meta: fallbackMeta
+        };
+    } catch (err) {
+        console.debug('[chatTab] alias search failed', err);
+        return null;
+    }
+}
+
+async function resolveChatConceptAlias(alias, options = {}) {
+    const cleanAlias = normalisePotentialConceptAlias(alias, { requireDistinctiveSyntax: false });
+    if (!cleanAlias) {
+        return null;
+    }
+
+    const directFullId = normalisePotentialConceptId(`#V#${cleanAlias}`);
+    if (directFullId) {
+        const directMeta = await fetchAndCacheConceptMetaForChat(directFullId);
+        if (directMeta) {
+            return {
+                alias: cleanAlias,
+                fullId: directFullId,
+                meta: directMeta,
+                source: 'direct_id'
+            };
+        }
+    }
+
+    if (options?.allowSearch === false) {
+        return null;
+    }
+
+    const searched = await searchConceptMetaForChatAlias(cleanAlias);
+    if (!searched) {
+        return null;
+    }
+
+    return {
+        alias: cleanAlias,
+        fullId: searched.fullId,
+        meta: searched.meta,
+        source: 'alias_search'
+    };
+}
+
+function shouldSkipInlineAliasTextNode(textNode) {
+    const parent = textNode?.parentElement;
+    if (!parent) {
+        return true;
+    }
+
+    for (const selector of CHAT_INLINE_ALIAS_TEXT_SKIP_SELECTORS) {
+        try {
+            if (parent.closest(selector)) {
+                return true;
+            }
+        } catch (_) {
+            // Ignore invalid selectors.
+        }
+    }
+
+    return false;
+}
+
+function shouldSkipInlineAliasCodeElement(codeEl) {
+    if (!codeEl || codeEl.closest('pre')) {
+        return true;
+    }
+    for (const selector of ['a', 'button', '.vontology-cartouche', '.vontology-inline-assertion']) {
+        try {
+            if (codeEl.closest(selector)) {
+                return true;
+            }
+        } catch (_) {
+            // Ignore invalid selectors.
+        }
+    }
+    return codeEl.childElementCount !== 0;
+}
+
+function appendInlineAliasCandidate(aliasCandidates, alias, options = {}) {
+    const cleanAlias = normalisePotentialConceptAlias(alias, { requireDistinctiveSyntax: false });
+    if (!cleanAlias) {
+        return;
+    }
+    const allowSearch = options?.allowSearch === true;
+    if (aliasCandidates.has(cleanAlias)) {
+        const existing = aliasCandidates.get(cleanAlias);
+        if (existing && typeof existing === 'object') {
+            existing.allowSearch = existing.allowSearch || allowSearch;
+        }
+        return;
+    }
+    if (aliasCandidates.size >= CHAT_INLINE_ALIAS_MAX_CANDIDATES) {
+        return;
+    }
+    aliasCandidates.set(cleanAlias, { allowSearch, resolved: null });
+}
+
+async function resolveInlineVontologyAliasesInElement(root, options = {}) {
+    if (!root || typeof root.querySelectorAll !== 'function') {
+        return 0;
+    }
+
+    const expectedRenderMode = options?.expectedRenderMode ? String(options.expectedRenderMode) : '';
+    if (expectedRenderMode && String(root?.dataset?.renderMode || '') !== expectedRenderMode) {
+        return 0;
+    }
+
+    const aliasCandidates = new Map();
+    const codeTargets = [];
+    const codeElements = Array.from(root.querySelectorAll('code'));
+    for (const codeEl of codeElements) {
+        if (shouldSkipInlineAliasCodeElement(codeEl)) {
+            continue;
+        }
+        const alias = normalisePotentialConceptAlias(codeEl.textContent, { requireDistinctiveSyntax: false });
+        if (!alias) {
+            continue;
+        }
+        codeTargets.push({ codeEl, alias });
+        appendInlineAliasCandidate(aliasCandidates, alias, { allowSearch: true });
+    }
+
+    const textTargets = [];
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let node = walker.nextNode();
+    while (node) {
+        const textNode = node;
+        node = walker.nextNode();
+        if (shouldSkipInlineAliasTextNode(textNode)) {
+            continue;
+        }
+        const value = textNode.nodeValue || '';
+        const matches = findPotentialConceptAliasMatches(value);
+        if (matches.length === 0) {
+            continue;
+        }
+        textTargets.push({ textNode, value, matches });
+        for (const match of matches) {
+            appendInlineAliasCandidate(aliasCandidates, match.alias, { allowSearch: false });
+        }
+    }
+
+    if (aliasCandidates.size === 0) {
+        return 0;
+    }
+
+    await Promise.all(Array.from(aliasCandidates.entries()).map(async ([alias, candidate]) => {
+        const resolved = await resolveChatConceptAlias(alias, { allowSearch: candidate?.allowSearch === true });
+        if (candidate && typeof candidate === 'object') {
+            candidate.resolved = resolved;
+        } else {
+            aliasCandidates.set(alias, { allowSearch: false, resolved });
+        }
+    }));
+
+    if (expectedRenderMode && String(root?.dataset?.renderMode || '') !== expectedRenderMode) {
+        return 0;
+    }
+
+    let replacementCount = 0;
+    for (const target of codeTargets) {
+        const resolved = aliasCandidates.get(target.alias)?.resolved || null;
+        const codeEl = target.codeEl;
+        if (!resolved || !codeEl?.parentNode || shouldSkipInlineAliasCodeElement(codeEl)) {
+            continue;
+        }
+        const currentAlias = normalisePotentialConceptAlias(codeEl.textContent, { requireDistinctiveSyntax: false });
+        if (currentAlias !== target.alias) {
+            continue;
+        }
+        const cartouche = createVontologyAliasCartouche(resolved.fullId, target.alias, resolved.meta);
+        try {
+            codeEl.replaceWith(cartouche);
+            updateCartoucheElement(cartouche, resolved.meta);
+            replacementCount += 1;
+        } catch (_) {
+            // Ignore detached nodes.
+        }
+    }
+
+    for (const target of textTargets) {
+        const textNode = target.textNode;
+        if (!textNode?.parentNode || shouldSkipInlineAliasTextNode(textNode)) {
+            continue;
+        }
+        if (String(textNode.nodeValue || '') !== target.value) {
+            continue;
+        }
+        const resolvedMatches = target.matches
+            .map((match) => {
+                const resolved = aliasCandidates.get(match.alias)?.resolved || null;
+                if (!resolved) {
+                    return null;
+                }
+                return {
+                    ...match,
+                    fullId: resolved.fullId,
+                    meta: resolved.meta
+                };
+            })
+            .filter(Boolean);
+        if (resolvedMatches.length === 0) {
+            continue;
+        }
+        const cartouches = replaceTextNodeWithVontologyAliasCartouches(textNode, resolvedMatches);
+        for (let index = 0; index < cartouches.length; index += 1) {
+            updateCartoucheElement(cartouches[index], resolvedMatches[index]?.meta || null);
+        }
+        replacementCount += cartouches.length;
+    }
+
+    return replacementCount;
 }
 
 function shouldRetryChatConceptMeta(fullId, meta) {
@@ -24754,6 +25122,7 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
                 try {
                     cartouchifyElementText(messageText, userText);
                     hydrateChatConceptCartouches(messageText);
+                    void resolveInlineVontologyAliasesInElement(messageText);
                 } catch (e) {
                     console.error('[chatTab] cartouchifyElementText failed for User/Error message:', e);
                     messageText.textContent = userText;

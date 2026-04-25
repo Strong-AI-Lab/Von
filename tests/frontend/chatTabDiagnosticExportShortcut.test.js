@@ -21,7 +21,9 @@ jest.mock('../../src/frontend/web/von_interface/static/js/utils/textDecorator.js
     applyCartoucheAppearance: jest.fn(),
     cartouchifyElementText: jest.fn(),
     cartouchifyVontologyTokensInElement: jest.fn(),
+    createVontologyAliasCartouche: jest.fn(),
     createVontologyCartouche: jest.fn(),
+    findPotentialConceptAliasMatches: jest.fn(() => []),
     getCartoucheAppearanceSettings: jest.fn(() => ({
         useShortestName: false,
         showName: true,
@@ -30,7 +32,9 @@ jest.mock('../../src/frontend/web/von_interface/static/js/utils/textDecorator.js
         kindAsBackground: false
     })),
     linkifyVontologyTokensInElement: jest.fn(),
-    normalisePotentialConceptId: jest.fn(() => '')
+    normalisePotentialConceptAlias: jest.fn(() => ''),
+    normalisePotentialConceptId: jest.fn(() => ''),
+    replaceTextNodeWithVontologyAliasCartouches: jest.fn(() => [])
 }));
 
 describe('chat diagnostics export shortcut', () => {

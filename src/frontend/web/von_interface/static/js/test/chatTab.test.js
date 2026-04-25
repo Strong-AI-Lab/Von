@@ -104,6 +104,18 @@ jest.mock('../utils/textDecorator.js', () => ({
     applyCartoucheAppearance: jest.fn(),
     cartouchifyElementText: jest.fn(),
     cartouchifyVontologyTokensInElement: jest.fn(),
+    createVontologyAliasCartouche: jest.fn((conceptId, aliasText, meta = null) => {
+        const idRaw = String(conceptId ?? '').trim();
+        const fullId = idRaw.startsWith('#V#') ? idRaw : `#V#${idRaw}`;
+        const button = globalThis.document.createElement('button');
+        button.type = 'button';
+        button.className = 'vontology-cartouche vontology-inline-alias-cartouche';
+        button.dataset.fullConceptId = fullId;
+        button.dataset.conceptId = fullId.startsWith('#V#') ? fullId.slice(3) : fullId;
+        if (aliasText) button.dataset.aliasText = String(aliasText);
+        button.textContent = meta?.name || fullId;
+        return button;
+    }),
     createVontologyCartouche: jest.fn((conceptId) => {
         const idRaw = String(conceptId ?? '').trim();
         const fullId = idRaw.startsWith('#V#') ? idRaw : `#V#${idRaw}`;
@@ -122,6 +134,7 @@ jest.mock('../utils/textDecorator.js', () => ({
         showKind: true,
         kindAsBackground: false
     })),
+    findPotentialConceptAliasMatches: jest.fn(() => []),
     normalisePotentialConceptId: jest.fn((value) => {
         let raw = String(value ?? '').trim();
         if (!raw) return '';
@@ -131,6 +144,11 @@ jest.mock('../utils/textDecorator.js', () => ({
         raw = raw.replace(/[.,:;!?)}\]…]+$/g, '');
         return raw.startsWith('#V#') && raw.length > 3 ? raw : '';
     }),
+    normalisePotentialConceptAlias: jest.fn((value) => {
+        const raw = String(value ?? '').trim();
+        return raw && /^[A-Za-z][A-Za-z0-9_./:–—-]*$/.test(raw) ? raw : '';
+    }),
+    replaceTextNodeWithVontologyAliasCartouches: jest.fn(() => []),
     linkifyVontologyTokensInElement: jest.fn()
 }));
 
