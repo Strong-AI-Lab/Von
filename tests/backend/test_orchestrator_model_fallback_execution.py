@@ -1464,7 +1464,7 @@ def test_tool_calling_backfill_finalises_from_completed_results_when_tool_cap_re
     def _run_llm_with_fallbacks(**kwargs: Any) -> tuple[str, str | None, None]:
         prompt = str(kwargs.get("prompt") or "")
         prompts.append(prompt)
-        if "tool invocation budget" in prompt:
+        if "tool invocation limit" in prompt:
             return (
                 "Partial final answer grounded in the completed tool results.",
                 kwargs.get("default_model"),
@@ -1510,11 +1510,20 @@ def test_tool_calling_backfill_finalises_from_completed_results_when_tool_cap_re
 
     result = orchestrator._action_tool_calling_backfill(request)
 
-    assert result.outputs["final_response"] == (
-        "Partial final answer grounded in the completed tool results."
+    assert result.outputs["final_response"].startswith(
+        "Tool-use limit reached: this turn reached "
+        "`internal_mcp_max_tool_invocations=8` after 8 tool call(s)."
+    )
+    assert "Partial final answer grounded in the completed tool results." in (
+        result.outputs["final_response"]
     )
     assert len(prompts) == 2
+    assert "internal_mcp_max_tool_invocations=8" in prompts[-1]
     assert any(event.get("status") == "tool_limit_reached" for event in progress_events)
+    assert any(
+        event.get("settings_key") == "internal_mcp_max_tool_invocations"
+        for event in progress_events
+    )
     aux_entries = [
         entry
         for entry in request.data["aux_llm_calls"]
@@ -1522,3 +1531,140 @@ def test_tool_calling_backfill_finalises_from_completed_results_when_tool_cap_re
         and entry.get("type") == "tool_limit_finalisation"
     ]
     assert aux_entries
+    assert aux_entries[-1]["settings_key"] == "internal_mcp_max_tool_invocations"
+
+
+def test_tool_calling_backfill_names_cap_when_follow_up_contract_is_blocked(
+    monkeypatch,
+) -> None:
+    orchestrator = _bare_orchestrator()
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_follow_up_llm_context",
+        lambda context, max_chars=40_000: list(context),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_turn_expected_outcome_stage_messages",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_tool_follow_up_stage_messages",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_selected_workflow_policy_memory_stage_messages",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_stage_llm_context",
+        lambda **kwargs: (
+            list(kwargs.get("base_context") or []),
+            {"stage": "summariser"},
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_attach_memory_context_lineage",
+        lambda *_args, **_kwargs: None,
+    )
+
+    prompts: list[str] = []
+
+    def _run_llm_with_fallbacks(**kwargs: Any) -> tuple[str, str | None, None]:
+        prompt = str(kwargs.get("prompt") or "")
+        prompts.append(prompt)
+        return (
+            "Partial answer from completed results.",
+            kwargs.get("default_model"),
+            None,
+        )
+
+    monkeypatch.setattr(orchestrator, "_run_llm_with_fallbacks", _run_llm_with_fallbacks)
+
+    progress_events: list[Mapping[str, Any]] = []
+    request = SimpleNamespace(
+        data={
+            "augmented_context": [
+                {"role": "user", "content": "List records and details."},
+                {"role": "tool", "content": '{"tool":"list_records","status":"ok"}'},
+            ],
+            "policy_state": None,
+            "registry_snapshot": None,
+            "user_concept_id": "#V#test_user",
+            "org_concept_id": "#V#test_org",
+            "model_for_stage": lambda _stage: "gpt-test",
+            "record_llm_call": lambda **_kwargs: None,
+            "aux_llm_calls": [],
+            "llm_calls": [],
+            "iteration_count": 2,
+            "remaining_tool_calls": [],
+            "invocations": [
+                {
+                    "tool": "list_records",
+                    "status": "ok",
+                    "effective_arguments": {"workspace_id": "lab"},
+                    "effective_payload": {
+                        "records": [{"record_id": "r1"}],
+                        "_tool_follow_up": {
+                            "schema_version": "mcp_tool_follow_up.v1",
+                            "item_array_field": "records",
+                            "required_when_any_item_missing_fields": ["detail"],
+                            "follow_up_tools": [
+                                {
+                                    "tool": "get_record",
+                                    "input_bindings": {
+                                        "workspace_id": {
+                                            "source": "request",
+                                            "field": "workspace_id",
+                                        },
+                                        "record_id": {
+                                            "source": "item",
+                                            "field": "record_id",
+                                        },
+                                    },
+                                }
+                            ],
+                        },
+                    },
+                },
+                {
+                    "tool": "other_tool",
+                    "status": "ok",
+                    "effective_arguments": {"id": "already-used"},
+                    "effective_payload": {"ok": True},
+                },
+            ],
+            "method_catalogue": {},
+            "prompt": "List records and details.",
+            "prompt_for_requirements": "List records and details.",
+            "emit_progress": progress_events.append,
+        },
+        environment=SimpleNamespace(
+            llm_client=object(),
+            model="gpt-test",
+            max_tool_invocations=2,
+        ),
+    )
+
+    result = orchestrator._action_tool_calling_backfill(request)
+
+    assert result.outputs["tool_limit_reached"] is True
+    assert result.outputs["pending_follow_up_tool_call_count"] == 1
+    assert result.outputs["final_response"].startswith(
+        "Tool-use limit reached: this turn reached "
+        "`internal_mcp_max_tool_invocations=2` after 2 tool call(s). "
+        "1 pending follow-up tool call(s) were blocked by that setting."
+    )
+    assert "Partial answer from completed results." in result.outputs["final_response"]
+    assert len(prompts) == 1
+    assert "1 pending follow-up call(s) blocked by that setting" in prompts[0]
+    assert any(
+        event.get("status") == "tool_limit_reached"
+        and event.get("settings_key") == "internal_mcp_max_tool_invocations"
+        and event.get("pending_follow_up_tool_call_count") == 1
+        for event in progress_events
+    )
