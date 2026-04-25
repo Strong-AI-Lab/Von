@@ -98,6 +98,10 @@ resolved through the model registry (for example “cheap reliable classifier”
 or similar capability/profile metadata) rather than hard-coded concrete model
 IDs. The explicit `provider:model` form remains the current concrete mechanism,
 not the desired end-state for learned or capability-based model selection.
+For the actor-critic learning loop that should produce and retire those
+capability certifications from real conversation rollouts, see
+`docs/engineering/automated_policy_learning_design.md`, especially the
+`JVNAUTOSCI-2090` model-use learning section.
 
 ```json
 {

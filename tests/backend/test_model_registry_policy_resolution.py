@@ -9,6 +9,10 @@ from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
     _WorkflowModelPolicyState,
 )
+from src.backend.services.model_registry_service import (
+    assess_model_stage_certification,
+    build_model_stage_suitability_evidence,
+)
 
 
 class _StubGateway:
@@ -99,3 +103,59 @@ def test_policy_candidate_prefers_active_llm_primary_before_enabled_models():
     assert candidates, "Expected at least one candidate"
     assert candidates[0].source == "active_llm"
     assert candidates[0].raw == "active_llm"
+
+
+def test_model_stage_suitability_evidence_blocks_single_case_certification():
+    evidence = build_model_stage_suitability_evidence(
+        model="gemma4:26b",
+        stage="workflow_selector",
+        workflow_id="#V#entity_information_retrieval_workflow",
+        prompt_id="#V#chat_turn_classifier_prompt",
+        replay_set_id="JVNAUTOSCI-1894",
+        replay_case_id="represented_self_facts_vs_inferences",
+        request_id="request-2090",
+        verdict="passed",
+        metrics={"structured_output_valid": True},
+        promotion_blockers=["single_prompt_replay_evidence_only"],
+    )
+
+    assert evidence["schema_version"] == "model_stage_suitability_evidence.v1"
+    assert evidence["evidence_type"] == "#V#model_stage_suitability_evidence"
+    assert evidence["promotion_eligible"] is False
+
+    decision = assess_model_stage_certification([evidence])
+
+    assert decision["schema_version"] == "model_stage_certification_decision.v1"
+    assert decision["promotion_authorised"] is False
+    assert "insufficient_distinct_replay_cases" in decision["promotion_blockers"]
+    assert "evidence_entry_promotion_blockers_present" in (
+        decision["promotion_blockers"]
+    )
+
+
+def test_model_stage_certification_requires_all_evidence_to_pass():
+    entries = [
+        build_model_stage_suitability_evidence(
+            model="gpt-5.5",
+            stage="workflow_selector",
+            replay_set_id="JVNAUTOSCI-1894",
+            replay_case_id="case-a",
+            verdict="passed",
+            metrics={},
+        ),
+        build_model_stage_suitability_evidence(
+            model="gpt-5.5",
+            stage="workflow_selector",
+            replay_set_id="JVNAUTOSCI-1894",
+            replay_case_id="case-b",
+            verdict="failed",
+            metrics={},
+        ),
+    ]
+
+    decision = assess_model_stage_certification(entries)
+
+    assert decision["distinct_replay_case_count"] == 2
+    assert decision["promotion_authorised"] is False
+    assert decision["verdict_counts"] == {"passed": 1, "failed": 1}
+    assert "non_passing_evidence_present" in decision["promotion_blockers"]

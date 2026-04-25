@@ -989,6 +989,97 @@ def test_build_summary_includes_replay_guide_metadata() -> None:
         == "jvnautosci-1894-replay-programme"
     )
     assert summary["environment"]["server_resolved_active_llm_model"] == "gemma4:26b"
+    model_report = summary["model_portfolio_evaluation"]
+    assert model_report["schema_version"] == "model_portfolio_replay_report.v1"
+    assert model_report["replay_set_id"] == "JVNAUTOSCI-1894"
+    assert model_report["stage_evidence_schema_version"] == (
+        "model_stage_suitability_evidence.v1"
+    )
+    assert [entry["workflow_stage"] for entry in model_report["stage_evidence"]] == [
+        "workflow_selector",
+        "turn_answer",
+    ]
+    assert model_report["certification_decision"]["promotion_authorised"] is False
+    assert "insufficient_distinct_replay_cases" in (
+        model_report["certification_decision"]["promotion_blockers"]
+    )
+
+
+def test_build_summary_flags_empty_success_llm_output_as_suspect() -> None:
+    summary = sampler._build_summary(
+        prompt_entry={
+            "id": "represented_self_facts_vs_inferences",
+            "category": "epistemic_summary",
+            "complexity_class": "vontology_grounded",
+            "prompt": "Tell me about myself as represented here.",
+            "knowledge_surfaces": ["kb"],
+            "likely_tools": ["search_knowledge_base"],
+        },
+        task_id="task-empty",
+        session_id="session-empty",
+        request_id="request-empty",
+        history_location={"history_index": 4, "session_id": "session-empty"},
+        generate_payload={"response": ""},
+        llm_debug_data={
+            "model": "gemma4:26b",
+            "stage_diagnostics": [
+                {
+                    "stage_id": "plain_response",
+                    "stage_label": "Plain response",
+                    "latest_status": "llm_call_end",
+                    "latest_llm_exchange": {
+                        "llm_request_state": "completed",
+                        "selected_model": "gemma4:26b",
+                        "response_preview": {"char_count": 0, "text": ""},
+                    },
+                }
+            ],
+            "turn_execution_diagnostics": {
+                "workflow_routing_diagnostics": {
+                    "selector": {
+                        "response": {
+                            "char_count": 120,
+                            "text": "{'workflow_id':'#V#chat_assistant_workflow'}",
+                        },
+                        "selection_metadata": {
+                            "structured_selection_detected": False,
+                            "raw_response_format": "text",
+                        },
+                        "selection_resolution": "candidate_label_exact_match",
+                    },
+                    "dispatch": {
+                        "dispatch_workflow_id": "#V#chat_assistant_workflow",
+                        "selected_execution_mode": "direct_response",
+                    },
+                },
+                "tool_history": [],
+            },
+        },
+        evaluation={
+            "verdict": "unhappy",
+            "should_user_be_happy": False,
+            "reasons": ["No assistant response text was returned."],
+            "missing_evidence": [],
+            "missing_answer_evidence": [],
+        },
+        prompt_bank_schema_version="live_kb_tool_prompt_bank.v3",
+        requested_complexity_classes=["vontology_grounded"],
+        seed=17,
+        requested_model="gemma4:26b",
+        run_environment={"base_url": "http://127.0.0.1:5010"},
+    )
+
+    model_report = summary["model_portfolio_evaluation"]
+    assert len(model_report["empty_success_suspects"]) == 2
+    assert model_report["selector"]["structured_output_valid"] is False
+    answer_evidence = model_report["stage_evidence"][1]
+    assert answer_evidence["workflow_stage"] == "turn_answer"
+    assert answer_evidence["verdict"] == "failed"
+    assert answer_evidence["metrics"]["empty_success_suspect_count"] == 2
+    assert answer_evidence["promotion_eligible"] is False
+    assert "single_prompt_replay_evidence_only" in answer_evidence[
+        "promotion_blockers"
+    ]
 
 
 def test_build_multi_arm_summary_reports_requested_arms_and_comparison() -> None:
@@ -1120,6 +1211,15 @@ def test_build_multi_arm_summary_reports_requested_arms_and_comparison() -> None
         "gemma4:26b",
         "gpt-5.4-mini",
     ]
+    portfolio_report = summary["model_portfolio_report"]
+    assert portfolio_report["schema_version"] == "model_portfolio_replay_report.v1"
+    assert portfolio_report["arm_count"] == 2
+    assert portfolio_report["stage_evidence_count"] == 4
+    assert portfolio_report["policy_update"]["authorised"] is False
+    assert (
+        portfolio_report["aggregate_certification_decision"]["promotion_authorised"]
+        is False
+    )
 
 
 def test_main_builds_multi_arm_comparison_from_one_prompt_selection(

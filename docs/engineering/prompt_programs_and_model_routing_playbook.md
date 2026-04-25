@@ -106,6 +106,35 @@ A reasonable default pattern is:
 
 Do not hard-code this into many helpers. Centralise it.
 
+## 7A. Replay-Backed Model Certification
+
+Cheap/local model use should be certified per workflow stage, prompt profile,
+and replay set. A passing single turn is evidence, not authority to update the
+runtime policy.
+
+For `JVNAUTOSCI-1894`-style replay work, the live sampler emits
+model-portfolio evidence alongside the normal response and telemetry summary:
+
+- selector evidence: selected workflow, raw selector response capture,
+  structured-output validity, selected model-policy candidate, and fallback
+  metadata;
+- answer evidence: final answer length/usefulness, missing required evidence,
+  empty-success suspect calls, completion-gate status, critic status, tool
+  count, and timing rows;
+- certification decision: whether the evidence is sufficient to promote a
+  model-stage certification.
+
+The certification decision is deliberately conservative. The sampler must not
+mutate workflow model policy by itself. Promotion requires represented evidence
+with replay provenance, enough distinct cases, passing stage evidence, and a
+separate Vontology/model-policy mutation path. A strong critic workflow or
+human review should decide whether to promote, expire, or reject the
+certification.
+
+When a model-specific prompt variant appears useful, represent it as a prompt
+concept with lineage and replay evidence. Do not hide the variant in Python
+branches keyed by provider or model name.
+
 ## 8. Workflow routing guardrails
 
 When workflow discovery, continuation, and selector preparation interact, keep

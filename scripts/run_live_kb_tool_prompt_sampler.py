@@ -43,13 +43,21 @@ from scripts.live_test_server_defaults import (
     get_default_agent_test_base_url,
     resolve_live_test_base_url,
 )
+from src.backend.services.model_registry_service import (
+    DEFAULT_MINIMUM_REPLAY_CASES_FOR_CERTIFICATION,
+    MODEL_STAGE_SUITABILITY_EVIDENCE_SCHEMA_VERSION,
+    assess_model_stage_certification,
+    build_model_stage_suitability_evidence,
+)
 
 DEFAULT_BASE_URL = DEFAULT_AGENT_TEST_BASE_URL
 DEFAULT_MODEL = "gemma4:26b"
+DEFAULT_REPLAY_SET_ID = "JVNAUTOSCI-1894"
 DEFAULT_USER_CONCEPT_ID = "#V#michael_witbrock"
 DEFAULT_ORGANISATION_CONCEPT_ID = "university_of_auckland_strong_ai_lab"
 DEFAULT_SESSION_NAME = "JVNAUTOSCI-1894 live prompt sample"
 ACTIVE_AUTHENTICATED_MODEL_LABEL = "active_authenticated_model"
+MODEL_PORTFOLIO_REPLAY_REPORT_SCHEMA_VERSION = "model_portfolio_replay_report.v1"
 CHAT_SESSION_ORIGIN_KIND_CODING_AGENT_TEST = "coding_agent_test"
 CHAT_SESSION_CREATED_BY_ACTOR_CONCEPT_ID = "#V#von_system"
 CHAT_SESSION_CREATED_BY_ACTOR_TYPE = "#V#coding_agent"
@@ -1501,6 +1509,366 @@ def _evaluate_user_happiness(
     }
 
 
+def _safe_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    return None
+
+
+def _selector_structured_output_valid(selector: Mapping[str, Any]) -> bool | None:
+    selection_metadata = _as_mapping(selector.get("selection_metadata"))
+    structured_detected = _optional_bool(
+        selection_metadata.get("structured_selection_detected")
+    )
+    if structured_detected is not None:
+        return structured_detected
+    raw_response_format = _safe_text(selector.get("raw_response_format")).lower()
+    if raw_response_format:
+        return raw_response_format in {"json", "structured_json"}
+    return None
+
+
+def _extract_selector_model_policy(routing: Mapping[str, Any]) -> dict[str, Any]:
+    selector = _as_mapping(routing.get("selector"))
+    selected_model_candidate = _as_mapping(selector.get("selected_model_candidate"))
+    return {
+        "selected_model_candidate": selected_model_candidate or None,
+        "fallback_used": bool(selector.get("fallback_used")),
+        "fallback_attempt_count": selector.get("fallback_attempt_count"),
+        "model_failure_count": selector.get("model_failure_count"),
+        "primary_fallback_failure_kind": (
+            _safe_text(selector.get("primary_fallback_failure_kind")) or None
+        ),
+        "model_errors": _as_list(selector.get("model_errors")),
+    }
+
+
+def _text_capture_preview(capture: Mapping[str, Any]) -> dict[str, Any]:
+    char_count = _safe_int(capture.get("char_count"))
+    text = _safe_text(capture.get("text"))
+    return {
+        "char_count": char_count if char_count is not None else len(text),
+        "preview": text[:400] if text else None,
+        "truncated": capture.get("truncated") if "truncated" in capture else None,
+    }
+
+
+def _extract_selector_evidence(
+    routing: Mapping[str, Any],
+) -> dict[str, Any]:
+    selector = _as_mapping(routing.get("selector"))
+    response_capture = _as_mapping(selector.get("response"))
+    selected_candidate = _as_mapping(selector.get("selected_candidate"))
+    return {
+        "prompt_id": _safe_text(selector.get("prompt_id")) or None,
+        "model_name": _safe_text(selector.get("model_name")) or None,
+        "confidence_score": selector.get("confidence_score"),
+        "reasoning": _safe_text(selector.get("reasoning")) or None,
+        "selected_workflow_id": (
+            _safe_text(routing.get("selected_workflow_id"))
+            or _safe_text(selected_candidate.get("concept_id"))
+            or None
+        ),
+        "selection_resolution": (
+            _safe_text(selector.get("selection_resolution")) or None
+        ),
+        "raw_candidate_label": _safe_text(selector.get("raw_candidate_label"))
+        or None,
+        "raw_response_format": _safe_text(selector.get("raw_response_format"))
+        or None,
+        "structured_output_valid": _selector_structured_output_valid(selector),
+        "raw_response": (
+            _text_capture_preview(response_capture) if response_capture else None
+        ),
+        "model_policy": _extract_selector_model_policy(routing),
+    }
+
+
+def _iter_llm_exchange_summaries(llm_debug_data: Mapping[str, Any]) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for stage in _as_list(llm_debug_data.get("stage_diagnostics")):
+        if not isinstance(stage, Mapping):
+            continue
+        stage_id = _safe_text(stage.get("stage_id"))
+        latest_exchange = _as_mapping(stage.get("latest_llm_exchange"))
+        if latest_exchange:
+            summaries.append(
+                {
+                    "stage_id": stage_id or None,
+                    "stage_label": _safe_text(stage.get("stage_label")) or None,
+                    "latest_status": _safe_text(stage.get("latest_status")) or None,
+                    "exchange": latest_exchange,
+                }
+            )
+        for exchange in _as_list(stage.get("llm_exchange_summaries")):
+            if not isinstance(exchange, Mapping):
+                continue
+            summaries.append(
+                {
+                    "stage_id": stage_id or None,
+                    "stage_label": _safe_text(stage.get("stage_label")) or None,
+                    "latest_status": _safe_text(stage.get("latest_status")) or None,
+                    "exchange": dict(exchange),
+                }
+            )
+    return summaries
+
+
+def _collect_empty_success_llm_suspects(
+    llm_debug_data: Mapping[str, Any],
+    *,
+    final_response_text: str,
+) -> list[dict[str, Any]]:
+    suspects: list[dict[str, Any]] = []
+    for index, entry in enumerate(_iter_llm_exchange_summaries(llm_debug_data)):
+        exchange = _as_mapping(entry.get("exchange"))
+        response_preview = _as_mapping(exchange.get("response_preview"))
+        char_count = _safe_int(response_preview.get("char_count"))
+        if char_count is None:
+            response_text = _safe_text(response_preview.get("text"))
+            char_count = len(response_text) if response_text else None
+        request_state = _safe_text(exchange.get("llm_request_state")).lower()
+        if char_count == 0 and request_state in {"completed", "success"}:
+            suspects.append(
+                {
+                    "source": "stage_diagnostics",
+                    "exchange_index": index,
+                    "stage_id": entry.get("stage_id"),
+                    "stage_label": entry.get("stage_label"),
+                    "latest_status": entry.get("latest_status"),
+                    "llm_request_state": request_state,
+                    "model": _safe_text(exchange.get("selected_model")) or None,
+                    "response_char_count": 0,
+                }
+            )
+    if not _safe_text(final_response_text):
+        suspects.append(
+            {
+                "source": "final_response",
+                "stage_id": "turn_answer",
+                "response_char_count": 0,
+            }
+        )
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    for suspect in suspects:
+        key = (
+            suspect.get("source"),
+            suspect.get("stage_id"),
+            suspect.get("exchange_index"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(suspect)
+    return deduped
+
+
+def _extract_timing_metrics(diagnostics: Mapping[str, Any]) -> dict[str, Any]:
+    timing = _as_mapping(diagnostics.get("timing_breakdown"))
+    totals = _as_mapping(timing.get("totals"))
+    return {
+        "elapsed_ms": totals.get("elapsed_ms"),
+        "llm_elapsed_ms": totals.get("llm_elapsed_ms"),
+        "llm_call_count": totals.get("llm_call_count"),
+        "llm_calls_by_stage_model": _as_list(
+            timing.get("llm_calls_by_stage_model")
+        ),
+    }
+
+
+def _build_model_portfolio_arm_evaluation(
+    *,
+    summary: Mapping[str, Any],
+    llm_debug_data: Mapping[str, Any],
+    prompt_entry: Mapping[str, Any],
+    requested_model: str | None,
+) -> dict[str, Any]:
+    telemetry = _as_mapping(summary.get("telemetry"))
+    evaluation = _as_mapping(summary.get("evaluation"))
+    response = _as_mapping(summary.get("response"))
+    conversation = _as_mapping(summary.get("conversation"))
+    diagnostics = _as_mapping(llm_debug_data.get("turn_execution_diagnostics"))
+    routing = _as_mapping(diagnostics.get("workflow_routing_diagnostics"))
+    selector_evidence = _extract_selector_evidence(routing)
+    completion_gate = _as_mapping(llm_debug_data.get("completion_gate_verdict"))
+    critic_verdict = _as_mapping(llm_debug_data.get("critic_verdict"))
+    response_text = _safe_text(response.get("text"))
+    empty_success_suspects = _collect_empty_success_llm_suspects(
+        llm_debug_data,
+        final_response_text=response_text,
+    )
+    missing_answer_evidence = _as_list(evaluation.get("missing_answer_evidence"))
+    missing_evidence = _as_list(evaluation.get("missing_evidence"))
+    tool_history = _as_list(telemetry.get("tool_history"))
+    structured_output_valid = selector_evidence.get("structured_output_valid")
+    should_user_be_happy = bool(evaluation.get("should_user_be_happy"))
+    selector_metrics = {
+        "selected_workflow_id": selector_evidence.get("selected_workflow_id"),
+        "selector_confidence_score": selector_evidence.get("confidence_score"),
+        "structured_output_valid": structured_output_valid,
+        "raw_response_format": selector_evidence.get("raw_response_format"),
+        "selection_resolution": selector_evidence.get("selection_resolution"),
+        "selected_model_candidate": selector_evidence["model_policy"].get(
+            "selected_model_candidate"
+        ),
+    }
+    answer_metrics = {
+        "final_response_length": len(response_text),
+        "final_answer_useful": should_user_be_happy,
+        "tool_count": len(tool_history),
+        "missing_evidence_count": len(missing_evidence),
+        "missing_answer_evidence_count": len(missing_answer_evidence),
+        "empty_success_suspect_count": len(empty_success_suspects),
+        "completion_gate_status": (
+            _safe_text(
+                completion_gate.get("status")
+                or completion_gate.get("verdict")
+                or completion_gate.get("decision")
+            )
+            or None
+        ),
+        "critic_verdict_status": (
+            _safe_text(
+                critic_verdict.get("status")
+                or critic_verdict.get("verdict")
+                or critic_verdict.get("decision")
+            )
+            or None
+        ),
+        **_extract_timing_metrics(diagnostics),
+    }
+    promotion_blockers = ["single_prompt_replay_evidence_only"]
+    selector_verdict = (
+        "passed"
+        if selector_metrics.get("selected_workflow_id") and structured_output_valid is not False
+        else "suspect"
+    )
+    if not should_user_be_happy or empty_success_suspects:
+        answer_verdict = "failed"
+    else:
+        answer_verdict = "passed"
+    observed_model = _safe_text(telemetry.get("model")) or _safe_text(requested_model)
+    replay_case_id = _safe_text(prompt_entry.get("id"))
+    replay_set_id = DEFAULT_REPLAY_SET_ID
+    selector_evidence_payload = build_model_stage_suitability_evidence(
+        model=observed_model,
+        stage="workflow_selector",
+        workflow_id=_safe_text(telemetry.get("selected_workflow_id")) or None,
+        prompt_id=selector_evidence.get("prompt_id"),
+        replay_set_id=replay_set_id,
+        replay_case_id=replay_case_id,
+        request_id=_safe_text(conversation.get("request_id")) or None,
+        verdict=selector_verdict,
+        metrics=selector_metrics,
+        rationale=selector_evidence.get("reasoning"),
+        evidence_artifact={
+            "conversation": conversation,
+            "selector": selector_evidence,
+        },
+        promotion_blockers=promotion_blockers,
+    )
+    answer_evidence_payload = build_model_stage_suitability_evidence(
+        model=observed_model,
+        stage="turn_answer",
+        workflow_id=_safe_text(telemetry.get("selected_workflow_id")) or None,
+        prompt_id=_safe_text(prompt_entry.get("id")) or None,
+        replay_set_id=replay_set_id,
+        replay_case_id=replay_case_id,
+        request_id=_safe_text(conversation.get("request_id")) or None,
+        verdict=answer_verdict,
+        metrics=answer_metrics,
+        rationale="; ".join(_as_list(evaluation.get("reasons"))) or None,
+        evidence_artifact={
+            "conversation": conversation,
+            "response_preview": response_text[:400],
+            "empty_success_suspects": empty_success_suspects,
+        },
+        promotion_blockers=promotion_blockers,
+    )
+    stage_evidence = [selector_evidence_payload, answer_evidence_payload]
+    return {
+        "schema_version": MODEL_PORTFOLIO_REPLAY_REPORT_SCHEMA_VERSION,
+        "replay_set_id": replay_set_id,
+        "replay_case_id": replay_case_id,
+        "requested_model": _safe_text(requested_model) or None,
+        "observed_model": observed_model or None,
+        "selector": selector_evidence,
+        "empty_success_suspects": empty_success_suspects,
+        "stage_evidence": stage_evidence,
+        "stage_evidence_schema_version": MODEL_STAGE_SUITABILITY_EVIDENCE_SCHEMA_VERSION,
+        "certification_decision": assess_model_stage_certification(
+            stage_evidence,
+            minimum_replay_cases=DEFAULT_MINIMUM_REPLAY_CASES_FOR_CERTIFICATION,
+        ),
+        "policy_update": {
+            "authorised": False,
+            "reason": (
+                "Replay evidence is emitted for represented policy review; "
+                "this runner does not mutate workflow/model policy."
+            ),
+        },
+    }
+
+
+def _build_model_portfolio_comparison_report(
+    *,
+    arm_summaries: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    stage_evidence: list[Mapping[str, Any]] = []
+    arm_reports: list[dict[str, Any]] = []
+    for arm_summary in arm_summaries:
+        if not isinstance(arm_summary, Mapping):
+            continue
+        arm = _as_mapping(arm_summary.get("arm"))
+        arm_label = _safe_text(arm.get("label")) or _safe_text(arm.get("arm_id"))
+        report = _as_mapping(arm_summary.get("model_portfolio_evaluation"))
+        if not report:
+            continue
+        arm_reports.append(
+            {
+                "arm_id": _safe_text(arm.get("arm_id")) or None,
+                "label": arm_label or None,
+                "requested_model": _safe_text(arm.get("requested_model")) or None,
+                "observed_model": _safe_text(report.get("observed_model")) or None,
+                "replay_case_id": _safe_text(report.get("replay_case_id")) or None,
+                "empty_success_suspect_count": len(
+                    _as_list(report.get("empty_success_suspects"))
+                ),
+                "certification_decision": _as_mapping(
+                    report.get("certification_decision")
+                ),
+            }
+        )
+        for entry in _as_list(report.get("stage_evidence")):
+            if isinstance(entry, Mapping):
+                stage_evidence.append(entry)
+
+    aggregate_decision = assess_model_stage_certification(
+        stage_evidence,
+        minimum_replay_cases=DEFAULT_MINIMUM_REPLAY_CASES_FOR_CERTIFICATION,
+    )
+    return {
+        "schema_version": MODEL_PORTFOLIO_REPLAY_REPORT_SCHEMA_VERSION,
+        "replay_set_id": DEFAULT_REPLAY_SET_ID,
+        "arm_count": len(arm_reports),
+        "stage_evidence_count": len(stage_evidence),
+        "arm_reports": arm_reports,
+        "aggregate_certification_decision": aggregate_decision,
+        "policy_update": {
+            "authorised": False,
+            "reason": (
+                "Comparison evidence is a replay artifact for represented "
+                "policy review. Model-stage certification requires the "
+                "promotion gate to pass and a separate Vontology/model-policy "
+                "mutation path."
+            ),
+        },
+    }
+
+
 def _build_prompt_summary(prompt_entry: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "id": _safe_text(prompt_entry.get("id")),
@@ -1623,6 +1991,12 @@ def _build_summary(
             "label": _safe_text(arm_metadata.get("label")) or None,
             "requested_model": _safe_text(arm_metadata.get("requested_model")) or None,
         }
+    summary["model_portfolio_evaluation"] = _build_model_portfolio_arm_evaluation(
+        summary=summary,
+        llm_debug_data=llm_debug_data,
+        prompt_entry=prompt_entry,
+        requested_model=requested_model,
+    )
     return summary
 
 
@@ -1827,7 +2201,7 @@ def _build_multi_arm_summary(
         )
         if execution_mode and execution_mode not in selected_execution_modes:
             selected_execution_modes.append(execution_mode)
-    return {
+    summary = {
         "status": "ok",
         "mode": "multi_arm_comparison",
         "guidance": {
@@ -1856,6 +2230,10 @@ def _build_multi_arm_summary(
         },
         "arms": [dict(entry) for entry in arm_summaries if isinstance(entry, Mapping)],
     }
+    summary["model_portfolio_report"] = _build_model_portfolio_comparison_report(
+        arm_summaries=arm_summaries
+    )
+    return summary
 
 
 def main(argv: Sequence[str] | None = None) -> int:

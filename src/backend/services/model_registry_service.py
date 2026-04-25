@@ -24,6 +24,12 @@ PRED_HAS_API_SURFACE = "#V#has_api_surface"
 PRED_HAS_PARAMETER_ACTION = "#V#has_parameter_action"
 PRED_HAS_FIXED_PARAMETER_VALUE = "#V#has_fixed_parameter_value"
 
+MODEL_STAGE_SUITABILITY_EVIDENCE_SCHEMA_VERSION = "model_stage_suitability_evidence.v1"
+MODEL_STAGE_CERTIFICATION_DECISION_SCHEMA_VERSION = (
+    "model_stage_certification_decision.v1"
+)
+DEFAULT_MINIMUM_REPLAY_CASES_FOR_CERTIFICATION = 2
+
 KNOWN_PROVIDER_PREFIXES = frozenset(
     {"openai", "anthropic", "gemini", "ollama", "deepseek"}
 )
@@ -39,6 +45,14 @@ def _parse_registry_json(raw_text: str) -> Optional[Mapping[str, Any]]:
     except Exception:
         return None
     return parsed if isinstance(parsed, Mapping) else None
+
+
+def _safe_evidence_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if value is None:
+        return ""
+    return str(value).strip()
 
 
 def _normalise_lookup_token(value: Any) -> str:
@@ -695,3 +709,125 @@ def sanitise_model_parameter_value(
     if action == PARAMETER_ACTION_FIXED_VALUE:
         return _coerce_fixed_parameter_value(policy.get("fixed_value"), value)
     return value
+
+
+def build_model_stage_suitability_evidence(
+    *,
+    model: str | None,
+    stage: str,
+    replay_set_id: str,
+    replay_case_id: str,
+    request_id: str | None = None,
+    workflow_id: str | None = None,
+    prompt_id: str | None = None,
+    prompt_variant_id: str | None = None,
+    verdict: str,
+    metrics: Mapping[str, Any] | None = None,
+    rationale: str | None = None,
+    evidence_artifact: Mapping[str, Any] | None = None,
+    promotion_blockers: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    """Build a Vontology-ready model/stage suitability evidence payload.
+
+    This helper deliberately does not decide semantic routing policy or mutate
+    Vontology. It shapes replay-derived observations into a stable payload that
+    a represented policy workflow can review, persist, promote, expire, or
+    reject with provenance.
+    """
+
+    metrics_payload = {
+        str(key): value
+        for key, value in (metrics or {}).items()
+        if isinstance(key, str)
+    }
+    blockers = [
+        cleaned
+        for item in promotion_blockers or ()
+        if (cleaned := _safe_evidence_text(item))
+    ]
+    payload: dict[str, Any] = {
+        "schema_version": MODEL_STAGE_SUITABILITY_EVIDENCE_SCHEMA_VERSION,
+        "evidence_type": "#V#model_stage_suitability_evidence",
+        "model": _safe_evidence_text(model) or None,
+        "workflow_stage": _safe_evidence_text(stage),
+        "workflow_id": _safe_evidence_text(workflow_id) or None,
+        "prompt_id": _safe_evidence_text(prompt_id) or None,
+        "prompt_variant_id": _safe_evidence_text(prompt_variant_id) or None,
+        "replay_set_id": _safe_evidence_text(replay_set_id),
+        "replay_case_id": _safe_evidence_text(replay_case_id),
+        "request_id": _safe_evidence_text(request_id) or None,
+        "verdict": _normalise_lookup_token(verdict) or "unknown",
+        "metrics": metrics_payload,
+        "rationale": _safe_evidence_text(rationale) or None,
+        "promotion_eligible": False,
+        "promotion_blockers": blockers,
+    }
+    if isinstance(evidence_artifact, Mapping):
+        payload["evidence_artifact"] = {
+            str(key): value
+            for key, value in evidence_artifact.items()
+            if isinstance(key, str)
+        }
+    return payload
+
+
+def assess_model_stage_certification(
+    evidence_entries: Sequence[Mapping[str, Any]],
+    *,
+    minimum_replay_cases: int = DEFAULT_MINIMUM_REPLAY_CASES_FOR_CERTIFICATION,
+) -> dict[str, Any]:
+    """Assess whether replay evidence is sufficient to certify a model/stage.
+
+    The function enforces only generic promotion guardrails: enough distinct
+    replay cases, successful evidence verdicts, and no per-entry blockers. It
+    does not encode which workflow, prompt, or domain should use a model.
+    """
+
+    usable_entries = [
+        entry for entry in evidence_entries if isinstance(entry, Mapping)
+    ]
+    replay_case_ids = {
+        case_id
+        for entry in usable_entries
+        if (case_id := _safe_evidence_text(entry.get("replay_case_id")))
+    }
+    verdict_counts: dict[str, int] = {}
+    blocker_counts: dict[str, int] = {}
+    for entry in usable_entries:
+        verdict = _normalise_lookup_token(entry.get("verdict")) or "unknown"
+        verdict_counts[verdict] = verdict_counts.get(verdict, 0) + 1
+        for blocker in entry.get("promotion_blockers") or ():
+            cleaned_blocker = _safe_evidence_text(blocker)
+            if cleaned_blocker:
+                blocker_counts[cleaned_blocker] = (
+                    blocker_counts.get(cleaned_blocker, 0) + 1
+                )
+
+    minimum_cases = max(int(minimum_replay_cases), 1)
+    blockers: list[str] = []
+    if len(replay_case_ids) < minimum_cases:
+        blockers.append("insufficient_distinct_replay_cases")
+    if not usable_entries:
+        blockers.append("no_suitability_evidence")
+    non_pass_verdicts = {
+        verdict: count
+        for verdict, count in verdict_counts.items()
+        if verdict not in {"passed", "pass"}
+    }
+    if non_pass_verdicts:
+        blockers.append("non_passing_evidence_present")
+    if blocker_counts:
+        blockers.append("evidence_entry_promotion_blockers_present")
+
+    promotion_authorised = not blockers
+    return {
+        "schema_version": MODEL_STAGE_CERTIFICATION_DECISION_SCHEMA_VERSION,
+        "promotion_authorised": promotion_authorised,
+        "certification_status": "eligible" if promotion_authorised else "not_eligible",
+        "minimum_replay_cases": minimum_cases,
+        "distinct_replay_case_count": len(replay_case_ids),
+        "evidence_entry_count": len(usable_entries),
+        "verdict_counts": verdict_counts,
+        "promotion_blocker_counts": blocker_counts,
+        "promotion_blockers": blockers,
+    }
