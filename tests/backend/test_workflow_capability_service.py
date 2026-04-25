@@ -990,6 +990,59 @@ def test_startup_check_warms_query_surface_for_ready_namespace(
     assert report["status"] == "ready"
 
 
+def test_readiness_report_starts_background_initialisation_for_persisted_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+    _fake_retrieval_backend: _FakeWorkflowRetrievalBackend,
+) -> None:
+    import src.backend.services.workflow_capability_service as capability_service
+
+    reset_workflow_capability_index()
+    _fake_retrieval_backend.namespace_runtime_state_override = {
+        "has_persisted_index": True,
+        "compatible": True,
+        "status": "compatible",
+        "detail": "Fake persisted workflow capability namespace is compatible.",
+        "current_embedding_signature": dict(_fake_retrieval_backend.embedding_signature),
+        "stored_embedding_signature": dict(_fake_retrieval_backend.embedding_signature),
+    }
+    started: list[dict[str, Any]] = []
+
+    def _fake_start_background(
+        *,
+        force_refresh: bool = False,
+        workflow_registry: object | None = None,
+        mode: str = "background",
+    ) -> bool:
+        started.append(
+            {
+                "force_refresh": force_refresh,
+                "workflow_registry": workflow_registry,
+                "mode": mode,
+            }
+        )
+        return True
+
+    monkeypatch.setattr(
+        capability_service,
+        "_start_background_workflow_capability_index_build",
+        _fake_start_background,
+    )
+
+    readiness = get_workflow_capability_index_readiness_report()
+
+    assert started == [
+        {
+            "force_refresh": False,
+            "workflow_registry": None,
+            "mode": "background",
+        }
+    ]
+    assert readiness["status"] == "building"
+    assert readiness["summary"] == "Workflow capability index initialising."
+    assert readiness["background_initialisation"]["started"] is True
+    assert readiness["background_initialisation"]["checked"] is True
+
+
 def test_invalidate_workflow_capability_index_clears_cached_entries() -> None:
     reset_workflow_capability_index()
     index = get_workflow_capability_index()

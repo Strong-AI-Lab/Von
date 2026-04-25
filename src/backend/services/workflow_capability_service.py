@@ -1322,6 +1322,74 @@ def _maybe_start_workflow_capability_index_auto_rebuild(
     return event
 
 
+def _maybe_start_workflow_capability_index_background_initialisation(
+    runtime_state: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Start a non-blocking initial load/build when the process cache is empty.
+
+    A compatible persisted RAG namespace can exist while the process-local
+    capability cache is still empty after restart. The status endpoint should
+    report that initialisation has started rather than doing registry and
+    materialisation work synchronously on the request path.
+    """
+
+    event: dict[str, Any] = {
+        "checked": False,
+        "started": False,
+        "skipped_reason": None,
+        "detail": None,
+    }
+    if bool(runtime_state.get("ready", False)):
+        return event
+    if bool(runtime_state.get("build_in_progress", False)):
+        event["skipped_reason"] = "build_in_progress"
+        return event
+    if int(runtime_state.get("size") or 0) > 0:
+        event["skipped_reason"] = "process_cache_present"
+        return event
+
+    namespace_state_raw = runtime_state.get("namespace_state")
+    namespace_state: Mapping[str, Any] | None = (
+        namespace_state_raw if isinstance(namespace_state_raw, Mapping) else None
+    )
+    if isinstance(namespace_state, Mapping) and not bool(
+        namespace_state.get("compatible", False)
+    ):
+        event["skipped_reason"] = "namespace_incompatible"
+        return event
+    if isinstance(namespace_state, Mapping) and not bool(
+        namespace_state.get("has_persisted_index", False)
+    ):
+        event["skipped_reason"] = "persisted_namespace_missing"
+        return event
+
+    event["checked"] = True
+    embedder_ready, embedder_skip_reason = (
+        _workflow_capability_runtime_embedder_ready_for_auto_rebuild(namespace_state)
+        if isinstance(namespace_state, Mapping)
+        else (False, "namespace_state_missing")
+    )
+    if not embedder_ready:
+        event["skipped_reason"] = embedder_skip_reason
+        event["detail"] = (
+            str(namespace_state.get("detail") or "").strip()
+            if isinstance(namespace_state, Mapping)
+            else ""
+        )
+        return event
+
+    started = _start_background_workflow_capability_index_build(
+        force_refresh=False,
+        mode="background",
+    )
+    event["started"] = bool(started)
+    if started:
+        event["detail"] = "Background workflow capability index initialisation started."
+    else:
+        event["skipped_reason"] = "background_start_refused"
+    return event
+
+
 def _warm_workflow_capability_query_surface(
     index: "WorkflowCapabilityIndex",
     *,
@@ -1435,6 +1503,11 @@ def get_workflow_capability_index_readiness_report() -> Dict[str, Any]:
     """Return a user-facing readiness report for the capability index."""
 
     runtime_state = get_workflow_capability_index_runtime_state()
+    background_initialisation_event = (
+        _maybe_start_workflow_capability_index_background_initialisation(runtime_state)
+    )
+    if background_initialisation_event.get("started"):
+        runtime_state = get_workflow_capability_index_runtime_state()
     auto_rebuild_event = _maybe_start_workflow_capability_index_auto_rebuild(
         runtime_state
     )
@@ -1517,6 +1590,14 @@ def get_workflow_capability_index_readiness_report() -> Dict[str, Any]:
             "Von detected an incompatible persisted workflow capability index "
             "and started an automatic background rebuild."
         )
+    elif background_initialisation_event.get("started"):
+        status = "building"
+        warning_level = "warning"
+        summary = "Workflow capability index initialising."
+        detail = (
+            "Von started a background load or build of the authoritative "
+            "workflow capability index for this server process."
+        )
     elif size > 0 and namespace_compatible and not query_surface_ready:
         status = "warming"
         warning_level = "warning"
@@ -1564,6 +1645,7 @@ def get_workflow_capability_index_readiness_report() -> Dict[str, Any]:
         "warning_level": warning_level,
         "summary": summary,
         "detail": detail,
+        "background_initialisation": background_initialisation_event,
         "auto_rebuild": auto_rebuild_state,
         "checked_at_utc": _utc_now_iso(),
     }
