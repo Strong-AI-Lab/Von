@@ -80,3 +80,90 @@ def test_internal_mcp_gmail_list_messages_accepts_max_results_aliases():
         {"profile": "zhan-gmail", "query": "in:inbox", "maxResults": 10},
     )
     assert ok, errors
+
+    assert method.output_schema is not None
+    assert "gmail_get_message" in (method.description or "")
+    assert "message_id" in (method.description or "")
+    list_output_description = method.output_schema.description or ""
+    assert "gmail_get_message" in list_output_description
+    assert "message_id" in list_output_description
+
+    detail_method = catalogue.get("gmail_get_message")
+    assert detail_method.output_schema is not None
+    assert "gmail_list_messages" in (detail_method.description or "")
+    assert "message_id" in (detail_method.description or "")
+    detail_output_description = detail_method.output_schema.description or ""
+    assert "sender" in detail_output_description
+    assert "subject" in detail_output_description
+
+
+def test_internal_mcp_gmail_handlers_expose_detail_follow_up_contract(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue as catalogue_module
+
+    def fake_list_messages(**kwargs):
+        assert kwargs["profile_id"] == "zhan-gmail"
+        return {
+            "messages": [
+                {"id": "msg-1", "threadId": "thread-1"},
+                {"id": "msg-2", "threadId": "thread-2", "subject": "Listed"},
+            ],
+            "resultSizeEstimate": 2,
+        }
+
+    def fake_get_message(**kwargs):
+        assert kwargs["profile_id"] == "zhan-gmail"
+        assert kwargs["message_id"] == "msg-1"
+        return {
+            "id": "msg-1",
+            "snippet": "Short preview",
+            "payload": {
+                "headers": [
+                    {"name": "From", "value": "Sender <sender@example.test>"},
+                    {"name": "Subject", "value": "Subject line"},
+                    {"name": "Date", "value": "Sat, 25 Apr 2026 09:00:00 +0000"},
+                ]
+            },
+        }
+
+    monkeypatch.setattr(
+        "src.backend.integrations.google.gmail_service.list_messages",
+        fake_list_messages,
+    )
+    monkeypatch.setattr(
+        "src.backend.integrations.google.gmail_service.get_message",
+        fake_get_message,
+    )
+
+    list_payload = catalogue_module._gmail_list_messages(
+        profile="zhan-gmail",
+        query="in:inbox",
+        max_results=2,
+    )
+
+    assert list_payload["messages"][0]["message_id"] == "msg-1"
+    follow_up = list_payload["_tool_follow_up"]
+    assert follow_up["schema_version"] == "mcp_tool_follow_up.v1"
+    assert follow_up["item_array_field"] == "messages"
+    assert follow_up["required_when_any_item_missing_fields"] == [
+        "sender",
+        "subject",
+        "date",
+        "snippet",
+    ]
+    assert follow_up["follow_up_tools"][0]["tool"] == "gmail_get_message"
+    assert follow_up["follow_up_tools"][0]["input_bindings"] == {
+        "profile": {"source": "request", "field": "profile"},
+        "message_id": {"source": "item", "field": "message_id"},
+    }
+
+    detail_payload = catalogue_module._gmail_get_message(
+        profile="zhan-gmail",
+        message_id="msg-1",
+    )
+
+    assert detail_payload["message_id"] == "msg-1"
+    assert detail_payload["sender"] == "Sender <sender@example.test>"
+    assert detail_payload["from"] == "Sender <sender@example.test>"
+    assert detail_payload["subject"] == "Subject line"
+    assert detail_payload["date"] == "Sat, 25 Apr 2026 09:00:00 +0000"
+    assert detail_payload["snippet"] == "Short preview"

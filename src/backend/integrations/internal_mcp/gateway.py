@@ -10,6 +10,7 @@ from .schemas import (
     Schema,
     SchemaValidationError,
     coerce_payload_types,
+    normalise_payload_aliases,
     validate_payload,
 )
 from .transport import InternalMCPTransport, TransportResult
@@ -90,6 +91,12 @@ class MethodCatalogue:
             "optional": sorted(schema.optional.keys()),
             "allow_unknown": schema.allow_unknown,
             "description": schema.description,
+            "aliases": dict(schema.aliases),
+            "batch_propagated_fields": [
+                field_name
+                for field_name in schema.batch_propagated_fields
+                if isinstance(field_name, str) and field_name
+            ],
         }
 
     def snapshot(self) -> Dict[str, Dict[str, Any]]:
@@ -159,6 +166,18 @@ class InternalMCPGateway:
         payload_dict: MutableMapping[str, Any] = dict(payload or {})
         definition = self._catalogue.get(method_name)
         self.register_metrics_if_missing(method_name)
+
+        payload_dict, alias_warnings = normalise_payload_aliases(
+            definition.input_schema,
+            payload_dict,
+        )
+        if alias_warnings:
+            logger.debug(
+                "%s normalised aliases for %s: %s",
+                self._log_tag,
+                method_name,
+                "; ".join(alias_warnings),
+            )
 
         payload_dict, coercion_warnings = coerce_payload_types(
             definition.input_schema,

@@ -34,6 +34,7 @@ from .schemas import (
     Schema as McpSchema,
     coerce_payload_types,
     expected_to_json_schema,
+    normalise_payload_aliases,
     validate_payload,
 )
 
@@ -8075,6 +8076,12 @@ class InternalMCPChatOrchestrator:
             ),
             user_namespace=env.user_namespace,
             selected_gmail_profile=gmail_profile,
+            tool_invocations=(
+                data.get("invocations")
+                if isinstance(data.get("invocations"), Sequence)
+                and not isinstance(data.get("invocations"), (str, bytes, bytearray))
+                else ()
+            ),
             conversation_session_id=conversation_session_id,
             turn_id=data.get("turn_id"),
         )
@@ -8124,6 +8131,14 @@ class InternalMCPChatOrchestrator:
                     ),
                     user_namespace=env.user_namespace,
                     selected_gmail_profile=gmail_profile,
+                    tool_invocations=(
+                        data.get("invocations")
+                        if isinstance(data.get("invocations"), Sequence)
+                        and not isinstance(
+                            data.get("invocations"), (str, bytes, bytearray)
+                        )
+                        else ()
+                    ),
                     conversation_session_id=conversation_session_id,
                     turn_id=data.get("turn_id"),
                 )
@@ -9087,6 +9102,75 @@ class InternalMCPChatOrchestrator:
                 }
             )
 
+        # Drain trusted tool-declared follow-up contracts before asking the
+        # summariser to decide whether more tools are needed. This keeps
+        # list/detail tool pairs generic while avoiding model-side re-planning
+        # loops over the same list response.
+        invocations_for_follow_up = cast(
+            Sequence[Mapping[str, Any]], data.get("invocations") or []
+        )
+        if iteration_count < max_tool_invocations:
+            pending_follow_up_tool_calls = self._extract_tool_follow_up_retry_tool_calls(
+                missing_required_tools=(),
+                tool_invocations=invocations_for_follow_up,
+                require_missing_tool_match=False,
+            )
+            if pending_follow_up_tool_calls:
+                import json
+
+                current_response = (
+                    json.dumps(pending_follow_up_tool_calls[0])
+                    if len(pending_follow_up_tool_calls) == 1
+                    else json.dumps(pending_follow_up_tool_calls)
+                )
+                if isinstance(aux_llm_calls, list):
+                    try:
+                        aux_llm_calls.append(
+                            annotate_python_decision_event(
+                                {
+                                    "type": "pending_tool_follow_up_contract",
+                                    "stage": "backfill",
+                                    "tool_call_count": len(pending_follow_up_tool_calls),
+                                    "tool_names": [
+                                        str(call.get("tool"))
+                                        for call in pending_follow_up_tool_calls
+                                        if isinstance(call.get("tool"), str)
+                                    ],
+                                },
+                                stage="tool_follow_up_contract",
+                                component="internal_mcp_orchestrator",
+                                function="_action_tool_calling_backfill",
+                                decision_class="tool_follow_up_contract",
+                                decision_source="tool_result_metadata",
+                                changed_outcome=True,
+                                reason_code="pending_tool_declared_follow_up",
+                                possible_inappropriate_python_code_use=False,
+                            )
+                        )
+                    except Exception:
+                        pass
+                return WorkflowActionResult(
+                    outputs={
+                        "more_tool_calls": True,
+                        "tool_calls_present": True,
+                        "tool_calls_validated": False,
+                        "tool_calls": pending_follow_up_tool_calls,
+                        "current_response": current_response,
+                        "remaining_tool_calls": [],
+                        "missing_tool_call_retry_attempts": missing_tool_call_retry_attempts,
+                        "missing_tool_call_retry_budget": missing_tool_call_retry_budget,
+                        "missing_tool_call_retry_remaining": max(
+                            0,
+                            missing_tool_call_retry_budget
+                            - missing_tool_call_retry_attempts,
+                        ),
+                        "missing_tool_call_retry_suppressed": missing_tool_call_retry_suppressed,
+                        "missing_tool_call_retry_stop_reason": missing_tool_call_retry_stop_reason,
+                        "missing_tool_call_recovery_outcome": missing_tool_call_recovery_outcome,
+                        "result": True,
+                    }
+                )
+
         # Summariser LLM call.
         follow_up_prompt = (
             "Provide a final answer to the user now that the tool result is available. "
@@ -9722,6 +9806,62 @@ class InternalMCPChatOrchestrator:
                         "tool_calls_cap": int(max_tool_invocations),
                         "tool_calls_remaining": 0,
                     }
+                )
+            limit_finaliser_prompt = (
+                "The tool invocation budget for this turn is exhausted. Produce the "
+                "best final answer to the user using only the tool results already "
+                "available in the conversation context. Do not call another tool. "
+                "If the available results are incomplete, say so concisely and "
+                "present any grounded partial answer that the completed tool calls "
+                "support."
+            )
+            try:
+                limited_response, _, _ = self._run_llm_with_fallbacks(
+                    stage="summariser",
+                    prompt=limit_finaliser_prompt,
+                    context=follow_up_context,
+                    default_client=llm_client,
+                    default_model=summariser_model,
+                    policy_state=policy_state,
+                    registry_snapshot=registry_snapshot,
+                    user_concept_id=user_concept_id,
+                    org_concept_id=org_concept_id,
+                    llm_calls_log=llm_calls,
+                    aux_log=aux_llm_calls,
+                    record_llm_call=record_llm_call,
+                    emit_progress=emit_progress_cb,
+                    context_telemetry=follow_up_context_telemetry,
+                    prefer_default_model=bool(data.get("prefer_default_model")),
+                )
+                if isinstance(limited_response, str) and limited_response.strip():
+                    current_response = limited_response
+                    if isinstance(aux_llm_calls, list):
+                        try:
+                            aux_llm_calls.append(
+                                annotate_python_decision_event(
+                                    {
+                                        "type": "tool_limit_finalisation",
+                                        "stage": "backfill",
+                                        "tool_calls_done": int(iteration_count),
+                                        "tool_calls_cap": int(max_tool_invocations),
+                                        "response_preview": limited_response[:800],
+                                    },
+                                    stage="tool_limit_finalisation",
+                                    component="internal_mcp_orchestrator",
+                                    function="_action_tool_calling_backfill",
+                                    decision_class="tool_budget_exhausted_finalisation",
+                                    decision_source="completed_tool_context",
+                                    changed_outcome=True,
+                                    reason_code="tool_invocation_budget_exhausted",
+                                    possible_inappropriate_python_code_use=False,
+                                )
+                            )
+                        except Exception:
+                            pass
+            except Exception as exc:
+                self._logger.warning(
+                    "[mcp_orchestrator] Tool-limit finalisation failed: %s",
+                    exc,
                 )
 
         safe_final_response = self._sanitise_user_visible_action_output(
@@ -11256,6 +11396,9 @@ class InternalMCPChatOrchestrator:
         required_fields = mcp_schema.get("required", {})
         optional_fields = mcp_schema.get("optional", {})
         allow_unknown = mcp_schema.get("allow_unknown")
+        aliases = mcp_schema.get("aliases")
+        batch_propagated_fields = mcp_schema.get("batch_propagated_fields")
+        description = mcp_schema.get("description")
 
         properties: Dict[str, Any] = {}
         required_list: List[str] = []
@@ -11293,6 +11436,27 @@ class InternalMCPChatOrchestrator:
 
         if required_list:
             json_schema["required"] = required_list
+        if isinstance(description, str) and description.strip():
+            json_schema["description"] = description.strip()
+        if isinstance(aliases, Mapping) and aliases:
+            json_schema["x-von-argument-aliases"] = {
+                str(alias).strip(): str(canonical).strip()
+                for alias, canonical in aliases.items()
+                if isinstance(alias, str)
+                and alias.strip()
+                and isinstance(canonical, str)
+                and canonical.strip()
+            }
+        if (
+            isinstance(batch_propagated_fields, Sequence)
+            and not isinstance(batch_propagated_fields, (str, bytes, bytearray))
+            and batch_propagated_fields
+        ):
+            json_schema["x-von-batch-propagated-fields"] = [
+                field_name.strip()
+                for field_name in batch_propagated_fields
+                if isinstance(field_name, str) and field_name.strip()
+            ]
 
         return json_schema
 
@@ -11381,7 +11545,7 @@ class InternalMCPChatOrchestrator:
         messages: Sequence[Mapping[str, Any]],
         *,
         max_chars: int | None = None,
-        keep_recent_tool_messages: int = 6,
+        keep_recent_tool_messages: int = 24,
         keep_recent_assistant_messages: int = 2,
         keep_recent_user_messages: int = 2,
     ) -> List[Mapping[str, Any]]:
@@ -12377,6 +12541,8 @@ class InternalMCPChatOrchestrator:
             required_tools.append(name)
 
         for match in cls._PROMPT_EXPLICIT_TOOL_CALL_PATTERN.finditer(user_prompt):
+            if cls._prompt_tool_mention_is_negated(user_prompt, match.start()):
+                continue
             candidate = str(match.group(1) or "").strip()
             if not candidate:
                 continue
@@ -12386,7 +12552,31 @@ class InternalMCPChatOrchestrator:
             resolved = catalogue_lookup.get(lowered, candidate)
             _add_tool(resolved)
 
+        if catalogue_lookup:
+            for lowered, canonical in catalogue_lookup.items():
+                pattern = re.compile(
+                    rf"(?<![A-Za-z0-9_])`?{re.escape(canonical)}`?(?![A-Za-z0-9_])",
+                    flags=re.IGNORECASE,
+                )
+                for match in pattern.finditer(user_prompt):
+                    if cls._prompt_tool_mention_is_negated(user_prompt, match.start()):
+                        continue
+                    _add_tool(canonical)
+                    break
+
         return required_tools
+
+    @staticmethod
+    def _prompt_tool_mention_is_negated(text: str, mention_start: int) -> bool:
+        prefix = text[max(0, mention_start - 64) : mention_start]
+        return bool(
+            re.search(
+                r"\b(?:do\s+not|don't|never|avoid|without|not)"
+                r"(?:\s+(?:use|call|invoke|execute|run|fetch))?\s+$",
+                prefix,
+                flags=re.IGNORECASE,
+            )
+        )
 
     @staticmethod
     def _missing_prompt_tool_requirements(
@@ -17341,6 +17531,37 @@ class InternalMCPChatOrchestrator:
                     if isinstance(raw_json_schema.get("description"), str)
                     else None
                 ),
+                aliases=(
+                    {
+                        str(alias).strip(): str(canonical).strip()
+                        for alias, canonical in raw_json_schema.get(
+                            "x-von-argument-aliases", {}
+                        ).items()
+                        if isinstance(alias, str)
+                        and alias.strip()
+                        and isinstance(canonical, str)
+                        and canonical.strip()
+                    }
+                    if isinstance(
+                        raw_json_schema.get("x-von-argument-aliases"), Mapping
+                    )
+                    else {}
+                ),
+                batch_propagated_fields=tuple(
+                    str(field_name).strip()
+                    for field_name in raw_json_schema.get(
+                        "x-von-batch-propagated-fields", ()
+                    )
+                    if isinstance(field_name, str) and field_name.strip()
+                )
+                if isinstance(
+                    raw_json_schema.get("x-von-batch-propagated-fields"), Sequence
+                )
+                and not isinstance(
+                    raw_json_schema.get("x-von-batch-propagated-fields"),
+                    (str, bytes, bytearray),
+                )
+                else (),
             )
 
         get_definition = getattr(self._gateway, "get_method_definition", None)
@@ -17384,6 +17605,29 @@ class InternalMCPChatOrchestrator:
                 if isinstance(raw_schema.get("description"), str)
                 else None
             ),
+            aliases=(
+                {
+                    str(alias).strip(): str(canonical).strip()
+                    for alias, canonical in raw_schema.get("aliases", {}).items()
+                    if isinstance(alias, str)
+                    and alias.strip()
+                    and isinstance(canonical, str)
+                    and canonical.strip()
+                }
+                if isinstance(raw_schema.get("aliases"), Mapping)
+                else {}
+            ),
+            batch_propagated_fields=tuple(
+                str(field_name).strip()
+                for field_name in raw_schema.get("batch_propagated_fields", ())
+                if isinstance(field_name, str) and field_name.strip()
+            )
+            if isinstance(raw_schema.get("batch_propagated_fields"), Sequence)
+            and not isinstance(
+                raw_schema.get("batch_propagated_fields"),
+                (str, bytes, bytearray),
+            )
+            else (),
         )
 
     def _preflight_tool_calls(
@@ -17394,6 +17638,7 @@ class InternalMCPChatOrchestrator:
         allowed_tool_names: set[str] | None,
         user_namespace: str | None,
         selected_gmail_profile: str | None,
+        tool_invocations: Sequence[Mapping[str, Any]] | None = None,
         conversation_session_id: str | None = None,
         turn_id: str | None = None,
     ) -> _ToolCallPreflightResult:
@@ -17408,6 +17653,15 @@ class InternalMCPChatOrchestrator:
         enforce_availability = bool(available_tools)
         exists_cache: dict[str, bool] = {}
         resolution_cache: dict[str, str | None] = {}
+        batch_field_hints = self._extract_batch_payload_field_hints(
+            tool_calls,
+            method_catalogue=method_catalogue,
+        )
+        allowed_follow_up_tool_names = self._extract_allowed_tool_follow_up_tool_names(
+            tool_invocations
+        )
+        effective_allowed_tool_names = set(allowed_tool_names or set())
+        effective_allowed_tool_names.update(allowed_follow_up_tool_names)
 
         for tool_call in tool_calls:
             tool_name = tool_call.get(self._TOOL_FIELD)
@@ -17422,7 +17676,10 @@ class InternalMCPChatOrchestrator:
                 tool_unavailable.append(tool_name)
                 errors.append(f"Tool '{tool_name}' is not available.")
                 continue
-            if allowed_tool_names and tool_name_key not in allowed_tool_names:
+            if (
+                effective_allowed_tool_names
+                and tool_name_key not in effective_allowed_tool_names
+            ):
                 tool_unavailable.append(tool_name)
                 errors.append(
                     f"Tool '{tool_name}' is not allowed for this workflow step."
@@ -17434,6 +17691,24 @@ class InternalMCPChatOrchestrator:
                 continue
 
             schema = self._tool_schema_for_name(tool_name, method_catalogue)
+            if schema is not None:
+                _, alias_warnings = normalise_payload_aliases(schema, payload)
+                warnings.extend(
+                    [f"{tool_name}: {warning}" for warning in alias_warnings]
+                )
+                for field_name in schema.batch_propagated_fields:
+                    if not isinstance(field_name, str) or not field_name.strip():
+                        continue
+                    field_key = field_name.strip()
+                    if not self._tool_follow_up_value_is_missing(payload.get(field_key)):
+                        continue
+                    hinted_value = batch_field_hints.get((tool_name_key, field_key))
+                    if self._tool_follow_up_value_is_missing(hinted_value):
+                        continue
+                    payload[field_key] = hinted_value
+                    warnings.append(
+                        f"{tool_name}: Filled field '{field_key}' from another same-tool batch item."
+                    )
 
             self._apply_payload_defaults(
                 tool_name,
@@ -17477,6 +17752,68 @@ class InternalMCPChatOrchestrator:
                 errors.extend([f"{tool_name}: {error}" for error in validation_errors])
 
         return _ToolCallPreflightResult(tool_calls, errors, warnings, tool_unavailable)
+
+    @classmethod
+    def _extract_allowed_tool_follow_up_tool_names(
+        cls,
+        tool_invocations: Sequence[Mapping[str, Any]] | None,
+    ) -> set[str]:
+        allowed_tools: set[str] = set()
+        if not tool_invocations:
+            return allowed_tools
+        for invocation in tool_invocations:
+            if not isinstance(invocation, Mapping):
+                continue
+            if not cls._tool_invocation_completed_successfully(invocation):
+                continue
+            result_payload = invocation.get("effective_payload")
+            if not isinstance(result_payload, Mapping):
+                continue
+            follow_up = result_payload.get("_tool_follow_up")
+            if not isinstance(follow_up, Mapping):
+                continue
+            follow_up_tools = follow_up.get("follow_up_tools")
+            if not isinstance(follow_up_tools, list):
+                continue
+            for tool_spec in follow_up_tools:
+                if not isinstance(tool_spec, Mapping):
+                    continue
+                tool_name = tool_spec.get("tool")
+                if isinstance(tool_name, str) and tool_name.strip():
+                    allowed_tools.add(tool_name.strip().lower())
+        return allowed_tools
+
+    def _extract_batch_payload_field_hints(
+        self,
+        tool_calls: Sequence[Mapping[str, Any]],
+        *,
+        method_catalogue: Mapping[str, Any],
+    ) -> dict[tuple[str, str], Any]:
+        hints: dict[tuple[str, str], Any] = {}
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, Mapping):
+                continue
+            tool_name = tool_call.get(self._TOOL_FIELD)
+            if not isinstance(tool_name, str) or not tool_name.strip():
+                continue
+            tool_name_key = tool_name.strip().lower()
+            schema = self._tool_schema_for_name(tool_name.strip(), method_catalogue)
+            if schema is None or not schema.batch_propagated_fields:
+                continue
+            payload = tool_call.get(self._PAYLOAD_FIELD)
+            if not isinstance(payload, Mapping):
+                continue
+            normalised_payload = dict(payload)
+            normalise_payload_aliases(schema, normalised_payload)
+            for raw_field_name in schema.batch_propagated_fields:
+                if not isinstance(raw_field_name, str) or not raw_field_name.strip():
+                    continue
+                field_name = raw_field_name.strip()
+                value = normalised_payload.get(field_name)
+                if self._tool_follow_up_value_is_missing(value):
+                    continue
+                hints.setdefault((tool_name_key, field_name), value)
+        return hints
 
     def _apply_payload_defaults(
         self,
@@ -19580,6 +19917,56 @@ class InternalMCPChatOrchestrator:
             if value not in (None, [], {})
         }
 
+    @staticmethod
+    def _generic_llm_scalar(value: Any) -> Any:
+        if value is None or isinstance(value, (bool, int, float)):
+            return value
+        if isinstance(value, str):
+            return value.strip()
+        return None
+
+    @classmethod
+    def _shape_generic_nested_payload_for_llm(
+        cls,
+        payload: Mapping[str, Any],
+        *,
+        max_list_items: int = 12,
+    ) -> Mapping[str, Any]:
+        """Drop bulky nested raw payloads when useful top-level fields exist."""
+
+        nested_payload = payload.get("payload")
+        if not isinstance(nested_payload, (Mapping, list)):
+            return payload
+
+        compact: dict[str, Any] = {}
+        for key, value in payload.items():
+            if not isinstance(key, str) or key == "payload":
+                continue
+            scalar = cls._generic_llm_scalar(value)
+            if scalar is not None:
+                compact[key] = scalar
+                continue
+            if isinstance(value, list):
+                scalar_items = [
+                    item
+                    for item in (cls._generic_llm_scalar(row) for row in value)
+                    if item is not None
+                ]
+                if scalar_items:
+                    compact[key] = scalar_items[:max_list_items]
+                    if len(scalar_items) > max_list_items:
+                        compact[f"{key}_omitted_count"] = (
+                            len(scalar_items) - max_list_items
+                        )
+            elif isinstance(value, Mapping) and key.startswith("_"):
+                compact[key] = dict(value)
+
+        if len(compact) < 2:
+            return payload
+        compact["_omitted_nested_payload_keys"] = ["payload"]
+        compact["_llm_view"] = "generic_tool_payload_top_level_fields.v1"
+        return compact
+
     def _prepare_tool_payload_for_llm(self, tool_name: str, payload: Any) -> Any:
         if not isinstance(tool_name, str) or not isinstance(payload, Mapping):
             return payload
@@ -19602,7 +19989,7 @@ class InternalMCPChatOrchestrator:
             return self._shape_search_arxiv_payload_for_llm(payload)
         if tool_lower == "jira_search":
             return self._shape_jira_search_payload_for_llm(payload)
-        return payload
+        return self._shape_generic_nested_payload_for_llm(payload)
 
     @classmethod
     def _shape_search_web_payload_for_llm(
@@ -24319,6 +24706,198 @@ class InternalMCPChatOrchestrator:
             summaries.append(entry)
         return summaries
 
+    @staticmethod
+    def _tool_follow_up_value_is_missing(value: Any) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, str):
+            return not bool(value.strip())
+        if isinstance(value, (list, tuple, dict, set)):
+            return len(value) == 0
+        return False
+
+    @classmethod
+    def _tool_follow_up_item_needs_detail(
+        cls,
+        item: Mapping[str, Any],
+        required_missing_fields: Sequence[Any],
+    ) -> bool:
+        fields = [
+            str(field).strip()
+            for field in required_missing_fields
+            if isinstance(field, str) and str(field).strip()
+        ]
+        if not fields:
+            return True
+        return any(cls._tool_follow_up_value_is_missing(item.get(field)) for field in fields)
+
+    @staticmethod
+    def _resolve_tool_follow_up_binding_value(
+        *,
+        binding: Any,
+        item: Mapping[str, Any],
+        request_payload: Mapping[str, Any],
+    ) -> Any:
+        if isinstance(binding, str):
+            if binding.startswith("$item."):
+                return item.get(binding.removeprefix("$item."))
+            if binding.startswith("$request."):
+                return request_payload.get(binding.removeprefix("$request."))
+            return binding
+
+        if not isinstance(binding, Mapping):
+            return None
+
+        source = str(binding.get("source") or "").strip().lower()
+        field_name = binding.get("field")
+        if not isinstance(field_name, str) or not field_name.strip():
+            if source == "literal":
+                return binding.get("value")
+            return None
+        field_name = field_name.strip()
+        if source == "item":
+            return item.get(field_name)
+        if source == "request":
+            return request_payload.get(field_name)
+        if source == "literal":
+            return binding.get("value")
+        return None
+
+    @classmethod
+    def _extract_tool_follow_up_retry_tool_calls(
+        cls,
+        *,
+        missing_required_tools: Sequence[str],
+        tool_invocations: Sequence[Mapping[str, Any]] | None,
+        require_missing_tool_match: bool = True,
+    ) -> list[_ToolCallRequest] | None:
+        """Build follow-up calls from trusted tool-result binding metadata."""
+
+        missing_tool_lookup = {
+            str(tool_name).strip().lower()
+            for tool_name in (missing_required_tools or [])
+            if isinstance(tool_name, str) and str(tool_name).strip()
+        }
+        if require_missing_tool_match and not missing_tool_lookup:
+            return None
+        if not tool_invocations:
+            return None
+
+        existing_call_keys: set[str] = set()
+
+        def _call_key(tool_name: str, payload: Mapping[str, Any]) -> str:
+            try:
+                return json.dumps(
+                    {"tool": tool_name.strip().lower(), "payload": dict(payload)},
+                    sort_keys=True,
+                    default=str,
+                )
+            except Exception:
+                return f"{tool_name.strip().lower()}:{payload}"
+
+        for invocation in tool_invocations:
+            if not isinstance(invocation, Mapping):
+                continue
+            if not cls._tool_invocation_completed_successfully(invocation):
+                continue
+            raw_tool = invocation.get("tool")
+            if not isinstance(raw_tool, str) or not raw_tool.strip():
+                continue
+            request_payload = invocation.get("effective_arguments")
+            if not isinstance(request_payload, Mapping):
+                request_payload = invocation.get("payload")
+            if isinstance(request_payload, Mapping):
+                existing_call_keys.add(_call_key(raw_tool, request_payload))
+
+        forced_calls: list[_ToolCallRequest] = []
+        seen_call_keys = set(existing_call_keys)
+        for invocation in tool_invocations:
+            if not isinstance(invocation, Mapping):
+                continue
+            if not cls._tool_invocation_completed_successfully(invocation):
+                continue
+            result_payload = invocation.get("effective_payload")
+            if not isinstance(result_payload, Mapping):
+                continue
+            follow_up = result_payload.get("_tool_follow_up")
+            if not isinstance(follow_up, Mapping):
+                continue
+
+            item_array_field = follow_up.get("item_array_field")
+            if not isinstance(item_array_field, str) or not item_array_field.strip():
+                continue
+            raw_items = result_payload.get(item_array_field.strip())
+            if not isinstance(raw_items, list):
+                continue
+
+            request_payload = invocation.get("effective_arguments")
+            if not isinstance(request_payload, Mapping):
+                request_payload = invocation.get("payload")
+            if not isinstance(request_payload, Mapping):
+                request_payload = {}
+
+            required_missing_fields = (
+                follow_up.get("required_when_any_item_missing_fields") or ()
+            )
+            follow_up_tools = follow_up.get("follow_up_tools")
+            if not isinstance(follow_up_tools, list):
+                continue
+
+            for tool_spec in follow_up_tools:
+                if not isinstance(tool_spec, Mapping):
+                    continue
+                tool_name = tool_spec.get("tool")
+                if not isinstance(tool_name, str) or not tool_name.strip():
+                    continue
+                tool_name = tool_name.strip()
+                if missing_tool_lookup and tool_name.lower() not in missing_tool_lookup:
+                    continue
+                bindings = tool_spec.get("input_bindings")
+                if not isinstance(bindings, Mapping):
+                    continue
+
+                for raw_item in raw_items:
+                    if not isinstance(raw_item, Mapping):
+                        continue
+                    if not cls._tool_follow_up_item_needs_detail(
+                        raw_item,
+                        required_missing_fields
+                        if isinstance(required_missing_fields, Sequence)
+                        and not isinstance(required_missing_fields, (str, bytes))
+                        else (),
+                    ):
+                        continue
+                    payload: dict[str, Any] = {}
+                    incomplete_binding = False
+                    for param_name, binding in bindings.items():
+                        if not isinstance(param_name, str) or not param_name.strip():
+                            continue
+                        value = cls._resolve_tool_follow_up_binding_value(
+                            binding=binding,
+                            item=raw_item,
+                            request_payload=request_payload,
+                        )
+                        if cls._tool_follow_up_value_is_missing(value):
+                            incomplete_binding = True
+                            break
+                        payload[param_name.strip()] = value
+                    if incomplete_binding or not payload:
+                        continue
+                    key = _call_key(tool_name, payload)
+                    if key in seen_call_keys:
+                        continue
+                    seen_call_keys.add(key)
+                    forced_calls.append(
+                        {
+                            "action": "call_tool",
+                            "tool": tool_name,
+                            "payload": payload,
+                            "_retry_binding_source": "tool_follow_up_contract",
+                        }
+                    )
+
+        return forced_calls or None
+
     def _infer_required_prompt_tool_retry_tool_calls(
         self,
         *,
@@ -24485,9 +25064,22 @@ class InternalMCPChatOrchestrator:
         }
 
         forced_calls: list[_ToolCallRequest] = []
+        metadata_follow_up_calls = self._extract_tool_follow_up_retry_tool_calls(
+            missing_required_tools=missing_required_tools,
+            tool_invocations=tool_invocations,
+        )
+        if metadata_follow_up_calls:
+            forced_calls.extend(metadata_follow_up_calls)
+
         for tool_name in missing_required_tools:
             name = str(tool_name).strip()
             if not name:
+                continue
+            if any(
+                isinstance(call, Mapping)
+                and str(call.get("tool") or "").strip().lower() == name.lower()
+                for call in forced_calls
+            ):
                 continue
 
             has_dynamic_relation_filter = bool(

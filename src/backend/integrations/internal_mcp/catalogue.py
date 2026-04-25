@@ -19525,6 +19525,136 @@ def _rag_sync_text_relations(**kwargs):
 
 
 # Gmail MCP handlers (read-only surface)
+_GMAIL_DETAIL_FIELDS = ("sender", "subject", "date", "snippet")
+
+
+def _gmail_headers_to_mapping(payload: Mapping[str, Any]) -> dict[str, str]:
+    message_payload = payload.get("payload")
+    if not isinstance(message_payload, Mapping):
+        return {}
+    raw_headers = message_payload.get("headers")
+    if not isinstance(raw_headers, list):
+        return {}
+
+    headers: dict[str, str] = {}
+    for header in raw_headers:
+        if not isinstance(header, Mapping):
+            continue
+        name = header.get("name")
+        value = header.get("value")
+        if not isinstance(name, str) or not isinstance(value, str):
+            continue
+        headers[name.strip().lower()] = value
+    return headers
+
+
+def _normalise_gmail_message_detail_payload(result: Mapping[str, Any]) -> dict[str, Any]:
+    payload = dict(result)
+    message_id = payload.get("message_id") or payload.get("id")
+    if isinstance(message_id, str) and message_id.strip():
+        payload.setdefault("message_id", message_id.strip())
+
+    headers = _gmail_headers_to_mapping(payload)
+    if "from" in headers:
+        payload.setdefault("sender", headers["from"])
+        payload.setdefault("from", headers["from"])
+    if "subject" in headers:
+        payload.setdefault("subject", headers["subject"])
+    if "date" in headers:
+        payload.setdefault("date", headers["date"])
+    if isinstance(payload.get("snippet"), str):
+        payload.setdefault("snippet", payload["snippet"])
+    return payload
+
+
+def _annotate_gmail_list_messages_payload(
+    result: Mapping[str, Any],
+    *,
+    profile: str,
+) -> dict[str, Any]:
+    payload = dict(result)
+    raw_messages = payload.get("messages")
+    messages: list[Any] = []
+    if isinstance(raw_messages, list):
+        for item in raw_messages:
+            if not isinstance(item, Mapping):
+                messages.append(item)
+                continue
+            row = dict(item)
+            message_id = row.get("message_id") or row.get("id")
+            if isinstance(message_id, str) and message_id.strip():
+                row.setdefault("message_id", message_id.strip())
+            messages.append(row)
+        payload["messages"] = messages
+
+    payload["_tool_follow_up"] = {
+        "schema_version": "mcp_tool_follow_up.v1",
+        "source_tool": "gmail_list_messages",
+        "item_array_field": "messages",
+        "item_id_field": "message_id",
+        "required_when_any_item_missing_fields": list(_GMAIL_DETAIL_FIELDS),
+        "follow_up_tools": [
+            {
+                "tool": "gmail_get_message",
+                "description": (
+                    "Fetch sender, subject, date, snippet, headers, body metadata, "
+                    "or labels for one listed Gmail message."
+                ),
+                "input_bindings": {
+                    "profile": {"source": "request", "field": "profile"},
+                    "message_id": {"source": "item", "field": "message_id"},
+                },
+            }
+        ],
+    }
+    payload.setdefault("profile", profile)
+    return payload
+
+
+def _gmail_list_messages_output_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "messages": list,
+            "nextPageToken": str,
+            "resultSizeEstimate": int,
+            "profile": str,
+            "_tool_follow_up": dict,
+        },
+        allow_unknown=True,
+        description=(
+            "gmail_list_messages output: messages contain Gmail id/threadId and "
+            "a message_id alias. Use the _tool_follow_up contract with "
+            "gmail_get_message when per-message sender, subject, date, snippet, "
+            "or other message details are required."
+        ),
+    )
+
+
+def _gmail_get_message_output_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "id": str,
+            "message_id": str,
+            "threadId": str,
+            "labelIds": list,
+            "snippet": str,
+            "payload": dict,
+            "sender": str,
+            "from": str,
+            "subject": str,
+            "date": str,
+        },
+        allow_unknown=True,
+        description=(
+            "gmail_get_message output: full Gmail message payload plus normalised "
+            "message_id, sender/from, subject, date, and snippet fields when "
+            "available."
+        ),
+    )
+
+
 def _gmail_list_messages(**kwargs):
     from ...integrations.google import gmail_service as gs
 
@@ -19541,7 +19671,7 @@ def _gmail_list_messages(**kwargs):
         max_results = kwargs.get("max_results")
         if max_results is None:
             max_results = kwargs.get("maxResults")
-        return gs.list_messages(
+        result = gs.list_messages(
             profile_id=profile,
             query=kwargs.get("query"),
             label_ids=kwargs.get("label_ids"),
@@ -19552,6 +19682,7 @@ def _gmail_list_messages(**kwargs):
                 "tool": "gmail_list_messages",
             },
         )
+        return _annotate_gmail_list_messages_payload(result, profile=str(profile))
     except Exception as exc:  # noqa: BLE001
         return make_error_response(
             "gmail_api_error",
@@ -19575,7 +19706,7 @@ def _gmail_get_message(**kwargs):
         )
 
     try:
-        return gs.get_message(
+        result = gs.get_message(
             profile_id=profile,
             message_id=message_id,
             format=kwargs.get("format", "metadata"),
@@ -19585,6 +19716,7 @@ def _gmail_get_message(**kwargs):
                 "tool": "gmail_get_message",
             },
         )
+        return _normalise_gmail_message_detail_payload(result)
     except Exception as exc:  # noqa: BLE001
         return make_error_response(
             "gmail_api_error",
@@ -26747,12 +26879,27 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
         },
         allow_unknown=False,
         description="List Gmail messages for a profile with optional query/labels (read-only).",
+        aliases={
+            "profile_id": "profile",
+            "identity": "profile",
+            "user_id": "profile",
+            "q": "query",
+        },
+        batch_propagated_fields=("profile",),
     )
     gmail_get_message_input_schema = Schema(
         required={"profile": str, "message_id": str},
         optional={"format": str},
         allow_unknown=False,
         description="Fetch a Gmail message for a profile (formats: metadata|full|raw|minimal).",
+        aliases={
+            "profile_id": "profile",
+            "identity": "profile",
+            "user_id": "profile",
+            "id": "message_id",
+            "messageId": "message_id",
+        },
+        batch_propagated_fields=("profile",),
     )
     gmail_get_attachment_input_schema = Schema(
         required={"profile": str, "message_id": str, "attachment_id": str},
@@ -27135,29 +27282,32 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             name="gmail_list_messages",
             handler=_gmail_list_messages,
             input_schema=gmail_list_messages_input_schema,
-            output_schema=Schema(
-                required={},
-                optional={},
-                allow_unknown=True,
-                description="Gmail API list response",
-            ),
+            output_schema=_gmail_list_messages_output_schema(),
             category="read",
             timeout_sec=20.0,
-            description="List Gmail messages for a profile with optional query and label filters. Read-only; relies on pre-provisioned tokens per profile.",
+            description=(
+                "List Gmail messages for a profile with optional query and label "
+                "filters. Returned rows include a message_id alias for Gmail's "
+                "id. Use gmail_get_message with profile and message_id to fetch "
+                "sender, subject, date, snippet, headers, and other per-message "
+                "details when the list response lacks them. Read-only; relies on "
+                "pre-provisioned tokens per profile."
+            ),
         ),
         MethodDefinition(
             name="gmail_get_message",
             handler=_gmail_get_message,
             input_schema=gmail_get_message_input_schema,
-            output_schema=Schema(
-                required={},
-                optional={},
-                allow_unknown=True,
-                description="Gmail API message response",
-            ),
+            output_schema=_gmail_get_message_output_schema(),
             category="read",
             timeout_sec=20.0,
-            description="Fetch a Gmail message for a profile. Supports Gmail API formats metadata|full|raw|minimal. Read-only; profile token required.",
+            description=(
+                "Fetch a Gmail message for a profile using message_id from "
+                "gmail_list_messages. Supports Gmail API formats "
+                "metadata|full|raw|minimal and returns normalised sender, "
+                "subject, date, and snippet fields when available. Read-only; "
+                "profile token required."
+            ),
         ),
         MethodDefinition(
             name="gmail_get_attachment",

@@ -16,6 +16,8 @@ from src.backend.integrations.internal_mcp.gateway import (
 from src.backend.integrations.internal_mcp.schemas import (
     Schema,
     coerce_payload_types,
+    normalise_payload_aliases,
+    schema_to_json_schema,
     validate_payload,
 )
 from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
@@ -132,6 +134,57 @@ def test_gateway_invoke_coerces_numeric_strings_without_mutating_caller_payload(
     assert result.payload["top_k"] == 10
 
 
+def test_schema_aliases_are_normalised_without_mutating_unrelated_fields() -> None:
+    schema = Schema(
+        required={"profile": str},
+        optional={"query": str},
+        aliases={"identity": "profile", "q": "query"},
+    )
+    payload = {"identity": "zhan-gmail", "q": "in:inbox", "max_results": 10}
+
+    normalised, warnings = normalise_payload_aliases(schema, payload)
+
+    assert normalised is payload
+    assert normalised == {
+        "profile": "zhan-gmail",
+        "query": "in:inbox",
+        "max_results": 10,
+    }
+    assert len(warnings) == 2
+
+
+def test_schema_metadata_round_trips_to_json_schema_extensions() -> None:
+    schema = Schema(
+        required={"profile": str},
+        optional={"query": str},
+        aliases={"identity": "profile"},
+        batch_propagated_fields=("profile",),
+    )
+
+    json_schema = schema_to_json_schema(schema)
+
+    assert json_schema["x-von-argument-aliases"] == {"identity": "profile"}
+    assert json_schema["x-von-batch-propagated-fields"] == ["profile"]
+
+
+def test_orchestrator_schema_conversion_preserves_tool_argument_metadata() -> None:
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, object()))
+
+    json_schema = orchestrator._mcp_schema_to_json_schema(
+        {
+            "required": {"profile": str},
+            "optional": {"query": str},
+            "description": "List records.",
+            "aliases": {"identity": "profile"},
+            "batch_propagated_fields": ["profile"],
+        }
+    )
+
+    assert json_schema["description"] == "List records."
+    assert json_schema["x-von-argument-aliases"] == {"identity": "profile"}
+    assert json_schema["x-von-batch-propagated-fields"] == ["profile"]
+
+
 def test_tool_schema_lookup_accepts_json_schema_metadata() -> None:
     """Tool-call preflight should understand JSON Schema-shaped metadata too."""
 
@@ -149,6 +202,8 @@ def test_tool_schema_lookup_accepts_json_schema_metadata() -> None:
                         },
                         "required": ["user_concept_id"],
                         "description": "Grounded current-user paper lookup.",
+                        "x-von-argument-aliases": {"user_id": "user_concept_id"},
+                        "x-von-batch-propagated-fields": ["user_concept_id"],
                     }
                 }
             }
@@ -164,9 +219,191 @@ def test_tool_schema_lookup_accepts_json_schema_metadata() -> None:
     assert schema is not None
     assert schema.required["user_concept_id"] is str
     assert schema.optional["top_k"] is int
+    assert schema.aliases == {"user_id": "user_concept_id"}
+    assert tuple(schema.batch_propagated_fields) == ("user_concept_id",)
     ok, errors = validate_payload(
         schema,
         {"user_concept_id": "#V#test_user", "top_k": 3},
     )
     assert ok is True
     assert errors == []
+
+
+def test_tool_call_preflight_applies_generic_aliases_and_batch_hints() -> None:
+    class _AliasGateway:
+        enabled = True
+
+        def describe_methods(self) -> dict[str, object]:
+            return {
+                "lookup_documents": {
+                    "input_schema": {
+                        "required": ["workspace_id", "query"],
+                        "optional": {"limit": int},
+                        "aliases": {"space": "workspace_id", "q": "query"},
+                        "batch_propagated_fields": ["workspace_id"],
+                    }
+                }
+            }
+
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _AliasGateway()))
+    tool_calls = orchestrator._extract_tool_calls(
+        (
+            '{"action":"call_tool","tool":"lookup_documents",'
+            '"payload":{"space":"lab","q":"workflow"}}\n'
+            '{"action":"call_tool","tool":"lookup_documents",'
+            '"payload":{"q":"telemetry","limit":5}}'
+        )
+    )
+
+    preflight = orchestrator._preflight_tool_calls(
+        tool_calls or [],
+        orchestrator._gateway.describe_methods(),
+        allowed_tool_names=None,
+        user_namespace=None,
+        selected_gmail_profile=None,
+    )
+
+    assert preflight.errors == []
+    assert tool_calls is not None
+    assert [dict(call["payload"]) for call in tool_calls] == [
+        {"workspace_id": "lab", "query": "workflow"},
+        {"workspace_id": "lab", "query": "telemetry", "limit": 5},
+    ]
+
+
+def test_tool_call_preflight_allows_declared_follow_up_tools() -> None:
+    class _FollowUpGateway:
+        enabled = True
+
+        def describe_methods(self) -> dict[str, object]:
+            return {
+                "list_documents": {
+                    "input_schema": {
+                        "required": ["workspace_id"],
+                        "optional": {},
+                    }
+                },
+                "get_document": {
+                    "input_schema": {
+                        "required": ["workspace_id", "document_id"],
+                        "optional": {},
+                    }
+                },
+            }
+
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _FollowUpGateway()))
+    tool_calls = orchestrator._extract_tool_calls(
+        (
+            '{"action":"call_tool","tool":"get_document",'
+            '"payload":{"workspace_id":"lab","document_id":"doc-1"}}'
+        )
+    )
+
+    preflight = orchestrator._preflight_tool_calls(
+        tool_calls or [],
+        orchestrator._gateway.describe_methods(),
+        allowed_tool_names={"list_documents"},
+        user_namespace=None,
+        selected_gmail_profile=None,
+        tool_invocations=[
+            {
+                "tool": "list_documents",
+                "status": "ok",
+                "effective_payload": {
+                    "documents": [{"document_id": "doc-1"}],
+                    "_tool_follow_up": {
+                        "schema_version": "mcp_tool_follow_up.v1",
+                        "item_array_field": "documents",
+                        "follow_up_tools": [
+                            {
+                                "tool": "get_document",
+                                "input_bindings": {
+                                    "workspace_id": {
+                                        "source": "request",
+                                        "field": "workspace_id",
+                                    },
+                                    "document_id": {
+                                        "source": "item",
+                                        "field": "document_id",
+                                    },
+                                },
+                            }
+                        ],
+                    },
+                },
+            }
+        ],
+    )
+
+    assert preflight.errors == []
+
+
+def test_tool_result_formatting_keeps_top_level_fields_over_raw_nested_payload() -> None:
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, object()))
+    payload = {
+        "id": "msg-1",
+        "message_id": "msg-1",
+        "sender": "sender@example.test",
+        "subject": "Subject line",
+        "date": "Sat, 25 Apr 2026 09:00:00 +0000",
+        "snippet": "Short snippet",
+        "payload": {
+            "headers": [
+                {
+                    "name": "Large-Raw-Header",
+                    "value": "x" * 50_000,
+                }
+            ]
+        },
+    }
+
+    formatted = orchestrator._format_tool_result(
+        "detail_tool",
+        payload,
+        duration_ms=1.0,
+        status="ok",
+    )
+    result = json.loads(formatted)
+
+    assert result["payload"]["_llm_view"] == (
+        "generic_tool_payload_top_level_fields.v1"
+    )
+    assert result["payload"]["message_id"] == "msg-1"
+    assert result["payload"]["subject"] == "Subject line"
+    assert result["payload"]["_omitted_nested_payload_keys"] == ["payload"]
+    assert "Large-Raw-Header" not in formatted
+
+
+def test_follow_up_context_keeps_many_recent_tool_messages() -> None:
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, object()))
+    messages: list[dict[str, str]] = [{"role": "user", "content": "Need records."}]
+    for index in range(10):
+        messages.append(
+            {
+                "role": "assistant",
+                "content": f"Tool call batch {index}",
+            }
+        )
+        messages.append(
+            {
+                "role": "tool",
+                "content": json.dumps(
+                    {
+                        "tool": "detail_tool",
+                        "payload": {"message_id": f"msg-{index}"},
+                    }
+                ),
+            }
+        )
+
+    compacted = orchestrator._build_follow_up_llm_context(
+        messages,
+        max_chars=40_000,
+    )
+
+    retained_tool_ids = [
+        json.loads(str(message["content"]))["payload"]["message_id"]
+        for message in compacted
+        if message.get("role") == "tool"
+    ]
+    assert retained_tool_ids == [f"msg-{index}" for index in range(10)]

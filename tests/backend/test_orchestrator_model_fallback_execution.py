@@ -1419,3 +1419,106 @@ def test_tool_calling_backfill_prioritises_positive_evidence_over_zero_result_su
     )
     assert "Treat zero-result notes as query-specific misses only." in context_text
     assert "Example Record via #V#linked_to_user -> Test User" in context_text
+
+
+def test_tool_calling_backfill_finalises_from_completed_results_when_tool_cap_reached(
+    monkeypatch,
+) -> None:
+    orchestrator = _bare_orchestrator()
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_follow_up_llm_context",
+        lambda context, max_chars=40_000: list(context),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_turn_expected_outcome_stage_messages",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_tool_follow_up_stage_messages",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_selected_workflow_policy_memory_stage_messages",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_stage_llm_context",
+        lambda **kwargs: (
+            list(kwargs.get("base_context") or []),
+            {"stage": "summariser"},
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_attach_memory_context_lineage",
+        lambda *_args, **_kwargs: None,
+    )
+
+    prompts: list[str] = []
+
+    def _run_llm_with_fallbacks(**kwargs: Any) -> tuple[str, str | None, None]:
+        prompt = str(kwargs.get("prompt") or "")
+        prompts.append(prompt)
+        if "tool invocation budget" in prompt:
+            return (
+                "Partial final answer grounded in the completed tool results.",
+                kwargs.get("default_model"),
+                None,
+            )
+        return (
+            '{"action":"call_tool","tool":"fetch_more","payload":{"id":"next"}}',
+            kwargs.get("default_model"),
+            None,
+        )
+
+    monkeypatch.setattr(orchestrator, "_run_llm_with_fallbacks", _run_llm_with_fallbacks)
+
+    progress_events: list[Mapping[str, Any]] = []
+    request = SimpleNamespace(
+        data={
+            "augmented_context": [
+                {"role": "user", "content": "List the records."},
+                {"role": "tool", "content": '{"tool":"list_records","status":"ok"}'},
+            ],
+            "policy_state": None,
+            "registry_snapshot": None,
+            "user_concept_id": "#V#test_user",
+            "org_concept_id": "#V#test_org",
+            "model_for_stage": lambda _stage: "gpt-test",
+            "record_llm_call": lambda **_kwargs: None,
+            "aux_llm_calls": [],
+            "llm_calls": [],
+            "iteration_count": 8,
+            "remaining_tool_calls": [],
+            "invocations": [{"tool": "list_records", "status": "ok"}],
+            "method_catalogue": {},
+            "prompt": "List the records.",
+            "prompt_for_requirements": "List the records.",
+            "emit_progress": progress_events.append,
+        },
+        environment=SimpleNamespace(
+            llm_client=object(),
+            model="gpt-test",
+            max_tool_invocations=8,
+        ),
+    )
+
+    result = orchestrator._action_tool_calling_backfill(request)
+
+    assert result.outputs["final_response"] == (
+        "Partial final answer grounded in the completed tool results."
+    )
+    assert len(prompts) == 2
+    assert any(event.get("status") == "tool_limit_reached" for event in progress_events)
+    aux_entries = [
+        entry
+        for entry in request.data["aux_llm_calls"]
+        if isinstance(entry, Mapping)
+        and entry.get("type") == "tool_limit_finalisation"
+    ]
+    assert aux_entries

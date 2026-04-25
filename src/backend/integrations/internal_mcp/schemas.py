@@ -17,6 +17,7 @@ from typing import (
     Mapping,
     MutableMapping,
     Optional,
+    Sequence,
     Tuple,
     Union,
 )
@@ -139,6 +140,8 @@ class Schema:
     optional: Mapping[str, JsonCompatibleType] = field(default_factory=dict)
     allow_unknown: bool = False
     description: str | None = None
+    aliases: Mapping[str, str] = field(default_factory=dict)
+    batch_propagated_fields: Sequence[str] = field(default_factory=tuple)
 
     def expect(self, key: str) -> JsonCompatibleType | None:
         if key in self.required:
@@ -228,7 +231,56 @@ def schema_to_json_schema(schema: "Schema") -> Dict[str, Any]:
         payload["additionalProperties"] = True
     if isinstance(schema.description, str) and schema.description.strip():
         payload["description"] = schema.description.strip()
+    if schema.aliases:
+        payload["x-von-argument-aliases"] = dict(schema.aliases)
+    if schema.batch_propagated_fields:
+        payload["x-von-batch-propagated-fields"] = [
+            field_name
+            for field_name in schema.batch_propagated_fields
+            if isinstance(field_name, str) and field_name.strip()
+        ]
     return payload
+
+
+def normalise_payload_aliases(
+    schema: Schema, payload: MutableMapping[str, Any]
+) -> Tuple[MutableMapping[str, Any], list[str]]:
+    """Map declared schema aliases onto canonical argument names."""
+
+    warnings: list[str] = []
+    if not schema.aliases:
+        return payload, warnings
+
+    for alias_name, canonical_name in schema.aliases.items():
+        if not isinstance(alias_name, str) or not alias_name.strip():
+            continue
+        if not isinstance(canonical_name, str) or not canonical_name.strip():
+            continue
+        alias_key = alias_name.strip()
+        canonical_key = canonical_name.strip()
+        if alias_key not in payload:
+            continue
+        alias_value = payload.pop(alias_key)
+        canonical_value = payload.get(canonical_key)
+        canonical_missing = (
+            canonical_key not in payload
+            or canonical_value is None
+            or (
+                isinstance(canonical_value, str)
+                and not canonical_value.strip()
+            )
+        )
+        if canonical_missing:
+            payload[canonical_key] = alias_value
+            warnings.append(
+                f"Mapped alias field '{alias_key}' to canonical field '{canonical_key}'."
+            )
+        else:
+            warnings.append(
+                f"Dropped alias field '{alias_key}' because canonical field '{canonical_key}' was already present."
+            )
+
+    return payload, warnings
 
 
 def validate_payload(
