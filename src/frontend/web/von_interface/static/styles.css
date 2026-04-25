@@ -7817,6 +7817,7 @@ footer {
 .thinking-card-header {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 8px;
     padding: 10px 14px;
     background: linear-gradient(to right, #eef2ff, #f8fafc);
@@ -7866,6 +7867,56 @@ footer {
     margin-left: auto;
     white-space: nowrap;
     flex-shrink: 0;
+}
+
+.thinking-card-mode-switch {
+    display: inline-flex;
+    align-items: center;
+    overflow: hidden;
+    border: 1px solid #cbd5e1;
+    border-radius: 7px;
+    background: #ffffff;
+    flex-shrink: 0;
+}
+
+.thinking-card-mode-button {
+    display: none;
+    min-height: 22px;
+    padding: 2px 7px;
+    border: 0;
+    border-right: 1px solid #e2e8f0;
+    background: transparent;
+    color: #475569;
+    font-size: 0.68rem;
+    font-weight: 500;
+    line-height: 1.1;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.thinking-card-mode-button:last-child {
+    border-right: 0;
+}
+
+.thinking-card-mode-button[aria-hidden="false"] {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.thinking-card-mode-button:hover {
+    background: #f8fafc;
+}
+
+.thinking-card-mode-button:focus-visible {
+    outline: 2px solid #93c5fd;
+    outline-offset: -2px;
+}
+
+.thinking-card-mode-button.is-active,
+.thinking-card-mode-button[aria-pressed="true"] {
+    background: #dbeafe;
+    color: #1e40af;
 }
 
 .thinking-card-status {

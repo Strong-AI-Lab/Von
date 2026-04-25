@@ -88,6 +88,14 @@
           <span class="thinking-card-phase loading-indicator-text" data-thinking-role="phase">Thinking...</span>
           <span id="thinkingCardStatusBadge" class="thinking-card-status active" data-thinking-role="status" aria-hidden="true">Active</span>
           <span class="thinking-card-meta" id="thinkingCardMeta" data-thinking-role="meta"></span>
+          <div class="thinking-card-mode-switch" role="group" aria-label="Thinking detail mode">
+            <button class="thinking-card-mode-button is-active" type="button" data-thinking-role="mode"
+              data-thinking-mode="default" aria-hidden="true" aria-pressed="true" title="Default thinking details">Default</button>
+            <button class="thinking-card-mode-button" type="button" data-thinking-role="mode"
+              data-thinking-mode="expert" aria-hidden="true" aria-pressed="false" title="Expert thinking details">Expert</button>
+            <button class="thinking-card-mode-button" type="button" data-thinking-role="mode"
+              data-thinking-mode="debug" aria-hidden="true" aria-pressed="false" title="Debug thinking details">Debug</button>
+          </div>
           <button id="thinkingCardToggleButton" class="btn thinking-card-action thinking-card-toggle" type="button"
             data-thinking-role="toggle" aria-hidden="true" aria-expanded="true" aria-controls="loadingIndicatorDetail"
             aria-label="Collapse thinking details" title="Collapse thinking details">

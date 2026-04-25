@@ -45,6 +45,7 @@ import {
     __testOnly_reduceThinkingCardDisplayState,
     __testOnly_copyActiveThinkingDiagnostics,
     __testOnly_shouldAcceptThinkingProgressUpdate,
+    __testOnly_getThinkingProgressPollFetchTimeoutMs,
     __testOnly_setThinkingCardRequests,
     __testOnly_setThinkingState,
     __testOnly_normaliseThinkingActivityHistory,
@@ -2331,6 +2332,7 @@ describe('thinking activity history normalisation', () => {
     test('surfaces live prepared and sent LLM request previews in stage diagnostics', () => {
         const request = {
             clientRequestId: 'req-live-llm',
+            thinkingCardMode: 'debug',
             promptRaw: 'tell me about the current user',
             latestProgress: {
                 status: 'llm_call_start',
@@ -2411,6 +2413,7 @@ describe('thinking activity history normalisation', () => {
     test('renders expected-outcome and selector stages with context-lineage diagnostics', () => {
         const request = {
             clientRequestId: 'req-1888',
+            thinkingCardMode: 'debug',
             promptRaw: 'What papers of mine do you know about?',
             latestProgress: {
                 status: 'llm_call_start',
@@ -2552,6 +2555,92 @@ describe('thinking activity history normalisation', () => {
         expect(html).toContain('Expected answer contract for this turn:');
     });
 
+    test('separates default, expert, and debug thinking-card detail modes', () => {
+        const createModeRequest = (mode) => ({
+            thinkingCardMode: mode,
+            clientRequestId: 'req-modes',
+            promptRaw: 'Find the relevant workflow and explain the route.',
+            latestProgress: {
+                status: 'llm_call_start',
+                phase: 'selector_decision',
+                stage: 'selector_decision',
+                selected_workflow_id: '#V#tool_calling_workflow',
+                selected_workflow_name: 'Tool calling workflow',
+                workflow_selector_verdict: 'tool_seeking',
+                workflow_selector_source: 'selector',
+                workflow_match_count: 1,
+                workflow_candidate_count: 2,
+                model: 'gpt-5-mini',
+                provider: 'openai',
+                fallback_attempt_no: 2,
+                fallback_candidate_count: 3,
+                llm_request_state: 'sent',
+                llm_request: {
+                    prompt: {
+                        text: 'Select a workflow using represented workflow metadata.',
+                        char_count: 54
+                    },
+                    context_summary: {
+                        message_count: 4,
+                        total_content_chars: 320
+                    },
+                    context_lineage: {
+                        base_context_source: 'augmented_context',
+                        stage_added_message_count: 1
+                    }
+                }
+            },
+            workflowStagePath: {
+                path: [
+                    { stage_id: 'workflow_discovery', stage_label: 'Workflow discovery' },
+                    { stage_id: 'selector_decision', stage_label: 'Select workflow' }
+                ]
+            },
+            workflowDiscovery: {
+                match_count: 1,
+                candidate_count: 2,
+                candidates: [
+                    {
+                        concept_id: '#V#tool_calling_workflow',
+                        name: 'Tool calling workflow',
+                        relevance_score: 0.92
+                    }
+                ],
+                matches: [
+                    {
+                        concept_id: '#V#tool_calling_workflow',
+                        name: 'Tool calling workflow'
+                    }
+                ]
+            }
+        });
+
+        const defaultHtml = __testOnly_renderThinkingCardBodyHTML(createModeRequest('default'));
+        const defaultContainer = document.createElement('div');
+        defaultContainer.innerHTML = defaultHtml;
+        expect(defaultHtml).toContain('Select workflow');
+        expect(defaultContainer.textContent).toContain('Selected Tool calling workflow');
+        expect(defaultHtml).not.toContain('Stage id');
+        expect(defaultHtml).not.toContain('Prepared prompt preview');
+        expect(defaultHtml).not.toContain('Context lineage');
+
+        const expertHtml = __testOnly_renderThinkingCardBodyHTML(createModeRequest('expert'));
+        expect(expertHtml).toContain('Selected workflow');
+        expect(expertHtml).toContain('Selector verdict');
+        expect(expertHtml).toContain('LLM model');
+        expect(expertHtml).toContain('Fallback attempt');
+        expect(expertHtml).toContain('Workflow candidates');
+        expect(expertHtml).not.toContain('Prepared prompt preview');
+        expect(expertHtml).not.toContain('Context lineage');
+        expect(expertHtml).not.toContain('LLM provider');
+
+        const debugHtml = __testOnly_renderThinkingCardBodyHTML(createModeRequest('debug'));
+        expect(debugHtml).toContain('Stage id');
+        expect(debugHtml).toContain('Prepared prompt preview');
+        expect(debugHtml).toContain('Context lineage');
+        expect(debugHtml).toContain('LLM provider');
+    });
+
     test('renders preserved stage diagnostics when workflow stage path is absent', () => {
         const html = __testOnly_renderThinkingCardBodyHTML({
             latestProgress: {
@@ -2594,6 +2683,7 @@ describe('thinking activity history normalisation', () => {
 
     test('renders canonical workflow stages with selected workflow details', () => {
         const html = __testOnly_renderThinkingCardBodyHTML({
+            thinkingCardMode: 'debug',
             workflowStagePath: {
                 path: [
                     { stage_id: 'workflow_discovery', stage_label: 'Workflow discovery' },
@@ -2619,12 +2709,13 @@ describe('thinking activity history normalisation', () => {
             }
         });
 
+        const container = document.createElement('div');
+        container.innerHTML = html;
         expect(html).toContain('Workflow discovery');
-        // JVNAUTOSCI-1441: collapsible summary now uses plain text, not button HTML
-        expect(html).toContain('Found Tool calling workflow');
+        expect(container.textContent).toContain('Found Tool calling workflow');
         expect(html).toContain('Tool calling workflow (#V#tool_calling_workflow)');
         expect(html).toContain('Workflow dispatch');
-        expect(html).toContain('Selected Tool calling workflow');
+        expect(container.textContent).toContain('Selected Tool calling workflow');
         expect(html).toContain('Source: Selector');
         expect(html).toContain('thinking-card-concept-link');
         expect(html).toContain('data-concept-id="#V#tool_calling_workflow"');
@@ -2633,6 +2724,7 @@ describe('thinking activity history normalisation', () => {
 
     test('renders workflow dispatch preparation with object-centred pre-dispatch detail', () => {
         const html = __testOnly_renderThinkingCardBodyHTML({
+            thinkingCardMode: 'debug',
             workflowStagePath: {
                 path: [
                     { stage_id: 'workflow_dispatch_prepare', stage_label: 'Workflow dispatch preparation' }
@@ -2696,6 +2788,7 @@ describe('thinking activity history normalisation', () => {
 
     test('renders tool planning against the selected workflow instead of generic mechanism text', () => {
         const html = __testOnly_renderThinkingCardBodyHTML({
+            thinkingCardMode: 'debug',
             workflowStagePath: {
                 path: [
                     { stage_id: 'tool_plan', stage_label: 'Tool-call planning' }
@@ -2744,6 +2837,7 @@ describe('thinking activity history normalisation', () => {
 
     test('renders screen and narration backfill stages with source-aware summaries', () => {
         const html = __testOnly_renderThinkingCardBodyHTML({
+            thinkingCardMode: 'debug',
             workflowStagePath: {
                 path: [
                     { stage_id: 'screen_backfill', stage_label: 'Screen backfill' },
@@ -2802,6 +2896,7 @@ describe('thinking activity history normalisation', () => {
 
     test('renders postcondition critic and completion gate with unresolved outcome detail', () => {
         const html = __testOnly_renderThinkingCardBodyHTML({
+            thinkingCardMode: 'debug',
             workflowStagePath: {
                 path: [
                     { stage_id: 'postcondition_critic', stage_label: 'Postcondition critic' },
@@ -2851,6 +2946,7 @@ describe('thinking activity history normalisation', () => {
 
     test('explains discovery-to-dispatch routing when selector chooses a workflow after no direct match', () => {
         const html = __testOnly_renderThinkingCardBodyHTML({
+            thinkingCardMode: 'debug',
             workflowStagePath: {
                 path: [
                     { stage_id: 'workflow_discovery', stage_label: 'Workflow discovery' },
@@ -2933,6 +3029,7 @@ describe('thinking activity history normalisation', () => {
 
     test('preserves selected custom workflow identity through finalising render stages', () => {
         const html = __testOnly_renderThinkingCardBodyHTML({
+            thinkingCardMode: 'debug',
             workflowStagePath: {
                 workflow_id: '#V#chat_narration_workflow',
                 workflow_id_source: 'mapped_stage_consensus',
@@ -3064,6 +3161,7 @@ describe('thinking activity history normalisation', () => {
 
     test('renders explicit no-workflow-found state as a failure row', () => {
         const html = __testOnly_renderThinkingCardBodyHTML({
+            thinkingCardMode: 'debug',
             workflowStagePath: {
                 path: [
                     { stage_id: 'workflow_discovery', stage_label: 'Workflow discovery' }
@@ -3106,14 +3204,16 @@ describe('thinking activity history normalisation', () => {
             }
         });
 
-        // JVNAUTOSCI-1441: collapsible summary now uses plain text, not button HTML
-        expect(html).toContain('Found candidate Scholarly paper representation workflow');
+        const container = document.createElement('div');
+        container.innerHTML = html;
+        expect(container.textContent).toContain('Found candidate Scholarly paper representation workflow');
         expect(html).toContain('Scholarly paper representation workflow (#V#scholarly_paper_representation_workflow)');
         expect(html).toContain('thinking-card-tool-status success');
     });
 
     test('renders workflow discovery search trace and rejection reasons in expandable diagnostics', () => {
         const html = __testOnly_renderThinkingCardBodyHTML({
+            thinkingCardMode: 'debug',
             workflowStagePath: {
                 path: [
                     { stage_id: 'workflow_discovery', stage_label: 'Workflow discovery' }
@@ -3166,6 +3266,7 @@ describe('thinking activity history normalisation', () => {
 
     test('renders fallback activity rows as expandable diagnostics entries', () => {
         const html = __testOnly_renderThinkingCardBodyHTML({
+            thinkingCardMode: 'debug',
             activityHistory: [{
                 sequenceNo: 7,
                 label: 'Tool call failed: fetch_concept',
@@ -3187,6 +3288,7 @@ describe('thinking activity history normalisation', () => {
 
     test('renders workflow dispatch terminal failures as failure rows and preserves dispatch diagnostics in export', () => {
         const request = {
+            thinkingCardMode: 'debug',
             workflowStagePath: {
                 path: [
                     { stage_id: 'workflow_dispatch', stage_label: 'Workflow dispatch' }
@@ -3260,6 +3362,7 @@ describe('thinking activity history normalisation', () => {
     // native <details> toggle from working.
     test('collapsible diagnostic rows use plain text detail in summary instead of button HTML', () => {
         const html = __testOnly_renderThinkingCardBodyHTML({
+            thinkingCardMode: 'debug',
             workflowStagePath: {
                 path: [
                     { stage_id: 'workflow_discovery', stage_label: 'Workflow discovery' }
@@ -3363,6 +3466,22 @@ describe('thinking card meta telemetry', () => {
 });
 
 describe('thinking card toggle accessibility', () => {
+    function seedActiveThinkingCardSession(
+        sessionId = 'thinking-card-test-session',
+        sessionName = 'Thinking card test session'
+    ) {
+        __testOnly_setSessionTabsCache([
+            {
+                session_id: sessionId,
+                session_name: sessionName,
+                message_count: 0,
+                is_completed: false
+            }
+        ]);
+        __testOnly_setActiveChatSession(sessionId, sessionName);
+        __testOnly_setDisplayedHistorySession(sessionId);
+    }
+
     beforeEach(() => {
         document.body.innerHTML = `
             <div id="scrollableField"></div>
@@ -3372,6 +3491,11 @@ describe('thinking card toggle accessibility', () => {
                         <span class="thinking-card-phase loading-indicator-text" data-thinking-role="phase">Thinking...</span>
                         <span id="thinkingCardStatusBadge" class="thinking-card-status active" data-thinking-role="status" aria-hidden="true">Active</span>
                         <span class="thinking-card-meta" id="thinkingCardMeta" data-thinking-role="meta"></span>
+                        <div class="thinking-card-mode-switch" role="group" aria-label="Thinking detail mode">
+                            <button class="thinking-card-mode-button is-active" type="button" data-thinking-role="mode" data-thinking-mode="default" aria-hidden="true" aria-pressed="true">Default</button>
+                            <button class="thinking-card-mode-button" type="button" data-thinking-role="mode" data-thinking-mode="expert" aria-hidden="true" aria-pressed="false">Expert</button>
+                            <button class="thinking-card-mode-button" type="button" data-thinking-role="mode" data-thinking-mode="debug" aria-hidden="true" aria-pressed="false">Debug</button>
+                        </div>
                         <button id="thinkingCardToggleButton" type="button" data-thinking-role="toggle" aria-hidden="true" aria-expanded="true" aria-controls="loadingIndicatorDetail" aria-label="Collapse thinking details" title="Collapse thinking details">
                             <span class="thinking-card-toggle-icon" aria-hidden="true">⌄</span>
                             <span class="visually-hidden">Toggle thinking details</span>
@@ -3389,6 +3513,7 @@ describe('thinking card toggle accessibility', () => {
             <textarea id="promptInput"></textarea>
             <input type="checkbox" id="annotationToggle" />
         `;
+        seedActiveThinkingCardSession();
     });
 
     afterEach(() => {
@@ -3410,6 +3535,61 @@ describe('thinking card toggle accessibility', () => {
             sizeDecreaseButton: wrapper.querySelector('[data-thinking-role="size-decrease"]')
         };
     }
+
+    test('mode switch rerenders the active card without changing the request path', () => {
+        const request = {
+            thinkingStartedAtMs: Date.now() - 1000,
+            latestProgress: {
+                status: 'llm_call_start',
+                phase: 'selector_decision',
+                stage: 'selector_decision',
+                selected_workflow_id: '#V#tool_calling_workflow',
+                selected_workflow_name: 'Tool calling workflow',
+                workflow_selector_verdict: 'tool_seeking',
+                workflow_selector_source: 'selector',
+                model: 'gpt-5-mini',
+                provider: 'openai',
+                llm_request_state: 'sent',
+                llm_request: {
+                    prompt: {
+                        text: 'Select a workflow using represented workflow metadata.',
+                        char_count: 54
+                    }
+                }
+            },
+            workflowStagePath: {
+                path: [
+                    { stage_id: 'selector_decision', stage_label: 'Select workflow' }
+                ]
+            }
+        };
+
+        __testOnly_setThinkingCardRequests(request, null);
+        __testOnly_refreshThinkingCardProgressUi(request);
+        __testOnly_bindThinkingCardControls();
+
+        const detail = document.getElementById('loadingIndicatorDetail');
+        const defaultButton = document.querySelector('[data-thinking-mode="default"]');
+        const expertButton = document.querySelector('[data-thinking-mode="expert"]');
+        const debugButton = document.querySelector('[data-thinking-mode="debug"]');
+
+        expect(defaultButton.getAttribute('aria-pressed')).toBe('true');
+        expect(detail.textContent).toContain('Selected Tool calling workflow');
+        expect(detail.innerHTML).not.toContain('Prepared prompt preview');
+
+        expertButton.click();
+        expect(request.thinkingCardMode).toBe('expert');
+        expect(expertButton.getAttribute('aria-pressed')).toBe('true');
+        expect(detail.innerHTML).toContain('Selected workflow');
+        expect(detail.innerHTML).toContain('LLM model');
+        expect(detail.innerHTML).not.toContain('Prepared prompt preview');
+
+        debugButton.click();
+        expect(request.thinkingCardMode).toBe('debug');
+        expect(debugButton.getAttribute('aria-pressed')).toBe('true');
+        expect(detail.innerHTML).toContain('Prepared prompt preview');
+        expect(detail.innerHTML).toContain('LLM provider');
+    });
 
     test('keeps card expanded while active and disables collapse toggle', async () => {
         const { getUserContext } = require('../apiService.js');
@@ -3618,6 +3798,7 @@ describe('thinking card toggle accessibility', () => {
 
             const sendPromise = sendMessage();
             await Promise.resolve();
+            const progressPollTimeoutMs = __testOnly_getThinkingProgressPollFetchTimeoutMs();
 
             const indicatorText = document.querySelector('.loading-indicator-text');
             expect(indicatorText.textContent).toContain('Preparing response');
@@ -3634,17 +3815,17 @@ describe('thinking card toggle accessibility', () => {
             expect(document.getElementById('loadingIndicatorDetail').innerHTML)
                 .not.toContain('timed out after');
 
-            jest.advanceTimersByTime(3_000);
+            jest.advanceTimersByTime(progressPollTimeoutMs);
             await Promise.resolve();
             await Promise.resolve();
 
             expect(indicatorText.textContent).toContain('Still preparing response');
             expect(document.getElementById('loadingIndicatorDetail').innerHTML)
-                .toContain('have not arrived yet');
+                .toContain('remain delayed');
             expect(document.getElementById('loadingIndicatorDetail').innerHTML)
                 .not.toContain('timed out after');
 
-            jest.advanceTimersByTime(11_000);
+            jest.advanceTimersByTime(progressPollTimeoutMs);
             await Promise.resolve();
             await Promise.resolve();
 
@@ -4382,6 +4563,7 @@ describe('copy diagnostics button visibility on preserved finished card', () => 
 
         const copied = await __testOnly_copyActiveThinkingDiagnostics(copyBtn, {
             clientRequestId: 'request-1458',
+            thinkingCardMode: 'debug',
             promptRaw: 'diagnose this',
             thinkingStartedAtMs: Date.now() - 250,
             latestProgress: null,
@@ -4395,6 +4577,7 @@ describe('copy diagnostics button visibility on preserved finished card', () => 
         expect(copied).toBe(true);
         const copiedPayload = JSON.parse(writeText.mock.calls[0][0]);
         expect(copiedPayload.schema_version).toBe('thinking_diagnostics_snapshot.v1');
+        expect(copiedPayload.thinking_card_mode).toBe('debug');
         expect(copiedPayload.mcp_access).toEqual(expect.objectContaining({
             turn_execution_get_live_progress: expect.objectContaining({
                 tool_name: 'turn_execution_get_live_progress'
@@ -4453,6 +4636,7 @@ describe('copy diagnostics button visibility on preserved finished card', () => 
     test('diagnostics export snapshot uses the preserved finished card when no active request exists', () => {
         const finishedRequest = {
             clientRequestId: 'request-export',
+            thinkingCardMode: 'expert',
             promptRaw: 'diagnose this',
             thinkingStartedAtMs: Date.now() - 250,
             latestProgress: {
@@ -4476,8 +4660,10 @@ describe('copy diagnostics button visibility on preserved finished card', () => 
         const payload = __testOnly_buildDiagnosticsExportRequestPayload();
 
         expect(payload.capture_scope).toBe('current_diagnostic_snapshot');
+        expect(payload.thinking_card_mode).toBe('expert');
         expect(payload.diagnostics.active_thinking).toEqual(expect.objectContaining({
-            request_id: 'request-export'
+            request_id: 'request-export',
+            thinking_card_mode: 'expert'
         }));
     });
 });
@@ -4492,6 +4678,16 @@ describe('chat abort behaviour', () => {
             <textarea id="promptInput"></textarea>
             <input type="checkbox" id="annotationToggle" />
         `;
+        __testOnly_setSessionTabsCache([
+            {
+                session_id: 'chat-abort-test-session',
+                session_name: 'Chat abort test session',
+                message_count: 0,
+                is_completed: false
+            }
+        ]);
+        __testOnly_setActiveChatSession('chat-abort-test-session', 'Chat abort test session');
+        __testOnly_setDisplayedHistorySession('chat-abort-test-session');
     });
 
     afterEach(() => {
