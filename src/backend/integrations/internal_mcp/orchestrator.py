@@ -158,6 +158,7 @@ from src.backend.services.tool_metadata_service import (
     get_tool_metadata,
     get_tool_planner_hint,
     get_tool_salience,
+    get_tool_target_concept_binding_metadata,
     is_tool_inventory_only_evidence,
     is_tool_relation_bearing_evidence,
     is_tool_visible,
@@ -1352,6 +1353,8 @@ class _ToolCallRequest(TypedDict):
     tool: Required[str]
     payload: Required[MutableMapping[str, Any]]
     _call_id: NotRequired[str]
+    _retry_binding_source: NotRequired[str]
+    _retry_target_concept_source: NotRequired[str]
 
 
 @dataclass(frozen=True)
@@ -5188,6 +5191,10 @@ class InternalMCPChatOrchestrator:
         if forced:
             import json
 
+            retry_binding_sources = self._summarise_retry_tool_call_binding_sources(
+                forced
+            )
+            forced = self._strip_retry_tool_call_internal_metadata(forced)
             try:
                 aux_log.append(
                     annotate_python_decision_event(
@@ -5202,6 +5209,7 @@ class InternalMCPChatOrchestrator:
                             "retry_budget": retry_budget,
                             "retries_remaining": retries_remaining_after,
                             "response_preview": "(forced tool call)",
+                            "retry_binding_sources": retry_binding_sources,
                         },
                         stage="tool_recovery",
                         component="internal_mcp_orchestrator",
@@ -24189,6 +24197,128 @@ class InternalMCPChatOrchestrator:
         user_candidates = cls._extract_quoted_concept_name_candidates(user_text)
         return user_candidates[0] if user_candidates else None
 
+    @classmethod
+    def _resolve_retry_binding_target_concept_ids(
+        cls,
+        *,
+        target_concept_source: str,
+        target_concept_sources: Mapping[str, Sequence[str]],
+    ) -> list[str]:
+        source = str(target_concept_source or "").strip().lower()
+        source_precedence = {
+            "focal_concept": ("focal_concept",),
+            "focal_target_concept": ("focal_concept",),
+            "turn_expected_outcome.target_concept_ids": (
+                "turn_expected_outcome.target_concept_ids",
+            ),
+            "target_concept_ids": ("turn_expected_outcome.target_concept_ids",),
+            "contract_target_concept_ids": (
+                "turn_expected_outcome.target_concept_ids",
+            ),
+            "missing_required_fetch_concept_ids": (
+                "missing_required_fetch_concept_ids",
+            ),
+            "required_fetch_or_focal_concept": (
+                "missing_required_fetch_concept_ids",
+                "focal_concept",
+            ),
+            "authenticated_user_concept_id": ("authenticated_user_concept_id",),
+            "user_concept_id": ("authenticated_user_concept_id",),
+            "recent_resolved_concept_ids": ("recent_resolved_concept_ids",),
+            "ontology_follow_up_concept_ids": ("ontology_follow_up_concept_ids",),
+            "predicate_incidence_follow_up_concept_ids": (
+                "predicate_incidence_follow_up_concept_ids",
+            ),
+            "uncertainty_source_concept_ids": ("uncertainty_source_concept_ids",),
+        }
+        for source_key in source_precedence.get(source, (source,)):
+            values = target_concept_sources.get(source_key) or ()
+            resolved = cls._dedupe_preserving_order(
+                [
+                    str(value).strip()
+                    for value in values
+                    if isinstance(value, str) and str(value).strip()
+                ]
+            )
+            if resolved:
+                return resolved
+        return []
+
+    @classmethod
+    def _infer_metadata_bound_required_retry_tool_calls(
+        cls,
+        *,
+        tool_name: str,
+        target_concept_sources: Mapping[str, Sequence[str]],
+    ) -> list[_ToolCallRequest] | None:
+        binding = get_tool_target_concept_binding_metadata(tool_name)
+        if binding is None:
+            return None
+        target_ids = cls._resolve_retry_binding_target_concept_ids(
+            target_concept_source=binding.target_concept_source,
+            target_concept_sources=target_concept_sources,
+        )
+        if not target_ids:
+            return None
+        if binding.target_concept_max_count is not None:
+            target_ids = target_ids[: binding.target_concept_max_count]
+
+        forced_calls: list[_ToolCallRequest] = []
+        for target_id in target_ids:
+            payload: MutableMapping[str, Any] = dict(binding.default_payload)
+            payload[binding.target_concept_argument_name] = target_id
+            forced_calls.append(
+                {
+                    "action": "call_tool",
+                    "tool": tool_name,
+                    "payload": payload,
+                    "_retry_binding_source": "metadata_binding",
+                    "_retry_target_concept_source": binding.target_concept_source,
+                }
+            )
+        return forced_calls or None
+
+    @staticmethod
+    def _strip_retry_tool_call_internal_metadata(
+        tool_calls: Sequence[_ToolCallRequest],
+    ) -> list[_ToolCallRequest]:
+        public_calls: list[_ToolCallRequest] = []
+        for tool_call in tool_calls:
+            public_call: _ToolCallRequest = {
+                "action": str(tool_call.get("action") or "call_tool"),
+                "tool": str(tool_call.get("tool") or ""),
+                "payload": cast(
+                    MutableMapping[str, Any],
+                    dict(tool_call.get("payload") or {}),
+                ),
+            }
+            call_id = tool_call.get("_call_id")
+            if isinstance(call_id, str) and call_id:
+                public_call["_call_id"] = call_id
+            public_calls.append(public_call)
+        return public_calls
+
+    @staticmethod
+    def _summarise_retry_tool_call_binding_sources(
+        tool_calls: Sequence[_ToolCallRequest],
+    ) -> list[dict[str, Any]]:
+        summaries: list[dict[str, Any]] = []
+        for tool_call in tool_calls:
+            tool_name = tool_call.get("tool")
+            if not isinstance(tool_name, str) or not tool_name.strip():
+                continue
+            entry: dict[str, Any] = {
+                "tool": tool_name.strip(),
+                "binding_source": str(
+                    tool_call.get("_retry_binding_source") or "legacy_branch"
+                ),
+            }
+            target_source = tool_call.get("_retry_target_concept_source")
+            if isinstance(target_source, str) and target_source.strip():
+                entry["target_concept_source"] = target_source.strip()
+            summaries.append(entry)
+        return summaries
+
     def _infer_required_prompt_tool_retry_tool_calls(
         self,
         *,
@@ -24325,12 +24455,70 @@ class InternalMCPChatOrchestrator:
         uncertainty_source_concept_ids = (
             explicit_uncertainty_source_ids or fallback_uncertainty_source_ids
         )
+        explicit_focal_concept_ids = self._dedupe_preserving_order(
+            [
+                *contract_target_concept_ids,
+                *missing_required_fetch_concept_ids,
+            ]
+        )
+        fallback_focal_concept_ids = self._dedupe_preserving_order(
+            [
+                *predicate_incidence_follow_up_concept_ids,
+                *ontology_follow_up_concept_ids,
+                *([retry_actor_concept_id] if retry_actor_concept_id else []),
+            ]
+        )
+        focal_concept_ids = explicit_focal_concept_ids or fallback_focal_concept_ids
+        target_concept_sources: Mapping[str, Sequence[str]] = {
+            "turn_expected_outcome.target_concept_ids": contract_target_concept_ids,
+            "missing_required_fetch_concept_ids": missing_required_fetch_concept_ids,
+            "authenticated_user_concept_id": (
+                [retry_actor_concept_id] if retry_actor_concept_id else []
+            ),
+            "recent_resolved_concept_ids": resolved_follow_up_concept_ids,
+            "ontology_follow_up_concept_ids": ontology_follow_up_concept_ids,
+            "predicate_incidence_follow_up_concept_ids": (
+                predicate_incidence_follow_up_concept_ids
+            ),
+            "uncertainty_source_concept_ids": uncertainty_source_concept_ids,
+            "focal_concept": focal_concept_ids,
+        }
 
         forced_calls: list[_ToolCallRequest] = []
         for tool_name in missing_required_tools:
             name = str(tool_name).strip()
             if not name:
                 continue
+
+            has_dynamic_relation_filter = bool(
+                ontology_follow_up_predicate_ids
+                or predicate_incidence_follow_up_predicate_ids
+            )
+            only_actor_target_is_available = bool(retry_actor_concept_id) and not (
+                contract_target_concept_ids
+                or missing_required_fetch_concept_ids
+                or predicate_incidence_follow_up_concept_ids
+                or ontology_follow_up_concept_ids
+            )
+            skip_metadata_binding = (
+                name in {"get_predicate_incidence", "find_relations_with_argument"}
+                and pure_ontology_follow_up
+                and only_actor_target_is_available
+            ) or (
+                name == "find_relations_with_argument" and has_dynamic_relation_filter
+            )
+            if name == "get_predicate_incidence" and ontology_follow_up_predicate_ids:
+                skip_metadata_binding = True
+            if not skip_metadata_binding:
+                metadata_bound_calls = (
+                    self._infer_metadata_bound_required_retry_tool_calls(
+                        tool_name=name,
+                        target_concept_sources=target_concept_sources,
+                    )
+                )
+                if metadata_bound_calls:
+                    forced_calls.extend(metadata_bound_calls)
+                    continue
 
             if name in {"resilient_extract_url", "extract_url"}:
                 target_url = (
@@ -25256,8 +25444,37 @@ class InternalMCPChatOrchestrator:
         )
 
         primary_concept_id = concept_ids[0]
+        target_concept_sources: Mapping[str, Sequence[str]] = {
+            "focal_concept": concept_ids,
+            "recent_resolved_concept_ids": concept_ids,
+            "ontology_follow_up_concept_ids": concept_ids,
+            "predicate_incidence_follow_up_concept_ids": (),
+            "turn_expected_outcome.target_concept_ids": (),
+            "missing_required_fetch_concept_ids": (),
+            "authenticated_user_concept_id": (),
+            "uncertainty_source_concept_ids": concept_ids,
+        }
         forced_calls: list[_ToolCallRequest] = []
         for tool_name in missing_tools:
+            if tool_name in {
+                "get_predicate_incidence",
+                "find_relations_with_argument",
+                "fetch_concept",
+                "list_uncertain_relationship_assertions",
+            }:
+                if tool_name == "find_relations_with_argument" and (
+                    concept_ids_are_predicate_only
+                ):
+                    continue
+                metadata_bound_calls = (
+                    cls._infer_metadata_bound_required_retry_tool_calls(
+                        tool_name=tool_name,
+                        target_concept_sources=target_concept_sources,
+                    )
+                )
+                if metadata_bound_calls:
+                    forced_calls.extend(metadata_bound_calls)
+                    continue
             if tool_name == "get_predicate_incidence":
                 forced_calls.append(
                     {
@@ -25469,7 +25686,10 @@ class InternalMCPChatOrchestrator:
                 seen_calls: set[str] = set()
                 for tool_call in [*ontology_follow_up, *required_forced]:
                     try:
-                        key = json.dumps(tool_call, sort_keys=True, default=str)
+                        key_call = self._strip_retry_tool_call_internal_metadata(
+                            [tool_call]
+                        )[0]
+                        key = json.dumps(key_call, sort_keys=True, default=str)
                     except Exception:
                         key = str(tool_call)
                     if key in seen_calls:

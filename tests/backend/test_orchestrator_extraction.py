@@ -1081,6 +1081,8 @@ def test_infer_required_prompt_tool_retry_tool_calls_forces_uncertainty_evidence
                 "source_id": "#V#michael_witbrock",
                 "include_legacy": True,
             },
+            "_retry_binding_source": "metadata_binding",
+            "_retry_target_concept_source": "focal_concept",
         }
     ]
 
@@ -1101,6 +1103,170 @@ def test_infer_required_prompt_tool_retry_tool_calls_forces_fetch_from_authentic
             "action": "call_tool",
             "tool": "fetch_concept",
             "payload": {"concept_id": "#V#michael_witbrock"},
+            "_retry_binding_source": "metadata_binding",
+            "_retry_target_concept_source": "required_fetch_or_focal_concept",
+        }
+    ]
+
+
+def test_infer_required_prompt_tool_retry_tool_calls_binds_predicate_incidence_from_target():
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=_DummyGateway()  # type: ignore[arg-type]
+    )
+
+    forced_calls = orchestrator._infer_required_prompt_tool_retry_tool_calls(
+        user_text="Tell me about myself as represented here.",
+        turn_expected_outcome_contract={
+            "schema_version": "turn_expected_outcome_contract.v1",
+            "target_concept_ids": ["#V#michael_witbrock"],
+        },
+        missing_required_tools=["get_predicate_incidence"],
+        user_concept_id="#V#authenticated_user_should_not_win",
+    )
+
+    assert forced_calls == [
+        {
+            "action": "call_tool",
+            "tool": "get_predicate_incidence",
+            "payload": {"concept_id": "#V#michael_witbrock"},
+            "_retry_binding_source": "metadata_binding",
+            "_retry_target_concept_source": "focal_concept",
+        }
+    ]
+
+
+def test_infer_required_prompt_tool_retry_tool_calls_binds_relation_lookup_from_target():
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=_DummyGateway()  # type: ignore[arg-type]
+    )
+
+    forced_calls = orchestrator._infer_required_prompt_tool_retry_tool_calls(
+        user_text="Tell me about myself as represented here.",
+        turn_expected_outcome_contract={
+            "schema_version": "turn_expected_outcome_contract.v1",
+            "target_concept_ids": ["#V#michael_witbrock"],
+        },
+        missing_required_tools=["find_relations_with_argument"],
+        user_concept_id="#V#authenticated_user_should_not_win",
+    )
+
+    assert forced_calls == [
+        {
+            "action": "call_tool",
+            "tool": "find_relations_with_argument",
+            "payload": {"limit": 20, "concept_id": "#V#michael_witbrock"},
+            "_retry_binding_source": "metadata_binding",
+            "_retry_target_concept_source": "focal_concept",
+        }
+    ]
+
+
+def test_infer_required_prompt_tool_retry_tool_calls_binds_profile_summary_tools_from_target():
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=_DummyGateway()  # type: ignore[arg-type]
+    )
+
+    forced_calls = orchestrator._infer_required_prompt_tool_retry_tool_calls(
+        user_text="Tell me about myself as represented here.",
+        turn_expected_outcome_contract={
+            "schema_version": "turn_expected_outcome_contract.v1",
+            "target_concept_ids": ["#V#michael_witbrock"],
+        },
+        missing_required_tools=[
+            "get_related_concepts",
+            "get_text_relations_summary",
+        ],
+        user_concept_id="#V#authenticated_user_should_not_win",
+    )
+
+    assert forced_calls == [
+        {
+            "action": "call_tool",
+            "tool": "get_related_concepts",
+            "payload": {"concept_id": "#V#michael_witbrock"},
+            "_retry_binding_source": "metadata_binding",
+            "_retry_target_concept_source": "focal_concept",
+        },
+        {
+            "action": "call_tool",
+            "tool": "get_text_relations_summary",
+            "payload": {"concept_id": "#V#michael_witbrock"},
+            "_retry_binding_source": "metadata_binding",
+            "_retry_target_concept_source": "focal_concept",
+        },
+    ]
+
+
+def test_infer_required_prompt_tool_retry_tool_calls_does_not_bind_unknown_tool():
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=_DummyGateway()  # type: ignore[arg-type]
+    )
+
+    forced_calls = orchestrator._infer_required_prompt_tool_retry_tool_calls(
+        user_text="Tell me about myself as represented here.",
+        missing_required_tools=["tool_without_target_binding_metadata"],
+        user_concept_id="#V#michael_witbrock",
+    )
+
+    assert forced_calls is None
+
+
+def test_missing_tool_retry_records_metadata_binding_source_and_strips_tool_call():
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=_DummyGateway()  # type: ignore[arg-type]
+    )
+    aux_llm_calls: list[dict[str, Any]] = []
+    request = _make_workflow_action_request(
+        orchestrator,
+        llm_client=_RecorderLLM(["Proceeding now."]),
+        action_id="missing_tool_call.retry",
+        data={
+            "response_text": "Proceeding now.",
+            "user_prompt": "Tell me about myself as represented here.",
+            "augmented_context": [],
+            "missing_tool_call_assessment": {"path": "legacy"},
+            "missing_tool_call_retry_reason": "required evidence missing",
+            "missing_tool_call_retry_attempts": 0,
+            "missing_tool_call_retry_budget": 1,
+            "missing_prompt_tools": ["list_uncertain_relationship_assertions"],
+            "missing_prompt_fetch_concept_ids": [],
+            "missing_prompt_read_file_copy_ids": [],
+            "missing_prompt_scholarly_representation_for_file_copy_ids": [],
+            "required_prompt_create_type_name": None,
+            "required_url_extraction_url": None,
+            "turn_expected_outcome_contract": {
+                "schema_version": "turn_expected_outcome_contract.v1",
+                "target_concept_ids": ["#V#michael_witbrock"],
+            },
+            "user_concept_id": "#V#authenticated_user_should_not_win",
+            "extract_tool_calls_fn": orchestrator._extract_tool_calls,
+            "aux_llm_calls": aux_llm_calls,
+        },
+    )
+
+    result = orchestrator._action_missing_tool_call_retry(request)
+
+    assert result.outputs["missing_tool_call_retry_success"] is True
+    assert result.outputs["tool_calls"] == [
+        {
+            "action": "call_tool",
+            "tool": "list_uncertain_relationship_assertions",
+            "payload": {
+                "source_id": "#V#michael_witbrock",
+                "include_legacy": True,
+            },
+        }
+    ]
+    retry_event = next(
+        entry
+        for entry in aux_llm_calls
+        if entry.get("type") == "missing_tool_call_retry"
+    )
+    assert retry_event["retry_binding_sources"] == [
+        {
+            "tool": "list_uncertain_relationship_assertions",
+            "binding_source": "metadata_binding",
+            "target_concept_source": "focal_concept",
         }
     ]
 

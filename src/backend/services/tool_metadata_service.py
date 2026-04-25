@@ -17,8 +17,9 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from dataclasses import dataclass
-from typing import Any
+import json
+from dataclasses import dataclass, field
+from typing import Any, Mapping
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,10 @@ class ToolMetadata:
     operation_category: str | None = None
     evidence_role: str | None = None
     evidence_kind: str | None = None
+    target_concept_argument_name: str | None = None
+    target_concept_source: str | None = None
+    target_concept_max_count: int | None = None
+    default_payload: dict[str, Any] | None = None
     expose_in_vontology_stdio: bool | None = None
     expose_in_vonrag_stdio: bool | None = None
     expose_in_manifest: bool | None = None
@@ -84,6 +89,16 @@ class ToolSurfaceExposureMetadata:
     expose_in_vonrag_stdio: bool = False
     expose_in_manifest: bool = False
     expose_in_jira_family_server: bool = False
+
+
+@dataclass(frozen=True)
+class ToolTargetConceptBindingMetadata:
+    """Intrinsic focal-concept argument binding metadata for an MCP tool."""
+
+    target_concept_argument_name: str
+    target_concept_source: str = "focal_concept"
+    target_concept_max_count: int | None = None
+    default_payload: Mapping[str, Any] = field(default_factory=dict)
 
 
 _DEFAULT_DISPATCH_SURFACE_METADATA: dict[str, ToolDispatchSurfaceMetadata] = {
@@ -160,6 +175,10 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "operation_category": "read",
         "evidence_role": "verification",
         "evidence_kind": "relation_bearing",
+        "target_concept_argument_name": "source_id",
+        "target_concept_source": "focal_concept",
+        "target_concept_max_count": 2,
+        "default_payload": {"include_legacy": True},
     },
     "add_relationship": {
         "salience": "high",
@@ -566,6 +585,33 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "evidence_surface_family": "knowledge_base",
         "evidence_kind": "relation_bearing",
         "external_surface": False,
+        "target_concept_argument_name": "concept_id",
+        "target_concept_source": "focal_concept",
+        "target_concept_max_count": 2,
+    },
+    "fetch_concept": {
+        "salience": "medium",
+        "category": "vontology",
+        "display_template": "Loaded: {name}",
+        "dispatch_surface_family": "knowledge_base",
+        "evidence_surface_family": "knowledge_base",
+        "external_surface": False,
+        "target_concept_argument_name": "concept_id",
+        "target_concept_source": "required_fetch_or_focal_concept",
+        "target_concept_max_count": 5,
+    },
+    "find_relations_with_argument": {
+        "salience": "medium",
+        "category": "vontology",
+        "display_template": "{count} relation(s)",
+        "dispatch_surface_family": "knowledge_base",
+        "evidence_surface_family": "knowledge_base",
+        "evidence_kind": "relation_bearing",
+        "external_surface": False,
+        "target_concept_argument_name": "concept_id",
+        "target_concept_source": "focal_concept",
+        "target_concept_max_count": 2,
+        "default_payload": {"limit": 20},
     },
     "read_paper": {
         "salience": "medium",
@@ -693,11 +739,23 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "salience": "low",
         "category": "vontology",
         "display_template": "Summary",
+        "dispatch_surface_family": "knowledge_base",
+        "evidence_surface_family": "knowledge_base",
+        "external_surface": False,
+        "target_concept_argument_name": "concept_id",
+        "target_concept_source": "focal_concept",
+        "target_concept_max_count": 2,
     },
     "get_related_concepts": {
         "salience": "low",
         "category": "vontology",
         "display_template": "{count} related",
+        "dispatch_surface_family": "knowledge_base",
+        "evidence_surface_family": "knowledge_base",
+        "external_surface": False,
+        "target_concept_argument_name": "concept_id",
+        "target_concept_source": "focal_concept",
+        "target_concept_max_count": 2,
     },
     "get_predicate_extent": {
         "salience": "low",
@@ -1196,6 +1254,12 @@ def _load_from_vontology() -> dict[str, ToolMetadata]:
                 operation_category=attrs.get("operation_category"),
                 evidence_role=attrs.get("evidence_role"),
                 evidence_kind=attrs.get("evidence_kind"),
+                target_concept_argument_name=attrs.get("target_concept_argument_name"),
+                target_concept_source=attrs.get("target_concept_source"),
+                target_concept_max_count=_coerce_optional_positive_int(
+                    attrs.get("target_concept_max_count")
+                ),
+                default_payload=_coerce_optional_mapping(attrs.get("default_payload")),
                 expose_in_vontology_stdio=attrs.get("expose_in_vontology_stdio"),
                 expose_in_vonrag_stdio=attrs.get("expose_in_vonrag_stdio"),
                 expose_in_manifest=attrs.get("expose_in_manifest"),
@@ -1243,6 +1307,16 @@ def _refresh_cache_if_needed() -> None:
                 operation_category=defaults.get("operation_category"),
                 evidence_role=defaults.get("evidence_role"),
                 evidence_kind=defaults.get("evidence_kind"),
+                target_concept_argument_name=defaults.get(
+                    "target_concept_argument_name"
+                ),
+                target_concept_source=defaults.get("target_concept_source"),
+                target_concept_max_count=_coerce_optional_positive_int(
+                    defaults.get("target_concept_max_count")
+                ),
+                default_payload=_coerce_optional_mapping(
+                    defaults.get("default_payload")
+                ),
                 expose_in_vontology_stdio=defaults.get("expose_in_vontology_stdio"),
                 expose_in_vonrag_stdio=defaults.get("expose_in_vonrag_stdio"),
                 expose_in_manifest=defaults.get("expose_in_manifest"),
@@ -1287,6 +1361,23 @@ def _refresh_cache_if_needed() -> None:
                     or default_metadata.evidence_role,
                     evidence_kind=metadata.evidence_kind
                     or default_metadata.evidence_kind,
+                    target_concept_argument_name=(
+                        metadata.target_concept_argument_name
+                        or default_metadata.target_concept_argument_name
+                    ),
+                    target_concept_source=(
+                        metadata.target_concept_source
+                        or default_metadata.target_concept_source
+                    ),
+                    target_concept_max_count=(
+                        metadata.target_concept_max_count
+                        if metadata.target_concept_max_count is not None
+                        else default_metadata.target_concept_max_count
+                    ),
+                    default_payload=(
+                        _coerce_optional_mapping(metadata.default_payload)
+                        or _coerce_optional_mapping(default_metadata.default_payload)
+                    ),
                     expose_in_vontology_stdio=(
                         metadata.expose_in_vontology_stdio
                         if metadata.expose_in_vontology_stdio is not None
@@ -1452,6 +1543,69 @@ def _coerce_optional_bool(value: Any) -> bool | None:
         if lowered in {"false", "0", "no"}:
             return False
     return None
+
+
+def _coerce_optional_positive_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value > 0:
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.isdigit():
+            parsed = int(stripped)
+            return parsed if parsed > 0 else None
+    return None
+
+
+def _coerce_optional_mapping(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, Mapping):
+        return {str(key): item for key, item in value.items() if str(key)}
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(parsed, Mapping):
+            return {str(key): item for key, item in parsed.items() if str(key)}
+    return None
+
+
+def _normalise_target_concept_argument_name(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    if not stripped or any(character.isspace() for character in stripped):
+        return None
+    return stripped
+
+
+def _normalise_target_concept_source(value: Any) -> str:
+    if not isinstance(value, str):
+        return "focal_concept"
+    source = value.strip().lower()
+    return source or "focal_concept"
+
+
+def get_tool_target_concept_binding_metadata(
+    tool_name: str,
+) -> ToolTargetConceptBindingMetadata | None:
+    """Resolve intrinsic focal-concept binding metadata for a tool."""
+
+    metadata = get_tool_metadata(tool_name)
+    argument_name = _normalise_target_concept_argument_name(
+        metadata.target_concept_argument_name
+    )
+    if argument_name is None:
+        return None
+    return ToolTargetConceptBindingMetadata(
+        target_concept_argument_name=argument_name,
+        target_concept_source=_normalise_target_concept_source(
+            metadata.target_concept_source
+        ),
+        target_concept_max_count=metadata.target_concept_max_count,
+        default_payload=_coerce_optional_mapping(metadata.default_payload) or {},
+    )
 
 
 def get_tool_operation_category(
