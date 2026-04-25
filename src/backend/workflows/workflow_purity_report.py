@@ -120,6 +120,9 @@ ORCHESTRATOR_RETIRED_SUPPORT_SYMBOLS = {
     "_infer_guided_retrieval_retry_tool_calls": "retired_guided_retrieval_helper",
     "_build_guided_jira_search_jql": "retired_guided_retrieval_helper",
     "_extract_topic_keywords_from_context": "retired_topic_keyword_helper",
+    "_relation_grounding_requested_for_structured_planner": (
+        "retired_structured_planner_text_scan_symbol"
+    ),
 }
 ORCHESTRATOR_RETIRED_SUPPORT_SYMBOL_PATTERNS = {
     "retired_prompt_semantic_regex_symbol": re.compile(

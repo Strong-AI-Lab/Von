@@ -1156,8 +1156,8 @@ def test_structured_candidate_resolver_uses_required_tools_for_workflow_testing_
     assert len(resolution.candidate_tool_names) < 20
 
 
-def test_structured_candidate_resolver_uses_context_for_entity_relative_kb_tools():
-    """Relation-grounding context should narrow tools without prompt-keyword family hints."""
+def test_structured_candidate_resolver_uses_required_tools_for_entity_relative_kb_tools():
+    """Relation-grounding requirements should come from explicit contract tools."""
 
     from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
 
@@ -1175,6 +1175,84 @@ def test_structured_candidate_resolver_uses_context_for_entity_relative_kb_tools
             "name": "resolve_concept_by_name",
             "description": "Resolve a concept by name",
             "input_schema": {"required": {"name": str}, "optional": {}, "allow_unknown": True},
+            "output_schema": None,
+            "category": "read",
+        },
+        "get_predicate_incidence": {
+            "name": "get_predicate_incidence",
+            "description": "Find predicates used with a concept argument",
+            "input_schema": {
+                "required": {"concept_id": str},
+                "optional": {},
+                "allow_unknown": True,
+            },
+            "output_schema": None,
+            "category": "read",
+        },
+        "find_relations_with_argument": {
+            "name": "find_relations_with_argument",
+            "description": "Find relations for a concept argument",
+            "input_schema": {
+                "required": {"concept_id": str},
+                "optional": {},
+                "allow_unknown": True,
+            },
+            "output_schema": None,
+            "category": "read",
+        },
+        "list_papers": {
+            "name": "list_papers",
+            "description": "List cached papers",
+            "input_schema": {"required": {}, "optional": {}, "allow_unknown": True},
+            "output_schema": None,
+            "category": "read",
+        },
+    }
+    gateway.describe_methods.return_value = catalogue
+
+    orch = InternalMCPChatOrchestrator(gateway=gateway)
+    tool_defs = orch._convert_mcp_tools_to_structured_definitions(
+        method_catalogue=catalogue
+    )
+    resolution = orch._resolve_structured_tool_candidates(
+        prompt="What papers of mine do you know about?",
+        context=[],
+        stage="tool_call",
+        workflow_action_id="tool_calling.plan",
+        provider="openai",
+        tool_definitions=tool_defs,
+        method_catalogue=catalogue,
+        required_prompt_tools=[
+            "get_predicate_incidence",
+            "find_relations_with_argument",
+        ],
+    )
+
+    lowered = {name.lower() for name in resolution.candidate_tool_names}
+    assert "search_knowledge_base" in lowered
+    assert "resolve_concept_by_name" in lowered
+    assert "get_predicate_incidence" in lowered
+    assert "find_relations_with_argument" in lowered
+    assert "list_papers" not in lowered
+    assert "vontology" in resolution.hinted_families
+
+
+def test_structured_candidate_resolver_ignores_relation_words_without_contract_tools():
+    """Context prose alone must not steer relation-bearing planner candidates."""
+
+    from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
+
+    gateway = MagicMock(spec=InternalMCPGateway)
+    gateway.enabled = True
+    catalogue = {
+        "search_knowledge_base": {
+            "name": "search_knowledge_base",
+            "description": "Search the knowledge base",
+            "input_schema": {
+                "required": {"query": str},
+                "optional": {},
+                "allow_unknown": True,
+            },
             "output_schema": None,
             "category": "read",
         },
@@ -1226,10 +1304,14 @@ def test_structured_candidate_resolver_uses_context_for_entity_relative_kb_tools
 
     lowered = {name.lower() for name in resolution.candidate_tool_names}
     assert "search_knowledge_base" in lowered
-    assert "resolve_concept_by_name" in lowered
-    assert "find_relations_with_argument" in lowered
-    assert "list_papers" not in lowered
-    assert resolution.hinted_families == ()
+    assert "find_relations_with_argument" not in lowered
+    assert "list_papers" in lowered
+    assert any(
+        item.get("tool") == "find_relations_with_argument"
+        and item.get("reason") == "relation_evidence_not_required"
+        for item in resolution.excluded_tools
+        if isinstance(item, Mapping)
+    )
 
 
 def test_structured_candidate_resolver_does_not_hint_families_from_prompt_keywords():

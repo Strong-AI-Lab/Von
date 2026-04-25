@@ -52,6 +52,7 @@ class ToolMetadata:
     external_surface: bool | None = None
     operation_category: str | None = None
     evidence_role: str | None = None
+    evidence_kind: str | None = None
     expose_in_vontology_stdio: bool | None = None
     expose_in_vonrag_stdio: bool | None = None
     expose_in_manifest: bool | None = None
@@ -489,6 +490,7 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "display_template": "{count} relations",
         "dispatch_surface_family": "knowledge_base",
         "evidence_surface_family": "knowledge_base",
+        "evidence_kind": "relation_bearing",
         "external_surface": False,
         "planner_hint": (
             "Use for entity-relative relationship lookup after resolving the anchor "
@@ -533,12 +535,22 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "display_template": "{count} papers",
         "dispatch_surface_family": "knowledge_base",
         "evidence_surface_family": "knowledge_base",
+        "evidence_kind": "inventory_only",
         "external_surface": False,
         "planner_hint": (
             "Inventory only. Use for cached/stored paper listings, not as evidence "
             "of authorship, ownership, provenance, affiliation, or any entity "
             "relationship."
         ),
+    },
+    "get_predicate_incidence": {
+        "salience": "medium",
+        "category": "vontology",
+        "display_template": "{count} predicate rows",
+        "dispatch_surface_family": "knowledge_base",
+        "evidence_surface_family": "knowledge_base",
+        "evidence_kind": "relation_bearing",
+        "external_surface": False,
     },
     "read_paper": {
         "salience": "medium",
@@ -1167,6 +1179,7 @@ def _load_from_vontology() -> dict[str, ToolMetadata]:
                 external_surface=attrs.get("external_surface"),
                 operation_category=attrs.get("operation_category"),
                 evidence_role=attrs.get("evidence_role"),
+                evidence_kind=attrs.get("evidence_kind"),
                 expose_in_vontology_stdio=attrs.get("expose_in_vontology_stdio"),
                 expose_in_vonrag_stdio=attrs.get("expose_in_vonrag_stdio"),
                 expose_in_manifest=attrs.get("expose_in_manifest"),
@@ -1213,6 +1226,7 @@ def _refresh_cache_if_needed() -> None:
                 external_surface=defaults.get("external_surface"),
                 operation_category=defaults.get("operation_category"),
                 evidence_role=defaults.get("evidence_role"),
+                evidence_kind=defaults.get("evidence_kind"),
                 expose_in_vontology_stdio=defaults.get("expose_in_vontology_stdio"),
                 expose_in_vonrag_stdio=defaults.get("expose_in_vonrag_stdio"),
                 expose_in_manifest=defaults.get("expose_in_manifest"),
@@ -1254,6 +1268,7 @@ def _refresh_cache_if_needed() -> None:
                         or default_metadata.operation_category
                     ),
                     evidence_role=metadata.evidence_role or default_metadata.evidence_role,
+                    evidence_kind=metadata.evidence_kind or default_metadata.evidence_kind,
                     expose_in_vontology_stdio=(
                         metadata.expose_in_vontology_stdio
                         if metadata.expose_in_vontology_stdio is not None
@@ -1356,6 +1371,15 @@ def _normalise_evidence_role(value: Any) -> str | None:
     return None
 
 
+def _normalise_evidence_kind(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    lowered = value.strip().lower().replace("-", "_")
+    if lowered in {"relation_bearing", "inventory_only"}:
+        return lowered
+    return None
+
+
 def get_tool_family(
     tool_name: str,
     *,
@@ -1450,6 +1474,24 @@ def get_tool_evidence_role(
     if operation_category == "write":
         return None
     return None
+
+
+def get_tool_evidence_kind(tool_name: str) -> str | None:
+    """Resolve the represented evidence-kind affordance for a tool."""
+
+    return _normalise_evidence_kind(get_tool_metadata(tool_name).evidence_kind)
+
+
+def is_tool_relation_bearing_evidence(tool_name: str) -> bool:
+    """Return true when tool metadata marks the tool as relation-bearing evidence."""
+
+    return get_tool_evidence_kind(tool_name) == "relation_bearing"
+
+
+def is_tool_inventory_only_evidence(tool_name: str) -> bool:
+    """Return true when tool metadata marks the tool as inventory-only evidence."""
+
+    return get_tool_evidence_kind(tool_name) == "inventory_only"
 
 
 def is_tool_write(

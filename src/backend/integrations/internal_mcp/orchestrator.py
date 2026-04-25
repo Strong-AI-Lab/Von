@@ -158,6 +158,8 @@ from src.backend.services.tool_metadata_service import (
     get_tool_metadata,
     get_tool_planner_hint,
     get_tool_salience,
+    is_tool_inventory_only_evidence,
+    is_tool_relation_bearing_evidence,
     is_tool_visible,
 )
 
@@ -10842,57 +10844,6 @@ class InternalMCPChatOrchestrator:
             tool_names.append(tool_name)
         return tool_names
 
-    @staticmethod
-    def _context_text_fragments(
-        context: Sequence[Mapping[str, Any]] | None,
-    ) -> list[str]:
-        if not isinstance(context, Sequence):
-            return []
-
-        fragments: list[str] = []
-        for message in context:
-            if not isinstance(message, Mapping):
-                continue
-            content = message.get("content")
-            if isinstance(content, str) and content.strip():
-                fragments.append(content.strip())
-        return fragments
-
-    @classmethod
-    def _relation_grounding_requested_for_structured_planner(
-        cls,
-        *,
-        prompt: str,
-        context: Sequence[Mapping[str, Any]] | None,
-    ) -> bool:
-        combined_text = "\n".join(
-            fragment.strip().lower()
-            for fragment in (
-                str(prompt or "").strip(),
-                *cls._context_text_fragments(context),
-            )
-            if isinstance(fragment, str) and fragment.strip()
-        )
-        if not combined_text:
-            return False
-        return any(
-            token in combined_text
-            for token in (
-                "find_relations_with_argument",
-                "concept/relation retrieval",
-                "relation retrieval",
-                "represented relation evidence",
-                "represented relationship",
-                "represented relationships",
-                "predicate",
-                "predicates",
-                "text relation",
-                "text relations",
-                "entity-relative relationship",
-                "prefer kb/concept/relation retrieval tools over inventory/listing tools",
-            )
-        )
-
     @classmethod
     def _collect_structured_tool_family_hints(
         cls,
@@ -11064,17 +11015,16 @@ class InternalMCPChatOrchestrator:
         candidate_names: list[str] = []
         included_lookup: set[str] = set()
         excluded_reasons: dict[str, str] = {}
-        relation_grounding_requested = (
-            profile == "planner"
-            and self._relation_grounding_requested_for_structured_planner(
-                prompt=prompt,
-                context=context,
-            )
+        relation_grounding_requested = profile == "planner" and any(
+            is_tool_relation_bearing_evidence(tool_name)
+            for tool_name in required_tools
         )
 
         def _is_inventory_only_tool(tool_name: str) -> bool:
-            hint = get_tool_planner_hint(tool_name)
-            return isinstance(hint, str) and "inventory only" in hint.lower()
+            return is_tool_inventory_only_evidence(tool_name)
+
+        def _is_relation_bearing_tool(tool_name: str) -> bool:
+            return is_tool_relation_bearing_evidence(tool_name)
 
         def _mark_excluded(tool_name: str, reason: str) -> None:
             key = tool_name.lower()
@@ -11090,11 +11040,11 @@ class InternalMCPChatOrchestrator:
                 return
             if (
                 profile == "planner"
-                and key == "find_relations_with_argument"
+                and _is_relation_bearing_tool(tool_name)
                 and key not in required_lookup
                 and not relation_grounding_requested
             ):
-                _mark_excluded(tool_name, "relation_grounding_not_requested")
+                _mark_excluded(tool_name, "relation_evidence_not_required")
                 return
             if (
                 relation_grounding_requested
