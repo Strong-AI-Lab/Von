@@ -16,6 +16,42 @@ jest.mock('../../src/frontend/web/von_interface/static/js/domUtils.js', () => ({
 
 const { sendMessage } = require(chatTabModulePath);
 
+function mockCommonChatSessionResponse(url) {
+    if (typeof url !== 'string') {
+        return null;
+    }
+
+    if (url.startsWith('/von/api/session/create_chat_session')) {
+        return Promise.resolve({
+            ok: true,
+            json: async () => ({
+                session_id: 'test-chat-session',
+                session_name: 'Test chat session',
+                history: []
+            })
+        });
+    }
+
+    if (url.startsWith('/von/api/session/set_chat_session')) {
+        return Promise.resolve({
+            ok: true,
+            json: async () => ({
+                session_id: 'test-chat-session',
+                session_name: 'Test chat session'
+            })
+        });
+    }
+
+    if (url.startsWith('/von/api/session/chat_session_links')) {
+        return Promise.resolve({
+            ok: true,
+            json: async () => ({ links: [] })
+        });
+    }
+
+    return null;
+}
+
 describe('chat markdown rendering (assistant)', () => {
     beforeEach(() => {
         document.body.innerHTML = `
@@ -64,6 +100,8 @@ describe('chat markdown rendering (assistant)', () => {
             '',
             'See #V#person',
             '',
+            'Grounding: #V#michael_witbrock #V#author_of #V#learning_to_tell_two_spirals_apart',
+            '',
             '```',
             '#V#person',
             '```',
@@ -84,12 +122,16 @@ describe('chat markdown rendering (assistant)', () => {
             '<p>Inline code token: <code>#V#yejin_choi</code></p>',
             '<p><a href="https://example.com" target="_blank" rel="noopener noreferrer">good</a></p>',
             '<p>See #V#person</p>',
+            '<p>Grounding: #V#michael_witbrock #V#author_of #V#learning_to_tell_two_spirals_apart</p>',
             '<pre><code>#V#person</code></pre>',
             '<pre><code>#V#person\n#V#thing</code></pre>',
             '<p>bad</p>'
         ].join('\n');
 
         global.fetch = jest.fn((url) => {
+            const common = mockCommonChatSessionResponse(url);
+            if (common) return common;
+
             if (typeof url === 'string' && url.startsWith('/von/history/length')) {
                 return Promise.resolve({
                     ok: true,
@@ -102,6 +144,24 @@ describe('chat markdown rendering (assistant)', () => {
                     return Promise.resolve({
                         ok: true,
                         json: async () => ({ display_name: 'Yejin Choi', kind: 'individual' })
+                    });
+                }
+                if (url.includes('identifier=%23V%23author_of')) {
+                    return Promise.resolve({
+                        ok: true,
+                        json: async () => ({ display_name: 'Author of', kind: 'predicate' })
+                    });
+                }
+                if (url.includes('identifier=%23V%23michael_witbrock')) {
+                    return Promise.resolve({
+                        ok: true,
+                        json: async () => ({ display_name: 'MJW', kind: 'individual' })
+                    });
+                }
+                if (url.includes('identifier=%23V%23learning_to_tell_two_spirals_apart')) {
+                    return Promise.resolve({
+                        ok: true,
+                        json: async () => ({ display_name: 'Learning To Tell Two Spirals Apart', kind: 'individual' })
                     });
                 }
                 return Promise.resolve({
@@ -183,6 +243,15 @@ describe('chat markdown rendering (assistant)', () => {
         const cartouche = assistantMarkdown.querySelector('.vontology-cartouche[data-full-concept-id="#V#person"]');
         expect(cartouche).not.toBeNull();
 
+        const assertion = assistantMarkdown.querySelector('.vontology-inline-assertion');
+        expect(assertion).not.toBeNull();
+        expect(assertion.dataset.subjectConceptId).toBe('#V#michael_witbrock');
+        expect(assertion.dataset.predicateConceptId).toBe('#V#author_of');
+        expect(assertion.dataset.objectConceptId).toBe('#V#learning_to_tell_two_spirals_apart');
+        const assertionCartouches = assertion.querySelectorAll('.vontology-cartouche[data-full-concept-id]');
+        expect(assertionCartouches).toHaveLength(3);
+        expect(assertionCartouches[1].dataset.assertionRole).toBe('predicate');
+
         // Inline code tokens should become cartouches, but only when the <code> span contains exactly the token.
         const codeCartouche = assistantMarkdown.querySelector('.vontology-cartouche.vontology-cartouche-inline-code[data-full-concept-id="#V#yejin_choi"]');
         expect(codeCartouche).not.toBeNull();
@@ -193,6 +262,8 @@ describe('chat markdown rendering (assistant)', () => {
         expect(cartouche.textContent).toContain('Person');
         expect(cartouche.textContent).toContain('#V#person');
         expect(cartouche.textContent).toContain('Type');
+        expect(assertionCartouches[1].textContent).toContain('Author of');
+        expect(assertionCartouches[1].textContent).toContain('Predicate');
 
         expect(codeCartouche.textContent).toContain('#V#yejin_choi');
 
@@ -232,7 +303,10 @@ describe('chat markdown rendering (assistant)', () => {
             '<p>See #V#person</p>'
         ].join('\n');
 
-        global.fetch = jest.fn((url, opts) => {
+        global.fetch = jest.fn((url, _opts) => {
+            const common = mockCommonChatSessionResponse(url);
+            if (common) return common;
+
             if (typeof url === 'string' && url.startsWith('/von/history/length')) {
                 return Promise.resolve({
                     ok: true,
@@ -319,6 +393,9 @@ describe('chat markdown rendering (assistant)', () => {
         ].join('\n');
 
         global.fetch = jest.fn((url) => {
+            const common = mockCommonChatSessionResponse(url);
+            if (common) return common;
+
             if (typeof url === 'string' && url.startsWith('/von/history/length')) {
                 return Promise.resolve({
                     ok: true,
@@ -409,6 +486,9 @@ describe('chat markdown rendering (assistant)', () => {
         ].join('\n');
 
         global.fetch = jest.fn((url) => {
+            const common = mockCommonChatSessionResponse(url);
+            if (common) return common;
+
             if (typeof url === 'string' && url.startsWith('/von/history/length')) {
                 return Promise.resolve({
                     ok: true,
@@ -503,6 +583,9 @@ describe('chat markdown rendering (assistant)', () => {
         ].join('\n');
 
         global.fetch = jest.fn((url) => {
+            const common = mockCommonChatSessionResponse(url);
+            if (common) return common;
+
             if (typeof url === 'string' && url.startsWith('/von/history/length')) {
                 return Promise.resolve({
                     ok: true,
@@ -601,6 +684,9 @@ describe('chat markdown rendering (assistant)', () => {
         ].join('');
 
         global.fetch = jest.fn((url) => {
+            const common = mockCommonChatSessionResponse(url);
+            if (common) return common;
+
             if (typeof url === 'string' && url.startsWith('/von/history/length')) {
                 return Promise.resolve({
                     ok: true,
@@ -676,6 +762,9 @@ describe('chat markdown rendering (assistant)', () => {
 
         let renderMarkdownCalls = 0;
         global.fetch = jest.fn((url) => {
+            const common = mockCommonChatSessionResponse(url);
+            if (common) return common;
+
             if (typeof url === 'string' && url.startsWith('/von/history/length')) {
                 return Promise.resolve({
                     ok: true,

@@ -18,7 +18,7 @@ export function parseVontologyTokens(text) {
 	// NOTE: Parentheses are not allowed in concept IDs
 	// Also treat common punctuation as a valid token boundary so we can cartouchify IDs
 	// at sentence boundaries (e.g., "#V#foo.", "(#V#bar)").
-	const tokenRe = /#V#([A-Za-z0-9_\./:–—\-]+?)(?=[\s"'`\.,:;!?\)\]\}…]|$)/g;
+	const tokenRe = /#V#([-A-Za-z0-9_./:–—]+?)(?=[\s"'`.,:;!?)\]}…]|$)/g;
 
 	let lastIndex = 0;
 	let match;
@@ -65,7 +65,7 @@ export function normalisePotentialConceptId(text) {
 
 	const slug = id.slice(3);
 	// Keep the same conservative character set used by token parsing.
-	if (!/^[A-Za-z0-9_\./:–—\-]+$/.test(slug)) {
+	if (!/^[-A-Za-z0-9_./:–—]+$/.test(slug)) {
 		return '';
 	}
 	return `#V#${slug}`;
@@ -395,15 +395,100 @@ export function createVontologyCartouche(conceptId, opts = {}) {
 	return btn;
 }
 
+export function createVontologyInlineAssertion(subjectId, predicateId, objectId, opts = {}) {
+	const subject = normalisePotentialConceptId(subjectId);
+	const predicate = normalisePotentialConceptId(predicateId);
+	const object = normalisePotentialConceptId(objectId);
+	if (!subject || !predicate || !object) {
+		return null;
+	}
+
+	const assertion = document.createElement('span');
+	assertion.className = 'vontology-inline-assertion';
+	assertion.setAttribute('role', 'group');
+	assertion.setAttribute('aria-label', opts.ariaLabel || 'Vontology assertion');
+	assertion.dataset.subjectConceptId = subject;
+	assertion.dataset.predicateConceptId = predicate;
+	assertion.dataset.objectConceptId = object;
+
+	const makeCartouche = (conceptId, role, cartoucheOpts = {}) => {
+		const cartouche = createVontologyCartouche(conceptId, cartoucheOpts);
+		cartouche.classList.add('vontology-inline-assertion-cartouche');
+		cartouche.dataset.assertionRole = role;
+		return cartouche;
+	};
+
+	const subjectCartouche = makeCartouche(subject, 'subject', {
+		title: 'Open assertion subject'
+	});
+	const predicateCartouche = makeCartouche(predicate, 'predicate', {
+		title: 'Open assertion predicate',
+		kind: 'predicate'
+	});
+	const objectCartouche = makeCartouche(object, 'object', {
+		title: 'Open assertion object'
+	});
+
+	const leftConnector = document.createElement('span');
+	leftConnector.className = 'vontology-inline-assertion-connector';
+	leftConnector.textContent = '--';
+	leftConnector.setAttribute('aria-hidden', 'true');
+
+	const rightConnector = document.createElement('span');
+	rightConnector.className = 'vontology-inline-assertion-connector';
+	rightConnector.textContent = '-->';
+	rightConnector.setAttribute('aria-hidden', 'true');
+
+	assertion.appendChild(subjectCartouche);
+	assertion.appendChild(leftConnector);
+	assertion.appendChild(predicateCartouche);
+	assertion.appendChild(rightConnector);
+	assertion.appendChild(objectCartouche);
+
+	return assertion;
+}
+
+function isInlineAssertionSeparator(segment) {
+	return segment?.type === 'text' && /^[\t ]+$/.test(segment.text || '');
+}
+
+function appendCartoucheOrText(frag, segment) {
+	if (segment.type === 'token' && segment.conceptId) {
+		frag.appendChild(createVontologyCartouche(segment.conceptId));
+		return;
+	}
+	frag.appendChild(document.createTextNode(segment.text || ''));
+}
+
 export function createCartoucheFragment(text) {
 	const frag = document.createDocumentFragment();
 	const segments = parseVontologyTokens(text);
-	for (const seg of segments) {
-		if (seg.type === 'token' && seg.conceptId) {
-			frag.appendChild(createVontologyCartouche(seg.conceptId));
-		} else {
-			frag.appendChild(document.createTextNode(seg.text));
+	for (let index = 0; index < segments.length; index += 1) {
+		const current = segments[index];
+		const separatorOne = segments[index + 1];
+		const predicate = segments[index + 2];
+		const separatorTwo = segments[index + 3];
+		const object = segments[index + 4];
+		if (
+			current?.type === 'token'
+			&& predicate?.type === 'token'
+			&& object?.type === 'token'
+			&& isInlineAssertionSeparator(separatorOne)
+			&& isInlineAssertionSeparator(separatorTwo)
+		) {
+			const assertion = createVontologyInlineAssertion(
+				current.text,
+				predicate.text,
+				object.text
+			);
+			if (assertion) {
+				frag.appendChild(assertion);
+				index += 4;
+				continue;
+			}
 		}
+
+		appendCartoucheOrText(frag, current);
 	}
 	return frag;
 }
@@ -445,7 +530,7 @@ function normaliseVontologyTokensForDisplay(text) {
 	// "V#person" -> "#V#person" (but do NOT rewrite "#V#person").
 	// Prefix capture avoids lookbehind to keep browser support broad.
 	output = output.replace(
-		/(^|[^#])([Vv])#([A-Za-z0-9_\./:–—\-]+?)(?=[\s"'`\.,:;!?\)\]\}…]|$)/g,
+		/(^|[^#])([Vv])#([-A-Za-z0-9_./:–—]+?)(?=[\s"'`.,:;!?)\]}…]|$)/g,
 		(_, prefix, _v, conceptId) => `${prefix}#V#${conceptId}`
 	);
 
@@ -455,11 +540,11 @@ function normaliseVontologyTokensForDisplay(text) {
 function extractStandaloneVontologyToken(text) {
 	const normalised = normaliseVontologyTokensForDisplay(String(text ?? '')).trim();
 	if (!normalised) return null;
-	const m = normalised.match(/^#V#([A-Za-z0-9_\./:–—\-]+)$/);
+	const m = normalised.match(/^#V#([-A-Za-z0-9_./:–—]+)$/);
 	return m ? m[1] : null;
 }
 
-function cartouchifyStandaloneVontologyCodeBlocks(root, options = {}) {
+function cartouchifyStandaloneVontologyCodeBlocks(root) {
 	if (!root || !root.querySelectorAll) return;
 
 	const codeNodes = Array.from(root.querySelectorAll('pre > code'));
@@ -493,7 +578,7 @@ function cartouchifyStandaloneVontologyCodeBlocks(root, options = {}) {
 	}
 }
 
-function cartouchifyStandaloneVontologyCodeSpans(root, options = {}) {
+function cartouchifyStandaloneVontologyCodeSpans(root) {
 	if (!root || !root.querySelectorAll) return;
 
 	const codeNodes = Array.from(root.querySelectorAll('code'));

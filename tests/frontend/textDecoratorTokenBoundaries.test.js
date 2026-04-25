@@ -25,6 +25,46 @@ describe('Vontology token boundaries', () => {
         expect(buttonNode.nextSibling.nodeValue).toBe('.');
     });
 
+    test('groups adjacent Vontology triples as one inline assertion with cartouches', () => {
+        const { cartouchifyVontologyTokensInElement } = require(modulePath);
+
+        const root = document.getElementById('root');
+        root.textContent = 'Grounding: #V#michael_witbrock #V#author_of #V#learning_to_tell_two_spirals_apart.';
+
+        cartouchifyVontologyTokensInElement(root);
+
+        const assertions = root.querySelectorAll('.vontology-inline-assertion');
+        expect(assertions).toHaveLength(1);
+        expect(assertions[0].dataset.subjectConceptId).toBe('#V#michael_witbrock');
+        expect(assertions[0].dataset.predicateConceptId).toBe('#V#author_of');
+        expect(assertions[0].dataset.objectConceptId).toBe('#V#learning_to_tell_two_spirals_apart');
+
+        const cartouches = assertions[0].querySelectorAll('.vontology-cartouche[data-full-concept-id]');
+        expect(cartouches).toHaveLength(3);
+        expect(cartouches[0].dataset.assertionRole).toBe('subject');
+        expect(cartouches[1].dataset.assertionRole).toBe('predicate');
+        expect(cartouches[1].querySelector('.vontology-cartouche-kind')?.textContent).toBe('Predicate');
+        expect(cartouches[2].dataset.assertionRole).toBe('object');
+
+        expect(assertions[0].nextSibling).not.toBeNull();
+        expect(assertions[0].nextSibling.nodeType).toBe(Node.TEXT_NODE);
+        expect(assertions[0].nextSibling.nodeValue).toBe('.');
+    });
+
+    test('keeps non-adjacent Vontology tokens as individual cartouches', () => {
+        const { cartouchifyVontologyTokensInElement } = require(modulePath);
+
+        const root = document.getElementById('root');
+        root.textContent = 'See #V#person, #V#researcher and #V#paper.';
+
+        cartouchifyVontologyTokensInElement(root);
+
+        expect(root.querySelectorAll('.vontology-inline-assertion')).toHaveLength(0);
+        const cartouches = root.querySelectorAll('.vontology-cartouche');
+        expect(cartouches).toHaveLength(3);
+        expect(cartouches[0].dataset.fullConceptId).toBe('#V#person');
+    });
+
     test('cartouchifies #V# tokens inside parentheses at sentence boundaries', () => {
         const { cartouchifyVontologyTokensInElement } = require(modulePath);
 

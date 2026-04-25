@@ -9149,6 +9149,37 @@ button.prompt-vontology-cartouche {
     display: none;
 }
 
+.vontology-inline-assertion {
+    display: inline-flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px;
+    max-width: 100%;
+    margin: 1px 2px;
+    padding: 3px 5px;
+    border: 1px solid #d8dee9;
+    border-left: 3px solid #64748b;
+    border-radius: 8px;
+    background: #fbfcfe;
+    color: #1f2937;
+    line-height: 1.35;
+    vertical-align: middle;
+}
+
+.vontology-inline-assertion-cartouche {
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: min(100%, 28rem);
+}
+
+.vontology-inline-assertion-connector {
+    color: #64748b;
+    flex: 0 0 auto;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0;
+}
+
 .concept-types-summary {
     display: flex;
     flex-wrap: wrap;
