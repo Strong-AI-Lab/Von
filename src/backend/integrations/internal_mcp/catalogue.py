@@ -16591,6 +16591,7 @@ def _jira_move_issue_input_schema() -> Schema:
             "timeout_seconds": (int, float, type(None)),
             "dry_run": (bool,),
             "approved": (bool,),
+            "confirm": (bool,),
             "execute": (bool,),
             "request_id": (str, type(None)),
         },
@@ -16601,8 +16602,9 @@ def _jira_move_issue_input_schema() -> Schema:
             "and Jira bulk move/convert via guardrails. Optional flags: send_bulk_notification, "
             "infer_field_defaults, infer_status_defaults, infer_subtask_type_default, "
             "target_mandatory_fields, target_status, await_completion, poll_interval_seconds, "
-            "timeout_seconds. Guardrails: dry_run (default true), approved, execute "
-            "(requires VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1)."
+            "timeout_seconds. Guardrails: dry_run defaults to true; pass approved=true "
+            "(or alias confirm=true) to execute. execute=true plus "
+            "VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1 bypasses per-write approval."
         ),
     )
 
@@ -16670,6 +16672,7 @@ def _jira_create_issue_input_schema() -> Schema:
             "components": (list, type(None)),
             "dry_run": (bool,),
             "approved": (bool,),
+            "confirm": (bool,),
             "execute": (bool,),
             "request_id": (str, type(None)),
         },
@@ -16677,7 +16680,9 @@ def _jira_create_issue_input_schema() -> Schema:
         description=(
             "jira_create_issue input: project_key, issue_type, summary (required). "
             "Optional description/parent/assignee_account_id/labels/components. "
-            "Guardrails: dry_run (default true), approved (per-write confirmation), execute (requires VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1)."
+            "Guardrails: dry_run defaults to true (preview only); pass approved=true "
+            "(or alias confirm=true) to execute the write. execute=true plus "
+            "VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1 bypasses per-write approval for batched flows."
         ),
     )
 
@@ -16691,13 +16696,16 @@ def _jira_update_issue_input_schema() -> Schema:
         optional={
             "dry_run": (bool,),
             "approved": (bool,),
+            "confirm": (bool,),
             "execute": (bool,),
             "request_id": (str, type(None)),
         },
         allow_unknown=True,
         description=(
             "jira_update_issue input: issue_key (required) and update_fields (dict of Jira fields to update). "
-            "Guardrails: dry_run (default true), approved (per-write confirmation), execute (requires VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1)."
+            "Guardrails: dry_run defaults to true (preview only); pass approved=true "
+            "(or alias confirm=true) to execute the write. execute=true plus "
+            "VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1 bypasses per-write approval for batched flows."
         ),
     )
 
@@ -16718,6 +16726,7 @@ def _jira_link_issue_input_schema() -> Schema:
             "comment": (str, type(None)),
             "dry_run": (bool,),
             "approved": (bool,),
+            "confirm": (bool,),
             "execute": (bool,),
             "request_id": (str, type(None)),
         },
@@ -16727,8 +16736,9 @@ def _jira_link_issue_input_schema() -> Schema:
             "Preferred issue fields: source_issue_key + target_issue_key "
             "(source maps to Jira inwardIssue; target maps to Jira outwardIssue). "
             "Backward-compatible fields: inward_issue_key + outward_issue_key. "
-            "Optional comment. Guardrails: dry_run (default true), approved, execute "
-            "(requires VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1)."
+            "Optional comment. Guardrails: dry_run defaults to true (preview only); "
+            "pass approved=true (or alias confirm=true) to execute. execute=true plus "
+            "VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1 bypasses per-write approval."
         ),
     )
 
@@ -16744,6 +16754,7 @@ def _jira_delete_issue_link_input_schema() -> Schema:
             "target_issue_key": (str, type(None)),
             "dry_run": (bool,),
             "approved": (bool,),
+            "confirm": (bool,),
             "execute": (bool,),
             "request_id": (str, type(None)),
         },
@@ -16751,8 +16762,9 @@ def _jira_delete_issue_link_input_schema() -> Schema:
         description=(
             "jira_delete_issue_link input: issue_link_id (required). "
             "At least one of source_issue_key or target_issue_key is required for project allow-list validation. "
-            "Guardrails: dry_run (default true), approved, execute "
-            "(requires VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1)."
+            "Guardrails: dry_run defaults to true (preview only); pass approved=true "
+            "(or alias confirm=true) to execute. execute=true plus "
+            "VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1 bypasses per-write approval."
         ),
     )
 
@@ -20472,6 +20484,37 @@ def _jira_execute_mode_enabled() -> bool:
     }
 
 
+def _jira_resolve_write_intent(
+    kwargs: dict[str, Any],
+) -> tuple[bool, bool, bool]:
+    """Resolve the (dry_run, approved, execute) triplet for a Jira write helper.
+
+    UX contract (JVNAUTOSCI-2137):
+
+    - ``confirm`` is accepted as an alias for ``approved`` to match common
+      agent phrasing and Atlassian-style confirmation flags.
+    - ``dry_run`` defaults to ``True`` for safety. However, if the caller did
+      *not* explicitly pass ``dry_run`` and any of ``approved``/``confirm``
+      (or ``execute`` while execute-mode is enabled) is truthy, ``dry_run``
+      defaults to ``False`` instead. This removes the historical foot-gun
+      where callers had to pass *both* ``approved=true`` *and* ``dry_run=false``
+      to actually execute a write.
+    - An explicit ``dry_run=true`` is always respected, so callers can still
+      preview a write while supplying ``approved=true``.
+    """
+
+    confirm = bool(kwargs.get("confirm", False))
+    approved = bool(kwargs.get("approved", False)) or confirm
+    execute = bool(kwargs.get("execute", False))
+    dry_run_raw = kwargs.get("dry_run")
+    if dry_run_raw is None:
+        intent_to_execute = approved or (execute and _jira_execute_mode_enabled())
+        dry_run = not intent_to_execute
+    else:
+        dry_run = bool(dry_run_raw)
+    return dry_run, approved, execute
+
+
 def _jira_write_guardrails(
     *,
     action: str,
@@ -21771,9 +21814,7 @@ def _jira_move_issue(**kwargs):
             suggestions=["Use the format PROJECT-123 for issue keys"],
         )
 
-    dry_run = bool(kwargs.get("dry_run", True))
-    approved = bool(kwargs.get("approved", False))
-    execute = bool(kwargs.get("execute", False))
+    dry_run, approved, execute = _jira_resolve_write_intent(kwargs)
     request_id = kwargs.get("request_id")
 
     source_issue_context = _jira_get_issue_context(issue_key_norm)
@@ -22184,9 +22225,7 @@ def _jira_create_issue(**kwargs):
         )
 
     project_key_norm = str(project_key).strip().upper()
-    dry_run = bool(kwargs.get("dry_run", True))
-    approved = bool(kwargs.get("approved", False))
-    execute = bool(kwargs.get("execute", False))
+    dry_run, approved, execute = _jira_resolve_write_intent(kwargs)
     request_id = kwargs.get("request_id")
 
     guardrail_error = _jira_write_guardrails(
@@ -22353,9 +22392,7 @@ def _jira_update_issue(**kwargs):
             suggestions=["Use the format PROJECT-123 for issue keys"],
         )
 
-    dry_run = bool(kwargs.get("dry_run", True))
-    approved = bool(kwargs.get("approved", False))
-    execute = bool(kwargs.get("execute", False))
+    dry_run, approved, execute = _jira_resolve_write_intent(kwargs)
     request_id = kwargs.get("request_id")
 
     guardrail_error = _jira_write_guardrails(
@@ -22520,9 +22557,7 @@ def _jira_link_issue(**kwargs):
             suggestions=["Use the format PROJECT-123 for issue keys"],
         )
 
-    dry_run = bool(kwargs.get("dry_run", True))
-    approved = bool(kwargs.get("approved", False))
-    execute = bool(kwargs.get("execute", False))
+    dry_run, approved, execute = _jira_resolve_write_intent(kwargs)
     request_id = kwargs.get("request_id")
 
     guardrail_error = _jira_write_guardrails(
@@ -22677,9 +22712,7 @@ def _jira_delete_issue_link(**kwargs):
             ],
         )
 
-    dry_run = bool(kwargs.get("dry_run", True))
-    approved = bool(kwargs.get("approved", False))
-    execute = bool(kwargs.get("execute", False))
+    dry_run, approved, execute = _jira_resolve_write_intent(kwargs)
     request_id = kwargs.get("request_id")
 
     guardrail_error = _jira_write_guardrails(
@@ -27891,7 +27924,8 @@ def _build_default_catalogue_external_integration_definitions() -> (
             description=(
                 "Create a Jira issue with safety guardrails. Default dry_run=true (no mutation). "
                 "Writes are allowed only for allow-listed projects (default JVNAUTOSCI). "
-                "To execute, pass dry_run=false and either approved=true (per write) or execute=true with VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1."
+                "To execute, pass approved=true (or alias confirm=true). "
+                "execute=true plus VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1 bypasses per-write approval for batched flows."
             ),
         ),
         MethodDefinition(
@@ -27904,7 +27938,8 @@ def _build_default_catalogue_external_integration_definitions() -> (
             description=(
                 "Update a Jira issue with safety guardrails. Default dry_run=true (no mutation). "
                 "Writes are blocked unless the issue belongs to an allow-listed project. "
-                "To execute, pass dry_run=false and either approved=true or execute=true with VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1."
+                "To execute, pass approved=true (or alias confirm=true). "
+                "execute=true plus VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1 bypasses per-write approval for batched flows."
             ),
         ),
         MethodDefinition(
@@ -27930,7 +27965,8 @@ def _build_default_catalogue_external_integration_definitions() -> (
             description=(
                 "Create a Jira issue link (e.g. Relates) with safety guardrails. Default dry_run=true (no mutation). "
                 "Both issue projects must be allow-listed. "
-                "To execute, pass dry_run=false and either approved=true or execute=true with VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1."
+                "To execute, pass approved=true (or alias confirm=true). "
+                "execute=true plus VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1 bypasses per-write approval for batched flows."
             ),
         ),
         MethodDefinition(
@@ -27943,7 +27979,8 @@ def _build_default_catalogue_external_integration_definitions() -> (
             description=(
                 "Delete a Jira issue link by link ID with safety guardrails. Default dry_run=true (no mutation). "
                 "At least one of source_issue_key or target_issue_key is required so allow-listed project checks can be enforced. "
-                "To execute, pass dry_run=false and either approved=true or execute=true with VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1."
+                "To execute, pass approved=true (or alias confirm=true). "
+                "execute=true plus VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1 bypasses per-write approval for batched flows."
             ),
         ),
         MethodDefinition(

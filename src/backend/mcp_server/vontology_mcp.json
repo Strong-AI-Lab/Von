@@ -2224,12 +2224,13 @@
                     "message_id",
                     "attachment_id"
                 ],
+                "additionalProperties": false,
                 "description": "Fetch a Gmail attachment for a profile (base64 payload)."
             }
         },
         {
             "name": "gmail_get_message",
-            "description": "Fetch a Gmail message for a profile. Supports Gmail API formats metadata|full|raw|minimal. Read-only; profile token required.",
+            "description": "Fetch a Gmail message for a profile using message_id from gmail_list_messages. The 'profile' parameter accepts either the configured profile alias or the authorised Gmail address. Supports Gmail API formats metadata|full|raw|minimal and returns normalised sender, subject, date, and snippet fields when available. Read-only; profile token required.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2247,7 +2248,18 @@
                     "profile",
                     "message_id"
                 ],
-                "description": "Fetch a Gmail message for a profile (formats: metadata|full|raw|minimal)."
+                "additionalProperties": false,
+                "description": "Fetch a Gmail message for a profile (formats: metadata|full|raw|minimal).",
+                "x-von-argument-aliases": {
+                    "profile_id": "profile",
+                    "identity": "profile",
+                    "user_id": "profile",
+                    "id": "message_id",
+                    "messageId": "message_id"
+                },
+                "x-von-batch-propagated-fields": [
+                    "profile"
+                ]
             }
         },
         {
@@ -2263,12 +2275,13 @@
                 "required": [
                     "profile"
                 ],
+                "additionalProperties": false,
                 "description": "List Gmail labels for a profile (read-only)."
             }
         },
         {
             "name": "gmail_list_messages",
-            "description": "List Gmail messages for a profile with optional query and label filters. Read-only; relies on pre-provisioned tokens per profile.",
+            "description": "List Gmail messages for a profile with optional query and label filters. The 'profile' parameter accepts either the configured profile alias (e.g. 'zhan-gmail') or the authorised Gmail address itself (e.g. 'alice@example.com'); the address is resolved to the matching profile via the stored OAuth credentials. Returned rows include a message_id alias for Gmail's id. The response includes an 'effective_query' field reporting any profile-level query_prefix/label_filter applied and the composed query string sent to Gmail; 'notes' surfaces warnings when profile-level filtering may silently exclude mailing-list, Google Groups, BCC, or alias-delivered mail. Pass bypass_profile_query_prefix=true to obtain an unfiltered listing when the user asks for the most recent or all mail. Use gmail_get_message with profile and message_id to fetch sender, subject, date, snippet, headers, and other per-message details when the list response lacks them. Read-only; relies on pre-provisioned tokens per profile.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2301,7 +2314,17 @@
                 "required": [
                     "profile"
                 ],
-                "description": "List Gmail messages for a profile with optional query/labels (read-only). Set bypass_profile_query_prefix=true to ignore the profile's configured query_prefix and label_filter for this call."
+                "additionalProperties": false,
+                "description": "List Gmail messages for a profile with optional query/labels (read-only). Set bypass_profile_query_prefix=true to ignore the profile's configured query_prefix and label_filter for this call.",
+                "x-von-argument-aliases": {
+                    "profile_id": "profile",
+                    "identity": "profile",
+                    "user_id": "profile",
+                    "q": "query"
+                },
+                "x-von-batch-propagated-fields": [
+                    "profile"
+                ]
             }
         },
         {
@@ -2333,6 +2356,7 @@
                     "message_id",
                     "allow_mutation"
                 ],
+                "additionalProperties": false,
                 "description": "Add/remove labels on a Gmail message. Requires allow_mutation=true and gmail.modify scope."
             }
         },
@@ -2400,7 +2424,7 @@
         },
         {
             "name": "jira_create_issue",
-            "description": "Create a Jira issue with safety guardrails. Default dry_run=true (no mutation). Writes are allowed only for allow-listed projects (default JVNAUTOSCI). To execute, pass dry_run=false and either approved=true (per write) or execute=true with VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1.",
+            "description": "Create a Jira issue with safety guardrails. Default dry_run=true (no mutation). Writes are allowed only for allow-listed projects (default JVNAUTOSCI). To execute, pass approved=true (or alias confirm=true). execute=true plus VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1 bypasses per-write approval for batched flows.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2451,6 +2475,9 @@
                     "approved": {
                         "type": "boolean"
                     },
+                    "confirm": {
+                        "type": "boolean"
+                    },
                     "execute": {
                         "type": "boolean"
                     },
@@ -2467,12 +2494,12 @@
                     "summary"
                 ],
                 "additionalProperties": true,
-                "description": "jira_create_issue input: project_key, issue_type, summary (required). Optional description/parent/assignee_account_id/labels/components. Guardrails: dry_run (default true), approved (per-write confirmation), execute (requires VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1)."
+                "description": "jira_create_issue input: project_key, issue_type, summary (required). Optional description/parent/assignee_account_id/labels/components. Guardrails: dry_run defaults to true (preview only); pass approved=true (or alias confirm=true) to execute the write. execute=true plus VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1 bypasses per-write approval for batched flows."
             }
         },
         {
             "name": "jira_delete_issue_link",
-            "description": "Delete a Jira issue link by link ID with safety guardrails. Default dry_run=true (no mutation). At least one of source_issue_key or target_issue_key is required so allow-listed project checks can be enforced. To execute, pass dry_run=false and either approved=true or execute=true with VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1.",
+            "description": "Delete a Jira issue link by link ID with safety guardrails. Default dry_run=true (no mutation). At least one of source_issue_key or target_issue_key is required so allow-listed project checks can be enforced. To execute, pass approved=true (or alias confirm=true). execute=true plus VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1 bypasses per-write approval for batched flows.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2497,6 +2524,9 @@
                     "approved": {
                         "type": "boolean"
                     },
+                    "confirm": {
+                        "type": "boolean"
+                    },
                     "execute": {
                         "type": "boolean"
                     },
@@ -2511,7 +2541,7 @@
                     "issue_link_id"
                 ],
                 "additionalProperties": true,
-                "description": "jira_delete_issue_link input: issue_link_id (required). At least one of source_issue_key or target_issue_key is required for project allow-list validation. Guardrails: dry_run (default true), approved, execute (requires VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1)."
+                "description": "jira_delete_issue_link input: issue_link_id (required). At least one of source_issue_key or target_issue_key is required for project allow-list validation. Guardrails: dry_run defaults to true (preview only); pass approved=true (or alias confirm=true) to execute. execute=true plus VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1 bypasses per-write approval."
             }
         },
         {
@@ -2614,7 +2644,7 @@
         },
         {
             "name": "jira_link_issue",
-            "description": "Create a Jira issue link (e.g. Relates) with safety guardrails. Default dry_run=true (no mutation). Both issue projects must be allow-listed. To execute, pass dry_run=false and either approved=true or execute=true with VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1.",
+            "description": "Create a Jira issue link (e.g. Relates) with safety guardrails. Default dry_run=true (no mutation). Both issue projects must be allow-listed. To execute, pass approved=true (or alias confirm=true). execute=true plus VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1 bypasses per-write approval for batched flows.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2657,6 +2687,9 @@
                     "approved": {
                         "type": "boolean"
                     },
+                    "confirm": {
+                        "type": "boolean"
+                    },
                     "execute": {
                         "type": "boolean"
                     },
@@ -2671,7 +2704,7 @@
                     "link_type"
                 ],
                 "additionalProperties": true,
-                "description": "jira_link_issue input: link_type (required; e.g. 'Relates'). Preferred issue fields: source_issue_key + target_issue_key (source maps to Jira inwardIssue; target maps to Jira outwardIssue). Backward-compatible fields: inward_issue_key + outward_issue_key. Optional comment. Guardrails: dry_run (default true), approved, execute (requires VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1)."
+                "description": "jira_link_issue input: link_type (required; e.g. 'Relates'). Preferred issue fields: source_issue_key + target_issue_key (source maps to Jira inwardIssue; target maps to Jira outwardIssue). Backward-compatible fields: inward_issue_key + outward_issue_key. Optional comment. Guardrails: dry_run defaults to true (preview only); pass approved=true (or alias confirm=true) to execute. execute=true plus VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1 bypasses per-write approval."
             }
         },
         {
@@ -2765,6 +2798,9 @@
                     "approved": {
                         "type": "boolean"
                     },
+                    "confirm": {
+                        "type": "boolean"
+                    },
                     "execute": {
                         "type": "boolean"
                     },
@@ -2779,7 +2815,7 @@
                     "issue_key"
                 ],
                 "additionalProperties": true,
-                "description": "jira_move_issue input: issue_key (required) plus optional target_project_key, target_issue_type, and target_parent_issue_key. Supports Task->Subtask conversion and Jira bulk move/convert via guardrails. Optional flags: send_bulk_notification, infer_field_defaults, infer_status_defaults, infer_subtask_type_default, target_mandatory_fields, target_status, await_completion, poll_interval_seconds, timeout_seconds. Guardrails: dry_run (default true), approved, execute (requires VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1)."
+                "description": "jira_move_issue input: issue_key (required) plus optional target_project_key, target_issue_type, and target_parent_issue_key. Supports Task->Subtask conversion and Jira bulk move/convert via guardrails. Optional flags: send_bulk_notification, infer_field_defaults, infer_status_defaults, infer_subtask_type_default, target_mandatory_fields, target_status, await_completion, poll_interval_seconds, timeout_seconds. Guardrails: dry_run defaults to true; pass approved=true (or alias confirm=true) to execute. execute=true plus VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1 bypasses per-write approval."
             }
         },
         {
@@ -2835,7 +2871,7 @@
         },
         {
             "name": "jira_update_issue",
-            "description": "Update a Jira issue with safety guardrails. Default dry_run=true (no mutation). Writes are blocked unless the issue belongs to an allow-listed project. To execute, pass dry_run=false and either approved=true or execute=true with VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1.",
+            "description": "Update a Jira issue with safety guardrails. Default dry_run=true (no mutation). Writes are blocked unless the issue belongs to an allow-listed project. To execute, pass approved=true (or alias confirm=true). execute=true plus VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1 bypasses per-write approval for batched flows.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2850,6 +2886,9 @@
                         "type": "boolean"
                     },
                     "approved": {
+                        "type": "boolean"
+                    },
+                    "confirm": {
                         "type": "boolean"
                     },
                     "execute": {
@@ -2867,7 +2906,7 @@
                     "update_fields"
                 ],
                 "additionalProperties": true,
-                "description": "jira_update_issue input: issue_key (required) and update_fields (dict of Jira fields to update). Guardrails: dry_run (default true), approved (per-write confirmation), execute (requires VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1)."
+                "description": "jira_update_issue input: issue_key (required) and update_fields (dict of Jira fields to update). Guardrails: dry_run defaults to true (preview only); pass approved=true (or alias confirm=true) to execute the write. execute=true plus VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1 bypasses per-write approval for batched flows."
             }
         },
         {
