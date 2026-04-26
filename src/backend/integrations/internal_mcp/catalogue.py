@@ -19571,6 +19571,8 @@ def _annotate_gmail_list_messages_payload(
     result: Mapping[str, Any],
     *,
     profile: str,
+    effective_query: Mapping[str, Any] | None = None,
+    notes: list[str] | None = None,
 ) -> dict[str, Any]:
     payload = dict(result)
     raw_messages = payload.get("messages")
@@ -19586,6 +19588,11 @@ def _annotate_gmail_list_messages_payload(
                 row.setdefault("message_id", message_id.strip())
             messages.append(row)
         payload["messages"] = messages
+
+    if effective_query is not None:
+        payload["effective_query"] = dict(effective_query)
+    if notes:
+        payload["notes"] = list(notes)
 
     payload["_tool_follow_up"] = {
         "schema_version": "mcp_tool_follow_up.v1",
@@ -19620,13 +19627,19 @@ def _gmail_list_messages_output_schema() -> Schema:
             "resultSizeEstimate": int,
             "profile": str,
             "_tool_follow_up": dict,
+            "effective_query": dict,
+            "notes": list,
         },
         allow_unknown=True,
         description=(
             "gmail_list_messages output: messages contain Gmail id/threadId and "
-            "a message_id alias. Use the _tool_follow_up contract with "
-            "gmail_get_message when per-message sender, subject, date, snippet, "
-            "or other message details are required."
+            "a message_id alias. The 'effective_query' field reports whether a "
+            "profile-level query_prefix or label_filter was applied and the "
+            "composed query string actually sent to Gmail; 'notes' surfaces "
+            "warnings such as silent profile-level filtering. Use the "
+            "_tool_follow_up contract with gmail_get_message when per-message "
+            "sender, subject, date, snippet, or other message details are "
+            "required."
         ),
     )
 
@@ -19687,22 +19700,95 @@ def _gmail_list_messages(**kwargs):
             suggestions=["Provide a Gmail profile ID"],
         )
 
+    bypass_profile_query_prefix = bool(
+        kwargs.get("bypass_profile_query_prefix") or False
+    )
+    caller_query = kwargs.get("query")
+    caller_label_ids = kwargs.get("label_ids")
+
     try:
         max_results = kwargs.get("max_results")
         if max_results is None:
             max_results = kwargs.get("maxResults")
         result = gs.list_messages(
             profile_id=profile,
-            query=kwargs.get("query"),
-            label_ids=kwargs.get("label_ids"),
+            query=caller_query,
+            label_ids=caller_label_ids,
             max_results=max_results or 25,
             audit_context={
                 "namespace": kwargs.get("namespace"),
                 "source": "internal_mcp_gateway",
                 "tool": "gmail_list_messages",
             },
+            bypass_profile_query_prefix=bypass_profile_query_prefix,
         )
-        return _annotate_gmail_list_messages_payload(result, profile=str(profile))
+
+        # Resolve the profile to surface the effective query info to callers.
+        try:
+            resolved_profile = gs.get_profile(profile)
+            applied_query_prefix = (
+                None
+                if bypass_profile_query_prefix
+                else (resolved_profile.query_prefix or None)
+            )
+            applied_label_filter = (
+                None
+                if bypass_profile_query_prefix
+                else (list(resolved_profile.label_filter)
+                      if resolved_profile.label_filter
+                      else None)
+            )
+        except Exception:  # noqa: BLE001
+            applied_query_prefix = None
+            applied_label_filter = None
+
+        composed_parts: list[str] = []
+        if applied_query_prefix:
+            composed_parts.append(applied_query_prefix)
+        if isinstance(caller_query, str) and caller_query.strip():
+            composed_parts.append(caller_query.strip())
+        effective_query_string = " ".join(composed_parts) if composed_parts else None
+
+        if bypass_profile_query_prefix:
+            effective_label_ids: list[str] | None = (
+                list(caller_label_ids) if caller_label_ids else None
+            )
+        else:
+            effective_label_ids = (
+                list(caller_label_ids)
+                if caller_label_ids
+                else (list(applied_label_filter) if applied_label_filter else None)
+            )
+
+        effective_query = {
+            "applied_query_prefix": applied_query_prefix,
+            "applied_label_filter": applied_label_filter,
+            "caller_query": caller_query,
+            "caller_label_ids": list(caller_label_ids) if caller_label_ids else None,
+            "effective_query_string": effective_query_string,
+            "effective_label_ids": effective_label_ids,
+            "bypass_profile_query_prefix": bypass_profile_query_prefix,
+        }
+
+        notes: list[str] = []
+        if applied_query_prefix and not (
+            isinstance(caller_query, str) and caller_query.strip()
+        ):
+            notes.append(
+                "Results restricted by profile query_prefix "
+                f"({applied_query_prefix!r}); mail delivered via mailing "
+                "lists, Google Groups, BCC, or aliases that do not match "
+                "this prefix may be excluded. Set "
+                "bypass_profile_query_prefix=true to obtain an unfiltered "
+                "listing."
+            )
+
+        return _annotate_gmail_list_messages_payload(
+            result,
+            profile=str(profile),
+            effective_query=effective_query,
+            notes=notes or None,
+        )
     except Exception as exc:  # noqa: BLE001
         return make_error_response(
             "gmail_api_error",
@@ -26908,9 +26994,14 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             "label_ids": list,
             "max_results": (int, type(None)),
             "maxResults": (int, type(None)),
+            "bypass_profile_query_prefix": bool,
         },
         allow_unknown=False,
-        description="List Gmail messages for a profile with optional query/labels (read-only).",
+        description=(
+            "List Gmail messages for a profile with optional query/labels "
+            "(read-only). Set bypass_profile_query_prefix=true to ignore the "
+            "profile's configured query_prefix and label_filter for this call."
+        ),
         aliases={
             "profile_id": "profile",
             "identity": "profile",
@@ -27340,8 +27431,15 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
                 "address itself (e.g. 'alice@example.com'); the address is "
                 "resolved to the matching profile via the stored OAuth "
                 "credentials. Returned rows include a message_id alias for "
-                "Gmail's id. Use gmail_get_message with profile and message_id "
-                "to fetch sender, subject, date, snippet, headers, and other "
+                "Gmail's id. The response includes an 'effective_query' field "
+                "reporting any profile-level query_prefix/label_filter applied "
+                "and the composed query string sent to Gmail; 'notes' surfaces "
+                "warnings when profile-level filtering may silently exclude "
+                "mailing-list, Google Groups, BCC, or alias-delivered mail. "
+                "Pass bypass_profile_query_prefix=true to obtain an unfiltered "
+                "listing when the user asks for the most recent or all mail. "
+                "Use gmail_get_message with profile and message_id to fetch "
+                "sender, subject, date, snippet, headers, and other "
                 "per-message details when the list response lacks them. "
                 "Read-only; relies on pre-provisioned tokens per profile."
             ),

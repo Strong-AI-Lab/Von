@@ -2293,12 +2293,15 @@
                             "integer",
                             "null"
                         ]
+                    },
+                    "bypass_profile_query_prefix": {
+                        "type": "boolean"
                     }
                 },
                 "required": [
                     "profile"
                 ],
-                "description": "List Gmail messages for a profile with optional query/labels (read-only)."
+                "description": "List Gmail messages for a profile with optional query/labels (read-only). Set bypass_profile_query_prefix=true to ignore the profile's configured query_prefix and label_filter for this call."
             }
         },
         {

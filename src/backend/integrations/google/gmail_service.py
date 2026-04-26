@@ -379,7 +379,18 @@ def list_messages(
     max_results: int = 25,
     profiles: Optional[Dict[str, GmailProfile]] = None,
     audit_context: Optional[Mapping[str, object]] = None,
+    bypass_profile_query_prefix: bool = False,
 ) -> Dict:
+    """List Gmail messages for ``profile_id``.
+
+    When ``bypass_profile_query_prefix`` is True, the profile's configured
+    ``query_prefix`` and ``label_filter`` are not applied; only caller-supplied
+    ``query`` / ``label_ids`` constrain the listing. This lets callers obtain
+    an unfiltered mailbox view when the profile-level filter would silently
+    exclude relevant mail (e.g. mailing-list deliveries that do not match a
+    ``to:``/``from:`` prefix).
+    """
+
     profile = get_profile(profile_id, profiles)
     _log_gmail_audit(
         "list_messages",
@@ -391,8 +402,12 @@ def list_messages(
     )
     service = get_service(profile_id, profiles)
 
-    label_ids = label_ids or profile.label_filter or None
-    composed_query = _compose_query(profile, query)
+    if bypass_profile_query_prefix:
+        effective_label_ids = list(label_ids) if label_ids else None
+        composed_query = query or None
+    else:
+        effective_label_ids = label_ids or profile.label_filter or None
+        composed_query = _compose_query(profile, query)
 
     request = (
         service.users()
@@ -400,7 +415,7 @@ def list_messages(
         .list(
             userId=profile.user_id,
             q=composed_query,
-            labelIds=label_ids,
+            labelIds=effective_label_ids,
             maxResults=max_results,
         )
     )

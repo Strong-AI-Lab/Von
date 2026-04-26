@@ -200,3 +200,165 @@ def test_internal_mcp_gmail_handlers_expose_detail_follow_up_contract(monkeypatc
     assert detail_payload["subject"] == "Subject line"
     assert detail_payload["date"] == "Sat, 25 Apr 2026 09:00:00 +0000"
     assert detail_payload["snippet"] == "Short preview"
+
+
+def test_gmail_list_messages_surfaces_effective_query_and_warns_on_prefix(
+    monkeypatch,
+):
+    """JVNAUTOSCI-2127: list response must surface profile-level filtering.
+
+    When a profile defines ``query_prefix`` and the caller did not supply
+    ``query``, the annotated payload must:
+      * include ``effective_query`` describing the applied prefix and the
+        composed query string actually sent to Gmail, and
+      * include a ``notes`` warning that mailing-list/BCC/alias mail may be
+        silently excluded.
+    """
+
+    from src.backend.integrations.google import gmail_service as gs
+    from src.backend.integrations.internal_mcp import catalogue as catalogue_module
+
+    captured_kwargs: dict = {}
+
+    def fake_list_messages(**kwargs):
+        captured_kwargs.update(kwargs)
+        return {"messages": [{"id": "msg-1"}], "resultSizeEstimate": 1}
+
+    fake_profile = gs.GmailProfile(
+        profile_id="vonwitbrock-gmail",
+        token_path="/tmp/fake-token.json",
+        label_filter=["INBOX"],
+        query_prefix=(
+            "to:zhanvonwitbrock@gmail.com OR from:zhanvonwitbrock@gmail.com"
+        ),
+    )
+
+    monkeypatch.setattr(gs, "list_messages", fake_list_messages)
+    monkeypatch.setattr(gs, "get_profile", lambda *_a, **_kw: fake_profile)
+
+    payload = catalogue_module._gmail_list_messages(profile="vonwitbrock-gmail")
+
+    assert "effective_query" in payload
+    eq = payload["effective_query"]
+    assert eq["applied_query_prefix"] == fake_profile.query_prefix
+    assert eq["applied_label_filter"] == ["INBOX"]
+    assert eq["caller_query"] is None
+    assert eq["effective_query_string"] == fake_profile.query_prefix
+    assert eq["effective_label_ids"] == ["INBOX"]
+    assert eq["bypass_profile_query_prefix"] is False
+
+    assert "notes" in payload
+    assert any("query_prefix" in n for n in payload["notes"])
+
+    # The handler did not pass bypass through unless asked.
+    assert captured_kwargs.get("bypass_profile_query_prefix") is False
+
+
+def test_gmail_list_messages_bypass_profile_query_prefix_passes_through(
+    monkeypatch,
+):
+    """JVNAUTOSCI-2127: bypass flag forwards to gmail_service and clears prefix."""
+
+    from src.backend.integrations.google import gmail_service as gs
+    from src.backend.integrations.internal_mcp import catalogue as catalogue_module
+
+    captured_kwargs: dict = {}
+
+    def fake_list_messages(**kwargs):
+        captured_kwargs.update(kwargs)
+        return {"messages": [], "resultSizeEstimate": 0}
+
+    fake_profile = gs.GmailProfile(
+        profile_id="vonwitbrock-gmail",
+        token_path="/tmp/fake-token.json",
+        label_filter=["INBOX"],
+        query_prefix="to:zhanvonwitbrock@gmail.com",
+    )
+
+    monkeypatch.setattr(gs, "list_messages", fake_list_messages)
+    monkeypatch.setattr(gs, "get_profile", lambda *_a, **_kw: fake_profile)
+
+    payload = catalogue_module._gmail_list_messages(
+        profile="vonwitbrock-gmail",
+        bypass_profile_query_prefix=True,
+    )
+
+    assert captured_kwargs["bypass_profile_query_prefix"] is True
+
+    eq = payload["effective_query"]
+    assert eq["bypass_profile_query_prefix"] is True
+    assert eq["applied_query_prefix"] is None
+    assert eq["applied_label_filter"] is None
+    assert eq["effective_query_string"] is None
+    # No filtering note when nothing was applied.
+    assert payload.get("notes") in (None, [])
+
+
+def test_gmail_list_messages_input_schema_accepts_bypass_flag():
+    """JVNAUTOSCI-2127: bypass_profile_query_prefix is part of the input schema."""
+
+    from src.backend.integrations.internal_mcp import build_default_catalogue
+    from src.backend.integrations.internal_mcp.schemas import validate_payload
+
+    catalogue = build_default_catalogue()
+    method = catalogue.get("gmail_list_messages")
+
+    ok, errors = validate_payload(
+        method.input_schema,
+        {"profile": "zhan-gmail", "bypass_profile_query_prefix": True},
+    )
+    assert ok, errors
+
+    assert method.output_schema is not None
+    output_description = method.output_schema.description or ""
+    assert "effective_query" in output_description
+
+
+def test_gmail_service_list_messages_bypass_skips_profile_prefix(monkeypatch):
+    """JVNAUTOSCI-2127: gmail_service honours bypass_profile_query_prefix."""
+
+    from src.backend.integrations.google import gmail_service as gs
+
+    captured: dict = {}
+
+    class _FakeMessages:
+        def list(self, **kwargs):
+            captured["list_kwargs"] = kwargs
+
+            class _Req:
+                def execute(self_inner):
+                    return {"messages": []}
+
+            return _Req()
+
+    class _FakeUsers:
+        def messages(self):
+            return _FakeMessages()
+
+    class _FakeService:
+        def users(self):
+            return _FakeUsers()
+
+    fake_profile = gs.GmailProfile(
+        profile_id="vonwitbrock-gmail",
+        token_path="/tmp/fake-token.json",
+        label_filter=["INBOX"],
+        query_prefix="to:zhanvonwitbrock@gmail.com",
+    )
+
+    monkeypatch.setattr(gs, "get_profile", lambda *_a, **_kw: fake_profile)
+    monkeypatch.setattr(gs, "get_service", lambda *_a, **_kw: _FakeService())
+
+    # Without bypass, the profile prefix and label filter are applied.
+    gs.list_messages(profile_id="vonwitbrock-gmail")
+    assert captured["list_kwargs"]["q"] == fake_profile.query_prefix
+    assert captured["list_kwargs"]["labelIds"] == ["INBOX"]
+
+    # With bypass, neither is applied.
+    captured.clear()
+    gs.list_messages(
+        profile_id="vonwitbrock-gmail",
+        bypass_profile_query_prefix=True,
+    )
+    assert captured["list_kwargs"]["q"] is None
+    assert captured["list_kwargs"]["labelIds"] is None

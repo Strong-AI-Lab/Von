@@ -2613,6 +2613,9 @@ async def _handle_gmail_list_messages(arguments: dict[str, Any]) -> list[TextCon
             label_ids=arguments.get("label_ids"),
             max_results=arguments.get("max_results", 25),
             audit_context=_gmail_audit_context("gmail_list_messages"),
+            bypass_profile_query_prefix=bool(
+                arguments.get("bypass_profile_query_prefix") or False
+            ),
         )
         return [_json_text(result)]
     except Exception as exc:
