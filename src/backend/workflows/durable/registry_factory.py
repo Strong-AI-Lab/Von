@@ -1170,6 +1170,9 @@ def _register_durable_action_modules(registry: ActionRegistry) -> None:
     from .rag_sync_workflow import register_rag_sync_actions
     from .rumination_workflow import register_rumination_actions
     from .subworkflow_actions import register_subworkflow_actions
+    from .synthesiser_context_prep_actions import (
+        register_synthesiser_context_prep_actions,
+    )
     from .talk_representation_workflow import register_talk_representation_actions
     from .testing_workflow_actions import register_testing_workflow_actions
     from .turn_execution_actions import register_turn_execution_actions
@@ -1207,6 +1210,7 @@ def _register_durable_action_modules(registry: ActionRegistry) -> None:
     register_workflow_creation_actions(registry)
     register_testing_workflow_actions(registry)
     register_skill_interop_actions(registry)
+    register_synthesiser_context_prep_actions(registry)
     register_turn_execution_actions(registry)
 
 
