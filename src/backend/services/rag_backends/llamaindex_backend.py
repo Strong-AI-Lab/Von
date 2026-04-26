@@ -651,10 +651,66 @@ class LlamaIndexRAGService(RAGService):
         signature = runtime_summary.get("embedding_signature")
         return dict(signature) if isinstance(signature, dict) else None
 
-    def _build_namespace_runtime_state(self, namespace: str) -> dict[str, Any]:
+    def _build_namespace_runtime_state(
+        self,
+        namespace: str,
+        *,
+        non_blocking: bool = True,
+    ) -> dict[str, Any]:
+        """Build a diagnostic snapshot of namespace runtime state.
+
+        JVNAUTOSCI-2124: This is a *read-only* diagnostic surface. Callers
+        include workflow discovery's runtime-state probe, which runs on the
+        latency-sensitive turn path under a sub-second budget. Holding the
+        per-namespace write lock here would serialise diagnostic reads behind
+        long-running rebuilds (``_get_or_create_index`` holds the same lock
+        through ``VectorStoreIndex.from_documents`` and
+        ``storage_context.persist``, which can take 25-30s for the
+        workflow-capability namespace).
+
+        We therefore default to a non-blocking acquire. When another thread
+        holds the lock (almost certainly a rebuild worker), return a fast
+        ``rebuild_in_progress`` snapshot so callers can short-circuit
+        gracefully instead of blocking. Callers that explicitly want strict
+        serialisation can pass ``non_blocking=False``; reentrant calls from
+        the lock holder always succeed because the namespace lock is an
+        ``RLock``.
+        """
+
         persist_dir = self._namespace_persist_dir(namespace)
         metadata_path = self._namespace_metadata_path(namespace)
-        with self._get_namespace_lock(namespace):
+        lock = self._get_namespace_lock(namespace)
+        if non_blocking:
+            acquired = lock.acquire(blocking=False)
+        else:
+            lock.acquire()
+            acquired = True
+        if not acquired:
+            # Another thread holds the namespace lock. Return a quick
+            # diagnostic snapshot so latency-sensitive callers can bail out
+            # without blocking on the rebuild. ``compatible=False`` ensures
+            # downstream readiness gates treat this as "index unsafe to use
+            # right now" rather than silently falling through to a stale
+            # success path.
+            return {
+                "namespace": namespace,
+                "persist_dir": persist_dir,
+                "metadata_path": metadata_path,
+                "has_persisted_index": None,
+                "compatible": False,
+                "status": "rebuild_in_progress",
+                "detail": (
+                    "Namespace lock is held by another thread (almost "
+                    "certainly a background rebuild). Returning a "
+                    "non-blocking diagnostic snapshot; retry once the "
+                    "rebuild completes for an authoritative state."
+                ),
+                "current_embedding_signature": None,
+                "stored_embedding_signature": None,
+                "metadata": None,
+                "lock_contended": True,
+            }
+        try:
             has_persisted_index = False
             try:
                 has_persisted_index = os.path.isdir(persist_dir) and bool(
@@ -707,6 +763,8 @@ class LlamaIndexRAGService(RAGService):
                     "Persisted index embeddings were built with a different embedding "
                     "signature. Rebuild is required before this namespace is trustworthy."
                 )
+        finally:
+            lock.release()
 
         return {
             "namespace": namespace,
@@ -719,12 +777,32 @@ class LlamaIndexRAGService(RAGService):
             "current_embedding_signature": current_signature,
             "stored_embedding_signature": stored_signature,
             "metadata": metadata,
+            "lock_contended": False,
         }
 
-    def get_namespace_runtime_state(self, namespace: Optional[str] = None) -> dict[str, Any]:
+    def get_namespace_runtime_state(
+        self,
+        namespace: Optional[str] = None,
+        *,
+        non_blocking: bool = True,
+    ) -> dict[str, Any]:
+        """Return diagnostic runtime state for ``namespace`` (default: all).
+
+        JVNAUTOSCI-2124: Defaults to ``non_blocking=True`` so that callers
+        on the latency-sensitive turn path (workflow discovery, status
+        endpoints) cannot stall behind a rebuild worker holding the
+        namespace lock. Strict callers that need to observe the
+        post-rebuild authoritative state can pass ``non_blocking=False``.
+        """
         effective_namespace = self._resolve_effective_namespace(namespace)
-        state = self._build_namespace_runtime_state(effective_namespace)
-        self._namespace_runtime_state[effective_namespace] = dict(state)
+        state = self._build_namespace_runtime_state(
+            effective_namespace, non_blocking=non_blocking
+        )
+        # Only update the cached snapshot when we observed authoritative
+        # state. A contended snapshot is intentionally fast and partial; do
+        # not let it overwrite a previously good cache entry.
+        if not state.get("lock_contended", False):
+            self._namespace_runtime_state[effective_namespace] = dict(state)
         return state
 
     def _maybe_load_index(self, namespace: str) -> Any:

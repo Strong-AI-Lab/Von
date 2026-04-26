@@ -362,3 +362,117 @@ def test_llamaindex_reset_namespace_retries_transient_sharing_violation(
 
     assert len(rmtree_calls) == 2
     assert not persist_dir.exists()
+
+
+def test_namespace_runtime_state_is_non_blocking_under_lock_contention(
+    monkeypatch,
+    workspace_tmp_path,
+) -> None:
+    """JVNAUTOSCI-2124: diagnostic reads must not stall behind a rebuild.
+
+    Holds the per-namespace write lock from a worker thread and asserts that
+    the diagnostic ``get_namespace_runtime_state`` returns promptly with a
+    ``rebuild_in_progress`` snapshot rather than blocking the caller.
+    """
+
+    import threading
+    import time
+
+    _configure_rag_runtime_settings(monkeypatch)
+
+    from src.backend.services.rag_backends.llamaindex_backend import (
+        LlamaIndexRAGService,
+    )
+
+    rag = LlamaIndexRAGService(
+        persistence_dir=str(workspace_tmp_path / "rag_storage")
+    )
+    namespace = "workflow_capabilities"
+
+    holder_acquired = threading.Event()
+    holder_release = threading.Event()
+    namespace_lock = rag._get_namespace_lock(namespace)
+
+    def _hold_lock() -> None:
+        with namespace_lock:
+            holder_acquired.set()
+            # Simulate a slow rebuild holding the lock.
+            holder_release.wait(timeout=5.0)
+
+    holder = threading.Thread(target=_hold_lock, daemon=True)
+    holder.start()
+    try:
+        assert holder_acquired.wait(timeout=2.0), "holder thread failed to acquire lock"
+        start = time.perf_counter()
+        state = rag.get_namespace_runtime_state(namespace)
+        elapsed = time.perf_counter() - start
+
+        assert elapsed < 0.5, (
+            f"get_namespace_runtime_state blocked for {elapsed:.3f}s "
+            "under lock contention; must return non-blocking snapshot"
+        )
+        assert state["status"] == "rebuild_in_progress"
+        assert state["compatible"] is False
+        assert state.get("lock_contended") is True
+    finally:
+        holder_release.set()
+        holder.join(timeout=2.0)
+
+
+def test_namespace_runtime_state_strict_blocks_until_lock_released(
+    monkeypatch,
+    workspace_tmp_path,
+) -> None:
+    """JVNAUTOSCI-2124: callers can opt back into strict serialised reads."""
+
+    import threading
+    import time
+
+    _configure_rag_runtime_settings(monkeypatch)
+
+    from src.backend.services.rag_backends.llamaindex_backend import (
+        LlamaIndexRAGService,
+    )
+
+    rag = LlamaIndexRAGService(
+        persistence_dir=str(workspace_tmp_path / "rag_storage")
+    )
+    namespace = "workflow_capabilities"
+
+    holder_acquired = threading.Event()
+    holder_release = threading.Event()
+    namespace_lock = rag._get_namespace_lock(namespace)
+
+    def _hold_lock() -> None:
+        with namespace_lock:
+            holder_acquired.set()
+            holder_release.wait(timeout=5.0)
+
+    holder = threading.Thread(target=_hold_lock, daemon=True)
+    holder.start()
+
+    result_holder: dict = {}
+
+    def _strict_probe() -> None:
+        result_holder["state"] = rag.get_namespace_runtime_state(
+            namespace, non_blocking=False
+        )
+        result_holder["finished_at"] = time.perf_counter()
+
+    try:
+        assert holder_acquired.wait(timeout=2.0)
+        probe = threading.Thread(target=_strict_probe, daemon=True)
+        probe.start()
+        # Strict probe must not have completed while the holder still has the lock.
+        time.sleep(0.2)
+        assert "state" not in result_holder, (
+            "strict (non_blocking=False) probe returned while another thread "
+            "still held the namespace lock"
+        )
+        holder_release.set()
+        probe.join(timeout=2.0)
+        assert "state" in result_holder, "strict probe never returned"
+        assert result_holder["state"].get("lock_contended") is False
+    finally:
+        holder_release.set()
+        holder.join(timeout=2.0)
