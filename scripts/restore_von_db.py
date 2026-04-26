@@ -12,15 +12,20 @@ by `scripts/backup_von_db.py`. It supports:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+# Repo root — enables lazy import of src.backend when blob download is requested.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 
 try:
     from scripts.backup_von_db import BACKUP_RECEIPT_SIDECAR_SUFFIX
@@ -187,6 +192,64 @@ def _materialise_backup(
     )
 
 
+def _download_artifact_from_blob(
+    *,
+    receipt_payload: dict[str, Any],
+    blob_store: Any,
+    tmp_dir: Path,
+) -> Path:
+    """Download the backup artefact referenced in *receipt_payload* from *blob_store*.
+
+    Verifies the downloaded bytes against ``blob_sha256`` from the receipt.
+    Returns the path of the downloaded file under *tmp_dir*.
+    """
+    blob_key: str = str(receipt_payload.get("blob_key") or "").strip()
+    if not blob_key:
+        raise RuntimeError(
+            "Receipt does not contain a blob_key; cannot download from blob store."
+        )
+    expected_sha256: str = str(receipt_payload.get("blob_sha256") or "").strip()
+
+    artifact_name = blob_key.rsplit("/", 1)[-1] or "blob_artifact"
+    dest = tmp_dir / artifact_name
+
+    print(f"[restore] Downloading from blob store: key={blob_key!r}")
+    data = blob_store.get_bytes(blob_key)
+
+    if expected_sha256:
+        actual_sha256 = hashlib.sha256(data).hexdigest()
+        if actual_sha256 != expected_sha256:
+            raise RuntimeError(
+                f"Blob download verification failed for key {blob_key!r}: "
+                f"expected sha256={expected_sha256!r} actual={actual_sha256!r}"
+            )
+        print(f"[restore] SHA-256 verified: {actual_sha256[:16]}...")
+    else:
+        print("[restore] WARN: receipt has no blob_sha256; skipping hash verification")
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(data)
+    print(f"[restore] Downloaded artefact: {dest}")
+    return dest
+
+
+def _resolve_blob_store_for_restore(backend: str):
+    """Lazily import and return a BlobStore for the requested backend."""
+    if str(_REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(_REPO_ROOT))
+    from src.backend.services.blob_store import get_blob_store_from_env  # noqa: PLC0415
+
+    orig = os.environ.get("VON_BLOB_STORE_BACKEND")
+    try:
+        os.environ["VON_BLOB_STORE_BACKEND"] = backend.strip().lower()
+        return get_blob_store_from_env()
+    finally:
+        if orig is None:
+            os.environ.pop("VON_BLOB_STORE_BACKEND", None)
+        else:
+            os.environ["VON_BLOB_STORE_BACKEND"] = orig
+
+
 def _run_mongorestore(
     *,
     mongo_uri: str,
@@ -241,6 +304,26 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         help="Optional Fernet key for encrypted .zip.enc backups. Defaults to VON_BACKUP_ENCRYPTION_KEY.",
     )
+    parser.add_argument(
+        "--from-blob",
+        action="store_true",
+        help=(
+            "Download the backup artefact from the blob store before restoring.  "
+            "The receipt at --backup-path must contain blob_key and blob_backend fields.  "
+            "Also activates automatically when the receipt has a blob_key and the local "
+            "artefact is missing."
+        ),
+    )
+    parser.add_argument(
+        "--blob-backend",
+        type=str,
+        default="",
+        help=(
+            "Blob backend to download from (swift, s3, local).  "
+            "Defaults to the blob_backend field in the receipt, then "
+            "VON_BACKUP_BLOB_BACKEND env var."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -248,10 +331,50 @@ def main(argv: list[str] | None = None) -> int:
     redacted_uri = _redact_mongo_uri(mongo_uri)
     fernet_key = (args.fernet_key or os.environ.get("VON_BACKUP_ENCRYPTION_KEY") or "").strip()
 
+    # -----------------------------------------------------------------
+    # Optional pre-materialise blob download.
+    # Activates when --from-blob is set OR when the receipt has a blob_key
+    # and the local final_artifact_path is missing.
+    # -----------------------------------------------------------------
+    backup_path_str = args.backup_path
+    blob_download_tmp: str | None = None  # temp dir to clean up
+
+    initial_receipt = _load_receipt_if_present(Path(backup_path_str))
+    needs_blob_download = args.from_blob or (
+        initial_receipt
+        and initial_receipt.get("blob_key")
+        and not Path(str(initial_receipt.get("final_artifact_path", ""))).exists()
+    )
+
+    if needs_blob_download:
+        if initial_receipt is None:
+            raise RuntimeError(
+                "--from-blob requires --backup-path to be a receipt JSON with blob metadata."
+            )
+        blob_backend = (
+            (args.blob_backend or "").strip()
+            or str(initial_receipt.get("blob_backend") or "").strip()
+            or os.environ.get("VON_BACKUP_BLOB_BACKEND", "").strip()
+        ).lower()
+        if not blob_backend:
+            raise RuntimeError(
+                "Blob backend not specified.  Pass --blob-backend, set blob_backend in the "
+                "receipt, or set VON_BACKUP_BLOB_BACKEND."
+            )
+        blob_download_tmp = tempfile.mkdtemp(prefix="von_restore_blob_")
+        blob_store = _resolve_blob_store_for_restore(blob_backend)
+        downloaded_artifact = _download_artifact_from_blob(
+            receipt_payload=initial_receipt,
+            blob_store=blob_store,
+            tmp_dir=Path(blob_download_tmp),
+        )
+        # Restore from the downloaded artefact directly (bypass the receipt path).
+        backup_path_str = str(downloaded_artifact)
+
     materialised: RestoreMaterialisedBackup | None = None
     try:
         materialised = _materialise_backup(
-            Path(args.backup_path), fernet_key=fernet_key
+            Path(backup_path_str), fernet_key=fernet_key
         )
         target_db_name = (
             (args.target_db_name or "").strip()
@@ -286,6 +409,8 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if materialised and materialised.cleanup_dir:
             shutil.rmtree(materialised.cleanup_dir, ignore_errors=True)
+        if blob_download_tmp:
+            shutil.rmtree(blob_download_tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":

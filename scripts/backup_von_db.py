@@ -17,13 +17,18 @@ Optional features are driven by environment variables:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
+import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
+
+# Repo root — enables lazy import of src.backend when blob upload is requested.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 BACKUP_SUCCESS_RECEIPT_SCHEMA_VERSION = "backup_success_receipt.v1"
@@ -67,6 +72,12 @@ class BackupSuccessReceipt:
     encrypted: bool
     artifact_size_bytes: int
     collection_count: int
+    # Optional blob-upload fields.  None when no blob upload was performed.
+    blob_backend: str | None = None
+    blob_key: str | None = None
+    blob_uri: str | None = None
+    blob_uploaded_at_utc: str | None = None
+    blob_sha256: str | None = None
 
 
 def _utc_timestamp_compact() -> str:
@@ -274,6 +285,86 @@ def _apply_retention_and_storage_limits(
             total -= sizes.get(p, 0)
 
 
+def _compute_sha256(path: Path) -> str:
+    """Return the SHA-256 hex digest of a file."""
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _resolve_blob_store_for_backup(backend: str):
+    """Lazily import and return a BlobStore for the requested backend.
+
+    Temporarily overrides VON_BLOB_STORE_BACKEND so the existing
+    ``get_blob_store_from_env()`` factory picks the right implementation while
+    still reading all Swift/S3 connection env vars from the environment.
+    """
+    if str(_REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(_REPO_ROOT))
+    from src.backend.services.blob_store import get_blob_store_from_env  # noqa: PLC0415
+
+    orig = os.environ.get("VON_BLOB_STORE_BACKEND")
+    try:
+        os.environ["VON_BLOB_STORE_BACKEND"] = backend.strip().lower()
+        return get_blob_store_from_env()
+    finally:
+        if orig is None:
+            os.environ.pop("VON_BLOB_STORE_BACKEND", None)
+        else:
+            os.environ["VON_BLOB_STORE_BACKEND"] = orig
+
+
+def _upload_backup_to_blob(
+    *,
+    final_artifact: Path,
+    blob_store: Any,
+    blob_key: str,
+    require_encrypted: bool,
+) -> tuple[str, str, str]:
+    """Upload a backup artefact to the blob store with post-upload SHA-256 verification.
+
+    Returns ``(blob_uri, blob_sha256_hex, uploaded_at_utc_iso)``.
+
+    Raises ``RuntimeError`` when *require_encrypted* is True and the artefact
+    is not a ``.zip.enc`` file (i.e. it is plaintext).
+    """
+    if require_encrypted and not final_artifact.name.lower().endswith(".zip.enc"):
+        raise RuntimeError(
+            f"Refusing to upload unencrypted backup artefact {final_artifact.name!r} to blob "
+            "store.  Enable encryption (VON_BACKUP_ENCRYPTION_ENABLED=1 + "
+            "VON_BACKUP_ENCRYPTION_KEY) before uploading, or pass "
+            "--no-require-encryption-for-blob / set "
+            "VON_BACKUP_BLOB_REQUIRE_ENCRYPTION=0 to allow plaintext upload."
+        )
+
+    local_sha256 = _compute_sha256(final_artifact)
+    data = final_artifact.read_bytes()
+
+    blob_ref = blob_store.put_bytes(
+        blob_key,
+        data,
+        content_type="application/octet-stream",
+        metadata={
+            "von-backup-sha256": local_sha256,
+            "von-backup-artifact-name": final_artifact.name,
+        },
+    )
+
+    # Post-upload readback verification.
+    readback = blob_store.get_bytes(blob_key)
+    readback_sha256 = hashlib.sha256(readback).hexdigest()
+    if readback_sha256 != local_sha256:
+        raise RuntimeError(
+            f"Blob upload verification failed for key {blob_key!r}: "
+            f"local sha256={local_sha256!r} but readback sha256={readback_sha256!r}"
+        )
+
+    uploaded_at_utc = _utc_timestamp_iso()
+    return blob_ref.uri, local_sha256, uploaded_at_utc
+
+
 def _run_mongodump(*, mongo_uri: str, db_name: str, out_path: Path) -> None:
     cmd = [
         "mongodump",
@@ -320,6 +411,34 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         help="Optional legacy ISO8601 UTC sentinel path to mirror from the success receipt.",
     )
+    parser.add_argument(
+        "--blob-backend",
+        type=str,
+        default="",
+        help=(
+            "Blob backend to upload the backup artefact to after local creation "
+            "(swift, s3, local).  Defaults to VON_BACKUP_BLOB_BACKEND env var; "
+            "if neither is set, no blob upload is performed."
+        ),
+    )
+    parser.add_argument(
+        "--blob-key-prefix",
+        type=str,
+        default="",
+        help=(
+            "Key prefix for the blob object (default: mongo_backups).  "
+            "Overrides VON_BACKUP_BLOB_KEY_PREFIX env var."
+        ),
+    )
+    parser.add_argument(
+        "--no-require-encryption-for-blob",
+        action="store_true",
+        help=(
+            "Allow uploading an unencrypted artefact to the blob store.  "
+            "By default (and when VON_BACKUP_BLOB_REQUIRE_ENCRYPTION=1) "
+            "the upload is refused unless the artefact ends in .zip.enc."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -362,6 +481,14 @@ def main(argv: list[str] | None = None) -> int:
                 )
             else:
                 print(f"[backup] Encryption key looks set (len={len(encryption_key)}).")
+        blob_backend_dry = (
+            (args.blob_backend or "").strip()
+            or os.environ.get("VON_BACKUP_BLOB_BACKEND", "").strip()
+        ).lower()
+        if blob_backend_dry:
+            print(f"[backup] Blob upload: backend={blob_backend_dry!r}")
+        else:
+            print("[backup] Blob upload: disabled (set --blob-backend or VON_BACKUP_BLOB_BACKEND)")
         return 0
 
     _ensure_dir(out_root)
@@ -428,6 +555,54 @@ def main(argv: list[str] | None = None) -> int:
 
     artifact_size_bytes = _artifact_size_bytes(final_artifact)
 
+    # -----------------------------------------------------------------
+    # Optional blob upload (Catalyst Cloud Swift / S3 / local).
+    # Must happen before receipt construction so blob metadata ends up
+    # in the single sidecar write.
+    # -----------------------------------------------------------------
+    blob_backend_arg = (
+        (args.blob_backend or "").strip()
+        or os.environ.get("VON_BACKUP_BLOB_BACKEND", "").strip()
+    ).lower()
+
+    effective_blob_backend: str | None = None
+    blob_key: str | None = None
+    blob_uri: str | None = None
+    blob_sha256: str | None = None
+    blob_uploaded_at_utc: str | None = None
+
+    if blob_backend_arg:
+        blob_key_prefix = (
+            (args.blob_key_prefix or "").strip()
+            or os.environ.get("VON_BACKUP_BLOB_KEY_PREFIX", "").strip()
+            or "mongo_backups"
+        ).strip("/")
+        require_enc_env = os.environ.get("VON_BACKUP_BLOB_REQUIRE_ENCRYPTION", "1").strip()
+        require_encrypted = (
+            not args.no_require_encryption_for_blob
+            and _env_truthy(require_enc_env if require_enc_env else "1")
+        )
+        candidate_key = f"{blob_key_prefix}/{final_artifact.name}"
+        print(
+            f"[backup] Uploading to blob store ({blob_backend_arg}): key={candidate_key!r}"
+        )
+        blob_store = _resolve_blob_store_for_backup(blob_backend_arg)
+        blob_uri_val, blob_sha256_val, blob_uploaded_at_utc_val = _upload_backup_to_blob(
+            final_artifact=final_artifact,
+            blob_store=blob_store,
+            blob_key=candidate_key,
+            require_encrypted=require_encrypted,
+        )
+        effective_blob_backend = blob_backend_arg
+        blob_key = candidate_key
+        blob_uri = blob_uri_val
+        blob_sha256 = blob_sha256_val
+        blob_uploaded_at_utc = blob_uploaded_at_utc_val
+        print(
+            f"[backup] Blob upload verified: uri={blob_uri!r} "
+            f"sha256={blob_sha256[:16]}..."
+        )
+
     receipt = BackupSuccessReceipt(
         schema_version=BACKUP_SUCCESS_RECEIPT_SCHEMA_VERSION,
         completed_at_utc=_utc_timestamp_iso(),
@@ -441,6 +616,11 @@ def main(argv: list[str] | None = None) -> int:
         encrypted=bool(encryption_enabled),
         artifact_size_bytes=int(artifact_size_bytes),
         collection_count=int(collection_count),
+        blob_backend=effective_blob_backend,
+        blob_key=blob_key,
+        blob_uri=blob_uri,
+        blob_uploaded_at_utc=blob_uploaded_at_utc,
+        blob_sha256=blob_sha256,
     )
     receipt_payload = asdict(receipt)
     sidecar_path = _backup_receipt_sidecar_path(final_artifact)

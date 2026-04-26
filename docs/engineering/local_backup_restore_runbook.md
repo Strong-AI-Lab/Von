@@ -112,7 +112,66 @@ python scripts/restore_von_db.py `
   --drop-target
 ```
 
-## 6. Production recovery guidance
+## 6. Blob-backed restore drill (Catalyst Cloud / S3)
+
+When a backup receipt contains `blob_key` and `blob_backend`, the artefact
+can be restored directly from the blob store.  This path is useful when:
+
+- the local artefact has been deleted or the backup host is unavailable, and
+- the receipt JSON is available (e.g. committed to `.run/` or emailed to the operator).
+
+### Prerequisites
+
+- Swift / S3 credentials are set (see `docs/engineering/catalyst_cloud_swift_setup.md`).
+- `VON_BACKUP_ENCRYPTION_KEY` is set (needed to decrypt `.zip.enc` after download).
+
+### Automatic fallback
+
+If `--backup-path` points at a receipt that has a `blob_key` and the local
+`final_artifact_path` is missing, the restore script automatically downloads
+the artefact from the blob store before materialising it:
+
+```powershell
+$env:VON_ENABLE_RESTORE_ACTION = '1'
+$env:VON_BACKUP_ENCRYPTION_KEY  = '<fernet-key>'
+$env:OS_CLOUD                   = 'catalystcloud'
+$env:VON_SWIFT_CONTAINER        = 'von-mongo-backups'
+
+python scripts/restore_von_db.py `
+  --backup-path .run\last_successful_backup_receipt.json `
+  --target-db-name von_db_restore_probe
+```
+
+The script prints `[restore] Downloading from blob store: key=...` and then
+verifies the SHA-256 of the downloaded bytes against `blob_sha256` in the receipt.
+
+### Explicit blob-first flag
+
+To force a blob download even when the local artefact still exists:
+
+```powershell
+python scripts/restore_von_db.py `
+  --backup-path .run\last_successful_backup_receipt.json `
+  --from-blob `
+  --blob-backend swift `
+  --target-db-name von_db_restore_probe `
+  --apply `
+  --drop-target
+```
+
+The `--blob-backend` argument overrides the `blob_backend` field in the receipt
+and the `VON_BACKUP_BLOB_BACKEND` env var.
+
+### Restore drill checklist
+
+1. Run without `--apply` first (dry-run, default).
+2. Confirm `[restore] SHA-256 verified` in the output.
+3. Confirm `Source DB` and `Target DB` match expectation.
+4. Re-run with `--apply --drop-target` to restore into `von_db_restore_probe`.
+5. Inspect the scratch DB; never target `von_db` unless deliberate recovery is required.
+6. Drop the scratch DB when finished.
+
+## 7. Production recovery guidance
 
 For a real production recovery:
 
@@ -125,3 +184,4 @@ If the backup incident is tied to MongoDB Atlas availability, credentials, or
 control-plane backup settings, treat those as separate operational concerns.
 This runbook covers the local dump artefact restore path, not Atlas control
 plane automation.
+

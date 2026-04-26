@@ -199,6 +199,67 @@ $env:OS_CLIENT_CONFIG_FILE = "$HOME\.config\openstack\clouds.yaml"
 - If you changed `.env`, restart Von so the new values are actually applied.
 - If you see a warning like `Couldn't find the vendor profile catalystcloud for the cloud envvars`, that usually means `openstacksdk` only saw the synthetic `envvars` cloud, not your intended `clouds.yaml` profile.
 
+---
+
+## MongoDB backup container
+
+Von can upload encrypted MongoDB dump artefacts to Catalyst Cloud immediately after
+a local backup completes.  This uses a **separate container** from the artefact store
+so backup objects can be managed with their own lifecycle and access policy.
+
+### Recommended container name
+
+```
+von-mongo-backups
+```
+
+Create it:
+
+```powershell
+openstack container create von-mongo-backups
+```
+
+### Required environment variables
+
+```powershell
+# Blob store for the backup script (separate from VON_BLOB_STORE_BACKEND)
+$env:VON_BACKUP_BLOB_BACKEND   = 'swift'
+$env:VON_BACKUP_BLOB_KEY_PREFIX = 'mongo_backups'
+
+# Swift connection (reuse the same auth as above)
+$env:VON_SWIFT_CONTAINER = 'von-mongo-backups'
+$env:OS_CLOUD            = 'catalystcloud'   # or use OS_AUTH_URL etc.
+```
+
+> **Note**: `VON_BACKUP_BLOB_BACKEND` is read only by `scripts/backup_von_db.py`.
+> It does not affect the main artefact store backend (`VON_BLOB_STORE_BACKEND`).
+> Both can point at different containers within the same Catalyst Cloud project.
+
+### Encryption requirement
+
+Plaintext artefacts are **refused** by default.  Ensure encryption is enabled:
+
+```
+VON_BACKUP_ENCRYPTION_ENABLED=1
+VON_BACKUP_ENCRYPTION_KEY=<fernet-key>
+```
+
+See `docs/engineering/backup_tooling_security.md` for key generation and rotation guidance.
+
+### Object naming
+
+Backup objects are stored under the prefix with the artefact filename:
+
+```
+mongo_backups/<db_name>_<YYYYMMDD_HHMMSSZ>_<tag>.zip.enc
+```
+
+### Restore drill from blob
+
+See `docs/engineering/local_backup_restore_runbook.md` § "Blob-backed restore drill"
+for the step-by-step restore procedure when restoring from Catalyst Cloud.
+
+
 ### Authentication errors
 
 - Confirm the credential/project has access to **Object Storage**.
